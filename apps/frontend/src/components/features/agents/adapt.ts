@@ -107,6 +107,9 @@ function commandText(value: unknown): string {
   return readableValue(value);
 }
 
+/** Stands in for a paired result that carried no text; it is not the tool's output. */
+export const EMPTY_TOOL_OUTPUT = 'Command completed with no output.';
+
 function toolOutput(payload: Record<string, unknown>): string[] | undefined {
   const output =
     readableValue(payload.output) ||
@@ -654,7 +657,7 @@ function displayEvents(events: AgentJobEventApi[], job?: AgentJobApi): AgentEven
       ) {
         rows[targetIndex] = {
           ...target,
-          output: row.text ? row.text.split('\n') : ['Command completed with no output.'],
+          output: row.text ? row.text.split('\n') : [EMPTY_TOOL_OUTPUT],
           outputIsError: row.isError,
           ...(row.structuredOutput !== undefined ? { structuredOutput: row.structuredOutput } : {}),
           resultState: row.cancelled ? 'cancelled' : row.isError ? 'failed' : 'received',

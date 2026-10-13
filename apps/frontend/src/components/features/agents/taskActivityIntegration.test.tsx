@@ -5,6 +5,7 @@ import { cleanup, fireEvent, render, screen, within } from '@testing-library/rea
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { AgentJobApi, AgentThreadEventApi } from '@/lib/api/agents';
+import { ActivityWindow } from './ActivityWindow';
 import { buildActivityOverview } from './activityOverview';
 import { toDisplayJob } from './adapt';
 import { EventRow } from './ChatMessages';
@@ -245,6 +246,105 @@ describe('task and delegation activity in the conversation', () => {
     expect(screen.queryByText('Completed')).not.toBeInTheDocument();
     const prompt = screen.getByText('Review test coverage without changing files.');
     expect(prompt.closest('details')).not.toHaveAttribute('open');
+  });
+
+  describe('a Claude subagent card, from records shaped like the pinned CLI’s', () => {
+    function delegation(background: boolean, content: unknown[], structured: object) {
+      return [
+        event(1, 'tool_use', {
+          id: 'toolu_delegate',
+          name: 'Agent',
+          input: {
+            description: 'Inspect the workspace',
+            prompt: 'Reply with the word inspected.',
+            subagent_type: 'Explore',
+            run_in_background: background,
+          },
+        }),
+        event(2, 'tool_result', {
+          tool_use_id: 'toolu_delegate',
+          is_error: false,
+          content: JSON.stringify(content),
+          structured_output: structured,
+        }),
+      ];
+    }
+
+    function renderCards(events: AgentThreadEventApi[]) {
+      render(
+        <ActivityWindow
+          overview={buildActivityOverview(toDisplayJob(job, { events }).events)}
+          turnNo={1}
+          attemptNo={1}
+          onClose={() => {}}
+          stepKeyForEvent={() => undefined}
+          onSelectStep={() => {}}
+        />,
+      );
+      return screen.getByRole('region', { name: 'Subagents overview' });
+    }
+
+    it('shows the answer the Agent call returned to the main agent', () => {
+      const blocks = [{ type: 'text', text: '## Findings\n\n- inspected' }];
+      const cards = renderCards(
+        delegation(false, blocks, {
+          status: 'completed',
+          prompt: 'Reply with the word inspected.',
+          agentId: 'aa9397b543b5f2ff7',
+          agentType: 'Explore',
+          content: blocks,
+          totalDurationMs: 11,
+          totalTokens: 2,
+          totalToolUseCount: 0,
+        }),
+      );
+      const reply = within(cards).getByRole('region', { name: 'Subagent reply' });
+      expect(within(reply).getByText('Completed')).toBeInTheDocument();
+      expect(within(reply).getByRole('heading', { name: 'Findings' })).toBeInTheDocument();
+      expect(within(reply).getByRole('listitem')).toHaveTextContent('inspected');
+      expect(cards).not.toHaveTextContent('"type"');
+      expect(within(cards).queryByText('Agent state not recorded')).not.toBeInTheDocument();
+    });
+
+    it('does not show a background launch notice as the answer', () => {
+      const notice =
+        'Async agent launched successfully.\nagentId: a0bc416394db49101\nThe agent is working in the background.';
+      const cards = renderCards(
+        delegation(true, [{ type: 'text', text: notice }], {
+          isAsync: true,
+          status: 'async_launched',
+          agentId: 'a0bc416394db49101',
+          description: 'Inspect the workspace',
+          prompt: 'Reply with the word inspected.',
+          canReadOutputFile: true,
+        }),
+      );
+      expect(
+        within(cards).getByText(
+          "Started in the background. This call returned only a launch notice, not the agent's reply.",
+        ),
+      ).toBeInTheDocument();
+      expect(cards).not.toHaveTextContent('Async agent launched successfully');
+      expect(within(cards).queryByText('Completed')).not.toBeInTheDocument();
+    });
+
+    it('keeps saying a state was not recorded for a launch that reports neither', () => {
+      const cards = renderCards([
+        event(1, 'tool_use', {
+          id: 'spawn',
+          name: 'spawn_agent',
+          input: { task_name: 'Review', message: 'Review the change.' },
+        }),
+        event(2, 'tool_result', {
+          tool_use_id: 'spawn',
+          content: JSON.stringify({ agent_id: 'reviewer' }),
+        }),
+      ]);
+      expect(within(cards).getByText('Agent state not recorded')).toBeInTheDocument();
+      expect(
+        within(cards).queryByRole('region', { name: 'Subagent reply' }),
+      ).not.toBeInTheDocument();
+    });
   });
 
   it('shows missing results as waiting only for the current active attempt', () => {

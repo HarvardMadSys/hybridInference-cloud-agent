@@ -75,8 +75,15 @@ the same row. **Status not recorded** means the selected events contain no statu
 for that task; a successful creation does not mean the task is completed.
 
 Subagent cards show assigned work, agent type, model, expandable prompts, and
-the latest reported agent state. A successful background launch does not imply
-that delegated work has finished. Chat keeps compact tool calls with expandable
+the latest reported agent state. When the delegating call's own result is the
+agent's answer, as with Claude Code's Agent or Task and OpenCode's task, the
+card shows it under **Returned to the main agent**: rendered as Markdown,
+collapsed when long, and with the status the runtime recorded alongside it. A
+card says when that reply is still pending or was not recorded. A failed or
+interrupted launch stays listed with what it returned. A background launch
+returns only a launch notice, and its card says so rather than presenting the
+notice as the answer; a successful background launch does not imply that
+delegated work has finished. Chat keeps compact tool calls with expandable
 recorded arguments and output. **View subagent execution** opens the source call
 in the trajectory inspector when its stored record is available.
 
