@@ -1,9 +1,11 @@
 """Reading the control row into this process, and nothing else.
 
-The collector can be told what to collect; this is what tells it. Every
-control-plane process runs one of these loops, reads the persisted control state
-and publishes it into that process's policy store, so a file or terminal request
-rooted here is selected by the same revision every replica agrees on.
+The collector can be told what to collect; this is what tells it. The one main
+control-plane process -- the one that owns the reaper, and the only one that
+roots file and terminal requests; the MCP relay roots none -- runs this loop. It
+reads the persisted control state and publishes it into the process's policy
+store, so a file or terminal request rooted here is selected by the revision the
+control row holds.
 
 Four numbers run this loop, and each is here for a different reason:
 
@@ -11,10 +13,10 @@ Four numbers run this loop, and each is here for a different reason:
   at all -- the design is explicit that a deployment can no longer claim zero
   I/O while switched off. When a run is in force the loop tightens, because that
   is when a Stop has a deadline to meet.
-* **A local wake.** After this replica's own Admin write the loop refreshes
-  immediately instead of waiting out the interval. It moves only this process:
-  the other replicas still learn through the same database read, which is what
-  keeps one code path authoritative.
+* **A local wake.** :meth:`ProfilingPolicyWorker.wake` makes the loop refresh
+  at once instead of waiting out the interval. The refresh goes through the
+  same database read as every other pass, which is what keeps one code path
+  authoritative.
 * **No lease, and no query on the hot path.** No file or terminal request ever
   reads the database: it consults this process's published snapshot, which the
   loop below keeps current. Timed runs expire independently; continuous runs

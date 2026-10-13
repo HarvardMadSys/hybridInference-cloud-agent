@@ -480,11 +480,12 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
             app.state.ledger_task = ledger_collector
             app.state.capacity_task = capacity_history
             app.state.user_memory_task = user_memories
-            # The profiling policy loop runs in every control-plane process, not
-            # only the one that owns the reaper: each process roots its own file and
-            # terminal requests, so each one has to know what it is allowed to
-            # collect. It polls the control row, which is why an idle deployment now
-            # has a small, stated background cost instead of claiming zero I/O.
+            # The profiling policy loop runs only here, in the one main process
+            # that owns the reaper: file and terminal requests are rooted in this
+            # process alone (the relay listener roots none, see below), so this is
+            # the process that has to know what it is allowed to collect. It polls
+            # the control row, which is why an idle deployment now has a small,
+            # stated background cost instead of claiming zero I/O.
             profiling_service = ProfilingControlService(
                 control=storage.profiling_control,
                 deployment=profiling_control_deployment(),
