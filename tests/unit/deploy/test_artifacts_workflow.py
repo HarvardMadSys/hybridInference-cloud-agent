@@ -32,6 +32,7 @@ CI = REPO_ROOT / ".github/workflows/ci.yml"
 CONSOLE_DOCKERFILE = REPO_ROOT / "deploy/control-plane/Dockerfile"
 RUNNER_DOCKERFILE = REPO_ROOT / "deploy/host/Dockerfile.agent-runner"
 HOST_STACK = REPO_ROOT / "deploy/host/docker-compose.sandbox.yml"
+WEB_DOCKERFILE = REPO_ROOT / "deploy/control-plane/Dockerfile.web"
 
 
 def workflow() -> dict[str, Any]:
@@ -319,6 +320,22 @@ def test_cleanup_cannot_reach_another_cell() -> None:
     labels = {f"345-1-{cell['name']}" for cell in cells()}
     assert len(labels) == len(cells())
     assert "label=io.hybridinference.smoke.run=${SUFFIX}" in str(step("Drop this run's")["run"])
+
+
+def test_the_web_image_ships_the_node_major_ci_checks_the_app_with() -> None:
+    """CI lints, tests and builds the app on one Node major; the image must run that one.
+
+    Both stages stayed on node:20 after CI moved to 22, so every check ran on a
+    different runtime from the one serving traffic, and Node 20's end of life
+    on 2026-04-30 left that internet-facing server without security fixes.
+    """
+    majors = re.findall(r"^FROM node:(\d+)\b", WEB_DOCKERFILE.read_text(), re.MULTILINE)
+    stages = re.findall(r"^FROM ", WEB_DOCKERFILE.read_text(), re.MULTILINE)
+    assert len(majors) == len(stages) == 2, "a builder and a runtime stage, both on Node"
+    expected = str(workflow()["env"]["NODE_VERSION"])
+    assert set(majors) == {expected}, f"Dockerfile.web uses Node {majors}, CI uses {expected}"
+    caches = yaml.safe_load((REPO_ROOT / ".github/workflows/pr-caches.yml").read_text())
+    assert str(caches["env"]["NODE_VERSION"]) == expected
 
 
 def test_the_build_passes_the_commit_every_image_must_name() -> None:
