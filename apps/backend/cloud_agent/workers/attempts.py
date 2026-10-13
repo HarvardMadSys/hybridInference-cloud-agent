@@ -1,12 +1,11 @@
-"""The attempt reaper, and the grant passes that ride its loop.
+"""Attempt maintenance, grant renewal, and the recovery they keep moving.
 
-One pass closes attempts whose lease expired, abandons the ones the gateway has
-definitively refused, renews the grants that are still live, reaps offline hosts
+The maintenance pass closes attempts whose lease expired, reaps offline hosts
 and lapsed residencies, cleans up the residencies a stranded fork left behind,
 reconciles the forks and snapshot publishes an expiry stranded, and purges
-abandoned staged uploads. It ran from ``app.py`` before this module existed; it
-runs from the same place in the same process now, started and stopped by the
-same lifespan.
+abandoned staged uploads. A sibling task renews live grants and handles
+definitive renewal refusals, so a slow maintenance operation cannot hold up
+their authorization. Both tasks are started and stopped by the same lifespan.
 """
 
 from __future__ import annotations
@@ -92,11 +91,10 @@ class _Reaping(Protocol):
     snapshot: SnapshotRepository
 
 
-#: How often the reaper looks for expired leases and stalled publishes — and,
-#: because the grant passes ride on the same loop, how often a live grant is
-#: renewed. It is :data:`cloud_agent.grants.RENEWAL_INTERVAL_S` rather than a
-#: number of its own precisely so it cannot drift from the grant TTL that is
-#: derived from it; the invariant is stated where those constants live.
+#: How often the reaper looks for expired leases and stalled publishes, and
+#: the cadence the separate grant-renewal task follows. It is
+#: :data:`cloud_agent.grants.RENEWAL_INTERVAL_S` rather than a number of its
+#: own so it cannot drift from the grant TTL derived from that interval.
 REAP_INTERVAL_S = RENEWAL_INTERVAL_S
 
 
@@ -479,6 +477,25 @@ async def _renew_live_grants(
         del failures[grant_id]
 
 
+async def _renew_live_grants_loop(
+    store: _GrantRenewal, grants: Any, *, interval_seconds: float
+) -> None:
+    """Renew current grants on their own cadence, independent of maintenance."""
+    failures: dict[str, int] = {}
+    loop = asyncio.get_running_loop()
+    next_pass = loop.time() + interval_seconds
+    while True:
+        await asyncio.sleep(max(0.0, next_pass - loop.time()))
+        try:
+            await _renew_live_grants(store, grants, failures=failures)
+        except Exception:
+            logger.warning("Grant renewal pass failed", exc_info=True)
+        next_pass += interval_seconds
+        if next_pass <= loop.time():
+            # Do not launch a catch-up burst after a deadline-bound slow pass.
+            next_pass = loop.time() + interval_seconds
+
+
 async def _reap_offline_hosts(store: HostPoolRepository) -> None:
     """Move hosts that stopped heartbeating to ``offline``.
 
@@ -621,9 +638,9 @@ async def _run_attempt_reaper(
         store: The agent store.
         interval_seconds: Delay between passes.
         max_attempts: How many attempts a job gets before it fails for good.
-        grants: The grant client, when this deployment mints grants. ``None``
-            skips both grant passes entirely — the capabilities then expire at
-            their own TTL, which is the same backstop revocation accelerates.
+        grants: The grant client used for revocation after maintenance. ``None``
+            skips inline revocation; the public loop also omits the independent
+            renewal task, so capabilities expire at their own TTL.
         github_app: Where to ask for the GitHub App's credentials, once per
             pass. A goal decision checks the repository's entitlement before it
             schedules, and with no minter that check can only see the
@@ -819,10 +836,6 @@ async def _run_attempt_reaper(
                 await _revoke_dead_grants(store.grants, grants)
             except Exception:
                 logger.warning("Grant revocation pass failed", exc_info=True)
-            try:
-                await _renew_live_grants(store, grants, failures=renewal_failures)
-            except Exception:
-                logger.warning("Grant renewal pass failed", exc_info=True)
 
 
 async def _recover_send_now_handoffs(store: _Reaping, *, interval_seconds: float) -> None:
@@ -863,13 +876,14 @@ async def reap_expired_attempts(
     github_app: GitHubAppSource | None = None,
     gateway: Any | None = None,
 ) -> None:
-    """Run attempt maintenance alongside independently bounded handoff recovery.
+    """Run attempt maintenance beside independent handoff and grant loops.
 
     Send-now handoff recovery and settled-terminal replay each run in an owned
     task, once at startup and then on the same cadence, so a slow host sandbox
     manager cannot hold up attempt reaping, queue settlement, or grant
-    revocation and renewal. Cancelling this worker also cancels and joins both
-    tasks, including any sandbox manager calls they currently own.
+    revocation. Grant renewal has its own cadence, so a slow maintenance or
+    sandbox manager call cannot hold up authorization renewal. Cancelling this
+    worker cancels and joins all three owned tasks, including work they own.
     """
     # Created first, so a restarted control plane still replays settled
     # terminals before anything else, as it did when that replay ran ahead of
@@ -882,6 +896,14 @@ async def reap_expired_attempts(
         _recover_send_now_handoffs(store, interval_seconds=interval_seconds),
         name="agent-send-now-recovery",
     )
+    renewal = (
+        asyncio.create_task(
+            _renew_live_grants_loop(store, grants, interval_seconds=interval_seconds),
+            name="agent-grant-renewal",
+        )
+        if grants is not None
+        else None
+    )
     try:
         await _run_attempt_reaper(
             store,
@@ -892,6 +914,9 @@ async def reap_expired_attempts(
             gateway=gateway,
         )
     finally:
-        recovery.cancel()
-        terminals.cancel()
-        await asyncio.gather(recovery, terminals, return_exceptions=True)
+        tasks = [recovery, terminals]
+        if renewal is not None:
+            tasks.append(renewal)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)

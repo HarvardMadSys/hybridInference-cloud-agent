@@ -140,12 +140,12 @@ async def _bounded_json(
 
 # ── The cadence and the lifetime are one decision ──────────────────────
 #
-# **Invariant: a grant must outlive several renewal passes.** Renewal runs on
-# the reaper's pass, so the cadence is a scheduling constant and the TTL is a
-# capability's lifetime — two numbers that live in different files and mean
-# nothing apart. If the TTL is ever shorter than the cadence plus its slack, a
-# running attempt loses its capability mid-run and the only symptom is a model
-# call refused inside a sandbox, far from either constant.
+# **Invariant: a grant must outlive several renewal passes.** The renewal task
+# follows the reaper's cadence, so the cadence is a scheduling constant and the
+# TTL is a capability's lifetime — two numbers that live in different files
+# and mean nothing apart. If the TTL is ever shorter than the cadence plus its
+# slack, a running attempt loses its capability mid-run and the only symptom is
+# a model call refused inside a sandbox, far from either constant.
 #
 # So the cadence is defined here, next to the lifetime derived from it, and
 # ``cloud_agent.workers.attempts.REAP_INTERVAL_S`` **is** this value rather than a second
@@ -153,8 +153,8 @@ async def _bounded_json(
 # agreeing, if the headroom is spent, or if either number leaves the bounds the
 # gateway enforces.
 
-#: How often the control plane renews a live grant — the reaper's interval,
-#: because the renewal pass rides on it.
+#: How often the control plane renews a live grant. The renewal task follows
+#: the attempt reaper's interval.
 RENEWAL_INTERVAL_S = 30.0
 
 #: Renewal passes a live grant can lose before it expires under a running

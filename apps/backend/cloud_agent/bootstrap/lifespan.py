@@ -408,10 +408,11 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
         else:
             app.state.source_control = None
 
-        # **The background work belongs to exactly one process.** The reaper
-        # renews and revokes grants and supersedes lapsed attempts; the publisher
-        # opens pull requests. A second listener on this same database — the MCP
-        # relay is one — running its own copies would renew every grant twice per
+        # **The background work belongs to exactly one process.** The attempt
+        # maintenance task supersedes lapsed attempts and revokes grants; its
+        # owned sibling task renews live grants. The publisher opens pull
+        # requests. A second listener on this same database — the MCP relay is
+        # one — running its own copies would renew every grant twice per
         # interval, double the load it puts on the gateway, and have two workers
         # racing for the same publish.
         #
