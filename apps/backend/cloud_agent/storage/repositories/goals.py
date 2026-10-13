@@ -564,7 +564,7 @@ class PostgresGoalRepository:
                         SELECT 1 FROM agent_goal_wakeups w
                         WHERE w.thread_id = t.id AND w.state = 'pending'
                   )
-                  AND t.goal_updated_at > NOW() - make_interval(secs => $1)
+                  AND t.goal_updated_at > clock_timestamp() - make_interval(secs => $1)
                 ORDER BY t.goal_updated_at
                 LIMIT 200
                 """,
@@ -636,7 +636,7 @@ class PostgresGoalRepository:
                         SELECT 1 FROM agent_goal_wakeups w
                         WHERE w.thread_id = t.id AND w.state = 'pending'
                   )
-                  AND t.goal_updated_at < NOW() - make_interval(secs => $1)
+                  AND t.goal_updated_at < clock_timestamp() - make_interval(secs => $1)
                 ORDER BY t.goal_updated_at
                 LIMIT 200
                 FOR UPDATE OF t SKIP LOCKED

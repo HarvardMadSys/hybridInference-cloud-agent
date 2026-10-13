@@ -1,8 +1,11 @@
 # Minimal Agent identity
 
-Cloud Agent stores the Gateway user ID and the issuer that minted it. It does
-not copy an account profile or derive permissions from account roles. Current
-access comes from the [Agent admission contract](agent-access-policy.md).
+Cloud Agent deliberately keeps identity small. It stores the Gateway user ID
+and the issuer that minted it, but it does not copy an account profile or derive
+permissions from account roles. The Gateway makes the current access decision,
+and Cloud Agent rechecks that decision instead of reading permissions from the
+session. The [Agent admission contract](agent-access-policy.md) defines those
+checks.
 
 ## Tokens and sessions
 

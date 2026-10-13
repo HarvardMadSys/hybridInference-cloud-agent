@@ -35,6 +35,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from cloud_agent_host import broker_profiling_policy
+from cloud_agent_host.bounded_output import OutputPump
 from cloud_agent_host.chat_sandbox import (
     CHAT_WORKDIR,
     ChatSandboxManager,
@@ -102,6 +103,7 @@ from cloud_agent_shared.host_settings import (
     resolve,
 )
 from cloud_agent_shared.operation_profiling import PROFILING_CONTEXT_HEADER
+from cloud_agent_shared.plugins import MAX_SANDBOX_PLUGINS, SandboxPlugin
 from cloud_agent_shared.sandbox_archive_settings import SandboxArchivePolicyError
 
 logger = get_logger(__name__)
@@ -383,9 +385,12 @@ class SharedResidentLaunchConfig(BaseModel):
     gateway_base_url: str = Field("", max_length=2048)
     credential: str | None = Field(None, max_length=16384)
     mcp_server_ids: list[str] = Field(default_factory=list, max_length=64)
+    plugins: list[SandboxPlugin] = Field(default_factory=list, max_length=MAX_SANDBOX_PLUGINS)
     # Replaced, like the gateway's, by this host's own MCP relay address.
     mcp_base_url: str = Field("", max_length=2048)
     mcp_credential: str = Field("", max_length=16384)
+    github_token: str | None = Field(None, max_length=16384, repr=False)
+    github_repo: str = Field("", max_length=512)
     slot_id: int = Field(..., ge=0, le=127)
     residency_generation: int = Field(0, ge=0)
 
@@ -1358,40 +1363,41 @@ def _run_sandbox(
             env={**backend.base_env(), "GIT_CONFIG_NOSYSTEM": "1", **env},
         )
     )
-    lines: queue.Queue[str | None] = queue.Queue()
-
-    def pump() -> None:
-        try:
-            for line in process.lines():
-                lines.put(line)
-        finally:
-            lines.put(None)
-
-    threading.Thread(target=pump, daemon=True, name="workspace-command").start()
+    # Real sandbox adapters read fixed-size chunks; injected line-only adapters
+    # remain supported without turning protocol frames into command records.
+    chunks_source = getattr(process, "chunks", process.lines)
+    output = OutputPump(chunks_source(), name="workspace-command")
     deadline = time.monotonic() + timeout_s
     chunks: list[str] = []
     size = 0
-    while True:
-        if time.monotonic() > deadline:
-            process.kill()
-            raise HTTPException(status_code=408, detail="workspace command timed out")
-        try:
-            line = lines.get(timeout=0.2)
-        except queue.Empty:
-            continue
-        if line is None:
-            break
-        size += len(line.encode("utf-8", errors="replace"))
-        if size > max_output_bytes:
-            process.kill()
-            raise HTTPException(status_code=413, detail="workspace command output is too large")
-        chunks.append(line)
-    exit_code = process.wait()
-    stderr = process.stderr_text()
-    if len(stderr.encode("utf-8", errors="replace")) > max_output_bytes:
-        stderr = stderr.encode("utf-8", errors="replace")[-max_output_bytes:].decode(
-            "utf-8", errors="replace"
-        )
+    try:
+        while True:
+            if time.monotonic() > deadline:
+                output.close(drain=True)
+                process.kill()
+                process.wait()
+                raise HTTPException(status_code=408, detail="workspace command timed out")
+            try:
+                chunk = output.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            if chunk is None:
+                break
+            size += len(chunk.encode("utf-8", errors="replace"))
+            if size > max_output_bytes:
+                output.close(drain=True)
+                process.kill()
+                process.wait()
+                raise HTTPException(status_code=413, detail="workspace command output is too large")
+            chunks.append(chunk)
+        exit_code = process.wait()
+        stderr = process.stderr_text()
+        if len(stderr.encode("utf-8", errors="replace")) > max_output_bytes:
+            stderr = stderr.encode("utf-8", errors="replace")[-max_output_bytes:].decode(
+                "utf-8", errors="replace"
+            )
+    finally:
+        output.close()
     if isinstance(workdir, Path):
         os.utime(workdir, None)
     return exit_code, "".join(chunks), stderr
@@ -1916,9 +1922,10 @@ def create_app(
     ) -> dict[str, object]:
         """Apply one complete DB policy and confirm its exact revision.
 
-        This authenticated runner-to-broker channel never transports AWS
-        credentials. The fixed destination and broker workload identity remain
-        the only S3 authority.
+        This authenticated runner-to-broker channel may carry one saved AWS
+        access key. The broker keeps it in memory for S3 and never writes it
+        into a sandbox marker. With no key, the broker's workload identity
+        remains the S3 authority. The destination stays fixed.
         """
         if archive_controller is None:
             raise HTTPException(
@@ -2093,6 +2100,7 @@ def create_app(
             reasoning_effort=body.reasoning_effort,
             gateway_base_url=gateway_base_url,
             credential=body.credential,
+            plugins=tuple(plugin.model_dump(exclude_none=True) for plugin in body.plugins),
             mcp_server_ids=tuple(body.mcp_server_ids),
             # Like the gateway's, the relay is this host's own, so the address
             # a CLI is told is the one the host rules admit for its group. Only
@@ -2103,6 +2111,8 @@ def create_app(
                 else ""
             ),
             mcp_credential=body.mcp_credential,
+            github_token=body.github_token,
+            github_repo=body.github_repo,
             slot_id=body.slot_id,
             residency_generation=body.residency_generation,
         )
@@ -2286,13 +2296,35 @@ def create_app(
                 resources = build_turn_resources(value, tool_windows, thread_id=thread_id)
                 return resources
 
-            try:
+            def observed_events() -> Iterator[Any]:
                 for event in turn.lines():
-                    tool_windows.observe(
-                        event.event_type,
-                        event.payload,
-                        mono=time.monotonic(),
-                    )
+                    # Timestamp at the native read boundary, before queueing:
+                    # backpressure must not move a tool's message window past
+                    # the trusted guest hook marks collected within it.
+                    tool_windows.observe(event.event_type, event.payload, mono=time.monotonic())
+                    yield event
+
+            events = OutputPump(observed_events(), name="shared-turn-events")
+            try:
+                while True:
+                    # Sampling and forwarding must both proceed while the CLI
+                    # is silent. A crash should retain its latest closed
+                    # checkpoint even during one long tool invocation.
+                    checkpoint = take_reported_checkpoint(owner, thread_id)
+                    if checkpoint is not None:
+                        yield (
+                            json.dumps(
+                                {"kind": "resource_checkpoint", "turn_resources": checkpoint},
+                                separators=(",", ":"),
+                            )
+                            + "\n"
+                        )
+                    try:
+                        event = events.get(timeout=0.25)
+                    except queue.Empty:
+                        continue
+                    if event is None:
+                        break
                     yield (
                         json.dumps(
                             {
@@ -2305,22 +2337,6 @@ def create_app(
                         )
                         + "\n"
                     )
-                    # A long turn crosses the checkpoint interval several
-                    # times. The sampler thread produces those checkpoints on
-                    # its own clock; this only forwards one that is waiting,
-                    # which costs a dictionary read per event.
-                    checkpoint = take_reported_checkpoint(owner, thread_id)
-                    if checkpoint is not None:
-                        yield (
-                            json.dumps(
-                                {
-                                    "kind": "resource_checkpoint",
-                                    "turn_resources": checkpoint,
-                                },
-                                separators=(",", ":"),
-                            )
-                            + "\n"
-                        )
                 result = turn.wait()
                 # The activation boundary is part of success, not cleanup
                 # after success. It reaps escaped background processes and
@@ -2374,6 +2390,7 @@ def create_app(
                     + "\n"
                 )
             finally:
+                events.close()
                 with contextlib.suppress(Exception):
                     if not turn_boundary_closed:
                         owner.abort_turn(thread_id, body.token, turn)
@@ -2752,19 +2769,26 @@ def create_app(
 
     @app.get("/sandboxes")
     async def list_chat_sandboxes(
+        thread_id: str | None = Query(None, min_length=1, max_length=256),
         _: None = Depends(authenticate),
     ) -> dict[str, Any]:
-        """Return Docker-observed state for host-heartbeat reconciliation.
+        """Return Docker-observed state for all groups or one member's group.
 
-        This is a complete observation, not an ownership mutation.  The
+        The full listing is a complete observation, not an ownership mutation. The
         control plane keeps the durable thread/container mapping and accepts
         only exact identity matches; the broker supplies the fact it alone
         can see: whether each retained Docker container is currently running.
         Reconciliation also makes a broker restart self-healing because it
         rebuilds the supervisor's in-memory index from Docker labels first.
+        A member query inspects only its known group without host reconciliation.
         """
         try:
-            shared_descriptors = await endpoint_calls.run(require_shared_supervisor().list)
+            owner = require_shared_supervisor()
+            shared_descriptors = (
+                await endpoint_calls.run(owner.list)
+                if thread_id is None
+                else await endpoint_calls.run(owner.list_for_thread, thread_id)
+            )
         except SandboxError as exc:
             raise supervisor_error(exc) from exc
         rows: list[dict[str, Any]] = []
@@ -2797,9 +2821,10 @@ def create_app(
             ]
             rows.append(origin)
         resource_collector = app.state.sandbox_resource_collector
-        if resource_collector is not None:
+        if resource_collector is not None and thread_id is None:
             # The listing already proved each group's labels and exact ID.
             # Synchronization and cache reads perform no Docker stats I/O.
+            # A partial listing must not evict unrelated collection targets.
             resource_collector.sync_targets(rows)
         for row in rows:
             row["resource_usage"] = (

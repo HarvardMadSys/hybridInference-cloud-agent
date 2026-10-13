@@ -45,15 +45,33 @@ import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from cloud_agent import web_search
 from cloud_agent.api.deps import get_mcp_decision_signal, get_storage
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp import protocol
 from cloud_agent.mcp.authorization import decide, visible_capabilities
-from cloud_agent.mcp.host import HostError, McpHost, SessionKey, arguments_digest
-from cloud_agent.mcp.invocations import deadline_for
-from cloud_agent.mcp.jsonrpc import INTERNAL_ERROR, INVALID_PARAMS, INVALID_REQUEST, PARSE_ERROR
+from cloud_agent.mcp.host import (
+    HostError,
+    McpHost,
+    SessionKey,
+    arguments_digest,
+    encode_arguments,
+)
+from cloud_agent.mcp.http_body import (
+    IDENTITY_ENCODING_HEADERS,
+    iter_response_bytes,
+    require_identity_encoding,
+)
+from cloud_agent.mcp.invocations import MAX_HELD_ARGUMENTS_BYTES, deadline_for
+from cloud_agent.mcp.jsonrpc import (
+    INTERNAL_ERROR,
+    INVALID_PARAMS,
+    INVALID_REQUEST,
+    MAX_MESSAGE_BYTES,
+    PARSE_ERROR,
+)
 from cloud_agent.mcp.models import CapabilityKind, McpServer
-from cloud_agent.mcp.net_policy import policy_from_environment
+from cloud_agent.mcp.net_policy import EndpointRejected, credential_headers, policy_from_environment
 from cloud_agent.mcp.refresh import RefreshRefused, ensure_fresh
 from cloud_agent.mcp.registry import (
     binding_from_row,
@@ -73,7 +91,10 @@ from cloud_agent.mcp_proxy import (
     MAX_BUFFERED_RESPONSE_BYTES,
     METHOD_NOT_FOUND,
     SseFilter,
+    UnreadableRequest,
+    canonical_request,
     filter_json_body,
+    parse_request,
     plan_request,
 )
 from cloud_agent.settings import number_setting
@@ -86,6 +107,7 @@ if TYPE_CHECKING:
     from cloud_agent.ports import (
         CredentialQueries,
         McpConnectionRepository,
+        WebSearchRepository,
     )
     from cloud_agent.workers.mcp_decision_signal import McpDecisionSignal
 
@@ -102,6 +124,7 @@ class _McpRelayStorage(Protocol):
 
     credential_queries: CredentialQueries
     mcp: McpConnectionRepository
+    web_search: WebSearchRepository
 
 
 router = APIRouter(prefix="/v1/agent/mcp")
@@ -141,6 +164,18 @@ _SSE_HEADERS = {
     "Cache-Control": "no-cache, no-transform",
     "X-Accel-Buffering": "no",
 }
+
+#: The largest request body either POST route reads or the per-connection route
+#: forwards: the bound every JSON-RPC frame in this service already has. It is
+#: enforced while bytes arrive, and again after canonical encoding, whose ASCII
+#: escapes can grow a UTF-8 body. The relay is one process every tenant shares;
+#: a body read whole before measurement has already cost what the bound saves.
+MAX_RELAY_BODY_BYTES = MAX_MESSAGE_BYTES
+
+#: The most messages one JSON-RPC batch may carry. Current MCP revisions do not
+#: batch at all, and no client batches tool calls in practice; the cap bounds
+#: how much work one request can queue behind itself.
+MAX_RELAY_BATCH_MESSAGES = 32
 
 
 @dataclass
@@ -224,6 +259,51 @@ def _refused(status_code: int, kind: str, message: str) -> HTTPException:
     return HTTPException(
         status_code=status_code, detail={"error": {"type": kind, "message": message}}
     )
+
+
+class _BodyRefused(Exception):
+    """A request this relay will not read or run, carrying the reply that says so."""
+
+    def __init__(self, status_code: int, message: str) -> None:
+        """Build the JSON-RPC refusal, with the null id an unread request gets."""
+        super().__init__(message)
+        self.response = JSONResponse(
+            _error_reply(None, message, INVALID_REQUEST), status_code=status_code
+        )
+
+
+def _require_body_size(size: int) -> None:
+    """Apply the same bound to the received and canonical request encodings."""
+    if size > MAX_RELAY_BODY_BYTES:
+        raise _BodyRefused(413, f"An MCP request body is limited to {MAX_RELAY_BODY_BYTES} bytes.")
+
+
+async def _read_body(request: Request) -> bytes:
+    """Read a POST body under :data:`MAX_RELAY_BODY_BYTES`, or refuse it.
+
+    A declared length over the bound is refused before anything is read. The
+    bound is applied again to the bytes as they stream in, because
+    ``Content-Length`` is only the sender's claim and a chunked body makes none.
+    """
+    declared = request.headers.get("content-length", "")
+    if declared.isdigit():
+        _require_body_size(int(declared))
+    chunks: list[bytes] = []
+    size = 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        _require_body_size(size)
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _bounded_batch(document: Any) -> Any:
+    """Return a parsed document, refusing a batch over :data:`MAX_RELAY_BATCH_MESSAGES`."""
+    if isinstance(document, list) and len(document) > MAX_RELAY_BATCH_MESSAGES:
+        raise _BodyRefused(
+            400, f"A JSON-RPC batch is limited to {MAX_RELAY_BATCH_MESSAGES} messages."
+        )
+    return document
 
 
 async def _authorize_fence(
@@ -584,6 +664,23 @@ async def _decide_call(
             # retry storm cannot send a write twice.
             authorized.dispatches.append((int(claimed["id"]), int(claimed["dispatch_generation"])))
             return None
+    if not _held_arguments_fit(arguments):
+        logger.warning(
+            "agent_mcp_call_too_large_to_hold",
+            extra={
+                "event": "agent_mcp_call_too_large_to_hold",
+                "job_id": authorized.job_id,
+                "alias": authorized.alias,
+                "tool": name,
+            },
+        )
+        return _error_reply(
+            request_id,
+            f"This call needs its owner's approval, and its arguments are larger than the "
+            f"{MAX_HELD_ARGUMENTS_BYTES} bytes a held call can keep for review. "
+            "It was not held or sent.",
+            INVALID_PARAMS,
+        )
     invocation = await store.mcp.create_mcp_invocation(
         job_id=authorized.job_id,
         attempt_id=attempt_id,
@@ -781,11 +878,15 @@ async def _capability_decision(
     the platform would be proxying a capability it cannot reason about, with a
     credential it is responsible for. Notifications are the exception, because
     they ask for nothing and carry no reply.
+
+    A body that does not parse is refused for the same reason. "No method this
+    relay can see" is not "no call": an upstream that decodes the bytes more
+    leniently could find a ``tools/call`` in them that nothing here decided.
     """
     try:
-        document = json.loads(body or b"{}")
-    except (json.JSONDecodeError, ValueError):
-        return None
+        document = parse_request(body)
+    except UnreadableRequest as exc:
+        return exc.reply()
     payloads = document if isinstance(document, list) else [document]
     for payload in payloads:
         if not isinstance(payload, dict):
@@ -839,6 +940,13 @@ async def _capability_decision(
     return None
 
 
+def _held_arguments_fit(arguments: Any) -> bool:
+    """Whether a held call's arguments fit under :data:`MAX_HELD_ARGUMENTS_BYTES` as stored."""
+    if not isinstance(arguments, dict):
+        return True
+    return len(encode_arguments(arguments)) <= MAX_HELD_ARGUMENTS_BYTES
+
+
 def _protect_arguments(arguments: Any) -> str | None:
     """Store a held call's arguments under the invocation cipher."""
     if not isinstance(arguments, dict):
@@ -872,7 +980,14 @@ def _upstream_headers(request: Request, server: McpServer) -> dict[str, str]:
     }
     # The registry always wins over anything the sandbox sent under the same
     # name — now that the same name is actually recognized as the same name.
-    headers.update({key.lower(): value for key, value in server.headers.items()})
+    try:
+        safe_credentials = credential_headers(server.headers)
+    except EndpointRejected as exc:
+        raise _refused(
+            503, "server_error", "The MCP credential uses an invalid HTTP header."
+        ) from exc
+    headers.update({key.lower(): value for key, value in safe_credentials.items()})
+    headers.update(IDENTITY_ENCODING_HEADERS)
     return headers
 
 
@@ -897,6 +1012,7 @@ def build_upstream_client(request_timeout_s: float | None = None) -> httpx.Async
             connect=number_setting("mcp_connect_timeout_s", _CONNECT_TIMEOUT_S),
         ),
         follow_redirects=False,
+        headers=IDENTITY_ENCODING_HEADERS,
         transport=pinned_transport(),
     )
 
@@ -935,12 +1051,17 @@ async def _proxy(
             f"The {server.name!r} MCP connection could not be reached: {exc}",
         ) from exc
     assert server.url is not None
+    headers = _upstream_headers(request, server)
+    if body:
+        # The body is this relay's own encoding of what it decided, so its type
+        # is too; a charset the sandbox named would describe other bytes.
+        headers["content-type"] = "application/json"
     client = build_upstream_client(server.request_timeout_s)
     upstream_request = client.build_request(
         method,
         server.url,
         content=body or None,
-        headers=_upstream_headers(request, server),
+        headers=headers,
     )
     try:
         upstream = await client.send(upstream_request, stream=True)
@@ -986,6 +1107,16 @@ async def _proxy(
         )
 
     content_type = upstream.headers.get("content-type", "")
+    try:
+        require_identity_encoding(upstream)
+    except httpx.DecodingError as exc:
+        await upstream.aclose()
+        await client.aclose()
+        raise _refused(
+            502,
+            "server_error",
+            "The MCP server sent a compressed response despite identity encoding.",
+        ) from exc
     if content_type.startswith("text/event-stream"):
         return StreamingResponse(
             _stream_sse(upstream, client, server),
@@ -997,7 +1128,7 @@ async def _proxy(
     try:
         chunks: list[bytes] = []
         total = 0
-        async for chunk in upstream.aiter_bytes():
+        async for chunk in iter_response_bytes(upstream):
             total += len(chunk)
             if total > MAX_BUFFERED_RESPONSE_BYTES:
                 raise HTTPException(
@@ -1047,7 +1178,7 @@ async def _stream_sse(
     """Relay an SSE reply, rewriting tool catalogues as they pass."""
     sse = SseFilter(server)
     try:
-        async for chunk in upstream.aiter_bytes():
+        async for chunk in iter_response_bytes(upstream):
             if out := sse.feed(chunk):
                 yield out
         if tail := sse.flush():
@@ -1317,13 +1448,16 @@ async def _host_post(
     authorization: str | None,
 ) -> Any:
     """Dispatch one JSON-RPC message addressed to the merged surface."""
-    body = await request.body()
     try:
-        document = json.loads(body or b"{}")
-    except (json.JSONDecodeError, ValueError) as exc:
-        return JSONResponse(
-            _error_reply(None, f"invalid JSON: {exc}", PARSE_ERROR), status_code=400
-        )
+        body = await _read_body(request)
+        try:
+            document = _bounded_batch(json.loads(body or b"{}"))
+        except (ValueError, RecursionError) as exc:
+            return JSONResponse(
+                _error_reply(None, f"invalid JSON: {exc}", PARSE_ERROR), status_code=400
+            )
+    except _BodyRefused as exc:
+        return exc.response
 
     payloads = document if isinstance(document, list) else [document]
     replies: list[dict[str, Any]] = []
@@ -1355,17 +1489,19 @@ async def _host_post(
             continue
         if method == protocol.TOOLS_LIST:
             catalogue = await _host_catalogue(identity, store)
+            tools = [
+                _host_tool_entry(name, authorized, capability)
+                for name, (authorized, capability) in sorted(
+                    catalogue.items(), key=lambda item: item[0]
+                )
+            ]
+            if web_search.configured():
+                tools.append(web_search.TOOL_DEFINITION)
+                tools.sort(key=lambda tool: str(tool["name"]))
             replies.append(
                 _result_reply(
                     request_id,
-                    {
-                        "tools": [
-                            _host_tool_entry(name, authorized, capability)
-                            for name, (authorized, capability) in sorted(
-                                catalogue.items(), key=lambda item: item[0]
-                            )
-                        ]
-                    },
+                    {"tools": tools},
                     stateless=stateless,
                 )
             )
@@ -1595,6 +1731,148 @@ async def _host_fetch(
     )
 
 
+async def _release_web_search(store: _McpRelayStorage, *, call_id: str, job_id: str) -> None:
+    """Release provider concurrency without ever replacing the call's outcome."""
+    try:
+        released = await store.web_search.release_web_search(call_id=call_id)
+        if not released:
+            logger.warning(
+                "agent_web_search_release_missing",
+                extra={"event": "agent_web_search_release_missing", "job_id": job_id},
+            )
+    except Exception:
+        logger.exception(
+            "agent_web_search_release_failed",
+            extra={"event": "agent_web_search_release_failed", "job_id": job_id},
+        )
+
+
+async def _host_web_search(
+    arguments: Any,
+    *,
+    request_id: Any,
+    identity: dict[str, Any],
+    store: _McpRelayStorage,
+    authorization: str | None,
+    stateless: bool,
+) -> dict[str, Any]:
+    """Dispatch the platform search tool without exposing its provider key."""
+    search_arguments = arguments if isinstance(arguments, dict) else {}
+    try:
+        # Validate before consuming a shared-key admission slot. ``search`` repeats
+        # this at the provider boundary so it remains safe as a standalone client.
+        web_search.validate(
+            search_arguments,
+            provider=web_search.selected_provider(),
+        )
+    except web_search.WebSearchInputError as exc:
+        return _error_reply(request_id, str(exc), INVALID_PARAMS)
+
+    attempt_id = _attempt_id_of(authorization)
+    lease_generation = _lease_of(authorization)
+    if attempt_id is None or lease_generation <= 0:
+        return _result_reply(
+            request_id,
+            {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Web search authorization expired. Retry in the active turn.",
+                    }
+                ],
+                "isError": True,
+            },
+            stateless=stateless,
+        )
+
+    try:
+        admission = await store.web_search.acquire_web_search(
+            job_id=str(identity["job_id"]),
+            attempt_id=attempt_id,
+            lease_generation=lease_generation,
+        )
+    except Exception:
+        logger.exception(
+            "agent_web_search_admission_failed",
+            extra={
+                "event": "agent_web_search_admission_failed",
+                "job_id": identity["job_id"],
+            },
+        )
+        return _result_reply(
+            request_id,
+            {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Web search is temporarily unavailable. Try again.",
+                    }
+                ],
+                "isError": True,
+            },
+            stateless=stateless,
+        )
+
+    if admission.call_id is None:
+        message = (
+            "Web search is busy. Try again shortly."
+            if admission.reason == "concurrency_limited"
+            else "Web search usage limit reached. Try again in a minute."
+        )
+        if admission.reason == "stale_fence":
+            message = "Web search authorization expired. Retry in the active turn."
+        logger.warning(
+            "agent_web_search_limited",
+            extra={
+                "event": "agent_web_search_limited",
+                "job_id": identity["job_id"],
+                "kind": admission.reason,
+            },
+        )
+        return _result_reply(
+            request_id,
+            {"content": [{"type": "text", "text": message}], "isError": True},
+            stateless=stateless,
+        )
+
+    try:
+        result = await web_search.search(search_arguments)
+    except web_search.WebSearchError as exc:
+        logger.warning(
+            "agent_web_search_failed",
+            extra={
+                "event": "agent_web_search_failed",
+                "job_id": identity["job_id"],
+                "kind": exc.kind,
+            },
+        )
+        return _result_reply(
+            request_id,
+            {
+                "content": [{"type": "text", "text": str(exc)}],
+                "isError": True,
+            },
+            stateless=stateless,
+        )
+    else:
+        return _result_reply(
+            request_id,
+            {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps(result, ensure_ascii=False, separators=(",", ":")),
+                    }
+                ]
+            },
+            stateless=stateless,
+        )
+    finally:
+        await asyncio.shield(
+            _release_web_search(store, call_id=admission.call_id, job_id=str(identity["job_id"]))
+        )
+
+
 async def _host_call(
     payload: dict[str, Any],
     *,
@@ -1609,6 +1887,15 @@ async def _host_call(
     params = payload.get("params")
     name = str(params.get("name") or "") if isinstance(params, dict) else ""
     arguments = params.get("arguments") if isinstance(params, dict) else None
+    if name == web_search.TOOL_NAME and web_search.configured():
+        return await _host_web_search(
+            arguments,
+            request_id=request_id,
+            identity=identity,
+            store=store,
+            authorization=authorization,
+            stateless=stateless,
+        )
     catalogue = await _host_catalogue(identity, store)
     entry = catalogue.get(name)
     if entry is None:
@@ -1642,10 +1929,12 @@ async def _host_call(
     # new owner the old one's upstream state.
     try:
         session = await _host_session(authorized, authorization)
+        schema = getattr(capability, "input_schema", None)
         outcome = await _host().call_tool(
             session,
             name=capability.name,
             arguments=arguments if isinstance(arguments, dict) else {},
+            input_schema=schema if isinstance(schema, dict) else None,
         )
     except asyncio.CancelledError:
         await asyncio.shield(_finish_dispatches(authorized, store, status="outcome_unknown"))
@@ -1729,13 +2018,26 @@ async def mcp_post(
         # Keep the existing JSON-RPC refusal for disabled selections, including
         # housekeeping requests, without resolving or refreshing credentials.
         try:
-            payload = json.loads(await request.body())
-        except ValueError:
+            payload = json.loads(await _read_body(request))
+        except (_BodyRefused, ValueError, RecursionError):
             payload = None
         request_id = payload.get("id") if isinstance(payload, dict) else None
         return JSONResponse(_error_reply(request_id, str(exc.detail)))
     assert store is not None
-    body = await request.body()
+    try:
+        document = _bounded_batch(parse_request(await _read_body(request)))
+        body = canonical_request(document)
+        # ASCII escapes can expand a body that fit as UTF-8. Refuse that before
+        # deciding any call, so it cannot be held or forwarded over the bound.
+        _require_body_size(len(body))
+    except _BodyRefused as exc:
+        return exc.response
+    except UnreadableRequest as exc:
+        # The merged endpoint's answer to the same body. Nothing below may see
+        # bytes other than the ones decided, so nothing below sees these.
+        return JSONResponse(exc.reply(), status_code=400)
+    # From here on the request *is* the parsed document: the decision, the
+    # allowlist and the upstream all read this one encoding of it.
 
     held = await _capability_decision(
         authorized,

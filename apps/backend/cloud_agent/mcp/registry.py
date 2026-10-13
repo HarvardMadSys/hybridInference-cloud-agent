@@ -52,6 +52,7 @@ from cloud_agent.mcp.models import (
     ToolRule,
     Transport,
 )
+from cloud_agent.mcp.net_policy import EndpointRejected
 from cloud_agent.source_control import SourceControlCipher, SourceControlError
 
 if TYPE_CHECKING:
@@ -416,6 +417,16 @@ async def resolve_connection(
             error="This connection could not be read. Connect it again.",
             error_kind=ConnectionErrorKind.NEEDS_AUTHORIZATION,
         )
+    if connection.auth.kind is AuthKind.STATIC:
+        try:
+            connection.auth.header.render(secret)
+        except EndpointRejected:
+            return ResolvedConnection(
+                connection=connection,
+                snapshot=snapshot,
+                error="This connection's credential uses an invalid HTTP header.",
+                error_kind=ConnectionErrorKind.PROTOCOL_INCOMPATIBLE,
+            )
     return ResolvedConnection(
         connection=connection,
         credential={"secret": secret, "refresh_rotates": bool(row.get("refresh_rotates"))},

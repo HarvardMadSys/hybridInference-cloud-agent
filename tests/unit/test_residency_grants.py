@@ -68,6 +68,50 @@ async def test_mint_retries_reuse_a_grant_but_a_new_resident_generation_does_not
     assert len(grants.issued) == 2
 
 
+async def test_a_grant_the_residency_will_not_link_is_revoked_and_not_returned():
+    """Expiry and takeover both refuse the link; the minted token must not leave.
+
+    ``link_residency_grant`` reports either failure as false. The mint path
+    revokes that grant and returns no credential, including when the refusal
+    is an already-expired lease rather than a generation change.
+    """
+    grants = IdempotentGrants()
+    store = SimpleNamespace(link_residency_grant=AsyncMock(return_value=False))
+    row = {
+        "thread_id": "athr_1",
+        "user_id": "owner",
+        "model": "model-1",
+        "generation": 1,
+        "establishing_attempt_id": "aatt_1",
+    }
+
+    assert await residency._mint_residency_grant(store, grants, row=row) is None
+
+    issued = next(iter(grants.issued.values()))
+    assert grants.revoked == {issued["grant_id"]}
+    assert not grants.live(issued["token"])
+
+
+async def test_a_failed_orphan_revoke_still_never_returns_rejected_grant():
+    """A cleanup failure cannot turn a rejected late link into authority."""
+    grants = IdempotentGrants()
+    grants.revoke = AsyncMock(side_effect=RuntimeError("gateway is down"))
+    store = SimpleNamespace(link_residency_grant=AsyncMock(return_value=False))
+    row = {
+        "thread_id": "athr_1",
+        "user_id": "owner",
+        "model": "model-1",
+        "generation": 1,
+        "establishing_attempt_id": "aatt_1",
+    }
+
+    credential = await residency._mint_residency_grant(store, grants, row=row)
+
+    assert credential is None
+    grant_id = next(iter(grants.issued.values()))["grant_id"]
+    grants.revoke.assert_awaited_once_with(grant_id)
+
+
 @pytest.mark.parametrize("revoke_raises", [False, True])
 async def test_worker_replacement_revokes_only_its_previous_resident_grant(
     monkeypatch, revoke_raises

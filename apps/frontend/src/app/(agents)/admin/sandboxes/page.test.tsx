@@ -301,6 +301,14 @@ describe('running sandbox inventory', () => {
     ).toHaveAttribute('aria-current', 'page');
   });
 
+  it('links each sandbox to its encoded admin trajectory route', async () => {
+    vi.mocked(getAdminSandboxes).mockResolvedValue(page([sandbox({ id: 'sandbox/one' })]));
+    render(<AdminSandboxesPage />);
+    expect(
+      await screen.findByRole('link', { name: 'View trajectory for Fix login' }),
+    ).toHaveAttribute('href', '/admin/sandboxes/sandbox%2Fone');
+  });
+
   it('keeps sandbox groups separate and links the origin session and host', async () => {
     vi.mocked(getAdminSandboxes).mockResolvedValue(
       page([

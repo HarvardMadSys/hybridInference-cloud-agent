@@ -210,6 +210,29 @@ describe('useAgentJob history-to-stream handoff', () => {
     expect(vi.mocked(streamAgentJob).mock.calls[0][1].lastEventId).toBe(17);
   });
 
+  it('discards buffered stream rows when the owner read scope changes', async () => {
+    const job = running();
+    serve(job, [event(50, 'message', { text: 'Alice history' })]);
+    let userId = 'alice';
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <AgentReadProvider userId={userId}>{children}</AgentReadProvider>
+    );
+    const { result, rerender } = renderHook(() => useAgentJob(job.id), { wrapper });
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    const oldStream = vi.mocked(streamAgentJob).mock.calls[0][1];
+    act(() => oldStream.onEvent(event(51, 'message', { text: 'Alice live reply' })));
+    expect(result.current.events.map((row) => row.id)).toEqual([50, 51]);
+
+    serve(job, [event(3, 'message', { text: 'Bob history' })]);
+    userId = 'bob';
+    rerender();
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(oldStream.signal?.aborted).toBe(true);
+    expect(result.current.events.map((row) => row.id)).toEqual([3]);
+    expect(result.current.job?.events.map((row) => row.sourceEventId)).toEqual([3]);
+    expect(vi.mocked(streamAgentJob).mock.calls[1][1].lastEventId).toBe(3);
+  });
+
   it('skips the history request when a previous route metadata response arrives late', async () => {
     const first = running();
     const next = running('next-job');
@@ -249,6 +272,117 @@ describe('useAgentJob history-to-stream handoff', () => {
 });
 
 describe('useAgentJob live turn rows', () => {
+  it('preserves and deduplicates streamed events while a history reload is pending', async () => {
+    const job = {
+      id: 'live-job',
+      state: 'queued',
+      conversation_state: 'queued',
+      current_attempt_id: null,
+      thread_id: 'live-thread',
+      turn_no: 1,
+      task_prompt: 'Task',
+      runtime: 'codex',
+      model: 'test',
+      title: 'Title',
+      title_source: 'generated',
+    } as AgentJobApi;
+    const before = event(1, 'message', { text: 'Before reload' });
+    const during = event(2, 'message', { text: 'During reload' });
+    const started = event(3, 'lifecycle', { phase: 'started' });
+    vi.mocked(getAgentJob).mockResolvedValue(job);
+    vi.mocked(getAgentJobThread).mockResolvedValue({
+      thread_id: 'live-thread',
+      jobs: [job],
+      messages: [],
+    } as unknown as AgentThreadApi);
+    vi.mocked(listAllAgentThreadEvents).mockResolvedValueOnce([before]);
+    vi.mocked(streamAgentJob).mockImplementation(stayOpen);
+    const { result } = renderHook(() => useAgentJob(job.id));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    let resolveHistory!: (events: AgentThreadEventApi[]) => void;
+    vi.mocked(listAllAgentThreadEvents).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveHistory = resolve;
+        }),
+    );
+    act(() => result.current.reload());
+    await waitFor(() => expect(resolveHistory).toBeDefined());
+    const stream = vi.mocked(streamAgentJob).mock.calls[0][1];
+    act(() => {
+      stream.onEvent(before);
+      stream.onEvent(during);
+      stream.onEvent(started);
+    });
+    expect(result.current.events.map((row) => row.id)).toEqual([1, 2, 3]);
+    expect(result.current.job?.events.map((row) => row.sourceEventId)).toEqual([1, 2, 3]);
+    expect(result.current.job?.state).toBe('running');
+    await act(async () => resolveHistory([before]));
+    expect(result.current.events.map((row) => row.id)).toEqual([1, 2, 3]);
+    expect(result.current.job?.events.map((row) => row.sourceEventId)).toEqual([1, 2, 3]);
+    expect(result.current.job?.state).toBe('running');
+    expect(result.current.threadJobs[0]).toMatchObject({
+      state: 'running',
+      current_attempt_id: 10,
+    });
+    act(() => stream.onEvent(during));
+    expect(result.current.events.map((row) => row.id)).toEqual([1, 2, 3]);
+    expect(streamAgentJob).toHaveBeenCalledOnce();
+  });
+
+  it('retains live content after a failed read and merges it into the retry snapshot', async () => {
+    const job = {
+      id: 'live-job',
+      state: 'running',
+      conversation_state: 'running',
+      current_attempt_id: 10,
+      thread_id: 'live-thread',
+      turn_no: 1,
+      task_prompt: 'Task',
+      runtime: 'codex',
+      model: 'test',
+      title: 'Title',
+      title_source: 'generated',
+    } as AgentJobApi;
+    const before = event(1, 'message', { text: 'Before reload' });
+    const during = event(2, 'message', { text: 'During failed reload' });
+    const publishing = event(3, 'lifecycle', { phase: 'publishing' });
+    vi.mocked(getAgentJob).mockResolvedValue(job);
+    vi.mocked(getAgentJobThread).mockResolvedValue({
+      thread_id: 'live-thread',
+      jobs: [job],
+      messages: [],
+    } as unknown as AgentThreadApi);
+    vi.mocked(listAllAgentThreadEvents).mockResolvedValueOnce([before]);
+    vi.mocked(streamAgentJob).mockImplementation(stayOpen);
+    const { result } = renderHook(() => useAgentJob(job.id));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    let rejectHistory!: (cause: Error) => void;
+    vi.mocked(listAllAgentThreadEvents).mockImplementationOnce(
+      () =>
+        new Promise((_, reject) => {
+          rejectHistory = reject;
+        }),
+    );
+    act(() => result.current.reload());
+    await waitFor(() => expect(rejectHistory).toBeDefined());
+    const stream = vi.mocked(streamAgentJob).mock.calls[0][1];
+    act(() => stream.onEvent(during));
+    await act(async () => rejectHistory(new Error('History unavailable')));
+    expect(result.current.error).toBe('History unavailable');
+    expect(result.current.job?.events.map((row) => row.sourceEventId)).toEqual([1, 2]);
+    act(() => stream.onEvent(publishing));
+    vi.mocked(listAllAgentThreadEvents).mockResolvedValueOnce([before]);
+    act(() => result.current.reload());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.error).toBeNull();
+    expect(result.current.events.map((row) => row.id)).toEqual([1, 2, 3]);
+    expect(result.current.job?.events.map((row) => row.sourceEventId)).toEqual([1, 2, 3]);
+    expect(result.current.job?.state).toBe('running');
+    expect(result.current.threadJobs[0].state).toBe('publishing');
+    expect(streamAgentJob).toHaveBeenCalledOnce();
+  });
+
   it('keeps the previous transcript while loading a follow-up without mixing their streams', async () => {
     const first = {
       id: 'live-job',

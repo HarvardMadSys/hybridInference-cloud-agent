@@ -67,6 +67,7 @@ describe('admin layout', () => {
     vi.mocked(getSessionUser).mockResolvedValue({ id: 'user-1', agent_access: adminAccess });
     renderAdmin();
     expect(await screen.findByText('Private admin data')).toBeVisible();
+    expect(screen.getByText('Private admin data').closest('[lang]')).toHaveAttribute('lang', 'en');
     expect(readAdminData).toHaveBeenCalledOnce();
   });
 

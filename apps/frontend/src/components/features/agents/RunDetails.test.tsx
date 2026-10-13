@@ -5,6 +5,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  createAgentJob,
   getAgentJobUsage,
   refreshAgentJobUsage,
   type AgentJobApi,
@@ -16,7 +17,14 @@ import { RunDetails } from './RunDetails';
 import { PUSH_BATCH_MS, receiveHint, resetAgentPush } from './agentPush';
 import type { AgentJob } from './types';
 
+const navigation = vi.hoisted(() => ({ push: vi.fn() }));
+
+vi.mock('next/navigation', () => ({
+  useRouter: () => navigation,
+}));
+
 vi.mock('@/lib/api/agents', () => ({
+  createAgentJob: vi.fn(),
   getAgentJobUsage: vi.fn(),
   refreshAgentJobUsage: vi.fn(),
 }));
@@ -24,6 +32,8 @@ vi.mock('@/lib/api/agents', () => ({
 beforeEach(() => {
   vi.mocked(getAgentJobUsage).mockReset();
   vi.mocked(refreshAgentJobUsage).mockReset();
+  vi.mocked(createAgentJob).mockReset();
+  navigation.push.mockReset();
 });
 
 afterEach(() => {
@@ -48,6 +58,8 @@ const HISTORY_JOB = {
   id: 'ajob_0',
   turn_no: 2,
   state: 'succeeded',
+  repo: 'acme/widgets',
+  task_prompt: '  Add checkout to the catalog page  ',
   runtime: 'codex',
   model: 'gpt-observed',
   reasoning_effort: 'high',
@@ -299,6 +311,53 @@ describe('RunDetails', () => {
 
     expect(screen.getByText(/Start a new chat to continue/)).toBeInTheDocument();
     expect(screen.queryByText(/sending a follow-up to try again/)).not.toBeInTheDocument();
+  });
+
+  it('offers to restart a failed run in a new session, then navigates to it', async () => {
+    vi.mocked(getAgentJobUsage).mockResolvedValue(null);
+    vi.mocked(createAgentJob).mockResolvedValue({ id: 'ajob_new' } as AgentJobApi);
+    render(
+      <RunDetails
+        jobId="ajob_0"
+        turnNo={2}
+        tab="overview"
+        job={{ ...HISTORY_JOB, state: 'failed', detail: 'Build step timed out.' }}
+        events={[]}
+        onOpenGitDiff={vi.fn()}
+      />,
+    );
+
+    const restart = screen.getByRole('button', { name: 'Restart in a new session' });
+    expect(restart).toBeInTheDocument();
+    fireEvent.click(restart);
+
+    await waitFor(() =>
+      expect(createAgentJob).toHaveBeenCalledWith({
+        repo: 'acme/widgets',
+        task_prompt: 'Add checkout to the catalog page',
+        model: 'gpt-observed',
+        reasoning_effort: 'high',
+      }),
+    );
+    expect(navigation.push).toHaveBeenCalledWith('/ajob_new');
+  });
+
+  it('does not offer to restart in a new session for a run that is not failed', () => {
+    vi.mocked(getAgentJobUsage).mockResolvedValue(null);
+    render(
+      <RunDetails
+        jobId="ajob_0"
+        turnNo={2}
+        tab="overview"
+        job={HISTORY_JOB}
+        events={[]}
+        onOpenGitDiff={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.queryByRole('button', { name: 'Restart in a new session' }),
+    ).not.toBeInTheDocument();
   });
 
   it('offers the workspace diff while saying it is the current workspace', () => {

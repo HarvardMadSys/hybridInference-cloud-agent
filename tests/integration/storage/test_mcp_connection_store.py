@@ -41,6 +41,7 @@ from tests.support.db import reset_agent_tables
 from tests.support.migrations import apply_migrations, downgrade_to
 
 from cloud_agent.mcp import refresh
+from cloud_agent.mcp.errors import McpConnectionCreateConflict
 from cloud_agent.mcp.registry import mcp_cipher, oauth_cipher
 from cloud_agent.storage.assembly import Storage
 
@@ -167,6 +168,7 @@ async def _invocation(
     *,
     expires_in: timedelta = timedelta(minutes=10),
     policy_revision: int = 1,
+    arguments_ciphertext: str | None = None,
 ) -> dict[str, Any]:
     """One held call, pending and undecided."""
     return await store.mcp.create_mcp_invocation(
@@ -177,7 +179,7 @@ async def _invocation(
         connection_id=int(connection["id"]),
         capability_name="get_issue",
         arguments_digest="digest-1",
-        arguments_ciphertext=None,
+        arguments_ciphertext=arguments_ciphertext,
         config_revision=int(connection["config_revision"]),
         authorization_epoch=int(connection["authorization_epoch"]),
         capability_revision=int(connection["capability_revision"]),
@@ -227,6 +229,204 @@ async def test_concurrent_setup_retries_resume_one_pending_connection(store):
     # Re-importing the original no-auth URL keeps OAuth registration and pause
     # state, instead of resetting the connection or enabling a duplicate.
     assert await store.mcp.create_mcp_connection(**values) == before
+
+
+async def test_bulk_create_rolls_back_when_a_later_credential_insert_is_rejected(
+    store: Storage, pool
+) -> None:
+    """A database rejection cannot leave the import's earlier draft visible."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            CREATE FUNCTION agent_test_reject_mcp_credential() RETURNS trigger
+            LANGUAGE plpgsql AS $$
+            BEGIN
+                IF NEW.access_token_ciphertext = 'reject-this-credential' THEN
+                    RAISE EXCEPTION 'injected credential rejection';
+                END IF;
+                RETURN NEW;
+            END
+            $$
+            """
+        )
+        await conn.execute(
+            """
+            CREATE TRIGGER trg_agent_test_reject_mcp_credential
+            BEFORE INSERT ON agent_mcp_connections
+            FOR EACH ROW EXECUTE FUNCTION agent_test_reject_mcp_credential()
+            """
+        )
+    common = {
+        "user_id": _OWNER,
+        "transport": "streamable-http",
+        "location": "remote",
+        "launch_spec": None,
+        "auth_config": {},
+        "template": None,
+        "reuse_pending": False,
+    }
+    connections = [
+        {
+            **common,
+            "label": "Public",
+            "url": "https://public.example.com/mcp",
+            "auth_kind": "none",
+        },
+        {
+            **common,
+            "label": "Private",
+            "url": "https://private.example.com/mcp",
+            "auth_kind": "static",
+            "access_token_ciphertext": "reject-this-credential",
+        },
+    ]
+    try:
+        with pytest.raises(asyncpg.PostgresError, match="injected credential rejection"):
+            await store.mcp.create_mcp_connections(connections=connections)
+    finally:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "DROP TRIGGER IF EXISTS trg_agent_test_reject_mcp_credential "
+                "ON agent_mcp_connections"
+            )
+            await conn.execute("DROP FUNCTION IF EXISTS agent_test_reject_mcp_credential()")
+
+    assert await store.mcp.list_mcp_connections(user_id=_OWNER) == []
+    retried = await store.mcp.create_mcp_connections(connections=connections)
+    assert [row["label"] for row in retried] == ["Public", "Private"]
+    assert retried[1]["access_token_ciphertext"] == "reject-this-credential"
+
+
+@pytest.mark.parametrize("invalid_connector", ["other-owner", "revoked"])
+async def test_bulk_create_rolls_back_when_a_later_connector_is_unavailable(
+    store: Storage, invalid_connector: str
+) -> None:
+    """Connector ownership and revocation are checked inside the batch transaction."""
+    connector = await store.mcp.create_mcp_connector(
+        user_id=_OTHER if invalid_connector == "other-owner" else _OWNER,
+        name="Laptop",
+        registration_hash=f"registration-{invalid_connector}",
+    )
+    if invalid_connector == "revoked":
+        assert await store.mcp.revoke_mcp_connector(
+            connector_id=int(connector["id"]), user_id=_OWNER
+        )
+    common = {
+        "user_id": _OWNER,
+        "transport": "streamable-http",
+        "location": "remote",
+        "launch_spec": None,
+        "auth_kind": "none",
+        "auth_config": {},
+        "template": None,
+        "reuse_pending": False,
+    }
+    with pytest.raises(McpConnectionCreateConflict, match="connector is no longer available"):
+        await store.mcp.create_mcp_connections(
+            connections=[
+                {
+                    **common,
+                    "label": "First",
+                    "url": "https://first.example.com/mcp",
+                },
+                {
+                    **common,
+                    "label": "Second",
+                    "transport": "stdio",
+                    "location": "user-connector",
+                    "url": None,
+                    "launch_spec": {"command": "mcp-server", "args": [], "env": {}, "mounts": []},
+                    "connector_id": int(connector["id"]),
+                },
+            ]
+        )
+
+    assert await store.mcp.list_mcp_connections(user_id=_OWNER) == []
+
+
+async def test_direct_connector_create_rolls_back_if_authorization_insert_fails(
+    store: Storage, pool
+) -> None:
+    """The route, encrypted config row, and reverse authority commit together."""
+    connector = await store.mcp.create_mcp_connector(
+        user_id=_OWNER,
+        name="Laptop",
+        registration_hash="registration-atomic-direct-create",
+    )
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            CREATE FUNCTION agent_test_reject_mcp_connector_mapping() RETURNS trigger
+            LANGUAGE plpgsql AS $$
+            BEGIN
+                RAISE EXCEPTION 'injected connector mapping rejection';
+            END
+            $$
+            """
+        )
+        await conn.execute(
+            """
+            CREATE TRIGGER trg_agent_test_reject_mcp_connector_mapping
+            BEFORE INSERT ON agent_mcp_connector_connections
+            FOR EACH ROW EXECUTE FUNCTION agent_test_reject_mcp_connector_mapping()
+            """
+        )
+    values = {
+        "user_id": _OWNER,
+        "label": "Local",
+        "transport": "stdio",
+        "location": "user-connector",
+        "url": None,
+        "launch_spec": {"command": "mcp-server", "args": [], "env": {}, "mounts": []},
+        "auth_kind": "none",
+        "auth_config": {},
+        "connector_id": int(connector["id"]),
+    }
+    try:
+        with pytest.raises(asyncpg.PostgresError, match="injected connector mapping rejection"):
+            await store.mcp.create_mcp_connection(**values)
+    finally:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "DROP TRIGGER IF EXISTS trg_agent_test_reject_mcp_connector_mapping "
+                "ON agent_mcp_connector_connections"
+            )
+            await conn.execute("DROP FUNCTION IF EXISTS agent_test_reject_mcp_connector_mapping()")
+
+    assert await store.mcp.list_mcp_connections(user_id=_OWNER) == []
+    assert await store.mcp.list_mcp_connector_connections(connector_id=int(connector["id"])) == []
+
+    created = await store.mcp.create_mcp_connection(**values)
+    assert created["connector_id"] == connector["id"]
+    assert await store.mcp.list_mcp_connector_connections(connector_id=int(connector["id"])) == [
+        created["id"]
+    ]
+
+
+async def test_direct_connector_create_rejects_a_non_connector_location(
+    store: Storage,
+) -> None:
+    """Repository callers cannot bypass the API's location validation."""
+    connector = await store.mcp.create_mcp_connector(
+        user_id=_OWNER,
+        name="Laptop",
+        registration_hash="registration-invalid-direct-location",
+    )
+    with pytest.raises(McpConnectionCreateConflict, match="can only serve"):
+        await store.mcp.create_mcp_connection(
+            user_id=_OWNER,
+            label="Remote",
+            transport="streamable-http",
+            location="remote",
+            url=_URL,
+            launch_spec=None,
+            auth_kind="none",
+            auth_config={},
+            connector_id=int(connector["id"]),
+        )
+
+    assert await store.mcp.list_mcp_connections(user_id=_OWNER) == []
+    assert await store.mcp.list_mcp_connector_connections(connector_id=int(connector["id"])) == []
 
 
 @pytest.mark.parametrize(
@@ -514,14 +714,14 @@ async def test_consuming_an_oauth_flow_has_exactly_one_winner(store: Storage) ->
     second would overwrite the credential the first just stored.
     """
     row = await _connect(store, _OWNER, auth_kind="oauth", access_token=None)
-    await store.mcp.create_mcp_oauth_flow(
+    created_generation = await store.mcp.create_mcp_oauth_flow(
         state_hash="state-hash",
         user_id=_OWNER,
         connection_id=row["id"],
         config_revision=row["config_revision"],
         authorization_epoch=row["authorization_epoch"],
         # Starting a flow moves the generation; the row records the new one.
-        oauth_generation=row["oauth_generation"] + 1,
+        expected_oauth_generation=row["oauth_generation"],
         code_verifier_ciphertext="ciphertext-verifier",
         client_id="client-1",
         client_secret_ciphertext=None,
@@ -537,21 +737,112 @@ async def test_consuming_an_oauth_flow_has_exactly_one_winner(store: Storage) ->
         registration_endpoint=None,
         expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
     )
+    assert created_generation == row["oauth_generation"] + 1
+
+    # Presented by a browser signed in as somebody else, the state matches
+    # nothing -- and the flow is left for the account that started it.
+    assert await store.mcp.consume_mcp_oauth_flow(state_hash="state-hash", user_id=_OTHER) is None
 
     first, second = await asyncio.gather(
-        store.mcp.consume_mcp_oauth_flow(state_hash="state-hash"),
-        store.mcp.consume_mcp_oauth_flow(state_hash="state-hash"),
+        store.mcp.consume_mcp_oauth_flow(state_hash="state-hash", user_id=_OWNER),
+        store.mcp.consume_mcp_oauth_flow(state_hash="state-hash", user_id=_OWNER),
     )
 
     winners = [consumed for consumed in (first, second) if consumed is not None]
     assert len(winners) == 1
     assert winners[0]["connection_id"] == row["id"]
     assert winners[0]["scopes"] == ["read"]
-    assert await store.mcp.consume_mcp_oauth_flow(state_hash="state-hash") is None
+    assert await store.mcp.consume_mcp_oauth_flow(state_hash="state-hash", user_id=_OWNER) is None
     # And starting a flow again moves the generation the row was fenced to.
     assert (await store.mcp.get_mcp_connection(connection_id=row["id"]))["oauth_generation"] == row[
         "oauth_generation"
     ] + 1
+
+
+def _oauth_start(row: dict[str, Any], *, state_hash: str) -> dict[str, Any]:
+    """Arguments for one start, fenced to the generation the caller observed."""
+    return {
+        "state_hash": state_hash,
+        "user_id": _OWNER,
+        "connection_id": row["id"],
+        "config_revision": row["config_revision"],
+        "authorization_epoch": row["authorization_epoch"],
+        "expected_oauth_generation": row["oauth_generation"],
+        "code_verifier_ciphertext": "ciphertext-verifier",
+        "client_id": "client-1",
+        "client_secret_ciphertext": None,
+        "client_auth_method": "none",
+        "registration": "dcr",
+        "issuer": "https://issuer.example.com",
+        "resource": _URL,
+        "redirect_uri": "https://app.example.com/callback",
+        "scopes": ["read"],
+        "authorization_endpoint": "https://issuer.example.com/authorize",
+        "token_endpoint": "https://issuer.example.com/token",
+        "revocation_endpoint": None,
+        "registration_endpoint": None,
+        "expires_at": datetime.now(timezone.utc) + timedelta(minutes=10),
+    }
+
+
+async def _pending_flows(pool: asyncpg.Pool, connection_id: int) -> list[dict[str, Any]]:
+    """Unconsumed authorization flows for one connection."""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT state_hash, oauth_generation
+            FROM agent_mcp_oauth_flows
+            WHERE connection_id = $1 AND consumed_at IS NULL
+            ORDER BY state_hash
+            """,
+            connection_id,
+        )
+    return [dict(row) for row in rows]
+
+
+async def test_concurrent_oauth_starts_leave_one_flow_at_the_allocated_generation(
+    store: Storage, pool
+) -> None:
+    """Two starts that both read generation X must not both insert a flow for X+1.
+
+    The survivor's generation is the value the connection update returned, so
+    the callback's generation check can still accept that URL. The loser does
+    not delete it.
+    """
+    row = await _connect(store, _OWNER, auth_kind="oauth", access_token=None)
+    observed = int(row["oauth_generation"])
+    first, second = await asyncio.gather(
+        store.mcp.create_mcp_oauth_flow(**_oauth_start(row, state_hash="state-a")),
+        store.mcp.create_mcp_oauth_flow(**_oauth_start(row, state_hash="state-b")),
+    )
+    allocated = [generation for generation in (first, second) if generation is not None]
+    assert allocated == [observed + 1]
+    current = await store.mcp.get_mcp_connection(connection_id=row["id"])
+    assert current is not None
+    assert int(current["oauth_generation"]) == observed + 1
+    flows = await _pending_flows(pool, row["id"])
+    assert len(flows) == 1
+    assert int(flows[0]["oauth_generation"]) == int(current["oauth_generation"])
+    consumed = await store.mcp.consume_mcp_oauth_flow(
+        state_hash=str(flows[0]["state_hash"]), user_id=_OWNER
+    )
+    assert consumed is not None
+    assert int(consumed["oauth_generation"]) == int(current["oauth_generation"])
+
+
+async def test_a_stale_oauth_start_cannot_delete_a_newer_flow(store: Storage, pool) -> None:
+    """A start that lost the generation fence must not remove the flow that won."""
+    row = await _connect(store, _OWNER, auth_kind="oauth", access_token=None)
+    allocated = await store.mcp.create_mcp_oauth_flow(**_oauth_start(row, state_hash="newer"))
+    assert allocated == int(row["oauth_generation"]) + 1
+    stale = dict(_oauth_start(row, state_hash="stale"))
+    assert await store.mcp.create_mcp_oauth_flow(**stale) is None
+    current = await store.mcp.get_mcp_connection(connection_id=row["id"])
+    assert current is not None
+    assert int(current["oauth_generation"]) == allocated
+    flows = await _pending_flows(pool, row["id"])
+    assert [str(item["state_hash"]) for item in flows] == ["newer"]
+    assert int(flows[0]["oauth_generation"]) == allocated
 
 
 async def test_claiming_an_approved_call_has_exactly_one_winner(store: Storage) -> None:
@@ -616,7 +907,8 @@ async def test_finishing_a_call_is_fenced_by_its_dispatch_generation(
     assert stored["status"] == "outcome_unknown"
 
 
-async def test_routing_a_connection_through_a_connector_moves_its_versions(
+async def test_rebinding_a_connection_replaces_its_authorized_connector(
+    pool,
     store: Storage,
 ) -> None:
     """A connector decides *where* a local process runs, so it is a target edit.
@@ -624,12 +916,15 @@ async def test_routing_a_connection_through_a_connector_moves_its_versions(
     The design lists it beside the command, the mount and the auth method for
     that reason. A connection whose connector changed is not the one a session
     was approved against, so both versions move -- and the connector's own
-    authorized set is written in the same statement, because the two halves
+    authorized set is written in the same transaction, because the two halves
     disagreeing is how a connector ends up serving something the connection no
     longer routes to it.
     """
-    connector = await store.mcp.create_mcp_connector(
+    first = await store.mcp.create_mcp_connector(
         user_id=_OWNER, name="My laptop", registration_hash="hash-1"
+    )
+    second = await store.mcp.create_mcp_connector(
+        user_id=_OWNER, name="My other laptop", registration_hash="hash-2"
     )
     connection = await store.mcp.create_mcp_connection(
         user_id=_OWNER,
@@ -645,23 +940,293 @@ async def test_routing_a_connection_through_a_connector_moves_its_versions(
     assert before is not None
 
     bound = await store.mcp.bind_mcp_connection_connector(
-        connection_id=connection["id"], user_id=_OWNER, connector_id=connector["id"]
+        connection_id=connection["id"], user_id=_OWNER, connector_id=first["id"]
     )
     assert bound is not None
-    assert bound["connector_id"] == connector["id"]
+    assert bound["connector_id"] == first["id"]
     assert bound["config_revision"] == before["config_revision"] + 1
     assert bound["authorization_epoch"] == before["authorization_epoch"] + 1
-    assert await store.mcp.list_mcp_connector_connections(connector_id=connector["id"]) == [
+    assert await store.mcp.list_mcp_connector_connections(connector_id=first["id"]) == [
+        connection["id"]
+    ]
+
+    rebound = await store.mcp.bind_mcp_connection_connector(
+        connection_id=connection["id"], user_id=_OWNER, connector_id=second["id"]
+    )
+    assert rebound is not None
+    assert rebound["connector_id"] == second["id"]
+    assert rebound["config_revision"] == bound["config_revision"] + 1
+    assert rebound["authorization_epoch"] == bound["authorization_epoch"] + 1
+
+    # This request started while the route still named the first connector.
+    # The rebind won the race, so the stale unbind must match no row and must
+    # not remove the second connector's authorization mapping.
+    assert (
+        await store.mcp.unbind_mcp_connection_connector(
+            connection_id=connection["id"],
+            user_id=_OWNER,
+            connector_id=first["id"],
+        )
+        is None
+    )
+    still_routed = await store.mcp.get_mcp_connection(connection_id=connection["id"])
+    assert still_routed is not None
+    assert still_routed["connector_id"] == second["id"]
+    assert still_routed["config_revision"] == rebound["config_revision"]
+    assert still_routed["authorization_epoch"] == rebound["authorization_epoch"]
+
+    async with pool.acquire() as conn:
+        route = await conn.fetchval(
+            "SELECT connector_id FROM agent_mcp_connections WHERE id = $1",
+            connection["id"],
+        )
+        mappings = await conn.fetch(
+            """
+            SELECT connector_id, connection_id
+            FROM agent_mcp_connector_connections
+            WHERE connection_id = $1
+            ORDER BY connector_id
+            """,
+            connection["id"],
+        )
+    assert route == second["id"]
+    assert [(row["connector_id"], row["connection_id"]) for row in mappings] == [
+        (second["id"], connection["id"])
+    ]
+    assert await store.mcp.list_mcp_connector_connections(connector_id=first["id"]) == []
+    assert await store.mcp.list_mcp_connector_connections(connector_id=second["id"]) == [
         connection["id"]
     ]
 
     unbound = await store.mcp.unbind_mcp_connection_connector(
-        connection_id=connection["id"], user_id=_OWNER
+        connection_id=connection["id"], user_id=_OWNER, connector_id=second["id"]
     )
     assert unbound is not None
     assert unbound["connector_id"] is None
-    assert unbound["config_revision"] == bound["config_revision"] + 1
-    assert await store.mcp.list_mcp_connector_connections(connector_id=connector["id"]) == []
+    assert unbound["config_revision"] == rebound["config_revision"] + 1
+    assert await store.mcp.list_mcp_connector_connections(connector_id=second["id"]) == []
+
+
+async def test_location_edit_away_from_user_connector_unbinds_atomically(
+    store: Storage,
+) -> None:
+    """Changing the run location removes the singular connector authority."""
+    connector = await store.mcp.create_mcp_connector(
+        user_id=_OWNER,
+        name="Laptop",
+        registration_hash="hash-location-edit-unbind",
+    )
+    connection = await store.mcp.create_mcp_connection(
+        user_id=_OWNER,
+        label="Local files",
+        transport="stdio",
+        location="user-connector",
+        url=None,
+        launch_spec={"command": "mcp-server", "args": [], "env": {}, "mounts": []},
+        auth_kind="none",
+        auth_config={},
+        connector_id=int(connector["id"]),
+    )
+
+    moved = await store.mcp.update_mcp_connection(
+        connection_id=int(connection["id"]),
+        user_id=_OWNER,
+        expected_config_revision=int(connection["config_revision"]),
+        transport="streamable-http",
+        location="remote",
+        url=_URL,
+    )
+
+    assert moved is not None
+    assert moved["location"] == "remote"
+    assert moved["connector_id"] is None
+    assert moved["config_revision"] == connection["config_revision"] + 1
+    assert moved["authorization_epoch"] == connection["authorization_epoch"] + 1
+    assert await store.mcp.list_mcp_connector_connections(connector_id=int(connector["id"])) == []
+
+
+async def test_disconnect_removes_connector_route_and_mapping(
+    store: Storage,
+) -> None:
+    """A soft-deleted connection is no longer authorized on the connector."""
+    connector = await store.mcp.create_mcp_connector(
+        user_id=_OWNER,
+        name="Laptop",
+        registration_hash="hash-disconnect-unbind",
+    )
+    connection = await store.mcp.create_mcp_connection(
+        user_id=_OWNER,
+        label="Local files",
+        transport="stdio",
+        location="user-connector",
+        url=None,
+        launch_spec={"command": "mcp-server", "args": [], "env": {}, "mounts": []},
+        auth_kind="none",
+        auth_config={},
+        connector_id=int(connector["id"]),
+    )
+
+    assert await store.mcp.disconnect_mcp_connection(
+        connection_id=int(connection["id"]), user_id=_OWNER
+    )
+
+    tombstone = await store.mcp.get_mcp_connection(
+        connection_id=int(connection["id"]), user_id=_OWNER
+    )
+    assert tombstone is not None
+    assert tombstone["deleted_at"] is not None
+    assert tombstone["connector_id"] is None
+    assert await store.mcp.list_mcp_connector_connections(connector_id=int(connector["id"])) == []
+
+
+async def test_remote_connection_cannot_be_bound_by_repository_caller(
+    store: Storage,
+) -> None:
+    """The storage boundary preserves location even when the API is bypassed."""
+    connector = await store.mcp.create_mcp_connector(
+        user_id=_OWNER,
+        name="Laptop",
+        registration_hash="hash-reject-remote-bind",
+    )
+    connection = await store.mcp.create_mcp_connection(
+        user_id=_OWNER,
+        label="Remote",
+        transport="streamable-http",
+        location="remote",
+        url=_URL,
+        launch_spec=None,
+        auth_kind="none",
+        auth_config={},
+    )
+
+    assert (
+        await store.mcp.bind_mcp_connection_connector(
+            connection_id=int(connection["id"]),
+            user_id=_OWNER,
+            connector_id=int(connector["id"]),
+        )
+        is None
+    )
+    unchanged = await store.mcp.get_mcp_connection(connection_id=int(connection["id"]))
+    assert unchanged is not None and unchanged["connector_id"] is None
+    assert await store.mcp.list_mcp_connector_connections(connector_id=int(connector["id"])) == []
+
+
+async def _stdio_connection(store: Storage, *, label: str = "Local files") -> dict[str, Any]:
+    """One connection that runs on the user's own machine."""
+    return await store.mcp.create_mcp_connection(
+        user_id=_OWNER,
+        label=label,
+        transport="stdio",
+        location="user-connector",
+        url=None,
+        launch_spec={"command": "npx", "args": ["server@1.0.0"], "env": {}, "mounts": []},
+        auth_kind="none",
+        auth_config={},
+    )
+
+
+async def _mapping_pairs(pool: asyncpg.Pool, connection_id: int) -> list[tuple[int, int]]:
+    """Every connector authorization row for one connection."""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT connector_id, connection_id
+            FROM agent_mcp_connector_connections
+            WHERE connection_id = $1
+            ORDER BY connector_id
+            """,
+            connection_id,
+        )
+    return [(int(row["connector_id"]), int(row["connection_id"])) for row in rows]
+
+
+async def test_unbinding_another_connector_leaves_the_binding(store: Storage, pool) -> None:
+    """DELETE names a connector, and the row update has to name the same one.
+
+    Checking that connector A exists and then clearing connection C is a stale
+    path detaching B. The mismatch matches no row, so C's route, versions, and
+    B's authorization row stay where they were.
+    """
+    left = await store.mcp.create_mcp_connector(
+        user_id=_OWNER, name="Laptop A", registration_hash="hash-unbind-a"
+    )
+    right = await store.mcp.create_mcp_connector(
+        user_id=_OWNER, name="Laptop B", registration_hash="hash-unbind-b"
+    )
+    connection = await _stdio_connection(store)
+    bound = await store.mcp.bind_mcp_connection_connector(
+        connection_id=connection["id"], user_id=_OWNER, connector_id=right["id"]
+    )
+    assert bound is not None
+
+    assert (
+        await store.mcp.unbind_mcp_connection_connector(
+            connection_id=connection["id"], user_id=_OWNER, connector_id=left["id"]
+        )
+        is None
+    )
+
+    current = await store.mcp.get_mcp_connection(connection_id=connection["id"])
+    assert current is not None
+    assert current["connector_id"] == right["id"]
+    assert current["config_revision"] == bound["config_revision"]
+    assert current["authorization_epoch"] == bound["authorization_epoch"]
+    assert await store.mcp.list_mcp_connector_connections(connector_id=left["id"]) == []
+    assert await store.mcp.list_mcp_connector_connections(connector_id=right["id"]) == [
+        connection["id"]
+    ]
+    assert await _mapping_pairs(pool, connection["id"]) == [(right["id"], connection["id"])]
+
+
+async def test_a_stale_unbind_cannot_clear_a_connector_the_connection_moved_to(
+    store: Storage, pool
+) -> None:
+    """Unbind and rebind serialize on the connection, and the loser does not win.
+
+    An unbind that still names A must not clear the route after a rebind to B
+    has committed, and it must not delete B's authorization row. Whichever
+    statement acquires the row first, B is the route that remains: the unbind
+    only matches while the connection still names A, so a successful rebind is
+    last only when it ran after that unbind.
+    """
+    left = await store.mcp.create_mcp_connector(
+        user_id=_OWNER, name="Laptop A", registration_hash="hash-unbind-race-a"
+    )
+    right = await store.mcp.create_mcp_connector(
+        user_id=_OWNER, name="Laptop B", registration_hash="hash-unbind-race-b"
+    )
+    connection = await _stdio_connection(store, label="Racing files")
+    assert (
+        await store.mcp.bind_mcp_connection_connector(
+            connection_id=connection["id"], user_id=_OWNER, connector_id=left["id"]
+        )
+        is not None
+    )
+
+    rebound, unbound = await asyncio.gather(
+        store.mcp.bind_mcp_connection_connector(
+            connection_id=connection["id"], user_id=_OWNER, connector_id=right["id"]
+        ),
+        store.mcp.unbind_mcp_connection_connector(
+            connection_id=connection["id"], user_id=_OWNER, connector_id=left["id"]
+        ),
+    )
+
+    current = await store.mcp.get_mcp_connection(connection_id=connection["id"])
+    assert current is not None
+    assert rebound is not None
+    assert current["connector_id"] == right["id"]
+    assert await store.mcp.list_mcp_connector_connections(connector_id=left["id"]) == []
+    assert await store.mcp.list_mcp_connector_connections(connector_id=right["id"]) == [
+        connection["id"]
+    ]
+    assert await _mapping_pairs(pool, connection["id"]) == [(right["id"], connection["id"])]
+    if unbound is not None:
+        # The unbind matched A, so the rebind ran after it and moved both versions
+        # one step further than that clear.
+        assert current["config_revision"] == unbound["config_revision"] + 1
+        assert current["authorization_epoch"] == unbound["authorization_epoch"] + 1
 
 
 async def test_revoking_a_connector_detaches_what_routed_through_it(
@@ -708,6 +1273,309 @@ async def test_revoking_a_connector_detaches_what_routed_through_it(
         )
         is None
     )
+
+
+async def test_revoked_connector_status_is_terminal(store: Storage) -> None:
+    """Heartbeat-style status changes cannot resurrect a revoked connector."""
+    connector = await store.mcp.create_mcp_connector(
+        user_id=_OWNER, name="My laptop", registration_hash="hash-terminal-revoke"
+    )
+    for status in ("online", "offline", "pending"):
+        assert await store.mcp.set_mcp_connector_status(connector_id=connector["id"], status=status)
+    with pytest.raises(ValueError, match="invalid connector status"):
+        await store.mcp.set_mcp_connector_status(connector_id=connector["id"], status="revoked")
+    assert await store.mcp.revoke_mcp_connector(connector_id=connector["id"], user_id=_OWNER)
+    for status in ("pending", "online", "offline"):
+        assert not await store.mcp.set_mcp_connector_status(
+            connector_id=connector["id"], status=status
+        )
+
+    rows = {row["id"]: row for row in await store.mcp.list_mcp_connectors(user_id=_OWNER)}
+    assert rows[connector["id"]]["status"] == "revoked"
+    assert rows[connector["id"]]["revoked_at"] is not None
+
+
+async def test_revocation_wins_against_a_late_connector_bind(pool, store: Storage) -> None:
+    """A bind waiting behind revoke cannot restore its route or authorization."""
+    connector = await store.mcp.create_mcp_connector(
+        user_id=_OWNER, name="My laptop", registration_hash="hash-revoke-race"
+    )
+    connection = await store.mcp.create_mcp_connection(
+        user_id=_OWNER,
+        label="Local files",
+        transport="stdio",
+        location="user-connector",
+        url=None,
+        launch_spec={"command": "npx", "args": ["server@1.0.0"], "env": {}, "mounts": []},
+        auth_kind="none",
+        auth_config={},
+    )
+    assert await store.mcp.bind_mcp_connection_connector(
+        connection_id=connection["id"], user_id=_OWNER, connector_id=connector["id"]
+    )
+
+    late_pool = await asyncpg.create_pool(**_db_config(), min_size=1, max_size=1)
+    late_store = Storage(late_pool)
+    async with late_pool.acquire() as late_conn:
+        late_pid = await late_conn.fetchval("SELECT pg_backend_pid()")
+    revoke: asyncio.Task[bool] | None = None
+    bind: asyncio.Task[dict[str, Any] | None] | None = None
+    try:
+        async with pool.acquire() as blocker, blocker.transaction():
+            blocker_pid = await blocker.fetchval("SELECT pg_backend_pid()")
+            await blocker.fetchval(
+                "SELECT id FROM agent_mcp_connections WHERE id = $1 FOR UPDATE",
+                connection["id"],
+            )
+            revoke = asyncio.create_task(
+                store.mcp.revoke_mcp_connector(connector_id=connector["id"], user_id=_OWNER)
+            )
+            revoke_blocked = False
+            for _ in range(100):
+                revoke_blocked = await blocker.fetchval(
+                    "SELECT EXISTS (SELECT 1 FROM pg_locks "
+                    "WHERE NOT granted AND $1 = ANY(pg_blocking_pids(pid)))",
+                    blocker_pid,
+                )
+                if revoke_blocked:
+                    break
+                await asyncio.sleep(0.01)
+            assert revoke_blocked, "revoke did not reach its connection lock"
+
+            bind = asyncio.create_task(
+                late_store.mcp.bind_mcp_connection_connector(
+                    connection_id=connection["id"],
+                    user_id=_OWNER,
+                    connector_id=connector["id"],
+                )
+            )
+            bind_blocked = False
+            for _ in range(100):
+                bind_blocked = await blocker.fetchval(
+                    """
+                    SELECT wait_event_type = 'Lock'
+                    FROM pg_stat_activity
+                    WHERE pid = $1
+                    """,
+                    late_pid,
+                )
+                if bind_blocked:
+                    break
+                await asyncio.sleep(0.01)
+            assert bind_blocked, "bind did not wait behind the connector revoke"
+
+        revoked, rebound = await asyncio.gather(revoke, bind)
+        assert revoked is True
+        assert rebound is None
+    finally:
+        pending = [task for task in (revoke, bind) if task is not None and not task.done()]
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        await late_pool.close()
+
+    detached = await store.mcp.get_mcp_connection(connection_id=connection["id"])
+    assert detached is not None
+    assert detached["connector_id"] is None
+    assert await store.mcp.list_mcp_connector_connections(connector_id=connector["id"]) == []
+
+
+async def test_revocation_wins_against_a_late_direct_connector_create(pool, store: Storage) -> None:
+    """Create waits on the connector lock and cannot authorize after revoke."""
+    connector = await store.mcp.create_mcp_connector(
+        user_id=_OWNER,
+        name="My laptop",
+        registration_hash="hash-direct-create-revoke-race",
+    )
+    existing = await store.mcp.create_mcp_connection(
+        user_id=_OWNER,
+        label="Existing local files",
+        transport="stdio",
+        location="user-connector",
+        url=None,
+        launch_spec={"command": "mcp-server", "args": [], "env": {}, "mounts": []},
+        auth_kind="none",
+        auth_config={},
+        connector_id=int(connector["id"]),
+    )
+    late_pool = await asyncpg.create_pool(**_db_config(), min_size=1, max_size=1)
+    late_store = Storage(late_pool)
+
+    revoke: asyncio.Task[bool] | None = None
+    create: asyncio.Task[dict[str, Any]] | None = None
+    try:
+        async with pool.acquire() as blocker, blocker.transaction():
+            blocker_pid = await blocker.fetchval("SELECT pg_backend_pid()")
+            await blocker.fetchval(
+                "SELECT id FROM agent_mcp_connections WHERE id = $1 FOR UPDATE",
+                existing["id"],
+            )
+            revoke = asyncio.create_task(
+                store.mcp.revoke_mcp_connector(connector_id=int(connector["id"]), user_id=_OWNER)
+            )
+            revoke_blocked = False
+            for _ in range(100):
+                revoke_blocked = await blocker.fetchval(
+                    "SELECT EXISTS (SELECT 1 FROM pg_locks "
+                    "WHERE NOT granted AND $1 = ANY(pg_blocking_pids(pid)))",
+                    blocker_pid,
+                )
+                if revoke_blocked:
+                    break
+                await asyncio.sleep(0.01)
+            assert revoke_blocked, "revoke did not reach its connection lock"
+
+            create = asyncio.create_task(
+                late_store.mcp.create_mcp_connection(
+                    user_id=_OWNER,
+                    label="Late local files",
+                    transport="stdio",
+                    location="user-connector",
+                    url=None,
+                    launch_spec={
+                        "command": "mcp-server",
+                        "args": [],
+                        "env": {},
+                        "mounts": [],
+                    },
+                    auth_kind="none",
+                    auth_config={},
+                    connector_id=int(connector["id"]),
+                )
+            )
+            create_blocked = False
+            for _ in range(100):
+                create_blocked = await blocker.fetchval(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1 FROM pg_stat_activity
+                        WHERE datname = current_database()
+                          AND pid <> pg_backend_pid()
+                          AND wait_event_type = 'Lock'
+                          AND query LIKE '%agent_mcp_connectors%'
+                    )
+                    """
+                )
+                if create_blocked:
+                    break
+                await asyncio.sleep(0.01)
+            assert create_blocked, (
+                "create did not wait behind the connector revoke; "
+                f"done={create.done()} "
+                f"exception={create.exception() if create.done() else None!r}"
+            )
+
+        assert await revoke is True
+        with pytest.raises(McpConnectionCreateConflict, match="no longer available"):
+            await create
+    finally:
+        pending = [task for task in (revoke, create) if task is not None and not task.done()]
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        await late_pool.close()
+
+    rows = await store.mcp.list_mcp_connections(user_id=_OWNER)
+    assert [row["label"] for row in rows] == ["Existing local files"]
+    assert rows[0]["connector_id"] is None
+    assert await store.mcp.list_mcp_connector_connections(connector_id=int(connector["id"])) == []
+
+
+async def test_rebinding_drops_the_previous_connector_authorization(store: Storage, pool) -> None:
+    """Moving C from A to B leaves one route and one authorization row.
+
+    Updating ``connector_id`` and inserting the new pair without deleting the
+    old one leaves A authorized for a connection that no longer routes there.
+    The listing, the connection, and the mapping table have to name B only,
+    and both versions still move with the rebind.
+    """
+    left = await store.mcp.create_mcp_connector(
+        user_id=_OWNER, name="Laptop A", registration_hash="hash-rebind-a"
+    )
+    right = await store.mcp.create_mcp_connector(
+        user_id=_OWNER, name="Laptop B", registration_hash="hash-rebind-b"
+    )
+    connection = await _stdio_connection(store, label="Rebound files")
+    first = await store.mcp.bind_mcp_connection_connector(
+        connection_id=connection["id"], user_id=_OWNER, connector_id=left["id"]
+    )
+    assert first is not None
+    rebound = await store.mcp.bind_mcp_connection_connector(
+        connection_id=connection["id"], user_id=_OWNER, connector_id=right["id"]
+    )
+    assert rebound is not None
+    assert rebound["connector_id"] == right["id"]
+    assert rebound["config_revision"] == first["config_revision"] + 1
+    assert rebound["authorization_epoch"] == first["authorization_epoch"] + 1
+    assert await store.mcp.list_mcp_connector_connections(connector_id=left["id"]) == []
+    assert await store.mcp.list_mcp_connector_connections(connector_id=right["id"]) == [
+        connection["id"]
+    ]
+    assert await _mapping_pairs(pool, connection["id"]) == [(right["id"], connection["id"])]
+
+
+async def test_a_connection_and_its_credential_commit_together(store: Storage) -> None:
+    """The secret is not a second request that can fail after the row is visible."""
+    created = await store.mcp.create_mcp_connection(
+        user_id=_OWNER,
+        label="GitHub",
+        transport="streamable-http",
+        location="remote",
+        url=_URL,
+        launch_spec={
+            "command": "npx",
+            "args": ["server@1.0.0"],
+            "env": {"API_KEY": "secret://API_KEY"},
+        },
+        auth_kind="static",
+        auth_config={"header_name": "Authorization", "scheme": "Bearer"},
+        access_token_ciphertext="ciphertext-token",
+        auth_config_patch={"hint": "ci****en"},
+        sealed_launch_spec={
+            "command": "npx",
+            "args": ["server@1.0.0"],
+            "env": {"API_KEY": "secret://API_KEY"},
+            "env_secrets": {"API_KEY": "ciphertext-env"},
+        },
+    )
+    assert created["access_token_ciphertext"] == "ciphertext-token"
+    assert created["credential_version"] == 2
+    assert created["auth_config"]["hint"] == "ci****en"
+    assert created["auth_config"]["scheme"] == "Bearer"
+    assert created["launch_spec"]["env_secrets"]["API_KEY"] == "ciphertext-env"
+    assert [row["id"] for row in await store.mcp.list_mcp_connections(user_id=_OWNER)] == [
+        created["id"]
+    ]
+
+
+async def test_a_rejected_credential_batch_leaves_no_connection(store: Storage) -> None:
+    """A later draft's credential failure rolls back the drafts already inserted."""
+
+    class _Unsealable:
+        """A patch value ``json.dumps`` refuses after the insert has run."""
+
+    first = {
+        "user_id": _OWNER,
+        "label": "Wiki",
+        "transport": "streamable-http",
+        "location": "remote",
+        "url": _URL,
+        "launch_spec": None,
+        "auth_kind": "static",
+        "auth_config": {"header_name": "Authorization", "scheme": "Bearer"},
+        "access_token_ciphertext": "ciphertext-wiki",
+        "auth_config_patch": {"hint": "wi****ki"},
+    }
+    second = {
+        **first,
+        "label": "Tracker",
+        "url": "https://tracker.example.com/mcp",
+        "access_token_ciphertext": "ciphertext-tracker",
+        "auth_config_patch": {"hint": _Unsealable()},
+    }
+    with pytest.raises(TypeError):
+        await store.mcp.create_mcp_connections(connections=[first, second])
+    assert await store.mcp.list_mcp_connections(user_id=_OWNER) == []
 
 
 async def test_a_connector_cannot_be_bound_across_owners(store: Storage) -> None:
@@ -757,6 +1625,139 @@ async def test_a_decision_after_the_deadline_does_not_revive_a_call(
     assert stored is not None
     assert stored["status"] == "expired"
     assert await store.mcp.claim_mcp_invocation(invocation_id=invocation["id"]) is None
+
+
+async def test_decision_rechecks_deadline_after_a_plain_invocation_row_lock(
+    pool, store: Storage
+) -> None:
+    job = await _create_job(store)
+    connection = await _connect(store, _OWNER)
+    invocation = await _invocation(store, job, connection)
+    async with pool.acquire() as setup:
+        await setup.execute(
+            "UPDATE agent_mcp_invocations "
+            "SET expires_at = clock_timestamp() + INTERVAL '400 milliseconds' "
+            "WHERE id = $1",
+            invocation["id"],
+        )
+
+    deciding = None
+    async with pool.acquire() as blocker, blocker.transaction():
+        blocker_pid = await blocker.fetchval("SELECT pg_backend_pid()")
+        await blocker.fetchval(
+            "SELECT id FROM agent_mcp_invocations WHERE id = $1 FOR UPDATE",
+            invocation["id"],
+        )
+        deciding = asyncio.create_task(
+            store.mcp.decide_mcp_invocation(
+                invocation_id=invocation["id"],
+                approve=True,
+                decided_by=_OWNER,
+            )
+        )
+        waiting = False
+        for _ in range(100):
+            waiting = await blocker.fetchval(
+                "SELECT EXISTS (SELECT 1 FROM pg_locks "
+                "WHERE NOT granted AND $1 = ANY(pg_blocking_pids(pid)))",
+                blocker_pid,
+            )
+            if waiting:
+                break
+            await asyncio.sleep(0.01)
+        assert waiting, "decision did not wait on the invocation row lock"
+        await asyncio.sleep(0.55)
+
+    assert deciding is not None
+    assert await asyncio.wait_for(deciding, timeout=2) is None
+    stored = await store.mcp.get_mcp_invocation(invocation_id=invocation["id"])
+    assert stored is not None and stored["status"] == "expired"
+
+
+async def test_dispatch_rechecks_attempt_expiry_after_waiting_on_connection_authority(
+    pool, store: Storage
+) -> None:
+    job = await _create_job(store)
+    connection = await _connect(store, _OWNER)
+    await store.mcp.replace_mcp_bindings(
+        thread_id=str(job["thread_id"]),
+        bindings=[_permission_binding(connection, "github")],
+    )
+    binding = (await store.mcp.list_mcp_bindings(thread_id=str(job["thread_id"])))[0]
+    async with pool.acquire() as setup:
+        attempt_id = await setup.fetchval(
+            """
+            INSERT INTO agent_attempts (
+                job_id, thread_id, attempt_no, lease_owner, lease_generation,
+                lease_expires_at, status
+            ) VALUES (
+                $1, $2, 1, 'mcp-clock-test', 1,
+                clock_timestamp() + INTERVAL '400 milliseconds', 'running'
+            ) RETURNING id
+            """,
+            job["id"],
+            job["thread_id"],
+        )
+        await setup.execute(
+            "UPDATE agent_jobs SET state = 'running', current_attempt_id = $2 WHERE id = $1",
+            job["id"],
+            attempt_id,
+        )
+    invocation = await store.mcp.create_mcp_invocation(
+        job_id=str(job["id"]),
+        attempt_id=attempt_id,
+        lease_generation=1,
+        thread_id=str(job["thread_id"]),
+        connection_id=int(connection["id"]),
+        capability_name="get_issue",
+        arguments_digest="clock-wait",
+        arguments_ciphertext=None,
+        config_revision=int(connection["config_revision"]),
+        authorization_epoch=int(connection["authorization_epoch"]),
+        capability_revision=int(connection["capability_revision"]),
+        policy_revision=int(binding["policy_revision"]),
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+    )
+    approved = await store.mcp.decide_mcp_invocation(
+        invocation_id=invocation["id"], approve=True, decided_by=_OWNER
+    )
+    assert approved is not None
+
+    dispatching = None
+    async with pool.acquire() as blocker, blocker.transaction():
+        blocker_pid = await blocker.fetchval("SELECT pg_backend_pid()")
+        await blocker.fetchval(
+            "SELECT id FROM agent_mcp_connections WHERE id = $1 FOR UPDATE",
+            connection["id"],
+        )
+        dispatching = asyncio.create_task(
+            store.mcp.claim_mcp_invocation(
+                invocation_id=invocation["id"],
+                config_revision=int(connection["config_revision"]),
+                authorization_epoch=int(connection["authorization_epoch"]),
+                capability_revision=int(connection["capability_revision"]),
+                policy_revision=int(binding["policy_revision"]),
+                attempt_id=attempt_id,
+                lease_generation=1,
+            )
+        )
+        waiting = False
+        for _ in range(100):
+            waiting = await blocker.fetchval(
+                "SELECT EXISTS (SELECT 1 FROM pg_locks "
+                "WHERE NOT granted AND $1 = ANY(pg_blocking_pids(pid)))",
+                blocker_pid,
+            )
+            if waiting:
+                break
+            await asyncio.sleep(0.01)
+        assert waiting, "dispatch did not lock the connection authority row"
+        await asyncio.sleep(0.55)
+
+    assert dispatching is not None
+    assert await asyncio.wait_for(dispatching, timeout=2) is None
+    stored = await store.mcp.get_mcp_invocation(invocation_id=invocation["id"])
+    assert stored is not None and stored["status"] == "approved"
 
 
 # -- bindings and snapshots --------------------------------------------
@@ -1122,13 +2123,13 @@ async def test_target_edit_invalidates_only_its_previous_discovery_and_flow(stor
         support={},
     )
     await store.mcp.set_mcp_connection_status(connection_id=row["id"], status="active")
-    await store.mcp.create_mcp_oauth_flow(
+    created_generation = await store.mcp.create_mcp_oauth_flow(
         state_hash="before-edit",
         user_id=_OWNER,
         connection_id=row["id"],
         config_revision=row["config_revision"],
         authorization_epoch=row["authorization_epoch"],
-        oauth_generation=row["oauth_generation"] + 1,
+        expected_oauth_generation=row["oauth_generation"],
         code_verifier_ciphertext="ciphertext-verifier",
         client_id="client",
         client_secret_ciphertext=None,
@@ -1144,6 +2145,7 @@ async def test_target_edit_invalidates_only_its_previous_discovery_and_flow(stor
         registration_endpoint=None,
         expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
     )
+    assert created_generation == row["oauth_generation"] + 1
     changes = {
         "rename": {"label": "New label"},
         "move": {"url": "https://new.example.com/mcp"},
@@ -1159,7 +2161,7 @@ async def test_target_edit_invalidates_only_its_previous_discovery_and_flow(stor
     assert (updated is None) is (operation == "stale_move")
     current = await store.mcp.get_mcp_connection(connection_id=row["id"])
     snapshot = await store.mcp.get_mcp_capabilities(connection_id=row["id"])
-    flow = await store.mcp.consume_mcp_oauth_flow(state_hash="before-edit")
+    flow = await store.mcp.consume_mcp_oauth_flow(state_hash="before-edit", user_id=_OWNER)
     invalidated = operation in ("move", "change_auth")
     assert current["status"] == ("draft" if invalidated else "active")
     assert current["config_revision"] == row["config_revision"] + invalidated
@@ -1559,6 +2561,51 @@ async def test_expiring_held_calls_leaves_the_settled_ones_alone(
     still_open = await store.mcp.get_mcp_invocation(invocation_id=int(pending["id"]))
     assert still_open is not None
     assert still_open["status"] == "pending"
+
+
+async def test_an_expired_call_no_longer_keeps_its_arguments(store: Storage) -> None:
+    """Arguments are held for a decision; once none can be made, they are dropped.
+
+    Every expiry path shares one assignment, so this walks four of them: the
+    waiting client leaving, a late decision, the deadline sweep, and the owner
+    turning the connection off. A call that was decided keeps its arguments as
+    the record of what was refused.
+    """
+    job = await _create_job(store)
+    connection = await _connect(store, _OWNER)
+    paused = await _connect(store, _OWNER, label="Second GitHub")
+    abandoned = await _invocation(store, job, connection, arguments_ciphertext="sealed-1")
+    late = await _invocation(
+        store, job, connection, expires_in=timedelta(seconds=-1), arguments_ciphertext="sealed-2"
+    )
+    overdue = await _invocation(
+        store, job, connection, expires_in=timedelta(seconds=-1), arguments_ciphertext="sealed-3"
+    )
+    switched_off = await _invocation(store, job, paused, arguments_ciphertext="sealed-4")
+    denied = await _invocation(store, job, connection, arguments_ciphertext="sealed-5")
+    assert await store.mcp.decide_mcp_invocation(
+        invocation_id=denied["id"], approve=False, decided_by=_OWNER
+    )
+
+    assert await store.mcp.expire_mcp_invocation(invocation_id=abandoned["id"])
+    assert (
+        await store.mcp.decide_mcp_invocation(
+            invocation_id=late["id"], approve=True, decided_by=_OWNER
+        )
+        is None
+    )
+    assert await store.mcp.expire_mcp_invocations() == 1
+    assert await store.mcp.set_mcp_connection_enabled(
+        connection_id=int(paused["id"]), user_id=_OWNER, enabled=False
+    )
+
+    for invocation in (abandoned, late, overdue, switched_off):
+        stored = await store.mcp.get_mcp_invocation(invocation_id=int(invocation["id"]))
+        assert stored is not None
+        assert (stored["status"], stored["arguments_ciphertext"]) == ("expired", None)
+    kept = await store.mcp.get_mcp_invocation(invocation_id=int(denied["id"]))
+    assert kept is not None
+    assert (kept["status"], kept["arguments_ciphertext"]) == ("denied", "sealed-5")
 
 
 async def test_listing_calls_filters_by_job_and_state(store: Storage) -> None:

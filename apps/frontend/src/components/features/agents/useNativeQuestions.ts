@@ -3,15 +3,17 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   answerThreadQuestion,
-  listThreadQuestions,
   type AgentQuestionRequestApi,
   type AgentQuestionsApi,
 } from '@/lib/api/questions';
 import { getErrorMessage } from '@/lib/utils/errors';
+import type { QuestionReadScope } from '@/lib/api/questionReadScope';
+import { useQuestionReads } from './AgentReadProvider';
 
 export const QUESTION_POLL_MS = 2_000;
 
 interface QuestionState {
+  reads: QuestionReadScope;
   scope: string;
   snapshot: AgentQuestionsApi | null;
   error: string | null;
@@ -39,10 +41,14 @@ export function useNativeQuestions({
   attemptId?: number | null;
   active: boolean;
 }) {
+  const reads = useQuestionReads();
   const scope = JSON.stringify([threadId, jobId, attemptId ?? null, active]);
   const currentScope = useRef(scope);
   currentScope.current = scope;
+  const currentReads = useRef(reads);
+  currentReads.current = reads;
   const [state, setState] = useState<QuestionState>({
+    reads,
     scope,
     snapshot: null,
     error: null,
@@ -59,18 +65,19 @@ export function useNativeQuestions({
     let answerError: string | null = null;
     const controller = new AbortController();
     let snapshot: AgentQuestionsApi | null = null;
-    const current = () => !disposed && currentScope.current === scope;
+    const current = () =>
+      !disposed && currentScope.current === scope && currentReads.current === reads;
     const update = (value: Partial<QuestionState>) => {
-      if (current()) setState((previous) => ({ ...previous, scope, ...value }));
+      if (current()) setState((previous) => ({ ...previous, reads, scope, ...value }));
     };
-    setState({ scope, snapshot: null, error: null, submitting: false });
+    setState({ reads, scope, snapshot: null, error: null, submitting: false });
     if (!active || !threadId || !jobId || typeof attemptId !== 'number') {
       operations.current = null;
       return;
     }
 
     async function refresh() {
-      if (!current() || submitting) return;
+      if (!current() || submitting || document.visibilityState === 'hidden') return;
       if (reading) {
         readAgain = true;
         return;
@@ -78,7 +85,7 @@ export function useNativeQuestions({
       reading = true;
       const version = readVersion;
       try {
-        const result = await listThreadQuestions(threadId, controller.signal);
+        const result = await reads.listThreadQuestions(threadId, controller.signal);
         if (!current() || version !== readVersion) return;
         // A refresh can race a turn transition. Only the active generation's
         // own snapshot can put an answer button on this page.
@@ -89,6 +96,15 @@ export function useNativeQuestions({
         snapshot = next;
         update({ snapshot, error: answerError });
       } catch (cause) {
+        // Shared reads are cancelled when the shell invalidates its cache.
+        // Keep the known question until the next poll confirms its state.
+        if (
+          typeof cause === 'object' &&
+          cause !== null &&
+          'name' in cause &&
+          cause.name === 'AbortError'
+        )
+          return;
         if (current() && version === readVersion) update({ error: getErrorMessage(cause) });
       } finally {
         reading = false;
@@ -129,6 +145,7 @@ export function useNativeQuestions({
           update({ error: answerError });
           return;
         }
+        reads.invalidate(threadId);
         snapshot = {
           ...owner,
           questions: owner.questions.filter(
@@ -151,14 +168,19 @@ export function useNativeQuestions({
     operations.current = { refresh, answer };
     void refresh();
     const interval = setInterval(() => void refresh(), QUESTION_POLL_MS);
+    const onVisible = () => {
+      if (document.visibilityState !== 'hidden') void refresh();
+    };
+    document.addEventListener('visibilitychange', onVisible);
     return () => {
       disposed = true;
       controller.abort();
       clearInterval(interval);
+      document.removeEventListener('visibilitychange', onVisible);
     };
-  }, [scope, active, threadId, jobId, attemptId]);
+  }, [scope, active, threadId, jobId, attemptId, reads]);
 
-  const visible = active && state.scope === scope;
+  const visible = active && state.scope === scope && state.reads === reads;
   return {
     request: visible ? (state.snapshot?.questions[0] ?? null) : null,
     error: visible ? state.error : null,

@@ -295,6 +295,25 @@ class SandboxArchiveController:
         self._started = False
         self._closed = False
 
+    def _config_for(self, policy: SandboxArchivePolicy) -> SandboxArchiveS3Config:
+        """Build an uploader config for one pinned policy.
+
+        Markers inside the sandbox omit credentials. A recovered upload uses
+        the access key the broker currently holds; the marker still chooses
+        the region, KMS key, owner and size limits.
+        """
+        current = self._policy
+        access_key_id = policy.aws_access_key_id
+        secret = policy.aws_secret_access_key
+        if secret == "" and current is not None and current.aws_secret_access_key:
+            access_key_id = current.aws_access_key_id
+            secret = current.aws_secret_access_key
+        return SandboxArchiveS3Config.from_policy(
+            policy,
+            aws_access_key_id=access_key_id,
+            aws_secret_access_key=secret,
+        )
+
     def _new_service(self, config: SandboxArchiveS3Config) -> _ArchiveService:
         uploader = SandboxArchiveS3Uploader(config)
         return SandboxArchiveService(
@@ -371,7 +390,7 @@ class SandboxArchiveController:
             if self._policy is not None and policy.revision < self._policy.revision:
                 raise ValueError("sandbox archive policy revision is stale")
             if self._policy is not None and policy.revision == self._policy.revision:
-                if policy != self._policy:
+                if not policy.equivalent(self._policy):
                     raise ValueError("sandbox archive policy changed without a new revision")
                 return self.status()
 
@@ -392,7 +411,7 @@ class SandboxArchiveController:
                 close_candidate = candidate is not None
                 error = (
                     None
-                    if policy == self._policy
+                    if policy.equivalent(self._policy)
                     else ValueError("sandbox archive policy changed without a new revision")
                 )
             else:
@@ -711,9 +730,7 @@ class SandboxArchiveController:
                         None,
                     )
                     if slot is None:
-                        service = self._service_factory(
-                            SandboxArchiveS3Config.from_policy(marker_policy)
-                        )
+                        service = self._service_factory(self._config_for(marker_policy))
                         try:
                             service.start()
                         except BaseException:
@@ -881,7 +898,7 @@ class SandboxArchiveController:
                     None,
                 )
             if slot is None:
-                service = self._service_factory(SandboxArchiveS3Config.from_policy(marker.policy))
+                service = self._service_factory(self._config_for(marker.policy))
                 try:
                     service.start()
                 except BaseException:
@@ -962,9 +979,7 @@ class SandboxArchiveController:
                     None,
                 )
                 if slot is None:
-                    service = self._service_factory(
-                        SandboxArchiveS3Config.from_policy(marker.policy)
-                    )
+                    service = self._service_factory(self._config_for(marker.policy))
                     try:
                         service.start()
                     except BaseException:

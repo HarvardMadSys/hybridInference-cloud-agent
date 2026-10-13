@@ -130,6 +130,12 @@ class Setting:
                 except (ValueError, ValidationError):
                     valid = False
         if not valid:
+            if self.key == "sandbox_archive.bucket":
+                raise ValueError(
+                    f"Invalid value for {self.label} ({self.key}). "
+                    "Use a bucket name such as freeinference; set cloud-agent/sandbox "
+                    "in Sandbox archive S3 prefix."
+                )
             raise ValueError(f"Invalid value for {self.label} ({self.key})")
         return value
 
@@ -360,6 +366,56 @@ SETTINGS: tuple[Setting, ...] = (
     _numeric("mcp_connect_timeout_s", "MCP connection timeout (seconds)", "MCP", 10.0, 0.1, 300),
     _numeric("mcp_metadata_timeout_s", "MCP metadata timeout (seconds)", "MCP", 20.0, 0.1, 300),
     Setting(
+        "web_search_provider",
+        "Web search provider",
+        "Web search",
+        "auto",
+        env="WEB_SEARCH_PROVIDER",
+        choices=("auto", "serper", "brave", "parallel"),
+        description=(
+            "Selects the provider behind the built-in web_search tool. Auto prefers Serper "
+            "then Brave, then Parallel when multiple provider keys are configured."
+        ),
+    ),
+    Setting(
+        "serper_api_key",
+        "Serper API key",
+        "Web search",
+        "",
+        env="SERPER_API_KEY",
+        secret=True,
+        description=(
+            "Enables Serper.dev for the built-in web_search tool. The key stays in the "
+            "control plane and never enters an agent sandbox."
+        ),
+    ),
+    Setting(
+        "brave_search_api_key",
+        "Brave Search API key",
+        "Web search",
+        "",
+        env="BRAVE_SEARCH_API_KEY",
+        secret=True,
+        description=(
+            "Enables Brave Search for the built-in web_search tool. Review Brave's result "
+            "retention and end-user terms before enabling it. Queries go only to Brave, and "
+            "the key never enters an agent sandbox."
+        ),
+    ),
+    Setting(
+        "parallel_api_key",
+        "Parallel API key",
+        "Web search",
+        "",
+        env="PARALLEL_API_KEY",
+        secret=True,
+        description=(
+            "Enables Parallel Search for the built-in web_search tool. Review Parallel's "
+            "data-use, retention, and end-user terms before enabling it. Queries go only "
+            "to Parallel, and the key never enters an agent sandbox."
+        ),
+    ),
+    Setting(
         "site.app_name", "Application name", "Appearance", "Cloud Agent", env="AGENT_WEB_APP_NAME"
     ),
     Setting("site.org_name", "Organization name", "Appearance", "", env="AGENT_WEB_ORG_NAME"),
@@ -562,6 +618,23 @@ SETTINGS: tuple[Setting, ...] = (
         url=True,
     ),
     Setting(
+        "mcp_github_client_id",
+        "GitHub MCP sign-in client ID",
+        "MCP",
+        "",
+        env="AGENT_MCP_GITHUB_CLIENT_ID",
+        description="Service-managed GitHub OAuth App or GitHub App used for MCP browser sign-in.",
+    ),
+    Setting(
+        "mcp_github_client_secret",
+        "GitHub MCP sign-in client secret",
+        "MCP",
+        "",
+        env="AGENT_MCP_GITHUB_CLIENT_SECRET",
+        secret=True,
+        description="Register <public API base>/v1/agent/mcp/oauth/callback/github on this app.",
+    ),
+    Setting(
         "alert_webhook_url",
         "Alert webhook URL",
         "Operations",
@@ -641,6 +714,15 @@ SETTINGS: tuple[Setting, ...] = (
     ),
     _numeric("attachments.max_files", "Maximum upload file count", "Attachments", 50, 1, 50),
     _numeric(
+        "attachments.staged_retention_hours",
+        "Abandoned upload retention (hours)",
+        "Attachments",
+        24,
+        1,
+        8760,
+        description="Remove uploads this old only when no job or pending message holds them. Changes apply on the next maintenance pass.",
+    ),
+    _numeric(
         "attachments.max_user_bytes",
         "Maximum stored upload bytes per user",
         "Attachments",
@@ -709,7 +791,7 @@ MIGRATED_SETTINGS: tuple[Setting, ...] = (
         "Sandbox archives",
         "",
         env="AGENT_SANDBOX_ARCHIVE_S3_BUCKET",
-        description="Required for sandbox deletion. The control plane verifies the completed archive before the host may remove its stopped container. Empty disables deletion.",
+        description="Enter a bucket name, or paste an S3 URI such as s3://freeinference/cloud-agent/sandbox to save the bucket and prefix together. Required for sandbox deletion; the completed archive is verified before removal. Empty disables deletion.",
     ),
     Setting(
         "sandbox_archive.region",
@@ -1133,6 +1215,12 @@ def setup_status(values: Mapping[str, SettingValue]) -> dict[str, Any]:
                 "gitlab_redirect_uri",
                 "source_control_encryption_key",
             ),
+        ),
+        (
+            "mcp_github",
+            "GitHub MCP browser sign-in",
+            False,
+            ("mcp_github_client_id", "mcp_github_client_secret", "source_control_encryption_key"),
         ),
         ("compute", "Compute credential storage", False, ("compute_encryption_key",)),
     ):

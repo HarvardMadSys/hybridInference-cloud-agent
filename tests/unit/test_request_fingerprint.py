@@ -16,11 +16,15 @@ _CREATE = {"repo": "owner/repo", "task_prompt": "Fix it", "model": "m"}
 
 
 def _previous_rule(kind: str, payload: dict[str, Any]) -> str:
-    """The rule the fingerprints already stored against live keys were made with."""
+    """The rule the fingerprints already stored against live keys were made with.
+
+    The last one released, which had learned to drop a null ``plugins`` too;
+    the release before it never sent that field, so the two agree.
+    """
     kept = {
         key: value
         for key, value in payload.items()
-        if (key not in {"skill_ids", "expected_latest_job_id"} or value is not None)
+        if (key not in {"skill_ids", "plugins", "expected_latest_job_id"} or value is not None)
         and (key != "require_idle" or value is not False)
     }
     canonical = json.dumps(

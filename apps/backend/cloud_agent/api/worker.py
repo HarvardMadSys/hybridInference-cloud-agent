@@ -14,14 +14,24 @@ router's own, so a prefix here would double it.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import contextlib
 import os
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request, Response
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from fastapi.routing import APIRoute
 
+from cloud_agent import web_search
+from cloud_agent.api._body_limits import (
+    HostBodyLimitRoute,
+    payload_too_large,
+    read_bounded_body,
+)
 from cloud_agent.api._workspace_access import (
     _workspace_id,
     _workspace_not_ready,
@@ -40,8 +50,8 @@ from cloud_agent.application.residency import _mint_residency_grant, residency_t
 from cloud_agent.attachments.models import AttachmentLeaseLost, AttachmentView
 from cloud_agent.attachments.selection import prompt_with_attachments
 from cloud_agent.broker_routing import ENV_BROKER_TOKEN, broker_for_attempt, hydrate_shared_broker
-from cloud_agent.domain.execution import QUEUED, RUNNING, TERMINAL_STATES
-from cloud_agent.entitlement import RepoNotAllowed, require_entitled_repo
+from cloud_agent.domain.execution import FAILED, QUEUED, RUNNING, TERMINAL_STATES
+from cloud_agent.entitlement import RepoAccessUnavailable, RepoNotAllowed, require_entitled_repo
 from cloud_agent.gateway import GatewayError
 from cloud_agent.github_app import AppNotInstalled
 from cloud_agent.goals.controller import continue_after_finish
@@ -58,6 +68,11 @@ from cloud_agent.mcp.models import ConnectionStatus
 from cloud_agent.mcp.registry import resolve_for_thread
 from cloud_agent.measurement_ingest import Owner
 from cloud_agent.measurement_persistence import persist_measurement
+from cloud_agent.owner_access import (
+    AGENT_ACCESS_WITHDRAWN,
+    AgentAccessUnavailable,
+    owner_may_use_agent,
+)
 from cloud_agent.schemas import (
     HostResidencyEstablishResponse,
     WorkerAckResponse,
@@ -102,12 +117,15 @@ from cloud_agent.tokens import (
     parse_host_token,
     parse_worker_token,
 )
+from cloud_agent.user_memory import prompt_with_user_memory
 from cloud_agent.workers.work_signal import WorkSignal  # noqa: TC001 — FastAPI resolves it.
 from cloud_agent.workspace_broker_client import WorkspaceBrokerError
 from cloud_agent.workspace_errors import _workspace_broker_http_error
 from cloud_agent_host.runtimes import runtimes_supporting_mcp
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Coroutine
+
     from cloud_agent.ports import (
         AttachmentRepository,
         AttemptCommands,
@@ -125,11 +143,89 @@ if TYPE_CHECKING:
         SandboxRepository,
         SkillRepository,
         SourceControlRepository as SourceControlPort,
+        UserMemoryRepository,
     )
     from cloud_agent.workspace_broker_client import WorkspaceBrokerClient
 
 
-router = APIRouter(prefix="/v1/agent")
+#: Check the raw report before FastAPI parses JSON or validates its model.
+MAX_TURN_RESOURCES_BODY_BYTES = 16 * 1024
+
+# Personalization must leave ample time inside the host's claim deadline.
+_USER_MEMORY_TIMEOUT_SECONDS = 2.0
+
+
+async def _refresh_claim_memory(
+    repository: UserMemoryRepository, user_id: str, *, repo: str | None = None
+) -> dict[str, Any] | None:
+    """Bound each scope independently so unavailable memory cannot block a claim."""
+    try:
+        async with asyncio.timeout(_USER_MEMORY_TIMEOUT_SECONDS):
+            if repo is None:
+                return await repository.refresh(user_id=user_id)
+            return await repository.refresh_project(user_id=user_id, repo=repo)
+    except Exception:
+        # Fixed log messages contain neither saved memory nor credentials.
+        logger.warning(
+            "agent_claim_user_memory_unavailable"
+            if repo is None
+            else "agent_claim_project_memory_unavailable"
+        )
+        return None
+
+
+class _BoundedTurnResourcesRoute(HostBodyLimitRoute):
+    """Limit every worker request body before parsing, including chunked ones.
+
+    Every body-carrying worker route gets the host ceiling. Turn-resource
+    reports get their own, much smaller one, and a fixed validation answer.
+    """
+
+    def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Response]]:
+        """Wrap the resource-report endpoint specially; the rest generically."""
+        if (
+            not self.path.endswith("/turn-resources")
+            or self.methods is None
+            or "POST" not in self.methods
+        ):
+            return super().get_route_handler()
+        handler = APIRoute.get_route_handler(self)
+
+        async def bounded_handler(request: Request) -> Response:
+            body = await read_bounded_body(request, MAX_TURN_RESOURCES_BODY_BYTES)
+            if body is None:
+                return payload_too_large(MAX_TURN_RESOURCES_BODY_BYTES, "A turn resource snapshot")
+            # Request.body() uses this same cache; give FastAPI only the bytes
+            # accepted above rather than asking it to consume the stream again.
+            request._body = body
+            try:
+                response = await handler(request)
+            except RequestValidationError:
+                # Missing fields otherwise repeat the entire input per error.
+                # A fixed response also keeps malformed reports out of logs
+                # and avoids returning any caller-supplied telemetry content.
+                return JSONResponse(
+                    status_code=422,
+                    content={
+                        "detail": {
+                            "error": {
+                                "type": "invalid_request",
+                                "message": "Invalid turn resource snapshot.",
+                            }
+                        }
+                    },
+                    headers={"Cache-Control": "no-store"},
+                )
+            except HTTPException as exc:
+                exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
+                raise
+            response.headers["Cache-Control"] = "no-store"
+            return response
+
+        return bounded_handler
+
+
+router = APIRouter(prefix="/v1/agent", route_class=_BoundedTurnResourcesRoute)
 
 #: The moved handlers keep logging under the aggregator's logger name: the
 #: deployment's log pipeline selects on ``cloud_agent.api.routes``, and a
@@ -162,6 +258,7 @@ class _WorkerStorage(Protocol):
     sandbox: SandboxRepository
     skills: SkillRepository
     source_control: SourceControlPort
+    user_memory: UserMemoryRepository
 
 
 def _require_store(store: _WorkerStorage | None) -> _WorkerStorage:
@@ -172,17 +269,10 @@ def _require_store(store: _WorkerStorage | None) -> _WorkerStorage:
 # The clone credential is narrowed at the point it is minted, not merely by
 # convention: the App also holds `contents: write` for the publisher, and an
 # installation token inherits every permission the App has unless it is asked
-# for less. Without this the runner would be handed push rights it must not
-# have, on a host that runs untrusted repository code.
+# for less. Keep checkout authority separate from the token explicitly
+# delivered to the sandbox for branch and pull-request publication.
 _CLONE_SCOPE = {"contents": "read"}
-
-
-#: One whole-turn resource snapshot, as UTF-8 bytes, exactly as the collection
-#: contract bounds it. The guest helper posts a fixed small shape, so this is
-#: not a tuning knob: it is the point past which the body is no longer the
-#: report it claims to be. Enforced on the raw body before parsing so an
-#: oversized post cannot allocate a model first.
-MAX_TURN_RESOURCES_BODY_BYTES = 16 * 1024
+_SANDBOX_GITHUB_SCOPE = {"contents": "write", "pull_requests": "write"}
 
 
 #: Cheap structural check before touching the signing key: host credentials
@@ -392,6 +482,77 @@ async def _worker_workspace_broker(
     return broker
 
 
+async def _require_owner_agent_access(
+    job_store: _WorkerStorage,
+    gateway: Any,
+    claim: dict[str, Any],
+) -> None:
+    """Ask the Gateway again whether this job's owner may still use Agent.
+
+    Admission was decided when the job was written, and a job can sit in the
+    queue long after that — or be written by a goal or a waiting message with
+    no request behind it at all. The grant mint does not catch a withdrawal:
+    the Gateway refuses it only for an account that is unknown or inactive, so
+    an active account without ``agent.use`` would still get a working grant.
+
+    **A denial ends the job rather than handing it back.** Released, it would be
+    eligible again at the next claim and refused again, every time; failed, it
+    carries a reason the owner can read, and the owner's goal and waiting
+    messages pause on it the way they do for any failed turn.
+
+    **No answer hands it back**, with the same delay as the other transient
+    claim failures: an unreachable Gateway is not a verdict on the owner, and a
+    released claim spends no attempt.
+
+    Raises:
+        HTTPException: 403 after ending the job when access was withdrawn, or
+            503 after releasing the claim when it could not be confirmed.
+    """
+    try:
+        permitted = await owner_may_use_agent(gateway, user_id=str(claim["user_id"]))
+    except AgentAccessUnavailable as exc:
+        await job_store.attempt_commands.release_claim(
+            job_id=claim["id"],
+            attempt_id=claim["attempt_id"],
+            lease_generation=claim["lease_generation"],
+            retry_after_seconds=30,
+        )
+        logger.warning(
+            "agent_job_owner_access_unavailable",
+            extra={"event": "agent_job_owner_access_unavailable", "job_id": claim["id"]},
+        )
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": {
+                    "type": "agent_access_unavailable",
+                    "message": (
+                        "Could not confirm the owner's Agent access; the job has been "
+                        "returned to the queue and no attempt was spent."
+                    ),
+                }
+            },
+        ) from exc
+    if permitted:
+        return
+    await job_store.attempt_commands.transition(
+        job_id=claim["id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        from_states=(RUNNING,),
+        to_state=FAILED,
+        detail=AGENT_ACCESS_WITHDRAWN,
+    )
+    logger.warning(
+        "agent_job_owner_access_withdrawn",
+        extra={"event": "agent_job_owner_access_withdrawn", "job_id": claim["id"]},
+    )
+    raise HTTPException(
+        status_code=403,
+        detail={"error": {"type": "agent_access_denied", "message": AGENT_ACCESS_WITHDRAWN}},
+    )
+
+
 async def _mint_sandbox_grant(
     job_store: _WorkerStorage,
     grants: Any,
@@ -404,12 +565,13 @@ async def _mint_sandbox_grant(
     gateway may narrow that further, and what comes back is what is handed
     over; the runner never sees what was asked for.
 
-    **Failure hands the job back.** A grant that could not be minted means the
+    **Transient failure hands the job back.** A grant that could not be minted means the
     sandbox has no way to call a model, so starting the attempt would burn one
     of the job's three tries producing an agent that fails at its first
     request. Releasing the claim costs nothing — a released claim is not a
-    spent attempt — and the runner idles until the gateway answers again. That
-    is the fail-closed direction: no grant, no run.
+    spent attempt — and its next claim waits briefly while later jobs can run.
+    A definitive refusal of the subject or requested model ends this job with
+    an actionable reason instead of retrying the same oldest row indefinitely.
 
     The grant id is recorded against the attempt under its own fence, because
     renewal and revocation both need to find it later, and because the fence is
@@ -434,6 +596,7 @@ async def _mint_sandbox_grant(
     Raises:
         HTTPException: 503, after releasing the claim, if no grant could be got
             or the one that was minted could not be linked to this attempt.
+            A definitive subject/model refusal returns 403 after ending the job.
     """
     try:
         grant = await grants.mint(
@@ -443,10 +606,29 @@ async def _mint_sandbox_grant(
             models=[claim["model"]],
         )
     except GatewayError as exc:
+        if exc.definitive and exc.error_type == "subject_unavailable":
+            await job_store.attempt_commands.transition(
+                job_id=claim["id"],
+                attempt_id=claim["attempt_id"],
+                lease_generation=claim["lease_generation"],
+                from_states=(RUNNING,),
+                to_state=FAILED,
+                detail="The gateway account can no longer run this job.",
+            )
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "error": {
+                        "type": "subject_unavailable",
+                        "message": ("The gateway account can no longer run this job."),
+                    }
+                },
+            ) from exc
         await job_store.attempt_commands.release_claim(
             job_id=claim["id"],
             attempt_id=claim["attempt_id"],
             lease_generation=claim["lease_generation"],
+            retry_after_seconds=30,
         )
         logger.warning(
             "agent_job_grant_unavailable",
@@ -477,9 +659,8 @@ async def _mint_sandbox_grant(
     # and the response reports the effective list.
     #
     # Unchecked, that lands as a sandbox that starts, spends an attempt, and
-    # fails on its first inference call with an authorization error the user
-    # cannot act on. Checked here, the job goes back to the queue with nothing
-    # spent, which is the same shape as every other credential failure above.
+    # fails on its first inference call. A definitive scope refusal ends this
+    # job so the same oldest row cannot monopolize every subsequent claim.
     #
     # Absence is refusal too. The contract says this field is returned; if it
     # is not, the scope cannot be verified, and "cannot verify" is not a reason
@@ -488,11 +669,23 @@ async def _mint_sandbox_grant(
     if not isinstance(granted_models, list) or claim["model"] not in granted_models:
         if grant_id:
             await grants.revoke(grant_id)
-        await job_store.attempt_commands.release_claim(
-            job_id=claim["id"],
-            attempt_id=claim["attempt_id"],
-            lease_generation=claim["lease_generation"],
-        )
+        definitive = isinstance(granted_models, list)
+        if definitive:
+            await job_store.attempt_commands.transition(
+                job_id=claim["id"],
+                attempt_id=claim["attempt_id"],
+                lease_generation=claim["lease_generation"],
+                from_states=(RUNNING,),
+                to_state=FAILED,
+                detail="The gateway no longer grants this job's model; choose an available model.",
+            )
+        else:
+            await job_store.attempt_commands.release_claim(
+                job_id=claim["id"],
+                attempt_id=claim["attempt_id"],
+                lease_generation=claim["lease_generation"],
+                retry_after_seconds=30,
+            )
         logger.warning(
             "agent_job_grant_scope_insufficient",
             extra={
@@ -503,13 +696,14 @@ async def _mint_sandbox_grant(
             },
         )
         raise HTTPException(
-            status_code=503,
+            status_code=403 if definitive else 503,
             detail={
                 "error": {
                     "type": "model_not_granted",
                     "message": (
-                        "The gateway did not grant this job's model; it has been "
-                        "returned to the queue and no attempt was spent."
+                        "The gateway no longer grants this job's model; choose an available model."
+                        if definitive
+                        else "The gateway returned an unreadable model scope; the job will retry shortly."
                     ),
                 }
             },
@@ -530,6 +724,7 @@ async def _mint_sandbox_grant(
             job_id=claim["id"],
             attempt_id=claim["attempt_id"],
             lease_generation=claim["lease_generation"],
+            retry_after_seconds=30,
         )
         logger.warning(
             "agent_job_grant_unlinked",
@@ -563,6 +758,7 @@ async def worker_claim(
     store: _WorkerStorage | None = Depends(get_storage),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
     grants: Any = Depends(get_grant_client),
+    gateway: Any = Depends(get_gateway_client),
 ) -> WorkerClaimResponse | None:
     """Claim the next queued job and mint this attempt's capability token.
 
@@ -610,6 +806,56 @@ async def worker_claim(
         "attempt_id": claim["attempt_id"],
         "lease_generation": claim["lease_generation"],
     }
+    # Whether the owner may still use Agent at all comes first: it is the one
+    # check every turn passes here, including the ones no request admitted.
+    await _require_owner_agent_access(job_store, gateway, claim)
+    # Re-checked at claim time, not just at create time. A row written before
+    # this check existed — or while the allowlist was wider — must not be able
+    # to produce a credential now.
+    #
+    # **And before any credential is minted.** A refusal here used to arrive
+    # after the gateway had already issued this attempt a grant, so every
+    # claim of a job whose repository its owner can no longer reach cost a
+    # mint and, later, a revocation, for a turn that was never going to run.
+    # Nothing below is asked for until the job is known to be runnable.
+    try:
+        # The same check create used. The allowlist-only variant here meant a
+        # job entitled by its owner's own GitHub connection passed creation and
+        # was then refused at claim — the two gates disagreeing about what the
+        # word entitled means.
+        await require_entitled_repo(
+            claim["repo"],
+            claim["user_id"],
+            store=job_store.source_control,
+            app_credentials=app_credentials,
+        )
+    except RepoAccessUnavailable as exc:
+        await job_store.attempt_commands.release_claim(
+            job_id=claim["id"],
+            attempt_id=claim["attempt_id"],
+            lease_generation=claim["lease_generation"],
+            retry_after_seconds=30,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail={"error": {"type": "source_control_unavailable", "message": str(exc)}},
+        ) from exc
+    except RepoNotAllowed as exc:
+        await job_store.attempt_commands.transition(
+            **fence,
+            from_states=(RUNNING,),
+            to_state=FAILED,
+            detail=str(exc),
+        )
+        logger.warning(
+            "agent_job_repo_not_allowed",
+            extra={"event": "agent_job_repo_not_allowed", "job_id": claim["id"]},
+        )
+        raise HTTPException(
+            status_code=403,
+            detail={"error": {"type": "repo_not_allowed", "message": str(exc)}},
+        ) from exc
+
     # Two credentials with different powers. The runner keeps the full one and
     # passes only the sandbox one inside, so a credential that leaks from inside
     # the agent can make model calls the gateway already meters but cannot touch
@@ -640,44 +886,19 @@ async def worker_claim(
     # not the publisher's token, which can write. It stays in the runner and
     # never enters the sandbox. Absent (null) is a working configuration: a
     # public repository clones without any credential at all.
-    # Re-checked at mint time, not just at create time. A row written before
-    # this check existed — or while the allowlist was wider — must not be able
-    # to produce a credential now.
-    try:
-        # The same check create used. The allowlist-only variant here meant a
-        # job entitled by its owner's own GitHub connection passed creation and
-        # was then refused at claim — the two gates disagreeing about what the
-        # word entitled means.
-        await require_entitled_repo(
-            claim["repo"],
-            claim["user_id"],
-            store=job_store.source_control,
-            app_credentials=app_credentials,
-        )
-    except RepoNotAllowed as exc:
-        await job_store.attempt_commands.release_claim(
-            job_id=claim["id"],
-            attempt_id=claim["attempt_id"],
-            lease_generation=claim["lease_generation"],
-        )
-        logger.warning(
-            "agent_job_repo_not_allowed",
-            extra={"event": "agent_job_repo_not_allowed", "job_id": claim["id"]},
-        )
-        raise HTTPException(
-            status_code=403,
-            detail={"error": {"type": "repo_not_allowed", "message": str(exc)}},
-        ) from exc
-
     clone_token: str | None = None
+    github_token: str | None = None
     if app_credentials is not None:
         try:
             clone_token = await app_credentials.token_for(
                 claim["repo"], permissions=_CLONE_SCOPE, repository_scoped=True
             )
+            github_token = await app_credentials.token_for(
+                claim["repo"], permissions=_SANDBOX_GITHUB_SCOPE, repository_scoped=True
+            )
         except AppNotInstalled:
             # A settled answer: the App does not cover this repository. Hand
-            # the job over without a credential — a public repository clones
+            # the job over without credentials — a public repository clones
             # anonymously, and a private one fails with a message the owner can
             # act on ("install the App"), which retrying would not improve.
             logger.info(
@@ -700,6 +921,7 @@ async def worker_claim(
                 job_id=claim["id"],
                 attempt_id=claim["attempt_id"],
                 lease_generation=claim["lease_generation"],
+                retry_after_seconds=30,
             )
             logger.warning(
                 "agent_job_clone_token_error",
@@ -721,7 +943,7 @@ async def worker_claim(
     # Resolve at every claim, including existing conversations and native
     # resumes. Loading the bindings adds newly connected servers while retaining
     # explicit opt-outs, independently of whether anyone opened the Tools UI.
-    mcp_aliases = []
+    mcp_aliases: list[str] = []
     if claim["runtime"] in runtimes_supporting_mcp():
         mcp_aliases = [
             binding.alias
@@ -732,11 +954,19 @@ async def worker_claim(
             and resolved.usable
             and resolved.connection.status is not ConnectionStatus.ERROR
         ]
+        if web_search.configured():
+            # A non-secret marker makes the runtime load the merged MCP endpoint
+            # even when this conversation selected no user-owned connections.
+            mcp_aliases.append(web_search.RUNTIME_SERVER_ID)
     # Counted for the whole conversation, not this turn: a rebuilt sandbox has
     # to restore every upload the chat ever carried, and a host that reads zero
     # here skips the fetch entirely — which is every turn that attached nothing.
     thread_attachment_count = await job_store.attachments.count_thread_attachments(
         thread_id=str(claim["thread_id"])
+    )
+    memory, project_memory = await asyncio.gather(
+        _refresh_claim_memory(job_store.user_memory, claim["user_id"]),
+        _refresh_claim_memory(job_store.user_memory, claim["user_id"], repo=claim["repo"]),
     )
     response = WorkerClaimResponse(
         thread_attachment_count=thread_attachment_count,
@@ -756,7 +986,12 @@ async def worker_claim(
         # set the objective is the first one that should be working toward it.
         task_prompt=prompt_with_goal(
             prompt_with_skills(
-                prompt_with_attachments(claim["task_prompt"], claim.get("attachments")),
+                prompt_with_user_memory(
+                    prompt_with_attachments(claim["task_prompt"], claim.get("attachments")),
+                    memory,
+                    repo=claim["repo"],
+                    project_view=project_memory,
+                ),
                 claim.get("skills"),
             ),
             # The goal preamble is the same for every runtime and every turn.
@@ -766,6 +1001,7 @@ async def worker_claim(
             claim.get("goal"),
         ),
         setup_script=claim.get("setup_script"),
+        plugins=claim.get("plugins") or [],
         runtime=claim["runtime"],
         model=claim["model"],
         execution_profile=claim.get("execution_profile", "trusted-v1"),
@@ -776,6 +1012,7 @@ async def worker_claim(
         sandbox_token=sandbox_token,
         mcp_token=mcp_token,
         clone_token=clone_token,
+        github_token=github_token,
         # Aliases, because that is what the runtime config addresses: the relay
         # path segment is the binding alias, and the runner learns nothing about
         # where the connection points.
@@ -1167,6 +1404,8 @@ async def worker_establish_shared_sandbox_residency(
         raise _lease_lost()
     row = await job_store.residency.establish_residency(
         thread_id=thread_id,
+        attempt_id=claims["attempt_id"],
+        lease_generation=claims["lease_generation"],
         host=str(host["host"]),
         runtime_id=body.runtime_id,
         runtime_version=body.runtime_version,
@@ -1238,6 +1477,7 @@ async def worker_record_thread_sandbox_process(
         lease_generation=claims["lease_generation"],
         sandbox_generation=body.sandbox_generation,
         activation_generation=body.activation_generation,
+        residency_generation=body.residency_generation,
         process_generation=body.process_generation,
     )
     if not recorded:
@@ -1267,6 +1507,7 @@ async def worker_admit_thread_sandbox_turn(
         lease_generation=claims["lease_generation"],
         sandbox_generation=body.sandbox_generation,
         activation_generation=body.activation_generation,
+        residency_generation=body.residency_generation,
     )
     if not recorded:
         raise _lease_lost()
@@ -1294,6 +1535,7 @@ async def worker_settle_thread_sandbox(
         lease_generation=claims["lease_generation"],
         sandbox_generation=body.sandbox_generation,
         activation_generation=body.activation_generation,
+        residency_generation=body.residency_generation,
         job_id=job_id,
         context_status=body.context_status,
         native_session_id=body.native_session_id,
@@ -1377,7 +1619,6 @@ async def worker_report_resources(
 
 @router.post("/worker/jobs/{job_id}/turn-resources", response_model=WorkerAckResponse)
 async def worker_report_turn_resources(
-    request: Request,
     job_id: str,
     body: WorkerTurnResourcesRequest,
     authorization: str | None = Header(None),
@@ -1405,19 +1646,6 @@ async def worker_report_turn_resources(
     job_store = _require_store(store)
     claims = _worker_claims(authorization)
     _match_job(claims, job_id)
-    if len(await request.body()) > MAX_TURN_RESOURCES_BODY_BYTES:
-        raise HTTPException(
-            status_code=413,
-            detail={
-                "error": {
-                    "type": "payload_too_large",
-                    "message": (
-                        "A turn resource snapshot is limited to "
-                        f"{MAX_TURN_RESOURCES_BODY_BYTES} bytes."
-                    ),
-                }
-            },
-        )
     result = await job_store.attempt_commands.record_attempt_turn_summary(
         attempt_id=claims["attempt_id"],
         lease_generation=claims["lease_generation"],
@@ -1566,6 +1794,9 @@ async def worker_release(
     has provably not begun and the person waiting on it should not wait out a
     lease that nothing is holding.
 
+    A short retry delay lets other queued work proceed while the host recovers
+    from a temporary refusal, including work that can resume an existing sandbox.
+
     **Not an escape hatch for a turn that is running.** The release is refused
     once the turn has been admitted to the CLI, and the check is the database's
     rather than the caller's: replaying an admitted prompt executes the same
@@ -1581,6 +1812,7 @@ async def worker_release(
         attempt_id=claims["attempt_id"],
         lease_generation=claims["lease_generation"],
         reason=body.reason,
+        retry_after_seconds=30,
     )
     if not released:
         # 409 rather than 400: the request was well formed and would have been

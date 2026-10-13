@@ -13,6 +13,7 @@ from cloud_agent.host_pool import hash_secret, new_enroll_token
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+    from uuid import UUID
 
     from cloud_agent.ports.host_pool import HostPoolRepository
 
@@ -85,6 +86,11 @@ class HostCommands:
                 409,
                 f"{host!r} is the active host. Switch to another host (or unpin) before removing it.",
             )
+        if outcome == "fenced":
+            raise HostCommandError(
+                409,
+                f"{host!r} is held by an automated deployment drain and cannot be forgotten.",
+            )
         if outcome == "unknown":
             raise HostCommandError(404, f"Unknown runner host: {host}")
         if outcome != "deleted":
@@ -93,17 +99,77 @@ class HostCommands:
                 f"{host!r} still has {outcome.replace('_', ' ')}; clear those dependencies before forgetting it.",
             )
 
-    async def set_status(self, *, host: str, status: str) -> None:
+    async def set_status(self, *, host: str, status: str, force: bool = False) -> None:
         """Apply the existing drain/undrain transition table."""
-        outcome = await self.repository.set_host_status(host=host, status=status)
+        outcome = await self.repository.set_host_status(host=host, status=status, force=force)
         if outcome == "unknown":
             raise HostCommandError(404, f"Unknown runner host: {host}")
+        if outcome == "fenced":
+            raise HostCommandError(
+                409,
+                f"{host!r} is held by an automated deployment drain; use its fenced release or repeat with force=true.",
+            )
         if outcome == "invalid":
             current = await self.repository.get_host(host=host)
             raise HostCommandError(
                 409,
                 f"{host!r} is {current['status'] if current else 'unknown'!r} and cannot become {status!r}.",
             )
+
+    async def acquire_drain_fence(
+        self,
+        *,
+        host: str,
+        expected_fence_token: UUID | None,
+        expected_fence_epoch: UUID,
+        fence_token: UUID,
+    ) -> tuple[str, UUID]:
+        """Acquire or idempotently confirm one deployment-owned drain."""
+        outcome, status_before, drain_fence_epoch = await self.repository.acquire_host_drain_fence(
+            host=host,
+            expected_fence_token=expected_fence_token,
+            expected_fence_epoch=expected_fence_epoch,
+            fence_token=fence_token,
+        )
+        if outcome == "unknown":
+            raise HostCommandError(404, f"Unknown runner host: {host}")
+        if outcome == "manual":
+            raise HostCommandError(
+                409,
+                f"{host!r} is draining without an automated owner and cannot be acquired.",
+            )
+        if outcome in ("stale", "released"):
+            raise HostCommandError(409, f"The deployment drain ownership for {host!r} changed.")
+        if outcome == "invalid":
+            current = await self.repository.get_host(host=host)
+            raise HostCommandError(
+                409,
+                f"{host!r} is {current['status'] if current else 'unknown'!r} and cannot be fenced.",
+            )
+        if status_before not in ("online", "draining"):
+            raise HostCommandError(409, f"The deployment drain receipt for {host!r} is invalid.")
+        if drain_fence_epoch is None:
+            raise HostCommandError(409, f"The deployment drain epoch for {host!r} is invalid.")
+        return status_before, drain_fence_epoch
+
+    async def release_drain_fence(self, *, host: str, fence_token: UUID) -> UUID:
+        """Release or idempotently confirm the exact deployment-owned drain."""
+        outcome, drain_fence_epoch = await self.repository.release_host_drain_fence(
+            host=host, fence_token=fence_token
+        )
+        if outcome == "unknown":
+            raise HostCommandError(404, f"Unknown runner host: {host}")
+        if outcome == "stale":
+            raise HostCommandError(409, f"The deployment drain ownership for {host!r} changed.")
+        if outcome == "invalid":
+            current = await self.repository.get_host(host=host)
+            raise HostCommandError(
+                409,
+                f"{host!r} is {current['status'] if current else 'unknown'!r} and cannot be released.",
+            )
+        if drain_fence_epoch is None:
+            raise HostCommandError(409, f"The deployment drain epoch for {host!r} is invalid.")
+        return drain_fence_epoch
 
     async def remove(self, *, host: str, force: bool = False) -> None:
         """Revoke Host access without releasing any underlying machine."""
@@ -114,7 +180,12 @@ class HostCommands:
             raise HostCommandError(
                 409,
                 f"{host!r} is still running attempts. Drain it first, or repeat with "
-                "force=true to let their leases expire under the retained-context fail-closed policy.",
+                "force=true to expire their leases now under the retained-context fail-closed policy.",
+            )
+        if outcome == "fenced":
+            raise HostCommandError(
+                409,
+                f"{host!r} is held by an automated deployment drain; release it first or repeat with force=true.",
             )
 
     async def global_settings(self, changes: Mapping[str, int | None]) -> dict[str, Any]:
@@ -133,6 +204,13 @@ class HostCommands:
         before = await self.repository.get_host(host=host)
         if before is None:
             raise HostCommandError(404, f"Unknown runner host: {host}")
-        if await self.repository.set_host_slots_desired(host=host, slots=slots) == "unknown":
+        outcome = await self.repository.set_host_slots_desired(host=host, slots=slots)
+        if outcome == "unknown":
             raise HostCommandError(404, f"Unknown runner host: {host}")
+        if outcome == "autoscaling_managed":
+            raise HostCommandError(
+                409,
+                f"{host!r} is managed by CloudLab autoscaling; its slot target is derived "
+                "from fresh capacity telemetry and cannot be edited directly.",
+            )
         return before

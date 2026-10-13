@@ -23,6 +23,7 @@ The rules that a naive ``split(b"\\n\\n")`` gets wrong:
 
 from __future__ import annotations
 
+import codecs
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -36,6 +37,10 @@ MAX_EVENT_BYTES = 4 * 1024 * 1024
 
 #: Kept between reads: the tail of a chunk that did not end in a complete line.
 _MAX_LINE_BYTES = 1024 * 1024
+
+#: Bound conversion work and the requested delay to signed 32-bit milliseconds.
+_MAX_RETRY_MS = 2_147_483_647
+_MAX_RETRY_DIGITS = 10
 
 
 class SseError(ValueError):
@@ -75,6 +80,11 @@ class SseDecoder:
 
     _buffer: str = field(default="", init=False)
     _data: list[str] = field(default_factory=list, init=False)
+    _data_bytes: int = field(default=0, init=False)
+    _utf8: codecs.IncrementalDecoder = field(
+        default_factory=lambda: codecs.getincrementaldecoder("utf-8")(errors="replace"),
+        init=False,
+    )
     _event: str = field(default="", init=False)
     _id: str = field(default="", init=False)
     _retry: int | None = field(default=None, init=False)
@@ -90,7 +100,7 @@ class SseDecoder:
         # ``errors="replace"`` rather than strict: a malformed byte in a
         # comment should not take down a stream that is otherwise working, and
         # the JSON events still fail loudly on their own.
-        self._buffer += chunk.decode("utf-8", errors="replace")
+        self._buffer += self._utf8.decode(chunk)
         events: list[SseEvent] = []
         while True:
             line, separator, remainder = _take_line(self._buffer)
@@ -100,7 +110,7 @@ class SseDecoder:
             event = self._consume_line(line)
             if event is not None:
                 events.append(event)
-        if len(self._buffer) > _MAX_LINE_BYTES:
+        if len(self._buffer.encode("utf-8")) > _MAX_LINE_BYTES:
             raise SseError("this stream has a line longer than the relay will buffer")
         return events
 
@@ -112,6 +122,7 @@ class SseDecoder:
         tool result that already happened.
         """
         events: list[SseEvent] = []
+        self._buffer += self._utf8.decode(b"", final=True)
         if self._buffer:
             event = self._consume_line(self._buffer)
             if event is not None:
@@ -123,6 +134,8 @@ class SseDecoder:
 
     def _consume_line(self, line: str) -> SseEvent | None:
         """Apply one line, returning an event when the line completes one."""
+        if len(line.encode("utf-8")) > _MAX_LINE_BYTES:
+            raise SseError("this stream has a line longer than the relay will buffer")
         if line == "":
             return self._dispatch() if self._data or self._event or self._id else None
         if line.startswith(":"):
@@ -132,21 +145,47 @@ class SseDecoder:
             value = value[1:]
         match name:
             case "data":
+                size = len(value.encode("utf-8")) + 1
+                self._check_event_size(data_bytes=self._data_bytes + size)
                 self._data.append(value)
+                self._data_bytes += size
             case "event":
+                self._check_event_size(event=value)
                 self._event = value
             case "id":
                 # A NUL in an id is defined to be ignored, which is how a
                 # server resets the id without ending the stream.
                 if "\x00" not in value:
+                    self._check_event_size(event_id=value)
                     self._id = value
             case "retry":
-                if value.isdigit():
-                    self._retry = int(value)
+                # SSE requires ASCII decimal digits. Unicode ``isdigit`` also
+                # accepts characters such as superscript two that int rejects.
+                if value.isascii() and value.isdecimal():
+                    if len(value) > _MAX_RETRY_DIGITS:
+                        raise SseError("this stream has a retry delay beyond the relay limit")
+                    delay = int(value)
+                    if delay > _MAX_RETRY_MS:
+                        raise SseError("this stream has a retry delay beyond the relay limit")
+                    self._retry = delay
             case _:
                 # Unknown fields are ignored by design.
                 return None
         return None
+
+    def _check_event_size(
+        self,
+        *,
+        data_bytes: int | None = None,
+        event: str | None = None,
+        event_id: str | None = None,
+    ) -> None:
+        """Bound retained fields across all lines and chunks of one event."""
+        size = self._data_bytes if data_bytes is None else data_bytes
+        size += len((self._event if event is None else event).encode("utf-8"))
+        size += len((self._id if event_id is None else event_id).encode("utf-8"))
+        if size > MAX_EVENT_BYTES:
+            raise SseError("an SSE event is larger than this relay will buffer")
 
     def _dispatch(self) -> SseEvent:
         """Build the event the accumulated fields describe, and reset."""
@@ -159,6 +198,7 @@ class SseDecoder:
         if event.id:
             self.last_event_id = event.id
         self._data = []
+        self._data_bytes = 0
         self._event = ""
         self._retry = None
         return event

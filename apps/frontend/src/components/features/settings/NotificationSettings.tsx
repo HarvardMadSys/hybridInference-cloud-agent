@@ -70,17 +70,15 @@ export function NotificationSettings() {
           : 'settings.notifications.off';
 
   return (
-    <section aria-labelledby="settings-notifications" className="mt-6">
-      <h3
-        id="settings-notifications"
-        className="text-[11px] font-semibold uppercase tracking-[0.08em] text-gray-400 dark:text-gray-500"
-      >
+    <section
+      aria-labelledby="settings-notifications"
+      className="ui-card mt-6 rounded-2xl bg-surface p-4 sm:p-6"
+    >
+      <h2 id="settings-notifications" className="text-base font-semibold text-foreground">
         {t('settings.notifications.title')}
-      </h3>
-      <p className="mt-3 text-[13px] leading-relaxed text-gray-600 dark:text-gray-400">
-        {t('settings.notifications.description')}
-      </p>
-      <p aria-live="polite" className="mt-2 text-[12px] text-gray-500 dark:text-gray-400">
+      </h2>
+      <p className="mt-3 text-sm leading-6 text-muted">{t('settings.notifications.description')}</p>
+      <p aria-live="polite" className="mt-2 text-sm text-muted">
         {t(guidance)}
       </p>
       <div className="mt-3 flex flex-wrap gap-2">
@@ -88,7 +86,7 @@ export function NotificationSettings() {
           <button
             type="button"
             onClick={() => updatePreferences({ enabled: false })}
-            className="rounded-lg border border-gray-200 px-3 py-1.5 text-[13px] font-medium text-gray-700 transition-colors hover:bg-gray-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson/25 dark:border-white/10 dark:text-gray-200 dark:hover:bg-white/5"
+            className="ui-button ui-button-secondary min-h-11"
           >
             {t('settings.notifications.disable')}
           </button>
@@ -98,7 +96,7 @@ export function NotificationSettings() {
             type="button"
             onClick={() => void enable()}
             disabled={!userId || permission === null || permission === 'denied' || requesting}
-            className="rounded-lg bg-crimson px-3 py-1.5 text-[13px] font-medium text-white transition-colors hover:bg-crimson-dark focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson/30 disabled:cursor-not-allowed disabled:opacity-50"
+            className="ui-button ui-button-primary min-h-11 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {t(requesting ? 'settings.notifications.enabling' : 'settings.notifications.enable')}
           </button>
@@ -106,7 +104,7 @@ export function NotificationSettings() {
       </div>
       <fieldset className="mt-3 space-y-2">
         <legend className="sr-only">{t('settings.notifications.events')}</legend>
-        <label className="flex items-center gap-2 text-[13px] text-gray-800 dark:text-gray-200">
+        <label className="flex min-h-11 items-center gap-2 text-sm text-foreground">
           <input
             type="checkbox"
             checked={preferences.questions}
@@ -116,7 +114,7 @@ export function NotificationSettings() {
           />
           {t('settings.notifications.questions')}
         </label>
-        <label className="flex items-center gap-2 text-[13px] text-gray-800 dark:text-gray-200">
+        <label className="flex min-h-11 items-center gap-2 text-sm text-foreground">
           <input
             type="checkbox"
             checked={preferences.turns}

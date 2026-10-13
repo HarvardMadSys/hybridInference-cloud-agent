@@ -1,41 +1,48 @@
 # Native conversation recall
 
-Cloud Agent resumes each chat's native CLI session in its retained sandbox.
-Native CLIs own the conversation history; Agent passes user messages unchanged.
-A retained session and a correct model answer about that history require separate
-verification. The September investigation reproduced both native persistence
-bugs and model replies claiming missing history despite complete requests.
+Cloud Agent keeps each chat's native CLI session in its retained sandbox. The
+CLI owns the conversation history, and Agent passes each user message through
+unchanged.
+
+Two questions need separate answers: did the same native session survive, and
+did the model answer correctly from its history? The September investigation
+found failures of both kinds. It reproduced native persistence bugs, but it also
+found models claiming that history was missing even when the request was
+complete.
 
 For session architecture, see the
 [native Fork/shared-workspace design](specs/2026-08-31-native-session-fork-shared-workspace-design.md).
-Dated findings below describe local acceptance evidence, not the state of a
-remote deployment.
+The dated findings below are local acceptance evidence. They do not describe
+the current state of a remote deployment.
 
 ## Native session identity at the shared boundary
 
-The runner verifies the settled native session ID before persisting it, including
-normally settled API failures. A continuation that reports another ID fails
-before it can replace the durable locator.
+After each turn settles, the runner verifies the native session ID before saving
+it. This check also covers API failures that settled normally. If a continuation
+reports a different ID, the turn fails before it can replace the durable
+locator.
 
-The broker uses a retained member's locator if launch omits it, rejects a
-conflicting requested/observed locator, and checks identity again at settlement.
-The runner independently rejects a retained chat without a resume locator.
-Claude root stream events are checked before normalization; child-agent events
-with `parent_tool_use_id` cannot replace the root session ID. The other bundled
-adapters validate their native resume handshake.
+If launch omits the locator, the broker uses the retained member's saved value.
+It rejects a conflict between the requested and observed locators, then checks
+the identity again when the turn settles. The runner also rejects any retained
+chat that has no resume locator.
 
-History comes from the native session, without transcript replay, JSONL rewriting
-or a continuation reminder. The earlier continuation-prompt experiment was
-withdrawn; its successful samples do not validate the current unchanged-input
-implementation. Fault-injection tests established a validation gap in the older
-shared runner, rather than evidence that a staging request actually supplied an
-incorrect locator.
+Claude root stream events are checked before normalization, so child-agent
+events with `parent_tool_use_id` cannot replace the root session ID. The other
+bundled adapters validate their own native resume handshakes.
+
+History comes directly from the native session. Cloud Agent does not replay
+transcripts, rewrite JSONL, or add a continuation reminder. An earlier
+continuation-prompt experiment was withdrawn, so its successful samples do not
+validate the current unchanged-input implementation. Fault-injection tests
+found a validation gap in the older shared runner; they did not show that a
+staging request had actually supplied the wrong locator.
 
 ## Other native CLIs
 
-All five bundled CLIs can retain a failed query for follow-up only when the native
-turn verifiably ended, activation cleanup completed, and the transport and native
-locator remain usable.
+All five bundled CLIs can keep a failed query for a follow-up, but only when the
+native turn verifiably ended, activation cleanup completed, and both the
+transport and native locator remain usable.
 
 | CLI | Native settlement evidence |
 | --- | --- |
@@ -44,20 +51,20 @@ locator remain usable.
 | Pi | `agent_end`; the last assistant's `stopReason` determines failure |
 | OpenCode / Kilo | Bridge `settled` for the active turn at native idle |
 
-A command rejection, dead transport, timeout or cancellation does not establish
-native settlement. Pi terminal API errors are failures rather than successful
-empty turns. OpenCode/Kilo reply collection uses message-role metadata and joins
-only assistant-owned text; late metadata is resolved at settlement and previous
-bridge-turn events are excluded. This prevents user text appearing as assistant
-output without changing the native model history.
+A command rejection, dead transport, timeout, or cancellation does not count as
+native settlement. Pi reports terminal API errors as failures, not successful
+empty turns. OpenCode/Kilo use message-role metadata to collect only
+assistant-owned text. They resolve late metadata at settlement and exclude
+events from earlier bridge turns. This keeps user text out of assistant output
+without changing the native model history.
 
-The pinned Claude 2.1.220 CLI also has a reproduced retry-parent-chain defect:
-a delayed `system/api_error` can bypass a successfully retried assistant reply
-on a later resume. When the driver sees `system/api_retry`, it settles the
-current turn and gracefully retires the process after saving its native locator.
-The next turn resumes that same session in the same container. Successful turns
-without a retry keep the live process. This does not repair transcripts already
-damaged by the older behavior.
+The pinned Claude 2.1.220 CLI has a reproduced retry-parent-chain defect: a
+delayed `system/api_error` can bypass a successfully retried assistant reply on
+a later resume. When the driver sees `system/api_retry`, it settles the current
+turn, saves the native locator, and gracefully retires the process. The next
+turn resumes that same session in the same container. A successful turn without
+a retry keeps the live process. This handling does not repair transcripts that
+the older behavior already damaged.
 
 The sandbox's `http-agent-live-bridge=4` helper pin is required by host
 attestation. Version 4 gates every turn on the current live SSE subscription,
@@ -71,10 +78,10 @@ an older helper image must not advertise readiness for the new host.
 
 ## Release scope and remaining findings
 
-The implementation covers reproduced retry/flush history loss, retention of
-verifiably settled failures across five CLIs, Pi error reporting,
-OpenCode/Kilo assistant-message ownership and runner/broker session identity.
-Local Responses fixtures and smoke checks were corrected as part of that work.
+The implementation addresses the reproduced retry/flush history loss and keeps
+verifiably settled failures across all five CLIs. It also covers Pi error
+reporting, OpenCode/Kilo assistant-message ownership, and runner/broker session
+identity. The same work corrected the local Responses fixtures and smoke checks.
 
 The documented investigation also left two separate findings:
 
@@ -83,9 +90,10 @@ The documented investigation also left two separate findings:
 | Flash can claim missing history with complete outbound messages | Reproduced in native and direct synthetic API calls. Reasoning effort and newer CLIs did not reliably fix it; client evidence does not identify the upstream engine/template/model cause. |
 | Gateway snapshot loses effort configuration and historical thinking blocks in translation | Reproduced locally. Separate patches outside this repository were not deployment-verified by this investigation; they do not establish that Flash recall is fixed. |
 
-Neither a successful HTTP response nor native persistence proves factual recall.
-Existing damaged transcripts and old disposable chats are not migrated by these
-fixes. Use a new chat when legacy history has no native shared-live membership.
+A successful HTTP response does not prove factual recall, and neither does a
+persisted native session. These fixes do not migrate already damaged transcripts
+or old disposable chats. Start a new chat when legacy history has no native
+shared-live membership.
 
 ## Verification before accepting a deployment
 

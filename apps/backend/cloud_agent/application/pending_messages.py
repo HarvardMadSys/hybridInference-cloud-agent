@@ -8,10 +8,11 @@ queue has one set of rules however it was woken.
 
 The settlement itself is one transaction in the store. What happens here is the
 part that cannot be inside it: checking the first message against the turn it
-would follow — model, effort, repository access, skills, uploads — can reach the
-gateway and the source-control provider, and a thread's lock must not be held
-across either. The check is made outside, handed back in, and applied only if
-it was made for exactly the message and the turn the transaction then finds.
+would follow — the owner's Agent access, model, effort, repository access,
+skills, uploads — can reach the gateway and the source-control provider, and a
+thread's lock must not be held across either. The check is made outside, handed
+back in, and applied only if it was made for exactly the message and the turn
+the transaction then finds.
 """
 
 from __future__ import annotations
@@ -23,6 +24,11 @@ from fastapi import HTTPException
 from cloud_agent.application.follow_ups import PreparedFollowUp, prepare_follow_up
 from cloud_agent.domain.pending_messages import PreparedHead, SettleOutcome
 from cloud_agent.logging_utils import get_logger
+from cloud_agent.owner_access import (
+    AGENT_ACCESS_WITHDRAWN,
+    AgentAccessUnavailable,
+    owner_may_use_agent,
+)
 from cloud_agent.source_control_runtime import SourceControlUnavailable
 
 if TYPE_CHECKING:
@@ -104,10 +110,37 @@ async def prepare_message(
     with it. ``None`` means the check could not be made — the gateway did not
     answer, say — and nothing about the message should change: the next
     settlement asks again.
+
+    **The owner's Agent access is asked first.** A message waiting in the queue
+    is sent with no request of its owner's behind it, so nothing else here
+    would notice that their access was withdrawn after they wrote it. A denial
+    holds the message with the reason; a Gateway that cannot answer leaves it
+    waiting, exactly as for any other check that could not be made.
     """
     parent = await store.conversation_queries.get_job(parent_job_id)
     if parent is None:
         return None
+    try:
+        permitted = await owner_may_use_agent(gateway, user_id=str(message["user_id"]))
+    except AgentAccessUnavailable:
+        logger.warning(
+            "agent_pending_message_check_unavailable",
+            extra={
+                "event": "agent_pending_message_check_unavailable",
+                "thread_id": message.get("thread_id"),
+                "message_id": message.get("id"),
+                "reason": "agent_access_unavailable",
+            },
+            exc_info=True,
+        )
+        return None
+    if not permitted:
+        return PreparedHead(
+            message_id=str(message["id"]),
+            revision=int(message["revision"]),
+            parent_job_id=parent_job_id,
+            error=AGENT_ACCESS_WITHDRAWN,
+        )
     try:
         resolved = await prepare_follow_up(
             parent,

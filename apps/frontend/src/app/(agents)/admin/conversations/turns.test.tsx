@@ -268,8 +268,13 @@ describe('turn level', () => {
       vi.mocked(getAdminRuns).mockResolvedValue(page());
       render(<SessionsPage />);
       await screen.findByTitle('job-1');
+      // The result row can render one effect before the child reports that
+      // loading finished to the parent toolbar. Clicking during that gap is
+      // correctly ignored because Refresh is still disabled.
+      const refresh = screen.getByRole('button', { name: 'Refresh' });
+      await waitFor(() => expect(refresh).toBeEnabled());
       vi.setSystemTime(new Date('2026-09-10T09:00:00Z'));
-      fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+      fireEvent.click(refresh);
       await waitFor(() => expect(getAdminRuns).toHaveBeenCalledTimes(2));
       expect(vi.mocked(getAdminRuns).mock.lastCall![0]).toMatchObject({
         since: '2026-09-01T00:00:00.000Z',
@@ -296,7 +301,9 @@ describe('turn level', () => {
       await waitFor(() => expect(getAdminRuns).toHaveBeenCalledTimes(2));
       expect(screen.getByLabelText('Turn created')).toHaveValue('custom');
 
-      fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+      const refresh = screen.getByRole('button', { name: 'Refresh' });
+      await waitFor(() => expect(refresh).toBeEnabled());
+      fireEvent.click(refresh);
       await waitFor(() => expect(getAdminRuns).toHaveBeenCalledTimes(3));
       const filters = vi.mocked(getAdminRuns).mock.lastCall![0];
       // The same seven-day window, re-anchored at the current time.

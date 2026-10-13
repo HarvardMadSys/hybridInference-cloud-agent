@@ -331,8 +331,23 @@ class Api:
             container_id=reserved.get("container_id") or f"container-{thread_id}",
             context_status="live" if known else "new",
         )
-        assert await self.store.sandbox.admit_thread_sandbox_turn(**fence, job_id=job["id"])
-        return {**claim, "fence": fence}
+        residency = await self.store.residency.establish_residency(
+            thread_id=thread_id,
+            attempt_id=claim["attempt_id"],
+            lease_generation=claim["lease_generation"],
+            host=_HOST,
+            sandbox_id=reserved["sandbox_id"],
+            runtime_id=reserved["runtime_id"],
+            runtime_version=reserved["runtime_version"],
+            ttl_seconds=1800,
+        )
+        assert residency is not None
+        assert await self.store.sandbox.admit_thread_sandbox_turn(
+            **fence,
+            residency_generation=residency["generation"],
+            job_id=job["id"],
+        )
+        return {**claim, "fence": fence, "residency_generation": residency["generation"]}
 
     async def finish(self, turn: dict[str, Any], state: str = "succeeded") -> None:
         """End a started turn through the worker's finish route.
@@ -342,6 +357,7 @@ class Api:
         """
         assert await self.store.sandbox.settle_thread_sandbox(
             **turn["fence"],
+            residency_generation=turn["residency_generation"],
             job_id=turn["job_id"],
             context_status="live",
             native_session_id=f"native-{turn['thread_id']}",
@@ -511,6 +527,7 @@ async def test_two_replicas_settling_at_once_create_one_turn(api: Api):
     # replicas below are the first to see it.
     assert await api.store.sandbox.settle_thread_sandbox(
         **first["fence"],
+        residency_generation=first["residency_generation"],
         job_id=job["id"],
         context_status="live",
         native_session_id=f"native-{thread_id}",
@@ -664,18 +681,39 @@ async def test_a_turn_the_reaper_fails_is_paused_by_the_periodic_sweep(api: Api)
     assert await api.store.pending_messages.threads_to_settle() == []
 
 
-async def test_the_reaper_loop_runs_the_queue_sweep(api: Api):
+async def test_the_reaper_loop_runs_queue_and_staged_attachment_sweeps(api: Api, monkeypatch):
     """The sweep is wired into the loop that runs in production, not only callable."""
-    job = await api.create()
+    claimed_upload = await api.store.attachments.create_attachment(
+        user_id=_OWNER, path="claimed.txt", content=b"claimed", content_type="text/plain"
+    )
+    job = await api.create(attachment_ids=[claimed_upload["id"]])
     thread_id = job["thread_id"]
     claim = await api.claim(job["id"])
-    await api.send(thread_id, "waits for a decision")
+    pending_upload = await api.store.attachments.create_attachment(
+        user_id=_OWNER, path="pending.txt", content=b"pending", content_type="text/plain"
+    )
+    sent = await api.send(thread_id, "waits for a decision", attachment_ids=[pending_upload["id"]])
+    assert sent.status_code == 201, sent.text
+    pending_message = sent.json()["pending"]
+    abandoned_upload = await api.store.attachments.create_attachment(
+        user_id=_OWNER, path="abandoned.txt", content=b"abandoned", content_type="text/plain"
+    )
     async with api.pool.acquire() as conn:
         await conn.execute(
             "UPDATE agent_attempts SET lease_expires_at = NOW() - INTERVAL '1 second' "
             "WHERE id = $1",
             claim["attempt_id"],
         )
+        await conn.execute(
+            "UPDATE agent_job_attachments SET created_at = NOW() - INTERVAL '2 hours'"
+        )
+
+    # Prove the loop reads the saved-setting seam rather than baking in the
+    # 24-hour default: these two-hour-old rows are eligible at one hour.
+    monkeypatch.setattr(
+        "cloud_agent.workers.attempts.integer_setting",
+        lambda key, fallback: 1 if key == "attachments.staged_retention_hours" else fallback,
+    )
 
     loop = asyncio.create_task(
         reap_expired_attempts(api.store, interval_seconds=0.05, max_attempts=1, gateway=api.gateway)
@@ -695,6 +733,23 @@ async def test_the_reaper_loop_runs_the_queue_sweep(api: Api):
 
     assert (await api.queue(thread_id))["queue_paused_reason"] == "failed"
     assert [turn["state"] for turn in await api.turns(thread_id)] == ["failed"]
+    async with api.pool.acquire() as conn:
+        attachments = await conn.fetch(
+            "SELECT id, job_id, pending_message_id FROM agent_job_attachments ORDER BY id"
+        )
+    assert [dict(row) for row in attachments] == [
+        {
+            "id": claimed_upload["id"],
+            "job_id": job["id"],
+            "pending_message_id": None,
+        },
+        {
+            "id": pending_upload["id"],
+            "job_id": None,
+            "pending_message_id": pending_message["id"],
+        },
+    ]
+    assert abandoned_upload["id"] not in {row["id"] for row in attachments}
 
 
 async def test_a_github_app_that_cannot_load_holds_a_message_back_without_refusing_it(api: Api):

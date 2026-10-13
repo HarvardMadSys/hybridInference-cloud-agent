@@ -5,10 +5,68 @@ from __future__ import annotations
 import asyncio
 import base64
 
+import httpx
 import pytest
 
 from cloud_agent import workspace_broker_client
-from cloud_agent.workspace_broker_client import WorkspaceBrokerClient
+from cloud_agent.workspace_broker_client import WorkspaceBrokerClient, WorkspaceBrokerError
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("thread_id", [None, "origin/thread?member=other&extra=value #fragment"])
+async def test_sandbox_inventory_selection_is_encoded_without_changing_authentication(thread_id):
+    requests: list[httpx.Request] = []
+    rows = [{"sandbox_id": "asbx_shared", "terminal_count": 2, "group_busy": True}]
+
+    def inventory(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"sandboxes": rows})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(inventory)) as client:
+        broker = WorkspaceBrokerClient("http://broker/", "secret", client=client)
+        assert await broker.list_sandboxes(thread_id=thread_id, timeout=5) == rows
+        assert client.is_closed is False
+
+    request = requests[0]
+    assert request.method == "GET"
+    assert request.url.path == "/sandboxes"
+    assert request.headers["X-Agent-Workspace-Token"] == "secret"
+    assert request.extensions["timeout"]["read"] == 5
+    if thread_id is None:
+        assert str(request.url) == "http://broker/sandboxes"
+    else:
+        assert list(request.url.params.multi_items()) == [("thread_id", thread_id)]
+        assert request.url.fragment == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("thread_id", [None, "athr_origin"])
+@pytest.mark.parametrize(
+    "status,body,error_status",
+    [
+        (401, {"detail": "PRIVATE credential diagnostic"}, 503),
+        (500, {"detail": "PRIVATE container diagnostic"}, 503),
+        (200, {"sandboxes": [{"thread_id": "athr_origin"}]}, 502),
+        (200, {"unrelated": []}, 502),
+    ],
+)
+async def test_sandbox_inventory_selection_preserves_fail_closed_validation(
+    thread_id, status, body, error_status
+):
+    requests: list[httpx.Request] = []
+
+    def inventory(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(status, json=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(inventory)) as client:
+        broker = WorkspaceBrokerClient("http://broker", "secret", client=client)
+        with pytest.raises(WorkspaceBrokerError) as failure:
+            await broker.list_sandboxes(thread_id=thread_id)
+
+    assert failure.value.status_code == error_status
+    assert "PRIVATE" not in failure.value.message
+    assert len(requests) == 1
 
 
 def _shared_snapshot() -> dict:
@@ -197,7 +255,8 @@ async def test_shared_snapshot_client_forwards_only_the_reviewed_identity(monkey
 
 
 @pytest.mark.asyncio
-async def test_shared_fork_client_forwards_the_group_origin(monkeypatch):
+@pytest.mark.parametrize("plugins, timeout", [([], 180), ([{"plugin": "example"}], 960)])
+async def test_shared_fork_client_forwards_the_group_origin(monkeypatch, plugins, timeout):
     broker = WorkspaceBrokerClient("http://broker", "secret")
     calls: list[tuple] = []
 
@@ -227,8 +286,8 @@ async def test_shared_fork_client_forwards_the_group_origin(monkeypatch):
         source_native_turn_no=2,
         target_thread_id="athr_target",
         target_slot_id=1,
-        source_launch={},
-        target_launch={},
+        source_launch={"plugins": plugins},
+        target_launch={"plugins": plugins},
     )
 
     assert result == {"ok": True}
@@ -237,7 +296,9 @@ async def test_shared_fork_client_forwards_the_group_origin(monkeypatch):
     assert call[3]["origin_thread_id"] == "athr_origin"
     assert call[3]["source_native_turn_no"] == 2
     assert call[3]["disk_limit_mib"] == 16384
-    assert call[4] == 180
+    assert call[3]["source_launch"]["plugins"] == plugins
+    assert call[3]["target_launch"]["plugins"] == plugins
+    assert call[4] == timeout
 
 
 @pytest.mark.asyncio

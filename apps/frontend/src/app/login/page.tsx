@@ -49,7 +49,10 @@ function LoginContent() {
   const authority = authorityName(branding.gatewayUrl);
 
   return (
-    <div className="relative isolate flex min-h-screen flex-col overflow-hidden bg-[#f8f7f4] dark:bg-gray-950">
+    <div
+      lang="en"
+      className="relative isolate flex min-h-screen flex-col overflow-hidden bg-[#f8f7f4] dark:bg-gray-950"
+    >
       <div
         aria-hidden="true"
         className="pointer-events-none absolute -right-44 -top-52 -z-10 h-[620px] w-[620px] rounded-full border border-crimson/5 bg-gradient-to-br from-crimson/5 to-transparent dark:border-crimson/10 dark:from-crimson/10"
