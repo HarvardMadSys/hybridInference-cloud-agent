@@ -12,6 +12,7 @@ measurement script exercises exactly what the route runs.
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
@@ -128,6 +129,17 @@ _PROJECTION_SQL = f"""
 """
 
 
+def _decoded_reports(rows: list[Any]) -> list[dict[str, Any]]:
+    """Decode each projected report; CPU-bound, so callers run it on a thread."""
+    return [
+        {
+            **dict(row),
+            "snapshot": load_json(row["snapshot"]) if row["id"] is not None else None,
+        }
+        for row in rows
+    ]
+
+
 class UsageQueryTooLarge(Exception):
     """The selection exceeds a published bound and is refused as a whole."""
 
@@ -215,16 +227,8 @@ class AdminUsageQueries:
             raise
         except Exception as error:
             raise UsageQueryUnavailable from error
-        return (
-            cohort,
-            [
-                {
-                    **dict(row),
-                    "snapshot": load_json(row["snapshot"]) if row["id"] is not None else None,
-                }
-                for row in rows
-            ],
-        )
+        # Up to the snapshot budget of JSON: decoded off the shared event loop.
+        return cohort, await asyncio.to_thread(_decoded_reports, rows)
 
     async def _cohort(
         self,

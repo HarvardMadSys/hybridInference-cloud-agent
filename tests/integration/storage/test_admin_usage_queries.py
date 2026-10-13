@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -26,6 +27,7 @@ from cloud_agent.admin_usage import (
 )
 from cloud_agent.api import admin_usage
 from cloud_agent.api.deps import get_storage
+from cloud_agent.storage import admin_usage_queries
 from cloud_agent.storage.assembly import Storage
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
@@ -442,6 +444,46 @@ async def test_the_projection_preserves_a_damaged_report_instead_of_repairing_it
     assert body["summary"]["totals"] is None
     assert body["summary"]["runs_with_snapshot"] == 0
     assert body["summary"]["status_counts"]["unavailable"] == 1
+
+
+async def test_reports_are_decoded_without_holding_the_event_loop(db, store, monkeypatch):
+    """Up to the snapshot budget of JSON must not stall the loop every request shares."""
+    job = await _create_job(store, user_id="owner-one", model="model-a")
+    _, _, ledger_id = await _seed_attempt(db, store, job=job)
+    await _backdate(db, store, [job["id"]], START, state="succeeded")
+    await _seed_snapshot(db, store, ledger_id, amount="1.00", calls=2)
+    decoding, served = threading.Event(), threading.Event()
+    answered: list[bool] = []
+    original = admin_usage_queries.load_json
+
+    def load_json(value):
+        if not decoding.is_set():
+            decoding.set()
+            # Only the event loop can answer; decoding on it would wait in vain.
+            answered.append(served.wait(timeout=5))
+        return original(value)
+
+    async def serve() -> None:
+        while not decoding.is_set():
+            await asyncio.sleep(0.001)
+        served.set()
+
+    monkeypatch.setattr(admin_usage_queries, "load_json", load_json)
+    server = asyncio.create_task(serve())
+    _, rows = await store.admin_usage.selection(
+        since=START,
+        until=END,
+        user_id=None,
+        model=None,
+        runtime=None,
+        repo=None,
+        max_runs=MAX_USAGE_RUNS,
+        max_rows=MAX_USAGE_LEDGER_ROWS,
+        max_snapshot_bytes=MAX_USAGE_SNAPSHOT_BYTES,
+    )
+    await asyncio.wait_for(server, timeout=5)
+    assert answered == [True]
+    assert rows[0]["snapshot"]["totals"]["spent_usd"] == "1.00"
 
 
 async def test_a_snapshot_carrying_only_allowlisted_keys_is_read(db, store, admin_token):

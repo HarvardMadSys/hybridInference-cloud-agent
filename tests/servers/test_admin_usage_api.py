@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import threading
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -189,6 +191,33 @@ async def test_a_response_over_its_byte_budget_is_refused_whole(setup, monkeypat
     assert response.json()["detail"]["error"]["type"] == "usage_query_too_large"
     assert "totals" not in response.json()
     assert MAX_USAGE_RESPONSE_BYTES == 1024 * 1024
+
+
+async def test_the_reduction_runs_without_holding_the_event_loop(setup, monkeypatch):
+    """Host heartbeats, claims and streams share this loop with a wide selection."""
+    app, _ = setup
+    reducing, served = threading.Event(), threading.Event()
+    answered: list[bool] = []
+    original = admin_usage.prepare_jobs
+
+    def prepare_jobs(*args, **kwargs):
+        reducing.set()
+        # Only the event loop can answer; reducing on it would wait in vain.
+        answered.append(served.wait(timeout=5))
+        return original(*args, **kwargs)
+
+    async def serve() -> None:
+        while not reducing.is_set():
+            await asyncio.sleep(0.001)
+        served.set()
+
+    monkeypatch.setattr(admin_usage, "prepare_jobs", prepare_jobs)
+    server = asyncio.create_task(serve())
+    response = await get(app, PATH)
+    await asyncio.wait_for(server, timeout=5)
+    assert answered == [True]
+    assert response.status_code == 200
+    assert response.json()["summary"]["totals"]["spent_usd"] == "0.00012345"
 
 
 async def test_an_unreadable_selection_returns_503_not_a_partial_total(setup):
