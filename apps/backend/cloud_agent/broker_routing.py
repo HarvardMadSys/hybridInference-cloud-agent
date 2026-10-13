@@ -77,7 +77,7 @@ def _literal_address(hostname: str) -> ipaddress.IPv4Address | ipaddress.IPv6Add
             # spellings ``ip_address`` refuses: "2852039166", "0xa9fea9fe",
             # "169.254.43518" all name 169.254.169.254.
             address = ipaddress.IPv4Address(socket.inet_aton(name))
-        except OSError:
+        except (OSError, ValueError):
             return None
     if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
         return address.ipv4_mapped
@@ -120,6 +120,10 @@ def validate_broker_url(url: str | None) -> str | None:
         raise BrokerUrlRefused("broker_url must be a valid http(s) URL") from None
     if parsed.scheme not in ("http", "https") or not parsed.hostname:
         raise BrokerUrlRefused(f"broker_url must be an http(s) URL, got {candidate!r}")
+    if not parsed.hostname.isprintable() or any(char.isspace() for char in parsed.hostname):
+        # No name or address contains one, and the resolver stops reading a
+        # host at a NUL: what it would dial is not what was checked below.
+        raise BrokerUrlRefused("broker_url host must not contain control characters or spaces")
     address = _literal_address(parsed.hostname)
     if address is not None and any(address in network for network in _NEVER_BROKER_NETWORKS):
         raise BrokerUrlRefused(

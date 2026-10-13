@@ -2095,6 +2095,23 @@ def test_a_link_local_broker_url_is_refused_even_without_an_allowlist(monkeypatc
 
 @pytest.mark.parametrize(
     "url",
+    ["http://169.254.169.254\x00:8092", "http://1\x00:8092", "http://169.254.169.254 x:8092"],
+)
+def test_a_broker_host_with_a_control_character_is_refused(monkeypatch, url) -> None:
+    """Refused as unusable, rather than parsed and either passed or crashed on.
+
+    The resolver stops reading a host at an embedded NUL, so
+    ``169.254.169.254\\x00`` names the metadata address to any client that
+    hands it on; and the address parser raises a plain ``ValueError`` on it,
+    which the heartbeat would have answered with a 500 instead of a 400.
+    """
+    monkeypatch.delenv(ENV_BROKER_HOSTS, raising=False)
+    with pytest.raises(BrokerUrlRefused):
+        validate_broker_url(url)
+
+
+@pytest.mark.parametrize(
+    "url",
     [
         "http://127.0.0.1:8092",
         "http://[::1]:8092",
