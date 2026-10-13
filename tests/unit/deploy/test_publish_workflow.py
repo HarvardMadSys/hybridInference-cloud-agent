@@ -69,9 +69,11 @@ def live_lines(script: str) -> list[str]:
 def test_publication_is_never_reachable_from_a_pull_request() -> None:
     """No `pull_request`: a run is a push to dev, CI finishing on dev, or a hand.
 
-    A `push` fires only for commits on dev, and `workflow_run` executes the copy
-    of this file on the default branch, which is dev: either runs merged code,
-    so a pull request cannot even edit its way in.
+    A `push` fires only for commits on dev and runs dev's copy, and
+    `workflow_run` executes the copy of this file on the default branch, which
+    is main: either runs merged code, so a pull request cannot even edit its way
+    in. A dispatch runs the copy on the ref it is dispatched from, which this
+    file cannot constrain.
     """
     assert set(triggers()) == {"push", "workflow_run", "workflow_dispatch"}
     assert triggers()["push"] == {"branches": ["dev"]}

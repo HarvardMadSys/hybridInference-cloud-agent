@@ -83,7 +83,9 @@ run_check() {
 }
 
 if [[ "$CI_TIER" != frontend ]]; then
-  uv sync --frozen --python 3.12
+  # --locked, as CI syncs: a uv.lock that no longer matches pyproject.toml
+  # fails here rather than being installed as if it were current.
+  uv sync --locked --python 3.12
 fi
 
 if [[ "$CI_TIER" == all || "$CI_TIER" == backend ]]; then

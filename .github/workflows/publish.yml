@@ -20,11 +20,18 @@ name: Publish
 # - `workflow_dispatch` names a commit by hand: for a commit whose own push run
 #   was cancelled by the push that followed it.
 #
-# A pull request cannot reach this file: there is no `pull_request` trigger, a
-# `push` runs only for commits on dev, and a `workflow_run` executes the copy of
-# this file on the default branch, which is dev. Each runs code that was merged,
-# never a pull request's copy. That is what keeps a publishing credential out of
-# the path that runs unreviewed code.
+# A pull request cannot reach this file: there is no `pull_request` trigger, and
+# a `push` runs dev's own copy for a commit on dev. A `workflow_run` executes
+# the copy on the default branch, which is main: sync-main.yml advances it by
+# hand, so that copy can lag dev's. Both are merged code, never a pull
+# request's copy, which keeps the publishing credentials out of the path that
+# runs unreviewed code. A `workflow_dispatch` executes the copy on the ref it is
+# dispatched from, so dispatch from dev. The steps below vet the commit, not
+# the file running them, and no job binds these credentials to a protected
+# environment: an edited copy on another branch, dispatched by someone with
+# write access, runs with them. Keeping that out is repository configuration
+# (who may push and dispatch, and environment rules for the Docker Hub
+# secrets), which this file cannot enforce.
 #
 # Publishing is idempotent per commit. A release that already exists is left
 # exactly as it is: a manifest that could be overwritten is one whose sha256 a
@@ -92,7 +99,7 @@ jobs:
       # dev, whatever branch the dispatch form was left on: the check below is
       # against dev's history, and a `workflow_run` job is filed under the
       # default branch, which is main and lags dev by weeks.
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           ref: dev
           fetch-depth: 0
@@ -130,7 +137,7 @@ jobs:
       - name: Require the commit's own CI to be green
         # A push's CI is still running; the `ci` job waits for its verdict.
         if: github.event_name != 'push'
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         env:
           SHA: ${{ steps.target.outputs.sha }}
         with:
@@ -157,7 +164,7 @@ jobs:
       # sha256 no longer matches what a distribution pinned.
       - name: Refuse to overwrite a published release
         id: existing
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         env:
           TAG: ${{ steps.target.outputs.tag }}
         with:
@@ -241,7 +248,7 @@ jobs:
             runner: '["self-hosted","Linux","X64","image-verify-x64"]'
             build_args: ""
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           ref: ${{ needs.commit.outputs.sha }}
           fetch-depth: 0
@@ -278,7 +285,7 @@ jobs:
       # Before the builder step, because creating a builder pulls
       # `moby/buildkit` from Docker Hub too.
       - name: Log in to Docker Hub
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -287,7 +294,7 @@ jobs:
       # first pushed this way is created private and linked to this
       # repository; making it visible is a decision, not a side effect.
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -347,7 +354,7 @@ jobs:
         # A build can fail for reasons of its own; one more attempt is cheaper
         # than a red cell. Nothing after the retry is allowed to fail quietly.
         continue-on-error: true
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           builder: ${{ env.BUILDER }}
           context: .
@@ -361,7 +368,7 @@ jobs:
       - name: Build ${{ matrix.artifact.name }} and push it by digest (retry)
         id: push_retry
         if: steps.push.outcome == 'failure'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           builder: ${{ env.BUILDER }}
           context: .
@@ -401,7 +408,7 @@ jobs:
           echo "UV_CACHE_DIR=${RUNNER_TEMP}/uv-cache" >> "${GITHUB_ENV}"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           enable-cache: true
           prune-cache: false
@@ -444,7 +451,7 @@ jobs:
         run: docker buildx imagetools create --tag "${PUBLISH_REPOSITORY}:${{ matrix.artifact.name }}-${SHA}" "${IMAGE_REF}"
 
       - name: Hand the record to the publish job
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-cell-${{ matrix.artifact.name }}
           path: cells/${{ matrix.artifact.name }}.json
@@ -496,7 +503,7 @@ jobs:
       contents: read
       packages: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           ref: ${{ needs.commit.outputs.sha }}
           fetch-depth: 0
@@ -513,7 +520,7 @@ jobs:
       # The stack's own Postgres and nginx come from Docker Hub, and the
       # anonymous allowance is shared with the other repository's CI.
       - name: Log in to Docker Hub
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -521,7 +528,7 @@ jobs:
       # Read-only: this job pulls the digests the cells pushed. It has no
       # business writing to a package, and `packages: read` above says so.
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -531,17 +538,21 @@ jobs:
         run: |
           echo "UV_CACHE_DIR=${RUNNER_TEMP}/uv-cache" >> "${GITHUB_ENV}"
 
+      # The uv CI checks the lock with: `--locked` then judges it the same way
+      # here, rather than by whichever release setup-uv would fetch today.
       - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
+          version: ${{ env.UV_VERSION }}
           enable-cache: true
           prune-cache: false
 
+      # `--locked`, as in CI: a stale uv.lock fails instead of being re-resolved.
       - name: Sync dependencies
-        run: uv sync
+        run: uv sync --locked
 
       - name: Collect what the cells published
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: release-cell-*
           merge-multiple: true
@@ -596,7 +607,7 @@ jobs:
       # These exact bytes are what the release carries. `publish` attaches them
       # rather than generating a second copy.
       - name: Hand the documents to the publish job
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-documents
           path: |
@@ -641,7 +652,7 @@ jobs:
     steps:
       - name: Wait for CI to conclude on this commit
         id: verdict
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         env:
           SHA: ${{ needs.commit.outputs.sha }}
         with:
@@ -690,7 +701,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           ref: ${{ needs.commit.outputs.sha }}
           fetch-depth: 0
@@ -700,20 +711,21 @@ jobs:
           echo "UV_CACHE_DIR=${RUNNER_TEMP}/uv-cache" >> "${GITHUB_ENV}"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
+          version: ${{ env.UV_VERSION }}
           enable-cache: true
           prune-cache: false
 
       - name: Sync dependencies
-        run: uv sync
+        run: uv sync --locked
 
       # The documents the acceptance generated and then deployed. Not rebuilt
       # here: a manifest checked in one job and rewritten in the next is two
       # documents with one sha256 between them, and the one a distribution pins
       # would be the one nobody deployed.
       - name: Collect the documents the acceptance deployed
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: release-documents
           path: release
@@ -737,7 +749,7 @@ jobs:
       # the draft is created, the draft is deleted rather than left half-made.
       - name: Publish the release
         id: release
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         env:
           SHA: ${{ needs.commit.outputs.sha }}
           TAG: ${{ needs.commit.outputs.tag }}

@@ -56,7 +56,7 @@ jobs:
       web: ${{ steps.classify.outputs.web }}
       docker: ${{ steps.classify.outputs.docker }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           # Full fetch: the diff below needs both endpoints, and shallow-clone
           # packs with missing delta bases have been failing random checkouts
@@ -67,15 +67,14 @@ jobs:
       - name: Classify changed paths
         id: classify
         env:
-          BEFORE: ${{ github.event.before }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
 
-          # Fails open: anything this cannot resolve — a dispatch, a first push
-          # to a new branch, a base commit the runner does not have — runs
-          # everything. A misclassification that skips is a job that silently
-          # did not check; one that over-runs costs a minute.
+          # Fails open: anything this cannot resolve — a dispatch, a push with
+          # no release in its history, a base commit the runner does not have —
+          # runs everything. A misclassification that skips is a job that
+          # silently did not check; one that over-runs costs a minute.
           files=""
           resolved=false
           case "${GITHUB_EVENT_NAME}" in
@@ -86,10 +85,17 @@ jobs:
               fi
               ;;
             push)
-              if [ -n "${BEFORE:-}" ] \
-                 && [ "${BEFORE}" != "0000000000000000000000000000000000000000" ] \
-                 && git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
-                files="$(git diff --name-only "${BEFORE}" "${GITHUB_SHA}")"
+              # From the newest release, not from the previous push. This run
+              # is what lets publish.yml release this commit, and the previous
+              # push may never have passed one: CI cancels a dev run when the
+              # next push arrives, and a red run publishes nothing. A release
+              # exists only for a commit whose own run passed, so everything
+              # since the newest one is what this run has to check. Searched
+              # from the parent, so re-running a released commit never compares
+              # it with its own release and finds nothing to check.
+              if release="$(git describe --tags --first-parent --match 'agent-*' --abbrev=0 "${GITHUB_SHA}^" 2>/dev/null)"; then
+                echo "classifying every change since the newest release, ${release}"
+                files="$(git diff --name-only "${release}" "${GITHUB_SHA}")"
                 resolved=true
               fi
               ;;
@@ -167,7 +173,7 @@ jobs:
     if: needs.changes.outputs.backend == 'true'
     runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-24.04"]' || '["self-hosted","Linux","ci-general"]') }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           # Full fetch: GitHub intermittently serves shallow-clone packs with
           # missing delta bases ("pack has N unresolved deltas"), which fails
@@ -192,7 +198,7 @@ jobs:
           echo "UV_CACHE_DIR=${RUNNER_TEMP}/uv-cache" >> "${GITHUB_ENV}"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
@@ -203,8 +209,12 @@ jobs:
       - name: Set up Python
         run: uv python install ${{ env.PYTHON_VERSION }}
 
+      # `--locked` here and in every other job: a uv.lock that no longer
+      # matches pyproject.toml fails instead of being re-resolved for this run.
+      # The images install the committed lock as it stands, so checks run
+      # against a fresh resolution would vouch for packages no image ships.
       - name: Sync dependencies
-        run: uv sync
+        run: uv sync --locked
 
       # `continue-on-error` on the checks and nowhere else. A setup step that
       # fails still stops the job outright — there is nothing to lint without a
@@ -264,10 +274,16 @@ jobs:
   # persistent pool, whose few runners a second job would only queue for.
   # `scripts/ci_shard.py` deals whole files, so `--dist loadfile` and the
   # isolation it buys are unchanged, and the shards cover each file once.
+  #
+  # Unlike the other backend jobs, this one runs whatever changed: its tests
+  # read files the classifier counts as docs or web app. The credential
+  # backstop scans every tracked file, the environment inventory reads
+  # apps/frontend/ and ENVIRONMENT.md, and the deployment tests read every
+  # Markdown file under docs/. Filtered by `backend`, a docs- or frontend-only
+  # change that broke one of them passed here and failed the next backend one.
   test:
     name: Tests (${{ matrix.shard }}/${{ github.event_name == 'pull_request' && 2 || 1 }})
     needs: changes
-    if: needs.changes.outputs.backend == 'true'
     runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-24.04"]' || '["self-hosted","Linux","ci-general"]') }}
     strategy:
       fail-fast: false
@@ -276,7 +292,7 @@ jobs:
     env:
       SHARD: ${{ matrix.shard }}/${{ github.event_name == 'pull_request' && 2 || 1 }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -287,7 +303,7 @@ jobs:
           echo "npm_config_cache=${RUNNER_TEMP}/npm-cache" >> "${GITHUB_ENV}"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
@@ -297,7 +313,7 @@ jobs:
         run: uv python install ${{ env.PYTHON_VERSION }}
 
       - name: Sync dependencies
-        run: uv sync
+        run: uv sync --locked
 
       # -n 4 --dist loadfile, not a serial run: parallel workers isolate each
       # test file into its own process, which is what surfaces environment
@@ -310,6 +326,10 @@ jobs:
           uv run pytest -n 4 --dist loadfile -q -m "not external and not dbtest" "${paths[@]}"
 
       # The external checks below run once per commit, in the first shard.
+      # Each test skips when what this job hands it is missing, and pytest
+      # calls a run that only skipped a success, so every external step in this
+      # workflow keeps a junit report and `scripts/ci_tests_ran.py` fails the
+      # step if any test in it declined to run.
       #
       # A single OS user cannot reproduce a sibling CLI's 0700 process registry.
       # Check the real normalizer across Linux UIDs before allowing deployment.
@@ -319,15 +339,18 @@ jobs:
         env:
           AGENT_PERMISSION_TEST_IMAGE: python:3.12-slim
         run: |
+          set -euo pipefail
           docker pull "${AGENT_PERMISSION_TEST_IMAGE}"
-          uv run pytest -q -m external tests/external/test_shared_member_permissions.py
+          uv run pytest -q -m external tests/external/test_shared_member_permissions.py \
+            --junitxml="${RUNNER_TEMP}/shared-member-permissions.xml"
+          uv run python scripts/ci_tests_ran.py "${RUNNER_TEMP}/shared-member-permissions.xml"
 
       # Completion can precede the native CLI's history flush. Unit doubles
       # cannot catch that race; exercise the shipped pin before CI can deploy.
       # Inference is a loopback protocol fixture, with no API key or model cost.
       - name: Set up Node for native CLI regression
         if: matrix.shard == 1
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: ${{ env.NODE_VERSION }}
 
@@ -362,7 +385,11 @@ jobs:
         timeout-minutes: 10
         env:
           PYTHONPATH: ${{ runner.temp }}/claude-context-sdk
-        run: uv run pytest -q -n 4 --dist load -m external tests/external/test_claude_driver_context.py
+        run: |
+          set -euo pipefail
+          uv run pytest -q -n 4 --dist load -m external tests/external/test_claude_driver_context.py \
+            --junitxml="${RUNNER_TEMP}/claude-driver-context.xml"
+          uv run python scripts/ci_tests_ran.py "${RUNNER_TEMP}/claude-driver-context.xml"
 
   # The other half of that command. `test` above deselects `dbtest`, and until
   # this job existed nothing selected it — 158 tests that are written, green,
@@ -423,7 +450,7 @@ jobs:
           --health-retries 15
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -451,7 +478,7 @@ jobs:
           } >> "${GITHUB_ENV}"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
@@ -461,7 +488,7 @@ jobs:
         run: uv python install ${{ env.PYTHON_VERSION }}
 
       - name: Sync dependencies
-        run: uv sync
+        run: uv sync --locked
 
       # Before pytest, because every dbtest fixture answers an unreachable
       # database with `pytest.skip`, not a failure. That is right for a laptop
@@ -619,7 +646,7 @@ jobs:
     env:
       SHARD: ${{ matrix.shard }}/${{ github.event_name == 'pull_request' && 2 || 1 }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           # Full fetch: shallow-clone packs with missing delta bases have been
           # failing random checkouts on this pool.
@@ -639,7 +666,7 @@ jobs:
           echo "npm_config_cache=${RUNNER_TEMP}/npm-cache" >> "${GITHUB_ENV}"
 
       - name: Set up Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -708,7 +735,7 @@ jobs:
     if: needs.changes.outputs.web == 'true'
     runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-24.04"]' || '["self-hosted","Linux","ci-general"]') }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           # Full fetch: shallow-clone packs with missing delta bases have been
           # failing random checkouts on this pool.
@@ -721,7 +748,7 @@ jobs:
           echo "npm_config_cache=${RUNNER_TEMP}/npm-cache" >> "${GITHUB_ENV}"
 
       - name: Set up Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -776,7 +803,7 @@ jobs:
     name: Gitleaks
     runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-24.04"]' || '["self-hosted","Linux","ci-general"]') }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -924,7 +951,7 @@ jobs:
             runner: '["self-hosted","Linux","X64","image-verify-x64"]'
             build_args: ""
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -971,7 +998,7 @@ jobs:
         # PRs use anonymous pulls and receive no registry credential, including
         # same-repository PRs where GitHub would otherwise make secrets available.
         if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -1068,7 +1095,7 @@ jobs:
         # backstop, because a build can still fail for reasons of its own and
         # running it once more is cheaper than a red cell.
         continue-on-error: true
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           builder: ${{ env.BUILDER }}
           context: .
@@ -1089,7 +1116,7 @@ jobs:
       # before the first attempt. What can still fail is the build itself.
       - name: Build ${{ matrix.artifact.name }} (retry)
         if: steps.build.outcome == 'failure'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           builder: ${{ env.BUILDER }}
           context: .
@@ -1125,7 +1152,7 @@ jobs:
           echo "UV_CACHE_DIR=${RUNNER_TEMP}/uv-cache" >> "${GITHUB_ENV}"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           enable-cache: true
           prune-cache: false
@@ -1183,7 +1210,9 @@ jobs:
           # or loadscope would keep them serial. Dynamic load balances the real
           # CLI processes while the worker databases isolate their storage.
           uv run pytest -q -n "${MCP_TEST_WORKERS}" --dist load \
-            -m external -k "${MCP_TEST_SELECTION}" tests/external/test_resident_mcp_parity.py
+            -m external -k "${MCP_TEST_SELECTION}" tests/external/test_resident_mcp_parity.py \
+            --junitxml="${RUNNER_TEMP}/mcp-parity.xml"
+          uv run python scripts/ci_tests_ran.py "${RUNNER_TEMP}/mcp-parity.xml"
 
       # The smoke harness removes its image, so run it after the CLI matrix.
       - name: Start it, and assert what only starting shows
@@ -1260,7 +1289,7 @@ jobs:
             runner: '["self-hosted","Linux","X64","image-verify-x64"]'
             build_args: ""
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -1334,7 +1363,7 @@ jobs:
       - name: Build ${{ matrix.artifact.name }}
         id: build
         continue-on-error: true
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           builder: ${{ env.BUILDER }}
           context: .
@@ -1349,7 +1378,7 @@ jobs:
 
       - name: Build ${{ matrix.artifact.name }} (retry)
         if: steps.build.outcome == 'failure'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           builder: ${{ env.BUILDER }}
           context: .
@@ -1377,7 +1406,7 @@ jobs:
           echo "UV_CACHE_DIR=${RUNNER_TEMP}/uv-cache" >> "${GITHUB_ENV}"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           enable-cache: true
           prune-cache: false
@@ -1430,7 +1459,9 @@ jobs:
           # or loadscope would keep them serial. Dynamic load balances the real
           # CLI processes while the worker databases isolate their storage.
           uv run pytest -q -n "${MCP_TEST_WORKERS}" --dist load \
-            -m external -k "${MCP_TEST_SELECTION}" tests/external/test_resident_mcp_parity.py
+            -m external -k "${MCP_TEST_SELECTION}" tests/external/test_resident_mcp_parity.py \
+            --junitxml="${RUNNER_TEMP}/mcp-parity.xml"
+          uv run python scripts/ci_tests_ran.py "${RUNNER_TEMP}/mcp-parity.xml"
 
       - name: Drop this run's containers and image
         if: always() && runner.environment != 'github-hosted'
@@ -1464,7 +1495,7 @@ jobs:
     # pull requests can parse these files on a disposable x64 hosted VM.
     runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-24.04"]' || '["self-hosted","Linux","ARM64","image-verify-arm64"]') }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -1474,7 +1505,7 @@ jobs:
           echo "UV_CACHE_DIR=${RUNNER_TEMP}/uv-cache" >> "${GITHUB_ENV}"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           enable-cache: true
           prune-cache: false
@@ -1660,16 +1691,33 @@ jobs:
                   if key.startswith(retired):
                       failures.append(f"{name} still passes the retired {key}")
 
+          # The Docker socket is the host's authority. `:ro` on the bind mount
+          # does not narrow the API: whatever can connect can start a privileged
+          # container with the host's root mounted. What this check can pin is
+          # who holds it — the runner, which starts each sandbox, and the
+          # broker, which execs into one — named, like the relays. Read-only
+          # stays their mount convention, and is not presented as more.
+          holders = set()
           for name, svc in stack["services"].items():
               for mount in svc.get("volumes") or []:
-                  target = mount.get("target") if isinstance(mount, dict) else str(mount)
-                  ro = mount.get("read_only") if isinstance(mount, dict) else ":ro" in str(mount)
-                  if "docker.sock" in str(target) and not ro:
-                      failures.append(f"{name} mounts the docker socket writable")
+                  if isinstance(mount, dict):
+                      paths = f"{mount.get('source', '')} {mount.get('target', '')}"
+                      ro = mount.get("read_only")
+                  else:
+                      paths, ro = str(mount), ":ro" in str(mount)
+                  if "docker.sock" in paths:
+                      holders.add(name)
+                      if not ro:
+                          failures.append(f"{name} mounts the docker socket without the holders' :ro convention")
+          if holders != {"runner", "workspace-broker"}:
+              failures.append(
+                  "the docker socket is the host's authority; only runner and workspace-broker "
+                  f"may hold it, not {sorted(holders)}"
+              )
 
           if failures:
               print("\n".join(failures)); sys.exit(1)
-          print("rendered stack: one sandbox network, relays discoverable only, docker socket read-only")
+          print("rendered stack: one sandbox network, relays discoverable only, docker socket held by runner and broker only")
           PY
 
       - name: Upload limits match encoded attachments through nginx
@@ -1679,7 +1727,9 @@ jobs:
         run: |
           set -euo pipefail
           docker --host=unix:///var/run/docker.sock pull "${AGENT_UPLOAD_TEST_NGINX_IMAGE}"
-          uv run --frozen pytest -q -m external tests/external/test_upload_edge_limits.py
+          uv run --frozen pytest -q -m external tests/external/test_upload_edge_limits.py \
+            --junitxml="${RUNNER_TEMP}/upload-edge-limits.xml"
+          uv run --frozen python scripts/ci_tests_ran.py "${RUNNER_TEMP}/upload-edge-limits.xml"
 
       - name: Retained commands clean up Docker siblings at execution limits
         timeout-minutes: 5
@@ -1688,7 +1738,9 @@ jobs:
         run: |
           set -euo pipefail
           docker --host=unix:///var/run/docker.sock pull "${AGENT_COMMAND_TEST_IMAGE}"
-          uv run --frozen pytest -q -m external tests/external/test_retained_command_limits.py
+          uv run --frozen pytest -q -m external tests/external/test_retained_command_limits.py \
+            --junitxml="${RUNNER_TEMP}/retained-command-limits.xml"
+          uv run --frozen python scripts/ci_tests_ran.py "${RUNNER_TEMP}/retained-command-limits.xml"
 
   # -------------------------------------------------------------------- gate
   kata:
@@ -1705,7 +1757,7 @@ jobs:
       group: cloud-agent-kata-ci
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
       - name: Isolate build configuration
@@ -1713,7 +1765,7 @@ jobs:
           mkdir -p "${RUNNER_TEMP}/kata-docker" "${RUNNER_TEMP}/kata-buildx"
           echo "DOCKER_CONFIG=${RUNNER_TEMP}/kata-docker" >> "$GITHUB_ENV"
           echo "BUILDX_CONFIG=${RUNNER_TEMP}/kata-buildx" >> "$GITHUB_ENV"
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         if: github.event_name != 'pull_request'
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}

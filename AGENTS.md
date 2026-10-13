@@ -194,3 +194,8 @@ requirement, and rules 4 and 5 remain permanent service boundaries.
 - Public multi-tenant use requires Kata isolation, non-root, dropped
   capabilities, seccomp, and resource limits — plain Docker containers are for
   trusted internal repositories only.
+- The Docker socket is the host's authority. Only the runner and the workspace
+  broker mount it, and `:ro` on that mount does not narrow the Docker API:
+  either can start a privileged container, so a flaw in either is a host
+  compromise. No other service may mount it; the deployment tests and CI's
+  Compose check pin the holders.

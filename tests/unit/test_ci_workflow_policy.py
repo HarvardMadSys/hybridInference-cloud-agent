@@ -284,6 +284,77 @@ def test_pr_workflow_has_only_read_permissions_and_no_privileged_event_trigger()
                 assert step.get("if") == "github.event_name != 'pull_request'", name
 
 
+#: Every workflow this repository runs, publication and synchronisation included.
+WORKFLOWS = sorted([*WORKFLOW.parent.glob("*.yml"), *WORKFLOW.parent.glob("*.yaml")])
+_PINNED = re.compile(r"[\w.-]+/[\w.-]+(?:/[\w./-]+)?@[0-9a-f]{40}")
+_PINNED_LINE = re.compile(r"(?:-\s+)?uses:\s+\S+@[0-9a-f]{40} # v\d+(?:\.\d+)*")
+
+
+@pytest.mark.parametrize("workflow", WORKFLOWS, ids=lambda path: path.name)
+def test_every_action_is_pinned_to_a_commit(workflow: Path) -> None:
+    """A tag can be moved to other code; a commit cannot.
+
+    Publication runs these actions beside `packages: write`, `contents: write`
+    and the Docker Hub token, on persistent runners where whatever a moved tag
+    delivers can also outlive the job. Each reference therefore names the
+    commit, and a comment names the release it is, which is how a person or an
+    update tool knows what to move it to.
+    """
+    text = workflow.read_text()
+    jobs = yaml.safe_load(text)["jobs"].values()
+    references = [job["uses"] for job in jobs if "uses" in job]
+    references += [step["uses"] for job in jobs for step in job.get("steps", []) if "uses" in step]
+    assert references, f"{workflow.name} uses no action; the check would prove nothing"
+    remote = [reference for reference in references if not reference.startswith("./")]
+    for reference in remote:
+        assert _PINNED.fullmatch(reference), f"{workflow.name}: {reference} is not a commit"
+    lines = [
+        line.strip() for line in text.splitlines() if re.match(r"\s*(?:-\s+)?uses:\s+(?!\./)", line)
+    ]
+    assert len(lines) == len(remote)
+    for line in lines:
+        assert _PINNED_LINE.fullmatch(line), f"{workflow.name}: {line!r} names no release"
+
+
+def _syncs(text: str) -> list[str]:
+    return [line.strip() for line in text.splitlines() if re.match(r"\s*uv sync\b", line)]
+
+
+@pytest.mark.parametrize("workflow", WORKFLOWS, ids=lambda path: path.name)
+def test_every_dependency_sync_refuses_a_stale_lock(workflow: Path) -> None:
+    """A bare `uv sync` re-resolves a uv.lock that no longer matches pyproject.toml.
+
+    The images install the committed lock as it stands, so a job that tested a
+    fresh resolution would vouch for packages no image ships. `--locked` makes
+    that job fail instead, on every event and in every workflow. Each job that
+    syncs installs the uv CI pins, so every one of them judges the lock alike.
+    """
+    document = yaml.safe_load(workflow.read_text())
+    syncing = []
+    for name, job in document["jobs"].items():
+        steps = job.get("steps", [])
+        syncs = [command for step in steps for command in _syncs(str(step.get("run", "")))]
+        for command in syncs:
+            assert "--locked" in command.split(), f"{workflow.name}: {command}"
+        if syncs:
+            syncing.append(name)
+            installs = [step for step in steps if "astral-sh/setup-uv@" in step.get("uses", "")]
+            versions = [step.get("with", {}).get("version") for step in installs]
+            assert versions == ["${{ env.UV_VERSION }}"], f"{workflow.name}: {name}"
+            assert document["env"]["UV_VERSION"] == _document()["env"]["UV_VERSION"]
+    if workflow.name in {"ci.yml", "publish.yml", "pr-caches.yml"}:
+        assert syncing, f"{workflow.name} no longer syncs; the check would prove nothing"
+
+
+def test_the_local_launcher_refuses_a_stale_lock_like_ci() -> None:
+    """`make ci` is the local copy of these jobs; it must fail where they fail."""
+    launcher = (WORKFLOW.parents[2] / "scripts/ci-local.sh").read_text()
+    syncs = _syncs(launcher)
+    assert syncs
+    for command in syncs:
+        assert "--locked" in command.split(), command
+
+
 def test_checkouts_leave_no_token_in_the_unreviewed_repository() -> None:
     for document in (_document(), _cache_document()):
         for name, job in document["jobs"].items():

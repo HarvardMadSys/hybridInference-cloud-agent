@@ -151,10 +151,12 @@ make ci-frontend
 
 Install `uv` and Python 3.12 before running backend or database checks. Frontend
 checks require Node.js 22 and npm; database checks require a running Docker
-daemon. The launcher synchronizes locked dependencies with `uv sync --frozen`
-and `npm ci`, and uses the installed runtimes. Direct invocation works from any
-directory: `./scripts/ci-local.sh [all|backend|database|frontend]` from the
-checkout, or its absolute path elsewhere. The default tier is `all`.
+daemon. The launcher synchronizes locked dependencies with `uv sync --locked`
+and `npm ci`, and uses the installed runtimes. Like CI, it fails when `uv.lock`
+no longer matches `pyproject.toml`; run `uv lock` and commit the result. Direct
+invocation works from any directory:
+`./scripts/ci-local.sh [all|backend|database|frontend]` from the checkout, or
+its absolute path elsewhere. The default tier is `all`.
 
 Backend checks run Ruff formatting and lint checks, pydocstyle, mypy, and pytest
 with four workers and `--dist loadfile`, excluding `external` and `dbtest`.
