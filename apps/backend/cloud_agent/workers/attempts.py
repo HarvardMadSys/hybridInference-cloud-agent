@@ -606,10 +606,6 @@ async def _run_attempt_reaper(
             without one, a message naming either waits for a settlement that
             can check it.
     """
-    try:
-        await _reconcile_settled_terminals(store)
-    except Exception:
-        logger.warning("Initial settled terminal reconciliation failed", exc_info=True)
     # Consecutive renewal refusals, per grant. Held by the loop rather than by
     # the module, so two reapers (a test's and a running app's) cannot count
     # each other's failures toward a give-up — and so a restart forgets, which
@@ -681,7 +677,6 @@ async def _run_attempt_reaper(
                 )
             )
             await _cleanup_reaped_shared_residencies(store.host_pool, actions, grants)
-            await _reconcile_settled_terminals(store)
             if actions:
                 logger.info(
                     "agent_attempts_reaped",
@@ -790,6 +785,25 @@ async def _recover_send_now_handoffs(store: _Reaping, *, interval_seconds: float
         await asyncio.sleep(interval_seconds)
 
 
+async def _replay_settled_terminals(store: _SettledTerminals, *, interval_seconds: float) -> None:
+    """Replay settled-terminal markers without delaying attempt or grant safety passes.
+
+    Every marker is a round trip to the broker of the host that ran its turn,
+    and a marker stays set until that broker confirms. A host that stopped
+    answering therefore costs each of its markers a full request timeout on
+    every pass, and the attempts the reaper supersedes when a host dies are
+    exactly the ones that leave markers behind. Inside the reaper's pass that
+    wait held up lease reaping, goal scheduling, queue settlement and grant
+    renewal for the whole pool.
+    """
+    while True:
+        try:
+            await _reconcile_settled_terminals(store)
+        except Exception:
+            logger.warning("Settled terminal reconciliation pass failed", exc_info=True)
+        await asyncio.sleep(interval_seconds)
+
+
 async def reap_expired_attempts(
     store: _Reaping,
     *,
@@ -799,16 +813,21 @@ async def reap_expired_attempts(
     github_app: GitHubAppSource | None = None,
     gateway: Any | None = None,
 ) -> None:
-    """Run attempt maintenance alongside independently bounded handoff recovery.
+    """Run attempt maintenance alongside independently bounded broker recovery.
 
-    The owned recovery task runs once at startup and then on the same cadence,
-    but a slow host broker cannot hold up attempt reaping, queue settlement, or
-    grant revocation and renewal. Cancelling this worker also cancels and joins
-    the recovery task, including any broker calls it currently owns.
+    Send-now handoff recovery and settled-terminal replay each run in an owned
+    task, once at startup and then on the same cadence, so a slow host broker
+    cannot hold up attempt reaping, queue settlement, or grant revocation and
+    renewal. Cancelling this worker also cancels and joins both tasks,
+    including any broker calls they currently own.
     """
     recovery = asyncio.create_task(
         _recover_send_now_handoffs(store, interval_seconds=interval_seconds),
         name="agent-send-now-recovery",
+    )
+    terminals = asyncio.create_task(
+        _replay_settled_terminals(store, interval_seconds=interval_seconds),
+        name="agent-settled-terminal-replay",
     )
     try:
         await _run_attempt_reaper(
@@ -821,4 +840,5 @@ async def reap_expired_attempts(
         )
     finally:
         recovery.cancel()
-        await asyncio.gather(recovery, return_exceptions=True)
+        terminals.cancel()
+        await asyncio.gather(recovery, terminals, return_exceptions=True)
