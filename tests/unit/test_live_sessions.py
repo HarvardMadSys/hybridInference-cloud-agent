@@ -577,6 +577,78 @@ def test_codex_mutable_tool_updates_emit_one_tool_use(tmp_path):
     assert kinds.count("tool_result") == 1
 
 
+def test_codex_subagent_thread_events_belong_to_the_call_that_spawned_it(tmp_path):
+    """The pinned 0.145.0 app-server sends a subagent thread's notifications too.
+
+    The order is the one it produced for one spawn: the spawn completes naming
+    the child thread before the child's own items arrive.
+    """
+    process = _LiveProcess()
+    context, _spawned = _protocol_context(process, tmp_path)
+    process.feed = _turn_lines(
+        {"id": "initialize-1", "result": {"userAgent": "codex"}},
+        {"id": "thread-2", "result": {"thread": {"id": "thread-a"}}},
+    )
+    session = CodexDriver(CodexRuntime()).launch_live(context)
+    session.ensure_started(model="gpt", reasoning_effort=None)
+    process.feed = _turn_lines({"id": "turn-3", "result": {"turn": {"id": "turn-a"}}})
+    turn = session.start_turn(TurnInput(prompt="delegate", model="gpt"))
+
+    def on(thread, method, item=None, **params):
+        return {
+            "method": method,
+            "params": {"threadId": thread, **({"item": item} if item else {}), **params},
+        }
+
+    spawn = {"type": "collabAgentToolCall", "id": "call-spawn", "tool": "spawnAgent"}
+    command = {"type": "commandExecution", "id": "child-cmd", "command": "ls"}
+    process.feed = _turn_lines(
+        on("thread-a", "item/started", {**spawn, "receiverThreadIds": []}),
+        on("child-t", "thread/status/changed", status={"type": "active"}),
+        on("thread-a", "item/completed", {**spawn, "receiverThreadIds": ["child-t"]}),
+        on("child-t", "item/agentMessage/delta", itemId="child-msg", delta="CHILD-"),
+        on(
+            "child-t",
+            "item/completed",
+            {"type": "agentMessage", "id": "child-msg", "text": "CHILD"},
+        ),
+        on("child-t", "item/completed", {"type": "reasoning", "id": "child-r", "summary": ["hm"]}),
+        on("child-t", "item/started", command),
+        on("child-t", "item/completed", {**command, "exitCode": 0, "aggregatedOutput": "a"}),
+        on("child-t", "error", error={"message": "the child's request failed"}),
+        on("child-t", "turn/completed", turn={"id": "turn-child", "status": "completed"}),
+        on("thread-a", "item/completed", {"type": "agentMessage", "id": "main", "text": "DONE"}),
+        on("thread-a", "turn/completed", turn={"id": "turn-a", "status": "completed"}),
+    )
+    events = [event for event in turn.iter_events() if not event.is_floor]
+    owner = {"agent_thread_id": "child-t", "parent_tool_use_id": "call-spawn"}
+
+    def owned(event):
+        return {key: event.payload[key] for key in owner if key in event.payload}
+
+    assert turn.wait().final_output == "DONE"
+    messages = [event for event in events if event.event_type == "message"]
+    assert [(event.payload["text"], owned(event)) for event in messages] == [
+        ("CHILD", owner),
+        ("DONE", {}),
+    ]
+    assert "preview_id" not in messages[0].payload
+    assert not any(event.payload.get("protocol") == "reply-preview" for event in events)
+    for kind in ("thinking", "tool_use", "tool_result"):
+        assert [owned(event) for event in events if event.event_type == kind] == [owner]
+    assert [event.event_type for event in events].count("error") == 0
+    results = [event for event in events if event.payload.get("phase") == "result"]
+    assert [owned(event) for event in results] == [owner, {}]
+    # Before the spawn named the thread, only the thread itself is known.
+    early = next(
+        event
+        for event in events
+        if event.event_type == "raw"
+        and event.payload["notification"]["method"] == "thread/status/changed"
+    )
+    assert owned(early) == {"agent_thread_id": "child-t"}
+
+
 def test_pi_rpc_two_turns_and_native_abort(tmp_path):
     process = _LiveProcess()
     context, spawned = _protocol_context(process, tmp_path)

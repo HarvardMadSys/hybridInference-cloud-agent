@@ -142,16 +142,17 @@ export function toDisplayEvent(event: AgentJobEventApi): AgentEvent | null {
   // their text from a payload: it is the only identity that survives folding,
   // and the Chat reading anchor is restored by row.
   const sourceEventId = event.id;
+  // The delegated agent that produced this event: Claude's delegating call,
+  // or the Codex thread a subagent runs in.
+  const owner = asText(payload, 'parent_tool_use_id', 'agent_thread_id');
 
   // Recorded reasoning has its own row, separate from the assistant's output.
   if (type === 'thinking')
-    return asText(payload, 'parent_tool_use_id')
-      ? null
-      : { kind: 'thinking', text: asText(payload, 'text'), sourceEventId };
+    return owner ? null : { kind: 'thinking', text: asText(payload, 'text'), sourceEventId };
   if (type === 'message') {
-    // A delegated agent's answer belongs to its Task/Agent result, and is
+    // A delegated agent's answer belongs to its delegation's result, and is
     // separately inspectable in Trajectory. It is not the main reply.
-    if (asText(payload, 'parent_tool_use_id')) return null;
+    if (owner) return null;
     const previewId = asText(payload, 'preview_id');
     return {
       kind: 'message',
@@ -181,9 +182,7 @@ export function toDisplayEvent(event: AgentJobEventApi): AgentEvent | null {
       tool: name,
       id: asText(payload, 'id') || undefined,
       ...(Object.hasOwn(payload, 'input') ? { input: payload.input } : {}),
-      ...(asText(payload, 'parent_tool_use_id')
-        ? { parentToolUseId: asText(payload, 'parent_tool_use_id') }
-        : {}),
+      ...(owner ? { parentToolUseId: owner } : {}),
       ...(payload.native_tool_status === 'completed' ? { resultState: 'received' as const } : {}),
       ...(payload.native_tool_status === 'cancelled' ? { resultState: 'cancelled' as const } : {}),
       ...(event.created_at ? { at: event.created_at } : {}),
@@ -209,9 +208,7 @@ export function toDisplayEvent(event: AgentJobEventApi): AgentEvent | null {
       ...(Object.hasOwn(payload, 'structured_output')
         ? { structuredOutput: payload.structured_output }
         : {}),
-      ...(asText(payload, 'parent_tool_use_id')
-        ? { parentToolUseId: asText(payload, 'parent_tool_use_id') }
-        : {}),
+      ...(owner ? { parentToolUseId: owner } : {}),
       ...(payload.native_tool_status === 'cancelled' ? { cancelled: true } : {}),
       isError: payload.is_error === true,
       ...(event.created_at ? { at: event.created_at } : {}),
@@ -238,6 +235,8 @@ export function toDisplayEvent(event: AgentJobEventApi): AgentEvent | null {
     return { kind: 'lifecycle', text: 'attempt_superseded', sourceEventId };
   }
   if (type === 'lifecycle') {
+    // A subagent finishing its own turn is not this conversation's milestone.
+    if (owner) return null;
     const phase = asText(payload, 'phase', 'text') || 'lifecycle';
     if (phase === 'api_retry') {
       return { kind: 'lifecycle', text: modelRetryMessage(payload), sourceEventId };

@@ -12,12 +12,21 @@ from cloud_agent.storage._sql.events import insert_event
 
 
 @pytest.mark.parametrize("truncated", [False, True])
-async def test_subagent_reply_is_recorded_without_an_assistant_transcript_mirror(truncated):
+@pytest.mark.parametrize(
+    "owner",
+    [
+        {"parent_tool_use_id": "delegate-call"},
+        # A Codex subagent thread, before and after its spawning call is known.
+        {"agent_thread_id": "child-thread"},
+        {"agent_thread_id": "child-thread", "parent_tool_use_id": "call-spawn"},
+    ],
+)
+async def test_subagent_reply_is_recorded_without_an_assistant_transcript_mirror(truncated, owner):
     """Fallback transcript reads and goal reports receive only the main answer."""
     conn = SimpleNamespace(fetchval=AsyncMock(return_value=42), execute=AsyncMock())
     payload = {
         "text": "The child agent's findings",
-        "parent_tool_use_id": "delegate-call",
+        **owner,
         "usage_id": "child-message",
         "truncated": truncated,
     }
@@ -34,11 +43,12 @@ async def test_subagent_reply_is_recorded_without_an_assistant_transcript_mirror
     conn.execute.assert_not_awaited()
 
 
+@pytest.mark.parametrize("field", ["parent_tool_use_id", "agent_thread_id"])
 @pytest.mark.parametrize("parent", [None, "", 1, {"id": "invalid"}])
-async def test_main_reply_keeps_its_transcript_mirror_without_a_recorded_parent(parent):
+async def test_main_reply_keeps_its_transcript_mirror_without_a_recorded_parent(parent, field):
     """Missing or malformed parent metadata must not hide a main answer."""
     conn = SimpleNamespace(fetchval=AsyncMock(return_value=42), execute=AsyncMock())
-    payload = {"text": "The main answer", "parent_tool_use_id": parent, "truncated": True}
+    payload = {"text": "The main answer", field: parent, "truncated": True}
     event_id = await insert_event(
         conn, job_id="job", attempt_id=1, event_type="message", payload=payload
     )

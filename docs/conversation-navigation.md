@@ -84,6 +84,9 @@ Trajectory marks explicitly recorded child activity with a **Subagent** label.
 Select a delegation step to browse its child steps in the inspector, or use
 **Delegated by** on a child step to return to its parent. These links require
 runtime ownership records; older sessions without them keep their flat step list.
+Claude Code records the delegating call; Codex records the subagent's own
+thread, which belongs to the spawn call that started it. A subagent's messages,
+reasoning and tool calls never read as the conversation's own.
 
 ## Reading position
 

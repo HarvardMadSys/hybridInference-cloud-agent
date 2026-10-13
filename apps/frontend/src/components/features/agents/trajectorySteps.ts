@@ -633,6 +633,8 @@ export function buildTrajectorySteps(
     if (input) pushUser(input.jobId, input.turnNo, input.text, input.at);
 
     if (event.event_type === 'input') {
+      // A subagent's prompt is its delegating call's input, not this turn's.
+      if (asText(payload.parent_tool_use_id) || asText(payload.agent_thread_id)) continue;
       const step = pushUser(
         jobIdOf(event),
         turnNoOf(event),
@@ -866,6 +868,9 @@ export function buildTrajectorySteps(
   // Link only explicit runtime delegation owners after all calls are indexed,
   // so backfilled parents and concurrent siblings keep their real identities.
   for (const step of steps) {
+    // Runtime records are grouped per attempt across every agent, so one
+    // subagent record cannot make the whole group its child.
+    if (step.diagnostic) continue;
     const source = step.sourceEvents.find((event) => {
       const parent = asRecord(event.payload).parent_tool_use_id;
       return typeof parent === 'string' && parent.length > 0;

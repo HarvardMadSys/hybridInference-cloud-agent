@@ -60,6 +60,7 @@ from cloud_agent_host.runtimes import (
 )
 from cloud_agent_host.sandbox import STATE_MOUNT_TARGET
 from cloud_agent_host.tool_windows import TOOL_MARK_FILE, hook_settings
+from cloud_agent_shared.event_payloads import subagent_owned
 from cloud_agent_shared.shared_protocol import (
     INPUT_PROCESS_GONE,
     INPUT_REFUSED,
@@ -548,10 +549,7 @@ class HarnessTurn(Generic[_RuntimeT]):
         event = self._runtime.parse_event(line)
         if event is None:
             return HarnessEvent(LINE, raw_line=line)
-        parent_tool_use_id = (event.payload or {}).get("parent_tool_use_id")
-        if event.event_type == MESSAGE and not (
-            isinstance(parent_tool_use_id, str) and parent_tool_use_id
-        ):
+        if event.event_type == MESSAGE and not subagent_owned(event.payload):
             text = str((event.payload or {}).get("text", ""))
             if text.strip():
                 self._final_messages.append(text)
@@ -894,10 +892,7 @@ class _JsonResidentTurn(HarnessTurn[_LiveRuntimeT], Generic[_LiveRuntimeT]):
             return [reply]
         events = self._session.events_for_protocol_line(line, self)
         for event in events:
-            parent_tool_use_id = event.payload.get("parent_tool_use_id")
-            if event.event_type == MESSAGE and not (
-                isinstance(parent_tool_use_id, str) and parent_tool_use_id
-            ):
+            if event.event_type == MESSAGE and not subagent_owned(event.payload):
                 text = str(event.payload.get("text", ""))
                 if text.strip():
                     self._final_messages.append(text)
@@ -1218,6 +1213,18 @@ class CodexAppServerSession(_JsonResidentSession[CodexRuntime]):
 
     _PROVIDER = "hybridinference"
 
+    def __init__(
+        self,
+        driver: HarnessDriver[CodexRuntime],
+        context: LaunchContext,
+        *,
+        resume_session_id: str | None = None,
+    ) -> None:
+        super().__init__(driver, context, resume_session_id=resume_session_id)
+        # Each subagent thread's spawning call, as the spawn items name it.
+        # Kept for the process, whose threads outlive any one turn.
+        self._agent_calls: dict[str, str] = {}
+
     def _initialize_protocol(self) -> None:
         initialize_id = self._request_id("initialize")
         self._write_json(
@@ -1349,12 +1356,31 @@ class CodexAppServerSession(_JsonResidentSession[CodexRuntime]):
         # identity. Trajectory can join deltas to this item without inventing a
         # provider request or attributing turn-wide usage to one reply.
         identity = {"native_item_id": str(item["id"])} if item.get("id") else {}
+        thread = params.get("thread")
+        thread_id = params.get("threadId") or (
+            thread.get("id") if isinstance(thread, dict) else None
+        )
+        if (
+            item_type == "collabAgentToolCall"
+            and item.get("tool") == "spawnAgent"
+            and item.get("id")
+        ):
+            for receiver in item.get("receiverThreadIds") or []:
+                if isinstance(receiver, str) and receiver:
+                    self._agent_calls.setdefault(receiver, str(item["id"]))
+        # The pinned app-server sends every thread's notifications to this
+        # client, its subagents' included. Those belong to the subagent.
+        owner: dict[str, str] = {}
+        if isinstance(thread_id, str) and thread_id and thread_id != self.runtime.session_id:
+            owner["agent_thread_id"] = thread_id
+            if thread_id in self._agent_calls:
+                owner["parent_tool_use_id"] = self._agent_calls[thread_id]
         raw_notification = HarnessEvent(
             RAW,
-            {"text": line[:4000], "protocol": "codex-app-server", "notification": value},
+            {"text": line[:4000], "protocol": "codex-app-server", "notification": value, **owner},
             raw_line=line,
         )
-        if method == "error" and params.get("willRetry") is not True:
+        if method == "error" and params.get("willRetry") is not True and not owner:
             # The error that fails the turn (0.145.0 sends it before the failed
             # turn/completed); a retried one says ``willRetry`` and stays raw.
             error = params.get("error")
@@ -1408,6 +1434,9 @@ class CodexAppServerSession(_JsonResidentSession[CodexRuntime]):
                 turn._forget_question(json.dumps(native_id))
             return raw_notification
         if method == "item/agentMessage/delta" and params.get("itemId"):
+            if owner:
+                # A subagent's text is not the conversation's answer.
+                return HarnessEvent(LINE, raw_line=line)
             # Batched rather than one stored notification per token.
             piece = turn.preview.add(str(params["itemId"]), str(params.get("delta") or ""))
             return (
@@ -1416,16 +1445,17 @@ class CodexAppServerSession(_JsonResidentSession[CodexRuntime]):
                 else HarnessEvent(LINE, raw_line=line)
             )
         if method == "item/completed" and item_type == "agentMessage":
-            preview = {"preview_id": str(item["id"])} if item.get("id") else {}
-            turn.preview.finish(preview.get("preview_id", ""))
+            preview = {"preview_id": str(item["id"])} if item.get("id") and not owner else {}
+            if preview:
+                turn.preview.finish(preview["preview_id"])
             return HarnessEvent(
                 MESSAGE,
-                {"text": str(item.get("text") or ""), **identity, **preview},
+                {"text": str(item.get("text") or ""), **identity, **preview, **owner},
                 raw_line=line,
             )
         if method == "item/completed" and item_type == "reasoning":
             text = "\n".join(str(value) for value in item.get("summary") or [])
-            return HarnessEvent(THINKING, {"text": text[:4000], **identity}, raw_line=line)
+            return HarnessEvent(THINKING, {"text": text[:4000], **identity, **owner}, raw_line=line)
         if method in {"item/started", "item/updated"} and item_type in {
             "commandExecution",
             "mcpToolCall",
@@ -1443,6 +1473,7 @@ class CodexAppServerSession(_JsonResidentSession[CodexRuntime]):
                     "name": item.get("tool") or item_type,
                     "id": item_id or None,
                     "input": item.get("command") or item.get("arguments"),
+                    **owner,
                 },
                 raw_line=line,
             )
@@ -1461,12 +1492,17 @@ class CodexAppServerSession(_JsonResidentSession[CodexRuntime]):
                         or ""
                     )[:4000],
                     "exit_code": exit_code,
+                    **owner,
                 },
                 raw_line=line,
             )
         if method in {"turn/diff/updated", "turn/diffUpdated"}:
-            return HarnessEvent(DIFF, {"text": str(params.get("diff") or "")[:4000]}, raw_line=line)
+            return HarnessEvent(
+                DIFF, {"text": str(params.get("diff") or "")[:4000], **owner}, raw_line=line
+            )
         if method == "turn/completed":
+            # A subagent's turn ending is not this turn's result; its usage
+            # still counts, so it stays a marked lifecycle record.
             completed = params.get("turn")
             return HarnessEvent(
                 LIFECYCLE,
@@ -1474,6 +1510,7 @@ class CodexAppServerSession(_JsonResidentSession[CodexRuntime]):
                     "phase": "result",
                     "status": completed.get("status") if isinstance(completed, dict) else None,
                     "usage": completed.get("usage") if isinstance(completed, dict) else None,
+                    **owner,
                 },
                 raw_line=line,
             )

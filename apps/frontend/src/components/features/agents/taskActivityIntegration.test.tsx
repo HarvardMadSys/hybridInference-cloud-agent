@@ -415,6 +415,67 @@ describe('recorded delegation hierarchy', () => {
     expect(onSelectStep).toHaveBeenCalledWith(child.key);
   });
 
+  it('links a Codex subagent thread’s records under the spawn that started it', () => {
+    const owned = { agent_thread_id: 'child-t', parent_tool_use_id: 'call-spawn' };
+    const spawn = {
+      type: 'collabAgentToolCall',
+      id: 'call-spawn',
+      tool: 'spawnAgent',
+      prompt: 'CHILD-TASK',
+      receiverThreadIds: ['child-t'],
+    };
+    function notification(id: number, thread: string, method: string, extra: object) {
+      return event(id, 'raw', {
+        protocol: 'codex-app-server',
+        notification: { method, params: { threadId: thread, ...extra } },
+        ...(thread === 'main' ? {} : { agent_thread_id: thread }),
+      });
+    }
+    const steps = buildTrajectorySteps(
+      [
+        notification(1, 'main', 'item/started', { item: { ...spawn, status: 'inProgress' } }),
+        notification(2, 'child-t', 'thread/status/changed', { status: { type: 'active' } }),
+        notification(3, 'main', 'item/completed', { item: { ...spawn, status: 'completed' } }),
+        {
+          ...notification(4, 'child-t', 'item/completed', {
+            item: {
+              type: 'userMessage',
+              id: 'child-in',
+              content: [{ type: 'text', text: 'CHILD-TASK' }],
+            },
+          }),
+          payload: {
+            ...notification(4, 'child-t', 'item/completed', {
+              item: {
+                type: 'userMessage',
+                id: 'child-in',
+                content: [{ type: 'text', text: 'CHILD-TASK' }],
+              },
+            }).payload,
+            ...owned,
+          },
+        },
+        event(5, 'message', { text: 'CHILD-ANSWER', native_item_id: 'child-msg', ...owned }),
+        event(6, 'message', { text: 'PARENT-DONE', native_item_id: 'main-msg' }),
+      ],
+      {
+        isAttemptActive: () => false,
+        inputs: [{ jobId: 'job', turnNo: 1, text: 'delegate', at: null }],
+      },
+    );
+    const parent = steps.find((step) => step.callId === 'call-spawn')!;
+    const child = steps.find((step) => step.detail === 'CHILD-ANSWER')!;
+    expect(child.delegationParentKey).toBe(parent.key);
+    expect(child.label).toBe('Subagent message');
+    expect(parent.delegatedKeys).toEqual([child.key]);
+    const user = steps.filter((step) => step.kind === 'user');
+    expect(user.map((step) => step.inputText)).toEqual(['delegate']);
+    expect(user[0].sourceEvents).toHaveLength(0);
+    expect(steps.filter((step) => step.delegationParentKey).map((step) => step.key)).toEqual([
+      child.key,
+    ]);
+  });
+
   it('does not link activity across attempts or jobs, or to ambiguous calls', () => {
     const parent = event(1, 'tool_use', {
       name: 'Task',

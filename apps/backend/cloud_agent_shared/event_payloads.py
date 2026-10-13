@@ -3,9 +3,16 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 MAX_EVENT_PAYLOAD_BYTES = 256 * 1024
+#: Name the delegated agent an event came from: Claude Code's delegating call,
+#: or the Codex thread a subagent runs in. The conversation's own events carry
+#: neither.
+SUBAGENT_OWNER_FIELDS = ("parent_tool_use_id", "agent_thread_id")
 TRUNCATION_NOTICE = "\n\n[Content truncated: event payload exceeded 256 KiB.]"
 _MARKERS = frozenset({"truncated", "original_payload_bytes", "truncation_notice"})
 _IDENTITY = frozenset(
@@ -23,6 +30,15 @@ _IDENTITY = frozenset(
     }
 )
 _TEXT_FIELDS = frozenset({"text", "content", "output", "detail", "input"})
+
+
+def subagent_owned(payload: Mapping[str, Any] | None) -> bool:
+    """Whether a delegated agent, not the conversation's own, produced this event."""
+    values = payload or {}
+    return any(
+        isinstance(values.get(field), str) and bool(values[field])
+        for field in SUBAGENT_OWNER_FIELDS
+    )
 
 
 def _json(value: Any) -> str:

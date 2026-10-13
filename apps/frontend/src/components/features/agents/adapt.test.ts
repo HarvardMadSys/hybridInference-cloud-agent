@@ -594,6 +594,29 @@ describe('recorded reasoning', () => {
     ]);
   });
 
+  it('keeps a Codex subagent thread’s records out of the conversation', () => {
+    const thread = { agent_thread_id: 'child-t' };
+    const owned = { ...thread, parent_tool_use_id: 'call-spawn' };
+    const rows = toDisplayJob(JOB, {
+      events: [
+        event(1, 'message', { text: 'CHILD', native_item_id: 'child-msg', ...owned }),
+        event(2, 'message', { text: 'Before the spawn named it', ...thread }),
+        event(3, 'thinking', { text: 'Child reasoning.', ...owned }),
+        event(4, 'tool_use', { name: 'commandExecution', id: 'child-cmd', input: 'ls', ...thread }),
+        event(5, 'tool_result', { tool_use_id: 'child-cmd', content: 'a', ...thread }),
+        event(6, 'tool_use', { name: 'commandExecution', id: 'linked', input: 'pwd', ...owned }),
+        event(7, 'lifecycle', { phase: 'result', status: 'completed', ...owned }),
+        event(8, 'message', { text: 'DONE' }),
+      ],
+    }).events;
+    expect(rows).toMatchObject([
+      { kind: 'tool_use', id: 'child-cmd', parentToolUseId: 'child-t', output: ['a'] },
+      { kind: 'tool_use', id: 'linked', parentToolUseId: 'call-spawn' },
+      { kind: 'message', text: 'DONE' },
+    ]);
+    expect(rows).toHaveLength(3);
+  });
+
   it('joins historical deltas only when the same attempt recorded their native owner', () => {
     const historical = (id: number, attemptId: number) =>
       event(
