@@ -554,9 +554,7 @@ def setup_actions(audit: AsyncMock) -> list[tuple[str, bool]]:
     ]
 
 
-async def test_a_failed_first_setup_saves_nothing_and_can_be_retried(
-    database_api, monkeypatch, tmp_path
-):
+async def test_a_failed_first_setup_can_be_retried(database_api, monkeypatch, tmp_path):
     """The operator's case: a slash on the bootstrap URL and a volume not yet writable."""
     client, _, result, audit, _, app = database_api
     monkeypatch.delenv("AGENT_PGADMIN_URL")
@@ -577,22 +575,23 @@ async def test_a_failed_first_setup_saves_nothing_and_can_be_retried(
 
     failed = await client.post(SETUP, headers=ADMIN, json=CREDENTIALS)
     assert failed.status_code == 503
-    repository.update_settings.assert_not_awaited()
-    assert setup_actions(audit) == [("agent.database.pgadmin.setup", False)]
+    # The connection is saved first, without the slash, and the failure is on record.
+    repository.update_settings.assert_awaited_once_with(
+        {"pgadmin_url": "http://pgadmin:5050", "pgadmin_public_url": PUBLIC}
+    )
+    assert setup_actions(audit) == [
+        ("agent.settings.update", True),
+        ("agent.database.pgadmin.setup", False),
+    ]
     status = await client.get("/admin/agent/database-tools", headers=ADMIN)
     assert status.json()["setup_required"] is True
 
     volume.mkdir()
     retried = await client.post(SETUP, headers=ADMIN, json=CREDENTIALS)
     assert retried.status_code == 202
-    repository.update_settings.assert_awaited_once_with(
-        {"pgadmin_url": "http://pgadmin:5050", "pgadmin_public_url": PUBLIC}
-    )
     assert (volume / "email").read_text() == CREDENTIALS["email"]
-    assert setup_actions(audit)[1:] == [
-        ("agent.settings.update", True),
-        ("agent.database.pgadmin.setup", True),
-    ]
+    assert repository.update_settings.await_count == 1
+    assert setup_actions(audit)[2:] == [("agent.database.pgadmin.setup", True)]
 
 
 async def test_a_saved_url_without_the_bootstrap_slash_is_the_same_service(

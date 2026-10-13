@@ -14,7 +14,7 @@ import os
 from dataclasses import dataclass
 from http.cookies import SimpleCookie
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 from urllib.parse import quote, urlsplit, urlunsplit
 
 import httpx
@@ -393,11 +393,9 @@ async def setup_pgadmin(
         raise HTTPException(status_code=403, detail="Open pgAdmin setup from the admin dashboard.")
     if await pgadmin_available(bootstrap):
         raise HTTPException(status_code=409, detail="pgAdmin has already been set up.")
-    # The connection is checked before the volume is written and saved only
-    # after it holds the account: a setup that fails leaves no saved setting
-    # that would refuse or misdescribe the retry.
-    storage: Storage | None = None
-    changes: dict[str, Any] = {}
+    # Saved before the volume is written, so a database failure leaves nothing
+    # half done. If the write then fails, the saved connection names the same
+    # service as the bootstrap address and the retry proceeds.
     if config is None:
         storage = require_store(store)
         changes = settings.encode_changes(
@@ -405,6 +403,16 @@ async def setup_pgadmin(
                 "pgadmin_url": str(bootstrap.upstream).rstrip("/"),
                 "pgadmin_public_url": bootstrap.public_url,
             }
+        )
+        revision, encoded, _ = await storage.settings.update_settings(changes)
+        settings.apply_settings(revision, encoded)
+        await log_admin_action(
+            storage,
+            get_client_ip(request),
+            "agent.settings.update",
+            details={"revision": revision, "changes": changes},
+            actor_id=admin,
+            success=True,
         )
     try:
         await run_in_threadpool(
@@ -423,17 +431,6 @@ async def setup_pgadmin(
         raise HTTPException(
             status_code=503, detail="pgAdmin setup storage is unavailable."
         ) from None
-    if storage is not None:
-        revision, encoded, _ = await storage.settings.update_settings(changes)
-        settings.apply_settings(revision, encoded)
-        await log_admin_action(
-            storage,
-            get_client_ip(request),
-            "agent.settings.update",
-            details={"revision": revision, "changes": changes},
-            actor_id=admin,
-            success=True,
-        )
     await log_admin_action(
         store, get_client_ip(request), "agent.database.pgadmin.setup", actor_id=admin, success=True
     )

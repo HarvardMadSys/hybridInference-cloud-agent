@@ -297,8 +297,8 @@ and its health state. Before setup, a waiting container is healthy and logs
 `Waiting for first-time setup in Admin -> Database.` After setup, unreadable
 bootstrap storage or unavailable PostgreSQL prevent startup. Setup records
 `agent.database.pgadmin.setup`. A setup that cannot write the bootstrap volume
-saves no setting and is recorded as failed; fix the volume and set up again
-from the same page. Opening pgAdmin records
+is recorded as failed; fix the volume and set up again from the same page.
+Opening pgAdmin records
 `agent.database.pgadmin.open` in the Agent audit log; pgAdmin manages SQL
 activity itself. Resetting **Private pgAdmin URL** in Admin Settings disables
 access after the listeners synchronize; removing the profile and stopping
