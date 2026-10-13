@@ -24,6 +24,7 @@ from pydantic import SecretStr
 
 from cloud_agent.application.host_commands import HostCommands
 from cloud_agent.broker_routing import broker_for_host
+from cloud_agent.compute_secrets import ComputeSecretError
 from cloud_agent.domain.compute import ComputeRefusal, discard_request_id, fingerprint
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.operational_health import deliver_event
@@ -53,6 +54,8 @@ _DRAIN_MARGIN = timedelta(minutes=30)
 # active native turn as a migration shortcut: that can lose its session.
 _LATE_DRAIN = timedelta(minutes=20)
 _VERIFY_TIMEOUT = timedelta(minutes=10)
+# SSH failures that say nothing about the node's state: a restart is retried.
+_TRANSIENT_SSH = {"result_unknown", "ssh_connection_failed"}
 _CLOCK_TOLERANCE = timedelta(seconds=2)
 _FINAL_REMINDER = timedelta(hours=1)
 _SYSTEMIC_REPEATS = 3
@@ -249,7 +252,12 @@ class ComputeRotation:
     # ---- the rotate operation -------------------------------------------
 
     async def rotate(self, operation: dict[str, Any], allocation: dict[str, Any]) -> None:
-        """Resume the move of this allocation's Host from its last checkpoint."""
+        """Resume the move of this allocation's Host from its last checkpoint.
+
+        A failure no step handles stops the move for an administrator here,
+        never in the generic operation handler: that one neither resumes
+        claims on an untouched Host nor alerts when the Host is already down.
+        """
         if allocation.get("autoscaling_owned"):
             await self._block(
                 operation,
@@ -258,6 +266,43 @@ class ComputeRotation:
                 "CloudLab autoscaling does not support node replacement.",
             )
             return
+        try:
+            await self._resume(operation, allocation)
+        except (ProviderError, ComputeRefusal, ComputeSecretError, ValueError) as exc:
+            if isinstance(exc, ValueError) and str(exc) == "operation_lease_lost":
+                raise
+            await self._stop_for_attention(operation, exc)
+
+    async def _stop_for_attention(self, operation: dict[str, Any], exc: Exception) -> None:
+        """Block after an unexpected failure, keeping a stopped Host's claims paused."""
+        result = operation.get("result") or {}
+        slot = result.get("slot")
+        # Our own codes only: any other error text may carry remote or stored data.
+        if isinstance(exc, ProviderError | ComputeRefusal):
+            code = exc.code
+        elif isinstance(exc, ComputeSecretError):
+            code = "credential_unavailable"
+        else:
+            code = "resource_state_conflict"
+        if result.get("verified") and slot:
+            # The Host already serves on its new node; only cleanup remains.
+            await self._defer_cleanup(operation, slot["host"], code)
+            return
+        if result.get("source_stopping") or result.get("source_stopped") or result.get("rebound"):
+            await self._block(
+                operation,
+                slot,
+                code,
+                "The move failed while the Host was stopped. Claims stay paused; "
+                "retry the move to resume it from its last step.",
+                critical=True,
+            )
+            return
+        await self._block(
+            operation, slot, code, "The move could not continue. Check it, then retry it."
+        )
+
+    async def _resume(self, operation: dict[str, Any], allocation: dict[str, Any]) -> None:
         result = operation.setdefault("result", {})
         if result.get("rollback"):
             await self._roll_back(operation, allocation)
@@ -1001,16 +1046,42 @@ class ComputeRotation:
                     )
                     token = SecretStr(issued)
                 rollback["restarted_at"] = _now().isoformat()
-                await self.reconciler._checkpoint(operation, "rolling_back", {"rollback": rollback})
-                deployed = await self.bootstrap.deploy(
-                    source,
-                    source_profile,
-                    source_intent,
-                    token,
-                    prerequisites=False,
-                    reenroll=token is not None,
+                rollback["restart_since"] = (
+                    rollback.get("restart_since") or rollback["restarted_at"]
                 )
-                if not deployed.ready:
+                await self.reconciler._checkpoint(operation, "rolling_back", {"rollback": rollback})
+                deployed = None
+                try:
+                    deployed = await self.bootstrap.deploy(
+                        source,
+                        source_profile,
+                        source_intent,
+                        token,
+                        prerequisites=False,
+                        reenroll=token is not None,
+                    )
+                except ProviderError as exc:
+                    # The Host is down on both nodes. A lost connection or an
+                    # SSH timeout is retried for a while (the restart is
+                    # idempotent); anything else, or too long, needs a person.
+                    since = _moment(rollback["restart_since"]) or _now()
+                    if (exc.retryable or exc.code in _TRANSIENT_SSH) and (
+                        _now() - since <= _VERIFY_TIMEOUT
+                    ):
+                        await self.reconciler._finish(
+                            operation,
+                            "waiting",
+                            "rolling_back",
+                            "Retrying the restart of the Host on its original node.",
+                            retry=30,
+                        )
+                        return
+                if deployed is None or not deployed.ready:
+                    # A retry by an administrator gets a fresh window.
+                    rollback["restart_since"] = None
+                    await self.reconciler._checkpoint(
+                        operation, "rolling_back", {"rollback": rollback}
+                    )
                     await self._block(
                         operation,
                         slot,
