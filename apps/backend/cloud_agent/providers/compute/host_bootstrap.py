@@ -8,6 +8,7 @@ the stable control-plane/gateway machines and supplied through the profile.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import io
 import json
@@ -631,6 +632,78 @@ def _remote_reasons(result: dict[str, Any], default: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(_remote_reason(reason, default) for reason in reasons))
 
 
+def _repack(source: bytes, assets: dict[str, bytes]) -> bytes:
+    """Rebuild a verified release bundle with this deployment's private files.
+
+    CPU-bound and synchronous: callers run it in a worker thread.
+    """
+    output = io.BytesIO()
+    try:
+        with (
+            tarfile.open(fileobj=io.BytesIO(source), mode="r:*") as archive,
+            tarfile.open(fileobj=output, mode="w:gz") as payload,
+        ):
+            found = set()
+            for member in archive.getmembers():
+                name = member.name.removeprefix("./")
+                if not name or name == ".":
+                    continue
+                if (
+                    name.startswith("/")
+                    or ".." in name.split("/")
+                    or not (member.isdir() or member.isfile())
+                ):
+                    raise ProviderError(
+                        "deployment_profile_invalid",
+                        "Deployment bundle contains an unsafe path",
+                    )
+                if name in {".env", ".compute-identity.json"} or name.startswith(
+                    (".compute-secrets/", ".git/")
+                ):
+                    raise ProviderError(
+                        "deployment_profile_invalid",
+                        "Deployment bundle contains private deployment state",
+                    )
+                if name == ".dockerignore":
+                    original = archive.extractfile(member)
+                    ignored = (
+                        original.read() if original else b""
+                    ) + b"\n.compute-secrets\n.compute-identity.json\n"
+                    member.size = len(ignored)
+                    member.name = name
+                    payload.addfile(member, io.BytesIO(ignored))
+                    found.add(name)
+                    continue
+                member.name = name
+                found.add(name)
+                payload.addfile(member, archive.extractfile(member) if member.isfile() else None)
+            required_files = {
+                "deploy/host/sandbox_host.sh",
+                "deploy/host/setup_kata_runtime.sh",
+                "deploy/host/docker-compose.sandbox.yml",
+                "pyproject.toml",
+            }
+            if not required_files <= found:
+                raise ProviderError(
+                    "deployment_profile_invalid",
+                    "Deployment bundle does not contain the host recipe",
+                )
+            if ".dockerignore" not in found:
+                assets = {
+                    **assets,
+                    ".dockerignore": b".env\n.compute-secrets\n.compute-identity.json\n",
+                }
+            for name, data in assets.items():
+                member = tarfile.TarInfo(name)
+                member.size, member.mode = len(data), 0o600
+                payload.addfile(member, io.BytesIO(data))
+    except (tarfile.TarError, OSError):
+        raise ProviderError(
+            "deployment_profile_invalid", "Trusted deployment bundle could not be read"
+        ) from None
+    return output.getvalue()
+
+
 class SshHostBootstrap:
     """Install and verify the existing host deployment recipe through SSH."""
 
@@ -741,16 +814,19 @@ class SshHostBootstrap:
         intent: BootstrapIntent,
         enrollment_token: SecretStr | None,
     ) -> bytes:
+        # The compute worker shares the API's event loop. Reading, hashing and
+        # repacking a bundle of up to 64 MiB takes seconds, so it runs in a
+        # thread: requests and Host heartbeats are served meanwhile.
         try:
             if profile.source_bundle.startswith("stored-profile:"):
                 source = await self._resolver.bundle(profile.source_bundle)
             else:
-                source = Path(profile.source_bundle).read_bytes()
+                source = await asyncio.to_thread(Path(profile.source_bundle).read_bytes)
         except (OSError, ComputeSecretError):
             raise ProviderError(
                 "deployment_profile_invalid", "Trusted deployment bundle is unavailable"
             ) from None
-        if hashlib.sha256(source).hexdigest() != profile.source_sha256:
+        if (await asyncio.to_thread(hashlib.sha256, source)).hexdigest() != profile.source_sha256:
             raise ProviderError(
                 "deployment_profile_invalid",
                 "Trusted deployment bundle digest differs from its profile",
@@ -838,70 +914,7 @@ class SshHostBootstrap:
                         "deployment_profile_invalid",
                         "Relay credentials must refer to this profile's dedicated deployed files",
                     )
-        output = io.BytesIO()
-        try:
-            with (
-                tarfile.open(fileobj=io.BytesIO(source), mode="r:*") as archive,
-                tarfile.open(fileobj=output, mode="w:gz") as payload,
-            ):
-                found = set()
-                for member in archive.getmembers():
-                    name = member.name.removeprefix("./")
-                    if not name or name == ".":
-                        continue
-                    if (
-                        name.startswith("/")
-                        or ".." in name.split("/")
-                        or not (member.isdir() or member.isfile())
-                    ):
-                        raise ProviderError(
-                            "deployment_profile_invalid",
-                            "Deployment bundle contains an unsafe path",
-                        )
-                    if name in {".env", ".compute-identity.json"} or name.startswith(
-                        (".compute-secrets/", ".git/")
-                    ):
-                        raise ProviderError(
-                            "deployment_profile_invalid",
-                            "Deployment bundle contains private deployment state",
-                        )
-                    if name == ".dockerignore":
-                        original = archive.extractfile(member)
-                        ignored = (
-                            original.read() if original else b""
-                        ) + b"\n.compute-secrets\n.compute-identity.json\n"
-                        member.size = len(ignored)
-                        member.name = name
-                        payload.addfile(member, io.BytesIO(ignored))
-                        found.add(name)
-                        continue
-                    member.name = name
-                    found.add(name)
-                    payload.addfile(
-                        member, archive.extractfile(member) if member.isfile() else None
-                    )
-                required_files = {
-                    "deploy/host/sandbox_host.sh",
-                    "deploy/host/setup_kata_runtime.sh",
-                    "deploy/host/docker-compose.sandbox.yml",
-                    "pyproject.toml",
-                }
-                if not required_files <= found:
-                    raise ProviderError(
-                        "deployment_profile_invalid",
-                        "Deployment bundle does not contain the host recipe",
-                    )
-                if ".dockerignore" not in found:
-                    assets[".dockerignore"] = b".env\n.compute-secrets\n.compute-identity.json\n"
-                for name, data in assets.items():
-                    member = tarfile.TarInfo(name)
-                    member.size, member.mode = len(data), 0o600
-                    payload.addfile(member, io.BytesIO(data))
-        except (tarfile.TarError, OSError):
-            raise ProviderError(
-                "deployment_profile_invalid", "Trusted deployment bundle could not be read"
-            ) from None
-        return output.getvalue()
+        return await asyncio.to_thread(_repack, source, assets)
 
     async def deploy(
         self,

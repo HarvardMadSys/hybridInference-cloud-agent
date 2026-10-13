@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import io
 import json
 import shlex
 import tarfile
+import threading
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -308,6 +310,35 @@ async def test_bundle_digest_and_archive_paths_are_verified_before_upload(tmp_pa
     with pytest.raises(ProviderError, match="unsafe path"):
         await bootstrap.deploy(NODE, profile, INTENT, SecretStr("token"))
     assert transport.run.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_the_bundle_is_repacked_without_holding_the_event_loop(tmp_path, monkeypatch):
+    """API requests and Host heartbeats share this loop; packing a release must not stall them."""
+    bootstrap, profile, _, _ = setup(tmp_path)
+    packing, served = threading.Event(), threading.Event()
+    answered: list[bool] = []
+    original = tarfile.TarFile.addfile
+
+    def addfile(self, *args, **kwargs):
+        if not packing.is_set():
+            packing.set()
+            # Only the event loop can answer; packing on it would wait in vain.
+            answered.append(served.wait(timeout=5))
+        return original(self, *args, **kwargs)
+
+    async def serve() -> None:
+        while not packing.is_set():
+            await asyncio.sleep(0.001)
+        served.set()
+
+    monkeypatch.setattr(tarfile.TarFile, "addfile", addfile)
+    server = asyncio.create_task(serve())
+    payload = await bootstrap._archive(profile, INTENT, SecretStr("token"))
+    await asyncio.wait_for(server, timeout=5)
+    assert answered == [True]
+    with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as archive:
+        assert "deploy/host/sandbox_host.sh" in archive.getnames()
 
 
 @pytest.mark.asyncio
