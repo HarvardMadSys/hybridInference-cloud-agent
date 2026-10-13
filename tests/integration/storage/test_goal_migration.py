@@ -107,6 +107,7 @@ async def _seed_0019_goal(
     goal_revision: int = 7,
     blocked_code: str | None = None,
     blocked_message: str | None = None,
+    pause_reason: str | None = None,
     with_succeeded_turn: bool = False,
 ) -> tuple[str, str | None]:
     """One conversation as ``0019`` held it, with the goal the caller describes."""
@@ -119,15 +120,16 @@ async def _seed_0019_goal(
             INSERT INTO agent_threads
                 (id, user_id, repo, title, title_source, setup_script, execution_profile,
                  goal_objective, goal_state, goal_max_rounds, goal_revision,
-                 goal_blocked_code, goal_blocked_message)
+                 goal_blocked_code, goal_blocked_message, goal_pause_reason)
             VALUES ($1, 'user-1', 'owner/name', 'ship it', 'fallback', NULL, 'trusted-v1',
-                    'ship it', $2, 5, $3, $4, $5)
+                    'ship it', $2, 5, $3, $4, $5, $6)
             """,
             thread_id,
             goal_state,
             goal_revision,
             blocked_code,
             blocked_message,
+            pause_reason,
         )
         if job_id is not None:
             await conn.execute(
@@ -293,6 +295,66 @@ async def test_a_completed_goal_with_no_turn_to_name_is_judged_again(at_0019):
     assert row["goal_state"] == "active"
     assert (row["goal_completion_basis"], row["goal_completed_by_job_id"]) == (None, None)
     assert row["goal_id"] is not None
+
+
+async def _goal_pause(config, thread_id: str) -> tuple[str, str | None, str | None]:
+    """The state, reason and detail one conversation's goal reads back with."""
+    conn = await asyncpg.connect(**config)
+    try:
+        row = await conn.fetchrow(
+            "SELECT goal_state, goal_pause_reason, goal_pause_detail "
+            "FROM agent_threads WHERE id = $1",
+            thread_id,
+        )
+    finally:
+        await conn.close()
+    return row["goal_state"], row["goal_pause_reason"], row["goal_pause_detail"]
+
+
+@pytest.mark.parametrize(
+    ("legacy_reason", "reason", "detail"),
+    [
+        ("user", "user", "paused by the user"),
+        ("fork", "fork", "copied from another conversation; resume it to start working"),
+        ("cancelled", "cancelled", "the automatic round was cancelled"),
+        ("archived", "archived", "the conversation was archived"),
+        ("turn-failed", "execution_failed", "the automatic round that was running did not finish"),
+        ("context-lost", "context_lost", "the conversation's session is gone"),
+        ("stalled", "scheduling_failed", "the platform could not schedule the next round"),
+    ],
+)
+async def test_a_goal_paused_for_a_reason_keeps_it_and_says_it(
+    at_0019, legacy_reason, reason, detail
+):
+    """Every ``0019`` pause reason upgrades, in this vocabulary and with words.
+
+    ``0019`` kept no detail beside a reason, and spelled three reasons
+    differently. Either used to make the paused-shape or the reason
+    constraint refuse the upgrade of the whole database.
+    """
+    thread_id, _ = await _seed_0019_goal(at_0019, goal_state="paused", pause_reason=legacy_reason)
+
+    await _upgrade_to_head(at_0019, thread_id=thread_id)
+
+    assert await _goal_pause(at_0019, thread_id) == ("paused", reason, detail)
+
+
+@pytest.mark.parametrize(
+    ("blocked_code", "reason", "detail"),
+    [
+        ("round-limit", "round_limit", "the goal reached the round limit its owner set"),
+        ("model-reported", "needs_input", "the agent stopped and asked for input"),
+    ],
+)
+async def test_a_blocked_goal_with_no_message_still_says_why_it_stopped(
+    at_0019, blocked_code, reason, detail
+):
+    """A block that kept no message is paused with the sentence for its reason."""
+    thread_id, _ = await _seed_0019_goal(at_0019, goal_state="blocked", blocked_code=blocked_code)
+
+    await _upgrade_to_head(at_0019, thread_id=thread_id)
+
+    assert await _goal_pause(at_0019, thread_id) == ("paused", reason, detail)
 
 
 async def test_the_upgraded_schema_has_the_wakeup_queue_and_its_partial_indexes(store):
@@ -686,3 +748,40 @@ async def test_a_large_bound_never_blocks_a_rollback_however_far_it_goes(at_0020
 
     assert row["goal_objective"] == "ship it"
     assert row["goal_max_rounds"] == 100
+
+
+async def test_0020_applies_again_after_a_rollback_to_0019(at_0020):
+    """A rollback across ``0020`` can be rolled forward again, even when empty.
+
+    ``0020``'s ``downgrade`` does not put back ``0019``'s inline round-kind
+    check, so an upgrade that insisted on dropping it by name refused every
+    database the same revision had rolled back.
+    """
+    downgrade_to(at_0020, "0019_conversation_goal")
+
+    apply_migrations(at_0020, "0020_goal_controller")
+
+    conn = await asyncpg.connect(**at_0020)
+    try:
+        names = {
+            row["conname"]
+            for row in await conn.fetch(
+                "SELECT conname FROM pg_constraint WHERE conrelid = 'agent_jobs'::regclass"
+            )
+        }
+    finally:
+        await conn.close()
+    assert "ck_agent_jobs_goal_round_kind" in names
+    assert "agent_jobs_goal_round_kind_check" not in names
+
+
+async def test_a_paused_goal_survives_a_rollback_to_0019_and_back(at_0020):
+    """The detail ``0019`` cannot hold is written again from the reason it kept."""
+    thread_id = await _seed_0020_goal(
+        at_0020, state="paused", pause_reason="user", pause_detail="paused by the user"
+    )
+    downgrade_to(at_0020, "0019_conversation_goal")
+
+    await _upgrade_to_head(at_0020, thread_id=thread_id)
+
+    assert await _goal_pause(at_0020, thread_id) == ("paused", "user", "paused by the user")
