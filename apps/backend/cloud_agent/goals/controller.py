@@ -55,6 +55,10 @@ logger = logging.getLogger(__name__)
 #: is what makes it correct when a round number is reused after a cancellation.
 CLIENT_REQUEST_PREFIX = "goal"
 
+#: Why a completion lost to an owner's message accepted while it was decided.
+#: The one stale reason that leaves the goal owing a decision afterwards.
+_OWNER_HAS_SPOKEN = "the owner has spoken since"
+
 
 class _GoalStore(Protocol):
     """The parts of the store this module uses, named so that it can be faked."""
@@ -640,6 +644,11 @@ async def _stop(
     writes while the decision is being made has *moved on* from the round it
     would finish, and finishing the goal over their message is the one outcome
     the whole "user input wins" rule exists to prevent.
+
+    Such a completion is not simply dropped, though. The message armed no
+    wakeup of its own, because this one was still pending, so this wakeup is
+    the goal's only obligation: it waits behind the message's turn, or is
+    judged again at once when that turn has already ended.
     """
     detail = (action.message or "")[:MAX_REASON_CHARS] or None
     decision = store.goal_wakeups.transaction()
@@ -659,6 +668,20 @@ async def _stop(
             stale = await _completion_superseded(
                 store, conn=conn, thread_id=thread_id, context=context
             )
+            if stale == _OWNER_HAS_SPOKEN:
+                # The message was accepted while this decision was being made,
+                # and ``arm_goal_wakeup`` armed nothing for it while this one
+                # was pending. Processing this wakeup would leave an active goal
+                # that nothing ever looks at again, until the stall sweep
+                # pauses it as ``scheduling_failed``.
+                await store.goal_wakeups.release_wakeup(
+                    wakeup_id=str(wakeup["id"]),
+                    lease_owner=str(wakeup.get("lease_owner") or ""),
+                    waiting_job_id=await store.goals.live_turn_id(thread_id=thread_id, conn=conn),
+                    detail=stale,
+                    conn=conn,
+                )
+                return "wait"
         if stale is not None:
             # The owner got there first. Their write stands, and this decision
             # is stale — recorded as such rather than retried.
@@ -749,7 +772,7 @@ async def _completion_superseded(
     if str(turn.get("goal_report_outcome") or "") != "complete":
         return "the round no longer reports completion"
     if _has_newer_input(turn):
-        return "the owner has spoken since"
+        return _OWNER_HAS_SPOKEN
     if await store.goals.has_pending_turn(thread_id=thread_id, conn=conn):
         return "a turn is waiting"
     return None

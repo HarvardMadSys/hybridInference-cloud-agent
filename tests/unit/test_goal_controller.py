@@ -1187,6 +1187,57 @@ async def test_a_completion_is_refused_when_a_person_spoke_while_it_was_decided(
     assert store.goal["completion_basis"] is None
 
 
+async def test_a_completion_overtaken_by_a_message_waits_behind_its_turn(monkeypatch):
+    """The overtaken completion's wakeup is the goal's only obligation; it is kept.
+
+    A message accepted while the decision runs arms no wakeup of its own,
+    because this one is still pending. Marking this one processed left an
+    active goal that nothing looked at again after the message's turn.
+    """
+    store = FakeStore(
+        goal=goal_row(rounds_used=1),
+        turns=[
+            turn(id="job-1", input_seq_at_create=1),
+            turn(
+                id="job-2",
+                turn_source="goal",
+                goal_id=GOAL_ID,
+                round_kind="work",
+                report_parse="valid",
+                report_outcome="complete",
+                report_reason="done",
+                input_seq_at_create=1,
+                turn_no=2,
+            ),
+        ],
+        input_seq=1,
+    )
+    wakeup = store.goal_wakeups.arm(trigger="finish", trigger_ref="job:job-2")
+    messages: list[dict[str, Any]] = []
+
+    async def a_message_lands_once(*args: Any, **kwargs: Any) -> None:
+        # Between the decision's read and the transaction that applies it.
+        if not messages:
+            store.input_seq += 1
+            messages.append(turn(id="job-3", state="queued", input_seq_at_create=2, turn_no=3))
+            store.turns.append(messages[0])
+
+    monkeypatch.setattr("cloud_agent.goals.controller.require_entitled_repo", a_message_lands_once)
+
+    assert await _consume(store) == "wait"
+
+    assert (store.goal["state"], store.goal["completion_basis"]) == ("active", None)
+    parked = store.wakeup(wakeup["id"])
+    assert (parked["state"], parked["waiting_job_id"]) == ("pending", "job-3")
+    assert parked["attempts"] == 0
+
+    # The person's turn ends, its finish releases the wait, and the goal goes on.
+    messages[0]["state"] = "succeeded"
+    parked["waiting_job_id"] = None
+    assert await _consume(store) == "queue_work_round"
+    assert len(store.queued_rounds()) == 1
+
+
 async def test_an_owner_wakeup_on_an_archived_conversation_pauses_and_says_so():
     """Resume is authorized by the owner, not by "the conversation is fine".
 
