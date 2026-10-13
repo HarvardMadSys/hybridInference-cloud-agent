@@ -23291,7 +23291,7 @@
     },
     "/v1/agent/changes": {
       "get": {
-        "description": "Stream the caller's changed jobs and conversations as SSE.\n\nEvents: ``hello`` and ``resync`` carry ``{\"live\": bool}``; ``job`` and\n``thread`` carry the row's current values and its ``revision``, or\n``{\"id\": ..., \"deleted\": true}`` once it is gone; ``usage`` carries the\njob's ``{\"id\": ..., \"usage\": ...}`` as ``GET /v1/agent/jobs/{id}/usage``\nreturns it; ``mcp`` (a job) and ``queue``, ``publication`` (a\nconversation) carry only ``{\"id\": ...}``: read that again. 404 where this\nprocess pushes nothing, which a tab treats as \"keep reading on a clock\".",
+        "description": "Stream the caller's changed jobs and conversations as SSE.\n\nEvents: ``hello`` and ``resync`` carry ``{\"live\": bool}``; ``job`` and\n``thread`` carry the row's current values and its ``revision``, or\n``{\"id\": ..., \"deleted\": true}`` once it is gone; ``usage`` carries the\njob's ``{\"id\": ..., \"usage\": ...}`` as ``GET /v1/agent/jobs/{id}/usage``\nreturns it; ``mcp`` (a job) and ``queue``, ``publication`` (a\nconversation) carry only ``{\"id\": ...}``: read that again. 404 where this\nprocess pushes nothing, which a tab treats as \"keep reading on a clock\".\nThe stream ends after at most ``OWNER_STREAM_MAX_S`` (15 minutes); the tab\nreconnects, is admitted again, and its ``hello`` has it read its lists.",
         "operationId": "stream_owner_changes_v1_agent_changes_get",
         "parameters": [
           {
@@ -25132,7 +25132,7 @@
     },
     "/v1/agent/jobs/{job_id}/stream": {
       "get": {
-        "description": "Stream a job's events as SSE, resumable via ``Last-Event-ID``.\n\nEach SSE frame carries the event's global id, so a client that reconnects\nwith ``Last-Event-ID`` resumes exactly where it left off — which is what\nmakes the finite stream cap (applied by the timeout middleware to\n``text/event-stream``) safe for jobs that outlive one connection.",
+        "description": "Stream a job's events as SSE, resumable via ``Last-Event-ID``.\n\nEach SSE frame carries the event's global id, so a client that reconnects\nwith ``Last-Event-ID`` (or ``after``) resumes exactly where it left off —\nwhich is what makes the finite stream cap safe for jobs that outlive one\nconnection. A stream ends after at most ``OWNER_STREAM_MAX_S`` (15\nminutes), without ``job_finished`` if the job is still going; the client\nreconnects from its cursor, and that request is admitted again.",
         "operationId": "stream_agent_job_events_v1_agent_jobs__job_id__stream_get",
         "parameters": [
           {
@@ -25617,7 +25617,7 @@
     },
     "/v1/agent/jobs/{job_id}/terminals/{terminal_id}/stream": {
       "get": {
-        "description": "Relay a resumable private PTY stream without exposing its broker token.",
+        "description": "Relay a resumable private PTY stream without exposing its broker token.\n\nThe relay ends after about ``OWNER_STREAM_MAX_S`` (15 minutes), between two\nframes; the client reconnects with ``after`` set to the last sequence it\napplied, and that request is admitted again.",
         "operationId": "stream_agent_job_terminal_v1_agent_jobs__job_id__terminals__terminal_id__stream_get",
         "parameters": [
           {
