@@ -153,7 +153,7 @@ class PostgresSessionForkRepository:
                 return {"error": "native_fork_unavailable"}
             if row["active_attempt_id"] is not None:
                 return {"error": "source_busy"}
-            if row["native_state"] != "ready" or not row["native_session_id"]:
+            if row["native_state"] != "ready" or not str(row["native_session_id"] or "").strip():
                 return {"error": "native_context_unavailable"}
             latest_settled = await conn.fetchrow(
                 """
@@ -186,6 +186,36 @@ class PostgresSessionForkRepository:
             if row["runtime_id"] != source["runtime"]:
                 return {"error": "runtime_mismatch"}
 
+            # A deleted chat keeps its membership as an audit row, so without
+            # this its slot stays occupied forever. The slot is a fixed member
+            # UID: it may serve a new child only once the old member can no
+            # longer act. Stopped/lost is the durable observation that its
+            # process is gone, and nothing restarts a deleted chat; a released
+            # residency means no grant still speaks for it. SKIP LOCKED keeps
+            # this transaction, which already holds the sandbox row, from
+            # waiting on a membership and inverting the membership -> sandbox
+            # order every other writer takes. A member skipped now is
+            # reclaimed by a later Fork.
+            await conn.execute(
+                """
+                UPDATE agent_thread_sandbox_memberships
+                SET resident_slot_id = NULL, updated_at = NOW()
+                WHERE thread_id IN (
+                    SELECT m.thread_id
+                    FROM agent_thread_sandbox_memberships m
+                    JOIN agent_threads t ON t.id = m.thread_id
+                    WHERE m.sandbox_id = $1
+                      AND m.resident_slot_id IS NOT NULL
+                      AND t.deleted_at IS NOT NULL
+                      AND m.resident_state IN ('stopped', 'lost')
+                      AND m.residency_status = 'none'
+                      AND m.active_attempt_id IS NULL
+                      AND m.fork_operation_id IS NULL
+                    FOR UPDATE OF m SKIP LOCKED
+                )
+                """,
+                row["sandbox_id"],
+            )
             occupied_rows = await conn.fetch(
                 """
                 SELECT resident_slot_id AS slot
@@ -609,7 +639,7 @@ class PostgresSessionForkRepository:
             }
             if any(receipt.get(key) != value for key, value in expected.items()):
                 return None
-            target_native_id = str(receipt.get("target_native_session_id") or "")
+            target_native_id = str(receipt.get("target_native_session_id") or "").strip()
             source_process = int(receipt.get("source_process_generation") or 0)
             target_process = int(receipt.get("target_process_generation") or 0)
             if (
@@ -949,7 +979,12 @@ class PostgresSessionForkRepository:
                             WHEN context_status = 'lost' THEN 'lost' ELSE 'ready' END,
                         fork_operation_id = NULL,
                         resident_state = CASE
-                            WHEN context_status = 'lost' THEN 'lost' ELSE 'restarting' END,
+                            WHEN context_status = 'lost' THEN 'lost'
+                            WHEN native_session_id IS NULL
+                                 OR native_session_id !~ '[^[:space:]]'
+                                THEN 'stopped'
+                            ELSE 'restarting'
+                        END,
                         last_error = $3, updated_at = NOW()
                     WHERE thread_id = $1 AND fork_operation_id = $2
                     """,

@@ -76,6 +76,7 @@ from cloud_agent_host.sandbox_archive import (
 )
 from cloud_agent_host.sandbox_archive_runtime import SandboxArchiveController
 from cloud_agent_host.sandbox_archive_s3 import SandboxArchiveConfigError
+from cloud_agent_host.sandbox_archives import safe_archive_error_type
 from cloud_agent_host.sandbox_resources import SandboxResourceCollector
 from cloud_agent_host.session_lifecycle import (
     DEFAULT_CHAT_IDLE_TIMEOUT_S,
@@ -88,6 +89,7 @@ from cloud_agent_host.shared_session_supervisor import (
     SharedSessionDescriptor,
     SharedTurnBoundaryError,
     SharedTurnTelemetry,
+    archive_failure_http_detail,
 )
 from cloud_agent_host.source_archive import DEFAULT_MAX_BASE_BUNDLE_BYTES
 from cloud_agent_host.tool_windows import ToolWindowTracker, attribute, tool_time_ms
@@ -132,6 +134,54 @@ DEFAULT_TERMINAL_IDLE_TTL_S = float(_DEFAULT_SETTINGS["terminal_idle_ttl_s"])
 DEFAULT_TERMINAL_HARD_TTL_S = float(_DEFAULT_SETTINGS["terminal_hard_ttl_s"])
 TERMINAL_STREAM_WAIT_S = 15.0
 _COMMIT_SHA = re.compile(r"^[0-9a-fA-F]{7,64}$")
+#: The Git view, and the shared-workspace snapshot that is the same capture,
+#: runs as the group UID against a ``.git/config`` any member can write. Git
+#: reads that file as instructions to run commands, and the view needs none of
+#: them: the fsmonitor daemon, hooks (``read-tree`` and ``add`` write an
+#: index, which fires ``post-index-change``), the signature check ``git log``
+#: makes under ``log.showSignature``, and the transport a partial clone's lazy
+#: fetch opens for a missing object (``remote.*.uploadpack``,
+#: ``core.sshCommand``, a remote helper). ``GIT_CONFIG_COUNT`` is command-line
+#: configuration, which outranks the repository's own and reaches every Git
+#: process the script starts, submodule ones included. An empty
+#: ``GIT_ALLOW_PROTOCOL`` allows no transport, whatever ``protocol.*.allow``
+#: says.
+_GIT_VIEW_ENV = {
+    "GIT_CONFIG_COUNT": "3",
+    "GIT_CONFIG_KEY_0": "core.fsmonitor",
+    "GIT_CONFIG_VALUE_0": "",
+    "GIT_CONFIG_KEY_1": "core.hooksPath",
+    "GIT_CONFIG_VALUE_1": "/dev/null",
+    "GIT_CONFIG_KEY_2": "log.showSignature",
+    "GIT_CONFIG_VALUE_2": "false",
+    "GIT_ALLOW_PROTOCOL": "",
+}
+
+#: Filter drivers are named by the repository, so they cannot be listed ahead
+#: of time: this reads the names configured when the script starts and empties
+#: each one, after which Git compares the file as it is. git-lfs's own driver,
+#: exactly as ``git lfs install`` writes it, is kept, so a smudged LFS file
+#: still compares equal to its committed pointer; the LFS extensions that
+#: driver would run are emptied with the rest. ``required`` is emptied for
+#: every driver, so an emptied one fails nothing. A subsection name cannot hold
+#: a newline, so one name per line is exact. Writers are stopped for a
+#: snapshot; for the live view this reads what a member left behind.
+_NEUTRALIZE_GIT_FILTERS = """set -f; IFS='
+'; n="${GIT_CONFIG_COUNT:-0}"
+for key in $(git config --name-only --get-regexp '^(filter|lfs[.]extension)[.]'); do
+  value=$(git config --get "$key")
+  case "$key=$value" in
+    'filter.lfs.clean=git-lfs clean -- %f') continue ;;
+    'filter.lfs.smudge=git-lfs smudge -- %f'|'filter.lfs.smudge=git-lfs smudge --skip -- %f')
+      continue ;;
+    'filter.lfs.process=git-lfs filter-process'|'filter.lfs.process=git-lfs filter-process --skip')
+      continue ;;
+  esac
+  export "GIT_CONFIG_KEY_$n=$key" "GIT_CONFIG_VALUE_$n="
+  n=$((n + 1))
+done
+export GIT_CONFIG_COUNT="$n"; unset IFS; set +f
+"""
 
 
 class _EndpointLifecycleCalls:
@@ -313,6 +363,9 @@ class SandboxArchiveDiscardRequest(BaseModel):
 
     request_id: str = Field(..., min_length=1, max_length=128)
     generation: int = Field(..., ge=1)
+    # Optional during a rolling deployment. New control planes include this
+    # durable identity so the broker can safely prove an already-absent target.
+    sandbox_id: str | None = Field(None, min_length=1, max_length=256)
     expected_container_id: str = Field(..., min_length=1, max_length=256)
 
 
@@ -1475,15 +1528,27 @@ def _run_git(
     status_tag = f"__HYI_{marker}_STATUS__"
     diff_tag = f"__HYI_{marker}_DIFF__"
     commits_tag = f"__HYI_{marker}_COMMITS__"
-    script = (
-        "git --no-pager status --porcelain=v1 --branch; status_status=$?; "
+    # Whether a submodule is dirty is answered by running Git inside it, under
+    # that submodule's own configuration, which none of the overrides here
+    # can name. So only its checked-out commit is read: ``status`` and
+    # ``diff`` are told so, and ``add -A`` (which takes no such option) is
+    # kept off every submodule by pathspec; its entry already holds the
+    # target's commit. The patch loses only the ``-dirty`` mark, which
+    # ``git apply`` cannot use. ``--submodule=short`` keeps that one form
+    # whatever ``diff.submodule`` says, and starts no Git in a submodule.
+    script = _NEUTRALIZE_GIT_FILTERS + (
+        "git --no-pager status --porcelain=v1 --branch --ignore-submodules=dirty; "
+        "status_status=$?; "
         f"printf '\n{diff_tag}\n'; "
         'index_path="${TMPDIR:-/tmp}/hyi-browser-index.$$"; '
         'rm -f "$index_path"; trap \'rm -f "$index_path"\' EXIT; '
         f'GIT_INDEX_FILE="$index_path" git read-tree {target} && '
-        'GIT_INDEX_FILE="$index_path" git add -A -N >/dev/null 2>&1 && '
-        f'GIT_INDEX_FILE="$index_path" git --no-pager diff '
-        f"--no-ext-diff --no-textconv --binary {target}; diff_status=$?; "
+        "{ printf '.\\0'; GIT_INDEX_FILE=\"$index_path\" git ls-files -z --stage | "
+        "sed -z -n 's/^160000 [0-9a-f]* [0-3]\\t/:(exclude,literal)/p'; } | "
+        'GIT_INDEX_FILE="$index_path" git add -A -N --pathspec-from-file=- '
+        "--pathspec-file-nul >/dev/null 2>&1 && "
+        f'GIT_INDEX_FILE="$index_path" git --no-pager diff --no-ext-diff --no-textconv '
+        f"--ignore-submodules=dirty --submodule=short --binary {target}; diff_status=$?; "
         f"printf '\n{commits_tag}\n'; "
         "git --no-pager log -20 --pretty=format:'%H%x09%h%x09%s%x09%an%x09%aI'; "
         "log_status=$?; overall_status=$status_status; "
@@ -1495,7 +1560,7 @@ def _run_git(
         backend,
         workdir=workdir,
         script=script,
-        env={},
+        env=dict(_GIT_VIEW_ENV),
         timeout_s=timeout_s,
         max_output_bytes=max_output_bytes,
     )
@@ -1740,17 +1805,25 @@ def create_app(
             _app.state.sandbox_resource_collector = resource_collector
             yield
         finally:
-            cleanup_errors: list[Exception] = []
+            cleanup_failures: list[tuple[str, str]] = []
 
             def cleanup(name: str, function: Callable[[], None]) -> None:
                 try:
                     function()
                 except Exception as exc:
-                    logger.exception(
+                    error_type = safe_archive_error_type(exc)
+                    logger.error(
                         "sandbox manager shutdown cleanup failed",
-                        extra={"event": "sandbox_manager_cleanup_failed", "component": name},
+                        extra={
+                            "event": "sandbox_manager_cleanup_failed",
+                            "component": name,
+                            "error_type": error_type,
+                        },
                     )
-                    cleanup_errors.append(exc)
+                    # Do not retain an archive/provider exception for the final
+                    # ASGI lifespan failure: raising from it would make the raw
+                    # message and its complete cause chain visible again.
+                    cleanup_failures.append((name, error_type))
 
             # A canceled request still owns its executor call. Drain every
             # admitted mutation before closing supervisors or archive clients.
@@ -1776,8 +1849,10 @@ def create_app(
             if archive_boundary_started:
                 assert archive_boundary is not None
                 cleanup("sandbox_archive_service", archive_boundary.close)
-            if cleanup_errors:
-                raise RuntimeError("sandbox manager shutdown cleanup failed") from cleanup_errors[0]
+            if cleanup_failures:
+                component, error_type = cleanup_failures[0]
+                safe_cause = RuntimeError(f"{component} cleanup failed ({error_type})")
+                raise RuntimeError("sandbox manager shutdown cleanup failed") from safe_cause
 
     app = FastAPI(title="Agent sandbox manager", docs_url=None, redoc_url=None, lifespan=lifespan)
     app.state.terminal_manager = terminals
@@ -1998,16 +2073,31 @@ def create_app(
             )
         return shared_supervisor
 
-    def supervisor_error(exc: Exception) -> HTTPException:
+    def supervisor_error(exc: Exception, *, safe_detail: str | None = None) -> HTTPException:
         if isinstance(exc, RetainedChatLost):
-            return HTTPException(status_code=410, detail=str(exc))
+            return HTTPException(
+                status_code=410,
+                detail=safe_detail if safe_detail is not None else str(exc),
+            )
         if isinstance(exc, SessionBusy):
-            return HTTPException(status_code=409, detail=str(exc))
+            return HTTPException(
+                status_code=409,
+                detail=safe_detail if safe_detail is not None else str(exc),
+            )
         if isinstance(exc, SessionLeaseLost):
-            return HTTPException(status_code=409, detail=str(exc))
+            return HTTPException(
+                status_code=409,
+                detail=safe_detail if safe_detail is not None else str(exc),
+            )
         if isinstance(exc, ValueError):
-            return HTTPException(status_code=422, detail=str(exc))
-        return HTTPException(status_code=503, detail=str(exc)[:300])
+            return HTTPException(
+                status_code=422,
+                detail=safe_detail if safe_detail is not None else str(exc),
+            )
+        return HTTPException(
+            status_code=503,
+            detail=safe_detail if safe_detail is not None else str(exc)[:300],
+        )
 
     def retained_owner(workspace_id: str) -> SharedChatSessionSupervisor:
         """Resolve the only supported workspace shape: a shared chat member."""
@@ -2199,7 +2289,10 @@ def create_app(
                 ),
             )
         except (SandboxError, ValueError) as exc:
-            raise supervisor_error(exc) from exc
+            raise supervisor_error(
+                exc,
+                safe_detail=archive_failure_http_detail(exc),
+            ) from exc
 
     @app.post("/shared-sandboxes/{thread_id}/archive-initial")
     async def capture_shared_initial_archive(
@@ -2231,7 +2324,10 @@ def create_app(
                 ),
             )
         except (SandboxError, ValueError) as exc:
-            raise supervisor_error(exc) from exc
+            raise supervisor_error(
+                exc,
+                safe_detail=archive_failure_http_detail(exc),
+            ) from exc
 
     @app.post("/shared-sandboxes/{thread_id}/resident")
     async def ensure_shared_resident(
@@ -2648,6 +2744,7 @@ def create_app(
                     expected_container_id=body.expected_container_id,
                     archive_key="",
                 ),
+                sandbox_id=body.sandbox_id,
             )
         except (SandboxError, ValueError) as exc:
             raise supervisor_error(exc) from exc

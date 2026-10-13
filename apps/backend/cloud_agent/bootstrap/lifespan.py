@@ -379,7 +379,10 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
         # building their own per call. They take the same seam; until this was
         # wired, the comment here described sharing that was not happening.
         app.state.grants = GrantClient(client=http)
-        _build_source_control(app)
+        if background:
+            _build_source_control(app)
+        else:
+            app.state.source_control = None
 
         # **The background work belongs to exactly one process.** The reaper
         # renews and revokes grants and supersedes lapsed attempts; the publisher

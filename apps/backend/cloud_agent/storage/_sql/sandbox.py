@@ -114,8 +114,9 @@ THREAD_SANDBOX_SOURCE = f"""
             )
             FROM agent_thread_sandbox_memberships peer
             WHERE peer.sandbox_id = g.id
-              -- Failed Fork placeholders keep their lineage but release their
-              -- slots. Only current slot owners belong in the host manifest.
+              -- Failed Fork placeholders and stopped deleted chats keep their
+              -- rows but release their slots. Only current slot owners belong
+              -- in the host manifest.
               AND peer.resident_slot_id IS NOT NULL
         ), '[]'::jsonb) AS group_members
     FROM agent_thread_sandbox_memberships m

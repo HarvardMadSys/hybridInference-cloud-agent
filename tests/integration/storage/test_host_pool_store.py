@@ -1144,6 +1144,33 @@ async def test_capability_labels_or_arbitrary_runtime_cannot_claim_secure_work(
     )
 
 
+@pytest.mark.parametrize("disk_limit_mib", [0, 20480, None])
+async def test_a_new_secure_group_is_claimed_whatever_disk_quota_is_attested(
+    store, hosts, disk_limit_mib
+):
+    """The disk quota is a recommendation: it warns, it never changes scheduling.
+
+    ``None`` is a runner from before the report.
+    """
+    await _enrol(store, "runner-a", hosts=hosts)
+    secure = await _create_job(store, execution_profile="untrusted-kata-v1")
+    attestation = (
+        _kata_attestation()
+        if disk_limit_mib is None
+        else _kata_attestation(sandbox_disk_limit_mib=disk_limit_mib)
+    )
+
+    claim = await _claim(
+        store,
+        worker_id="w1",
+        lease_ttl_seconds=60,
+        host="runner-a",
+        claim_attestation=attestation,
+    )
+
+    assert claim is not None and claim["id"] == secure["id"]
+
+
 async def test_shared_or_superseded_host_credential_cannot_claim_secure_work(store, hosts):
     await _enrol(store, "runner-a", hosts=hosts)
     job = await _create_job(store, execution_profile="untrusted-kata-v1")

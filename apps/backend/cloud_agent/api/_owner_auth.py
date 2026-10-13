@@ -30,7 +30,7 @@ from cloud_agent.api.deps import (
     get_gateway_client,
     looks_like_agent_token,
 )
-from cloud_agent.identity import SESSION_COOKIE
+from cloud_agent.identity import session_from_cookies
 
 if TYPE_CHECKING:
     from typing import Any
@@ -72,7 +72,7 @@ async def authenticate_agent_owner(
     both are present, which is the precedence ``session_token`` documents.
     """
     presented = bearer_token(authorization)
-    if not request.cookies.get(SESSION_COOKIE) and looks_like_agent_token(presented):
+    if not session_from_cookies(request.cookies) and looks_like_agent_token(presented):
         raise HTTPException(
             status_code=403,
             detail={

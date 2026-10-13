@@ -249,6 +249,20 @@ SITE_MISCONFIGURED_MCP = (
     "has no MCP relay. Ask an admin to finish setting up the site."
 )
 
+#: The execution profile for public, untrusted work. Spelled out here because
+#: the host cannot import the control plane's ``ExecutionProfile``.
+UNTRUSTED_EXECUTION_PROFILE = "untrusted-kata-v1"
+#: What the runner logs when it starts a new untrusted group without a disk
+#: quota. Recommended, not required: the group's writable layer holds its
+#: workspace and every installed file and survives ``docker stop``, so without
+#: one a single tenant can fill the disk every other group on this host writes
+#: to. The fix is the deployment's, so this names the setting.
+UNTRUSTED_DISK_QUOTA_RECOMMENDED = (
+    "this untrusted sandbox has no container disk quota: set Container disk "
+    "(sandbox_disk_mib) above 0 for this server, on Docker overlay2 backed by XFS "
+    "with project quotas"
+)
+
 # Hermetic git for anything the *runner* runs: no user config, no hooks, no
 # credential helpers, no prompts.
 _GIT_ENV = {
@@ -1386,8 +1400,13 @@ def _claim_attestation(
     backend: SandboxBackend,
     *,
     sandbox_archive_settings_applied_revision: int | None = None,
+    host_settings: Mapping[str, float] | None = None,
 ) -> dict[str, Any]:
-    """Build the exact-replica proof required for every claim."""
+    """Build the exact-replica proof required for every claim.
+
+    ``host_settings`` are the settings a turn claimed now would be handed;
+    absent ones are read from this process's environment, as the turn does.
+    """
     stamper = getattr(backend, "version_stamp", None)
     stamp: dict[str, Any] = stamper() if stamper is not None else {}
     # ``version_stamp`` proves the immutable image. This separately proves the
@@ -1395,6 +1414,15 @@ def _claim_attestation(
     # needed to use it; a sibling replica's host heartbeat cannot stand in for
     # those process-local facts during a rolling deployment.
     stamp["runner_capabilities"] = _shared_live_host_capabilities(backend, stamp)
+    # The disk quota a group created by this claim would get, so the control
+    # plane can warn about a new untrusted group with none. Zero, or a value
+    # the turn would refuse, is no quota.
+    try:
+        stamp["sandbox_disk_limit_mib"] = _sandbox_resource_setting(
+            "sandbox_disk_mib", host_settings or {}
+        )
+    except ValueError:
+        stamp["sandbox_disk_limit_mib"] = 0
     if sandbox_archive_settings_applied_revision is not None:
         stamp["sandbox_archive_settings_applied_revision"] = (
             sandbox_archive_settings_applied_revision
@@ -2287,6 +2315,16 @@ def _run_shared_live_attempt(
         except ValueError as exc:
             finish_attempt("failed", str(exc))
             return 2
+        if job.execution_profile == UNTRUSTED_EXECUTION_PROFILE and not disk_limit_mib:
+            # A warning, not a refusal: the group starts as configured.
+            logger.warning(
+                UNTRUSTED_DISK_QUOTA_RECOMMENDED,
+                extra={
+                    "event": "agent_untrusted_sandbox_without_disk_quota",
+                    "job_id": job.job_id,
+                    "host": host,
+                },
+            )
     sandbox_id = str(existing.get("sandbox_id") or f"asbx_{secrets.token_hex(16)}")
     origin_thread_id = str(existing.get("origin_thread_id") or job.thread_id)
     seed_spec = ChatSandboxSpec(
@@ -4253,6 +4291,7 @@ def run_forever(
                         attestation=_claim_attestation(
                             backend,
                             sandbox_archive_settings_applied_revision=archive_settings.report(),
+                            host_settings=runtime_settings.turn_settings(),
                         ),
                     )
             except ClaimUnreachable as exc:

@@ -3,9 +3,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useT } from '@/components/providers';
 import { GettingStartedSettings } from '@/components/features/settings/GettingStartedSettings';
+import { ProfileSettings } from '@/components/features/settings/ProfileSettings';
 import { NotificationSettings } from '@/components/features/settings/NotificationSettings';
-import { UserMemorySettings } from '@/components/features/settings/UserMemorySettings';
-import { ProjectMemorySettings } from '@/components/features/settings/ProjectMemorySettings';
+import { MemorySettings } from '@/components/features/settings/MemorySettings';
 import {
   disconnectAgentIntegration,
   disconnectGitHubAccount,
@@ -233,6 +233,10 @@ export function IntegrationsView({
   mcpAuthorization?: McpAuthorizationResult;
 }) {
   const t = useT();
+  const [companion, setCompanion] = useState<{ userId: string; dataUrl?: string } | null>(null);
+  const updateCompanion = useCallback((userId: string, dataUrl?: string) => {
+    setCompanion({ userId, dataUrl });
+  }, []);
   const [providers, setProviders] = useState<AgentIntegrationProviderApi[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -366,6 +370,8 @@ export function IntegrationsView({
         </div>
       ) : null}
 
+      <ProfileSettings companion={companion} />
+
       <section
         aria-labelledby="source-control-heading"
         className="ui-card mt-4 bg-surface px-3 sm:px-4"
@@ -435,8 +441,7 @@ export function IntegrationsView({
         <McpConnectionsSection authorizationResult={mcpAuthorization} />
       </div>
       <SkillsSection />
-      <UserMemorySettings />
-      <ProjectMemorySettings />
+      <MemorySettings onAvatarChange={updateCompanion} />
       <NotificationSettings />
       <GettingStartedSettings />
     </section>

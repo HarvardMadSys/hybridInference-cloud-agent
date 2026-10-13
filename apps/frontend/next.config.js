@@ -60,12 +60,34 @@ if (rawApiPrefix.startsWith('/') && rawApiPrefix !== derivedApiPrefix) {
   );
 }
 
+// Security headers on every response this app serves, documents and build
+// assets alike. The Content-Security-Policy is not among them: it carries a
+// per-request script nonce, so `src/middleware.ts` sets it, and with it
+// `frame-ancestors 'none'`. `X-Frame-Options` says the same for browsers that
+// predate `frame-ancestors`. Strict-Transport-Security belongs to whatever
+// terminates TLS in front of this process, not to a server that speaks plain
+// HTTP behind it (see `deploy/control-plane/edge.nginx.conf`).
+//
+// `securityHeaders.test.ts` reads these from this file.
+const SECURITY_HEADERS = [
+  { key: 'X-Content-Type-Options', value: 'nosniff' },
+  // Cross-origin requests and links learn the origin only, never a
+  // conversation's path. Same-origin requests keep the full referrer.
+  { key: 'Referrer-Policy', value: 'strict-origin-when-cross-origin' },
+  { key: 'X-Frame-Options', value: 'DENY' },
+];
+
 const nextConfig = {
   reactStrictMode: true,
   output: 'standalone',
   // Omitted entirely when empty: Next rejects `basePath: ''`, and empty means
   // a deployment that owns its hostname.
   ...(basePath ? { basePath } : {}),
+  // Relative to `basePath`, so this covers the whole mount and nothing of the
+  // gateway's beside it.
+  async headers() {
+    return [{ source: '/:path*', headers: SECURITY_HEADERS }];
+  },
 };
 
 module.exports = nextConfig;

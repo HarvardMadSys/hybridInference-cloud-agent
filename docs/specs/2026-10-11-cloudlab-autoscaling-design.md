@@ -120,17 +120,28 @@ target may size an owned Host. Neither mode silently admits an unsized Host.
 
 ## Preferred node types
 
-The dashboard separately reads CloudLab's public hardware inventory and offers
-a quick-select list for the profile's `phystype` binding. This list is advice,
-not scheduler authority: selecting a type only edits the policy draft, and the
-administrator still saves the revisioned policy explicitly.
+The dashboard reads CloudLab's public hardware inventory in the same curated
+order used for new allocations. CloudLab defaults supply the ordered
+`node_types` list and `node_type_binding` (normally `phystype`); the administrator
+can edit the list or pin one type using an explicit profile binding.
 
 The v1 shortlist includes only curated, general-purpose, non-GPU CloudLab
 families introduced in 2021 or later with at least 16 physical cores and 128
-GiB RAM. A type is shown only while the public inventory reports more than 16
-nodes free. The list is sorted by current free count, and each row displays its
+GiB RAM and more than 20 total nodes. The default order is `r6615`, `c6620`,
+`r650`, `r6525`, `c6525-100g`, `c6525-25g`: newer families first, then more CPU
+cores and RAM within the same introduction year. Current free counts do not
+change the order or hide a family. Each row displays its
 site, total inventory, cores, threads, memory and introduction year so the
 filter remains reviewable.
+
+Each new manual or autoscaled allocation snapshots the preference list. The
+provider tries it from top to bottom, advancing only after a confirmed capacity
+rejection. It stops when an experiment is created or the outcome is ambiguous;
+credentials, profile errors and other failures also stop the sequence. If every
+type is refused for capacity, the durable operation waits and retries from the
+top. An explicit nonempty hardware binding pins the request to that type; an
+empty candidate list leaves hardware selection to the profile. Existing
+allocations keep their recorded configuration.
 
 Availability comes from the inert `amlist-json` payload on CloudLab's public
 hardware page. The control plane uses a fixed HTTPS URL, follows no redirects,

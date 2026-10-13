@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
@@ -26,6 +27,7 @@ from cloud_agent.ledger import (
     refresh_ledger_entry,
     summarize_ledger,
 )
+from cloud_agent.workers.background_wake import LEDGER, BackgroundWake
 
 START = datetime(2026, 9, 9, 10, tzinfo=UTC)
 END = START + timedelta(minutes=1)
@@ -488,3 +490,99 @@ async def test_background_collector_limits_inflight_queries_and_propagates_cance
         with pytest.raises(asyncio.CancelledError):
             await task
     store.complete_ledger_refresh.assert_not_awaited()
+
+
+@pytest.mark.parametrize("save_fails", [False, True])
+async def test_collector_reuses_a_free_slot_while_other_queries_are_slow(
+    monkeypatch, caplog, save_fails
+):
+    rows = deque(ledger_row(id=index) for index in range(1, 6))
+    entered = [asyncio.Event() for _ in range(5)]
+    release_fast = asyncio.Event()
+    release_slow = asyncio.Event()
+    active = 0
+    peak = 0
+    cancelled = set()
+
+    async def refresh(store, grants, row):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        entered[row["id"] - 1].set()
+        try:
+            await (release_fast if row["id"] == 2 else release_slow).wait()
+            if save_fails:
+                raise RuntimeError("snapshot save failed")
+        except asyncio.CancelledError:
+            cancelled.add(row["id"])
+            raise
+        finally:
+            active -= 1
+
+    monkeypatch.setattr(ledger, "refresh_ledger_entry", refresh)
+    store = SimpleNamespace(
+        claim_due_ledger_refresh=AsyncMock(side_effect=lambda: rows.popleft() if rows else None)
+    )
+    task = asyncio.create_task(collect_usage_snapshots(store, SimpleNamespace()))
+    try:
+        await asyncio.wait_for(asyncio.gather(*(event.wait() for event in entered[:4])), 1)
+        assert active == 4
+        release_fast.set()
+        # The fifth job must start without waiting for the three slow queries.
+        await asyncio.wait_for(entered[4].wait(), 1)
+        assert active == peak == 4
+        assert not release_slow.is_set()
+        if save_fails:
+            assert "agent_ledger_snapshot_save_failed" in caplog.text
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert active == 0
+    assert cancelled == {1, 3, 4, 5}
+
+
+@pytest.mark.parametrize("arrival", ["notification", "scheduled", "poll"])
+async def test_collector_uses_spare_capacity_for_new_work_during_a_slow_query(monkeypatch, arrival):
+    rows = deque([ledger_row(id=1)])
+    first_empty = asyncio.Event()
+    started = [asyncio.Event(), asyncio.Event()]
+    blocker = asyncio.Event()
+    monkeypatch.setattr(ledger, "REFRESH_POLL_SECONDS", 0.01)
+
+    async def claim():
+        if rows:
+            return rows.popleft()
+        first_empty.set()
+        return None
+
+    async def refresh(store, grants, row):
+        started[row["id"] - 1].set()
+        await blocker.wait()
+
+    monkeypatch.setattr(ledger, "refresh_ledger_entry", refresh)
+    wake = None if arrival == "poll" else BackgroundWake()
+    if wake is not None:
+        wake.listening = True
+    store = SimpleNamespace(
+        claim_due_ledger_refresh=claim,
+        next_ledger_refresh_due=AsyncMock(
+            side_effect=lambda: (
+                datetime.now(UTC) + timedelta(seconds=0.05) if arrival == "scheduled" else None
+            )
+        ),
+    )
+    task = asyncio.create_task(collect_usage_snapshots(store, SimpleNamespace(), wake=wake))
+    try:
+        await asyncio.wait_for(first_empty.wait(), 1)
+        await asyncio.wait_for(started[0].wait(), 1)
+        rows.append(ledger_row(id=2))
+        if arrival == "notification":
+            wake.notified(LEDGER)
+        # Arrival is observed while the first query still owns its slot.
+        await asyncio.wait_for(started[1].wait(), 1)
+        assert not blocker.is_set()
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task

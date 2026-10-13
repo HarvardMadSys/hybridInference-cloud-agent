@@ -23,6 +23,8 @@ import {
 import type { AgentConfigApi, AgentConversationApi, AgentJobApi } from '@/lib/api/agents';
 import { getUserMemory, type UserMemoryView } from '@/lib/api/userMemory';
 vi.mock('@/lib/api/userMemory', () => ({ getUserMemory: vi.fn() }));
+import { getUserProfile } from '@/lib/api/userProfile';
+vi.mock('@/lib/api/userProfile', () => ({ getUserProfile: vi.fn() }));
 
 import { rewritePrompt, type RewritePromptResult } from '@/lib/api/promptRewrite';
 
@@ -41,6 +43,14 @@ beforeEach(() => {
   account.id = undefined;
   vi.mocked(getUserMemory).mockReset();
   vi.mocked(getUserMemory).mockRejectedValue(new Error('Avatar unavailable'));
+  vi.mocked(getUserProfile).mockReset();
+  vi.mocked(getUserProfile).mockResolvedValue({
+    email: 'owner@example.com',
+    first_name: '',
+    last_name: '',
+    image_data_url: null,
+    revision: 0,
+  });
   localStorage.clear();
 });
 
@@ -393,8 +403,8 @@ describe('TaskComposer source-control onboarding', () => {
       const available = screen.getByRole('button', { name: 'Create repository' });
       expect(available).toBeEnabled();
       fireEvent.click(available);
+      expect(await screen.findByRole('textbox', { name: 'Repository name' })).toHaveFocus();
       expect(screen.getByRole('dialog', { name: 'Create repository' })).toBeInTheDocument();
-      expect(screen.getByRole('textbox', { name: 'Repository name' })).toHaveFocus();
       expect(createAgentJob).not.toHaveBeenCalled();
     },
   );
@@ -633,6 +643,7 @@ describe('TaskComposer source-control onboarding', () => {
       } else {
         fireEvent.click(screen.getByRole('button', { name: 'Create repository' }));
       }
+      await screen.findByRole('textbox', { name: 'Repository name' });
       const dialog = screen.getByRole('dialog', { name: 'Create repository' });
       fireEvent.change(within(dialog).getByRole('textbox', { name: 'Repository name' }), {
         target: { value: 'new-repo' },
@@ -1778,7 +1789,8 @@ describe('TaskComposer plugins', () => {
   async function openPlugins() {
     const menu = await openAttachMenu();
     fireEvent.click(within(menu).getByRole('menuitem', { name: /Plugins/ }));
-    return screen.findByRole('dialog', { name: 'Plugins' });
+    await screen.findByRole('button', { name: 'Done' });
+    return screen.getByRole('dialog', { name: 'Plugins' });
   }
 
   async function selectPlugin() {
@@ -1904,6 +1916,7 @@ describe('TaskComposer plugins', () => {
     fireEvent.keyDown(box, { key: 'Enter' });
     expect(createAgentJob).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: 'Manage plugins' }));
+    await screen.findByRole('button', { name: 'Done' });
     const dialog = within(screen.getByRole('dialog', { name: 'Plugins' }));
     expect(dialog.getByText(plugin.plugin)).toBeInTheDocument();
     fireEvent.click(dialog.getByRole('button', { name: `Remove ${plugin.plugin}` }));

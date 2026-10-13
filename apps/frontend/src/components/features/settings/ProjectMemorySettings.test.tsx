@@ -15,16 +15,9 @@ import {
   updateProjectMemory,
   type ProjectMemoryView,
 } from '@/lib/api/projectMemory';
-import {
-  clearUserMemory,
-  getUserMemory,
-  updateUserMemory,
-  type UserMemoryView,
-} from '@/lib/api/userMemory';
 import { LOCALE_STORAGE_KEY } from '@/lib/i18n/locales';
 import { APIError } from '@/lib/utils/errors';
 import { ProjectMemorySettings } from './ProjectMemorySettings';
-import { UserMemorySettings } from './UserMemorySettings';
 
 const auth = vi.hoisted(() => ({ userId: 'alice' as string | undefined }));
 vi.mock('@/components/providers/AuthProvider', () => ({
@@ -40,15 +33,6 @@ vi.mock('@/lib/api/projectMemory', () => ({
   deleteProjectMemoryEntry: vi.fn(),
   saveProjectMemories: vi.fn(),
   consolidateProjectMemory: vi.fn(),
-}));
-vi.mock('@/lib/api/userMemory', () => ({
-  getUserMemory: vi.fn(),
-  updateUserMemory: vi.fn(),
-  clearUserMemory: vi.fn(),
-  consolidateUserMemory: vi.fn(),
-  saveUserMemories: vi.fn(),
-  editUserMemoryEntry: vi.fn(),
-  deleteUserMemoryEntry: vi.fn(),
 }));
 
 const repo = 'alice/toolbox';
@@ -122,31 +106,16 @@ const other: ProjectMemoryView = {
   repo: otherRepo,
   portrait: { ...empty.portrait, summary: 'Work in the other repository.' },
 };
-const user: UserMemoryView = {
-  ...empty,
-  avatar: { style: 'illustrated', data_url: 'data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=' },
-  portrait: { ...empty.portrait, summary: 'Account-wide preferences.' },
-  memories: [
-    {
-      id: 'user-preference',
-      kind: 'preference',
-      content: 'Use small pull requests across projects.',
-      source_job_id: 'user-job',
-      source_repo: 'alice/user-source',
-      user_edited: false,
-      scope: 'user',
-      created_at: null,
-    },
-  ],
-};
-
-function panel(includeUser = false) {
+function panel() {
   return (
     <LocaleProvider>
-      {includeUser ? <UserMemorySettings /> : null}
       <ProjectMemorySettings />
     </LocaleProvider>
   );
+}
+
+function openConsolidation() {
+  fireEvent.click(screen.getByRole('button', { name: 'Consolidate' }));
 }
 
 function deferred<T>() {
@@ -168,9 +137,6 @@ beforeEach(() => {
   );
   vi.mocked(updateProjectMemory).mockResolvedValue({ ...populated, enabled: false });
   vi.mocked(clearProjectMemory).mockResolvedValue(empty);
-  vi.mocked(getUserMemory).mockResolvedValue(user);
-  vi.mocked(updateUserMemory).mockResolvedValue({ ...user, enabled: false });
-  vi.mocked(clearUserMemory).mockResolvedValue({ ...user, portrait: empty.portrait, memories: [] });
 });
 
 afterEach(cleanup);
@@ -178,44 +144,43 @@ afterEach(cleanup);
 describe('project memory settings', () => {
   it('loads repository choices, the selected project’s profile, source-linked memories, and suggestions', async () => {
     render(panel());
-    expect(screen.getByRole('status')).toHaveTextContent('Loading your repositories');
+    expect(screen.getByRole('status')).toHaveTextContent('Loading repositories');
     await screen.findByText(populated.portrait.summary);
 
     expect(getMemoryProjects).toHaveBeenCalledWith(expect.any(AbortSignal));
     expect(getProjectMemory).toHaveBeenCalledWith(repo, expect.any(AbortSignal));
-    expect(screen.getByRole('combobox', { name: 'Repository (owner/repo)' })).toHaveValue(repo);
+    expect(screen.getByRole('combobox', { name: 'Repository' })).toHaveValue(repo);
     expect(
-      within(screen.getByRole('combobox', { name: 'Repository (owner/repo)' }))
+      within(screen.getByRole('combobox', { name: 'Repository' }))
         .getAllByRole('option')
         .map((option) => option.textContent),
     ).toEqual([repo, otherRepo]);
-    expect(
-      screen.getByRole('switch', { name: 'Automatically build project memory' }),
-    ).toBeChecked();
-    expect(screen.getByRole('heading', { name: 'Project profile' })).toBeInTheDocument();
+    expect(screen.getByText(/takes priority over user memory/)).toBeInTheDocument();
+    expect(screen.getByRole('switch', { name: 'Remember automatically' })).toBeChecked();
+    fireEvent.click(screen.getByText('Profile and suggestions'));
+    expect(screen.getByRole('heading', { name: 'Project profile' })).toBeVisible();
     expect(screen.getByText('Testing')).toBeInTheDocument();
     expect(screen.getByText('codex')).toBeInTheDocument();
     expect(screen.getByText('model-a', { selector: 'dd' })).toBeInTheDocument();
-    expect(screen.getByRole('combobox', { name: 'Consolidation model' })).toHaveValue('model-a');
+    openConsolidation();
+    expect(await screen.findByRole('combobox', { name: 'Model' })).toHaveValue('model-a');
     expect(screen.getByText('Preference')).toBeInTheDocument();
     expect(screen.getByText('Task context')).toBeInTheDocument();
     expect(
-      within(screen.getByRole('listitem', { name: 'Saved memory 1' })).getByText(
-        `Project: ${repo}`,
-      ),
+      within(screen.getByRole('listitem', { name: 'Memory 1' })).getByText(repo),
     ).toBeInTheDocument();
-    expect(screen.getAllByRole('link', { name: 'View source task' })[0]).toHaveAttribute(
+    expect(screen.getAllByRole('link', { name: 'Source task' })[0]).toHaveAttribute(
       'href',
       '/job%2Fone',
     );
-    expect(screen.getAllByRole('link', { name: 'View source task' })[1]).toHaveAttribute(
+    expect(screen.getAllByRole('link', { name: 'Source task' })[1]).toHaveAttribute(
       'href',
       '/job_two',
     );
     expect(screen.getByText(populated.suggestions[0].title)).toBeInTheDocument();
     expect(screen.getByText(populated.suggestions[0].reason)).toBeInTheDocument();
     expect(screen.getByText(populated.suggestions[0].action)).toBeInTheDocument();
-    expect(screen.getByText(/Memory updated/)).toBeInTheDocument();
+    expect(screen.getByText(/^Updated /)).toBeInTheDocument();
     expect(screen.queryByRole('img')).not.toBeInTheDocument();
   });
 
@@ -223,8 +188,8 @@ describe('project memory settings', () => {
     vi.mocked(getMemoryProjects).mockResolvedValue([]);
     render(panel());
 
-    await screen.findByText('Project memory will appear after you send a request in a repository.');
-    expect(screen.getByRole('combobox', { name: 'Repository (owner/repo)' })).toBeDisabled();
+    await screen.findByText('Project memory appears after you send a request in a repository.');
+    expect(screen.getByRole('combobox', { name: 'Repository' })).toBeDisabled();
     expect(screen.getByRole('option', { name: 'Select a repository' })).toBeInTheDocument();
     expect(getProjectMemory).not.toHaveBeenCalled();
     expect(screen.queryByRole('switch')).not.toBeInTheDocument();
@@ -234,11 +199,9 @@ describe('project memory settings', () => {
     vi.mocked(getProjectMemory).mockResolvedValue(empty);
     render(panel());
 
-    await screen.findByText('No saved memory for this project yet.');
-    expect(screen.getByText(/This project’s profile will appear/)).toBeInTheDocument();
-    expect(
-      screen.getByText(/Suggestions will appear when this project’s activity/),
-    ).toBeInTheDocument();
+    await screen.findByText('No memories yet.');
+    expect(screen.getByText('Appears after a few requests.')).toBeInTheDocument();
+    expect(screen.getByText('None yet.')).toBeInTheDocument();
   });
 
   it('applies the canonical toggle response only when it arrives and refreshes the selected project', async () => {
@@ -259,7 +222,6 @@ describe('project memory settings', () => {
     await act(async () => mutation.resolve(canonical));
     expect(toggle).not.toBeChecked();
     expect(screen.getByText(canonical.portrait.summary)).toBeInTheDocument();
-    expect(screen.getByText(/paused for this repository/)).toBeInTheDocument();
 
     vi.mocked(updateProjectMemory).mockResolvedValueOnce(populated);
     fireEvent.click(toggle);
@@ -267,100 +229,40 @@ describe('project memory settings', () => {
     expect(updateProjectMemory).toHaveBeenLastCalledWith(repo, true, expect.any(AbortSignal));
 
     vi.mocked(getProjectMemory).mockResolvedValueOnce(empty);
-    fireEvent.click(screen.getByRole('button', { name: 'Refresh project memory' }));
-    await screen.findByText('No saved memory for this project yet.');
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await screen.findByText('No memories yet.');
     expect(getProjectMemory).toHaveBeenCalledTimes(2);
     expect(getProjectMemory).toHaveBeenLastCalledWith(repo, expect.any(AbortSignal));
-  });
-
-  it('keeps user and project toggles and clearing independent, with a scoped confirmation and restored focus', async () => {
-    vi.mocked(clearProjectMemory).mockResolvedValueOnce({ ...empty, enabled: false });
-    render(panel(true));
-    const project = within(screen.getByRole('region', { name: 'Project memory' }));
-    const account = within(screen.getByRole('region', { name: 'User memory' }));
-    const projectToggle = await project.findByRole('switch');
-    const userToggle = await account.findByRole('switch');
-    expect(account.queryByRole('img')).not.toBeInTheDocument();
-
-    fireEvent.click(projectToggle);
-    await waitFor(() => expect(projectToggle).not.toBeChecked());
-    expect(userToggle).toBeChecked();
-    expect(updateUserMemory).not.toHaveBeenCalled();
-
-    fireEvent.click(userToggle);
-    await waitFor(() => expect(userToggle).not.toBeChecked());
-    expect(updateProjectMemory).toHaveBeenCalledTimes(1);
-    expect(projectToggle).not.toBeChecked();
-
-    const clearButton = project.getByRole('button', { name: 'Clear project memory' });
-    fireEvent.click(clearButton);
-    expect(project.getByRole('group', { name: `Clear memory for ${repo}?` })).toBeInTheDocument();
-    expect(
-      project.getByText(/Your user memory, avatar, and other projects are kept/),
-    ).toBeInTheDocument();
-    expect(project.getByRole('button', { name: 'Confirm clear project memory' })).toHaveFocus();
-    expect(clearProjectMemory).not.toHaveBeenCalled();
-    fireEvent.click(project.getByRole('button', { name: 'Cancel' }));
-    expect(clearButton).toHaveFocus();
-    expect(clearProjectMemory).not.toHaveBeenCalled();
-
-    fireEvent.click(clearButton);
-    fireEvent.click(project.getByRole('button', { name: 'Confirm clear project memory' }));
-    await project.findByText('No saved memory for this project yet.');
-    expect(clearProjectMemory).toHaveBeenCalledWith(repo, expect.any(AbortSignal));
-    expect(clearButton).toHaveFocus();
-    expect(project.queryByRole('group')).not.toBeInTheDocument();
-    expect(projectToggle).not.toBeChecked();
-    expect(account.getByText(user.memories[0].content)).toBeInTheDocument();
-    expect(account.getByText('Project: alice/user-source')).toBeInTheDocument();
-    expect(account.queryByRole('img')).not.toBeInTheDocument();
-    expect(clearUserMemory).not.toHaveBeenCalled();
-
-    fireEvent.change(project.getByRole('combobox', { name: 'Repository (owner/repo)' }), {
-      target: { value: otherRepo },
-    });
-    await project.findByText(other.portrait.summary);
-    fireEvent.click(account.getByRole('button', { name: 'Clear memory' }));
-    fireEvent.click(account.getByRole('button', { name: 'Confirm clear memory' }));
-    await account.findByText('No saved memory yet.');
-    expect(project.getByText(other.portrait.summary)).toBeInTheDocument();
-    expect(clearProjectMemory).toHaveBeenCalledTimes(1);
   });
 
   it('retries repository-list errors and preserves the selected project while it remains available', async () => {
     vi.mocked(getMemoryProjects).mockRejectedValueOnce(new Error('Unavailable'));
     render(panel());
-    expect(await screen.findByRole('alert')).toHaveTextContent('Could not load your repositories');
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not load repositories');
     expect(getProjectMemory).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: 'Refresh repositories' }));
     await screen.findByText(populated.portrait.summary);
 
-    fireEvent.change(screen.getByRole('combobox', { name: 'Repository (owner/repo)' }), {
+    fireEvent.change(screen.getByRole('combobox', { name: 'Repository' }), {
       target: { value: otherRepo },
     });
     await screen.findByText(other.portrait.summary);
     fireEvent.click(screen.getByRole('button', { name: 'Refresh repositories' }));
-    await waitFor(() =>
-      expect(screen.getByRole('combobox', { name: 'Repository (owner/repo)' })).toBeEnabled(),
-    );
-    expect(screen.getByRole('combobox', { name: 'Repository (owner/repo)' })).toHaveValue(
-      otherRepo,
-    );
+    await waitFor(() => expect(screen.getByRole('combobox', { name: 'Repository' })).toBeEnabled());
+    expect(screen.getByRole('combobox', { name: 'Repository' })).toHaveValue(otherRepo);
     expect(getProjectMemory).toHaveBeenCalledTimes(2);
 
     vi.mocked(getMemoryProjects).mockResolvedValueOnce([repo]);
     fireEvent.click(screen.getByRole('button', { name: 'Refresh repositories' }));
     await screen.findByText(populated.portrait.summary);
-    expect(screen.getByRole('combobox', { name: 'Repository (owner/repo)' })).toHaveValue(repo);
+    expect(screen.getByRole('combobox', { name: 'Repository' })).toHaveValue(repo);
     expect(getProjectMemory).toHaveBeenLastCalledWith(repo, expect.any(AbortSignal));
   });
 
   it('retries project load failures and preserves the server view after a mutation fails', async () => {
     vi.mocked(getProjectMemory).mockRejectedValueOnce(new Error('Unavailable'));
     render(panel());
-    expect(await screen.findByRole('alert')).toHaveTextContent(
-      'Could not load or update this project',
-    );
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not load or update memory');
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
     const toggle = await screen.findByRole('switch');
 
@@ -391,27 +293,29 @@ describe('project memory settings', () => {
     vi.mocked(getProjectMemory).mockResolvedValueOnce(paused);
     vi.mocked(editProjectMemoryEntry).mockReturnValueOnce(mutation.promise);
     render(panel());
-    const first = await screen.findByRole('listitem', { name: 'Saved memory 1' });
+    const first = await screen.findByRole('listitem', { name: 'Memory 1' });
     const card = within(first);
-    fireEvent.click(card.getByRole('button', { name: 'Edit memory' }));
+    fireEvent.click(card.getByRole('button', { name: 'Edit' }));
     let editor = card.getByRole('textbox', { name: 'Memory content' });
     expect(editor).toHaveFocus();
     expect(editor).toHaveValue(populated.memories[0].content);
     expect(editor).toHaveAttribute('maxlength', '240');
     expect(card.getByRole('combobox', { name: 'Applies to' })).toHaveValue('repo');
-    expect(screen.getByRole('button', { name: 'Consolidate project memory' })).toBeDisabled();
+    openConsolidation();
+    expect(screen.getByRole('button', { name: 'Consolidate now' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Consolidate' }));
     fireEvent.change(editor, { target: { value: '   ' } });
-    expect(card.getByRole('button', { name: 'Save memory' })).toBeDisabled();
+    expect(card.getByRole('button', { name: 'Save' })).toBeDisabled();
     fireEvent.change(editor, { target: { value: 'x'.repeat(241) } });
-    expect(card.getByRole('button', { name: 'Save memory' })).toBeDisabled();
+    expect(card.getByRole('button', { name: 'Save' })).toBeDisabled();
     fireEvent.click(card.getByRole('button', { name: 'Cancel' }));
-    expect(card.getByRole('button', { name: 'Edit memory' })).toHaveFocus();
+    expect(card.getByRole('button', { name: 'Edit' })).toHaveFocus();
     expect(editProjectMemoryEntry).not.toHaveBeenCalled();
 
-    fireEvent.click(card.getByRole('button', { name: 'Edit memory' }));
+    fireEvent.click(card.getByRole('button', { name: 'Edit' }));
     editor = card.getByRole('textbox');
     fireEvent.change(editor, { target: { value: 'Run focused project checks.' } });
-    fireEvent.click(card.getByRole('button', { name: 'Save memory' }));
+    fireEvent.click(card.getByRole('button', { name: 'Save' }));
     expect(editProjectMemoryEntry).toHaveBeenCalledWith(
       repo,
       'preference-1',
@@ -433,7 +337,7 @@ describe('project memory settings', () => {
     expect(card.queryByRole('textbox')).not.toBeInTheDocument();
     expect(card.getByText('Canonical project preference.')).toBeInTheDocument();
     expect(card.getByText('Edited')).toBeInTheDocument();
-    expect(card.getByRole('button', { name: 'Edit memory' })).toHaveFocus();
+    expect(card.getByRole('button', { name: 'Edit' })).toHaveFocus();
     expect(screen.getByRole('switch')).not.toBeChecked();
     expect(saveProjectMemories).not.toHaveBeenCalled();
   });
@@ -443,11 +347,11 @@ describe('project memory settings', () => {
       new APIError('project_memory_conflict', 'private server detail', 409),
     );
     render(panel());
-    const first = await screen.findByRole('listitem', { name: 'Saved memory 1' });
+    const first = await screen.findByRole('listitem', { name: 'Memory 1' });
     const card = within(first);
-    fireEvent.click(card.getByRole('button', { name: 'Edit memory' }));
+    fireEvent.click(card.getByRole('button', { name: 'Edit' }));
     fireEvent.change(card.getByRole('textbox'), { target: { value: 'My project draft.' } });
-    fireEvent.click(card.getByRole('button', { name: 'Save memory' }));
+    fireEvent.click(card.getByRole('button', { name: 'Save' }));
     expect(await card.findByRole('alert')).toHaveTextContent(
       'Refresh to review the latest saved text',
     );
@@ -472,7 +376,7 @@ describe('project memory settings', () => {
       revision: 8,
       memories: [{ ...latest.memories[0], content: 'My project draft.' }, latest.memories[1]],
     });
-    fireEvent.click(card.getByRole('button', { name: 'Save memory' }));
+    fireEvent.click(card.getByRole('button', { name: 'Save' }));
     await waitFor(() => expect(card.queryByRole('textbox')).not.toBeInTheDocument());
     expect(editProjectMemoryEntry).toHaveBeenLastCalledWith(
       repo,
@@ -490,17 +394,17 @@ describe('project memory settings', () => {
         new APIError('project_memory_error', 'credential-secret-do-not-render', status),
       );
       render(panel());
-      const card = within(await screen.findByRole('listitem', { name: 'Saved memory 1' }));
-      fireEvent.click(card.getByRole('button', { name: 'Edit memory' }));
+      const card = within(await screen.findByRole('listitem', { name: 'Memory 1' }));
+      fireEvent.click(card.getByRole('button', { name: 'Edit' }));
       fireEvent.change(card.getByRole('textbox'), {
         target: { value: 'Keep this project draft.' },
       });
-      fireEvent.click(card.getByRole('button', { name: 'Save memory' }));
+      fireEvent.click(card.getByRole('button', { name: 'Save' }));
       expect(await card.findByRole('alert')).toHaveTextContent(
         status === 422 ? 'leave out credentials' : 'Your draft is kept',
       );
       expect(card.getByRole('textbox')).toHaveValue('Keep this project draft.');
-      expect(card.getByRole('button', { name: 'Save memory' })).toBeEnabled();
+      expect(card.getByRole('button', { name: 'Save' })).toBeEnabled();
       expect(screen.queryByText('credential-secret-do-not-render')).not.toBeInTheDocument();
     },
   );
@@ -510,18 +414,18 @@ describe('project memory settings', () => {
       .mockRejectedValueOnce(new APIError('project_memory_error', 'private server detail', 503))
       .mockResolvedValueOnce({ ...populated, revision: 2, memories: [populated.memories[1]] });
     render(panel());
-    const first = await screen.findByRole('listitem', { name: 'Saved memory 1' });
+    const first = await screen.findByRole('listitem', { name: 'Memory 1' });
     const card = within(first);
-    fireEvent.click(card.getByRole('button', { name: 'Remove memory' }));
-    expect(card.getByRole('button', { name: 'Confirm remove memory' })).toHaveFocus();
+    fireEvent.click(card.getByRole('button', { name: 'Remove' }));
+    expect(card.getByRole('button', { name: 'Yes, remove' })).toHaveFocus();
     expect(deleteProjectMemoryEntry).not.toHaveBeenCalled();
     fireEvent.click(card.getByRole('button', { name: 'Cancel' }));
-    expect(card.getByRole('button', { name: 'Remove memory' })).toHaveFocus();
-    fireEvent.click(card.getByRole('button', { name: 'Remove memory' }));
-    fireEvent.click(card.getByRole('button', { name: 'Confirm remove memory' }));
+    expect(card.getByRole('button', { name: 'Remove' })).toHaveFocus();
+    fireEvent.click(card.getByRole('button', { name: 'Remove' }));
+    fireEvent.click(card.getByRole('button', { name: 'Yes, remove' }));
     await card.findByRole('alert');
     expect(card.getByText(populated.memories[0].content)).toBeInTheDocument();
-    fireEvent.click(card.getByRole('button', { name: 'Confirm remove memory' }));
+    fireEvent.click(card.getByRole('button', { name: 'Yes, remove' }));
     await waitFor(() => expect(first).not.toBeInTheDocument());
     expect(deleteProjectMemoryEntry).toHaveBeenLastCalledWith(
       repo,
@@ -529,7 +433,7 @@ describe('project memory settings', () => {
       populated.revision,
       expect.any(AbortSignal),
     );
-    expect(screen.getByRole('heading', { name: 'Saved project memory' })).toHaveFocus();
+    expect(screen.getByRole('heading', { name: 'Saved memories' })).toHaveFocus();
     expect(screen.getByText(populated.memories[1].content)).toBeInTheDocument();
     expect(clearProjectMemory).not.toHaveBeenCalled();
   });
@@ -543,7 +447,12 @@ describe('project memory settings', () => {
     };
     vi.mocked(consolidateProjectMemory).mockResolvedValueOnce(consolidated);
     render(panel());
-    fireEvent.click(await screen.findByRole('button', { name: 'Consolidate project memory' }));
+    await screen.findByRole('switch');
+    openConsolidation();
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Consolidate now' })).toBeEnabled(),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Consolidate now' }));
     await screen.findByText('Keep project checks focused.');
     expect(consolidateProjectMemory).toHaveBeenCalledWith(
       repo,
@@ -553,22 +462,24 @@ describe('project memory settings', () => {
     );
     expect(screen.getByText(consolidated.portrait.summary)).toBeInTheDocument();
     expect(screen.queryByText(populated.memories[1].content)).not.toBeInTheDocument();
-    expect(screen.getByText(/1\/12 project memories/)).toBeInTheDocument();
-    expect(screen.getByRole('combobox', { name: 'Repository (owner/repo)' })).toHaveValue(repo);
+    expect(screen.getByText('1/12 · 28/2,400 characters')).toBeInTheDocument();
+    expect(screen.getByRole('combobox', { name: 'Repository' })).toHaveValue(repo);
   });
 
   it('submits the chosen project model and keeps an explicit choice after memory refresh', async () => {
     vi.mocked(consolidateProjectMemory).mockResolvedValueOnce(populated);
     render(panel());
-    const selector = await screen.findByRole('combobox', { name: 'Consolidation model' });
-    expect(selector).toHaveValue('model-a');
+    await screen.findByRole('switch');
+    openConsolidation();
+    const selector = screen.getByRole('combobox', { name: 'Model' });
+    await waitFor(() => expect(selector).toHaveValue('model-a'));
     expect(
       within(selector)
         .getAllByRole('option')
         .map((option) => option.textContent),
     ).toEqual(['model-a', 'model-b']);
     fireEvent.change(selector, { target: { value: 'model-b' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Consolidate project memory' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Consolidate now' }));
     await waitFor(() =>
       expect(consolidateProjectMemory).toHaveBeenCalledWith(
         repo,
@@ -577,36 +488,22 @@ describe('project memory settings', () => {
         expect.any(AbortSignal),
       ),
     );
-    await waitFor(() =>
-      expect(screen.getByRole('button', { name: 'Refresh project memory' })).toBeEnabled(),
-    );
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Refresh' })).toBeEnabled());
     expect(screen.getByText(populated.memories[0].content)).toBeInTheDocument();
     expect(screen.getByText(populated.memories[1].content)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Refresh project memory' }));
-    await waitFor(() =>
-      expect(screen.getByRole('button', { name: 'Refresh project memory' })).toBeEnabled(),
-    );
-    expect(selector).toHaveValue('model-b');
-  });
-
-  it('uses the preferred available project model when memory arrives after the catalog', async () => {
-    const read = deferred<ProjectMemoryView>();
-    vi.mocked(getProjectMemory).mockReturnValueOnce(read.promise);
-    vi.mocked(getAgentConfig).mockResolvedValueOnce({
-      ...agentConfig,
-      models: ['model-b', 'model-a'],
-    });
-    render(panel());
-    await waitFor(() => expect(getAgentConfig).toHaveBeenCalledTimes(1));
-    await act(async () => read.resolve(populated));
-    expect(screen.getByRole('combobox', { name: 'Consolidation model' })).toHaveValue('model-a');
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Refresh' })).toBeEnabled());
+    openConsolidation();
+    expect(screen.getByRole('combobox', { name: 'Model' })).toHaveValue('model-b');
   });
 
   it('uses the preferred project model when the catalog arrives after memory', async () => {
     const catalog = deferred<AgentConfigApi>();
     vi.mocked(getAgentConfig).mockReturnValueOnce(catalog.promise);
     render(panel());
-    const selector = await screen.findByRole('combobox', { name: 'Consolidation model' });
+    await screen.findByRole('switch');
+    openConsolidation();
+    const selector = screen.getByRole('combobox', { name: 'Model' });
     expect(selector).toBeDisabled();
     await act(async () => catalog.resolve({ ...agentConfig, models: ['model-b', 'model-a'] }));
     expect(selector).toHaveValue('model-a');
@@ -618,31 +515,34 @@ describe('project memory settings', () => {
       models: ['model-b', 'model-c'],
     });
     render(panel());
-    expect(await screen.findByRole('combobox', { name: 'Consolidation model' })).toHaveValue(
-      'model-b',
-    );
+    await screen.findByRole('switch');
+    openConsolidation();
+    const selector = screen.getByRole('combobox', { name: 'Model' });
+    await waitFor(() => expect(selector).toHaveValue('model-b'));
   });
 
   it('keeps project controls usable while models load and retries an empty catalog without reloading memory', async () => {
     const catalog = deferred<AgentConfigApi>();
     vi.mocked(getAgentConfig).mockReturnValueOnce(catalog.promise);
     render(panel());
-    const selector = await screen.findByRole('combobox', { name: 'Consolidation model' });
+    await screen.findByRole('switch');
+    openConsolidation();
+    const selector = screen.getByRole('combobox', { name: 'Model' });
     expect(selector).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Consolidate project memory' })).toBeDisabled();
-    expect(screen.getByRole('status')).toHaveTextContent('Loading available models');
-    expect(screen.getByRole('button', { name: 'Refresh project memory' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Consolidate now' })).toBeDisabled();
+    expect(within(selector).getByRole('option')).toHaveTextContent('Loading models');
+    expect(screen.getByRole('button', { name: 'Refresh' })).toBeEnabled();
     expect(screen.getByRole('switch')).toBeEnabled();
-    expect(screen.getByRole('button', { name: 'Clear project memory' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Clear' })).toBeEnabled();
     await act(async () => catalog.resolve({ ...agentConfig, models: [] }));
-    expect(screen.getByRole('status')).toHaveTextContent('No models available for consolidation');
+    expect(within(selector).getByRole('option')).toHaveTextContent('No models available');
     expect(selector).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Consolidate project memory' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Refresh project memory' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Consolidate now' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Refresh' })).toBeEnabled();
     expect(consolidateProjectMemory).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole('button', { name: 'Retry models' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Reload models' }));
     await waitFor(() =>
-      expect(screen.getByRole('button', { name: 'Consolidate project memory' })).toBeEnabled(),
+      expect(screen.getByRole('button', { name: 'Consolidate now' })).toBeEnabled(),
     );
     expect(selector).toHaveValue('model-a');
     expect(selector).toBeEnabled();
@@ -653,14 +553,16 @@ describe('project memory settings', () => {
   it('disables project consolidation after a catalog error and retries without reloading memory', async () => {
     vi.mocked(getAgentConfig).mockRejectedValueOnce(new Error('Offline'));
     render(panel());
+    await screen.findByRole('switch');
+    openConsolidation();
     expect(await screen.findByRole('alert')).toHaveTextContent('Could not load models');
-    expect(screen.getByRole('button', { name: 'Consolidate project memory' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Consolidate now' })).toBeDisabled();
     expect(screen.getByRole('switch')).toBeEnabled();
-    expect(screen.getByRole('button', { name: 'Refresh project memory' })).toBeEnabled();
-    expect(screen.getByRole('button', { name: 'Clear project memory' })).toBeEnabled();
-    fireEvent.click(screen.getByRole('button', { name: 'Retry models' }));
+    expect(screen.getByRole('button', { name: 'Refresh' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Clear' })).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Reload models' }));
     await waitFor(() =>
-      expect(screen.getByRole('button', { name: 'Consolidate project memory' })).toBeEnabled(),
+      expect(screen.getByRole('button', { name: 'Consolidate now' })).toBeEnabled(),
     );
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     expect(getAgentConfig).toHaveBeenCalledTimes(2);
@@ -676,18 +578,29 @@ describe('project memory settings', () => {
         .mockReturnValueOnce(oldCatalog.promise)
         .mockReturnValueOnce(newCatalog.promise);
       const rendered = render(panel());
-      await screen.findByRole('combobox', { name: 'Consolidation model' });
+      await screen.findByRole('switch');
+      openConsolidation();
       if (identity === 'account') {
         auth.userId = 'bob';
         rendered.rerender(panel());
+        await screen.findByText(populated.portrait.summary);
       } else {
-        fireEvent.change(screen.getByRole('combobox', { name: 'Repository (owner/repo)' }), {
+        // Consolidation needs saved memories, so the next project has some.
+        vi.mocked(getProjectMemory).mockResolvedValueOnce({
+          ...populated,
+          repo: otherRepo,
+          portrait: other.portrait,
+        });
+        fireEvent.change(screen.getByRole('combobox', { name: 'Repository' }), {
           target: { value: otherRepo },
         });
+        await screen.findByText(other.portrait.summary);
       }
+      expect(screen.queryByRole('combobox', { name: 'Model' })).not.toBeInTheDocument();
+      openConsolidation();
       await waitFor(() => expect(getAgentConfig).toHaveBeenCalledTimes(2));
       await act(async () => newCatalog.resolve({ ...agentConfig, models: ['new-owner-model'] }));
-      const selector = screen.getByRole('combobox', { name: 'Consolidation model' });
+      const selector = screen.getByRole('combobox', { name: 'Model' });
       expect(selector).toHaveValue('new-owner-model');
       await act(async () => oldCatalog.resolve({ ...agentConfig, models: ['stale-owner-model'] }));
       expect(selector).toHaveValue('new-owner-model');
@@ -701,9 +614,12 @@ describe('project memory settings', () => {
       const consolidation = deferred<ProjectMemoryView>();
       vi.mocked(consolidateProjectMemory).mockReturnValueOnce(consolidation.promise);
       const rendered = render(panel());
-      const selector = await screen.findByRole('combobox', { name: 'Consolidation model' });
+      await screen.findByRole('switch');
+      openConsolidation();
+      const selector = screen.getByRole('combobox', { name: 'Model' });
+      await waitFor(() => expect(selector).toBeEnabled());
       fireEvent.change(selector, { target: { value: 'model-b' } });
-      fireEvent.click(screen.getByRole('button', { name: 'Consolidate project memory' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Consolidate now' }));
       const oldSignal = vi.mocked(consolidateProjectMemory).mock.calls[0][3]!;
       expect(consolidateProjectMemory).toHaveBeenCalledWith(
         repo,
@@ -729,20 +645,19 @@ describe('project memory settings', () => {
         auth.userId = 'bob';
         rendered.rerender(panel());
       } else {
-        fireEvent.change(screen.getByRole('combobox', { name: 'Repository (owner/repo)' }), {
+        fireEvent.change(screen.getByRole('combobox', { name: 'Repository' }), {
           target: { value: otherRepo },
         });
       }
       expect(oldSignal.aborted).toBe(true);
-      expect(await screen.findByRole('combobox', { name: 'Consolidation model' })).toHaveValue(
-        'new-owner-model',
-      );
+      expect(screen.queryByRole('group', { name: 'Consolidate memory' })).not.toBeInTheDocument();
       await screen.findByText('New project memory.');
+      openConsolidation();
+      const nextSelector = screen.getByRole('combobox', { name: 'Model' });
+      await waitFor(() => expect(nextSelector).toHaveValue('new-owner-model'));
       await act(async () => consolidation.resolve(empty));
       expect(screen.getByText('New project memory.')).toBeInTheDocument();
-      expect(screen.getByRole('combobox', { name: 'Consolidation model' })).toHaveValue(
-        'new-owner-model',
-      );
+      expect(nextSelector).toHaveValue('new-owner-model');
     },
   );
 
@@ -753,14 +668,15 @@ describe('project memory settings', () => {
       memories: [populated.memories[1]],
     });
     render(panel());
-    const first = await screen.findByRole('listitem', { name: 'Saved memory 1' });
+    const first = await screen.findByRole('listitem', { name: 'Memory 1' });
     const card = within(first);
-    fireEvent.click(card.getByRole('button', { name: 'Edit memory' }));
+    fireEvent.click(card.getByRole('button', { name: 'Edit' }));
     fireEvent.change(card.getByRole('combobox', { name: 'Applies to' }), {
       target: { value: 'user' },
     });
-    expect(screen.getByRole('button', { name: 'Consolidate project memory' })).toBeDisabled();
-    fireEvent.click(card.getByRole('button', { name: 'Save memory' }));
+    openConsolidation();
+    expect(screen.getByRole('button', { name: 'Consolidate now' })).toBeDisabled();
+    fireEvent.click(card.getByRole('button', { name: 'Save' }));
     await waitFor(() =>
       expect(saveProjectMemories).toHaveBeenCalledWith(
         repo,
@@ -783,11 +699,11 @@ describe('project memory settings', () => {
       new APIError('project_memory_missing', 'private source detail', 404),
     );
     render(panel());
-    const first = await screen.findByRole('listitem', { name: 'Saved memory 1' });
+    const first = await screen.findByRole('listitem', { name: 'Memory 1' });
     const card = within(first);
-    fireEvent.click(card.getByRole('button', { name: 'Edit memory' }));
+    fireEvent.click(card.getByRole('button', { name: 'Edit' }));
     fireEvent.change(card.getByRole('textbox'), { target: { value: 'Copy this project draft.' } });
-    fireEvent.click(card.getByRole('button', { name: 'Save memory' }));
+    fireEvent.click(card.getByRole('button', { name: 'Save' }));
     await card.findByRole('alert');
     vi.mocked(getProjectMemory).mockResolvedValueOnce({ ...populated, revision: 3, memories: [] });
     fireEvent.click(card.getByRole('button', { name: 'Refresh memory' }));
@@ -796,10 +712,10 @@ describe('project memory settings', () => {
     expect(editor).toHaveValue('Copy this project draft.');
     expect(editor).toHaveAttribute('readonly');
     expect(editor).toBeEnabled();
-    expect(card.getByRole('button', { name: 'Save memory' })).toBeDisabled();
+    expect(card.getByRole('button', { name: 'Save' })).toBeDisabled();
     editor.select();
     expect(editor.selectionEnd).toBe('Copy this project draft.'.length);
-    fireEvent.change(screen.getByRole('combobox', { name: 'Repository (owner/repo)' }), {
+    fireEvent.change(screen.getByRole('combobox', { name: 'Repository' }), {
       target: { value: otherRepo },
     });
     await screen.findByText(other.portrait.summary);
@@ -813,10 +729,10 @@ describe('project memory settings', () => {
       const mutation = deferred<ProjectMemoryView>();
       vi.mocked(editProjectMemoryEntry).mockReturnValueOnce(mutation.promise);
       const rendered = render(panel());
-      const card = within(await screen.findByRole('listitem', { name: 'Saved memory 1' }));
-      fireEvent.click(card.getByRole('button', { name: 'Edit memory' }));
+      const card = within(await screen.findByRole('listitem', { name: 'Memory 1' }));
+      fireEvent.click(card.getByRole('button', { name: 'Edit' }));
       fireEvent.change(card.getByRole('textbox'), { target: { value: 'Private project draft.' } });
-      fireEvent.click(card.getByRole('button', { name: 'Save memory' }));
+      fireEvent.click(card.getByRole('button', { name: 'Save' }));
       const oldSignal = vi.mocked(editProjectMemoryEntry).mock.calls[0][4]!;
       const next = {
         ...other,
@@ -828,7 +744,7 @@ describe('project memory settings', () => {
         auth.userId = 'bob';
         rendered.rerender(panel());
       } else {
-        fireEvent.change(screen.getByRole('combobox', { name: 'Repository (owner/repo)' }), {
+        fireEvent.change(screen.getByRole('combobox', { name: 'Repository' }), {
           target: { value: otherRepo },
         });
       }
@@ -852,7 +768,7 @@ describe('project memory settings', () => {
     await waitFor(() => expect(getProjectMemory).toHaveBeenCalledTimes(1));
     const oldSignal = vi.mocked(getProjectMemory).mock.calls[0][1]!;
 
-    fireEvent.change(screen.getByRole('combobox', { name: 'Repository (owner/repo)' }), {
+    fireEvent.change(screen.getByRole('combobox', { name: 'Repository' }), {
       target: { value: otherRepo },
     });
     expect(oldSignal.aborted).toBe(true);
@@ -875,15 +791,15 @@ describe('project memory settings', () => {
       await screen.findByText(populated.portrait.summary);
       if (operation === 'toggle') fireEvent.click(screen.getByRole('switch'));
       else {
-        fireEvent.click(screen.getByRole('button', { name: 'Clear project memory' }));
-        fireEvent.click(screen.getByRole('button', { name: 'Confirm clear project memory' }));
+        fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+        fireEvent.click(screen.getByRole('button', { name: 'Yes, clear' }));
       }
       const oldSignal =
         operation === 'toggle'
           ? vi.mocked(updateProjectMemory).mock.calls[0][2]!
           : vi.mocked(clearProjectMemory).mock.calls[0][1]!;
 
-      fireEvent.change(screen.getByRole('combobox', { name: 'Repository (owner/repo)' }), {
+      fireEvent.change(screen.getByRole('combobox', { name: 'Repository' }), {
         target: { value: otherRepo },
       });
       expect(screen.queryByText(populated.portrait.summary)).not.toBeInTheDocument();
@@ -893,7 +809,7 @@ describe('project memory settings', () => {
       expect(screen.getByRole('switch')).not.toBeChecked();
       expect(screen.getByText(other.portrait.summary)).toBeInTheDocument();
       expect(screen.queryByText(populated.memories[0].content)).not.toBeInTheDocument();
-      expect(screen.queryByRole('group')).not.toBeInTheDocument();
+      expect(screen.queryByRole('group', { name: /^Clear memory for/ })).not.toBeInTheDocument();
     },
   );
 
@@ -912,8 +828,8 @@ describe('project memory settings', () => {
         await screen.findByText(populated.portrait.summary);
         if (operation === 'toggle') fireEvent.click(screen.getByRole('switch'));
         else {
-          fireEvent.click(screen.getByRole('button', { name: 'Clear project memory' }));
-          fireEvent.click(screen.getByRole('button', { name: 'Confirm clear project memory' }));
+          fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+          fireEvent.click(screen.getByRole('button', { name: 'Yes, clear' }));
         }
       }
       const oldSignal =
@@ -926,7 +842,7 @@ describe('project memory settings', () => {
       auth.userId = 'bob';
       rendered.rerender(panel());
       expect(screen.queryByText(populated.portrait.summary)).not.toBeInTheDocument();
-      expect(screen.queryByRole('group')).not.toBeInTheDocument();
+      expect(screen.queryByRole('group', { name: /^Clear memory for/ })).not.toBeInTheDocument();
       expect(oldSignal.aborted).toBe(true);
       await waitFor(() => expect(getProjectMemory).toHaveBeenCalledTimes(2));
       const bob = {
@@ -957,12 +873,10 @@ describe('project memory settings', () => {
     await screen.findByText(other.portrait.summary);
     await act(async () => oldList.resolve([repo]));
 
-    expect(screen.getByRole('combobox', { name: 'Repository (owner/repo)' })).toHaveValue(
-      otherRepo,
-    );
+    expect(screen.getByRole('combobox', { name: 'Repository' })).toHaveValue(otherRepo);
     expect(screen.queryByRole('option', { name: repo })).not.toBeInTheDocument();
     expect(getProjectMemory).toHaveBeenCalledTimes(1);
-    expect(getAgentConfig).toHaveBeenCalledTimes(1);
+    expect(getAgentConfig).not.toHaveBeenCalled();
     expect(getProjectMemory).toHaveBeenCalledWith(otherRepo, expect.any(AbortSignal));
   });
 
@@ -987,31 +901,34 @@ describe('project memory settings', () => {
 
     auth.userId = undefined;
     render(panel());
-    expect(screen.getByText('Sign in to see your project memory.')).toBeInTheDocument();
+    expect(screen.getByText('Sign in to see your memory.')).toBeInTheDocument();
     expect(getMemoryProjects).toHaveBeenCalledTimes(2);
     expect(getProjectMemory).toHaveBeenCalledTimes(1);
-    expect(getAgentConfig).toHaveBeenCalledTimes(1);
+    expect(getAgentConfig).not.toHaveBeenCalled();
   });
 
   it('translates project choice, memory controls, and the scoped confirmation into Chinese', async () => {
     localStorage.setItem(LOCALE_STORAGE_KEY, 'zh-CN');
     render(panel());
-    expect(await screen.findByRole('switch', { name: '自动建立项目记忆' })).toBeChecked();
-    expect(screen.getByRole('heading', { name: '项目记忆' })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: '项目画像' })).toBeInTheDocument();
-    expect(screen.getByRole('combobox', { name: '仓库（所有者/仓库名）' })).toHaveValue(repo);
-    expect(screen.getByRole('button', { name: '刷新项目记忆' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '整合项目记忆' })).toBeInTheDocument();
-    expect(screen.getByRole('combobox', { name: '整合模型' })).toHaveValue('model-a');
-    const card = within(screen.getByRole('listitem', { name: '已保存的记忆 1' }));
-    fireEvent.click(card.getByRole('button', { name: '编辑记忆' }));
+    expect(await screen.findByRole('switch', { name: '自动记忆' })).toBeChecked();
+    expect(screen.getByText('仅用于该仓库，与用户记忆冲突时优先。')).toBeInTheDocument();
+    fireEvent.click(screen.getByText('画像与建议'));
+    expect(screen.getByRole('heading', { name: '项目画像' })).toBeVisible();
+    expect(screen.getByRole('combobox', { name: '仓库' })).toHaveValue(repo);
+    expect(screen.getByRole('button', { name: '刷新仓库列表' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '刷新' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '整合' }));
+    expect(await screen.findByRole('combobox', { name: '模型' })).toHaveValue('model-a');
+    expect(screen.getByRole('button', { name: '立即整合' })).toBeEnabled();
+    const card = within(screen.getByRole('listitem', { name: '记忆 1' }));
+    fireEvent.click(card.getByRole('button', { name: '编辑' }));
     expect(card.getByRole('textbox', { name: '记忆内容' })).toHaveFocus();
     expect(card.getByRole('combobox', { name: '适用范围' })).toHaveValue('repo');
-    expect(card.getByRole('button', { name: '保存记忆' })).toBeInTheDocument();
+    expect(card.getByRole('button', { name: '保存' })).toBeInTheDocument();
     fireEvent.click(card.getByRole('button', { name: '取消' }));
-    fireEvent.click(screen.getByRole('button', { name: '清除项目记忆' }));
+    fireEvent.click(screen.getByRole('button', { name: '清除' }));
     expect(screen.getByRole('group', { name: `清除 ${repo} 的记忆？` })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '确认清除项目记忆' })).toHaveFocus();
-    expect(screen.getByText(/用户记忆、头像和其他项目会保留/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '确认清除' })).toHaveFocus();
+    expect(screen.getByText(/用户记忆和其他仓库不受影响/)).toBeInTheDocument();
   });
 });

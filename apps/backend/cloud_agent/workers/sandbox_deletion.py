@@ -8,9 +8,15 @@ import re
 from typing import TYPE_CHECKING, Any, Protocol, TypedDict
 from urllib.parse import urlparse
 
+import httpx
+
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.sandbox_archive import S3SandboxArchiveStore
-from cloud_agent.sandbox_manager_routing import sandbox_manager_for_host
+from cloud_agent.sandbox_manager_client import SandboxManagerError
+from cloud_agent.sandbox_manager_routing import (
+    sandbox_manager_configuration_error,
+    sandbox_manager_for_host,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -43,6 +49,50 @@ def _validate_receipt(receipt: dict[str, Any], expected: dict[str, Any]) -> None
         raise ValueError("Sandbox archive receipt did not match the reviewed container.")
 
 
+def _discard_failure_reason(cause: BaseException) -> str:
+    """Classify sandbox manager failures without persisting their text or request URLs."""
+    transport = cause.__cause__ if isinstance(cause, SandboxManagerError) else cause
+    if isinstance(transport, httpx.TimeoutException):
+        return "The owning host's sandbox manager timed out before confirming removal."
+    if isinstance(transport, httpx.TransportError):
+        return "The owning host's sandbox manager could not be reached. Check its connectivity."
+    if not isinstance(cause, SandboxManagerError):
+        return ""
+    if cause.status_code in {401, 403}:
+        return (
+            "The owning host rejected the sandbox manager credential. "
+            "Check that the control plane and host use the same credential."
+        )
+    if cause.status_code == 404:
+        return (
+            "The owning host could not find the sandbox or deletion endpoint. "
+            "Check its container inventory and sandbox manager version."
+        )
+    if cause.status_code == 409:
+        return (
+            "The owning host refused deletion of the reviewed container. "
+            "Confirm that the exact container is stopped and idle."
+        )
+    if cause.status_code == 410:
+        return (
+            "The owning host could not recover the retained sandbox. "
+            "Check the reviewed container on that host."
+        )
+    if cause.status_code == 422:
+        return (
+            "The owning host rejected the deletion request. "
+            "Check that its sandbox manager is up to date."
+        )
+    if cause.status_code == 429:
+        return "The owning host's sandbox manager is busy."
+    if cause.status_code >= 500:
+        return (
+            "The owning host's sandbox manager failed while processing deletion. "
+            "Check its sandbox manager logs."
+        )
+    return "The owning host rejected the deletion request."
+
+
 async def delete_one_archived_sandbox(
     store: _DeletionStorage,
     *,
@@ -70,20 +120,26 @@ async def delete_one_archived_sandbox(
     discarding = bool(claim.get("deletion_discard"))
     verified = claim["deletion_state"] == "archived"
     archive_verified = verified
+    configuration_error = None
+    request_phase = "resolve_sandbox_manager"
     try:
         if discarding:
             host = await store.host_pool.get_host(host=str(claim["host"]))
             sandbox_manager = sandbox_manager_for_host(host) if host is not None else None
             if sandbox_manager is None:
+                configuration_error = sandbox_manager_configuration_error(host)
                 raise ValueError("The owning sandbox manager is unavailable.")
             payload = {
                 "request_id": fence["request_id"],
                 "generation": fence["generation"],
                 "expected_container_id": fence["container_id"],
+                "sandbox_id": fence["sandbox_id"],
             }
+            request_phase = "discard"
             deleted = await sandbox_manager.discard_sandbox_deletion(
                 str(claim["origin_thread_id"]), payload
             )
+            request_phase = "validate_discard_receipt"
             _validate_receipt(
                 deleted,
                 {
@@ -93,6 +149,7 @@ async def delete_one_archived_sandbox(
             )
             if deleted.get("deleted") is not True:
                 raise ValueError("The host did not confirm container deletion.")
+            request_phase = "complete_discard"
             completed = await store.sandbox.complete_admin_sandbox_discard(**fence)
             if not completed:
                 raise ValueError("Container deletion lost its durable request fence.")
@@ -221,9 +278,11 @@ async def delete_one_archived_sandbox(
         # instead of aborting it or starting an archive for a missing container.
         retain_pending = discarding or archive_verified or not abort_acknowledged
         if discarding:
+            reason = configuration_error or _discard_failure_reason(cause)
             error = (
                 "Container removal without an archive could not be confirmed. "
-                "Deletion will be retried."
+                + (f"{reason} " if reason else "")
+                + "Deletion will be retried."
             )
         else:
             error = "S3 archive or sandbox deletion could not complete. " + (
@@ -245,7 +304,14 @@ async def delete_one_archived_sandbox(
             raise
         logger.warning(
             "Sandbox archive/delete request did not complete",
-            extra={"sandbox_id": fence["sandbox_id"], "failure_type": type(cause).__name__},
+            extra={
+                "sandbox_id": fence["sandbox_id"],
+                "failure_type": type(cause).__name__,
+                "request_phase": request_phase if discarding else "archive_delete",
+                "sandbox_manager_status": cause.status_code
+                if isinstance(cause, SandboxManagerError)
+                else None,
+            },
         )
     return True
 

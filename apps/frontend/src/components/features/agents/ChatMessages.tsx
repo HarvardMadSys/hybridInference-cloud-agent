@@ -1,6 +1,17 @@
 'use client';
 
-import { Fragment, useEffect, useId, useState, type ReactNode } from 'react';
+import {
+  createContext,
+  Fragment,
+  memo,
+  useCallback,
+  useContext,
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
 import toast from 'react-hot-toast';
 
 import { Markdown } from '@/components/ui/Markdown';
@@ -145,6 +156,35 @@ type ToolActivityItem = {
   blockKey?: string;
 };
 
+type DisclosureState = {
+  expanded: boolean;
+  presentation?: TranscriptPresentation;
+};
+
+// A compact process body is unmounted while folded. Its small state store
+// remembers the reader's disclosures without retaining the transcript DOM.
+const ProcessDisclosureState = createContext<Map<string, DisclosureState> | null>(null);
+
+function useToolDisclosure(key: string, presentation?: TranscriptPresentation) {
+  const states = useContext(ProcessDisclosureState);
+  const [expanded, setExpanded] = useState(() => {
+    const saved = states?.get(key);
+    return saved && saved.presentation === presentation
+      ? saved.expanded
+      : presentation === 'detailed';
+  });
+  const previousPresentation = useRef(presentation);
+  useEffect(() => {
+    if (previousPresentation.current === presentation) return;
+    previousPresentation.current = presentation;
+    setExpanded(presentation === 'detailed');
+  }, [presentation]);
+  useEffect(() => {
+    states?.set(key, { expanded, presentation });
+  }, [states, key, expanded, presentation]);
+  return [expanded, setExpanded] as const;
+}
+
 function toolResultLabel(event: ToolActivityItem['event'], t: ReturnType<typeof useT>): string {
   return t(
     event.resultState === 'unknown'
@@ -177,6 +217,11 @@ function RichToolActivity({
   onInspectEvent?: InspectTranscriptEvent;
 }) {
   const t = useT();
+  const disclosureId = useId();
+  const [detailsExpanded, setDetailsExpanded] = useToolDisclosure(
+    `call:${blockKey ?? disclosureId}`,
+    presentation,
+  );
   const activity = parseToolActivity(event.tool, event.input);
   const resultLabel = toolResultLabel(event, t);
   if (activity && presentation !== 'compact') {
@@ -217,19 +262,27 @@ function RichToolActivity({
             output={event.output?.join('\n')}
             isError={event.outputIsError}
           />
-          <details className="group" open={presentation === 'detailed' || undefined}>
+          <details
+            className="group"
+            open={detailsExpanded}
+            onToggle={(event) => setDetailsExpanded(event.currentTarget.open)}
+          >
             <summary className="cursor-pointer text-xs text-gray-500 dark:text-gray-400">
               Call details
             </summary>
-            <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-md bg-gray-950 p-3 font-mono text-xs text-gray-200">
-              {event.input === undefined ? event.detail : JSON.stringify(event.input, null, 2)}
-            </pre>
-            {event.output !== undefined ? (
-              <pre
-                className={`mt-2 max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-md p-3 font-mono text-xs ${event.outputIsError ? 'bg-red-950 text-red-100' : 'bg-gray-950 text-gray-200'}`}
-              >
-                {event.output.join('\n')}
-              </pre>
+            {detailsExpanded ? (
+              <>
+                <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-md bg-gray-950 p-3 font-mono text-xs text-gray-200">
+                  {event.input === undefined ? event.detail : JSON.stringify(event.input, null, 2)}
+                </pre>
+                {event.output !== undefined ? (
+                  <pre
+                    className={`mt-2 max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-md p-3 font-mono text-xs ${event.outputIsError ? 'bg-red-950 text-red-100' : 'bg-gray-950 text-gray-200'}`}
+                  >
+                    {event.output.join('\n')}
+                  </pre>
+                ) : null}
+              </>
             ) : null}
           </details>
         </div>
@@ -241,7 +294,7 @@ function RichToolActivity({
   );
 }
 
-function ToolActivity({
+function ToolActivityBody({
   tools,
   presentation,
   jobId,
@@ -253,11 +306,11 @@ function ToolActivity({
   onInspectEvent?: InspectTranscriptEvent;
 }) {
   const t = useT();
-  const [expanded, setExpanded] = useState(presentation === 'detailed');
-  useEffect(() => {
-    setExpanded(presentation === 'detailed');
-  }, [presentation]);
   const detailsId = useId();
+  const [expanded, setExpanded] = useToolDisclosure(
+    `tools:${tools[0]?.blockKey ?? detailsId}`,
+    presentation,
+  );
   const label = tools.length === 1 ? 'tool call' : 'tool calls';
 
   return (
@@ -336,51 +389,65 @@ function ToolActivity({
         hidden={!expanded}
         className="mt-1 space-y-3 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2.5 dark:border-gray-700 dark:bg-gray-800"
       >
-        {tools.map(({ event, blockKey }, index) => {
-          const call =
-            event.input === undefined
-              ? event.detail
-              : typeof event.input === 'string'
-                ? event.input
-                : JSON.stringify(event.input, null, 2);
-          return (
-            <section
-              key={blockKey ?? index}
-              className="space-y-2 border-b border-gray-200 pb-3 last:border-b-0 last:pb-0 dark:border-gray-700"
-            >
-              <p className="flex items-center gap-1.5 text-xs font-medium text-gray-700 dark:text-gray-300">
-                <ToolIcon tool={event.tool} />
-                <span>
-                  {event.tool} · Call {index + 1}
-                </span>
-              </p>
-              <p className="text-xs text-gray-500 dark:text-gray-400">Tool call</p>
-              <pre className="max-h-72 overflow-auto whitespace-pre-wrap rounded-md bg-gray-100 px-3 py-2.5 font-mono text-xs leading-relaxed text-gray-700 dark:bg-gray-900 dark:text-gray-300">
-                {call}
-              </pre>
-              <p className="text-xs text-gray-500 dark:text-gray-400">Result</p>
-              {event.output !== undefined ? (
-                <pre
-                  className={`max-h-72 overflow-auto whitespace-pre-wrap rounded-md px-3 py-2.5 font-mono text-xs leading-relaxed ${
-                    event.outputIsError ? 'bg-red-950 text-red-100' : 'bg-gray-950 text-gray-200'
-                  }`}
-                >
-                  {event.output.join('\n') || 'No output text recorded.'}
-                </pre>
-              ) : (
-                <p className="text-xs text-gray-400 dark:text-gray-500">
-                  {event.resultState && event.resultState !== 'waiting'
-                    ? toolResultLabel(event, t)
-                    : 'Waiting for the tool result…'}
+        {expanded &&
+          tools.map(({ event, blockKey }, index) => {
+            const call =
+              event.input === undefined
+                ? event.detail
+                : typeof event.input === 'string'
+                  ? event.input
+                  : JSON.stringify(event.input, null, 2);
+            return (
+              <section
+                key={blockKey ?? index}
+                className="space-y-2 border-b border-gray-200 pb-3 last:border-b-0 last:pb-0 dark:border-gray-700"
+              >
+                <p className="flex items-center gap-1.5 text-xs font-medium text-gray-700 dark:text-gray-300">
+                  <ToolIcon tool={event.tool} />
+                  <span>
+                    {event.tool} · Call {index + 1}
+                  </span>
                 </p>
-              )}
-            </section>
-          );
-        })}
+                <p className="text-xs text-gray-500 dark:text-gray-400">Tool call</p>
+                <pre className="max-h-72 overflow-auto whitespace-pre-wrap rounded-md bg-gray-100 px-3 py-2.5 font-mono text-xs leading-relaxed text-gray-700 dark:bg-gray-900 dark:text-gray-300">
+                  {call}
+                </pre>
+                <p className="text-xs text-gray-500 dark:text-gray-400">Result</p>
+                {event.output !== undefined ? (
+                  <pre
+                    className={`max-h-72 overflow-auto whitespace-pre-wrap rounded-md px-3 py-2.5 font-mono text-xs leading-relaxed ${
+                      event.outputIsError ? 'bg-red-950 text-red-100' : 'bg-gray-950 text-gray-200'
+                    }`}
+                  >
+                    {event.output.join('\n') || 'No output text recorded.'}
+                  </pre>
+                ) : (
+                  <p className="text-xs text-gray-400 dark:text-gray-500">
+                    {event.resultState && event.resultState !== 'waiting'
+                      ? toolResultLabel(event, t)
+                      : 'Waiting for the tool result…'}
+                  </p>
+                )}
+              </section>
+            );
+          })}
       </div>
     </div>
   );
 }
+
+const ToolActivity = memo(
+  ToolActivityBody,
+  (previous, next) =>
+    previous.presentation === next.presentation &&
+    previous.jobId === next.jobId &&
+    previous.onInspectEvent === next.onInspectEvent &&
+    previous.tools.length === next.tools.length &&
+    previous.tools.every(
+      (tool, index) =>
+        tool.event === next.tools[index].event && tool.blockKey === next.tools[index].blockKey,
+    ),
+);
 
 /** Consecutive reasoning and calls share one activity group. */
 export function EventList({
@@ -597,6 +664,7 @@ function ProcessDisclosure({
     setExpanded(false);
   }, [enabled]);
   const bodyId = useId();
+  const states = useRef(new Map<string, DisclosureState>());
   const collapsed = enabled && !expanded;
   return (
     <section data-transcript-process data-transcript-process-collapsed={collapsed || undefined}>
@@ -613,7 +681,9 @@ function ProcessDisclosure({
         </button>
       ) : null}
       <div id={bodyId} hidden={collapsed} aria-label={t('transcript.process')}>
-        {children}
+        <ProcessDisclosureState.Provider value={states.current}>
+          {collapsed ? null : children}
+        </ProcessDisclosureState.Provider>
       </div>
     </section>
   );
@@ -941,12 +1011,26 @@ function ReasoningMessage({
   event: Extract<AgentEvent, { kind: 'thinking' }>;
   blockKey?: string;
 }) {
+  const states = useContext(ProcessDisclosureState);
+  const details = useRef<HTMLDetailsElement | null>(null);
+  const disclosureKey = `reasoning:${blockKey ?? event.sourceEventId ?? 'group'}`;
+  const rememberDetails = useCallback(
+    (element: HTMLDetailsElement | null) => {
+      if (element === null && details.current) {
+        states?.set(disclosureKey, { expanded: details.current.open });
+      }
+      details.current = element;
+    },
+    [states, disclosureKey],
+  );
   const blocks = (event.reasoningBlocks ?? [{ text: event.text, channel: undefined }]).filter(
     (block) => block.text.trim(),
   );
   if (blocks.length) {
     return (
       <details
+        ref={rememberDetails}
+        open={states?.get(disclosureKey)?.expanded}
         data-block-key={blockKey}
         aria-label="Agent reasoning"
         className="group my-2 rounded-lg border border-gray-200 bg-gray-50 dark:border-white/10 dark:bg-white/[0.025]"

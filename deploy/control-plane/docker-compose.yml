@@ -154,6 +154,11 @@ services:
       # header the caller chose.
       AGENT_SESSION_COOKIE_SECURE: ${AGENT_SESSION_COOKIE_SECURE:-true}
       AGENT_TRUST_PROXY_HEADERS: ${AGENT_TRUST_PROXY_HEADERS:-false}
+      # Serves the API schema and its docs pages on the main listener; for
+      # development only. The MCP-only listener never serves them.
+      AGENT_API_DOCS: ${AGENT_API_DOCS:-false}
+      # Live-update streams one account may hold open on this process.
+      AGENT_MAX_STREAMS_PER_USER: ${AGENT_MAX_STREAMS_PER_USER:-24}
       AGENT_LOG_LEVEL: ${AGENT_LOG_LEVEL:-INFO}
       AGENT_LOG_FORMAT: ${AGENT_LOG_FORMAT:-text}
       # Opt-in operation profiling. All three values are inert by default;

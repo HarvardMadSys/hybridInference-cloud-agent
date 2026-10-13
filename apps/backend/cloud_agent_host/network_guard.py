@@ -39,6 +39,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from cloud_agent_host.logging_utils import get_logger
 from cloud_agent_shared.egress import (
     RELAY_FAMILIES,
     TABLE_PREFIX,
@@ -48,9 +49,13 @@ from cloud_agent_shared.egress import (
 )
 from cloud_agent_shared.errors import SandboxError
 
+logger = get_logger(__name__)
+
 #: How long a successful verification is trusted before activation checks
 #: again. Group creation and every activation call :meth:`ensure`; reads of
-#: the kernel in between would put a container start on every command.
+#: the kernel in between would put a container start on every command. The
+#: background sweep does not wait this long: :meth:`recheck` reads the kernel
+#: on every pass.
 GUARD_RECHECK_S = 60.0
 
 _HELPER_TIMEOUT_S = 60
@@ -163,6 +168,38 @@ class HostNetworkGuard:
             self._refuse_overlapping_pools(listing=listings[-1])
             self._refuse_overlapping_routes()
             self._verified_at = time.monotonic()
+
+    def recheck(self) -> None:
+        """Read this deployment's tables from the kernel now, and repair them if changed.
+
+        :meth:`ensure` trusts a verification for a minute, which suits
+        activations but not the background sweep: a flush of the host's
+        ruleset (an ``nftables.service`` reload, say) would leave running
+        groups without their table for up to that long. So the sweep reads
+        the tables back on every pass, in one helper run and without
+        reinstalling, and only a difference (or a failed read) costs the full
+        :meth:`ensure`: reinstall, read back, and the neighbour and route
+        checks. That raises when the rules still cannot be shown, which is
+        what stops the running groups. A verification past its minute takes
+        the full path regardless, so those checks keep their cadence.
+        """
+        with self._lock:
+            verified_at = self._verified_at
+        if verified_at is not None and time.monotonic() - verified_at < GUARD_RECHECK_S:
+            try:
+                self._verify(render_ruleset(self.network))
+                return
+            except NetworkGuardError as exc:
+                logger.warning(
+                    "network_guard_rules_changed",
+                    extra={
+                        "event": "network_guard_rules_changed",
+                        "table": self.network.table,
+                        "detail": str(exc)[:300],
+                    },
+                )
+                self.invalidate()
+        self.ensure()
 
     def invalidate(self) -> None:
         """Forget the last verification, so the next activation reads the kernel."""

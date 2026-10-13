@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Protocol
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.settings import number_setting
 from cloud_agent.workers.background_wake import SNAPSHOT
+from cloud_agent_shared.host_settings import HOST_SETTINGS_BY_KEY
 
 if TYPE_CHECKING:
     from cloud_agent.ports import HostPoolRepository, SnapshotRepository
@@ -34,6 +35,14 @@ class _SnapshotCapture(Protocol):
 
 
 SNAPSHOT_CAPTURE_INTERVAL_S = 5.0
+#: The largest patch a snapshot receipt may carry. The broker captures it from
+#: Git output it stops at its command-output limit, and no host may set that
+#: above this setting's maximum, so an honest receipt never exceeds it. A
+#: larger one is a host misbehaving, and is refused before it reaches the
+#: database rather than stored for the publisher to reject later.
+MAX_SNAPSHOT_PATCH_BYTES = (
+    HOST_SETTINGS_BY_KEY["workspace_command_output_max_mib"].maximum * 1024 * 1024
+)
 #: The longest an idle coordinator that is told about new work sleeps. It wakes
 #: sooner for a notification or the earliest capture retry; this is for what
 #: announces nothing, such as a capture the reaper found stalled.
@@ -78,6 +87,8 @@ async def _capture_due_shared_snapshot(store: _SnapshotCapture) -> bool:
         digest = receipt.get("content_sha256")
         if not isinstance(patch, str) or not isinstance(digest, str):
             raise ValueError("shared snapshot host receipt omitted its patch or hash")
+        if len(patch.encode("utf-8")) > MAX_SNAPSHOT_PATCH_BYTES:
+            raise ValueError("shared snapshot host receipt exceeds the patch size limit")
         recorded = await store.snapshot.record_sandbox_snapshot_capture(
             snapshot_id=int(snapshot["snapshot_id"]),
             sandbox_id=str(snapshot["sandbox_id"]),

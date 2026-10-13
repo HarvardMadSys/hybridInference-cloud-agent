@@ -11,6 +11,7 @@ from urllib.parse import quote
 
 import httpx
 
+from cloud_agent.mcp.http_body import IDENTITY_ENCODING_HEADERS, iter_response_bytes
 from cloud_agent_shared.operation_profiling import (
     MAX_CONTEXT_CHARS,
     PROFILING_CONTEXT_HEADER,
@@ -24,6 +25,47 @@ if TYPE_CHECKING:
 SHARED_SESSION_FORK_TIMEOUT_S = 180.0
 # A new member can install its selected plugins before opening the native CLI.
 SHARED_PLUGIN_SESSION_FORK_TIMEOUT_S = 960.0
+
+#: The most this process buffers from one sandbox manager reply that carries workspace
+#: content: a file or listing, a one-shot command, Git inspection or a shared
+#: snapshot. The sandbox manager's own bounds, which a misbehaving host does not have to
+#: keep, stop those at 2 MiB of command or Git output plus 2 MiB of stderr, a
+#: 512 KiB preview or 5,000 directory entries. JSON escapes a control byte as
+#: six bytes, the widest any character grows, so no honest reply passes 24 MiB.
+MAX_SANDBOX_MANAGER_CONTENT_BYTES = 32 * 1024 * 1024
+#: The same for every other reply: lifecycle answers, terminal bookkeeping,
+#: the retained-sandbox inventory and native questions, which are themselves
+#: cut from protocol records of at most 8 MiB.
+MAX_SANDBOX_MANAGER_CONTROL_BYTES = 16 * 1024 * 1024
+#: The route suffixes whose replies are workspace content.
+_CONTENT_ROUTES = frozenset({"files", "terminal", "git", "snapshot"})
+
+
+async def _read_capped(response: httpx.Response, limit: int) -> bytes | None:
+    """Return the body, or ``None`` as soon as it passes ``limit`` bytes.
+
+    A host chooses both when the control plane reads from its sandbox manager and how
+    much it sends, and these reads run in the process every tenant shares. So
+    the body is consumed as a stream and abandoned at the ceiling, rather than
+    buffered whole and measured afterwards; ``Content-Length`` is not a
+    control, because the far side writes it. Compressed bodies are refused
+    before a decoder can expand them: the sandbox manager never compresses.
+    """
+    body = bytearray()
+    async for chunk in iter_response_bytes(response):
+        if len(body) + len(chunk) > limit:
+            return None
+        body.extend(chunk)
+    return bytes(body)
+
+
+def _json_object(body: bytes) -> dict[str, Any] | None:
+    """Decode a JSON object, or return ``None`` for anything else."""
+    try:
+        value = json.loads(body)
+    except ValueError:
+        return None
+    return value if isinstance(value, dict) else None
 
 
 @dataclass
@@ -79,7 +121,7 @@ class SandboxManagerClient:
                 one, each call opens and closes its own connection as before.
         """
         self._base_url = base_url.rstrip("/")
-        self._headers = {"X-Agent-Workspace-Token": token}
+        self._headers = {"X-Agent-Workspace-Token": token, **IDENTITY_ENCODING_HEADERS}
         self._client = client
 
     @asynccontextmanager
@@ -103,17 +145,59 @@ class SandboxManagerClient:
             yield client
 
     @staticmethod
-    def _response_error(response: httpx.Response) -> SandboxManagerError:
-        """Read a bounded, owner-safe error from a completed sandbox manager response."""
+    def _response_error(status_code: int, body: bytes | None) -> SandboxManagerError:
+        """Read a bounded, owner-safe error from a sandbox manager's error reply.
+
+        ``body`` is ``None`` when the reply passed its ceiling; the generic
+        message stands in for whatever detail it held.
+        """
         message = "The live workspace request failed."
-        try:
-            body = response.json()
-            detail = body.get("detail") if isinstance(body, dict) else None
-            if isinstance(detail, str) and detail:
-                message = detail
-        except ValueError:
-            pass
-        return SandboxManagerError(response.status_code, message)
+        decoded = _json_object(body) if body is not None else None
+        detail = decoded.get("detail") if decoded is not None else None
+        if isinstance(detail, str) and detail:
+            message = detail
+        return SandboxManagerError(status_code, message)
+
+    @staticmethod
+    async def _exchange(
+        client: httpx.AsyncClient,
+        method: str,
+        url: str,
+        *,
+        limit: int,
+        read_success: bool = True,
+        **request: Any,
+    ) -> tuple[int, bytes | None]:
+        """Send one request; return its status and its body read under ``limit``.
+
+        ``read_success=False`` leaves a success body unread, for a caller that
+        needs only the status. Error bodies are always read, for their detail.
+        """
+        async with client.stream(method, url, **request) as response:
+            if response.status_code < 400 and not read_success:
+                return response.status_code, b""
+            return response.status_code, await _read_capped(response, limit)
+
+    @classmethod
+    def _reply(
+        cls, status_code: int, body: bytes | None, *, subject: str, invalid: str
+    ) -> dict[str, Any]:
+        """Turn one bounded sandbox manager reply into its JSON object, or raise.
+
+        A body that is not a JSON object is ``invalid`` — the same 502 the
+        caller always gave a non-object, and now also what a non-JSON body
+        gets instead of escaping as a bare decoding error.
+        """
+        if status_code >= 400:
+            raise cls._response_error(status_code, body)
+        if body is None:
+            raise SandboxManagerError(
+                502, f"{subject} returned more data than the control plane accepts."
+            )
+        decoded = _json_object(body)
+        if decoded is None:
+            raise SandboxManagerError(502, invalid)
+        return decoded
 
     async def _request(
         self,
@@ -126,11 +210,18 @@ class SandboxManagerClient:
         timeout: float = 30,
         headers: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
+        limit = (
+            MAX_SANDBOX_MANAGER_CONTENT_BYTES
+            if suffix in _CONTENT_ROUTES
+            else MAX_SANDBOX_MANAGER_CONTROL_BYTES
+        )
         try:
             async with self._http(timeout) as client:
-                response = await client.request(
+                status_code, body = await self._exchange(
+                    client,
                     method,
                     f"{self._base_url}/workspaces/{workspace_id}/{suffix}",
+                    limit=limit,
                     headers=headers or self._headers,
                     params=params,
                     json=json,
@@ -140,12 +231,12 @@ class SandboxManagerClient:
             raise SandboxManagerError(
                 503, "The live workspace is temporarily unavailable."
             ) from exc
-        if response.is_error:
-            raise self._response_error(response)
-        body = response.json()
-        if not isinstance(body, dict):
-            raise SandboxManagerError(502, "The live workspace returned an invalid response.")
-        return body
+        return self._reply(
+            status_code,
+            body,
+            subject="The live workspace",
+            invalid="The live workspace returned an invalid response.",
+        )
 
     async def _shared_sandbox_request(
         self,
@@ -162,11 +253,18 @@ class SandboxManagerClient:
         path = f"/shared-sandboxes/{encoded}"
         if suffix:
             path += f"/{suffix}"
+        limit = (
+            MAX_SANDBOX_MANAGER_CONTENT_BYTES
+            if suffix in _CONTENT_ROUTES
+            else MAX_SANDBOX_MANAGER_CONTROL_BYTES
+        )
         try:
             async with self._http(timeout) as client:
-                response = await client.request(
+                status_code, body = await self._exchange(
+                    client,
                     method,
                     f"{self._base_url}{path}",
+                    limit=limit,
                     headers=self._headers,
                     params=params,
                     json=json,
@@ -176,12 +274,12 @@ class SandboxManagerClient:
             raise SandboxManagerError(
                 503, "The shared chat supervisor is temporarily unavailable."
             ) from exc
-        if response.is_error:
-            raise self._response_error(response)
-        body = response.json()
-        if not isinstance(body, dict):
-            raise SandboxManagerError(502, "The shared chat supervisor returned invalid data.")
-        return body
+        return self._reply(
+            status_code,
+            body,
+            subject="The shared chat supervisor",
+            invalid="The shared chat supervisor returned invalid data.",
+        )
 
     async def health(self, *, timeout: float = 3) -> None:
         """Reach the sandbox manager and be recognised by it, or raise.
@@ -199,13 +297,19 @@ class SandboxManagerClient:
         """
         try:
             async with self._http(timeout) as client:
-                response = await client.get(
-                    f"{self._base_url}/health", headers=self._headers, timeout=timeout
+                status_code, body = await self._exchange(
+                    client,
+                    "GET",
+                    f"{self._base_url}/health",
+                    limit=MAX_SANDBOX_MANAGER_CONTROL_BYTES,
+                    read_success=False,
+                    headers=self._headers,
+                    timeout=timeout,
                 )
         except httpx.HTTPError as exc:
             raise SandboxManagerError(503, f"unreachable: {exc}") from exc
-        if response.is_error:
-            raise self._response_error(response)
+        if status_code >= 400:
+            raise self._response_error(status_code, body)
 
     async def list_sandboxes(
         self, *, timeout: float = 10, thread_id: str | None = None
@@ -216,8 +320,11 @@ class SandboxManagerClient:
         )
         try:
             async with self._http(timeout) as client:
-                response = await client.get(
+                status_code, raw = await self._exchange(
+                    client,
+                    "GET",
                     f"{self._base_url}/sandboxes",
+                    limit=MAX_SANDBOX_MANAGER_CONTROL_BYTES,
                     headers=self._headers,
                     timeout=timeout,
                     **selection,
@@ -226,10 +333,12 @@ class SandboxManagerClient:
             raise SandboxManagerError(
                 503, "The sandbox manager inventory is unavailable."
             ) from None
-        if response.is_error:
+        if status_code >= 400:
             raise SandboxManagerError(503, "The sandbox manager refused the inventory request.")
+        if raw is None:
+            raise SandboxManagerError(502, "The sandbox manager inventory exceeds the size limit.")
         try:
-            body = response.json()
+            body = json.loads(raw)
         except ValueError:
             raise SandboxManagerError(502, "The sandbox manager inventory is invalid.") from None
         if not isinstance(body, dict) or not isinstance(body.get("sandboxes"), list):
@@ -367,8 +476,10 @@ class SandboxManagerClient:
             )
             response = await client.send(request, stream=True)
             if response.is_error:
-                await response.aread()
-                raise self._response_error(response)
+                raise self._response_error(
+                    response.status_code,
+                    await _read_capped(response, MAX_SANDBOX_MANAGER_CONTROL_BYTES),
+                )
             ownership_transferred = True
             return SandboxManagerStream(
                 client, response, profiling_answer=answer_from_headers(response.headers)

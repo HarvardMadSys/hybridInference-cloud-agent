@@ -3063,21 +3063,48 @@ async def test_the_ambiguous_quarantine_branch_cannot_be_reached_from_the_old_sc
         await pool.close()
 
 
-async def test_public_catalog_snapshot_survives_repository_restart_and_refuses_older_sync(pool):
-    """Replacing the directory is atomic and cannot overwrite newer metadata."""
+async def test_public_catalog_snapshot_uses_settings_and_database_generation_fences(pool):
+    """A stale process cannot replace the current Registry's complete snapshot."""
     from cloud_agent.storage.repositories.mcp_catalog import PostgresMcpCatalogRepository
 
+    old_url = "https://old-registry.example"
+    new_url = "https://new-registry.example"
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO agent_settings (id, revision, "values")
+               VALUES (TRUE, 1, jsonb_build_object('mcp_registry_url', $1::text))""",
+            old_url,
+        )
     catalog = PostgresMcpCatalogRepository(pool)
     assert await catalog.load_mcp_catalog() is None
-    first = datetime.now(timezone.utc)
-    await catalog.save_mcp_catalog([{"name": "com.example/old"}], first)
-    newer = first + timedelta(hours=1)
-    await catalog.save_mcp_catalog([{"name": "com.example/new"}], newer)
-    await catalog.save_mcp_catalog([{"name": "com.example/stale"}], first)
+    stale_source = await catalog.begin_mcp_catalog_sync()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """UPDATE agent_settings
+               SET revision = revision + 1,
+                   "values" = jsonb_set("values", '{mcp_registry_url}', to_jsonb($1::text))
+               WHERE id = TRUE""",
+            new_url,
+        )
+    older_scan = await catalog.begin_mcp_catalog_sync()
+    newer_scan = await catalog.begin_mcp_catalog_sync()
+    saved = await catalog.save_mcp_catalog([{"name": "com.example/new"}], newer_scan)
+    assert saved.saved_at is not None
+    rejected_older = await catalog.save_mcp_catalog([{"name": "com.example/older"}], older_scan)
+    assert rejected_older.saved_at is None
+    assert rejected_older.registry_url == new_url
+    assert rejected_older.settings_revision == newer_scan.settings_revision
+    rejected_stale = await catalog.save_mcp_catalog([{"name": "com.example/stale"}], stale_source)
+    assert rejected_stale.saved_at is None
+    assert rejected_stale.registry_url == new_url
+    assert rejected_stale.settings_revision == newer_scan.settings_revision
     restarted = PostgresMcpCatalogRepository(pool)
     assert await restarted.load_mcp_catalog() == {
         "entries": [{"name": "com.example/new"}],
-        "synced_at": newer,
+        "synced_at": saved.saved_at,
+        "registry_url": new_url,
+        "settings_revision": newer_scan.settings_revision,
+        "generation": newer_scan.generation,
     }
 
 

@@ -2,7 +2,7 @@ openapi: 3.1.0
 
 info:
   title: HybridInference gateway — internal lookups
-  version: "1.1.0"
+  version: "1.2.0"
   x-source:
     repo: HarvardMadSys/hybridInference
     branch: murphy/codex/gateway-agent-access-policy
@@ -29,6 +29,7 @@ info:
     |---|---|
     | `GET /internal/model-catalog` | the `visible_models` catalog read |
     | `GET /internal/users/{id}/agent-access` | Agent admission and administration policy |
+    | `GET /internal/users/{id}/status` | Read-only account email in Profile |
 
     **Every consumer of this document must fail closed.** An unreachable
     catalog resolves to *no* models, not every model; an unreadable user status
@@ -46,6 +47,42 @@ tags:
     description: Not public API. Behind the shared dispatch token.
 
 paths:
+  /internal/users/{user_id}/status:
+    get:
+      operationId: userStatusForProfile
+      summary: Read an account's current email for display
+      description: |
+        Existing Gateway lookup, verified against origin/dev commit 3d06362f
+        in serving/servers/routers/internal_lookups.py. Profile consumes only
+        user_id, exists, and email. Agent authorization still uses agent-access;
+        status, active, and role never grant any Agent permission. Email is read
+        on demand and is not copied to the Agent database or session claims.
+      security:
+        - dispatchToken: []
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Existing account metadata or exists false for an unknown account.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [user_id, exists, active]
+                properties:
+                  user_id: { type: string }
+                  exists: { type: boolean }
+                  active: { type: boolean }
+                  status: { type: [string, "null"] }
+                  role: { type: string }
+                  email: { type: [string, "null"] }
+        "401":
+          description: Invalid dispatch token.
+        "404":
+          description: Internal API or account storage is not configured.
   /internal/model-catalog:
     get:
       tags: [internal]

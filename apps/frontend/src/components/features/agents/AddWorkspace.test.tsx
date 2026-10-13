@@ -45,8 +45,8 @@ describe('add workspace picker', () => {
     render(<AddWorkspace userId="alice" existing={[]} onSelect={select} />);
     fireEvent.click(screen.getByRole('button', { name: 'Add workspace' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Create repository' }));
+    const name = await screen.findByRole('textbox', { name: 'Repository name' });
     const dialog = screen.getByRole('dialog', { name: 'Create repository' });
-    const name = screen.getByRole('textbox', { name: 'Repository name' });
     expect(name).toHaveFocus();
     fireEvent.change(name, { target: { value: 'new-repo' } });
     fireEvent.submit(dialog.querySelector('form')!);

@@ -9,7 +9,7 @@ import {
   recordedResultUrl,
   type RecordedFileSelection,
   type RecordedTurnOutputs,
-} from './turnDeliverables';
+} from './recordedTurnOutputs';
 
 export interface TurnDeliverablesProps {
   job: { id: string; state: AgentJobState | AgentJobApi['state'] | undefined };

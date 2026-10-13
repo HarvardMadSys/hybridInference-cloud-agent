@@ -274,6 +274,22 @@ async def agent_access(user_id: str, authorization: str | None = Header(None)) -
     return {"user_id": user_id, "allowed": True, "permissions": ["agent.use", "agent.admin"]}
 
 
+@app.get("/internal/users/{user_id}/status")
+async def user_status(user_id: str, authorization: str | None = Header(None)) -> dict[str, Any]:
+    """Supply the local developer's display email through the Gateway contract."""
+    _require_dispatch(authorization)
+    if user_id != USER_ID:
+        return {"user_id": user_id, "exists": False, "active": False}
+    return {
+        "user_id": user_id,
+        "exists": True,
+        "active": True,
+        "status": "active",
+        "role": "admin",
+        "email": "developer@example.com",
+    }
+
+
 @app.get("/internal/model-catalog")
 async def model_catalog(
     user_id: str = Query(...), authorization: str | None = Header(None)

@@ -27,7 +27,7 @@ import hashlib
 import hmac
 import secrets
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 import jwt
@@ -35,6 +35,9 @@ from jwt import PyJWKClient
 
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.settings import setting_env
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 logger = get_logger(__name__)
 
@@ -73,7 +76,39 @@ JWKS_FETCH_TIMEOUT_S = 10.0
 #: extended on use. Nothing revokes a session before then: signing out drops
 #: only the browser's copy, and rotating ``AGENT_SESSION_SECRET`` ends them all.
 SESSION_TTL_S = 30 * 24 * 60 * 60
-SESSION_COOKIE = "cloud_agent_session"
+
+#: The session cookie's name wherever it carries ``Secure``.
+#:
+#: A browser accepts a ``__Host-`` cookie only from this host, over HTTPS, with
+#: ``Path=/`` and no ``Domain``. A plain name accepts more: any host on the same
+#: site can set a ``Domain=`` cookie of that name, which lands beside this
+#: host's and can pin a browser into a session somebody else chose.
+SESSION_COOKIE = "__Host-cloud_agent_session"
+
+#: The name the cookie had before the prefix, and still has without ``Secure``
+#: (plain ``http://localhost``, where browsers refuse the prefix). Still read,
+#: for sessions issued under it before the rename — at most
+#: :data:`SESSION_TTL_S` after it — and expired by every sign-in and sign-out
+#: so that a browser converges on the prefixed name.
+LEGACY_SESSION_COOKIE = "cloud_agent_session"
+
+
+def session_cookie_name(*, secure: bool) -> str:
+    """Return the name a new session cookie is set under."""
+    return SESSION_COOKIE if secure else LEGACY_SESSION_COOKIE
+
+
+def session_from_cookies(cookies: Mapping[str, str]) -> str | None:
+    """Return the session a request's cookies carry, preferring the prefixed name.
+
+    While a prefixed cookie is present the plain one is not read at all, even
+    if the prefixed one turns out not to verify: a plain-named cookie is the
+    one a sibling host can plant, so it never stands in for this host's own.
+    """
+    if SESSION_COOKIE in cookies:
+        return cookies[SESSION_COOKIE] or None
+    return cookies.get(LEGACY_SESSION_COOKIE) or None
+
 
 #: The parked half of a sign-in: the PKCE verifier and the CSRF ``state``,
 #: signed and handed to the browser as an HttpOnly cookie for the length of one
@@ -403,7 +438,8 @@ def state_matches(presented: str, expected: str) -> bool:
 
     Constant-time: the comparison is of a secret this service minted, and a
     timing oracle on it would let a caller discover a valid ``state`` a
-    character at a time.
+    character at a time. Bytes rather than text, because ``compare_digest``
+    raises on a non-ASCII ``str`` and the presented value is any query text.
 
     Args:
         presented: The ``state`` the callback arrived with.
@@ -414,4 +450,4 @@ def state_matches(presented: str, expected: str) -> bool:
     """
     if not presented or not expected:
         return False
-    return hmac.compare_digest(presented, expected)
+    return hmac.compare_digest(presented.encode(), expected.encode())

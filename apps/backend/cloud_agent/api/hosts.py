@@ -33,6 +33,7 @@ from cloud_agent.host_pool import (
 )
 from cloud_agent.sandbox_manager_routing import (
     SandboxManagerUrlRefused,
+    probe_error_for_host,
     probe_sandbox_manager,
     validate_sandbox_manager_url,
 )
@@ -189,8 +190,9 @@ async def register_host(
     # operator can correct; consuming the token first turns that typo into a
     # second privileged admin operation for no security benefit.
     sandbox_manager_url = _checked_sandbox_manager_url(body.sandbox_manager_url)
+    enrollment_token_hash = hash_secret(body.enroll_token)
     if not await job_store.host_pool.consume_enroll_token(
-        token_hash=hash_secret(body.enroll_token), host=body.name
+        token_hash=enrollment_token_hash, host=body.name
     ):
         # One answer for expired, already-spent, never-issued and issued-for-
         # another-host: they are the same fact from the presenter's side — this
@@ -211,6 +213,7 @@ async def register_host(
         host = await job_store.host_pool.register_host(
             host=body.name,
             credential_hash=hash_secret(credential),
+            enrollment_token_hash=enrollment_token_hash,
             capabilities=body.capabilities,
             slots_total=body.slots_total,
             sandbox_manager_url=sandbox_manager_url,
@@ -219,6 +222,16 @@ async def register_host(
         )
     except ValueError as exc:
         error_type = str(exc)
+        if error_type == "enrollment_token_removed":
+            raise HTTPException(
+                status_code=401,
+                detail={
+                    "error": {
+                        "type": "unauthorized",
+                        "message": "This enrollment token is no longer valid. Issue a new one.",
+                    }
+                },
+            ) from exc
         if error_type == "host_drain_fenced":
             raise HTTPException(
                 status_code=409,
@@ -446,13 +459,16 @@ from cloud_agent.application.residency import residency_ttl_s
 async def _probed_sandbox_manager_error(
     host: str, sandbox_manager_url: str | None, *, force: bool = False
 ) -> str | None:
-    """Probe the reported sandbox manager, log a failure, and hand it back to the host.
+    """Probe the reported sandbox manager, log a failure, and tell the host it failed.
 
     Two audiences, because they notice different things. The log is where an
-    operator looks after something is already wrong. The response is what the
-    runner prints on the machine being deployed — which `sandbox_host.sh
-    up` tails, so a misconfigured deploy says so while somebody is still
-    watching it.
+    operator looks after something is already wrong, and it gets the full
+    reason. The response is what the runner prints on the machine being
+    deployed — which `sandbox_host.sh up` tails, so a misconfigured deploy says
+    so while somebody is still watching it. It gets only
+    :func:`~cloud_agent.sandbox_manager_routing.probe_error_for_host`: the host chose
+    the address being dialled, so the dial's own error would tell it what this
+    control plane can reach.
 
     Never raises and never refuses the registration. A sandbox manager that is slow to
     start is normal — compose brings it up beside the runner — and a control
@@ -468,4 +484,4 @@ async def _probed_sandbox_manager_error(
                 "sandbox_manager_error": error,
             },
         )
-    return error
+    return probe_error_for_host(error)

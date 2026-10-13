@@ -3054,3 +3054,217 @@ async def test_running_autoscale_acquisition_cannot_be_cancelled(db, store):
 
     with pytest.raises(ValueError, match="operation_in_flight"):
         await repo.cancel_operation(operation_row["id"])
+
+
+OLD_SHA = "d" * 40
+NEW_SHA = "e" * 40
+OTHER_SHA = "f" * 40
+OLD_DIGEST = "a" * 64
+NEW_DIGEST = "b" * 64
+OTHER_DIGEST = "c" * 64
+
+
+def _profile_snapshot(profile_id: str, sha: str, digest: str, bundle: str) -> dict:
+    return {
+        "id": profile_id,
+        "label": profile_id,
+        "deployment_sha": sha,
+        "source_sha256": digest,
+        "source_bundle": bundle,
+        "deploy_root": "/opt/" + profile_id,
+    }
+
+
+async def _ready_allocation(repo, name: str, profile: dict, *, state: str = "ready") -> str:
+    request = str(uuid4())
+    created = await repo.create_allocation_operation(
+        request_id=request,
+        fingerprint=request,
+        kind="add",
+        allocation={
+            "name": name,
+            "provider_id": "existing_ssh",
+            "mode": "attach",
+            "management_mode": "manage",
+            "deployment_profile": profile,
+        },
+        parameters={},
+        requested_by="admin",
+    )
+    claimed = await repo.claim_operation(worker_id="fixture")
+    assert claimed is not None and claimed["id"] == created["id"]
+    await repo.upsert_node(
+        allocation_id=created["allocation_id"],
+        node={"provider_node_id": name, "instance_identity": request, "name": name},
+    )
+    await repo.observe_allocation(
+        allocation_id=created["allocation_id"],
+        observation={
+            "external_id": request,
+            "observed_state": state,
+            "expiration_known": False,
+            "scope_complete": True,
+        },
+    )
+    assert await repo.finish_operation(
+        operation_id=created["id"],
+        generation=claimed["generation"],
+        worker_id="fixture",
+        state="succeeded",
+        step="ready",
+    )
+    return created["allocation_id"]
+
+
+async def test_host_release_moves_shared_profiles_and_live_snapshots(store):
+    """One release moves together, including its spare, and leaves other work alone."""
+    repo = store.compute_resources
+    profiles = {
+        "profile-current": b"current-old",
+        "profile-spare": b"spare-old",
+        "profile-inflight": b"inflight-old",
+        "profile-retired": b"retired-old",
+        "profile-other": b"other-old",
+    }
+    for profile_id, bundle in profiles.items():
+        sha = OTHER_SHA if profile_id == "profile-other" else OLD_SHA
+        digest = OTHER_DIGEST if profile_id == "profile-other" else OLD_DIGEST
+        await repo.save_deployment_profile(
+            profile_id=profile_id,
+            label=profile_id,
+            configuration={"deployment_sha": sha, "deploy_root": "/opt/" + profile_id},
+            source_bundle=bundle,
+            source_sha256=digest,
+            secret_ciphertext="cipher-" + profile_id,
+        )
+    current = await _ready_allocation(
+        repo,
+        "current",
+        _profile_snapshot(
+            "profile-current", OLD_SHA, OLD_DIGEST, "stored-profile:profile-current:bundle"
+        ),
+    )
+    file_backed = await _ready_allocation(
+        repo,
+        "file-backed",
+        _profile_snapshot("file-backed", OLD_SHA, OLD_DIGEST, "/private/host.tar.gz"),
+    )
+    inflight = await _ready_allocation(
+        repo,
+        "inflight",
+        _profile_snapshot(
+            "profile-inflight", OLD_SHA, OLD_DIGEST, "stored-profile:profile-inflight:bundle"
+        ),
+    )
+    other = await _ready_allocation(
+        repo,
+        "other",
+        _profile_snapshot("profile-other", OTHER_SHA, OTHER_DIGEST, "/private/other.tar.gz"),
+    )
+    retired = await _ready_allocation(
+        repo,
+        "retired",
+        _profile_snapshot(
+            "profile-retired", OLD_SHA, OLD_DIGEST, "stored-profile:profile-retired:bundle"
+        ),
+        state="terminated",
+    )
+    acquire = await operation(repo, inflight, "acquire")
+    assert acquire["allocation_id"] == inflight
+    assert acquire["kind"] == "acquire"
+    upgrade = await operation(repo, current, "upgrade")
+    assert upgrade["allocation_id"] == current
+    assert upgrade["kind"] == "upgrade"
+    before = await repo.get_deployment_profile("profile-current")
+    with pytest.raises(ValueError, match="host_release_not_recorded"):
+        await repo.advance_host_release(
+            allocation_id=current,
+            previous_sha=OLD_SHA,
+            previous_digest="0" * 64,
+            deployment_sha=NEW_SHA,
+            source_sha256=NEW_DIGEST,
+            source_bundle=b"replacement",
+            release_bundle_path="/app/compute-host-release/source.tar.gz",
+            **fence(upgrade),
+        )
+    assert (await repo.get_deployment_profile("profile-current"))["source_bundle"] == b"current-old"
+
+    await repo.advance_host_release(
+        allocation_id=current,
+        previous_sha=OLD_SHA,
+        previous_digest=OLD_DIGEST,
+        deployment_sha=NEW_SHA,
+        source_sha256=NEW_DIGEST,
+        source_bundle=b"replacement",
+        release_bundle_path="/app/compute-host-release/source.tar.gz",
+        **fence(upgrade),
+    )
+
+    async def stored(profile_id: str) -> dict:
+        return await repo.get_deployment_profile(profile_id)
+
+    moved = await stored("profile-current")
+    spare = await stored("profile-spare")
+    assert moved["source_bundle"] == spare["source_bundle"] == b"replacement"
+    assert moved["source_sha256"] == spare["source_sha256"] == NEW_DIGEST
+    assert moved["configuration"]["deployment_sha"] == NEW_SHA
+    assert moved["configuration"]["deploy_root"] == "/opt/profile-current"
+    assert moved["secret_ciphertext"] == "cipher-profile-current"
+    assert moved["revision"] == before["revision"] + 1
+    assert (await stored("profile-inflight"))["source_bundle"] == b"inflight-old"
+    assert (await stored("profile-inflight"))["source_sha256"] == OLD_DIGEST
+    assert (await stored("profile-retired"))["source_bundle"] == b"replacement"
+    assert (await stored("profile-other"))["source_bundle"] == b"other-old"
+    assert (await stored("profile-other"))["configuration"]["deployment_sha"] == OTHER_SHA
+
+    current_profile = (await repo.get_allocation(current))["deployment_profile"]
+    assert current_profile["deployment_sha"] == NEW_SHA
+    assert current_profile["source_sha256"] == NEW_DIGEST
+    assert current_profile["source_bundle"] == "stored-profile:profile-current:bundle"
+    assert current_profile["deploy_root"] == "/opt/profile-current"
+    file_profile = (await repo.get_allocation(file_backed))["deployment_profile"]
+    assert file_profile["source_bundle"] == "/app/compute-host-release/source.tar.gz"
+    assert file_profile["deployment_sha"] == NEW_SHA
+    inflight_profile = (await repo.get_allocation(inflight))["deployment_profile"]
+    assert inflight_profile["deployment_sha"] == OLD_SHA
+    assert inflight_profile["source_bundle"] == "stored-profile:profile-inflight:bundle"
+    assert (await repo.get_allocation(other))["deployment_profile"]["deployment_sha"] == OTHER_SHA
+    retired_profile = (await repo.get_allocation(retired))["deployment_profile"]
+    assert retired_profile["deployment_sha"] == OLD_SHA
+    assert retired_profile["source_bundle"] == "stored-profile:profile-retired:bundle"
+
+    await repo.advance_host_release(
+        allocation_id=current,
+        previous_sha=NEW_SHA,
+        previous_digest=NEW_DIGEST,
+        deployment_sha=NEW_SHA,
+        source_sha256=NEW_DIGEST,
+        source_bundle=b"replacement",
+        release_bundle_path="/app/compute-host-release/source.tar.gz",
+        **fence(upgrade),
+    )
+    assert (await stored("profile-current"))["revision"] == moved["revision"]
+
+    assert await repo.finish_operation(
+        **fence(upgrade),
+        state="blocked",
+        step="restored",
+        message="rolled back",
+        result={"release_attempts": 2, "restore_attempted": True, "kept": True},
+    )
+    checked = await operation(repo, file_backed, "inspect")
+    assert checked["kind"] == "inspect"
+    assert await repo.finish_operation(
+        **fence(checked),
+        state="blocked",
+        step="observed",
+        message="kept",
+        result={"release_attempts": 1, "restore_attempted": True},
+    )
+    inspected = await repo.retry_operation(checked["id"])
+    assert inspected["result"]["release_attempts"] == 1
+    assert inspected["result"]["restore_attempted"] is True
+
+    retried = await repo.retry_operation(upgrade["id"])
+    assert retried["state"] == "pending"
+    assert retried["result"] == {"kept": True}

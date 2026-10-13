@@ -5,9 +5,13 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 
+from cloud_agent import sandbox_manager_routing
+from cloud_agent.logging_utils import JsonLogFormatter
 from cloud_agent.sandbox_archive import ArchiveReceipt, ArchiveUpload
+from cloud_agent.sandbox_manager_client import SandboxManagerError
 from cloud_agent.workers import sandbox_deletion as worker
 
 SHA256 = "a" * 64
@@ -116,6 +120,15 @@ async def test_discard_removes_the_container_without_an_archive(monkeypatch):
     store.sandbox.record_admin_sandbox_archive.assert_not_awaited()
     store.sandbox.complete_admin_sandbox_deletion.assert_not_awaited()
     store.sandbox.complete_admin_sandbox_discard.assert_awaited_once()
+    sandbox_manager.discard_sandbox_deletion.assert_awaited_once_with(
+        "origin",
+        {
+            "request_id": "request",
+            "generation": 4,
+            "expected_container_id": "container-one",
+            "sandbox_id": "group",
+        },
+    )
 
 
 @pytest.mark.asyncio
@@ -134,6 +147,170 @@ async def test_unconfirmed_discard_retries_without_aborting_or_uploading(monkeyp
     assert failure["retain_pending"] is True
     assert "without an archive" in failure["error"]
     assert "lost acknowledgement" not in failure["error"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "reason"),
+    [
+        (401, "same credential"),
+        (403, "same credential"),
+        (404, "container inventory and sandbox manager version"),
+        (409, "exact container is stopped and idle"),
+        (410, "reviewed container on that host"),
+        (422, "sandbox manager is up to date"),
+        (429, "sandbox manager is busy"),
+        (503, "Check its sandbox manager logs"),
+    ],
+)
+async def test_discard_reports_safe_sandbox_manager_status_without_exposing_details(
+    monkeypatch, caplog, status, reason
+):
+    store, broker, archives, _ = setup(monkeypatch)
+    claim = store.sandbox.claim_due_admin_sandbox_deletion.return_value
+    claim["deletion_discard"] = True
+    broker.discard_sandbox_deletion = AsyncMock(
+        side_effect=SandboxManagerError(
+            status, "PRIVATE credential at https://private.invalid/?token=PRIVATE"
+        )
+    )
+    store.sandbox.complete_admin_sandbox_discard = AsyncMock(return_value=True)
+    assert await run(store, archives)
+    failure = store.sandbox.fail_admin_sandbox_deletion.call_args.kwargs
+    assert reason in failure["error"]
+    assert failure["retain_pending"] is True
+    assert failure["request_id"] == "request"
+    assert failure["container_id"] == "container-one"
+    store.sandbox.complete_admin_sandbox_discard.assert_not_awaited()
+    broker.abort_sandbox_deletion.assert_not_awaited()
+    archives.prepare_upload.assert_not_awaited()
+    record = caplog.records[-1]
+    assert record.sandbox_manager_status == status
+    assert record.request_phase == "discard"
+    output = failure["error"] + JsonLogFormatter().format(record)
+    assert "PRIVATE" not in output
+    assert "private.invalid" not in output
+    assert "claim-token" not in output
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("transport_error", "reason"),
+    [
+        (httpx.ReadTimeout, "timed out before confirming removal"),
+        (httpx.ConnectTimeout, "timed out before confirming removal"),
+        (httpx.ConnectError, "could not be reached"),
+    ],
+)
+async def test_discard_distinguishes_timeout_from_connection_failure(
+    monkeypatch, caplog, transport_error, reason
+):
+    store, broker, archives, _ = setup(monkeypatch)
+    store.sandbox.claim_due_admin_sandbox_deletion.return_value["deletion_discard"] = True
+    failure_cause = SandboxManagerError(503, "PRIVATE broker credential")
+    failure_cause.__cause__ = transport_error("https://private.invalid/?token=PRIVATE")
+    broker.discard_sandbox_deletion = AsyncMock(side_effect=failure_cause)
+    assert await run(store, archives)
+    failure = store.sandbox.fail_admin_sandbox_deletion.call_args.kwargs
+    assert reason in failure["error"]
+    assert failure["retain_pending"] is True
+    output = failure["error"] + JsonLogFormatter().format(caplog.records[-1])
+    assert "PRIVATE" not in output
+    assert "private.invalid" not in output
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("host", "credential", "reason"),
+    [
+        (None, "PRIVATE", "host is no longer registered"),
+        ({"host": "host-one"}, "PRIVATE", "has not advertised a sandbox manager URL"),
+        (
+            {"host": "host-one", "sandbox_manager_url": "ftp://PRIVATE@private.invalid"},
+            "PRIVATE",
+            "URL is invalid or refused",
+        ),
+        (
+            {"host": "host-one", "sandbox_manager_url": "https://private.invalid"},
+            "",
+            "control plane has no sandbox manager credential",
+        ),
+    ],
+)
+async def test_discard_reports_safe_sandbox_manager_configuration_errors(
+    monkeypatch, caplog, host, credential, reason
+):
+    store, broker, archives, _ = setup(monkeypatch)
+    store.sandbox.claim_due_admin_sandbox_deletion.return_value["deletion_discard"] = True
+    store.host_pool.get_host.return_value = host
+    monkeypatch.setattr(worker, "sandbox_manager_for_host", lambda _: None)
+    monkeypatch.setattr(
+        sandbox_manager_routing,
+        "setting_env",
+        lambda name: (
+            credential if name == sandbox_manager_routing.ENV_SANDBOX_MANAGER_TOKEN else None
+        ),
+    )
+    assert await run(store, archives)
+    failure = store.sandbox.fail_admin_sandbox_deletion.call_args.kwargs
+    assert reason in failure["error"]
+    assert failure["retain_pending"] is True
+    record = caplog.records[-1]
+    assert record.request_phase == "resolve_sandbox_manager"
+    assert record.sandbox_manager_status is None
+    output = failure["error"] + JsonLogFormatter().format(record)
+    assert "PRIVATE" not in output
+    assert "private.invalid" not in output
+    broker.prepare_sandbox_deletion.assert_not_awaited()
+    archives.prepare_upload.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "receipt_change",
+    [{"request_id": "another-request"}, {"container_id": "another-container"}, {"deleted": False}],
+)
+async def test_discard_receipt_failure_keeps_exact_request_pending(
+    monkeypatch, caplog, receipt_change
+):
+    store, broker, archives, _ = setup(monkeypatch)
+    store.sandbox.claim_due_admin_sandbox_deletion.return_value["deletion_discard"] = True
+    broker.discard_sandbox_deletion = AsyncMock(
+        return_value={
+            "request_id": "request",
+            "container_id": "container-one",
+            "deleted": True,
+            **receipt_change,
+        }
+    )
+    store.sandbox.complete_admin_sandbox_discard = AsyncMock(return_value=True)
+    assert await run(store, archives)
+    store.sandbox.complete_admin_sandbox_discard.assert_not_awaited()
+    failure = store.sandbox.fail_admin_sandbox_deletion.call_args.kwargs
+    assert failure["retain_pending"] is True
+    assert failure["request_id"] == "request"
+    assert failure["container_id"] == "container-one"
+    assert caplog.records[-1].request_phase == "validate_discard_receipt"
+
+
+@pytest.mark.asyncio
+async def test_archive_broker_failures_keep_generic_private_diagnostics(monkeypatch, caplog):
+    store, broker, archives, _ = setup(monkeypatch)
+    broker.upload_sandbox_deletion_archive.side_effect = SandboxManagerError(
+        401, "PRIVATE https://private.invalid/?token=PRIVATE"
+    )
+    assert await run(store, archives)
+    failure = store.sandbox.fail_admin_sandbox_deletion.call_args.kwargs
+    assert failure["error"] == (
+        "S3 archive or sandbox deletion could not complete. "
+        "The container has not been deleted. Refresh details before retrying."
+    )
+    record = caplog.records[-1]
+    assert record.request_phase == "archive_delete"
+    assert record.sandbox_manager_status == 401
+    output = failure["error"] + JsonLogFormatter().format(record)
+    assert "PRIVATE" not in output
+    assert "private.invalid" not in output
 
 
 @pytest.mark.asyncio

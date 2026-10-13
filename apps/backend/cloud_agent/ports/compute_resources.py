@@ -29,7 +29,28 @@ class ComputeResourceRepository(Protocol):
         source_sha256: str,
         secret_ciphertext: str,
     ) -> dict[str, Any]:
-        """Create one immutable profile; active allocations retain exact inputs."""
+        """Create one profile. A host release may later advance its commit and bundle."""
+        ...
+
+    async def advance_host_release(
+        self,
+        *,
+        allocation_id: str,
+        previous_sha: str,
+        previous_digest: str,
+        deployment_sha: str,
+        source_sha256: str,
+        source_bundle: bytes,
+        release_bundle_path: str,
+        operation_id: str,
+        generation: int,
+        worker_id: str,
+    ) -> None:
+        """Move one release's stored bundles and live snapshots onto a new commit.
+
+        Profiles and allocations that another deployment is already using stay
+        on their current bytes. Tunnel credentials and install directories stay.
+        """
         ...
 
     async def provider_defaults(self, provider_id: str) -> dict[str, Any]:
@@ -103,6 +124,10 @@ class ComputeResourceRepository(Protocol):
 
     async def get_allocation(self, allocation_id: str) -> dict[str, Any] | None:
         """Read one allocation and its stable node and Host bindings."""
+        ...
+
+    async def remove_allocation(self, *, allocation_id: str, expected_revision: int) -> None:
+        """Atomically remove safe server inventory and its private bookkeeping."""
         ...
 
     async def list_allocations(self) -> list[dict[str, Any]]:

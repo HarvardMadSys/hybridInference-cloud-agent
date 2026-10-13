@@ -145,6 +145,14 @@ _HostLabelValue = Annotated[str, Field(max_length=HOST_LABEL_VALUE_MAX_CHARS)]
 # publisher targets the PR at it, so a caller must not be able to forge one.
 BASE_REF_METADATA_KEY = "_agent_base_ref"
 
+#: Reserved metadata mark for jobs the on-call service door created. Stamped by
+#: the platform after caller metadata so a body cannot un-mark itself, and read
+#: by anything that wants to tell an on-call analysis from an owner's thread
+#: (the web UI, spend reports). Reserved in the same sense as the base ref: the
+#: creation path drops a caller-supplied copy, so an owner's job cannot claim
+#: to be one the platform dispatched.
+ONCALL_METADATA_KEY = "oncall"
+
 #: What a follow-up sends to clear an inherited effort. A plain null cannot
 #: mean this: null is what "no override, inherit" already sends, and the two
 #: have to be distinguishable or a thread that once chose an effort could never
@@ -1576,6 +1584,9 @@ class WorkerClaimAttestation(BaseModel):
     sandbox_archive_settings_applied_revision: StrictInt | None = Field(None, ge=0)
     host_kernel: str | None = Field(None, max_length=256)
     guest_kernel: str | None = Field(None, max_length=256)
+    #: The writable-layer quota, in MiB, a group this claim creates would get;
+    #: 0 is none. ``None`` is a runner from before it was reported.
+    sandbox_disk_limit_mib: StrictInt | None = Field(None, ge=0, le=16777216)
 
 
 class WorkerClaimRequest(BaseModel):
@@ -1951,6 +1962,14 @@ class WorkerSandboxSettleRequest(BaseModel):
     native_session_id: str | None = Field(None, max_length=512)
     base_sha: str | None = Field(None, min_length=7, max_length=64)
     idle_timeout_seconds: float = Field(1800.0, gt=0, le=7 * 24 * 60 * 60)
+
+    @field_validator("native_session_id")
+    @classmethod
+    def normalize_native_session_id(cls, value: str | None) -> str | None:
+        """Repeat the host's locator canonicalization at the API trust boundary."""
+        if value is None:
+            return None
+        return value.strip() or None
 
 
 class WorkerSandboxAbandonRequest(BaseModel):
@@ -2736,6 +2755,16 @@ class AgentRunnerHost(_SandboxManagerWireNames):
         description=(
             "Archive-policy revision this host's sandbox manager confirmed applying. Null means "
             "the host predates database-backed archive settings or has not synchronized yet."
+        ),
+    )
+    untrusted_without_disk_quota: bool = Field(
+        False,
+        description=(
+            "True when this host can be given untrusted (Kata) work and reports "
+            "applying no container disk quota (sandbox_disk_mib 0), so a new "
+            "untrusted sandbox's writable layer is unbounded on a disk every other "
+            "sandbox on the host shares. A recommendation only: nothing is refused "
+            "or rescheduled. False when the host has not reported the setting."
         ),
     )
 

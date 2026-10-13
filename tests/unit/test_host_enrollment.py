@@ -111,6 +111,57 @@ def test_the_credential_is_stored_unreadable_to_others(credential_file, monkeypa
     assert credential_file.stat().st_mode & 0o077 == 0, "the credential is readable by others"
 
 
+def test_a_file_left_at_the_old_temporary_name_cannot_widen_the_credential(
+    credential_file,
+) -> None:
+    stale = credential_file.with_suffix(".tmp")
+    stale.write_text("stale")
+    stale.chmod(0o644)
+
+    enrollment.store_credential("hc_secret")
+
+    assert credential_file.read_text() == "hc_secret"
+    assert credential_file.stat().st_mode & 0o777 == 0o600
+    assert stale.read_text() == "stale"
+
+
+def test_a_planted_link_cannot_receive_the_credential(credential_file, tmp_path) -> None:
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.write_text("")
+    credential_file.with_suffix(".tmp").symlink_to(elsewhere)
+
+    enrollment.store_credential("hc_secret")
+
+    assert elsewhere.read_text() == ""
+    assert not credential_file.is_symlink()
+    assert credential_file.read_text() == "hc_secret"
+
+
+def test_storing_leaves_no_temporary_file_and_a_new_directory_private(
+    tmp_path, monkeypatch
+) -> None:
+    path = tmp_path / "state" / "credential"
+    monkeypatch.setenv(enrollment.ENV_CREDENTIAL_FILE, str(path))
+
+    enrollment.store_credential("hc_first")
+    enrollment.store_credential("hc_second")
+
+    assert path.read_text() == "hc_second"
+    assert path.parent.stat().st_mode & 0o777 == 0o700
+    assert sorted(entry.name for entry in path.parent.iterdir()) == ["credential"]
+
+
+def test_a_failed_store_removes_its_temporary_file(credential_file, monkeypatch) -> None:
+    def refuse(_src, _dst):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(enrollment.os, "replace", refuse)
+    with pytest.raises(OSError, match="disk full"):
+        enrollment.store_credential("hc_secret")
+
+    assert list(credential_file.parent.iterdir()) == []
+
+
 def test_a_stored_credential_is_not_spent_again(credential_file, monkeypatch) -> None:
     """Restarting must not consume a second enrollment token."""
     credential_file.write_text("hc_existing")

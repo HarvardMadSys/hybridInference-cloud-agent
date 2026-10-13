@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import logging
 import os
 from dataclasses import replace
 from types import SimpleNamespace
@@ -356,6 +357,123 @@ def test_a_disabled_disk_quota_takes_precedence_over_the_bootstrap_value(monkeyp
     assert run.reserved["disk_limit_mib"] == 0
     command = ChatSandboxManager(ContainerBackend(image="img")).build_create_command(run.spec)
     assert "--storage-opt" not in command
+
+
+def _quota_warnings(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "agent_untrusted_sandbox_without_disk_quota"
+    ]
+
+
+@pytest.mark.parametrize("settings", [{"sandbox_disk_mib": 0}, None])
+def test_a_new_untrusted_sandbox_without_a_disk_quota_starts_with_a_warning(
+    monkeypatch, caplog, settings
+):
+    """Recommended, not required: the group starts unbounded and says so."""
+    monkeypatch.delenv("AGENT_SANDBOX_DISK_MIB", raising=False)
+
+    with caplog.at_level(logging.WARNING):
+        run = _run_new_chat(
+            monkeypatch, settings, replace(_JOB, execution_profile="untrusted-kata-v1")
+        )
+
+    assert run.result == 0
+    assert run.reserved["disk_limit_mib"] == 0
+    (warning,) = _quota_warnings(caplog)
+    assert warning.getMessage() == runner_mod.UNTRUSTED_DISK_QUOTA_RECOMMENDED
+    assert warning.job_id == _JOB.job_id  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize(
+    ("profile", "settings"),
+    [("untrusted-kata-v1", {"sandbox_disk_mib": 20480}), ("trusted-v1", {"sandbox_disk_mib": 0})],
+)
+def test_a_bounded_or_trusted_new_sandbox_is_not_warned_about(
+    monkeypatch, caplog, profile, settings
+):
+    with caplog.at_level(logging.WARNING):
+        run = _run_new_chat(monkeypatch, settings, replace(_JOB, execution_profile=profile))
+
+    assert run.result == 0
+    assert run.reserved["disk_limit_mib"] == settings["sandbox_disk_mib"]
+    assert _quota_warnings(caplog) == []
+    if settings["sandbox_disk_mib"]:
+        command = ChatSandboxManager(ContainerBackend(image="img")).build_create_command(run.spec)
+        assert command[command.index("--storage-opt") + 1] == "size=20480M"
+
+
+def test_an_existing_untrusted_sandbox_without_a_quota_is_not_warned_about(monkeypatch, caplog):
+    """The quota is immutable; only a group about to be created can still get one."""
+    existing = {
+        "shared_live": True,
+        "runtime_id": "claude-code",
+        "execution_profile": "untrusted-kata-v1",
+        "resident_slot_capacity": 4,
+        "sandbox_id": "asbx_existing",
+        "host": "host-a",
+        "memory_limit": "6g",
+        "cpu_limit": "3.5",
+    }
+    job = replace(_JOB, execution_profile="untrusted-kata-v1", thread_sandbox=existing)
+    existing["container_name"] = runner_mod.ChatSandboxSpec(
+        thread_id=job.thread_id,
+        sandbox_id="asbx_existing",
+        generation=1,
+        runtime_id="claude-code",
+        runtime_version=None,
+        sandbox_image_digest=None,
+        shared_live=True,
+        resident_slot_capacity=4,
+    ).container_name
+    backend = ContainerBackend(image="img")
+    monkeypatch.setattr(backend, "version_stamp", _stamp)
+    control = Mock()
+    control.reserve_chat_sandbox.side_effect = RuntimeError("stop after the reservation request")
+    finish = Mock()
+
+    with caplog.at_level(logging.WARNING):
+        runner_mod._run_shared_live_attempt(
+            runtime=get_runtime("claude-code"),
+            job=job,
+            control=control,
+            heart=SimpleNamespace(),
+            backend=backend,
+            host="host-a",
+            gateway_base_url="http://gateway",
+            agent_timeout_s=30,
+            finish_attempt=finish,
+            host_settings={"sandbox_disk_mib": 0},
+        )
+
+    assert control.reserve_chat_sandbox.call_args.args[0]["disk_limit_mib"] == 0
+    assert _quota_warnings(caplog) == []
+
+
+@pytest.mark.parametrize(
+    ("settings", "environment", "attested"),
+    [
+        ({"sandbox_disk_mib": 20480.0}, None, 20480),
+        ({"sandbox_disk_mib": 0}, "40960", 0),
+        (None, "40960", 40960),
+        (None, None, 0),
+        (None, "not-a-number", 0),
+    ],
+)
+def test_a_claim_attests_the_disk_quota_a_new_group_would_get(
+    monkeypatch, settings, environment, attested
+):
+    if environment is None:
+        monkeypatch.delenv("AGENT_SANDBOX_DISK_MIB", raising=False)
+    else:
+        monkeypatch.setenv("AGENT_SANDBOX_DISK_MIB", environment)
+
+    stamp = runner_mod._claim_attestation(
+        ProcessBackend(acknowledged_unsafe=True), host_settings=settings
+    )
+
+    assert stamp["sandbox_disk_limit_mib"] == attested
 
 
 @pytest.mark.parametrize(

@@ -150,6 +150,15 @@ def test_internal_preflight_needs_exact_identity_and_both_existing_store_binds(
     )
     assert checks["data_mount_available"]
     assert checks["data_mount_conflict_free"] is (binding == "both")
+    # The release stamp may advance. A different owner still cannot adopt the disk.
+    advanced = {**IDENTITY, "deployment_sha": "b" * 40}
+    advanced_checks = inspect(
+        disk,
+        monkeypatch,
+        capsys,
+        deployment={"root": str(root), "identity": advanced},
+    )
+    assert advanced_checks["data_mount_conflict_free"] is (binding == "both")
     # An initial attachment has no allocation identity even on a managed disk.
     assert not inspect(disk, monkeypatch, capsys)["data_mount_conflict_free"]
 
@@ -177,3 +186,26 @@ def test_staged_transfer_activation_and_rotation_retry_keep_owned_source_data(
         assert all(state.read_bytes() == b"existing user workload state" for state in retained)
         assert json.loads((root / ".compute-identity.json").read_text()) == identity
     assert len([call for call in machine.calls if call[:2] == ["mount", "--bind"]]) == 2
+
+
+def test_same_owner_can_advance_the_release_without_adopting_another_host(
+    tmp_path, machine, monkeypatch, capsys
+):
+    for store in ("docker", "containerd"):
+        source_state(machine, store)
+    bind_stores(machine)
+    root = tmp_path / "deploy"
+    marker(root, "matching")
+    new_identity = {**IDENTITY, "deployment_sha": "b" * 40}
+    result = run_remote(
+        _DEPLOY,
+        deploy_params(root, sha="b" * 40, identity=new_identity),
+        monkeypatch,
+        capsys,
+        stdin=payload(),
+    )
+    assert result["ready"] is True
+    assert json.loads((root / ".compute-identity.json").read_text()) == new_identity
+    assert ["bash", "deploy/host/sandbox_host.sh", "up"] in machine.calls
+    retained = machine.root / "mydata/docker/retained-workspace"
+    assert retained.read_bytes() == b"existing user workload state"

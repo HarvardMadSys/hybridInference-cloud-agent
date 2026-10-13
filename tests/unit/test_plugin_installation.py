@@ -292,7 +292,7 @@ def test_other_runtime_installers_receive_private_env_before_launch(monkeypatch,
         assert not any("secret" in value for value in env.values())
         if runtime_id == "codex":
             assert selected == (plugins,)
-            assert "/codex-members/" in kwargs["state_dir"]
+            assert kwargs["state_dir"].startswith("/agent-state/codex-homes/")
             return None
         assert kwargs["runtime_id"] == runtime_id
         assert kwargs["plugins"] == plugins

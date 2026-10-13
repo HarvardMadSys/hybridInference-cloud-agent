@@ -54,6 +54,13 @@ DEFAULT_ARCHIVE_OPERATION_TIMEOUT_S: Final = 12 * 60.0
 INITIAL_ARCHIVE_MARKER_FORMAT_VERSION: Final = 2
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _GIT_OBJECT_ID = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
+_ERROR_TYPE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
+
+
+def safe_archive_error_type(error: BaseException) -> str:
+    """Return a bounded class name without copying provider-controlled text."""
+    name = type(error).__name__
+    return name if _ERROR_TYPE.fullmatch(name) else "Error"
 
 
 class _BoundedBundleWriter:
@@ -822,11 +829,11 @@ class SandboxArchiveService:
                 # S3's conditional-write 409 race. Retrying that exhausted
                 # result here would silently multiply the documented cap.
                 if is_sandbox_archive_conditional_conflict(exc):
-                    logger.exception(
+                    logger.error(
                         "initial sandbox archive conditional conflict exhausted",
                         extra={
                             "event": "sandbox_initial_archive_upload_failed",
-                            "error_type": type(exc).__name__,
+                            "error_type": safe_archive_error_type(exc),
                         },
                     )
                     raise SandboxError("initial sandbox archive could not be stored") from exc
@@ -835,12 +842,12 @@ class SandboxArchiveService:
                 except SandboxError:
                     raise SandboxError("initial sandbox archive operation timed out") from exc
                 if attempt == self._max_upload_attempts:
-                    logger.exception(
+                    logger.error(
                         "initial sandbox archive upload failed",
                         extra={
                             "event": "sandbox_initial_archive_upload_failed",
                             "attempts": attempt,
-                            "error_type": type(exc).__name__,
+                            "error_type": safe_archive_error_type(exc),
                         },
                     )
                     raise SandboxError("initial sandbox archive could not be stored") from exc
@@ -888,12 +895,12 @@ class SandboxArchiveService:
                 except SandboxError:
                     raise SandboxError("final sandbox archive operation timed out") from exc
                 if attempt == self._max_upload_attempts:
-                    logger.exception(
+                    logger.error(
                         "sandbox final archive upload failed",
                         extra={
                             "event": "sandbox_final_archive_upload_failed",
                             "attempts": attempt,
-                            "error_type": type(exc).__name__,
+                            "error_type": safe_archive_error_type(exc),
                         },
                     )
                     raise SandboxError("final sandbox archive could not be stored") from exc

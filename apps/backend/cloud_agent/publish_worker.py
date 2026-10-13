@@ -306,9 +306,33 @@ def _github_headers(credential: GitHubCredential) -> dict[str, str]:
     }
 
 
+_BACKTICK_RUN = re.compile(r"`+")
+
+
+def _code_span(value: str) -> str:
+    """Render agent-chosen text as one Markdown code span it cannot close early.
+
+    A file name is the agent's to choose, and the App posts the body under its
+    own name, so a name that closed its span could write mentions, closing
+    keywords or links into it. A span ends at the first backtick run as long
+    as the one that opened it, so the fence is one longer than any run inside,
+    and padded when the text starts or ends with a backtick or a space (the
+    renderer strips one space from each side). Control characters, which could
+    end the list item with the span still open, are shown as escapes; the
+    publisher's change-set gate refuses such names before this is reached.
+    """
+    text = "".join(
+        ascii(char)[1:-1] if unicodedata.category(char).startswith("C") else char for char in value
+    )
+    fence = "`" * (max(map(len, _BACKTICK_RUN.findall(text)), default=0) + 1)
+    if text[:1] in ("`", " ") or text[-1:] in ("`", " "):
+        text = f" {text} "
+    return f"{fence}{text}{fence}"
+
+
 def _pr_body(job: dict[str, Any], changed_files: list[str]) -> str:
     """Compose a PR body that tells the reviewer what they are reviewing."""
-    files = "\n".join(f"- `{path}`" for path in changed_files[:50])
+    files = "\n".join(f"- {_code_span(path)}" for path in changed_files[:50])
     if len(changed_files) > 50:
         files += f"\n- …and {len(changed_files) - 50} more"
     included = ", ".join(f"`{item}`" for item in job.get("included_job_ids") or [])

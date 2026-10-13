@@ -22,6 +22,7 @@ import {
   ErrorNotice,
   Field,
   inputClass,
+  parseStringList,
   primaryClass,
   Reasons,
 } from './compute-ui';
@@ -29,6 +30,7 @@ import {
 interface Draft {
   policy: CloudLabAutoscalingPolicy;
   bindings: string;
+  nodeTypes: string;
 }
 
 const READY_STATES = new Set(['active', 'online', 'ready']);
@@ -41,10 +43,11 @@ const PROVISIONING_STATES = new Set([
 ]);
 const RETIRING_STATES = new Set(['releasing', 'retiring']);
 
-function asDraft(policy: CloudLabAutoscalingPolicy): Draft {
+function asDraft(policy: CloudLabAutoscalingPolicy, defaultNodeTypes: string[]): Draft {
   return {
     policy,
     bindings: JSON.stringify(policy.configuration.bindings ?? {}, null, 2),
+    nodeTypes: (policy.configuration.node_types ?? defaultNodeTypes).join('\n'),
   };
 }
 
@@ -68,9 +71,9 @@ function bindingsHaveValues(value: string): boolean {
   }
 }
 
-function selectedNodeType(value: string): string | null {
+function selectedNodeType(value: string, binding: string): string | null {
   try {
-    const selected = parseBindings(value).phystype;
+    const selected = parseBindings(value)[binding];
     return typeof selected === 'string' ? selected : null;
   } catch {
     return null;
@@ -181,6 +184,19 @@ export default function CloudLabAutoscaling({
   connections: ComputeConnection[];
   activeHost: string | null;
 }) {
+  const cloudLabFields = catalog.providers.find((provider) => provider.id === 'cloudlab')?.fields;
+  const nodeTypesDefault = cloudLabFields?.find((field) => field.key === 'node_types')?.default;
+  const defaultNodeTypes = useMemo(
+    () =>
+      Array.isArray(nodeTypesDefault)
+        ? nodeTypesDefault.filter((item): item is string => typeof item === 'string')
+        : [],
+    [nodeTypesDefault],
+  );
+  const bindingDefault = cloudLabFields?.find(
+    (field) => field.key === 'node_type_binding',
+  )?.default;
+  const defaultNodeTypeBinding = typeof bindingDefault === 'string' ? bindingDefault : 'phystype';
   const [snapshot, setSnapshot] = useState<CloudLabAutoscalingSnapshot | null>(null);
   const [availability, setAvailability] = useState<CloudLabPreferredNodesSnapshot | null>(null);
   const [availabilityLoading, setAvailabilityLoading] = useState(true);
@@ -206,18 +222,21 @@ export default function CloudLabAutoscaling({
     setDraft(next);
   }, []);
 
-  const acceptSnapshot = useCallback((next: CloudLabAutoscalingSnapshot, replaceDraft: boolean) => {
-    setSnapshot(next);
-    const current = draftRef.current;
-    const unchanged = current !== null && signature(current) === baseline.current;
-    if (replaceDraft || current === null || unchanged) {
-      const nextDraft = asDraft(next.policy);
-      draftRef.current = nextDraft;
-      baseline.current = signature(nextDraft);
-      setDraft(nextDraft);
-      setConflict(false);
-    }
-  }, []);
+  const acceptSnapshot = useCallback(
+    (next: CloudLabAutoscalingSnapshot, replaceDraft: boolean) => {
+      setSnapshot(next);
+      const current = draftRef.current;
+      const unchanged = current !== null && signature(current) === baseline.current;
+      if (replaceDraft || current === null || unchanged) {
+        const nextDraft = asDraft(next.policy, defaultNodeTypes);
+        draftRef.current = nextDraft;
+        baseline.current = signature(nextDraft);
+        setDraft(nextDraft);
+        setConflict(false);
+      }
+    },
+    [defaultNodeTypes],
+  );
 
   const load = useCallback(
     async (replaceDraft: boolean, signal?: AbortSignal) => {
@@ -351,11 +370,16 @@ export default function CloudLabAutoscaling({
     );
   }
 
-  const { policy } = draft;
+  const { policy, nodeTypes: nodeTypesDraft } = draft;
   const bindingsDraft = draft.bindings;
   const account = connections.find((connection) => connection.id === policy.connection_id);
   const ssh = connections.find((connection) => connection.id === policy.ssh_connection_id);
-  const isPausing = snapshot.policy.enabled && !policy.enabled;
+  const isPausing =
+    snapshot.policy.enabled &&
+    !policy.enabled &&
+    JSON.stringify({ ...policy, enabled: true }) === JSON.stringify(snapshot.policy) &&
+    bindingsDraft === JSON.stringify(snapshot.policy.configuration.bindings ?? {}, null, 2) &&
+    nodeTypesDraft === (snapshot.policy.configuration.node_types ?? defaultNodeTypes).join('\n');
   const configurationStarted = Boolean(
     policy.enabled ||
     policy.max_hosts ||
@@ -365,6 +389,7 @@ export default function CloudLabAutoscaling({
     Object.entries(policy.configuration).some(
       ([key, value]) => key !== 'bindings' && value !== '' && value !== null && value !== undefined,
     ) ||
+    draft.nodeTypes !== defaultNodeTypes.join('\n') ||
     bindingsHaveValues(bindingsDraft),
   );
   const requiredProfiles = policy.max_hosts;
@@ -435,17 +460,30 @@ export default function CloudLabAutoscaling({
   }
   const dirty = signature(draft) !== baseline.current;
   const profileSet = new Set(policy.deployment_profiles);
-  const selectedType = selectedNodeType(bindingsDraft);
+  const nodeTypeBinding = policy.configuration.node_type_binding ?? defaultNodeTypeBinding;
+  const selectedType = selectedNodeType(bindingsDraft, nodeTypeBinding);
 
   function choosePreferredNode(nodeType: string) {
     try {
       const bindings = parseBindings(bindingsDraft);
-      const nextBindings = JSON.stringify({ ...bindings, phystype: nodeType }, null, 2);
+      const nextBindings = JSON.stringify({ ...bindings, [nodeTypeBinding]: nodeType }, null, 2);
       updateDraft((current) => ({ ...current, bindings: nextBindings }));
       setSaved(false);
       setError(null);
     } catch {
       setError('Fix Profile parameters JSON before selecting a preferred node type.');
+    }
+  }
+
+  function useOrderedPreferences() {
+    try {
+      const bindings = parseBindings(bindingsDraft);
+      delete bindings[nodeTypeBinding];
+      updateDraft((current) => ({ ...current, bindings: JSON.stringify(bindings, null, 2) }));
+      setSaved(false);
+      setError(null);
+    } catch {
+      setError('Fix Profile parameters JSON before restoring the preferred order.');
     }
   }
 
@@ -480,12 +518,14 @@ export default function CloudLabAutoscaling({
         configuration = {
           ...cleanedConfiguration,
           bindings: parsed,
+          node_types: parseStringList(nodeTypesDraft),
+          node_type_binding: nodeTypeBinding,
           host_key_source: 'registration',
         };
       }
-      const next = await updateCloudLabAutoscaling({
-        expected_revision: revision,
-        policy: {
+      let requestPolicy = writePolicy;
+      if (!isPausing) {
+        requestPolicy = {
           ...writePolicy,
           sandbox_storage_path: writePolicy.sandbox_storage_path?.trim() || null,
           renewal_policy: {
@@ -493,7 +533,11 @@ export default function CloudLabAutoscaling({
             rotation_enabled: false,
           },
           configuration,
-        },
+        };
+      }
+      const next = await updateCloudLabAutoscaling({
+        expected_revision: revision,
+        policy: requestPolicy,
       });
       if (!mounted.current) return;
       acceptSnapshot(next, true);
@@ -818,16 +862,60 @@ export default function CloudLabAutoscaling({
               />
             </Field>
           </div>
+          <Field label="Preferred node types (top to bottom)">
+            <textarea
+              className={`${inputClass} font-mono`}
+              rows={6}
+              spellCheck={false}
+              value={draft.nodeTypes}
+              onChange={(event) => {
+                updateDraft((current) => ({ ...current, nodeTypes: event.target.value }));
+                setSaved(false);
+                setError(null);
+              }}
+            />
+          </Field>
+          <p className="text-xs text-muted">
+            Allocations try each type from top to bottom. Enter one type per line, or separate with
+            commas. Free counts below do not change this order. Leave blank to use the
+            profile&apos;s hardware.
+          </p>
+          <Field label="Node type profile parameter">
+            <input
+              className={inputClass}
+              required={configurationStarted && !isPausing}
+              maxLength={64}
+              pattern="[A-Za-z][A-Za-z0-9_]{0,63}"
+              value={nodeTypeBinding}
+              onChange={(event) =>
+                changeConfiguration((current) => ({
+                  ...current,
+                  node_type_binding: event.target.value,
+                }))
+              }
+            />
+          </Field>
+          {selectedType && (
+            <div className="flex flex-wrap items-center gap-3 rounded-xl border border-border bg-surface p-3 text-sm">
+              <span>
+                Hardware pinned to {selectedType} by profile parameter {nodeTypeBinding}.
+              </span>
+              <button className={buttonClass} type="button" onClick={useOrderedPreferences}>
+                Use ordered preferences
+              </button>
+            </div>
+          )}
           <section
             className="space-y-3 rounded-xl border border-border bg-surface p-3"
             aria-label="Preferred CloudLab node types"
           >
             <div className="flex flex-wrap items-start justify-between gap-2">
               <div>
-                <h4 className="text-sm font-medium">Preferred node types</h4>
+                <h4 className="text-sm font-medium">Preferred node inventory</h4>
                 <p className="mt-1 text-xs text-muted">
-                  Modern general-purpose nodes with at least 16 physical cores and 128 GiB RAM; only
-                  types with more than 16 currently free are shown.
+                  Newer general-purpose types with more than 20 total nodes, at least 16 physical
+                  cores, and 128 GiB RAM. Types remain listed when none are free. Use pins one type
+                  for this pool.
                 </p>
               </div>
               {availability && (

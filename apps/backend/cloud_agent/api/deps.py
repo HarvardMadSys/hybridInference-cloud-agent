@@ -180,8 +180,8 @@ def get_mcp_decision_signal(request: Request) -> McpDecisionSignal | None:
 def get_source_control(request: Request) -> SourceControlRuntime | None:
     """Dependency to obtain the process's source-control runtime.
 
-    ``None`` only where nothing built one — a test application that injects
-    credentials through the dependencies below. The lifespan always does.
+    ``None`` in the MCP relay, which has no source-control work, and in a test
+    application that injects credentials through the dependencies below.
     """
     return getattr(request.app.state, "source_control", None)
 
@@ -387,13 +387,14 @@ def session_token(request: Request, authorization: str | None = None) -> str | N
     """Find this service's session credential on a request.
 
     The cookie is preferred: it is what the web app sends, it is ``HttpOnly``,
-    and it is the only credential the browser holds. A bearer is accepted too,
-    for the programmatic caller that has one and for the router's existing
-    credential dispatch — a session token is this service's own credential
-    whichever way it travels, and reading it from a header weakens nothing that
-    reading it from a cookie does not.
+    and it is the only credential the browser holds. Either of its names is
+    read, the ``__Host-`` one first (:func:`identity.session_from_cookies`). A
+    bearer is accepted too, for the programmatic caller that has one and for
+    the router's existing credential dispatch — a session token is this
+    service's own credential whichever way it travels, and reading it from a
+    header weakens nothing that reading it from a cookie does not.
     """
-    cookie = request.cookies.get(identity.SESSION_COOKIE)
+    cookie = identity.session_from_cookies(request.cookies)
     if cookie:
         return cookie
     presented = bearer_token(authorization)
@@ -457,7 +458,9 @@ async def verify_admin_access(
     """
     presented = bearer_token(authorization)
     configured = (os.environ.get(ENV_ADMIN_TOKEN) or "").strip()
-    if configured and presented and hmac.compare_digest(presented, configured):
+    # Bytes, not text: ``compare_digest`` raises on a non-ASCII ``str``, and a
+    # header value is whatever latin-1 the caller sent. A refusal, not a 500.
+    if configured and presented and hmac.compare_digest(presented.encode(), configured.encode()):
         return "admin-token"
 
     token = session_token(request, authorization)

@@ -42,6 +42,8 @@
 #   DEPLOY_ROOT   where the deployed checkout lives (default /srv/freeinference-cloud-agent)
 #   COMPOSE_PROJECT  compose project name (default cloudagent)
 #   ALLOW_DIRTY=1 deploy over local modifications instead of refusing
+#   AGENT_CONTROL_PLANE_COMPOSE_OVERRIDE_FILE  optional absolute path to an
+#                         operator-owned private Compose override, appended last
 #   AGENT_DEPLOY_DRAINING_HOST  optional exact host that must stay idle and
 #                              draining through the compatibility fence
 #   AGENT_DEPLOY_MODE=artifacts uses AGENT_RELEASE_MANIFEST and the packaged
@@ -228,6 +230,21 @@ AGENT_CONTROL_PLANE_SSH_HOST="${AGENT_CONTROL_PLANE_SSH_HOST:-$(from_env AGENT_C
 AGENT_CONTROL_PLANE_SSH_HOST="${AGENT_CONTROL_PLANE_SSH_HOST:-$(hostname -f 2>/dev/null || hostname)}"
 export AGENT_CONTROL_PLANE_SSH_HOST
 
+# A private override is deployment state, not release content. Require an
+# absolute, readable regular file so changing directory or checking out a new
+# source revision cannot silently retarget it. Keeping this one explicit hook
+# on the control-plane deployer also prevents host deployments from inheriting
+# credentials intended only for the trusted API process.
+AGENT_CONTROL_PLANE_COMPOSE_OVERRIDE_FILE="$(from_env AGENT_CONTROL_PLANE_COMPOSE_OVERRIDE_FILE)"
+if [[ -n "${AGENT_CONTROL_PLANE_COMPOSE_OVERRIDE_FILE}" ]]; then
+  [[ "${AGENT_CONTROL_PLANE_COMPOSE_OVERRIDE_FILE}" = /* ]] \
+    || die "AGENT_CONTROL_PLANE_COMPOSE_OVERRIDE_FILE must be an absolute path"
+  [[ -f "${AGENT_CONTROL_PLANE_COMPOSE_OVERRIDE_FILE}" ]] \
+    || die "AGENT_CONTROL_PLANE_COMPOSE_OVERRIDE_FILE must name a regular file"
+  [[ -r "${AGENT_CONTROL_PLANE_COMPOSE_OVERRIDE_FILE}" ]] \
+    || die "AGENT_CONTROL_PLANE_COMPOSE_OVERRIDE_FILE is not readable"
+fi
+
 compose() {
   if [[ "$AGENT_DEPLOY_MODE" == "artifacts" ]]; then
     case "$1" in
@@ -239,6 +256,9 @@ compose() {
   local command=(docker compose -p "${COMPOSE_PROJECT}" --env-file .env -f "${COMPOSE_FILE}")
   if [[ -n "${AGENT_COMPUTE_DIRECTORY:-$(from_env AGENT_COMPUTE_DIRECTORY)}" ]]; then
     command+=(-f "$SCRIPT_DIR/docker-compose.compute.yml")
+  fi
+  if [[ -n "${AGENT_CONTROL_PLANE_COMPOSE_OVERRIDE_FILE}" ]]; then
+    command+=(-f "${AGENT_CONTROL_PLANE_COMPOSE_OVERRIDE_FILE}")
   fi
   if [[ "${WATCH_READINESS:-0}" == "1" && -n "${DEPLOY_PEER_JOB:-}" ]]; then
     python3 "$SCRIPT_DIR/../watch_peer.py" --peer "$DEPLOY_PEER_JOB" \

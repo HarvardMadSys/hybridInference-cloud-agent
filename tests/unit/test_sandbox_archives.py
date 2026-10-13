@@ -389,12 +389,13 @@ def test_initial_already_exists_is_a_successful_idempotent_result() -> None:
     assert uploader.bodies[0].closed
 
 
-def test_initial_upload_failure_logs_root_cause_and_discards_the_spool(
+def test_initial_upload_failure_logs_safe_type_and_discards_the_spool(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     spec = _spec()
     manager = _Manager(spec, running=True)
-    error = RuntimeError("S3 unavailable")
+    unsafe = "https://user:secret@example.com/private/object?X-Amz-Credential=leaked"
+    error = RuntimeError(unsafe)
     uploader = _Uploader(_config(), outcomes=[error, error, error])
     service = _service(manager, uploader)
     service.start()
@@ -421,16 +422,22 @@ def test_initial_upload_failure_logs_root_cause_and_discards_the_spool(
         if getattr(record, "event", None) == "sandbox_initial_archive_upload_failed"
     )
     assert record.error_type == "RuntimeError"  # type: ignore[attr-defined]
+    assert record.exc_info is None
+    assert unsafe not in caplog.text
 
 
-def test_initial_conditional_conflict_has_exactly_three_total_put_attempts() -> None:
+def test_initial_conditional_conflict_has_exactly_three_total_put_attempts(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    unsafe = "conditional conflict for s3://private-bucket/secret-object"
+
     class ConditionalConflict(RuntimeError):
         def __init__(self) -> None:
             self.response = {
                 "Error": {"Code": "ConditionalRequestConflict"},
                 "ResponseMetadata": {"HTTPStatusCode": 409},
             }
-            super().__init__("conditional request conflict")
+            super().__init__(unsafe)
 
     class AlwaysConflictClient:
         def __init__(self) -> None:
@@ -480,6 +487,14 @@ def test_initial_conditional_conflict_has_exactly_three_total_put_attempts() -> 
         "initial": {"pending": 0, "uploaded": 0, "failed": 1},
         "final": {"pending": 0, "uploaded": 0, "failed": 0},
     }
+    record = next(
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "sandbox_initial_archive_upload_failed"
+    )
+    assert record.error_type == "ConditionalConflict"  # type: ignore[attr-defined]
+    assert record.exc_info is None
+    assert unsafe not in caplog.text
 
 
 def test_commit_response_loss_reuses_the_marker_without_rebuilding() -> None:
@@ -873,9 +888,10 @@ def test_final_exhaustion_is_reported_and_never_counted_as_a_clean_success(
 ) -> None:
     spec = _spec()
     manager = _Manager(spec, running=False)
+    unsafe = "https://user:secret@example.com/private-final?token=leaked"
     errors: list[BaseException | None] = [
-        RuntimeError("S3 unavailable"),
-        RuntimeError("still unavailable"),
+        RuntimeError(unsafe),
+        RuntimeError(unsafe),
     ]
     uploader = _Uploader(_config(), outcomes=errors)
     service = _service(manager, uploader, max_upload_attempts=2)
@@ -898,6 +914,8 @@ def test_final_exhaustion_is_reported_and_never_counted_as_a_clean_success(
         if getattr(record, "event", None) == "sandbox_final_archive_upload_failed"
     )
     assert record.error_type == "RuntimeError"  # type: ignore[attr-defined]
+    assert record.exc_info is None
+    assert unsafe not in caplog.text
 
 
 def test_capture_capacity_blocks_before_copy_instead_of_dropping_a_clean_stop() -> None:

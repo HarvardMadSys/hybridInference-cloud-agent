@@ -58,6 +58,7 @@ from cloud_agent.application.job_admission import _create_job_as
 from cloud_agent.application.pending_messages import settle_queue_when_possible
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.schemas import (
+    ONCALL_METADATA_KEY,
     AgentJobCancelResponse,
     AgentJobCreate,
     AgentJobEventsResponse,
@@ -112,11 +113,6 @@ router = APIRouter(prefix="/v1/agent/service/oncall")
 ENV_ONCALL_DISPATCH_TOKEN = "AGENT_ONCALL_DISPATCH_TOKEN"
 ENV_ONCALL_USER_ID = "AGENT_ONCALL_USER_ID"
 
-#: Reserved metadata mark. Stamped by the platform after caller metadata so a
-#: body cannot un-mark itself, and read by anything that wants to tell an
-#: on-call analysis from an owner's thread (the web UI, spend reports).
-ONCALL_METADATA_KEY = "oncall"
-
 
 async def verify_oncall_dispatch(
     request: Request,
@@ -139,7 +135,8 @@ async def verify_oncall_dispatch(
     presented = (
         authorization[7:].strip() if authorization and authorization.startswith("Bearer ") else ""
     )
-    if configured and presented and secrets.compare_digest(presented, configured):
+    # Compared as bytes, as the admin token is: a non-ASCII header is a refusal.
+    if configured and presented and secrets.compare_digest(presented.encode(), configured.encode()):
         return "oncall-dispatch"
     return await verify_admin_access(request, authorization, gateway)
 

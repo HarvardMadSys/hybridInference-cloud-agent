@@ -1,8 +1,9 @@
 'use client';
 
+import type { HTMLAttributes } from 'react';
 import { hasActivityOverview, type ActivityOverview } from './activityOverview';
 import type { AgentEvent } from './types';
-import { ToolActivityDetails } from './ToolActivityDetails';
+import { DelegationReplyDetails, ToolActivityDetails } from './ToolActivityDetails';
 
 type ToolEvent = Extract<AgentEvent, { kind: 'tool_use' }>;
 
@@ -33,6 +34,7 @@ export function ActivityWindow({
   onClose,
   stepKeyForEvent,
   onSelectStep,
+  moveHandleProps,
 }: {
   overview: ActivityOverview;
   turnNo: number;
@@ -40,6 +42,7 @@ export function ActivityWindow({
   onClose: () => void;
   stepKeyForEvent: (event: ToolEvent) => string | undefined;
   onSelectStep: (stepKey: string) => void;
+  moveHandleProps?: HTMLAttributes<HTMLDivElement>;
 }) {
   if (!hasActivityOverview(overview)) return null;
 
@@ -47,8 +50,8 @@ export function ActivityWindow({
 
   return (
     <>
-      <header className="flex shrink-0 items-start gap-3 border-b border-gray-200 px-4 py-3 dark:border-white/10">
-        <div className="min-w-0 flex-1">
+      <header className="flex shrink-0 items-start gap-3 rounded-t-xl border-b border-gray-200 px-4 py-3 dark:border-white/10">
+        <div className="min-w-0 flex-1" {...moveHandleProps}>
           <h2 className="text-sm font-semibold text-gray-900 dark:text-gray-100">
             Tasks &amp; subagents
           </h2>
@@ -79,7 +82,7 @@ export function ActivityWindow({
         role="region"
         aria-label="Tasks and subagents details"
         tabIndex={0}
-        className="min-h-0 flex-1 space-y-6 overflow-y-auto p-4 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-crimson/40"
+        className="min-h-0 flex-1 space-y-6 overflow-x-hidden overflow-y-auto rounded-b-xl p-4 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-crimson/40"
       >
         {taskActivity ? (
           <section aria-label="Tasks overview" className="space-y-3">
@@ -108,7 +111,9 @@ export function ActivityWindow({
                     className="min-w-0 space-y-2.5 rounded-lg border border-gray-200 p-3 dark:border-white/10"
                   >
                     <ToolActivityDetails activity={agent.activity} />
-                    {agent.activity.states.length === 0 ? (
+                    {agent.reply ? (
+                      <DelegationReplyDetails reply={agent.reply} />
+                    ) : agent.activity.states.length === 0 ? (
                       <p className="text-[11px] text-gray-400 dark:text-gray-500">
                         Agent state not recorded
                       </p>

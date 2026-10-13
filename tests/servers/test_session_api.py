@@ -426,6 +426,20 @@ async def test_a_callback_with_a_mismatched_state_is_refused_before_the_exchange
     assert not client.cookies.get(identity.SESSION_COOKIE)
 
 
+async def test_a_non_ascii_state_is_a_mismatch_not_a_server_error(client_and_gateway):
+    """The comparison takes bytes, so text it cannot compare is just wrong."""
+    client, gateway = client_and_gateway
+    await _begin(client)
+
+    response = await client.get(
+        "/v1/session/callback", params={"code": "the-code", "state": "café"}
+    )
+
+    assert response.status_code == 303
+    assert "sign_in_error=expired" in response.headers["location"]
+    assert gateway.exchanged == []
+
+
 async def test_a_callback_with_no_parked_flow_is_refused(client_and_gateway):
     """A response to a request this service never made buys nothing."""
     client, gateway = client_and_gateway
@@ -754,6 +768,70 @@ async def test_logout_clears_the_cookie(client_and_gateway):
     assert (await client.post("/v1/session/logout")).status_code == 200
 
 
+async def test_a_secure_sign_in_uses_the_host_prefix_and_expires_the_plain_name(
+    client_and_gateway,
+):
+    """``__Host-`` binds the cookie to this host; a sibling cannot plant one."""
+    client, _ = client_and_gateway
+
+    response = await _sign_in(client)
+
+    cookies = response.headers.get_list("set-cookie")
+    session = next(c for c in cookies if c.startswith(f"{identity.SESSION_COOKIE}="))
+    assert identity.SESSION_COOKIE.startswith("__Host-")
+    lowered = session.lower()
+    assert "secure" in lowered and "path=/" in lowered and "domain=" not in lowered
+    legacy = next(c for c in cookies if c.startswith(f"{identity.LEGACY_SESSION_COOKIE}="))
+    assert "max-age=0" in legacy.lower()
+    assert client.cookies.get(identity.SESSION_COOKIE)
+    assert not client.cookies.get(identity.LEGACY_SESSION_COOKIE)
+
+
+async def test_a_session_under_the_plain_name_still_works_during_the_rename(
+    client_and_gateway,
+):
+    """A browser signed in before the rename is not signed out by it."""
+    client, _ = client_and_gateway
+    client.cookies.set(identity.LEGACY_SESSION_COOKIE, identity.mint_session(user_id=_USER))
+
+    response = await client.get("/v1/session/me")
+
+    assert response.status_code == 200
+    assert response.json()["id"] == _USER
+
+
+async def test_a_plain_named_cookie_never_stands_in_for_the_prefixed_one(client_and_gateway):
+    """The plain name is what a sibling host can set, so it loses every tie."""
+    client, _ = client_and_gateway
+    client.cookies.set(identity.SESSION_COOKIE, identity.mint_session(user_id=_USER))
+    client.cookies.set(identity.LEGACY_SESSION_COOKIE, identity.mint_session(user_id="intruder"))
+
+    response = await client.get("/v1/session/me")
+    assert response.status_code == 200
+    assert response.json()["id"] == _USER
+
+    client.cookies.set(identity.SESSION_COOKIE, "not-a-session")
+    assert (await client.get("/v1/session/me")).status_code == 401
+
+
+async def test_logout_expires_both_names(client_and_gateway):
+    client, _ = client_and_gateway
+    # Stored the way the pre-rename sign-in's host-only cookie was: the jar
+    # files a dotless host under ``<host>.local``.
+    client.cookies.set(
+        identity.LEGACY_SESSION_COOKIE, identity.mint_session(user_id=_USER), domain="test.local"
+    )
+    await _sign_in(client)
+
+    response = await client.post("/v1/session/logout")
+
+    expired = {c.split("=", 1)[0] for c in response.headers.get_list("set-cookie")}
+    assert expired == {identity.SESSION_COOKIE, identity.LEGACY_SESSION_COOKIE}
+    assert not client.cookies.get(identity.SESSION_COOKIE)
+    assert not client.cookies.get(identity.LEGACY_SESSION_COOKIE)
+    assert (await client.get("/v1/session/me")).status_code == 401
+
+
 async def test_a_deployment_without_a_session_secret_explains_configuration(monkeypatch, key):
     """Unset secret is an operator problem, reported as one — never a pass."""
     gateway = _FakeGateway(
@@ -784,8 +862,13 @@ async def test_secure_can_be_turned_off_only_deliberately(monkeypatch, key):
         transport=transport, base_url="http://test", follow_redirects=False
     ) as client:
         response = await _sign_in(client)
+        # Browsers refuse a ``__Host-`` cookie without ``Secure``.
+        assert client.cookies.get(identity.LEGACY_SESSION_COOKIE)
+        logout = await client.post("/v1/session/logout")
 
     assert "secure" not in response.headers["set-cookie"].lower()
+    assert "__host-" not in response.headers["set-cookie"].lower()
+    assert "__host-" not in logout.headers["set-cookie"].lower()
 
 
 @pytest.mark.parametrize("role", ["free", "admin"])
