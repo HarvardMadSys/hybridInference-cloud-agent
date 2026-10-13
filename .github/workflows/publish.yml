@@ -537,8 +537,9 @@ jobs:
           enable-cache: true
           prune-cache: false
 
+      # `--locked`, as in CI: a stale uv.lock fails instead of being re-resolved.
       - name: Sync dependencies
-        run: uv sync
+        run: uv sync --locked
 
       - name: Collect what the cells published
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -706,7 +707,7 @@ jobs:
           prune-cache: false
 
       - name: Sync dependencies
-        run: uv sync
+        run: uv sync --locked
 
       # The documents the acceptance generated and then deployed. Not rebuilt
       # here: a manifest checked in one job and rewritten in the next is two

@@ -203,8 +203,12 @@ jobs:
       - name: Set up Python
         run: uv python install ${{ env.PYTHON_VERSION }}
 
+      # `--locked` here and in every other job: a uv.lock that no longer
+      # matches pyproject.toml fails instead of being re-resolved for this run.
+      # The images install the committed lock as it stands, so checks run
+      # against a fresh resolution would vouch for packages no image ships.
       - name: Sync dependencies
-        run: uv sync
+        run: uv sync --locked
 
       # `continue-on-error` on the checks and nowhere else. A setup step that
       # fails still stops the job outright — there is nothing to lint without a
@@ -297,7 +301,7 @@ jobs:
         run: uv python install ${{ env.PYTHON_VERSION }}
 
       - name: Sync dependencies
-        run: uv sync
+        run: uv sync --locked
 
       # -n 4 --dist loadfile, not a serial run: parallel workers isolate each
       # test file into its own process, which is what surfaces environment
@@ -461,7 +465,7 @@ jobs:
         run: uv python install ${{ env.PYTHON_VERSION }}
 
       - name: Sync dependencies
-        run: uv sync
+        run: uv sync --locked
 
       # Before pytest, because every dbtest fixture answers an unreachable
       # database with `pytest.skip`, not a failure. That is right for a laptop

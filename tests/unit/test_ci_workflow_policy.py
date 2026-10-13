@@ -318,6 +318,40 @@ def test_every_action_is_pinned_to_a_commit(workflow: Path) -> None:
         assert _PINNED_LINE.fullmatch(line), f"{workflow.name}: {line!r} names no release"
 
 
+def _syncs(text: str) -> list[str]:
+    return [line.strip() for line in text.splitlines() if re.match(r"\s*uv sync\b", line)]
+
+
+@pytest.mark.parametrize("workflow", WORKFLOWS, ids=lambda path: path.name)
+def test_every_dependency_sync_refuses_a_stale_lock(workflow: Path) -> None:
+    """A bare `uv sync` re-resolves a uv.lock that no longer matches pyproject.toml.
+
+    The images install the committed lock as it stands, so a job that tested a
+    fresh resolution would vouch for packages no image ships. `--locked` makes
+    that job fail instead, on every event and in every workflow.
+    """
+    jobs = yaml.safe_load(workflow.read_text())["jobs"].values()
+    syncs = [
+        command
+        for job in jobs
+        for step in job.get("steps", [])
+        for command in _syncs(str(step.get("run", "")))
+    ]
+    if workflow.name in {"ci.yml", "publish.yml", "pr-caches.yml"}:
+        assert syncs, f"{workflow.name} no longer syncs; the check would prove nothing"
+    for command in syncs:
+        assert "--locked" in command.split(), f"{workflow.name}: {command}"
+
+
+def test_the_local_launcher_refuses_a_stale_lock_like_ci() -> None:
+    """`make ci` is the local copy of these jobs; it must fail where they fail."""
+    launcher = (WORKFLOW.parents[2] / "scripts/ci-local.sh").read_text()
+    syncs = _syncs(launcher)
+    assert syncs
+    for command in syncs:
+        assert "--locked" in command.split(), command
+
+
 def test_checkouts_leave_no_token_in_the_unreviewed_repository() -> None:
     for document in (_document(), _cache_document()):
         for name, job in document["jobs"].items():

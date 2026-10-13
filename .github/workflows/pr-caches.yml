@@ -55,7 +55,7 @@ jobs:
       - name: Fill the uv cache
         run: |
           uv python install ${{ env.PYTHON_VERSION }}
-          uv sync
+          uv sync --locked
 
       - name: Set up Node
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
