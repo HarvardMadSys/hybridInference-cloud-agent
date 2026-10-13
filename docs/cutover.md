@@ -15,9 +15,9 @@ deliberate choice, and two facts make it the honest one:
   attempt cannot survive the switch. Draining is therefore *required*, not a
   courtesy — MIGRATION.md's deferred register carries this row for exactly this
   step.
-- **Terminal sessions are process memory.** `WorkspaceBroker` keeps live
-  sessions in a dict on the broker process
-  (`cloud_agent_host/workspace_broker.py:658`,
+- **Terminal sessions are process memory.** `Sandbox Manager` keeps live
+  sessions in a dict on the sandbox manager process
+  (`cloud_agent_host/sandbox_manager.py:658`,
   `self._sessions`). They are not in any
   database, so there is nothing to migrate and no honest way to preserve them.
   They are closed deliberately, and the announcement says so.
@@ -98,7 +98,7 @@ blocker that vanishes without a record reads as one that was never real.
 | ~~Inference grants (C5–C8) are not on the gateway~~ | ~~unmerged #1180~~ | ✅ **resolved** — #1180 through #1183, #1191 and #1195 are all on the gateway's `dev`. |
 | ~~`/internal/model-catalog`, `/internal/users/{id}/status`, `/internal/mcp-registry` do not exist upstream~~ | ~~`gateway.py`~~ | ✅ **resolved for two of the three, and the third was removed by design.** The catalog and user-status routes exist and carry an alias table; `/internal/mcp-registry` is gone — MCP belongs to this service now, so there is nothing to ask the gateway about. |
 | ~~Host enrollment exists on the control plane but **the runner does not use it**~~ | ~~`grep -rn AGENT_ENROLL_TOKEN host/` returns nothing~~ | ✅ **resolved** — `cloud_agent_host/enrollment.py` redeems the token and `runner.py` calls `ensure_enrolled` at startup. Staging's runner host carries a stored credential and heartbeats as `online`, so step 6 is enrolment, not environment variables. |
-| **The pool's broker token must be the *same value* on the control plane and on every host** — and nothing checks that it is. Discovered 2026-08-06: with the reverse tunnel up and the address advertised correctly, every broker call still failed, because the two machines had been configured with two different 64-character secrets. | Each host's `.env` and the control plane's | `broker_routing.py` states the design — one shared `AGENT_WORKSPACE_BROKER_TOKEN` for the whole pool — but a mismatch is not refused anywhere, it is a **401 on every file listing, terminal and git status** for jobs on that host. It reads like the tunnel is broken, and it is not; nothing distinguishes the two from the control plane's logs. Compare fingerprints (`sha256` of the value, never the value) on both machines before step 6, and re-check after any host is re-provisioned. |
+| **The pool's sandbox manager token must be the *same value* on the control plane and on every host** — and nothing checks that it is. Discovered 2026-08-06: with the reverse tunnel up and the address advertised correctly, every sandbox manager call still failed, because the two machines had been configured with two different 64-character secrets. | Each host's `.env` and the control plane's | `sandbox_manager_routing.py` states the design — one shared `AGENT_SANDBOX_MANAGER_TOKEN` for the whole pool — but a mismatch is not refused anywhere, it is a **401 on every file listing, terminal and git status** for jobs on that host. It reads like the tunnel is broken, and it is not; nothing distinguishes the two from the control plane's logs. Compare fingerprints (`sha256` of the value, never the value) on both machines before step 6, and re-check after any host is re-provisioned. |
 
 ---
 
@@ -199,7 +199,7 @@ a queue nothing will ever serve again. Draining still means *waiting*.
 
 - [ ] When both are empty, block `POST /v1/agent/worker/claim` at the edge too,
       so nothing can be taken after this point.
-- [ ] Stop the old runner replicas and the workspace broker on the runner host.
+- [ ] Stop the old runner replicas and the sandbox manager on the runner host.
 - [ ] Confirm the old publisher has nothing left: no job in `publishing`, and
       `published_pr_url IS NULL` for nothing that finished successfully.
 
@@ -277,13 +277,13 @@ that credential. Request-body host names are not identity.
       - `AGENT_ENROLL_TOKEN` → a new single-use token bound to this host; remove
         it after the persisted credential is written.
       - `AGENT_RUNNER_HOST` → the enrolled machine name.
-      - `AGENT_WORKSPACE_BROKER_URL` and
-        `AGENT_WORKSPACE_BROKER_TOKEN` → the advertised broker and the same
+      - `AGENT_SANDBOX_MANAGER_URL` and
+        `AGENT_SANDBOX_MANAGER_TOKEN` → the advertised sandbox manager and the same
         environment secret configured on the control plane.
-- [ ] Start the runner and the broker. Confirm the startup line names the new
+- [ ] Start the runner and the sandbox_manager. Confirm the startup line names the new
       host and the sandbox backend, and that preflight passed.
 - [ ] Confirm on the new control plane that the enrolled host appears online
-      with a fresh heartbeat and usable broker (`GET /admin/agent/runner-hosts`).
+      with a fresh heartbeat and usable sandbox manager (`GET /admin/agent/runner-hosts`).
 - [ ] Leave the pool **unpinned**. The new database's `agent_runner_policy`
       singleton has `active_host = NULL`, which means claiming is unrestricted;
       pinning to a host that has not polled yet is refused, and pinning at all
@@ -357,7 +357,7 @@ not copied back.
 4. [ ] Remove the edge rules from steps 2 and 3, in that order: unblock
        `/worker/claim` **before** unblocking creation, or the first job created
        sits in a queue nothing is polling.
-5. [ ] Start the old runner and broker. Confirm a create → claim → finish
+5. [ ] Start the old runner and sandbox_manager. Confirm a create → claim → finish
        round trip.
 6. [ ] Remove the banner.
 7. [ ] Leave the new database as it is. Re-running step 5 later with
@@ -391,8 +391,8 @@ would read as "not yet" when the truth is "never, deliberately".
 | 5. Migration dry run | | skipped | — | payload was 1 GitHub connection + 0 GitLab rows |
 | 5. Migration applied | | skipped — fallback taken, then deletion | Murphy | the one GitHub connection was re-made by hand on 2026-08-06 (DR5's reconnect fallback); DR5 was amended 2026-08-09 and the source tables dropped |
 | 5. Idempotency re-run | | n/a | — | nothing was migrated |
-| 6. Runner re-pointed | | 2026-08-06 | Murphy + Claude | by enrolment, not env edit: rtx6000b redeemed an enrol token, heartbeats `online`; broker reachability needed #41 plus aligning the two hosts' `AGENT_WORKSPACE_BROKER_TOKEN` values |
+| 6. Runner re-pointed | | 2026-08-06 | Murphy + Claude | by enrolment, not env edit: rtx6000b redeemed an enrol token, heartbeats `online`; sandbox manager reachability needed #41 plus aligning the two hosts' `AGENT_SANDBOX_MANAGER_TOKEN` values |
 | 7. Domain switched | | staging 2026-08-06, production 2026-08-07 16:59 | Murphy | same-origin `/agents` rewrites through the console (no separate domain — DR4 as deployed); production needed hybridInference#1229 |
-| 8. Smoke passed | | 2026-08-06, partial | Claude | `ajob_8b0be5f9e7ff9ad5`: create → remote claim → broker workspace → tool-calling run → succeeded, with grant mint / renew ×4 / revoke. **Still unproven: publish, mid-run cancel, the fail-closed trio (smoke.md § 6).** |
+| 8. Smoke passed | | 2026-08-06, partial | Claude | `ajob_8b0be5f9e7ff9ad5`: create → remote claim → sandbox manager workspace → tool-calling run → succeeded, with grant mint / renew ×4 / revoke. **Still unproven: publish, mid-run cancel, the fail-closed trio (smoke.md § 6).** |
 | 9. Banner up | | n/a | — | the rewrite made the old UI unreachable the moment it deployed, and H4 then deleted it; no banner ever shipped |
 | Rollback rehearsed | before the run | never — window closed 2026-08-09 | — | see the note at the top of the Rollback section |

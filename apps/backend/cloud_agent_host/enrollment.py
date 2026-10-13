@@ -10,7 +10,7 @@ so every consequence that hangs off a host row was inert:
   which with no heartbeats meant either every host or none, depending on
   whether a row existed at all;
 * **drain and remove** — an operator's decision the runner never read;
-* **broker address** — the row carries the `broker_url` from which file,
+* **sandbox manager address** — the row carries the `sandbox_manager_url` from which file,
   terminal and git requests are served, and a row without one answers 409 for
   every one of them.
 
@@ -250,7 +250,7 @@ def register(
     base_url: str,
     host: str,
     enroll_token: str,
-    broker_url: str | None = None,
+    sandbox_manager_url: str | None = None,
     slots_total: int | None = None,
     capabilities: list[str] | None = None,
     runner_version: str | None = None,
@@ -261,7 +261,7 @@ def register(
         {
             "enroll_token": enroll_token,
             "name": host,
-            "broker_url": broker_url,
+            "broker_url": sandbox_manager_url,
             "slots_total": slots_total,
             "capabilities": capabilities or [],
             "runner_version": runner_version,
@@ -284,7 +284,7 @@ def register(
         status=str(answer.get("status") or "enrolling"),
     )
     store_credential(credential)
-    _warn_broker_error(answer, identity.host)
+    _warn_sandbox_manager_error(answer, identity.host)
     logger.info(
         "agent_host_registered",
         extra={"event": "agent_host_registered", "host": identity.host, "status": identity.status},
@@ -292,7 +292,7 @@ def register(
     return identity
 
 
-def _warn_broker_error(answer: dict[str, Any], host: str) -> None:
+def _warn_sandbox_manager_error(answer: dict[str, Any], host: str) -> None:
     """Surface the control plane's verdict on the address we just reported.
 
     It is the only party that can answer "is this address usable", because it
@@ -300,21 +300,25 @@ def _warn_broker_error(answer: dict[str, Any], host: str) -> None:
     exactly when the answer stops being obvious. Printed to stderr as well as
     logged because `sandbox_host.sh up` tails these logs after starting
     the stack: a deploy that misconfigured the reverse tunnel or the shared
-    broker token says so while somebody is still watching, instead of at the
+    sandbox manager token says so while somebody is still watching, instead of at the
     first terminal request of the first job.
     """
-    error = answer.get("broker_error")
+    error = answer.get("sandbox_manager_error", answer.get("broker_error"))
     if not error:
         return
     logger.warning(
-        "agent_host_broker_unusable",
-        extra={"event": "agent_host_broker_unusable", "host": host, "broker_error": error},
+        "agent_host_sandbox_manager_unusable",
+        extra={
+            "event": "agent_host_sandbox_manager_unusable",
+            "host": host,
+            "sandbox_manager_error": error,
+        },
     )
     print(
-        f"agent runner: the control plane cannot use this host's broker address: {error}\n"
+        f"agent runner: the control plane cannot use this host's sandbox manager address: {error}\n"
         "  Files, terminals and git for every job on this host will fail until this is fixed.\n"
-        "  On a remote runner host, check AGENT_WORKSPACE_BROKER_ADVERTISE_URL, the reverse\n"
-        "  forward on the control-plane tunnel, and that AGENT_WORKSPACE_BROKER_TOKEN matches\n"
+        "  On a remote runner host, check AGENT_SANDBOX_MANAGER_ADVERTISE_URL, the reverse\n"
+        "  forward on the control-plane tunnel, and that AGENT_SANDBOX_MANAGER_TOKEN matches\n"
         "  the control plane's.",
         file=sys.stderr,
         flush=True,
@@ -327,7 +331,7 @@ def heartbeat(
     identity: HostIdentity,
     slots_total: int | None = None,
     launch_error: str | None = None,
-    broker_url: str | None = None,
+    sandbox_manager_url: str | None = None,
     capabilities: list[str] | None = None,
     runner_version: str | None = None,
     sandbox_runtime: str | None = None,
@@ -380,7 +384,7 @@ def heartbeat(
             "launch_error": (
                 None if launch_error is None else launch_error[:HOST_LAUNCH_ERROR_MAX_CHARS]
             ),
-            "broker_url": broker_url,
+            "broker_url": sandbox_manager_url,
             "capabilities": capabilities,
             "runner_version": runner_version,
             "sandbox_runtime": sandbox_runtime,
@@ -400,7 +404,7 @@ def heartbeat(
         },
         bearer=identity.credential,
     )
-    _warn_broker_error(answer, identity.host)
+    _warn_sandbox_manager_error(answer, identity.host)
     lost = answer.get("residencies_lost")
     if lost and on_residencies_lost is not None:
         # The control plane's side of the fence, delivered with the
@@ -421,7 +425,7 @@ def heartbeat(
             archive_policy = SandboxArchivePolicy.from_mapping(raw_archive_settings)
         except SandboxArchivePolicyError as exc:
             raise EnrollmentError("heartbeat returned invalid sandbox archive settings") from exc
-        archive_settings = archive_policy.as_broker_dict()
+        archive_settings = archive_policy.as_sandbox_manager_dict()
         updated_at = raw_archive_settings.get("updated_at")
         if isinstance(updated_at, str):
             archive_settings["updated_at"] = updated_at
@@ -455,7 +459,7 @@ def ensure_enrolled(
     *,
     base_url: str,
     host: str,
-    broker_url: str | None = None,
+    sandbox_manager_url: str | None = None,
     slots_total: int | None = None,
     capabilities: list[str] | None = None,
     runner_version: str | None = None,
@@ -481,7 +485,7 @@ def ensure_enrolled(
         return _enroll_once(
             base_url=base_url,
             host=host,
-            broker_url=broker_url,
+            sandbox_manager_url=sandbox_manager_url,
             slots_total=slots_total,
             capabilities=capabilities,
             runner_version=runner_version,
@@ -517,7 +521,7 @@ def _enroll_once(
     *,
     base_url: str,
     host: str,
-    broker_url: str | None,
+    sandbox_manager_url: str | None,
     slots_total: int | None,
     capabilities: list[str] | None,
     runner_version: str | None,
@@ -535,7 +539,7 @@ def _enroll_once(
         base_url=base_url,
         host=host,
         enroll_token=token,
-        broker_url=broker_url,
+        sandbox_manager_url=sandbox_manager_url,
         slots_total=slots_total,
         capabilities=capabilities,
         runner_version=runner_version,
@@ -559,7 +563,7 @@ class HostHeartbeat:
         identity: HostIdentity,
         slots_total: int | Callable[[], int | None] | None = None,
         launch_error: str | Callable[[], str] | None = None,
-        broker_url: str | None = None,
+        sandbox_manager_url: str | None = None,
         capabilities: list[str] | Callable[[], list[str]] | None = None,
         runner_version: str | None = None,
         sandbox_runtime: str | None = None,
@@ -590,7 +594,7 @@ class HostHeartbeat:
         # same reason, and ``""`` is a positive "nothing wrong" rather than an
         # absent field that would leave a stale reason on the page.
         self._launch_error = launch_error
-        self._broker_url = broker_url
+        self._sandbox_manager_url = sandbox_manager_url
         self._capabilities = capabilities
         self._runner_version = runner_version
         self._sandbox_runtime = sandbox_runtime
@@ -713,7 +717,7 @@ class HostHeartbeat:
                     launch_error=(
                         self._launch_error() if callable(self._launch_error) else self._launch_error
                     ),
-                    broker_url=self._broker_url,
+                    sandbox_manager_url=self._sandbox_manager_url,
                     capabilities=capabilities,
                     runner_version=self._runner_version,
                     sandbox_runtime=self._sandbox_runtime,

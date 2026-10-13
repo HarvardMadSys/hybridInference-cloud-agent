@@ -29,7 +29,7 @@ HOST_COLUMN_NAMES = (
     "slots_desired",
     "launch_error",
     "runner_version",
-    "broker_url",
+    "sandbox_manager_url",
     "last_heartbeat_at",
     "drain_fence_token",
     "drain_fence_status_before",
@@ -49,14 +49,24 @@ HOST_COLUMN_NAMES = (
 )
 
 
-HOST_COLUMNS = ", ".join(HOST_COLUMN_NAMES) + ", (credential_hash IS NOT NULL) AS enrolled"
+# The database column is stable so old and new control planes can overlap.
+HOST_COLUMNS = (
+    ", ".join(
+        "broker_url AS sandbox_manager_url" if column == "sandbox_manager_url" else column
+        for column in HOST_COLUMN_NAMES
+    )
+    + ", (credential_hash IS NOT NULL) AS enrolled"
+)
 
 
 # The same list qualified with ``h.``. Required wherever the query joins
 # ``agent_attempts``, which has its own ``status`` and ``host_id``: unqualified,
 # Postgres rejects the whole statement as ambiguous.
 QUALIFIED_HOST_COLUMNS = (
-    ", ".join(f"h.{column}" for column in HOST_COLUMN_NAMES)
+    ", ".join(
+        "h.broker_url AS sandbox_manager_url" if column == "sandbox_manager_url" else f"h.{column}"
+        for column in HOST_COLUMN_NAMES
+    )
     + ", (h.credential_hash IS NOT NULL) AS enrolled"
 )
 
@@ -64,7 +74,7 @@ QUALIFIED_HOST_COLUMNS = (
 #: The latest host-capacity observation, projected only where it is read.
 #:
 #: Deliberately *not* part of ``HOST_COLUMN_NAMES``. That list is also what
-#: every broker request resolves a host through — a file read, a terminal, a
+#: every sandbox manager request resolves a host through — a file read, a terminal, a
 #: git operation — and an 8 KiB monitoring snapshot has no business riding
 #: along on any of them. The admin pool read and the capacity history task ask
 #: for these columns by name; nothing else does.

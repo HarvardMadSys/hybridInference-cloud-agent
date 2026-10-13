@@ -9,7 +9,7 @@ Cloud Agent 仓库的改动本身不修改 FI 的环境配置。按设计文档 
 ## 1. 默认即可使用（2026-09-22 更新）
 
 包含 [默认行为修正](../specs/2026-09-22-measurement-admin-default.zh-CN.md) 的版本中，
-CP、runner、broker 和 turn 子进程无需 `MODE=admin` 即支持 Admin 开关。采集在没有活动
+CP、runner、sandbox manager 和 turn 子进程无需 `MODE=admin` 即支持 Admin 开关。采集在没有活动
 实验时保持 Disabled。四类进程都需升级；旧版本仍遵循旧默认。
 
 FI 已有的显式 `MODE=admin` 可以保留。若旧配置有 `ENABLED=true`，仍进入静态实验兼容
@@ -36,20 +36,20 @@ alembic upgrade head    # 新增 0018_profiling_control
    `MODE` 没生效。
 2. 点 **Enable measurement**，选 1 分钟、All hosts、三项全选。按钮应变成
    **Disable measurement**，状态变 `Enabled`；**正常约 30 秒**让配置同步到 CP、
-   runner、broker（页面就写着这个数）。
+   runner、sandbox manager（页面就写着这个数）。
 3. 期间做一次文件浏览、一次终端打开、一次沙盒启动，`Stored samples` 应增长。若一直是 0，
    先确认这些操作确实发生过（空状态提示说的就是这个）。
 4. 点 **Disable measurement**，确认状态变 `Disabled` 且 `last_stopped_run.run_id` 是刚才那个
    实验；随后再浏览一次文件，`Stored samples` **不应**增长。
    注意：停用**不会**取消已经开始的测量，所以停用前一刻发起的请求仍可能入库——这是预期行为。
-5. 确认 Enable/Disable 期间 CP / runner / broker 的 PID 或容器**没有重启**（`docker ps`
+5. 确认 Enable/Disable 期间 CP / runner / sandbox manager 的 PID 或容器**没有重启**（`docker ps`
    的 `STATUS` 不变）。若开关触发了重启，说明配置接线错了。
 
 ## 4. 不要做
 
 - **不要**用开关去触发 CI、deploy workflow 或改 GitHub Secrets；本功能不碰这些。
-- **不要**把 host 凭据给 broker 或沙盒。配置是从 runner 经 broker 已有的共享令牌通道下发
-  的；给 broker 加 host 凭据是设计明确禁止的扩张。
+- **不要**把 host 凭据给 sandbox manager 或沙盒。配置是从 runner 经 sandbox manager 已有的共享令牌通道下发
+  的；给 sandbox manager 加 host 凭据是设计明确禁止的扩张。
 - **不要**在未授权的情况下开生产采集。本 PR 只在本地/测试部署验收，staging 按后续
   授权推进，生产不在范围内。
 

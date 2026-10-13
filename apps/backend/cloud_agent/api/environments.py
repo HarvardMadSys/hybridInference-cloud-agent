@@ -27,8 +27,8 @@ from cloud_agent.environments import (
     EnvironmentEncryptionError,
     EnvironmentNotFound,
 )
+from cloud_agent.sandbox_manager_client import SandboxManagerError
 from cloud_agent.schemas import REPO_PATTERN
-from cloud_agent.workspace_broker_client import WorkspaceBrokerError
 from cloud_agent_shared.environment import (
     ENVIRONMENT_CAPABILITY,
     MAX_IMPORT_BYTES,
@@ -74,7 +74,7 @@ class CredentialSafeRoute(APIRoute):
                 response = JSONResponse(
                     status_code=404, content={"detail": "Environment or run not found."}
                 )
-            except WorkspaceBrokerError as exc:
+            except SandboxManagerError as exc:
                 response = JSONResponse(
                     status_code=exc.status_code, content={"detail": exc.message}
                 )
@@ -658,9 +658,9 @@ async def workspace_environment(
         user["user_id"], str(job["thread_id"])
     )
     if view.get("binding_id") and view.get("required"):
-        from cloud_agent.broker_routing import broker_for_job
+        from cloud_agent.sandbox_manager_routing import sandbox_manager_for_job
 
-        broker = await broker_for_job(store.host_pool, job_id)
+        broker = await sandbox_manager_for_job(store.host_pool, job_id)
         if broker is not None:
             try:
                 receipt = await broker.environment_status(str(job["thread_id"]), view["binding_id"])
@@ -668,7 +668,7 @@ async def workspace_environment(
                     view["steps"] = await store.environments.redact_environment_steps(
                         user["user_id"], view["binding_id"], receipt.get("steps", [])
                     )
-            except WorkspaceBrokerError:
+            except SandboxManagerError:
                 pass
     return view
 
@@ -783,7 +783,7 @@ async def action_status(
     try:
         terminal = await broker.terminal_output(str(job["thread_id"]), terminal_id)
         update = _action_result(terminal)
-    except WorkspaceBrokerError as exc:
+    except SandboxManagerError as exc:
         if exc.status_code != 404:
             raise
         # A starting HTTP request can still be in flight. Do not fence it prematurely.
@@ -820,13 +820,13 @@ async def stop_action(
         update["exit_code"] = output.get("exit_code")
         if output.get("state") in {"exited", "unknown", "failed"}:
             update = _action_result(output)
-    except WorkspaceBrokerError as exc:
+    except SandboxManagerError as exc:
         if exc.status_code != 404:
             raise
         update = _missing_action_result()
     try:
         await broker.delete_terminal(str(job["thread_id"]), terminal_id)
-    except WorkspaceBrokerError as exc:
+    except SandboxManagerError as exc:
         if exc.status_code != 404:
             raise
     return await store.environments.update_environment_action_run(user["user_id"], run_id, update)
@@ -841,14 +841,14 @@ async def retry_preparation(
 ) -> dict[str, Any]:
     """Retry failed preparation using the same workspace binding."""
     from cloud_agent.api._owner_auth import _owned_job
-    from cloud_agent.broker_routing import broker_for_job
+    from cloud_agent.sandbox_manager_routing import sandbox_manager_for_job
 
     store = require_store(store)
     job = await _owned_job(store.conversation_queries, job_id, user)
     await _entitled(store, user["user_id"], job["repo"], credentials)
     if not job.get("environment_binding_id"):
         raise HTTPException(409, "Workspace has no environment binding")
-    broker = await broker_for_job(store.host_pool, job_id)
+    broker = await sandbox_manager_for_job(store.host_pool, job_id)
     if broker is None:
         raise HTTPException(503, "Workspace host is unavailable")
     bound = await store.environments.get_environment_binding(
@@ -898,14 +898,14 @@ async def skip_environment_start(
 ) -> dict[str, Any]:
     """Allow one next turn to proceed after an explicitly acknowledged start failure."""
     from cloud_agent.api._owner_auth import _owned_job
-    from cloud_agent.broker_routing import broker_for_job
+    from cloud_agent.sandbox_manager_routing import sandbox_manager_for_job
 
     store = require_store(store)
     job = await _owned_job(store.conversation_queries, job_id, user)
     await _entitled(store, user["user_id"], job["repo"], credentials)
     if not job.get("environment_binding_id"):
         raise HTTPException(409, "Workspace has no environment binding")
-    broker = await broker_for_job(store.host_pool, job_id)
+    broker = await sandbox_manager_for_job(store.host_pool, job_id)
     if broker is None:
         raise HTTPException(503, "Workspace host is unavailable")
     receipt = await broker.environment_status(str(job["thread_id"]), job["environment_binding_id"])

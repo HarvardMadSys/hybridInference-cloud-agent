@@ -50,7 +50,6 @@ from cloud_agent.application.pending_messages import settle_queue_when_possible
 from cloud_agent.application.residency import _mint_residency_grant, residency_ttl_s
 from cloud_agent.attachments.models import AttachmentLeaseLost, AttachmentView
 from cloud_agent.attachments.selection import prompt_with_attachments
-from cloud_agent.broker_routing import ENV_BROKER_TOKEN, broker_for_attempt, hydrate_shared_broker
 from cloud_agent.domain.execution import FAILED, QUEUED, RUNNING, TERMINAL_STATES
 from cloud_agent.entitlement import RepoAccessUnavailable, RepoNotAllowed, require_entitled_repo
 from cloud_agent.environments import EnvironmentEncryptionError
@@ -75,6 +74,12 @@ from cloud_agent.owner_access import (
     AGENT_ACCESS_WITHDRAWN,
     AgentAccessUnavailable,
     owner_may_use_agent,
+)
+from cloud_agent.sandbox_manager_client import SandboxManagerError
+from cloud_agent.sandbox_manager_routing import (
+    ENV_SANDBOX_MANAGER_TOKEN,
+    hydrate_shared_sandbox_manager,
+    sandbox_manager_for_attempt,
 )
 from cloud_agent.schemas import (
     HostResidencyEstablishResponse,
@@ -124,8 +129,7 @@ from cloud_agent.tokens import (
 )
 from cloud_agent.user_memory import prompt_with_user_memory
 from cloud_agent.workers.work_signal import WorkSignal  # noqa: TC001 — FastAPI resolves it.
-from cloud_agent.workspace_broker_client import WorkspaceBrokerError
-from cloud_agent.workspace_errors import _workspace_broker_http_error
+from cloud_agent.workspace_errors import _sandbox_manager_http_error
 from cloud_agent_host.runtimes import runtimes_supporting_mcp
 from cloud_agent_shared.environment import ENVIRONMENT_CAPABILITY
 
@@ -152,7 +156,7 @@ if TYPE_CHECKING:
         UserMemoryRepository,
     )
     from cloud_agent.ports.environments import EnvironmentRepository
-    from cloud_agent.workspace_broker_client import WorkspaceBrokerClient
+    from cloud_agent.sandbox_manager_client import SandboxManagerClient
 
 
 #: Check the raw report before FastAPI parses JSON or validates its model.
@@ -426,22 +430,22 @@ def _match_job(claims: dict[str, Any], job_id: str) -> None:
 
 
 async def _restore_terminal_suspension(
-    broker: WorkspaceBrokerClient | None,
+    sandbox_manager: SandboxManagerClient | None,
     *,
     workspace_id: str,
     job_id: str,
     lease_generation: int,
 ) -> None:
     """Best-effort compensation after a worker fails to finalize a resume."""
-    if broker is None:
+    if sandbox_manager is None:
         return
     try:
-        await broker.suspend_terminals(
+        await sandbox_manager.suspend_terminals(
             workspace_id,
             lease_generation=lease_generation,
             job_id=job_id,
         )
-    except WorkspaceBrokerError:
+    except SandboxManagerError:
         logger.warning(
             "agent_terminal_resume_compensation_failed",
             exc_info=True,
@@ -454,30 +458,30 @@ async def _restore_terminal_suspension(
         )
 
 
-async def _worker_workspace_broker(
+async def _worker_sandbox_manager(
     job_store: _WorkerStorage,
     job: dict[str, Any],
     *,
     attempt_id: int,
     required: bool,
-) -> WorkspaceBrokerClient | None:
+) -> SandboxManagerClient | None:
     """Resolve the retained owner for worker-side terminal coordination.
 
     A failed attempt may settle before it ever reserves Docker, in which case
     there is genuinely no terminal state to coordinate. Once a group mapping
-    exists, however, a missing broker is a routing failure and must not be
+    exists, however, a missing sandbox manager is a routing failure and must not be
     treated as a successful no-op.
     """
     if job.get("thread_sandbox") is None:
         if required:
             raise _workspace_not_ready()
         return None
-    broker = await broker_for_attempt(job_store.host_pool, attempt_id)
+    sandbox_manager = await sandbox_manager_for_attempt(job_store.host_pool, attempt_id)
     try:
-        broker = await hydrate_shared_broker(job, broker)
-    except WorkspaceBrokerError as exc:
-        raise _workspace_broker_http_error(exc) from exc
-    if broker is None:
+        sandbox_manager = await hydrate_shared_sandbox_manager(job, sandbox_manager)
+    except SandboxManagerError as exc:
+        raise _sandbox_manager_http_error(exc) from exc
+    if sandbox_manager is None:
         raise HTTPException(
             status_code=503,
             detail={
@@ -487,7 +491,7 @@ async def _worker_workspace_broker(
                 }
             },
         )
-    return broker
+    return sandbox_manager
 
 
 def _warn_on_unbounded_untrusted_group(
@@ -816,13 +820,13 @@ async def worker_claim(
     job_store = _require_store(store)
     from cloud_agent.settings import setting_env
 
-    if not (setting_env(ENV_BROKER_TOKEN) or "").strip():
+    if not (setting_env(ENV_SANDBOX_MANAGER_TOKEN) or "").strip():
         raise HTTPException(
             status_code=503,
             detail={
                 "error": {
                     "type": "workspace_unavailable",
-                    "message": "The retained workspace broker credential is not configured.",
+                    "message": "The retained sandbox manager credential is not configured.",
                 }
             },
         )
@@ -902,16 +906,16 @@ async def worker_claim(
             if environment.required:
                 if ENVIRONMENT_CAPABILITY not in capabilities:
                     raise SourceControlError("Host cannot execute environment configuration")
-                from cloud_agent.broker_routing import broker_for_job
-                from cloud_agent.workspace_broker_client import WorkspaceBrokerError
+                from cloud_agent.sandbox_manager_client import SandboxManagerError
+                from cloud_agent.sandbox_manager_routing import sandbox_manager_for_job
 
                 try:
-                    broker = await broker_for_job(job_store.host_pool, claim["id"])
+                    broker = await sandbox_manager_for_job(job_store.host_pool, claim["id"])
                     if broker is None:
-                        raise SourceControlError("Workspace broker is unavailable")
+                        raise SourceControlError("Sandbox manager is unavailable")
                     await broker.require_environment_capability()
-                except (WorkspaceBrokerError, httpx.HTTPError):
-                    raise SourceControlError("Workspace broker must be upgraded") from None
+                except (SandboxManagerError, httpx.HTTPError):
+                    raise SourceControlError("Sandbox manager must be upgraded") from None
             else:
                 environment = None
         except (SourceControlError, EnvironmentEncryptionError):
@@ -1756,17 +1760,17 @@ async def worker_suspend_terminals(
     )
     if event_id is None:
         raise _lease_lost()
-    broker = await _worker_workspace_broker(
+    sandbox_manager = await _worker_sandbox_manager(
         job_store, job, attempt_id=claims["attempt_id"], required=True
     )
-    assert broker is not None
+    assert sandbox_manager is not None
     try:
-        await broker.suspend_terminals(
+        await sandbox_manager.suspend_terminals(
             workspace_id,
             lease_generation=claims["lease_generation"],
             job_id=job_id,
         )
-    except WorkspaceBrokerError as exc:
+    except SandboxManagerError as exc:
         raise HTTPException(
             status_code=503,
             detail={
@@ -1799,19 +1803,19 @@ async def worker_resume_terminals(
     )
     if not fenced:
         raise _lease_lost()
-    broker = await _worker_workspace_broker(
+    sandbox_manager = await _worker_sandbox_manager(
         job_store, job, attempt_id=claims["attempt_id"], required=True
     )
-    assert broker is not None
+    assert sandbox_manager is not None
     try:
-        await broker.resume_terminals(
+        await sandbox_manager.resume_terminals(
             workspace_id,
             lease_generation=claims["lease_generation"],
             job_id=job_id,
         )
-    except WorkspaceBrokerError as exc:
+    except SandboxManagerError as exc:
         await _restore_terminal_suspension(
-            broker,
+            sandbox_manager,
             workspace_id=workspace_id,
             job_id=job_id,
             lease_generation=claims["lease_generation"],
@@ -1834,7 +1838,7 @@ async def worker_resume_terminals(
         )
     except Exception:
         await _restore_terminal_suspension(
-            broker,
+            sandbox_manager,
             workspace_id=workspace_id,
             job_id=job_id,
             lease_generation=claims["lease_generation"],
@@ -1842,7 +1846,7 @@ async def worker_resume_terminals(
         raise
     if event_id is None:
         await _restore_terminal_suspension(
-            broker,
+            sandbox_manager,
             workspace_id=workspace_id,
             job_id=job_id,
             lease_generation=claims["lease_generation"],
@@ -1992,19 +1996,19 @@ async def worker_finish(
     )
     if not fenced:
         raise _lease_lost()
-    broker = await _worker_workspace_broker(
+    sandbox_manager = await _worker_sandbox_manager(
         job_store, job, attempt_id=claims["attempt_id"], required=False
     )
-    if broker is not None:
+    if sandbox_manager is not None:
         try:
-            await broker.resume_terminals(
+            await sandbox_manager.resume_terminals(
                 workspace_id,
                 lease_generation=claims["lease_generation"],
                 job_id=job_id,
             )
-        except WorkspaceBrokerError as exc:
+        except SandboxManagerError as exc:
             await _restore_terminal_suspension(
-                broker,
+                sandbox_manager,
                 workspace_id=workspace_id,
                 job_id=job_id,
                 lease_generation=claims["lease_generation"],
@@ -2035,7 +2039,7 @@ async def worker_finish(
         )
     except Exception:
         await _restore_terminal_suspension(
-            broker,
+            sandbox_manager,
             workspace_id=workspace_id,
             job_id=job_id,
             lease_generation=claims["lease_generation"],
@@ -2043,7 +2047,7 @@ async def worker_finish(
         raise
     if not ok:
         await _restore_terminal_suspension(
-            broker,
+            sandbox_manager,
             workspace_id=workspace_id,
             job_id=job_id,
             lease_generation=claims["lease_generation"],

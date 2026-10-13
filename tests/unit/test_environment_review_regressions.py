@@ -10,14 +10,14 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
-from tests.unit.test_agent_workspace_broker import _Spawner, _TerminalProcess, _wait_for
+from tests.unit.test_agent_sandbox_manager import _Spawner, _TerminalProcess, _wait_for
 
-from cloud_agent.workspace_broker_client import WorkspaceBrokerClient, WorkspaceBrokerError
+from cloud_agent.sandbox_manager_client import SandboxManagerClient, SandboxManagerError
 from cloud_agent_host import environment_tests
 from cloud_agent_host.action_receipts import ActionReceipts
 from cloud_agent_host.environment_snapshot import check_snapshot_secrets
 from cloud_agent_host.sandbox import SandboxError
-from cloud_agent_host.workspace_broker import _TerminalManager
+from cloud_agent_host.sandbox_manager import _TerminalManager
 from cloud_agent_shared.environment import (
     BoundEnvironment,
     EnvironmentAction,
@@ -286,7 +286,7 @@ async def test_terminal_prepares_at_the_broker_once_and_empty_bindings_need_no_c
 
     bound = BoundEnvironment(binding_id="b", setup_script="install" if configured else "")
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
-        broker = WorkspaceBrokerClient("http://broker", "credential", client=client)
+        broker = SandboxManagerClient("http://broker", "credential", client=client)
         args = (
             {"command": "echo 1", "cwd": "/workspace", "timeout_seconds": 60}
             if operation == "terminal"
@@ -307,8 +307,8 @@ async def test_old_broker_receives_no_secret_bearing_payload():
         return httpx.Response(200, json={"capabilities": []})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
-        broker = WorkspaceBrokerClient("http://broker", "credential", client=client)
-        with pytest.raises(WorkspaceBrokerError, match="upgraded"):
+        broker = SandboxManagerClient("http://broker", "credential", client=client)
+        with pytest.raises(SandboxManagerError, match="upgraded"):
             await broker.create_terminal(
                 "workspace",
                 rows=24,
@@ -323,7 +323,7 @@ async def test_old_broker_receives_no_secret_bearing_payload():
 async def test_empty_binding_snapshot_uses_the_existing_broker_protocol(monkeypatch):
     from unittest.mock import AsyncMock
 
-    from cloud_agent import broker_routing
+    from cloud_agent import sandbox_manager_routing
     from cloud_agent.workers.snapshots import _capture_due_shared_snapshot
 
     snapshot = {
@@ -337,7 +337,9 @@ async def test_empty_binding_snapshot_uses_the_existing_broker_protocol(monkeypa
     }
     receipt = {**snapshot, "sandbox_generation": 1, "patch": "", "content_sha256": "digest"}
     broker = SimpleNamespace(capture_shared_snapshot=AsyncMock(return_value=receipt))
-    monkeypatch.setattr(broker_routing, "broker_for_job", AsyncMock(return_value=broker))
+    monkeypatch.setattr(
+        sandbox_manager_routing, "sandbox_manager_for_job", AsyncMock(return_value=broker)
+    )
     store = SimpleNamespace(
         host_pool=object(),
         snapshot=SimpleNamespace(
@@ -361,7 +363,7 @@ async def test_empty_binding_fork_reaches_coordination_without_environment_prepa
     from cloud_agent.application import session_fork
 
     broker = SimpleNamespace(prepare_environment=AsyncMock(side_effect=RuntimeError("old broker")))
-    monkeypatch.setattr(session_fork, "broker_for_job", AsyncMock(return_value=broker))
+    monkeypatch.setattr(session_fork, "sandbox_manager_for_job", AsyncMock(return_value=broker))
     store = SimpleNamespace(
         host_pool=object(),
         environments=SimpleNamespace(

@@ -116,7 +116,7 @@ def _no_wait_endpoint(**_kwargs: Any) -> str:
     raise runner_mod.WorkWaitUnsupported("404")
 
 
-class _SettingsBroker:
+class _SettingsSandboxManager:
     """Acknowledge the two DB-owned settings contracts used by this suite."""
 
     def apply_host_settings(self, settings: dict[str, int]) -> dict[str, object]:
@@ -143,7 +143,7 @@ def service(monkeypatch):
     )
     monkeypatch.setattr(runner_mod, "ensure_enrolled", lambda **_kw: identity)
     monkeypatch.setattr(runner_mod, "HostHeartbeat", FakeHeartbeat)
-    monkeypatch.setattr(runner_mod, "_session_supervisor_from_env", _SettingsBroker)
+    monkeypatch.setattr(runner_mod, "_session_supervisor_from_env", _SettingsSandboxManager)
     monkeypatch.setattr(runner_mod, "_start_host_capacity_collector", lambda _b: None)
     monkeypatch.setattr(
         runner_mod,
@@ -787,7 +787,9 @@ def test_each_turn_is_handed_the_admin_settings_from_the_latest_beat(service, mo
 
     assert handed[0]["_host_settings"]["agent_timeout_s"] == runner_mod.DEFAULT_AGENT_TIMEOUT_S
     assert handed[1]["_host_settings"]["agent_timeout_s"] == 900
-    assert "terminal_max_sessions" not in handed[1]["_host_settings"], "the broker's, not a turn's"
+    assert "terminal_max_sessions" not in handed[1]["_host_settings"], (
+        "the sandbox manager's, not a turn's"
+    )
     beat = FakeHeartbeat.last
     assert HOST_SETTINGS_CAPABILITY in beat.kwargs["capabilities"]()
     applied, local = beat.kwargs["settings_report"]()
@@ -2204,7 +2206,7 @@ class _IdleHeart:
 
 
 class _EmptyStream:
-    """A broker stream that ends as soon as it is read."""
+    """A sandbox manager stream that ends as soon as it is read."""
 
     def frames(self) -> Any:
         """Yield the one frame that ends the turn."""

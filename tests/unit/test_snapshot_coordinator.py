@@ -121,7 +121,7 @@ async def test_a_receipt_patch_past_the_capture_limit_is_never_recorded(monkeypa
     """No honest host produces a patch past its own Git output limit."""
     import hashlib
 
-    from cloud_agent import broker_routing
+    from cloud_agent import sandbox_manager_routing
 
     patch = "x" * (control_plane.MAX_SNAPSHOT_PATCH_BYTES + (1 if oversized else 0))
     claimed = _claimed_snapshot()
@@ -139,10 +139,10 @@ async def test_a_receipt_patch_past_the_capture_limit_is_never_recorded(monkeypa
                 "content_sha256": hashlib.sha256(patch.encode()).hexdigest(),
             }
 
-    async def broker_for_job(_store: Any, _job_id: str) -> _Broker:
+    async def sandbox_manager_for_job(_store: Any, _job_id: str) -> _Broker:
         return _Broker()
 
-    monkeypatch.setattr(broker_routing, "broker_for_job", broker_for_job)
+    monkeypatch.setattr(sandbox_manager_routing, "sandbox_manager_for_job", sandbox_manager_for_job)
     port = _CapturePort()
     store = type("Store", (), {"snapshot": port, "host_pool": None})()
 

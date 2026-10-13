@@ -346,7 +346,7 @@ def test_a_probe_removes_only_its_own_namespaces_abandoned_probes(monkeypatch):
 
 
 def test_retained_discovery_never_adopts_a_probe(monkeypatch):
-    """The broker's reconcile stopped probes as orphan chats, mid-probe."""
+    """The sandbox manager's reconcile stopped probes as orphan chats, mid-probe."""
     manager = ChatSandboxManager(ContainerBackend(image="img", sandbox_namespace="this-stack"))
 
     def run(argv, **_kwargs):

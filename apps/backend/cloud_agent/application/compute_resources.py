@@ -881,7 +881,7 @@ class ComputeCommands:
         return row
 
     async def _deployment_profile(self, requested: str | None) -> DeploymentProfile:
-        """Choose configured setup capacity without sharing a live broker endpoint."""
+        """Choose configured setup capacity without sharing a live sandbox manager endpoint."""
         profiles = await self.deployment_profiles()
         reserved_reader = getattr(self.repository, "list_reserved_deployment_profiles", None)
         reserved = set(await reserved_reader()) if reserved_reader is not None else set()

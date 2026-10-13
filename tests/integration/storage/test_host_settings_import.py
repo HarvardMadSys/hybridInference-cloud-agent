@@ -59,11 +59,11 @@ async def test_custom_environment_is_imported_once_and_reset_uses_the_default(st
     assert runtime.turn_settings() == default_values(RUNNER_SETTING_KEYS)
 
 
-async def test_partial_runner_report_waits_for_the_brokers_legacy_settings(store):
+async def test_partial_runner_report_waits_for_the_sandbox_managers_legacy_settings(store):
     hosts = store.host_pool
     credential = hash_secret("legacy")
     await hosts.register_host(
-        host="runner-a", credential_hash=credential, broker_url="http://broker"
+        host="runner-a", credential_hash=credential, sandbox_manager_url="http://sandbox_manager"
     )
     runner_local = {**default_values(RUNNER_SETTING_KEYS), "agent_timeout_s": 7200}
     first = await hosts.record_host_heartbeat(host="runner-a", settings_local=runner_local)
@@ -133,12 +133,14 @@ async def test_delayed_report_with_an_old_credential_cannot_import_environment_s
 
 
 @pytest.mark.parametrize("global_change", [False, True])
-async def test_admin_reset_preserves_unrelated_values_from_a_late_broker_report(
+async def test_admin_reset_preserves_unrelated_values_from_a_late_sandbox_manager_report(
     store, global_change
 ):
     hosts = store.host_pool
     await hosts.register_host(
-        host="runner-a", credential_hash=hash_secret("legacy"), broker_url="http://broker"
+        host="runner-a",
+        credential_hash=hash_secret("legacy"),
+        sandbox_manager_url="http://sandbox_manager",
     )
     runner_local = default_values(RUNNER_SETTING_KEYS)
     await hosts.record_host_heartbeat(host="runner-a", settings_local=runner_local)

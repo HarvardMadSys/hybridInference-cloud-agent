@@ -305,7 +305,7 @@ member turn lock held, resident ready
   -> open scan: register the member UID, take the live thread baseline, take
      the first PSS census
   -> prompt sent
-  -> guest samples once per second; the broker posts a cumulative checkpoint
+  -> guest samples once per second; the sandbox manager posts a cumulative checkpoint
      at most once every 15 seconds
   -> normal end / error / cancel: close scan, freeze the summary
   -> existing member cleanup and settlement

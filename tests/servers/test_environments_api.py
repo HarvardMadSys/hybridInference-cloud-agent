@@ -235,7 +235,7 @@ async def test_completed_action_retry_never_dispatches_or_changes_the_result(mon
 async def test_lost_terminal_becomes_an_explicit_unknown_result_not_an_endless_404(
     monkeypatch, operation
 ):
-    from cloud_agent.workspace_broker_client import WorkspaceBrokerError
+    from cloud_agent.sandbox_manager_client import SandboxManagerError
 
     run = {"id": "run", "state": "running", "terminal_id": "term_run"}
     repo = SimpleNamespace(
@@ -245,8 +245,8 @@ async def test_lost_terminal_becomes_an_explicit_unknown_result_not_an_endless_4
         ),
     )
     broker = SimpleNamespace(
-        terminal_output=AsyncMock(side_effect=WorkspaceBrokerError(404, "terminal missing")),
-        delete_terminal=AsyncMock(side_effect=WorkspaceBrokerError(404, "terminal missing")),
+        terminal_output=AsyncMock(side_effect=SandboxManagerError(404, "terminal missing")),
+        delete_terminal=AsyncMock(side_effect=SandboxManagerError(404, "terminal missing")),
     )
     monkeypatch.setattr(
         environments,
@@ -303,8 +303,8 @@ async def test_dotenv_preview_requires_review_of_short_values_without_echoing_th
 
 async def test_empty_binding_terminal_does_not_prepare_or_interrupt_a_running_turn(monkeypatch):
     from cloud_agent.api import workspace
+    from cloud_agent.sandbox_manager_client import SandboxManagerError
     from cloud_agent.schemas import AgentTerminalRequest
-    from cloud_agent.workspace_broker_client import WorkspaceBrokerError
     from cloud_agent_shared.environment import BoundEnvironment
 
     job = {
@@ -314,7 +314,7 @@ async def test_empty_binding_terminal_does_not_prepare_or_interrupt_a_running_tu
         "environment_binding_id": "empty",
     }
     broker = SimpleNamespace(
-        prepare_environment=AsyncMock(side_effect=WorkspaceBrokerError(409, "SessionBusy")),
+        prepare_environment=AsyncMock(side_effect=SandboxManagerError(409, "SessionBusy")),
         terminal=AsyncMock(
             return_value={"output": "1", "stderr": "", "cwd": "/workspace", "exit_code": 0}
         ),
@@ -329,7 +329,7 @@ async def test_empty_binding_terminal_does_not_prepare_or_interrupt_a_running_tu
     monkeypatch.setattr(workspace, "_owned_job", AsyncMock(return_value=job))
     monkeypatch.setattr(workspace, "_require_workspace_entitlement", AsyncMock())
     monkeypatch.setattr(workspace, "_require_mutable_workspace_ready", AsyncMock())
-    monkeypatch.setattr(workspace, "_workspace_broker_for_job", AsyncMock(return_value=broker))
+    monkeypatch.setattr(workspace, "_sandbox_manager_for_job", AsyncMock(return_value=broker))
     result = await workspace.run_agent_job_terminal_command(
         "job",
         AgentTerminalRequest(command="echo 1"),
@@ -391,7 +391,10 @@ async def test_workspace_get_only_reads_and_redacts_without_persistence(monkeypa
             return_value={"binding_id": "bound", "steps": [{"output": "private"}]}
         )
     )
-    monkeypatch.setattr("cloud_agent.broker_routing.broker_for_job", AsyncMock(return_value=broker))
+    monkeypatch.setattr(
+        "cloud_agent.sandbox_manager_routing.sandbox_manager_for_job",
+        AsyncMock(return_value=broker),
+    )
     result = await environments.workspace_environment("job", user={"user_id": "alice"}, store=store)
     assert result["steps"] == [{"output": "masked"}]
     repository.record_environment_preparation.assert_not_awaited()

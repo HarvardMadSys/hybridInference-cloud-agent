@@ -186,6 +186,36 @@ class PostgresSessionForkRepository:
             if row["runtime_id"] != source["runtime"]:
                 return {"error": "runtime_mismatch"}
 
+            # A deleted chat keeps its membership as an audit row, so without
+            # this its slot stays occupied forever. The slot is a fixed member
+            # UID: it may serve a new child only once the old member can no
+            # longer act. Stopped/lost is the durable observation that its
+            # process is gone, and nothing restarts a deleted chat; a released
+            # residency means no grant still speaks for it. SKIP LOCKED keeps
+            # this transaction, which already holds the sandbox row, from
+            # waiting on a membership and inverting the membership -> sandbox
+            # order every other writer takes. A member skipped now is
+            # reclaimed by a later Fork.
+            await conn.execute(
+                """
+                UPDATE agent_thread_sandbox_memberships
+                SET resident_slot_id = NULL, updated_at = NOW()
+                WHERE thread_id IN (
+                    SELECT m.thread_id
+                    FROM agent_thread_sandbox_memberships m
+                    JOIN agent_threads t ON t.id = m.thread_id
+                    WHERE m.sandbox_id = $1
+                      AND m.resident_slot_id IS NOT NULL
+                      AND t.deleted_at IS NOT NULL
+                      AND m.resident_state IN ('stopped', 'lost')
+                      AND m.residency_status = 'none'
+                      AND m.active_attempt_id IS NULL
+                      AND m.fork_operation_id IS NULL
+                    FOR UPDATE OF m SKIP LOCKED
+                )
+                """,
+                row["sandbox_id"],
+            )
             occupied_rows = await conn.fetch(
                 """
                 SELECT resident_slot_id AS slot

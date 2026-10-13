@@ -2,10 +2,10 @@
 
 Claude Code and Codex run from the built sandbox image (``AGENT_STEER_TEST_IMAGE``,
 or ``MCP_TEST_SANDBOX_IMAGE``) against a fake model, launched and driven exactly
-as the broker drives them: the production driver, ``docker exec -i`` as the
+as the sandbox manager drives them: the production driver, ``docker exec -i`` as the
 member uid, one thread reading the turn's stream. The message arrives from a
 second thread through the driver's own seam, ``HarnessTurn.inject`` — the call
-the broker makes for the control plane's "send now".
+the sandbox manager makes for the control plane's "send now".
 
 What is pinned is the rule for mid-turn input — the model gets the message
 before its next tool call, and a turn that answers without one never gets it:
@@ -340,7 +340,7 @@ class _Sandbox:
 
 
 class _Stream:
-    """The broker's side of a turn: one thread reading its events to the end."""
+    """The sandbox manager's side of a turn: one thread reading its events to the end."""
 
     def __init__(self, turn: Any) -> None:
         self.turn = turn

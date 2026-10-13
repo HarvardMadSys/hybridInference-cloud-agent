@@ -202,7 +202,7 @@ class PostgresSandboxRepository:
         last_activity_at: datetime,
         actor_id: str,
         admin_ip: str,
-        broker_confirmed_stopped: bool = False,
+        sandbox_manager_confirmed_stopped: bool = False,
         discard: bool = False,
     ) -> str:
         """Fence an idle stopped sandbox for deletion.
@@ -234,7 +234,9 @@ class PostgresSandboxRepository:
                 return "stale"
             if group["deletion_state"] in {"pending", "archived", "deleted"}:
                 return "accepted"
-            forced_stopped_recovery = group["state"] == "running" and broker_confirmed_stopped
+            forced_stopped_recovery = (
+                group["state"] == "running" and sandbox_manager_confirmed_stopped
+            )
             if group["state"] != "stopped" and not forced_stopped_recovery:
                 return "not_stopped"
             busy = await conn.fetchval(
@@ -319,7 +321,7 @@ class PostgresSandboxRepository:
                 action="agent.sandbox.delete.requested",
                 actor_id=actor_id,
                 admin_ip=admin_ip,
-                broker_confirmed_stopped=forced_stopped_recovery,
+                sandbox_manager_confirmed_stopped=forced_stopped_recovery,
             )
         return "accepted"
 
@@ -751,7 +753,7 @@ class PostgresSandboxRepository:
         sha256: str | None = None,
         size_bytes: int | None = None,
         archive_version_id: str | None = None,
-        broker_confirmed_stopped: bool = False,
+        sandbox_manager_confirmed_stopped: bool = False,
     ) -> None:
         """Keep each deletion transition and content-free audit atomic."""
         await conn.execute(
@@ -777,10 +779,10 @@ class PostgresSandboxRepository:
                 | (
                     {
                         "force": True,
-                        "broker_confirmed_stopped": True,
+                        "sandbox_manager_confirmed_stopped": True,
                         "docker_status": "stopped",
                     }
-                    if broker_confirmed_stopped
+                    if sandbox_manager_confirmed_stopped
                     else {}
                 )
             ),
@@ -967,8 +969,8 @@ class PostgresSandboxRepository:
     async def thread_workspace_ready(self, *, thread_id: str) -> bool:
         """Return whether a retained thread permits owner workspace mutation.
 
-        The broker's in-memory suspension is the immediate barrier. This
-        durable copy closes broker-restart and old-turn-URL gaps: an active
+        The sandbox manager's in-memory suspension is the immediate barrier. This
+        durable copy closes sandbox-manager-restart and old-turn-URL gaps: an active
         attempt must have published ``workspace_ready``.
         """
         async with self._pool.acquire() as conn:
@@ -1035,7 +1037,7 @@ class PostgresSandboxRepository:
         return result == "UPDATE 1"
 
     async def list_terminal_resumes_pending(self, *, limit: int = 100) -> list[str]:
-        """List settled workspaces whose broker resume still needs confirmation."""
+        """List settled workspaces whose sandbox manager resume still needs confirmation."""
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 """
@@ -1052,7 +1054,7 @@ class PostgresSandboxRepository:
         return [row["id"] for row in rows]
 
     async def mark_terminal_resume_complete(self, *, job_id: str) -> bool:
-        """Clear durable recovery state after the broker confirms a resume."""
+        """Clear durable recovery state after the sandbox manager confirms a resume."""
         async with self._pool.acquire() as conn:
             result = await conn.execute(
                 """
@@ -2327,7 +2329,7 @@ class PostgresSandboxRepository:
             # explicit pre-admission abandon leaves the group PROVISIONING
             # with no active member; if Docker reports that exact labelled
             # object afterwards, it is an orphan to stop, not a fresh active
-            # group to adopt. This recovery fence prevents a broker-local
+            # group to adopt. This recovery fence prevents a sandbox-manager-local
             # lease from keeping an unowned container resident forever.
             if group["state"] == "provisioning" and not durable_activity:
                 recovered = await conn.fetchval(
@@ -2371,11 +2373,11 @@ class PostgresSandboxRepository:
                     deadline_sql = "clock_timestamp() + make_interval(secs => $2)"
                     deadline_arg = idle_remaining_seconds
                 elif activity_active is None:
-                    # A broker reconstructed this running container without
+                    # A sandbox manager reconstructed this running container without
                     # its old monotonic clock. Give a group whose durable
                     # deadline was cleared one bounded recovery window, but do
                     # not refresh that window on every host heartbeat. Once a
-                    # real terminal/operation closes, the broker reports its
+                    # real terminal/operation closes, the sandbox manager reports its
                     # concrete decreasing remainder through the branch above.
                     deadline_sql = (
                         "COALESCE(idle_deadline, "

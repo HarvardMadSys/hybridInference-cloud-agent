@@ -6,8 +6,8 @@ worker's claim and finish — against Postgres, with the rest of a turn's protoc
 (the retained sandbox's reservation, admission and settlement) written through
 the store exactly as the runner's own routes write it.
 
-No workspace broker runs in this tier. The finish route's one call to a host's
-terminal broker is answered with "no broker here", which it already treats as
+No sandbox manager runs in this tier. The finish route's one call to a host's
+terminal sandbox manager is answered with "no sandbox manager here", which it already treats as
 nothing to coordinate; nothing the queue does depends on it.
 
 The database is required. This tier is selected with ``-m dbtest``, so a
@@ -378,7 +378,7 @@ class Api:
 @pytest_asyncio.fixture
 async def api(pool, monkeypatch):
     monkeypatch.setenv("AGENT_CONTROL_TOKEN_SECRET", "queue-test-secret")
-    monkeypatch.setenv("AGENT_WORKSPACE_BROKER_TOKEN", "queue-broker-secret")
+    monkeypatch.setenv("AGENT_SANDBOX_MANAGER_TOKEN", "queue-sandbox-manager-secret")
     monkeypatch.setenv("AGENT_REPO_ALLOWLIST", _REPO)
     store = Storage(pool)
     await store.host_pool.register_host(
@@ -393,10 +393,10 @@ async def api(pool, monkeypatch):
         sandbox_image_digest=_IMAGE_DIGEST,
     )
 
-    async def no_broker(*_args: Any, **_kwargs: Any) -> None:
+    async def no_sandbox_manager(*_args: Any, **_kwargs: Any) -> None:
         return None
 
-    monkeypatch.setattr(worker, "_worker_workspace_broker", no_broker)
+    monkeypatch.setattr(worker, "_worker_sandbox_manager", no_sandbox_manager)
     gateway = _Gateway()
     app = FastAPI()
     app.include_router(routes.router)

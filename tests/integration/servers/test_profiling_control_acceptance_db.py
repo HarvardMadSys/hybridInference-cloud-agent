@@ -9,12 +9,12 @@ Alembic, and the real FastAPI applications served on real sockets:
    configuration its routes then collect under -- without a restart and without
    an environment variable changing.
 3. A real runner policy sync, pointed at the real control-plane endpoint with a
-   real broker client, carries that configuration to a **separately served
-   broker application** over HTTP. This is the hop that used to be broken: a
-   sync with no broker client left every file and terminal sample missing its
+   real sandbox manager client, carries that configuration to a **separately served
+   sandbox manager application** over HTTP. This is the hop that used to be broken: a
+   sync with no sandbox manager client left every file and terminal sample missing its
    container sub-stages.
 4. A real file read through the workspace route roots a measurement, hands the
-   selection to the broker over the real fragment protocol, and stores what came
+   selection to the sandbox manager over the real fragment protocol, and stores what came
    back.
 5. `GET /admin/agent/profiling-control` reads the same configuration back,
    including the real stored-sample count.
@@ -23,7 +23,7 @@ Alembic, and the real FastAPI applications served on real sockets:
    stored under the experiment that selected it.
 
 What is *simulated* here is stated rather than hidden. There is no container in
-this environment, so the broker's own workspace read is the in-process double
+this environment, so the sandbox manager's own workspace read is the in-process double
 the existing measurement acceptance test uses -- it validates selections through
 the real `operation_call` code but answers a file read from a fixture. The
 parent/child turn handoff on a real fork is covered in
@@ -50,11 +50,11 @@ from tests.integration.servers.test_measurement_acceptance_db import (
     HOST,
     REPO,
     _arrange_chain,
-    _Broker,
     _db_config,
     _dsn,
     _Gateway,
     _reset,
+    _SandboxManager,
     _serve,
 )
 
@@ -85,11 +85,11 @@ DURATION_SECONDS = 600
 
 
 class _IdleSupervisor:
-    """The smallest supervisor the broker's lifespan will start.
+    """The smallest supervisor the sandbox manager's lifespan will start.
 
     The workspace read in this chain is answered by the double the measurement
     acceptance test already uses, and the policy route touches no container at
-    all -- but the broker refuses to start beside a process backend without a
+    all -- but the sandbox manager refuses to start beside a process backend without a
     supervisor, which is a real product rule this test should not work around.
     """
 
@@ -117,15 +117,15 @@ class _ControlChain:
     pool: Any
     store: Storage
     base_url: str
-    broker: _Broker
+    sandbox_manager: _SandboxManager
     job_id: str
     sandbox_id: str
     service: ProfilingControlService
     worker: ProfilingPolicyWorker
     worker_task: asyncio.Task[None]
-    #: The broker's own application, served on its own socket so the runner's
+    #: The sandbox manager's own application, served on its own socket so the runner's
     #: configuration push crosses a real HTTP boundary into it.
-    broker_base_url: str
+    sandbox_manager_base_url: str
     #: The real host credential this chain's host row was pointed at, so the
     #: runner's own configuration exchange authenticates for real.
     host_credential: str
@@ -155,7 +155,7 @@ async def control_chain(monkeypatch, tmp_path) -> AsyncIterator[_ControlChain]:
     monkeypatch.setenv("AGENT_SESSION_SECRET", "acceptance-session-secret-32-bytes!")
     monkeypatch.setenv("GATEWAY_ISSUER", "https://gateway.example")
     monkeypatch.setenv("AGENT_REPO_ALLOWLIST", REPO)
-    monkeypatch.setenv("AGENT_WORKSPACE_BROKER_TOKEN", "acceptance-broker-token")
+    monkeypatch.setenv("AGENT_SANDBOX_MANAGER_TOKEN", "acceptance-sandbox-manager-token")
     monkeypatch.setenv(operation_profiling.ENV_PROFILING_SINK, str(tmp_path / "records.jsonl"))
     # The product default needs no opt-in mode or namespace. A stale descriptor
     # without the legacy switch must not silently start a static experiment.
@@ -176,14 +176,14 @@ async def control_chain(monkeypatch, tmp_path) -> AsyncIterator[_ControlChain]:
     operation_profiling.reset_cache()
     operation_profiling.reset_policy()
 
-    from cloud_agent import broker_routing, operation_measurement
+    from cloud_agent import operation_measurement, sandbox_manager_routing
     from cloud_agent_host import runner as runner_mod
 
     operation_measurement.reset()
     runner_mod.reset_delivery_state()
 
-    broker = _Broker()
-    monkeypatch.setattr(broker_routing, "_client_for", lambda _host: broker)
+    sandbox_manager = _SandboxManager()
+    monkeypatch.setattr(sandbox_manager_routing, "_client_for", lambda _host: sandbox_manager)
     app = create_app()
     app.dependency_overrides[get_gateway_client] = _Gateway
     app.dependency_overrides[get_agent_app_credentials] = lambda: None
@@ -203,20 +203,22 @@ async def control_chain(monkeypatch, tmp_path) -> AsyncIterator[_ControlChain]:
             HOST,
         )
 
-    # The broker application, served on its own socket. It is built through its
+    # The sandbox manager application, served on its own socket. It is built through its
     # own factory with the same token the runner would present, so the push
     # below is the real route with the real credential check in front of it.
-    from cloud_agent_host.broker_profiling_policy import reset_applied_state
     from cloud_agent_host.sandbox import ProcessBackend
-    from cloud_agent_host.workspace_broker import create_app as create_broker_app
+    from cloud_agent_host.sandbox_manager import create_app as create_sandbox_manager_app
+    from cloud_agent_host.sandbox_manager_profiling_policy import reset_applied_state
 
     reset_applied_state()
-    broker_app = create_broker_app(
+    sandbox_manager_app = create_sandbox_manager_app(
         backend=ProcessBackend(acknowledged_unsafe=True),
-        token="acceptance-broker-token",
+        token="acceptance-sandbox-manager-token",
         shared_session_supervisor=_IdleSupervisor(),  # type: ignore[arg-type]
     )
-    broker_server, broker_task, broker_base_url = await _serve(broker_app)
+    sandbox_manager_server, sandbox_manager_task, sandbox_manager_base_url = await _serve(
+        sandbox_manager_app
+    )
     chain_job = job
 
     # The policy loop, driven exactly as the lifespan drives it -- but with the
@@ -240,14 +242,14 @@ async def control_chain(monkeypatch, tmp_path) -> AsyncIterator[_ControlChain]:
         pool=pool,
         store=store,
         base_url=base_url,
-        broker=broker,
+        sandbox_manager=sandbox_manager,
         job_id=str(chain_job["id"]),
         sandbox_id=str(sandbox["sandbox_id"]),
         service=service,
         worker=worker,
         worker_task=worker_task,
         owner_cookie={SESSION_COOKIE: mint_session(user_id=USER_ID)},
-        broker_base_url=broker_base_url,
+        sandbox_manager_base_url=sandbox_manager_base_url,
         host_credential=host_credential,
     )
     try:
@@ -258,8 +260,8 @@ async def control_chain(monkeypatch, tmp_path) -> AsyncIterator[_ControlChain]:
 
         with contextlib.suppress(asyncio.CancelledError):
             await worker_task
-        broker_server.should_exit = True
-        await asyncio.wait_for(broker_task, timeout=10)
+        sandbox_manager_server.should_exit = True
+        await asyncio.wait_for(sandbox_manager_task, timeout=10)
         server.should_exit = True
         await asyncio.wait_for(task, timeout=10)
         from cloud_agent import measurement_writer
@@ -385,22 +387,22 @@ async def test_start_collects_reads_a_real_sample_and_stop_ends_it(
         # collection, including on a node that never hears anything again.
         assert published.run.deadline_mono > time.monotonic()
 
-        # -- 3b. The runner's own sync carries it to the broker --------
+        # -- 3b. The runner's own sync carries it to the sandbox manager --------
         # Real client, real endpoints, real credential: the control plane's
-        # exchange, then the broker's own policy route. This is the wiring that
-        # a sync built without a broker client silently skipped.
-        from cloud_agent_host.broker_profiling_policy import applied_state
+        # exchange, then the sandbox manager's own policy route. This is the wiring that
+        # a sync built without a sandbox manager client silently skipped.
         from cloud_agent_host.profiling_policy import ProfilingPolicySync
+        from cloud_agent_host.sandbox_manager_profiling_policy import applied_state
         from cloud_agent_host.session_supervisor_client import SessionSupervisorClient
 
-        broker_client = SessionSupervisorClient(
-            chain.broker_base_url, "acceptance-broker-token", timeout=10
+        sandbox_manager_client = SessionSupervisorClient(
+            chain.sandbox_manager_base_url, "acceptance-sandbox-manager-token", timeout=10
         )
         sync = ProfilingPolicySync(
             base_url=chain.base_url,
             credential=chain.host_credential,
             host=HOST,
-            broker=broker_client,
+            sandbox_manager=sandbox_manager_client,
         )
         try:
             # Off the event loop: the sync is synchronous, and both servers are
@@ -413,8 +415,8 @@ async def test_start_collects_reads_a_real_sample_and_stop_ends_it(
         state = sync.state()
         assert state["run_id"] == run_id
         assert state["applied_revision"] == 1
-        assert state["broker_ok"] is True, state["broker_detail"]
-        # The broker really received it: its own applied state names the run.
+        assert state["sandbox_manager_ok"] is True, state["sandbox_manager_detail"]
+        # The sandbox manager really received it: its own applied state names the run.
         assert applied_state()["revision"] == 1
         assert applied_state()["run_id"] == run_id
 
@@ -428,8 +430,8 @@ async def test_start_collects_reads_a_real_sample_and_stop_ends_it(
         assert metadata is not None, "the read must report the selection it was measured under"
         measurement_id = metadata["measurement_id"]
 
-        # The broker really answered a fragment for this measurement: the
-        # double validates the inherited selection through the broker's own
+        # The sandbox manager really answered a fragment for this measurement: the
+        # double validates the inherited selection through the sandbox manager's own
         # `open_call`, so a refused fragment would have left the record partial.
         assert metadata["fragment_recorded"] is True
 
@@ -588,7 +590,7 @@ async def test_a_measurement_open_when_the_switch_flips_still_lands(
             # fragment must still be collected, under the experiment that
             # selected the attempt, or the stored record is silently partial.
             # The stage the fragment belongs to, marked the way the runner
-            # marks it before it calls the broker.
+            # marks it before it calls the sandbox manager.
             measure.mark("supervisor_acquire")
             fragment = measure.begin_call("supervisor_acquire")
             context = measure.context(fragment)

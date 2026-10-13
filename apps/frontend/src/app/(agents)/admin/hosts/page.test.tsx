@@ -190,7 +190,7 @@ function host(over: Partial<Record<string, unknown>> = {}) {
     slots_desired: null,
     launch_error: '',
     runner_version: '1.2.3',
-    broker_url: 'http://runner-a:8092',
+    sandbox_manager_url: 'http://runner-a:8092',
     last_heartbeat_at: '2026-08-05T00:00:00Z',
     sandbox_runtime: 'io.containerd.kata.v2',
     sandbox_image_digest: 'freeinference-cloud-agent-job@sha256:abcdef0123456789',
@@ -1621,7 +1621,7 @@ describe('runtime settings', () => {
       default: 64,
       minimum: 1,
       maximum: 4096,
-      scope: 'broker',
+      scope: 'sandbox_manager',
     },
   ] as AgentRunnerHostPool['host_setting_definitions'];
 

@@ -77,7 +77,7 @@ THREAD_SANDBOX_SOURCE = f"""
         g.workspace_epoch,
         {NATIVE_FORK_CAPABLE} AS native_fork_capable,
         -- The host holding this group can hand a message to a running turn of
-        -- the group's runtime: its broker and driver say so, per runtime, and
+        -- the group's runtime: its sandbox_manager and driver say so, per runtime, and
         -- the driver speaks the CLI version this container runs. No helper in
         -- the container takes part; the message goes to the CLI itself.
         EXISTS (
@@ -114,8 +114,9 @@ THREAD_SANDBOX_SOURCE = f"""
             )
             FROM agent_thread_sandbox_memberships peer
             WHERE peer.sandbox_id = g.id
-              -- Failed Fork placeholders keep their lineage but release their
-              -- slots. Only current slot owners belong in the host manifest.
+              -- Failed Fork placeholders and stopped deleted chats keep their
+              -- rows but release their slots. Only current slot owners belong
+              -- in the host manifest.
               AND peer.resident_slot_id IS NOT NULL
         ), '[]'::jsonb) AS group_members
     FROM agent_thread_sandbox_memberships m

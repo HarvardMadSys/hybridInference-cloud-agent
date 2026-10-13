@@ -137,7 +137,7 @@ async def test_the_fork_flow_refuses_through_the_assembled_host_pool() -> None:
         }
     }
     assert any("agent_jobs" in query for query in pool.queries), (
-        "the fork flow resolved its broker without asking the assembled host pool"
+        "the fork flow resolved its sandbox manager without asking the assembled host pool"
     )
 
 

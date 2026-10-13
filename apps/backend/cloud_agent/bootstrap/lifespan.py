@@ -215,7 +215,7 @@ async def _shutdown_lifespan(
     writer_installed: bool,
     log_stopped: bool,
     close_host: Any,
-    close_broker_clients: Any,
+    close_sandbox_manager_clients: Any,
     reset_writer: Any,
     reset_settings: Any,
 ) -> list[BaseException]:
@@ -227,7 +227,7 @@ async def _shutdown_lifespan(
     errors: list[BaseException] = []
     owner = asyncio.current_task()
     owner_cancellation_baseline = owner.cancelling() if owner is not None else 0
-    # Eager request waiters share the store, signal, and broker clients. Their
+    # Eager request waiters share the store, signal, and sandbox manager clients. Their
     # durable rows are the recovery owner, so join them before those resources.
     try:
         from cloud_agent.api.turns import close_send_now_handovers
@@ -284,9 +284,9 @@ async def _shutdown_lifespan(
         finally:
             _BACKGROUND_TASKS.discard(task)
     await _invoke(close_host, errors)
-    # Close what was opened, innermost first: the per-broker pools, the
+    # Close what was opened, innermost first: the per-sandbox-manager pools, the
     # GitHub App's own client, then the shared gateway pool.
-    await _invoke(close_broker_clients, errors)
+    await _invoke(close_sandbox_manager_clients, errors)
     source_control = getattr(app.state, "source_control", None)
     if source_control is not None:
         await _invoke(source_control.aclose, errors)
@@ -318,7 +318,6 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
 
     from cloud_agent.api.mcp_relay import close_host, maintain_host_sessions
     from cloud_agent.application.profiling_control import ProfilingControlService
-    from cloud_agent.broker_routing import close_broker_clients
     from cloud_agent.capacity_history import prune_host_capacity_history
     from cloud_agent.gateway import GatewayClient
     from cloud_agent.grants import GrantClient
@@ -327,6 +326,7 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
     from cloud_agent.measurement_writer import MeasurementWriter, reset_writer
     from cloud_agent.operational_health import monitor_queue
     from cloud_agent.profiling_control_config import profiling_control_deployment
+    from cloud_agent.sandbox_manager_routing import close_sandbox_manager_clients
     from cloud_agent.settings import (
         initialize_settings,
         reset_settings,
@@ -559,7 +559,7 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
                 writer_installed=writer_installed,
                 log_stopped=entered,
                 close_host=close_host,
-                close_broker_clients=close_broker_clients,
+                close_sandbox_manager_clients=close_sandbox_manager_clients,
                 reset_writer=reset_writer,
                 reset_settings=reset_settings,
             )

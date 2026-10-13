@@ -1,4 +1,4 @@
-"""Regression tests for the shared-only workspace broker."""
+"""Regression tests for the shared-only sandbox manager."""
 
 from __future__ import annotations
 
@@ -17,25 +17,15 @@ import pytest
 from fastapi import HTTPException
 from httpx import ASGITransport, AsyncClient
 
-from cloud_agent.workspace_broker_client import WorkspaceBrokerClient
-from cloud_agent_host import workspace_broker as broker_mod
+from cloud_agent.sandbox_manager_client import SandboxManagerClient
+from cloud_agent_host import sandbox_manager as sandbox_manager_mod
 from cloud_agent_host.chat_sandbox import RetainedChatBackend
 from cloud_agent_host.drivers import InputOutcome
 from cloud_agent_host.guest_observer import GuestObservation, GuestProcess
 from cloud_agent_host.resident_transport import ResidentLaunch
 from cloud_agent_host.runtimes import RuntimeEffortUnsupportedError, RuntimeMCPUnavailableError
 from cloud_agent_host.sandbox import ProcessBackend, SandboxError, TerminalProcess
-from cloud_agent_host.session_supervisor_client import (
-    SessionSupervisorClient,
-    SessionSupervisorError,
-)
-from cloud_agent_host.shared_session_supervisor import (
-    SharedSessionDescriptor,
-    SharedSessionLease,
-    SharedTurnTelemetry,
-)
-from cloud_agent_host.tool_windows import ToolMark
-from cloud_agent_host.workspace_broker import (
+from cloud_agent_host.sandbox_manager import (
     MAX_TERMINAL_BUFFER_BYTES,
     MAX_TERMINAL_BUFFER_EVENTS,
     MAX_TERMINAL_SESSIONS_PER_WORKSPACE,
@@ -48,7 +38,17 @@ from cloud_agent_host.workspace_broker import (
     _TerminalSession,
     create_app,
 )
-from cloud_agent_shared.host_settings import BROKER_SETTING_KEYS, default_values
+from cloud_agent_host.session_supervisor_client import (
+    SessionSupervisorClient,
+    SessionSupervisorError,
+)
+from cloud_agent_host.shared_session_supervisor import (
+    SharedSessionDescriptor,
+    SharedSessionLease,
+    SharedTurnTelemetry,
+)
+from cloud_agent_host.tool_windows import ToolMark
+from cloud_agent_shared.host_settings import SANDBOX_MANAGER_SETTING_KEYS, default_values
 
 
 @pytest.mark.asyncio
@@ -369,7 +369,7 @@ class _SharedSupervisor:
 
 
 def _launch() -> dict[str, object]:
-    """The minimum resident launch the broker's request model accepts."""
+    """The minimum resident launch the sandbox manager's request model accepts."""
     return {
         "runtime_id": "claude-code",
         "runtime_version": "2.1.220",
@@ -414,12 +414,12 @@ def _identity() -> dict[str, object]:
 def _app(supervisor: _SharedSupervisor):
     return create_app(
         backend=ProcessBackend(acknowledged_unsafe=True),
-        token="broker-secret",
+        token="sandbox-manager-secret",
         shared_session_supervisor=supervisor,  # type: ignore[arg-type]
     )
 
 
-def test_broker_requires_a_container_backend_without_an_injected_supervisor():
+def test_sandbox_manager_requires_a_container_backend_without_an_injected_supervisor():
     with pytest.raises(ValueError, match="require the container or kata backend"):
         create_app(backend=ProcessBackend(acknowledged_unsafe=True), token="x")
 
@@ -506,10 +506,10 @@ async def test_initial_archive_routes_return_only_sanitized_failure_diagnostics(
         return safe
 
     supervisor.capture_initial_archive = fail_capture  # type: ignore[attr-defined]
-    monkeypatch.setattr(broker_mod, "archive_failure_http_detail", safe_detail)
+    monkeypatch.setattr(sandbox_manager_mod, "archive_failure_http_detail", safe_detail)
     app = create_app(
         backend=ProcessBackend(acknowledged_unsafe=True),
-        token="broker-secret",
+        token="sandbox_manager-secret",
         shared_session_supervisor=supervisor,  # type: ignore[arg-type]
         sandbox_archive_service=_ArchiveService([]),  # type: ignore[arg-type]
     )
@@ -520,10 +520,12 @@ async def test_initial_archive_routes_return_only_sanitized_failure_diagnostics(
         **extra,
     }
 
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://sandbox_manager"
+    ) as client:
         response = await client.post(
             path,
-            headers={"X-Agent-Workspace-Token": "broker-secret"},
+            headers={"X-Agent-Workspace-Token": "sandbox_manager-secret"},
             json=payload,
         )
 
@@ -534,7 +536,7 @@ async def test_initial_archive_routes_return_only_sanitized_failure_diagnostics(
 
 
 @pytest.mark.asyncio
-async def test_broker_lifespan_preflights_without_a_host_worktree():
+async def test_sandbox_manager_lifespan_preflights_without_a_host_worktree():
     supervisor = _SharedSupervisor()
     backend = ProcessBackend(acknowledged_unsafe=True)
     roots: list[object] = []
@@ -544,7 +546,7 @@ async def test_broker_lifespan_preflights_without_a_host_worktree():
     )
     app = create_app(
         backend=backend,
-        token="broker-secret",
+        token="sandbox-manager-secret",
         shared_session_supervisor=supervisor,  # type: ignore[arg-type]
     )
     try:
@@ -564,7 +566,7 @@ async def test_archive_shutdown_quiesces_then_strictly_stops_before_cleanup() ->
     archive = _ArchiveService(events)
     app = create_app(
         backend=ProcessBackend(acknowledged_unsafe=True),
-        token="broker-secret",
+        token="sandbox-manager-secret",
         shared_session_supervisor=supervisor,  # type: ignore[arg-type]
         sandbox_archive_service=archive,  # type: ignore[arg-type]
     )
@@ -596,7 +598,7 @@ async def test_archive_shutdown_surfaces_sanitized_stop_failure_before_closing_s
     archive = _ArchiveService(events)
     app = create_app(
         backend=ProcessBackend(acknowledged_unsafe=True),
-        token="broker-secret",
+        token="sandbox-manager-secret",
         shared_session_supervisor=supervisor,  # type: ignore[arg-type]
         sandbox_archive_service=archive,  # type: ignore[arg-type]
     )
@@ -614,7 +616,7 @@ async def test_archive_shutdown_surfaces_sanitized_stop_failure_before_closing_s
     record = next(
         record
         for record in caplog.records
-        if getattr(record, "event", None) == "workspace_broker_cleanup_failed"
+        if getattr(record, "event", None) == "sandbox_manager_cleanup_failed"
     )
     assert record.component == "shared_sandbox_stop_all"  # type: ignore[attr-defined]
     assert record.error_type == "SandboxError"  # type: ignore[attr-defined]
@@ -631,13 +633,15 @@ async def test_archive_shutdown_surfaces_sanitized_stop_failure_before_closing_s
 
 
 @pytest.mark.asyncio
-async def test_disabled_dynamic_policy_still_strictly_stops_on_clean_broker_shutdown() -> None:
+async def test_disabled_dynamic_policy_still_strictly_stops_on_clean_sandbox_manager_shutdown() -> (
+    None
+):
     events: list[str] = []
     supervisor = _SharedSupervisor(events=events)
     controller = _ArchiveController(events)
     app = create_app(
         backend=ProcessBackend(acknowledged_unsafe=True),
-        token="broker-secret",
+        token="sandbox-manager-secret",
         shared_session_supervisor=supervisor,  # type: ignore[arg-type]
         sandbox_archive_controller=controller,  # type: ignore[arg-type]
     )
@@ -645,11 +649,11 @@ async def test_disabled_dynamic_policy_still_strictly_stops_on_clean_broker_shut
     async with app.router.lifespan_context(app):
         async with AsyncClient(
             transport=ASGITransport(app=app),
-            base_url="http://broker",
+            base_url="http://sandbox_manager",
         ) as client:
             response = await client.post(
                 "/sandbox-archive-settings",
-                headers={"X-Agent-Workspace-Token": "broker-secret"},
+                headers={"X-Agent-Workspace-Token": "sandbox-manager-secret"},
                 json={"settings": {"enabled": False, "revision": 7}},
             )
         assert response.status_code == 200
@@ -670,8 +674,10 @@ async def test_disabled_dynamic_policy_still_strictly_stops_on_clean_broker_shut
 @pytest.mark.asyncio
 async def test_health_and_sandbox_inventory_are_authenticated_and_shared_only():
     app = _app(_SharedSupervisor())
-    headers = {"X-Agent-Workspace-Token": "broker-secret"}
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+    headers = {"X-Agent-Workspace-Token": "sandbox-manager-secret"}
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://sandbox_manager"
+    ) as client:
         denied = await client.get("/sandboxes")
         health = await client.get("/health", headers=headers)
         listed = await client.get("/sandboxes", headers=headers)
@@ -703,8 +709,10 @@ async def test_targeted_inventory_is_authenticated_and_isolated_from_full_invent
     supervisor.list = failed_inventory
     supervisor.list_for_thread = targeted_inventory
     app = _app(supervisor)
-    headers = {"X-Agent-Workspace-Token": "broker-secret"}
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+    headers = {"X-Agent-Workspace-Token": "sandbox-manager-secret"}
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://sandbox_manager"
+    ) as client:
         denied = await client.get("/sandboxes", params={"thread_id": "athr_child"})
         assert denied.status_code == 401
         assert calls == []
@@ -726,10 +734,12 @@ async def test_targeted_inventory_rejects_unknown_members_without_falling_back_t
     supervisor = _SharedSupervisor()
     supervisor.list = lambda: pytest.fail("targeted inventory must not list the host")
     app = _app(supervisor)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://sandbox_manager"
+    ) as client:
         response = await client.get(
             "/sandboxes",
-            headers={"X-Agent-Workspace-Token": "broker-secret"},
+            headers={"X-Agent-Workspace-Token": "sandbox-manager-secret"},
             params={"thread_id": "athr_unknown"},
         )
 
@@ -751,8 +761,10 @@ async def test_targeted_shared_status_serializes_force_delete_proof_fields():
         snapshotting=False,
     )
     app = _app(supervisor)
-    headers = {"X-Agent-Workspace-Token": "broker-secret"}
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+    headers = {"X-Agent-Workspace-Token": "sandbox-manager-secret"}
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://sandbox_manager"
+    ) as client:
         denied = await client.get("/shared-sandboxes/athr_source")
         response = await client.get("/shared-sandboxes/athr_source", headers=headers)
 
@@ -805,10 +817,12 @@ async def test_sandbox_inventory_reports_terminals_across_all_shared_members(
     supervisor.list = lambda: descriptors
     supervisor.list_for_thread = lambda _thread_id: descriptors
     app = _app(supervisor)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://sandbox_manager"
+    ) as client:
         response = await client.get(
             "/sandboxes",
-            headers={"X-Agent-Workspace-Token": "broker-secret"},
+            headers={"X-Agent-Workspace-Token": "sandbox-manager-secret"},
             params={} if thread_id is None else {"thread_id": thread_id},
         )
 
@@ -823,7 +837,7 @@ async def test_sandbox_inventory_reports_terminals_across_all_shared_members(
 async def test_native_question_routes_require_authentication_and_forward_exact_answers():
     supervisor = _SharedSupervisor()
     app = _app(supervisor)
-    headers = {"X-Agent-Workspace-Token": "broker-secret"}
+    headers = {"X-Agent-Workspace-Token": "sandbox-manager-secret"}
     path = "/shared-sandboxes/athr_source/questions"
     payload = {
         "owner": "attempt:1",
@@ -831,7 +845,9 @@ async def test_native_question_routes_require_authentication_and_forward_exact_a
         "answers": {"approach": ["First", "A custom answer"]},
         "reject": False,
     }
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://sandbox_manager"
+    ) as client:
         denied_read = await client.get(path, params={"owner": "attempt:1"})
         denied_reply = await client.post(path, json=payload)
         assert supervisor.calls == []
@@ -875,10 +891,12 @@ async def test_native_question_routes_require_authentication_and_forward_exact_a
 async def test_native_question_answers_are_bounded_before_transport(invalid):
     supervisor = _SharedSupervisor()
     app = _app(supervisor)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://sandbox_manager"
+    ) as client:
         response = await client.post(
             "/shared-sandboxes/athr_source/questions",
-            headers={"X-Agent-Workspace-Token": "broker-secret"},
+            headers={"X-Agent-Workspace-Token": "sandbox-manager-secret"},
             json={"owner": "attempt:1", "request_id": "request-one", "answers": {}, **invalid},
         )
     assert response.status_code == 422
@@ -890,10 +908,12 @@ async def test_native_question_answers_are_bounded_before_transport(invalid):
 async def test_native_question_reads_require_a_bounded_owner(params):
     supervisor = _SharedSupervisor()
     app = _app(supervisor)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://sandbox_manager"
+    ) as client:
         response = await client.get(
             "/shared-sandboxes/athr_source/questions",
-            headers={"X-Agent-Workspace-Token": "broker-secret"},
+            headers={"X-Agent-Workspace-Token": "sandbox-manager-secret"},
             params=params,
         )
     assert response.status_code == 422
@@ -915,9 +935,11 @@ async def test_inventory_syncs_one_group_and_reads_only_cached_resources(running
         sync_targets=lambda rows: calls.append(("sync", [dict(row) for row in rows])),
         latest=lambda container: calls.append(("latest", container)) or sample,
     )
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://sandbox_manager"
+    ) as client:
         response = await client.get(
-            "/sandboxes", headers={"X-Agent-Workspace-Token": "broker-secret"}
+            "/sandboxes", headers={"X-Agent-Workspace-Token": "sandbox-manager-secret"}
         )
     assert response.status_code == 200
     assert len(calls[0][1]) == 1
@@ -948,10 +970,12 @@ async def test_targeted_inventory_reads_cached_resources_without_syncing_collect
         sync_targets=lambda _rows: pytest.fail("partial inventory must not evict other groups"),
         latest=lambda container: calls.append(("latest", container)) or sample,
     )
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://sandbox_manager"
+    ) as client:
         response = await client.get(
             "/sandboxes",
-            headers={"X-Agent-Workspace-Token": "broker-secret"},
+            headers={"X-Agent-Workspace-Token": "sandbox-manager-secret"},
             params={"thread_id": "athr_child"},
         )
 
@@ -962,7 +986,7 @@ async def test_targeted_inventory_reads_cached_resources_without_syncing_collect
 
 
 @pytest.mark.asyncio
-async def test_resource_collector_is_owned_and_cleaned_up_by_broker_lifespan(monkeypatch):
+async def test_resource_collector_is_owned_and_cleaned_up_by_sandbox_manager_lifespan(monkeypatch):
     calls = []
     collector = SimpleNamespace(
         start=lambda: calls.append("start"),
@@ -973,7 +997,7 @@ async def test_resource_collector_is_owned_and_cleaned_up_by_broker_lifespan(mon
         calls.append("construct")
         return collector
 
-    monkeypatch.setattr(broker_mod, "SandboxResourceCollector", factory)
+    monkeypatch.setattr(sandbox_manager_mod, "SandboxResourceCollector", factory)
     supervisor = _SharedSupervisor()
     app = _app(supervisor)
     assert calls == []
@@ -991,8 +1015,10 @@ async def test_resource_collector_is_owned_and_cleaned_up_by_broker_lifespan(mon
 @pytest.mark.asyncio
 async def test_legacy_lifecycle_and_host_workspace_routes_do_not_exist():
     app = _app(_SharedSupervisor())
-    headers = {"X-Agent-Workspace-Token": "broker-secret"}
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+    headers = {"X-Agent-Workspace-Token": "sandbox-manager-secret"}
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://sandbox_manager"
+    ) as client:
         old_acquire = await client.post("/sandboxes/athr_source/acquire", headers=headers, json={})
         host_workspace = await client.get("/workspaces/ajob_old/files", headers=headers)
 
@@ -1006,7 +1032,7 @@ async def test_legacy_lifecycle_and_host_workspace_routes_do_not_exist():
         "abandon_chat_sandbox",
         "chat_sandbox_status",
     ):
-        assert not hasattr(WorkspaceBrokerClient, method)
+        assert not hasattr(SandboxManagerClient, method)
 
 
 @pytest.mark.asyncio
@@ -1019,7 +1045,7 @@ async def test_an_invalid_profiling_context_never_rejects_a_sandbox_request():
     """
     supervisor = _SharedSupervisor()
     app = _app(supervisor)
-    headers = {"X-Agent-Workspace-Token": "broker-secret"}
+    headers = {"X-Agent-Workspace-Token": "sandbox-manager-secret"}
     identity = _identity()
     live = {
         "run_id": "run-1",
@@ -1028,7 +1054,9 @@ async def test_an_invalid_profiling_context_never_rejects_a_sandbox_request():
         "expires_at": time.time() + 60,
     }
 
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://sandbox_manager"
+    ) as client:
         plain = await client.post(
             "/shared-sandboxes/athr_source/acquire",
             headers=headers,
@@ -1094,18 +1122,20 @@ async def test_an_invalid_profiling_context_never_rejects_a_sandbox_request():
 
 
 def _runner_client(app) -> SessionSupervisorClient:
-    """The runner's own client, wired to this broker app in-process.
+    """The runner's own client, wired to this sandbox manager app in-process.
 
     The client is synchronous and the app is ASGI, so each request runs the app
-    on an event loop of its own. Every answer the client reads is one the broker
+    on an event loop of its own. Every answer the client reads is one the sandbox manager
     produced, never a body written by the test.
     """
 
     def forward(request: httpx.Request) -> httpx.Response:
         async def answer() -> httpx.Response:
             transport = ASGITransport(app=app, raise_app_exceptions=False)
-            async with AsyncClient(transport=transport, base_url="http://broker") as broker:
-                answered = await broker.request(
+            async with AsyncClient(
+                transport=transport, base_url="http://sandbox_manager"
+            ) as sandbox_manager:
+                answered = await sandbox_manager.request(
                     request.method,
                     request.url.path,
                     headers=dict(request.headers),
@@ -1119,11 +1149,11 @@ def _runner_client(app) -> SessionSupervisorClient:
 
         return asyncio.run(answer())
 
-    client = SessionSupervisorClient("http://broker", "broker-secret")
+    client = SessionSupervisorClient("http://sandbox_manager", "sandbox-manager-secret")
     client._client.close()
     client._client = httpx.Client(
         transport=httpx.MockTransport(forward),
-        headers={"X-Agent-Workspace-Token": "broker-secret"},
+        headers={"X-Agent-Workspace-Token": "sandbox-manager-secret"},
     )
     return client
 
@@ -1144,7 +1174,7 @@ def _resident_launch(**changes: object) -> ResidentLaunch:
     return ResidentLaunch(**fields)  # type: ignore[arg-type]
 
 
-def test_runner_github_token_survives_broker_roundtrip_without_entering_the_response():
+def test_runner_github_token_survives_sandbox_manager_roundtrip_without_entering_the_response():
     launches = []
 
     class RecordingSupervisor(_SharedSupervisor):
@@ -1185,7 +1215,7 @@ def test_a_runtime_refusal_reaches_the_runner_in_the_runtimes_own_words(refusal)
 
     The runtime refuses a launch it cannot run as configured, with a reason
     written for the owner. Neither refusal is a driver or sandbox error, so the
-    broker answered Starlette's plain-text 500, and the turn's error event said
+    sandbox manager answered Starlette's plain-text 500, and the turn's error event said
     only "shared Session Supervisor rejected the lifecycle transition".
     """
 
@@ -1204,10 +1234,10 @@ def test_a_runtime_refusal_reaches_the_runner_in_the_runtimes_own_words(refusal)
     assert str(raised.value) == str(refusal)
 
 
-def test_an_unexpected_broker_failure_names_its_type_and_route_but_not_its_message():
+def test_an_unexpected_sandbox_manager_failure_names_its_type_and_route_but_not_its_message():
     """A failure no route anticipated still answers a body the runner can read.
 
-    The message stays in the broker's log: the same answer reaches the owner's
+    The message stays in the sandbox manager's log: the same answer reaches the owner's
     browser through the control plane, which shows only what is safe to show.
     """
 
@@ -1224,12 +1254,12 @@ def test_an_unexpected_broker_failure_names_its_type_and_route_but_not_its_messa
 
     assert raised.value.status_code == 500
     assert str(raised.value) == (
-        "workspace broker failed unexpectedly "
+        "sandbox manager failed unexpectedly "
         "(OSError in POST /shared-sandboxes/{thread_id}/resident)"
     )
 
 
-def test_a_request_the_broker_rejects_names_the_field_but_never_its_value():
+def test_a_request_the_sandbox_manager_rejects_names_the_field_but_never_its_value():
     """FastAPI's validation ``detail`` is a list, which the runner used to drop.
 
     The field path is what makes the rejection actionable. The value is left
@@ -1256,7 +1286,7 @@ def test_a_request_the_broker_rejects_names_the_field_but_never_its_value():
 
 
 @pytest.mark.asyncio
-async def test_the_broker_launches_tools_through_its_hosts_own_mcp_relay(monkeypatch):
+async def test_the_sandbox_manager_launches_tools_through_its_hosts_own_mcp_relay(monkeypatch):
     """Like the gateway's, the MCP relay is this host's, whatever a caller names.
 
     It is the relay the host rules admit for the group, so any other address
@@ -1271,14 +1301,16 @@ async def test_the_broker_launches_tools_through_its_hosts_own_mcp_relay(monkeyp
 
     monkeypatch.setenv("AGENT_SANDBOX_MCP_URL", "http://agent-mcp:8000")
     app = _app(_RecordingSupervisor())
-    headers = {"X-Agent-Workspace-Token": "broker-secret"}
+    headers = {"X-Agent-Workspace-Token": "sandbox-manager-secret"}
     with_tools = {
         **_launch(),
         "mcp_server_ids": ["deepwiki"],
         "mcp_base_url": "http://elsewhere:9000",
         "mcp_credential": "mcp-token",
     }
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://sandbox_manager"
+    ) as client:
         for launch in (with_tools, _launch()):
             answered = await client.post(
                 "/shared-sandboxes/athr_source/resident",
@@ -1293,9 +1325,9 @@ async def test_the_broker_launches_tools_through_its_hosts_own_mcp_relay(monkeyp
     assert plain.mcp_base_url == ""
 
 
-def test_a_crash_an_older_broker_answers_as_plain_text_still_names_the_call():
-    """A broker without the JSON answer, mid-rollout, still yields a findable error."""
-    client = SessionSupervisorClient("http://broker", "broker-secret")
+def test_a_crash_an_older_sandbox_manager_answers_as_plain_text_still_names_the_call():
+    """A sandbox manager without the JSON answer, mid-rollout, still yields a findable error."""
+    client = SessionSupervisorClient("http://sandbox_manager", "sandbox-manager-secret")
     client._client.close()
     client._client = httpx.Client(
         transport=httpx.MockTransport(
@@ -1321,12 +1353,14 @@ def test_a_crash_an_older_broker_answers_as_plain_text_still_names_the_call():
 async def test_shared_registration_snapshot_and_base_import_keep_identity():
     supervisor = _SharedSupervisor()
     app = _app(supervisor)
-    headers = {"X-Agent-Workspace-Token": "broker-secret"}
+    headers = {"X-Agent-Workspace-Token": "sandbox-manager-secret"}
     identity = _identity()
     bundle = b"trusted-git-bundle"
     commit_sha = "b" * 40
 
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://sandbox_manager"
+    ) as client:
         registered = await client.post(
             "/shared-sandboxes/athr_source/register", headers=headers, json=identity
         )
@@ -1388,11 +1422,13 @@ async def test_file_routes_use_the_shared_container_not_a_host_directory(monkeyp
         writes.append((backend, relative, content))
         return {**read(backend, relative), "content": content, "size": len(content)}
 
-    monkeypatch.setattr("cloud_agent_host.workspace_broker.read_retained_file", read)
-    monkeypatch.setattr("cloud_agent_host.workspace_broker.write_retained_file", write)
+    monkeypatch.setattr("cloud_agent_host.sandbox_manager.read_retained_file", read)
+    monkeypatch.setattr("cloud_agent_host.sandbox_manager.write_retained_file", write)
     app = _app(supervisor)
-    headers = {"X-Agent-Workspace-Token": "broker-secret"}
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+    headers = {"X-Agent-Workspace-Token": "sandbox-manager-secret"}
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://sandbox_manager"
+    ) as client:
         fetched = await client.get("/workspaces/athr_source/files?path=README.md", headers=headers)
         updated = await client.put(
             "/workspaces/athr_source/files?path=README.md",
@@ -1410,8 +1446,10 @@ async def test_file_routes_use_the_shared_container_not_a_host_directory(monkeyp
 async def test_interactive_terminal_runs_in_the_shared_container():
     supervisor = _SharedSupervisor()
     app = _app(supervisor)
-    headers = {"X-Agent-Workspace-Token": "broker-secret"}
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+    headers = {"X-Agent-Workspace-Token": "sandbox-manager-secret"}
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://sandbox_manager"
+    ) as client:
         created = await client.post(
             "/workspaces/athr_source/terminals",
             headers=headers,
@@ -1433,8 +1471,10 @@ async def test_fork_siblings_share_terminal_visibility_capacity_and_suspension()
     """Member URLs authenticate separately but address one workspace PTY scope."""
     supervisor = _SharedSupervisor()
     app = _app(supervisor)
-    headers = {"X-Agent-Workspace-Token": "broker-secret"}
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+    headers = {"X-Agent-Workspace-Token": "sandbox-manager-secret"}
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://sandbox_manager"
+    ) as client:
         created = await client.post(
             "/workspaces/athr_source/terminals",
             headers=headers,
@@ -1502,8 +1542,10 @@ async def test_fork_siblings_share_terminal_visibility_capacity_and_suspension()
 async def test_refused_terminal_creation_releases_its_activity_token():
     supervisor = _SharedSupervisor()
     app = _app(supervisor)
-    headers = {"X-Agent-Workspace-Token": "broker-secret"}
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+    headers = {"X-Agent-Workspace-Token": "sandbox-manager-secret"}
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://sandbox_manager"
+    ) as client:
         for _ in range(MAX_TERMINAL_SESSIONS_PER_WORKSPACE):
             created = await client.post(
                 "/workspaces/athr_source/terminals",
@@ -1539,27 +1581,29 @@ def test_shared_one_shot_terminal_uses_group_writable_umask():
 
 
 @pytest.mark.asyncio
-async def test_the_runner_sets_the_brokers_runtime_settings_over_its_own():
+async def test_the_runner_sets_the_sandbox_managers_runtime_settings_over_its_own():
     """Apply runtime overrides and reset the complete configuration to defaults."""
     supervisor = _SharedSupervisor()
     app = create_app(
         backend=ProcessBackend(acknowledged_unsafe=True),
-        token="broker-secret",
+        token="sandbox-manager-secret",
         shared_session_supervisor=supervisor,  # type: ignore[arg-type]
         terminal_idle_ttl_s=1800,
         terminal_hard_ttl_s=28800,
         terminal_max_sessions=64,
         session_idle_timeout_s=1800,
     )
-    headers = {"X-Agent-Workspace-Token": "broker-secret"}
+    headers = {"X-Agent-Workspace-Token": "sandbox-manager-secret"}
     own = {
-        **default_values(BROKER_SETTING_KEYS),
+        **default_values(SANDBOX_MANAGER_SETTING_KEYS),
         "terminal_idle_ttl_s": 1800,
         "terminal_hard_ttl_s": 28800,
         "terminal_max_sessions": 64,
         "chat_idle_timeout_s": 1800,
     }
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://sandbox_manager"
+    ) as client:
         denied = await client.post("/host-settings", json={"settings": {}})
         applied = await client.post(
             "/host-settings",
@@ -1568,7 +1612,7 @@ async def test_the_runner_sets_the_brokers_runtime_settings_over_its_own():
                 "settings": {
                     "terminal_max_sessions": 16,
                     "chat_idle_timeout_s": 600,
-                    # Not the broker's, and outside its bounds: both ignored.
+                    # Not the sandbox manager's, and outside its bounds: both ignored.
                     "agent_timeout_s": 900,
                     "terminal_idle_ttl_s": 1,
                 }
@@ -1590,20 +1634,24 @@ async def test_the_runner_sets_the_brokers_runtime_settings_over_its_own():
 
 
 @pytest.mark.asyncio
-async def test_reset_uses_defaults_after_the_broker_bootstrapped_from_environment(monkeypatch):
+async def test_reset_uses_defaults_after_the_sandbox_manager_bootstrapped_from_environment(
+    monkeypatch,
+):
     monkeypatch.setenv("AGENT_TERMINAL_MAX_SESSIONS", "99")
     monkeypatch.setenv("AGENT_CHAT_IDLE_TIMEOUT_S", "600")
     monkeypatch.setenv("AGENT_TERMINAL_INPUT_MAX_KIB", "2")
     supervisor = _SharedSupervisor()
     app = _app(supervisor)
-    headers = {"X-Agent-Workspace-Token": "broker-secret"}
+    headers = {"X-Agent-Workspace-Token": "sandbox-manager-secret"}
     assert app.state.terminal_manager._max_sessions == 99
 
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://sandbox_manager"
+    ) as client:
         reset = await client.post("/host-settings", headers=headers, json={"settings": {}})
 
     assert reset.status_code == 200
-    assert reset.json()["applied"] == default_values(BROKER_SETTING_KEYS)
+    assert reset.json()["applied"] == default_values(SANDBOX_MANAGER_SETTING_KEYS)
     assert reset.json()["local"]["terminal_max_sessions"] == 99
     assert reset.json()["local"]["chat_idle_timeout_s"] == 600
     assert reset.json()["local"]["terminal_input_max_kib"] == 2
@@ -1617,8 +1665,10 @@ async def test_admin_workspace_terminal_limits_are_advertised_and_enforced(monke
     process = _RunningTerminalProcess()
     monkeypatch.setattr(supervisor.workspace_backend, "spawn_terminal", lambda *_a, **_k: process)
     app = _app(supervisor)
-    headers = {"X-Agent-Workspace-Token": "broker-secret"}
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+    headers = {"X-Agent-Workspace-Token": "sandbox-manager-secret"}
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://sandbox_manager"
+    ) as client:
         configured = await client.post(
             "/host-settings",
             headers=headers,
@@ -1668,11 +1718,13 @@ async def test_admin_file_limits_reach_the_retained_workspace_reader_and_writer(
         seen.append(kwargs)
         return {"path": relative, "kind": "file", "content": "saved"}
 
-    monkeypatch.setattr("cloud_agent_host.workspace_broker.read_retained_file", read)
-    monkeypatch.setattr("cloud_agent_host.workspace_broker.write_retained_file", write)
+    monkeypatch.setattr("cloud_agent_host.sandbox_manager.read_retained_file", read)
+    monkeypatch.setattr("cloud_agent_host.sandbox_manager.write_retained_file", write)
     app = _app(_SharedSupervisor())
-    headers = {"X-Agent-Workspace-Token": "broker-secret"}
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+    headers = {"X-Agent-Workspace-Token": "sandbox-manager-secret"}
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://sandbox_manager"
+    ) as client:
         configured = await client.post(
             "/host-settings",
             headers=headers,
@@ -1741,8 +1793,10 @@ async def test_lower_command_output_limit_stops_an_oversized_command(monkeypatch
 
     monkeypatch.setattr(supervisor.workspace_backend, "spawn", spawn)
     app = _app(supervisor)
-    headers = {"X-Agent-Workspace-Token": "broker-secret"}
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+    headers = {"X-Agent-Workspace-Token": "sandbox-manager-secret"}
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://sandbox_manager"
+    ) as client:
         configured = await client.post(
             "/host-settings",
             headers=headers,
@@ -1829,7 +1883,7 @@ def test_a_shortened_terminal_lifetime_closes_terminals_already_past_it():
     ("idle", "hard", "sessions"),
     [(0, 60, 8), (60, -1, 8), (60, 60, 0), (60, 60, 4097)],
 )
-def test_terminal_limits_are_refused_outside_the_bounds_the_broker_starts_with(
+def test_terminal_limits_are_refused_outside_the_bounds_the_sandbox_manager_starts_with(
     idle, hard, sessions
 ):
     terminals = _TerminalManager(idle_ttl_s=30, hard_ttl_s=60, max_sessions=8)
@@ -2024,8 +2078,8 @@ def test_an_exited_shell_stays_listed_while_there_is_room():
     terminals.close()
 
 
-def test_exited_shells_across_workspaces_stay_within_the_broker_limit():
-    """Exited shells keep their output, so the broker-wide bound still holds them."""
+def test_exited_shells_across_workspaces_stay_within_the_sandbox_manager_limit():
+    """Exited shells keep their output, so the sandbox-manager-wide bound still holds them."""
     terminals = _TerminalManager(
         idle_ttl_s=1800, hard_ttl_s=28800, max_sessions=2, max_sessions_per_workspace=2
     )
@@ -2053,7 +2107,7 @@ def test_exited_shells_across_workspaces_stay_within_the_broker_limit():
     _wait_for(lambda: _state(terminals, second["id"], "athr_two") == "exited")
 
     # Neither exited shell refuses a third terminal, but together they would
-    # exceed the broker's bound: the oldest of them, in another chat, goes.
+    # exceed the sandbox manager's bound: the oldest of them, in another chat, goes.
     live = create("athr_three")
     assert listed() == {"athr_one": [], "athr_two": [second["id"]], "athr_three": [live["id"]]}
     assert oldest.killed
@@ -2096,8 +2150,10 @@ async def test_a_terminal_stream_first_says_where_its_history_ends(monkeypatch):
         supervisor.workspace_backend, "spawn_terminal", lambda *_a, **_k: Finished()
     )
     app = _app(supervisor)
-    headers = {"X-Agent-Workspace-Token": "broker-secret"}
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+    headers = {"X-Agent-Workspace-Token": "sandbox-manager-secret"}
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://sandbox_manager"
+    ) as client:
         created = await client.post(
             "/workspaces/athr_source/terminals", headers=headers, json={"rows": 24, "cols": 80}
         )
@@ -2149,10 +2205,12 @@ async def test_activation_boundary_failure_is_not_reported_as_success():
     supervisor.abort_turn = lambda *_args, **_kwargs: None  # type: ignore[attr-defined]
     app = _app(supervisor)
 
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://sandbox_manager"
+    ) as client:
         response = await client.post(
             "/shared-sandboxes/athr_source/turn",
-            headers={"X-Agent-Workspace-Token": "broker-secret"},
+            headers={"X-Agent-Workspace-Token": "sandbox-manager-secret"},
             json={
                 "token": "lease",
                 "prompt": "test",
@@ -2247,10 +2305,12 @@ async def test_shared_turn_returns_closed_member_telemetry_and_exact_tool_marks(
     )
     app = _app(supervisor)
 
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://sandbox_manager"
+    ) as client:
         response = await client.post(
             "/shared-sandboxes/athr_source/turn",
-            headers={"X-Agent-Workspace-Token": "broker-secret"},
+            headers={"X-Agent-Workspace-Token": "sandbox-manager-secret"},
             json={
                 "token": "lease",
                 "prompt": "test",
@@ -2273,11 +2333,11 @@ async def test_shared_turn_returns_closed_member_telemetry_and_exact_tool_marks(
 
 
 def test_build_turn_resources_adopts_late_announced_guest_marks_and_logs_them(caplog):
-    """A short call whose announcing line reached the broker after it ran:
+    """A short call whose announcing line reached the sandbox manager after it ran:
     the guest pair is adopted, its process is attributed on the guest clock,
     and the log carries the lag for a reviewer to check per call."""
+    from cloud_agent_host.sandbox_manager import build_turn_resources
     from cloud_agent_host.tool_windows import ToolWindowTracker
-    from cloud_agent_host.workspace_broker import build_turn_resources
 
     tracker = ToolWindowTracker()
     tracker.observe("tool_use", {"id": "toolu_late", "name": "Read"}, mono=100.050)
@@ -2319,7 +2379,7 @@ def test_build_turn_resources_adopts_late_announced_guest_marks_and_logs_them(ca
         ),
     )
 
-    with caplog.at_level(logging.INFO, logger="cloud_agent_host.workspace_broker"):
+    with caplog.at_level(logging.INFO, logger="cloud_agent_host.sandbox_manager"):
         resources = build_turn_resources(telemetry, tracker, thread_id="athr_late")
 
     (call,) = resources["tool_calls"]

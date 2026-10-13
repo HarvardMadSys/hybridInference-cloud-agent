@@ -150,7 +150,7 @@
 
 API 保留显式 `setup_script` 覆盖：字段未提供时用环境脚本，显式 `null` 或空串表示这次禁用安装脚本；解析使用字段是否出现，不能只判断 truthiness。覆盖和变量一样冻结到绑定上，后续消息接口不接受更换绑定。临时变量默认 Secret，也必须通过保留名和总量校验，不能原样进入普通 job 参数日志。
 
-旧工作区迁移为 `legacy` 绑定，保存它原有的安装脚本和空用户变量，不自动继承后来配置的全局变量，也不在升级后补跑新脚本。旧客户端新建任务时使用当时的默认环境；无配置时维持基础环境行为。功能开启时空配置仍创建绑定，防止以后新增全局变量影响旧任务；空绑定标记 required=False，不阻止 migration downgrade；所有执行入口统一按绑定的 `required` 判断是否需要新协议。空绑定不触发安装、写入冻结、环境 health 检查，不影响运行中打开终端、Fork 或快照，也不要求旧 broker 升级。
+旧工作区迁移为 `legacy` 绑定，保存它原有的安装脚本和空用户变量，不自动继承后来配置的全局变量，也不在升级后补跑新脚本。旧客户端新建任务时使用当时的默认环境；无配置时维持基础环境行为。功能开启时空配置仍创建绑定，防止以后新增全局变量影响旧任务；空绑定标记 required=False，不阻止 migration downgrade；所有执行入口统一按绑定的 `required` 判断是否需要新协议。空绑定不触发安装、写入冻结、环境 health 检查，不影响运行中打开终端、Fork 或快照，也不要求旧 Sandbox Manager 升级。
 
 ### 4.2 合并上限与并发
 
@@ -244,7 +244,7 @@ Docker 客户端名单包含 `DOCKER_`、`BUILDKIT_`、`BUILDX_`、`COMPOSE_`、
 
 `.env` 支持 `KEY=VALUE`、可选 `export`、单双引号、注释和空行；引用规则由解析器统一定义，不执行命令替换或变量插值。预览不暂存原始明文，提交时重新解析，并验证目标环境及全局版本未变化。
 
-变量、导入、任务覆盖和 broker 相关错误采用 `CredentialSafeRoute` 等价处理，移除校验错误中的原始 input；422、异常日志、追踪和审计均不记录请求体。Secret 从类型切换、复制、恢复或普通变量读取接口中也不能被间接读出。脱敏路由仅用于接受环境值的输入面（包括创建任务），422 保留字段位置和安全原因，移除原始 input/ctx。普通 jobs 路由保持原校验行为，不把通用 `ValueError` 文本回显给用户。环境加密使用独立 `EnvironmentEncryptionError`，不能全局捕获 `SourceControlError` 后把 GitHub/GitLab/MCP 故障误标为环境加密错误。
+变量、导入、任务覆盖和 Sandbox Manager 相关错误采用 `CredentialSafeRoute` 等价处理，移除校验错误中的原始 input；422、异常日志、追踪和审计均不记录请求体。Secret 从类型切换、复制、恢复或普通变量读取接口中也不能被间接读出。脱敏路由仅用于接受环境值的输入面（包括创建任务），422 保留字段位置和安全原因，移除原始 input/ctx。普通 jobs 路由保持原校验行为，不把通用 `ValueError` 文本回显给用户。环境加密使用独立 `EnvironmentEncryptionError`，不能全局捕获 `SourceControlError` 后把 GitHub/GitLab/MCP 故障误标为环境加密错误。
 
 ## 7. 控制面下发与 host 生命周期
 
@@ -267,13 +267,13 @@ flowchart LR
 
 claim 返回固定 `binding_id`、版本引用、解析后的脚本/操作和分阶段变量；所有带值字段 `repr=False`，不得参与普通事件序列化。每次 claim 解密同一安装绑定和显式选择的运行期快照；未点击更新时不读取最新配置。终端、一次性命令、快捷操作、测试和容器启动请求也通过同一解析服务获取绑定。
 
-能力必须验证到实际执行的 runner 和 broker。claim attestation 与 broker 协议握手都需声明支持，且与当前部署/进程代次关联；不能只相信 host 曾注册过新版本。broker 重启后重新协商。对新协议请求禁止忽略未知关键字段。
+能力必须验证到实际执行的 runner 和 Sandbox Manager。claim attestation 与 Sandbox Manager 协议握手都需声明支持，且与当前部署/进程代次关联；不能只相信 host 曾注册过新版本。Sandbox Manager 重启后重新协商。对新协议请求禁止忽略未知关键字段。
 
-需要该能力而领取副本不支持时，归还 claim、短暂退避，不消耗任务重试预算，不缺变量继续运行。调度优先过滤不兼容 host，界面显示“等待支持环境配置的 host”。终端和操作等不走 claim 的入口直接返回可重试的能力错误，不发送会被旧 broker 静默忽略的字段。
+需要该能力而领取副本不支持时，归还 claim、短暂退避，不消耗任务重试预算，不缺变量继续运行。调度优先过滤不兼容 host，界面显示“等待支持环境配置的 host”。终端和操作等不走 claim 的入口直接返回可重试的能力错误，不发送会被旧 Sandbox Manager 静默忽略的字段。
 
 解密失败按环境不可用处理，显示明确状态并记录无值健康信息；有界退避，不持续占据执行槽位。无新增配置的 legacy 工作区可走已有协议，不要求因空字段整体停用旧 host。
 
-注册、heartbeat 和 claim attestation 均只有在实际 ContainerBackend 和 shared-live/broker 支持完整时才宣告环境能力；运行过程中失去支持后撤销宣告。
+注册、heartbeat 和 claim attestation 均只有在实际 ContainerBackend 和 shared-live/Sandbox Manager 支持完整时才宣告环境能力；运行过程中失去支持后撤销宣告。
 
 ### 7.2 准备步骤与恢复
 
@@ -296,7 +296,7 @@ claim 返回固定 `binding_id`、版本引用、解析后的脚本/操作和分
 
 ### 7.3 注入、终端和成员隔离
 
-`ResidentLaunch`、broker 的 `SharedResidentLaunchConfig` 及终端请求携带绑定身份和对应阶段的环境，纳入兼容性检查；比较绑定/版本标识，不把 Secret 明文或无盐摘要写进日志。平台凭据继续按原机制续期，与用户配置冻结分开。
+`ResidentLaunch`、Sandbox Manager 的 `SharedResidentLaunchConfig` 及终端请求携带绑定身份和对应阶段的环境，纳入兼容性检查；比较绑定/版本标识，不把 Secret 明文或无盐摘要写进日志。平台凭据继续按原机制续期，与用户配置冻结分开。
 
 合并顺序为 backend `base_env()` → 该阶段用户变量 → 平台 HOME/PATH/Git 等 → runtime 凭据与配置。平台与用户名字冲突在前后两侧均拒绝；最终顺序只是防御，不是静默覆盖的产品行为。
 
@@ -304,7 +304,7 @@ claim 返回固定 `binding_id`、版本引用、解析后的脚本/操作和分
 
 Agent 成员沿用独立 UID 和私有目录；不得把平台推理/MCP/GitHub 凭据移入 group 的基础环境。该功能只支持同 owner 的共享工作区，不能借此把个人 Secret 分享给另一用户。
 
-交互终端和一次性命令均使用工作区绑定的运行期变量，冷启动时先通过 ready gate。现有终端不会因保存配置而改值。新增字段必须在 broker 确实消费后才返回成功，不能靠 Pydantic 默认忽略额外字段。配置非空时，控制面在同一次操作前检查实际认证 broker 能力，再发送一次 terminal 请求；broker 在取得终端操作令牌前完成 ready gate。不再先从控制面单独 prepare，再在终端入口重复 prepare；不缓存跨升级失效的能力检查。
+交互终端和一次性命令均使用工作区绑定的运行期变量，冷启动时先通过 ready gate。现有终端不会因保存配置而改值。新增字段必须在 Sandbox Manager 确实消费后才返回成功，不能靠 Pydantic 默认忽略额外字段。配置非空时，控制面在同一次操作前检查实际认证 Sandbox Manager 能力，再发送一次 terminal 请求；Sandbox Manager 在取得终端操作令牌前完成 ready gate。不再先从控制面单独 prepare，再在终端入口重复 prepare；不缓存跨升级失效的能力检查。
 
 ## 8. 测试环境与快捷操作
 
@@ -324,13 +324,13 @@ Agent 成员沿用独立 UID 和私有目录；不得把平台推理/MCP/GitHub 
 
 ### 8.2 快捷操作
 
-操作是当前绑定中的具名命令，通过现有 terminal/broker 执行，不创建模型 turn、不使用推理额度。配置更新后，旧工作区仍显示旧操作列表；用户可手动在终端运行其他命令。
+操作是当前绑定中的具名命令，通过现有 terminal/Sandbox Manager 执行，不创建模型 turn、不使用推理额度。配置更新后，旧工作区仍显示旧操作列表；用户可手动在终端运行其他命令。
 
 操作复用现有终端的 admission、暂停/恢复及 activity 机制：agent 或快照需要协调工作区时，操作进程同样受控，界面显示暂停状态；不能作为绕过共享写入冻结的新通道。新增执行与 snapshot capture 必须串行协调，已运行的进程及脱离原进程组的子进程也在写入者登记/冻结范围内。
 
 运行请求只提交 `action_id`、binding 和幂等键，host 从受信配置解析命令，不信任客户端覆盖 owner、工作区或脚本文本。工作目录必须规范化并检查 realpath 位于工作区内。运行终态保存退出码；停止只终止本次操作进程树，不终止兄弟成员或整组服务。
 
-数据库 run 身份与幂等键持久化，终态不可被迟到的 running 响应覆盖。broker 在产生副作用前，将运行身份写入 host 私有持久目录 `environment-actions`（不挂入容器），完成时保存有界脱敏输出及退出码；terminal 回收不删除这些不含凭据明文的执行记录。相同 run ID 在回收或 broker 重启后也不重新 spawn。停止先于延迟启动请求到达时，保留停止记录阻止该运行随后启动。
+数据库 run 身份与幂等键持久化，终态不可被迟到的 running 响应覆盖。Sandbox Manager 在产生副作用前，将运行身份写入 host 私有持久目录 `environment-actions`（不挂入容器），完成时保存有界脱敏输出及退出码；terminal 回收不删除这些不含凭据明文的执行记录。相同 run ID 在回收或 Sandbox Manager 重启后也不重新 spawn。停止先于延迟启动请求到达时，保留停止记录阻止该运行随后启动。
 
 状态查询优先读活动 terminal，回收后读取持久结果。若结果缺失或启动完成与否无法确认，标记 `unknown`，明确提示核对外部副作用后手动创建新 run；不能凭 404 判为成功，也不能永远保持 running 或自动重跑。停止遇到 terminal 404 仍完成状态收敛。持久记录由 host 私有状态卷保存；灾难性卷丢失后的结果为未知，不能承诺外部服务的 exactly-once 效果。
 
@@ -346,7 +346,7 @@ Agent 成员沿用独立 UID 和私有目录；不得把平台推理/MCP/GitHub 
 
 Secret 集合来自实际绑定及该工作区曾注入的版本引用，包含安装期 Secret 和临时覆盖。轮换、删除或归档环境不能让旧值失去保护。
 
-脱敏发生在原始文本被上传、持久化或进入异常详情之前，覆盖 runner、broker、环境测试、安装/启动后台输出、操作摘要、资源测量中的文本详情和 snapshot/publish 失败路径。不能只在 `ControlPlane._post` 对每个独立 payload 做 `.replace()`：一个 Secret 可能被分成多个 delta。
+脱敏发生在原始文本被上传、持久化或进入异常详情之前，覆盖 runner、Sandbox Manager、环境测试、安装/启动后台输出、操作摘要、资源测量中的文本详情和 snapshot/publish 失败路径。不能只在 `ControlPlane._post` 对每个独立 payload 做 `.replace()`：一个 Secret 可能被分成多个 delta。
 
 共享脱敏器按输出流维护状态，保留最长匹配串所需的尾部缓冲，处理跨 chunk、UTF-8 字节边界及 stdout/stderr 各自的顺序。采用增量输出时，同一逻辑流的截断、拼接、重试、flush、异常和取消都必须遵守它；不能先截断/落盘再打码，或在 cancel 时直接上传未检查尾部。
 
@@ -403,7 +403,7 @@ Secret 集合来自实际绑定及该工作区曾注入的版本引用，包含�
 
 ## 13. 单个 PR 的实现与合入要求
 
-功能开关 repository_environments_enabled 默认关闭，首次初始化可通过 AGENT_REPOSITORY_ENVIRONMENTS_ENABLED=true 导入。/config 仅开启时提供 environment_limits；三个 UI 入口据此显示。关闭后禁止新增非空绑定及独立测试，已有绑定的执行与恢复仍保持兼容。关闭时普通新任务沿用原创建路径，不写空绑定或取得环境 advisory 锁；显式携带非空环境选择的请求返回错误。所有控制面和 host/broker 升级且完成现场验收后再开启。
+功能开关 repository_environments_enabled 默认关闭，首次初始化可通过 AGENT_REPOSITORY_ENVIRONMENTS_ENABLED=true 导入。/config 仅开启时提供 environment_limits；三个 UI 入口据此显示。关闭后禁止新增非空绑定及独立测试，已有绑定的执行与恢复仍保持兼容。关闭时普通新任务沿用原创建路径，不写空绑定或取得环境 advisory 锁；显式携带非空环境选择的请求返回错误。所有控制面和 host/Sandbox Manager 升级且完成现场验收后再开启。
 
 Environment tab 的 GET 不写库，Secret 脱敏材料按 owner、绑定、运行期版本和加密 key 缓存 60 秒，最多 256 条；状态的 Docker inspect 在线程执行器运行并缓存 15 秒。准备摘要由实时 attempt 租约锁保护的生命周期事件写入，不能由失去租约的 host 覆盖。操作状态轮询不重复查询 GitHub entitlement；新操作仍校验权限。过期检查持续执行，历史 GC 每小时一次，反向引用查询配套索引。
 
@@ -413,13 +413,13 @@ Environment tab 的 GET 不写库，Secret 脱敏材料按 owner、绑定、运�
 同一 PR 内可以按依赖顺序开发和组织 commits，但须完整包含以下内容，不能只合入 API 或占位 UI：
 
 1. 共享协议、保留规则、版本/绑定存储、owner API 和迁移。
-2. admission 固定配置、Fork 继承、claim 和所有 broker 入口的能力检查。
+2. admission 固定配置、Fork 继承、claim 和所有 Sandbox Manager 入口的能力检查。
 3. 安装/启动协调器、变量注入、终端、环境测试、快捷操作和清理。
 4. 流式脱敏、历史 Secret 引用、快照及发布扫描。
 5. Settings、Environment tab、「…」入口、新建任务选择/覆盖、导入、历史和完整运行状态。
 6. 安全文档、运维说明、中英文文案及下面的验收测试。
 
-兼容滚动部署是这个 PR 自身的要求：迁移先可用，host/broker 宣告能力后才承接新增配置。部署期间不能丢变量执行，测试队列也不能把新协议派给旧进程。
+兼容滚动部署是这个 PR 自身的要求：迁移先可用，host/Sandbox Manager 宣告能力后才承接新增配置。部署期间不能丢变量执行，测试队列也不能把新协议派给旧进程。
 
 首次创建新绑定前，所有接收任务创建、后续消息、Fork 和终端请求的控制面副本必须已升级；不能让旧副本将新绑定视为无配置。存在新绑定后不支持直接回退到不理解绑定的旧二进制。回滚须先关闭相关执行入口、排空测试及准备操作，并保持已绑定工作区由兼容版本服务或处于禁止执行状态；部署检查和运维说明必须落实这一限制。
 
@@ -450,7 +450,7 @@ Environment tab 的 GET 不写库，Secret 脱敏材料按 owner、绑定、运�
 - 并发全局/环境写入、导入、设默认和绑定创建的数据库测试，证明有效上限不会因竞态突破。
 - 显式 `setup_script` 的未提供/null/空串语义；临时覆盖加密及继承；同组 Fork 不能更换绑定。
 - 普通消息、重试、goal、终端和测试均使用正确固定版本；轮换后旧会话默认仍读旧值；点击更新后只更换运行期值，安装输入保持原样，新工作区读完整新版本。
-- 不兼容 runner、broker 重启后协议退回、旧 broker 忽略额外字段等情形均拒绝执行；任务重试预算不因能力不匹配消耗。
+- 不兼容 runner、Sandbox Manager 重启后协议退回、旧 Sandbox Manager 忽略额外字段等情形均拒绝执行；任务重试预算不因能力不匹配消耗。
 - 环境测试的并发额度、lease 过期、取消/完成竞争、TTL、host 失联及孤儿清理；不给予推理/MCP/Git 写凭据。
 
 ### 14.3 Host、输出与发布验证
@@ -459,7 +459,7 @@ Environment tab 的 GET 不写库，Secret 脱敏材料按 owner、绑定、运�
 - 并发 ready 请求只启动一次；host 进程重启不当作容器 boot；停止后重启执行启动；失败、取消和模糊完成可安全重试。
 - 安装期后台进程被清理，group 服务不随 member 替换而死；服务、操作和 detached 子进程均受快照冻结约束。
 - 终端、一次性命令、快捷操作冷启动不绕过准备；操作幂等、暂停恢复、相对路径与 symlink 逃逸、停止范围正确；覆盖完成后/回收后/进程重启后的同键重试，以及状态查询和停止的 404、模糊启动与迟到结果。
-- Secret 在任意 chunk 边界切分、UTF-8、多行、相互包含、短值、flush、取消、截断和日志重试时都验证；覆盖 runner 与 broker 的所有持久化输出路径。
+- Secret 在任意 chunk 边界切分、UTF-8、多行、相互包含、短值、flush、取消、截断和日志重试时都验证；覆盖 runner 与 Sandbox Manager 的所有持久化输出路径。
 - 轮换/删除后的旧 Secret 仍被识别；未跟踪/已暂存/已跟踪文件、二进制、符号链接目标文本、分行补丁和待发布快照扫描有效；删除秘密内容不被误阻止，错误不含值。
 - 五个 runtime 在真实 host 各验证普通变量读取、平台凭据不受覆盖、native resume 与 Fork 行为；多租户边界在 Kata 下验收。
 
@@ -480,12 +480,12 @@ Environment tab 的 GET 不写库，Secret 脱敏材料按 owner、绑定、运�
 | 加密与绑定解析 | `cloud_agent/source_control.py` 的 cipher 模式；`cloud_agent/application/` 新环境解析服务 |
 | Owner API 与配置 | `cloud_agent/api/` 新环境路由；`api/config.py`、`schemas.py`、bootstrap 路由组装 |
 | 新任务与 Fork | `cloud_agent/application/job_admission.py`；`cloud_agent/storage/repositories/session_fork.py` |
-| claim 与兼容 | `cloud_agent/api/worker.py`、`schemas.py`、`cloud_agent_host/runner.py`、broker 能力握手 |
+| claim 与兼容 | `cloud_agent/api/worker.py`、`schemas.py`、`cloud_agent_host/runner.py`、Sandbox Manager 能力握手 |
 | 环境准备与服务 | `cloud_agent_host/setup.py`、`chat_sandbox.py`、group supervisor；新增步骤执行/状态协调模块 |
-| 成员变量 | `cloud_agent_host/resident_transport.py`、`workspace_broker.py`；`SharedResidentLaunchConfig` 与 `ResidentLaunch` |
-| 终端和操作 | `cloud_agent/api/workspace.py`、`workspace_broker_client.py`、`cloud_agent_host/workspace_broker.py` |
+| 成员变量 | `cloud_agent_host/resident_transport.py`、`sandbox_manager.py`；`SharedResidentLaunchConfig` 与 `ResidentLaunch` |
+| 终端和操作 | `cloud_agent/api/workspace.py`、`sandbox_manager_client.py`、`cloud_agent_host/sandbox_manager.py` |
 | 测试调度与清理 | 新环境测试 admission/claim/worker；复用现有 host 容量及 lease/reaper 机制，独立 run 类型 |
-| 输出脱敏 | 共享有状态脱敏模块；runner、broker 和准备/测试/操作输出适配；覆盖 `_post`、`record_measurement` 等上报点 |
+| 输出脱敏 | 共享有状态脱敏模块；runner、Sandbox Manager 和准备/测试/操作输出适配；覆盖 `_post`、`record_measurement` 等上报点 |
 | 快照与发布 | `cloud_agent/workers/snapshots.py`、`publisher.py`、`publish_worker.py` 及其 Secret 引用解析 |
 | 前端 | `apps/frontend/src/components/features/agents/` 的 `TaskComposer.tsx`、`useWorkspaceTabs.ts`、`WorkspaceTabBar.tsx`、`JobDetail.tsx`、`ThreadActions.tsx`、`IntegrationsView.tsx`、`adapt.ts`；新增 environment 组件、API 客户端和中英文文案 |
 

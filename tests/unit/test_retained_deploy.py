@@ -29,7 +29,7 @@ def _host(
     slots: str | None = "3",
     running_containers: int = 1,
     runner_ps_exit: int = 0,
-    broker_ps_exit: int = 0,
+    sandbox_manager_ps_exit: int = 0,
     turn_starts: bool = True,
     credential: bool = True,
     configured_root: str = "/var/lib/docker",
@@ -37,8 +37,9 @@ def _host(
     capability: str = "shared-sandbox-v1,native-fork-at-anchor-v1",
     credential_rejected: bool = False,
     attest_exit: int = 0,
-    broker_running: bool = True,
-    broker_serving: bool = True,
+    sandbox_manager_running: bool = True,
+    legacy_manager_running: bool = False,
+    sandbox_manager_serving: bool = True,
     candidate_exit: int = 0,
     network_settings_exit: int = 0,
     storage_json: str | None = None,
@@ -69,11 +70,11 @@ def _host(
     fake_bin.mkdir()
     rejection_log = "agent_host_credential_rejected" if credential_rejected else ""
     runner_ids = "\n".join(f"runner-{index}" for index in range(1, running_containers + 1))
-    broker_id = "workspace-broker-1" if broker_running else ""
-    # The readiness wait probes the broker with urllib; the fake answers it
-    # separately from the attestation exec so a broker that is up but not yet
+    sandbox_manager_id = "sandbox-manager-1" if sandbox_manager_running else ""
+    # The readiness wait probes the sandbox manager with urllib; the fake answers it
+    # separately from the attestation exec so a sandbox manager that is up but not yet
     # serving can be modelled.
-    broker_probe_exit = 0 if broker_serving else 1
+    sandbox_manager_probe_exit = 0 if sandbox_manager_serving else 1
     # Only modelled when a test asks for it: the storage probe's describe
     # command is a second `docker exec`, and a fake that answered it by default
     # would make every deployment test exercise the attestation path.
@@ -100,6 +101,7 @@ def _host(
     _write_executable(
         fake_bin / "docker",
         "#!/bin/sh\n"
+        'if [ "$1" = compose ] && [ -n "${MANAGER_TOKEN_LOG:-}" ]; then printf \'%s\\n\' "${AGENT_SANDBOX_MANAGER_TOKEN:-}" >> "$MANAGER_TOKEN_LOG"; fi\n'
         'if [ -n "${DOCKER_CALL_LOG:-}" ]; then printf \'%s\\n\' "$*" >> "$DOCKER_CALL_LOG"; fi\n'
         'case " $* " in *" config --environment "*) cat >/dev/null; { if [ -f .env ]; then cat .env; fi; env; } | awk -F= \'{v[$1]=$0} END {for (k in v) print v[k]}\'; exit 0 ;; esac\n'
         'case "$*" in\n'
@@ -109,11 +111,16 @@ def _host(
         f"  run*'cloud_agent_host.candidate_check') exit {candidate_exit} ;;\n"
         f"  run*'network_from_env()') exit {network_settings_exit} ;;\n"
         f"  *' ps -q runner') printf '%s\\n' '{runner_ids}'; exit {runner_ps_exit} ;;\n"
-        f"  *' ps -q workspace-broker') printf '%s\\n' '{broker_id}'; exit {broker_ps_exit} ;;\n"
-        f"  *' logs --since 2m runner') echo '{rejection_log}' ;;\n"
+        f"  *' ps -q sandbox-manager') printf '%s\\n' '{sandbox_manager_id}'; exit {sandbox_manager_ps_exit} ;;\n"
+        + (
+            "  ps*'label=com.docker.compose.service=workspace-broker') echo legacy-manager-1 ;;\n"
+            if legacy_manager_running
+            else ""
+        )
+        + f"  *' logs --since 2m runner') echo '{rejection_log}' ;;\n"
         f"  exec*'_shared_live_host_capabilities'*) echo '{capability}'; exit {attest_exit} ;;\n"
         + storage_case
-        + f"  exec*8092/health*) exit {broker_probe_exit} ;;\n"
+        + f"  exec*8092/health*) exit {sandbox_manager_probe_exit} ;;\n"
         # The realistic shape: the same preflight a real turn runs logs a Kata
         # measurement warning to stderr before the child answers on stdout,
         # and the script captures both. The verdict has to be read past it.
@@ -154,7 +161,7 @@ def _host(
         "AGENT_GATEWAY_HOSTNAME",
         "AGENT_MCP_HOSTNAME",
         "AGENT_CONTROL_PLANE_HOSTNAME",
-        "AGENT_WORKSPACE_BROKER_TOKEN",
+        "AGENT_SANDBOX_MANAGER_TOKEN",
         "AGENT_TUNNEL_SSH_DESTINATION",
         "AGENT_TUNNEL_SSH_KEY",
         "AGENT_TUNNEL_SSH_KNOWN_HOSTS",
@@ -164,9 +171,9 @@ def _host(
         "AGENT_CONTROL_PLANE_TUNNEL_SSH_DESTINATION",
         "AGENT_CONTROL_PLANE_TUNNEL_SSH_KEY",
         "AGENT_CONTROL_PLANE_TUNNEL_SSH_KNOWN_HOSTS",
-        "AGENT_BROKER_REVERSE_BIND",
-        "AGENT_BROKER_REVERSE_PORT",
-        "AGENT_WORKSPACE_BROKER_ADVERTISE_URL",
+        "AGENT_SANDBOX_MANAGER_REVERSE_BIND",
+        "AGENT_SANDBOX_MANAGER_REVERSE_PORT",
+        "AGENT_SANDBOX_MANAGER_ADVERTISE_URL",
         "AGENT_HOST_STORAGE_PROBE",
         # Runtime image defaults are reviewed source pins. A launcher's own
         # CLI version must not become an operator override in this fixture.
@@ -182,9 +189,9 @@ def _host(
 
 
 def _add_required_host_paths(env: dict[str, str], tmp_path: Path) -> None:
-    """Populate the three relays and reverse broker path used by ``up``."""
+    """Populate the three relays and reverse sandbox manager path used by ``up``."""
     app_dir = Path(env["APP_DIR"])
-    values = ["AGENT_WORKSPACE_BROKER_TOKEN=test-broker-token"]
+    values = ["AGENT_SANDBOX_MANAGER_TOKEN=test-sandbox-manager-token"]
     for index, prefix in enumerate(
         ("AGENT_TUNNEL", "AGENT_MCP_TUNNEL", "AGENT_CONTROL_PLANE_TUNNEL"),
         start=1,
@@ -202,9 +209,9 @@ def _add_required_host_paths(env: dict[str, str], tmp_path: Path) -> None:
         )
     values.extend(
         (
-            "AGENT_BROKER_REVERSE_BIND=172.24.0.1",
-            "AGENT_BROKER_REVERSE_PORT=18092",
-            "AGENT_WORKSPACE_BROKER_ADVERTISE_URL=http://172.24.0.1:18092",
+            "AGENT_SANDBOX_MANAGER_REVERSE_BIND=172.24.0.1",
+            "AGENT_SANDBOX_MANAGER_REVERSE_PORT=18092",
+            "AGENT_SANDBOX_MANAGER_ADVERTISE_URL=http://172.24.0.1:18092",
             "AGENT_EGRESS_CHAT_NETWORK_POOL=10.240.0.0/16",
             "AGENT_EGRESS_DNS_SERVER=1.1.1.1",
         )
@@ -249,24 +256,26 @@ def test_target_sha_marker_is_a_rollout_fence_not_a_topology_switch() -> None:
     assert "AGENT_SHARED_LIVE_SANDBOX" not in host_script
 
 
-def test_host_builds_then_drains_runners_and_broker_without_forced_kills() -> None:
+def test_host_builds_then_drains_runners_and_sandbox_manager_without_forced_kills() -> None:
     script = SANDBOX_HOST.read_text()
 
     build = script.index("compose build")
     marker = script.index("prepare_shared_live_marker", build)
     helper = script[
-        script.index("drain_runners_then_broker() {") : script.index("cmd_activate() {")
+        script.index("drain_runners_then_sandbox_manager() {") : script.index("cmd_activate() {")
     ]
     runner_lookup = helper.index('runner_ids_text="$(compose ps -q runner)"')
-    broker_lookup = helper.index('broker_ids_text="$(compose ps -q workspace-broker)"')
+    sandbox_manager_lookup = helper.index(
+        'sandbox_manager_ids_text="$(compose ps -q sandbox-manager)"'
+    )
     runner_drain = helper.index('docker stop --time=-1 "${runner_ids[@]}"')
-    broker_drain = helper.index('docker stop --time=-1 "${broker_ids[@]}"')
+    sandbox_manager_drain = helper.index('docker stop --time=-1 "${sandbox_manager_ids[@]}"')
     activate = script[script.index("cmd_activate() {") : script.index("cmd_up() {")]
-    drain = activate.index("drain_runners_then_broker")
+    drain = activate.index("drain_runners_then_sandbox_manager")
     replace = activate.index("compose up -d --no-build --remove-orphans", drain)
 
     assert build < marker
-    assert runner_lookup < broker_lookup < runner_drain < broker_drain
+    assert runner_lookup < sandbox_manager_lookup < runner_drain < sandbox_manager_drain
     assert drain < replace
     assert "compose stop runner" not in script
 
@@ -286,10 +295,10 @@ def test_host_refuses_replacement_when_runner_lookup_fails(tmp_path: Path) -> No
     assert "starting the three purpose-scoped tunnels" not in result.stdout
 
 
-def test_host_refuses_replacement_before_draining_when_broker_lookup_fails(
+def test_host_refuses_replacement_before_draining_when_sandbox_manager_lookup_fails(
     tmp_path: Path,
 ) -> None:
-    env = _host(tmp_path, broker_ps_exit=23)
+    env = _host(tmp_path, sandbox_manager_ps_exit=23)
     _add_required_host_paths(env, tmp_path)
     env["AGENT_DEPLOYMENT_SHA"] = "target-sha"
 
@@ -297,13 +306,13 @@ def test_host_refuses_replacement_before_draining_when_broker_lookup_fails(
 
     assert result.returncode != 0
     assert (
-        "could not resolve the existing workspace-broker containers; refusing to stop the stack"
+        "could not resolve the existing sandbox-manager containers; refusing to stop the stack"
         in result.stderr
     )
     assert "draining existing runners" not in result.stdout
 
 
-def test_activate_stops_exact_runners_then_exact_broker_without_deadlines(
+def test_activate_stops_exact_runners_then_exact_sandbox_manager_without_deadlines(
     tmp_path: Path,
 ) -> None:
     env = _host(tmp_path, running_containers=2)
@@ -318,15 +327,63 @@ def test_activate_stops_exact_runners_then_exact_broker_without_deadlines(
     stops = [line for line in command_log.read_text().splitlines() if line.startswith("stop ")]
     assert stops == [
         "stop --time=-1 runner-1 runner-2",
-        "stop --time=-1 workspace-broker-1",
+        "stop --time=-1 sandbox-manager-1",
     ]
 
 
-def test_down_drains_runners_then_broker_before_compose_removal() -> None:
+def test_upgrade_drains_and_removes_the_previous_service_before_starting_replacement(tmp_path):
+    env = _host(tmp_path, legacy_manager_running=True)
+    _add_required_host_paths(env, tmp_path)
+    env["AGENT_DEPLOYMENT_SHA"] = "target-sha"
+    command_log = tmp_path / "docker-calls"
+    env["DOCKER_CALL_LOG"] = str(command_log)
+
+    result = _run(env, "up")
+
+    assert result.returncode == 0, result.stderr
+    calls = command_log.read_text().splitlines()
+    runner_stop = calls.index("stop --time=-1 runner-1")
+    managers_stop = calls.index("stop --time=-1 sandbox-manager-1 legacy-manager-1")
+    previous_removed = calls.index("rm legacy-manager-1")
+    replacement = next(i for i, call in enumerate(calls) if " up -d" in call)
+    assert runner_stop < managers_stop < previous_removed < replacement
+    assert any(
+        "label=com.docker.compose.project=test-retained" in call
+        and "label=com.docker.compose.service=workspace-broker" in call
+        for call in calls
+    )
+
+
+def test_existing_host_environment_can_pass_preflight_after_service_rename(tmp_path):
+    env = _host(tmp_path)
+    _add_required_host_paths(env, tmp_path)
+    dotenv = Path(env["APP_DIR"]) / ".env"
+    contents = dotenv.read_text()
+    for current, previous in (
+        ("AGENT_SANDBOX_MANAGER_TOKEN", "AGENT_WORKSPACE_BROKER_TOKEN"),
+        ("AGENT_SANDBOX_MANAGER_ADVERTISE_URL", "AGENT_WORKSPACE_BROKER_ADVERTISE_URL"),
+        ("AGENT_SANDBOX_MANAGER_REVERSE_BIND", "AGENT_BROKER_REVERSE_BIND"),
+        ("AGENT_SANDBOX_MANAGER_REVERSE_PORT", "AGENT_BROKER_REVERSE_PORT"),
+    ):
+        contents = contents.replace(current, previous)
+    dotenv.write_text(contents)
+
+    result = _run(env, "preflight")
+
+    assert result.returncode == 0, result.stderr
+
+    token_log = tmp_path / "manager-token"
+    env["MANAGER_TOKEN_LOG"] = str(token_log)
+    status = _run(env, "status")
+    assert status.returncode == 0, status.stderr
+    assert token_log.read_text().splitlines()[-1] == "test-sandbox-manager-token"
+
+
+def test_down_drains_runners_then_sandbox_manager_before_compose_removal() -> None:
     script = SANDBOX_HOST.read_text()
     down = script[script.index("cmd_down() {") : script.index("cmd_mark_ready() {")]
 
-    assert down.index("drain_runners_then_broker") < down.index("compose down")
+    assert down.index("drain_runners_then_sandbox_manager") < down.index("compose down")
 
 
 def test_down_rejects_arguments_before_draining(tmp_path: Path) -> None:
@@ -515,11 +572,11 @@ def test_scoped_relay_aliases_must_be_distinct(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "missing",
     [
-        "AGENT_WORKSPACE_BROKER_TOKEN",
+        "AGENT_SANDBOX_MANAGER_TOKEN",
         "AGENT_MCP_TUNNEL_SSH_KEY",
         "AGENT_CONTROL_PLANE_TUNNEL_SSH_KNOWN_HOSTS",
-        "AGENT_BROKER_REVERSE_BIND",
-        "AGENT_WORKSPACE_BROKER_ADVERTISE_URL",
+        "AGENT_SANDBOX_MANAGER_REVERSE_BIND",
+        "AGENT_SANDBOX_MANAGER_ADVERTISE_URL",
     ],
 )
 def test_host_up_refuses_any_missing_scoped_or_reverse_path(tmp_path: Path, missing: str) -> None:
@@ -535,11 +592,13 @@ def test_host_up_refuses_any_missing_scoped_or_reverse_path(tmp_path: Path, miss
 
 
 @pytest.mark.parametrize("unsafe_bind", ["0.0.0.0", "127.0.0.1", "localhost", "::1"])
-def test_host_up_refuses_an_unsafe_reverse_broker_bind(tmp_path: Path, unsafe_bind: str) -> None:
+def test_host_up_refuses_an_unsafe_reverse_sandbox_manager_bind(
+    tmp_path: Path, unsafe_bind: str
+) -> None:
     env = _host(tmp_path)
     _add_required_host_paths(env, tmp_path)
     with (Path(env["APP_DIR"]) / ".env").open("a") as dotenv:
-        dotenv.write(f"AGENT_BROKER_REVERSE_BIND={unsafe_bind}\n")
+        dotenv.write(f"AGENT_SANDBOX_MANAGER_REVERSE_BIND={unsafe_bind}\n")
 
     result = _run(env, "up")
 
@@ -650,7 +709,7 @@ def test_retained_mode_refuses_the_wrong_docker_data_root(tmp_path: Path) -> Non
     assert "expects '/mnt/retained-docker'" in result.stderr
 
 
-def test_shared_live_check_attests_every_runner_and_broker(tmp_path: Path) -> None:
+def test_shared_live_check_attests_every_runner_and_sandbox_manager(tmp_path: Path) -> None:
     result = _run(_host(tmp_path), "check")
 
     assert result.returncode == 0, result.stderr
@@ -794,27 +853,29 @@ def test_shared_live_check_fails_for_a_rejected_host_credential(tmp_path: Path) 
     assert "rejected this host's persisted credential" in result.stderr
 
 
-def test_shared_live_check_waits_for_the_broker_and_names_it_on_timeout(tmp_path: Path) -> None:
-    """A broker that is up but not yet serving is what a rollout must wait out.
+def test_shared_live_check_waits_for_the_sandbox_manager_and_names_it_on_timeout(
+    tmp_path: Path,
+) -> None:
+    """A sandbox manager that is up but not yet serving is what a rollout must wait out.
 
-    The runners' preflight asks the broker for its retained sandboxes once, so a
-    replica judging a broker that started a second ago reports the session
+    The runners' preflight asks the sandbox manager for its retained sandboxes once, so a
+    replica judging a sandbox manager that started a second ago reports the session
     supervisor as unavailable and fails a rollout whose stack is healthy moments
-    later. With no time left to wait, the verdict has to name the broker rather
+    later. With no time left to wait, the verdict has to name the sandbox manager rather
     than the runners that merely repeated its silence.
     """
-    result = _run(_host(tmp_path, broker_serving=False), "check")
+    result = _run(_host(tmp_path, sandbox_manager_serving=False), "check")
 
     assert result.returncode != 0
-    assert "workspace broker did not answer /health" in result.stderr
+    assert "sandbox manager did not answer /health" in result.stderr
 
 
-def test_shared_live_check_reports_a_missing_broker_replica(tmp_path: Path) -> None:
-    """No broker at all is a different statement from one still starting."""
-    result = _run(_host(tmp_path, broker_running=False), "check")
+def test_shared_live_check_reports_a_missing_sandbox_manager_replica(tmp_path: Path) -> None:
+    """No sandbox manager at all is a different statement from one still starting."""
+    result = _run(_host(tmp_path, sandbox_manager_running=False), "check")
 
     assert result.returncode != 0
-    assert "no workspace-broker replica is running" in result.stderr
+    assert "no sandbox-manager replica is running" in result.stderr
 
 
 # ---------------------------------------------------------------------------

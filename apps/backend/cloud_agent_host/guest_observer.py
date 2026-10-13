@@ -45,7 +45,7 @@ GUEST_OBSERVER_BINARY = "/usr/local/libexec/freeinference-guest-observer"
 GUEST_BOOT_ID_PATH = "/proc/sys/kernel/random/boot_id"
 
 # One member turn may read at most this much of the group-wide journal.  The
-# observer itself has a larger lifetime cap; this one bounds one broker result.
+# observer itself has a larger lifetime cap; this one bounds one sandbox manager result.
 MAX_OBSERVATION_BYTES = 4 * 1024 * 1024
 MAX_OBSERVED_PROCESSES = 4096
 MAX_OBSERVED_TOOL_MARKS = 1000
@@ -106,7 +106,7 @@ class GuestObserverCursor:
     journal_dev: int = 0
     journal_ino: int = 0
     guest_mono_ns: int = 0
-    # Add this to a guest monotonic timestamp to place it on the broker host's
+    # Add this to a guest monotonic timestamp to place it on the sandbox manager host's
     # monotonic axis.  ``clock_error_ns`` is half the Docker-exec round trip;
     # attribution widens by it rather than claiming false boundary precision.
     mono_offset_ns: int = 0
@@ -178,7 +178,7 @@ class GuestObservation:
     truncated: bool
     processes: tuple[GuestProcess, ...] = ()
     # Guest-root accepted boundary records, each carrying the guest's own
-    # monotonic reading and its bridged position on the broker's clock. They
+    # monotonic reading and its bridged position on the sandbox manager's clock. They
     # share the process journal's UID/loss fence.
     tool_marks: tuple[ToolMark, ...] = ()
     origin_guest_mono_ns: int = 0
@@ -1133,7 +1133,7 @@ def attribute_processes(
     tick.  When two tool windows overlap, both call sequence numbers are kept
     on the process row instead of arbitrarily picking one.  A window the
     guest's own hooks bounded is on the process journal's clock already and
-    is compared directly.  A message-level window is on the broker's clock;
+    is compared directly.  A message-level window is on the sandbox manager's clock;
     the guest/host bridge has a measured error bound, and widening such a
     window by that bound is conservative and prevents a boundary-adjacent
     process from being assigned with false precision.  If any tool window
@@ -1206,7 +1206,7 @@ def _started_inside(process: GuestProcess, window: ToolWindow, error_s: float) -
 
     A window the guest's own hooks bounded shares the process journal's
     clock, so the comparison is direct and carries no error band. A
-    message-level window lives on the broker's clock, and the process start
+    message-level window lives on the sandbox manager's clock, and the process start
     is bridged onto it with the measured error, which widens the window by
     that much rather than claiming a boundary the bridge cannot support.
     """

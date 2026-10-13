@@ -233,7 +233,7 @@ class HostBootstrap(Protocol):
     async def readiness(
         self, node: NodeObservation, profile: DeploymentProfile, intent: BootstrapIntent
     ) -> BootstrapResult:
-        """Recheck deployment identity and the full host and broker readiness gates."""
+        """Recheck deployment identity and the full host and sandbox manager readiness gates."""
         ...
 
     async def inventory(

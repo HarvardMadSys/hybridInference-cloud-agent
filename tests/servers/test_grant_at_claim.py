@@ -220,7 +220,7 @@ def _app(store: _ClaimStore, grants: _Grants, gateway: _Gateway | None = None) -
 @pytest.fixture(autouse=True)
 def _env(monkeypatch):
     monkeypatch.setenv("AGENT_CONTROL_TOKEN_SECRET", "claim-test-secret")
-    monkeypatch.setenv("AGENT_WORKSPACE_BROKER_TOKEN", "claim-test-broker-secret")
+    monkeypatch.setenv("AGENT_SANDBOX_MANAGER_TOKEN", "claim-test-sandbox-manager-secret")
     monkeypatch.setenv("AGENT_REPO_ALLOWLIST", "owner/name")
     yield
 
@@ -609,7 +609,7 @@ async def test_environment_claim_requires_both_actual_runner_and_broker(monkeypa
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
 
-    from cloud_agent.workspace_broker_client import WorkspaceBrokerError
+    from cloud_agent.sandbox_manager_client import SandboxManagerError
     from cloud_agent_shared.environment import BoundEnvironment, EnvironmentVariable
 
     store, grants = _ClaimStore(), _Grants()
@@ -628,11 +628,11 @@ async def test_environment_claim_requires_both_actual_runner_and_broker(monkeypa
     )
     broker = SimpleNamespace(require_environment_capability=AsyncMock())
     if compatibility == "old-broker":
-        broker.require_environment_capability.side_effect = WorkspaceBrokerError(
+        broker.require_environment_capability.side_effect = SandboxManagerError(
             503, "Broker upgrade required"
         )
     route = AsyncMock(return_value=None if compatibility == "missing-broker" else broker)
-    monkeypatch.setattr("cloud_agent.broker_routing.broker_for_job", route)
+    monkeypatch.setattr("cloud_agent.sandbox_manager_routing.sandbox_manager_for_job", route)
     body = {
         "worker_id": "w1",
         "attestation": {

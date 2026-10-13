@@ -68,7 +68,7 @@ def test_local_dev_script_upgrades_an_existing_env_without_rotating_it(tmp_path:
     dotenv = script.parent / ".env.local"
     dotenv.write_text(
         "AGENT_SESSION_SECRET=keep-this-secret\n"
-        "AGENT_WORKSPACE_BROKER_TOKEN=keep-this-broker-token\n"
+        "AGENT_SANDBOX_MANAGER_TOKEN=keep-this-sandbox-manager-token\n"
         "AGENT_DEPLOYMENT_SHA=local-freeinference-local\n"
         "LOCAL_EDGE_PORT=23002\n"
     )
@@ -112,7 +112,7 @@ def test_local_dev_script_upgrades_an_existing_env_without_rotating_it(tmp_path:
         if line and not line.startswith("#")
     )
     assert values["AGENT_SESSION_SECRET"] == "keep-this-secret"
-    assert values["AGENT_WORKSPACE_BROKER_TOKEN"] == "keep-this-broker-token"
+    assert values["AGENT_SANDBOX_MANAGER_TOKEN"] == "keep-this-sandbox-manager-token"
     assert values["LOCAL_PROJECT_NAME"] == "freeinference-local"
     assert values["LOCAL_RELAY_NETWORK"] == "freeinference-local-agent-relays"
     assert values["LOCAL_CHAT_NETWORK_POOL"] == "10.240.0.0/16"
@@ -137,7 +137,7 @@ def _local_dev_with_resolver(tmp_path: Path, resolv_answer: str) -> tuple[Path, 
     script.parent.mkdir(parents=True)
     shutil.copy2(_LOCAL_DEV_SCRIPT, script)
     (script.parent / ".env.local").write_text(
-        "AGENT_WORKSPACE_BROKER_TOKEN=keep\nLOCAL_EDGE_PORT=13002\n"
+        "AGENT_SANDBOX_MANAGER_TOKEN=keep\nLOCAL_EDGE_PORT=13002\n"
     )
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -246,7 +246,7 @@ def test_local_up_stops_before_full_stack_when_retained_database_auth_fails(
     (script.parent / ".env.local").write_text(
         "AGENT_POSTGRES_PASSWORD=wrong-retained-password\n"
         "AGENT_DATABASE_URL=postgresql://cloudagent:wrong-retained-password@postgres/cloudagent\n"
-        "AGENT_WORKSPACE_BROKER_TOKEN=keep\n"
+        "AGENT_SANDBOX_MANAGER_TOKEN=keep\n"
         "LOCAL_PROJECT_NAME=freeinference-local\n"
         "LOCAL_RELAY_NETWORK=freeinference-local-agent-relays\n"
         "LOCAL_CHAT_NETWORK_POOL=10.240.0.0/16\n"
@@ -314,14 +314,14 @@ def test_complete_local_stack_exposes_only_its_loopback_edge(local_compose: dict
 def test_the_local_stack_can_switch_profiling_on_for_every_producer(local_compose: dict):
     """A local experiment must be able to measure more than the control plane.
 
-    The runner, the broker and the control plane are separate processes and each
+    The runner, the sandbox manager and the control plane are separate processes and each
     reads the switch itself. Only the control-plane compose file passed it on,
     so a local stack with profiling enabled collected the file and terminal
     requests and silently nothing else: no startup record at all, and the four
     startup paths the experiment exists to compare could not be produced.
     """
     services = local_compose["services"]
-    for name in ("runner", "workspace-broker"):
+    for name in ("runner", "sandbox-manager"):
         environment = services[name]["environment"]
         assert environment["AGENT_OPERATION_PROFILING_ENABLED"] == (
             "${AGENT_OPERATION_PROFILING_ENABLED:-false}"
@@ -357,7 +357,7 @@ def test_complete_local_sandbox_network_has_only_narrow_relays(local_compose: di
 
 def test_complete_local_stack_uses_the_one_network(local_compose: dict):
     """The local stack runs the production network, not a closed local variant."""
-    for name in ("runner", "workspace-broker"):
+    for name in ("runner", "sandbox-manager"):
         env = local_compose["services"][name]["environment"]
         assert (
             env["AGENT_RELAY_NETWORK"] == "${LOCAL_RELAY_NETWORK:-freeinference-local-agent-relays}"
@@ -379,12 +379,12 @@ def test_mcp_only_listener_receives_the_connection_decryption_key() -> None:
 
 
 def test_complete_local_host_data_is_docker_owned(local_compose: dict):
-    """Runner/broker may control Docker but may not map app data from the host."""
+    """Runner/sandbox manager may control Docker but may not map app data from the host."""
     named = set(local_compose["volumes"])
     control = local_compose["services"]["control-plane"]
     assert control["environment"]["AGENT_GITHUB_APP_PRIVATE_KEY_PATH"] == ""
     assert control["volumes"] == ["local-empty-github-key:/etc/cloud-agent/github-app.pem:ro"]
-    for service_name in ("runner", "workspace-broker"):
+    for service_name in ("runner", "sandbox-manager"):
         for mount in local_compose["services"][service_name]["volumes"]:
             source = _split_mount(mount)[0]
             if "docker.sock" in source:
@@ -398,7 +398,7 @@ def test_complete_local_stack_runs_every_native_session_driver(local_compose: di
 
     expected = {"claude-code", "codex", "pi", "opencode", "kilo"}
     assert set(registered_runtimes()) == expected
-    for service_name in ("runner", "workspace-broker"):
+    for service_name in ("runner", "sandbox-manager"):
         configured = local_compose["services"][service_name]["environment"]
         assert "AGENT_RESTARTABLE_RUNTIMES" not in configured
         assert "AGENT_SHARED_LIVE_RUNTIMES" not in configured
@@ -669,7 +669,7 @@ def test_the_relay_network_name_is_pinned(compose: dict):
     """
     name = compose["networks"]["agent-relays"]["name"]
     assert "COMPOSE_PROJECT" in name
-    for service in ("runner", "workspace-broker"):
+    for service in ("runner", "sandbox-manager"):
         assert compose["services"][service]["environment"]["AGENT_RELAY_NETWORK"] == name
 
 
@@ -815,7 +815,7 @@ def test_only_the_control_tunnel_key_may_listen_and_only_where_it_must(compose: 
 
     So a documented key line without `permitlisten` lets its key open
     listeners on the far machine. The control-plane key needs exactly one, for
-    the broker's way back, and must name it; the two relay keys need none and
+    the sandbox manager's way back, and must name it; the two relay keys need none and
     are refused remote forwarding by their accounts' Match blocks instead
     (`permitlisten="none"` is not something OpenSSH accepts on a key line).
     """
@@ -901,9 +901,9 @@ def test_no_shipped_doc_or_config_offers_gateway_ports_yes():
     """`GatewayPorts yes` moves every remote forward to the wildcard address.
 
     sshd overrides the requested bind and still reports success, so
-    `ExitOnForwardFailure` never fires and each host's broker is published on
+    `ExitOnForwardFailure` never fires and each host's sandbox manager is published on
     every interface of the control-plane machine behind one shared token.
-    The broker route needs `clientspecified`, held to one address and port by
+    The sandbox manager route needs `clientspecified`, held to one address and port by
     the account's PermitListen and the key's permitlisten.
     """
     offered = re.compile(r"GatewayPorts[\s=`'\"]+yes\b", re.IGNORECASE)
@@ -951,19 +951,19 @@ def test_job_worktrees_are_not_host_mounted(compose: dict):
     assert workdir_mounts == []
 
 
-def test_workspace_broker_and_runner_share_no_host_worktree(compose: dict):
+def test_sandbox_manager_and_runner_share_no_host_worktree(compose: dict):
     """Files, Terminal, and Git resolve the shared container through Docker."""
     services = compose["services"]
     runner_mounts = {mount for mount in services["runner"]["volumes"] if "agent-jobs" in mount}
-    broker_mounts = {
-        mount for mount in services["workspace-broker"]["volumes"] if "agent-jobs" in mount
+    sandbox_manager_mounts = {
+        mount for mount in services["sandbox-manager"]["volumes"] if "agent-jobs" in mount
     }
 
-    assert broker_mounts == runner_mounts
-    assert broker_mounts == set()
-    assert "tmpfs" not in compose["services"]["workspace-broker"]
+    assert sandbox_manager_mounts == runner_mounts
+    assert sandbox_manager_mounts == set()
+    assert "tmpfs" not in compose["services"]["sandbox-manager"]
     # The source also asserted the gateway's own `backend` service pointed at
-    # the broker on :8092. Here the gateway is not a service — it is reached
+    # the sandbox manager on :8092. Here the gateway is not a service — it is reached
     # through the tunnel — so the caller-side half of that pairing lives in the
     # control plane's configuration, not in this file.
 
@@ -971,12 +971,14 @@ def test_workspace_broker_and_runner_share_no_host_worktree(compose: dict):
 def test_shared_chat_timeout_matches_and_no_legacy_gate_remains(compose: dict):
     services = compose["services"]
     runner_env = services["runner"]["environment"]
-    broker_env = services["workspace-broker"]["environment"]
+    sandbox_manager_env = services["sandbox-manager"]["environment"]
 
     for name in ("AGENT_RESTARTABLE_SANDBOX", "AGENT_SHARED_LIVE_SANDBOX"):
         assert name not in runner_env
-        assert name not in broker_env
-    assert runner_env["AGENT_CHAT_IDLE_TIMEOUT_S"] == broker_env["AGENT_CHAT_IDLE_TIMEOUT_S"]
+        assert name not in sandbox_manager_env
+    assert (
+        runner_env["AGENT_CHAT_IDLE_TIMEOUT_S"] == sandbox_manager_env["AGENT_CHAT_IDLE_TIMEOUT_S"]
+    )
 
 
 @pytest.mark.parametrize("stack_fixture", ["compose", "local_compose"])
@@ -1064,18 +1066,18 @@ def test_target_commit_readiness_cannot_be_bypassed() -> None:
     assert "--expected-deployment-sha" in control_script
 
 
-def test_workspace_broker_keeps_execution_off_the_public_gateway(compose: dict):
-    """Only the private broker may spawn an isolated workspace command."""
+def test_sandbox_manager_keeps_execution_off_the_public_gateway(compose: dict):
+    """Only the private sandbox manager may spawn an isolated workspace command."""
     services = compose["services"]
-    broker = services["workspace-broker"]
-    socket_mounts = [mount for mount in broker["volumes"] if "docker.sock" in mount]
+    sandbox_manager = services["sandbox-manager"]
+    socket_mounts = [mount for mount in sandbox_manager["volumes"] if "docker.sock" in mount]
 
     assert socket_mounts and all(mount.endswith(":ro") for mount in socket_mounts)
     # The source additionally proved the *gateway* held no socket. There is no
     # gateway service here, so the equivalent guarantee is that the socket
     # holders are exactly the two that need it — asserted as a set in
     # test_deploy_security.py, which fails if a third service acquires one.
-    assert broker["networks"] == ["internal"]
+    assert sandbox_manager["networks"] == {"internal": {"aliases": ["workspace-broker"]}}
 
 
 def test_chat_container_idle_timeout_is_configured(compose: dict):
@@ -1167,15 +1169,15 @@ def test_there_is_no_network_mode_to_select(path: Path):
     assert not [name for name in services if "proxy" in name], "no proxy service remains"
 
 
-def test_runner_and_broker_build_group_networks_from_the_same_settings(compose: dict):
+def test_runner_and_sandbox_manager_build_group_networks_from_the_same_settings(compose: dict):
     """Either process may create or wake a group, so they must agree exactly.
 
-    A broker with another pool, resolver or relay network would build the
+    A sandbox manager with another pool, resolver or relay network would build the
     group bridge for a Fork that the runner then refuses, or install a host
     table the runner's verification reports as tampered.
     """
     runner = compose["services"]["runner"]["environment"]
-    broker = compose["services"]["workspace-broker"]["environment"]
+    sandbox_manager = compose["services"]["sandbox-manager"]["environment"]
     for name in (
         "AGENT_SANDBOX_NAMESPACE",
         "AGENT_RELAY_NETWORK",
@@ -1185,7 +1187,7 @@ def test_runner_and_broker_build_group_networks_from_the_same_settings(compose: 
         "AGENT_GATEWAY_URL",
         "AGENT_SANDBOX_MCP_URL",
     ):
-        assert runner[name] == broker[name], name
+        assert runner[name] == sandbox_manager[name], name
     assert "COMPOSE_PROJECT" in runner["AGENT_SANDBOX_NAMESPACE"]
 
 
@@ -1210,14 +1212,14 @@ def test_the_runner_image_carries_the_host_rule_helper():
 
 
 def test_complete_local_stack_namespaces_daemon_wide_chat_discovery(local_compose: dict):
-    broker_namespace = local_compose["services"]["workspace-broker"]["environment"][
+    sandbox_manager_namespace = local_compose["services"]["sandbox-manager"]["environment"][
         "AGENT_SANDBOX_NAMESPACE"
     ]
-    assert "LOCAL_PROJECT_NAME" in broker_namespace
+    assert "LOCAL_PROJECT_NAME" in sandbox_manager_namespace
     # Runner inherits the exact same anchored environment.
     assert (
         local_compose["services"]["runner"]["environment"]["AGENT_SANDBOX_NAMESPACE"]
-        == broker_namespace
+        == sandbox_manager_namespace
     )
 
 
@@ -1905,7 +1907,7 @@ def test_remote_compose_starts_no_gateway(remote_compose: dict):
         "gateway-tunnel",
         "mcp-tunnel",
         "control-plane-tunnel",
-        "workspace-broker",
+        "sandbox-manager",
         "runner",
     }
     for name, service in remote_compose["services"].items():

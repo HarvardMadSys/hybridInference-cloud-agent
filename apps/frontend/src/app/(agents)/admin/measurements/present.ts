@@ -35,6 +35,11 @@ export const SERVER_SIDE_NOTE =
 /** The minimum eligible sample a percentile needs before it is worth reading. */
 export const MIN_PERCENTILE_SAMPLES = 20;
 
+/** Present the stable telemetry ID using the service's current name. */
+export function producerLabel(producer: string): string {
+  return producer === 'broker' || producer === 'sandbox_manager' ? 'Sandbox Manager' : producer;
+}
+
 // ---------------------------------------------------------------------------
 // Durations and times
 // ---------------------------------------------------------------------------
@@ -177,7 +182,10 @@ export function operationLabel(item: {
 
 /** A stage or span name as words: `supervisor_acquire` reads as `Supervisor acquire`. */
 export function stageName(name: string): string {
-  const words = name.replace(/[_.]+/g, ' ').trim();
+  const words = name
+    .replace(/^(?:broker|sandbox_manager)(?=[_.]|$)/, 'Sandbox Manager')
+    .replace(/[_.]+/g, ' ')
+    .trim();
   return words ? `${words.charAt(0).toUpperCase()}${words.slice(1)}` : name;
 }
 
@@ -290,7 +298,7 @@ export function partialReasons(record: MeasurementRecord): string[] {
   }
   const producers = record.missing_producers ?? [];
   if (producers.length) {
-    reasons.push(`Producer(s) that never reported: ${producers.join(', ')}.`);
+    reasons.push(`Producer(s) that never reported: ${producers.map(producerLabel).join(', ')}.`);
   }
   if (typeof record.dropped_spans === 'number' && record.dropped_spans > 0) {
     reasons.push(
@@ -313,7 +321,7 @@ const SCOPES: Record<string, CoverageLabel> = {
   server_request: {
     label: 'Server request',
     basis:
-      'Control-plane-rooted: starts after authentication, ownership and broker resolution and ' +
+      'Control-plane-rooted: starts after authentication, ownership and sandbox manager resolution and ' +
       'ends when the business result is validated. Response encoding, transfer and browser work ' +
       'are outside it.',
   },

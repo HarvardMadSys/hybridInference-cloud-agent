@@ -14,7 +14,7 @@ import {
 import { TerminalPane } from './TerminalPane';
 import { loadTerminalRuntime } from './terminalRuntime';
 
-// Compatibility fallback for brokers that predate advertised limits.
+// Compatibility fallback for sandbox managers that predate advertised limits.
 const DEFAULT_MAX_SESSIONS = 4;
 
 // xterm's cell box for this pane's font (13px monospace, 1.25 line height),
@@ -45,7 +45,7 @@ function estimateSize(host: HTMLElement | null): { rows: number; cols: number } 
 }
 
 /**
- * Whether a shell ended on its own. As on the broker, only that frees its slot:
+ * Whether a shell ended on its own. As on the sandbox manager, only that frees its slot:
  * one still closing, or whose cleanup failed, may still be running something.
  */
 function hasExited(session: AgentTerminalApi, exited: ReadonlySet<string>): boolean {
@@ -216,11 +216,11 @@ export function TerminalWorkspace({
   // The initial listing is not: it answers "which terminals already exist",
   // and it is a full round trip, so gating the first click on it made the
   // click wait for an answer it did not need. The cap is still enforced here
-  // once the listing lands, and by the broker regardless.
+  // once the listing lands, and by the sandbox manager regardless.
   //
   // Workspace readiness is. There is no container to open a PTY in until the
   // job reports `workspace_ready`, so a create issued before then fails at the
-  // broker — which is what happened when this gate was removed along with the
+  // sandbox manager — which is what happened when this gate was removed along with the
   // other one. The button stays visible and disabled rather than absent: the
   // wait is short and aiming at a control that is about to work beats hunting
   // for one that is not there yet.
@@ -249,7 +249,7 @@ export function TerminalWorkspace({
       }
       setSessions((current) => {
         const next = [...current, session];
-        // The broker made room the same way: the oldest ended shells go first.
+        // The sandbox manager made room the same way: the oldest ended shells go first.
         while (next.length > maxSessions) {
           const index = next.findIndex((candidate) => hasExited(candidate, exitedIds));
           if (index < 0) break;
@@ -317,7 +317,7 @@ export function TerminalWorkspace({
     // words can be read.
     setSessions((current) => current.filter((session) => session.id !== terminalId));
     void deleteAgentTerminal(jobIdRef.current, terminalId).catch(() => {
-      // It has already exited; the broker reaps what this cannot close.
+      // It has already exited; the sandbox manager reaps what this cannot close.
     });
   }
 

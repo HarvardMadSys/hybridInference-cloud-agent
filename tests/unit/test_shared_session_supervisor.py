@@ -46,6 +46,7 @@ from cloud_agent_host.resident_transport import (
 )
 from cloud_agent_host.sandbox import KATA_RUNTIME, ProcessBackend, SandboxError
 from cloud_agent_host.sandbox_archive_runtime import SandboxArchiveController
+from cloud_agent_host.sandbox_manager import SharedSandboxIdentityRequest, create_app
 from cloud_agent_host.session_lifecycle import SessionBusy, SessionLeaseLost
 from cloud_agent_host.shared_session_supervisor import (
     SharedChatSessionSupervisor,
@@ -55,7 +56,6 @@ from cloud_agent_host.shared_session_supervisor import (
     archive_failure_http_detail,
 )
 from cloud_agent_host.tool_windows import ToolMark
-from cloud_agent_host.workspace_broker import SharedSandboxIdentityRequest, create_app
 from cloud_agent_shared import operation_profiling
 from cloud_agent_shared.errors import SandboxArchiveBlocked
 from cloud_agent_shared.sandbox_archive_settings import SandboxArchivePolicy
@@ -611,7 +611,7 @@ def test_native_answer_delivery_holds_the_owner_fence_against_expiry(monkeypatch
 
 
 @pytest.mark.parametrize("disk_limit_mib", [0, 16384])
-def test_broker_reconcile_blocks_an_unmarked_running_orphan_before_accepting_requests(
+def test_sandbox_manager_reconcile_blocks_an_unmarked_running_orphan_before_accepting_requests(
     disk_limit_mib,
 ):
     manager = _Manager()
@@ -1509,7 +1509,7 @@ def test_a_lease_claims_a_bridge_proof_only_for_a_call_that_made_one():
     repeat = acquire()
 
     assert first.network_verified is True
-    assert asdict(first)["network_verified"] is True, "what the broker endpoint sends"
+    assert asdict(first)["network_verified"] is True, "what the sandbox manager endpoint sends"
     # The same owner is handed its existing lease without touching the group.
     assert repeat.token == first.token
     assert manager.starts == [_spec().container_name]
@@ -1781,7 +1781,7 @@ def test_claude_member_launch_shares_only_native_projects(monkeypatch, tmp_path)
         home.mkdir()
         config = home / ".claude-members" / f"member-{slot}"
         # Exercise the actual preparation script twice, as a native resume
-        # after broker/container restart would do, against legacy state.
+        # after sandbox manager/container restart would do, against legacy state.
         for _ in range(2):
             subprocess.run(
                 ["python3", "-c", calls[slot][0][2], str(config), str(projects)], check=True
@@ -2853,7 +2853,7 @@ def test_native_fork_tracks_activity_but_does_not_lock_a_sibling_operation(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("already_registered", [False, True])
 @pytest.mark.parametrize("disk_limit_mib", [0, 16384])
-async def test_broker_fork_materializes_reserved_target_and_replays_stale_manifest(
+async def test_sandbox_manager_fork_materializes_reserved_target_and_replays_stale_manifest(
     already_registered,
     disk_limit_mib,
 ):
@@ -2875,7 +2875,7 @@ async def test_broker_fork_materializes_reserved_target_and_replays_stale_manife
     supervisor.register_manifest(spec, members if already_registered else _members())
     app = create_app(
         backend=ProcessBackend(acknowledged_unsafe=True),
-        token="broker-secret",
+        token="sandbox-manager-secret",
         shared_session_supervisor=supervisor,
     )
     body = {
@@ -2900,10 +2900,12 @@ async def test_broker_fork_materializes_reserved_target_and_replays_stale_manife
         "source_launch": asdict(_launch("athr_source", native_session_id="native-source", slot=0)),
         "target_launch": asdict(_launch("athr_child", native_session_id=None, slot=2)),
     }
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://broker") as client:
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://sandbox_manager"
+    ) as client:
         first = await client.post(
             "/shared-sandboxes/athr_source/fork",
-            headers={"X-Agent-Workspace-Token": "broker-secret"},
+            headers={"X-Agent-Workspace-Token": "sandbox-manager-secret"},
             json=body,
         )
         assert first.status_code == 200, first.text
@@ -2911,7 +2913,7 @@ async def test_broker_fork_materializes_reserved_target_and_replays_stale_manife
         # after the host has created the child but before receipt finalization.
         registered = await client.post(
             "/shared-sandboxes/athr_source/register",
-            headers={"X-Agent-Workspace-Token": "broker-secret"},
+            headers={"X-Agent-Workspace-Token": "sandbox-manager-secret"},
             json=SharedSandboxIdentityRequest.model_validate(body).model_dump(),
         )
         assert registered.status_code == 200, registered.text
@@ -2921,7 +2923,7 @@ async def test_broker_fork_materializes_reserved_target_and_replays_stale_manife
         body["target_launch"]["residency_generation"] = 11
         retried = await client.post(
             "/shared-sandboxes/athr_source/fork",
-            headers={"X-Agent-Workspace-Token": "broker-secret"},
+            headers={"X-Agent-Workspace-Token": "sandbox-manager-secret"},
             json=body,
         )
         assert retried.status_code == 200, retried.text
@@ -2938,7 +2940,7 @@ async def test_broker_fork_materializes_reserved_target_and_replays_stale_manife
         }
         refused = await client.post(
             "/shared-sandboxes/athr_source/fork",
-            headers={"X-Agent-Workspace-Token": "broker-secret"},
+            headers={"X-Agent-Workspace-Token": "sandbox-manager-secret"},
             json=collision,
         )
         assert refused.status_code == 409, refused.text
@@ -5363,7 +5365,7 @@ def test_abandon_releases_observation_when_normal_turn_cleanup_fails(monkeypatch
 
 
 def test_shared_claude_turn_fences_and_returns_exact_tool_marks():
-    """The supervisor must carry the retained hook slice to the broker."""
+    """The supervisor must carry the retained hook slice to the sandbox manager."""
 
     class Manager(_Manager):
         def tool_mark_reader(self, _spec):
@@ -5544,7 +5546,7 @@ def test_a_checkpoint_is_produced_without_any_turn_event():
 def test_checkpoints_are_produced_without_a_hook_because_production_has_none():
     """The delivery gate must not depend on an observer nobody installs.
 
-    The broker builds its supervisor without a checkpoint hook. An earlier
+    The sandbox manager builds its supervisor without a checkpoint hook. An earlier
     version returned early when the hook was absent, so no checkpoint was ever
     produced in production while a test that passed its own hook stayed green --
     the same shape of gap as a fixture that does not match the producer.
@@ -5663,7 +5665,7 @@ def test_the_final_report_sequence_stays_above_every_checkpoint():
 def test_acquire_reports_what_it_did_to_the_container(pre_existing, running, expected):
     """The four startup paths differ by the action, and only the call knows it.
 
-    A group can outlive the broker that made it, and a container that was
+    A group can outlive the sandbox manager that made it, and a container that was
     stopped and restarted looks exactly like one that never stopped once it is
     running again. So the action is reported by the code that performed it
     rather than inferred later from the container's state.
@@ -5814,14 +5816,16 @@ def test_ensure_resident_reports_reuse_for_a_hot_process():
     assert len(factory.opened) == 1
 
 
-def test_broker_sub_stages_are_reported_when_this_process_is_profiling(monkeypatch, tmp_path):
-    """With the broker's switch on, the container work comes back as durations."""
+def test_sandbox_manager_sub_stages_are_reported_when_this_process_is_profiling(
+    monkeypatch, tmp_path
+):
+    """With the sandbox manager's switch on, the container work comes back as durations."""
     monkeypatch.setenv(operation_profiling.ENV_PROFILING_ENABLED, "true")
     monkeypatch.setenv(
         operation_profiling.ENV_PROFILING_RUN,
         json.dumps(
             {
-                "run_id": "broker-stages-1",
+                "run_id": "sandbox-manager-stages-1",
                 "operations": ["attempt.startup"],
                 "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=15)).isoformat(),
                 "max_operations": 10,
@@ -5840,7 +5844,7 @@ def test_broker_sub_stages_are_reported_when_this_process_is_profiling(monkeypat
         has_settled_context=True,
         manifest=_members(),
         profiling={
-            "run_id": "broker-stages-1",
+            "run_id": "sandbox-manager-stages-1",
             "measurement_id": "msm_x",
             "operation": "attempt.startup",
             "call_id": "c7",
@@ -5861,13 +5865,13 @@ def test_broker_sub_stages_are_reported_when_this_process_is_profiling(monkeypat
     assert lease.container_action == "create"
 
 
-def _enable_broker_profiling(monkeypatch) -> None:
+def _enable_sandbox_manager_profiling(monkeypatch) -> None:
     monkeypatch.setenv(operation_profiling.ENV_PROFILING_ENABLED, "true")
     monkeypatch.setenv(
         operation_profiling.ENV_PROFILING_RUN,
         json.dumps(
             {
-                "run_id": "broker-context-1",
+                "run_id": "sandbox-manager-context-1",
                 "operations": ["attempt.startup"],
                 "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=15)).isoformat(),
                 "max_operations": 10,
@@ -5877,13 +5881,13 @@ def _enable_broker_profiling(monkeypatch) -> None:
     operation_profiling.reset_cache()
 
 
-def test_a_lapsed_selection_stops_the_broker_recording(monkeypatch):
+def test_a_lapsed_selection_stops_the_sandbox_manager_recording(monkeypatch):
     """A run that already expired must not collect container sub-stages.
 
-    Regression: the broker checked only that its cached run existed, so it
+    Regression: the sandbox manager checked only that its cached run existed, so it
     kept measuring after the runner had stopped.
     """
-    _enable_broker_profiling(monkeypatch)
+    _enable_sandbox_manager_profiling(monkeypatch)
     manager = _Manager()
     supervisor = SharedChatSessionSupervisor(manager)
 
@@ -5895,7 +5899,7 @@ def test_a_lapsed_selection_stops_the_broker_recording(monkeypatch):
         has_settled_context=True,
         manifest=_members(),
         profiling={
-            "run_id": "broker-context-1",
+            "run_id": "sandbox-manager-context-1",
             "measurement_id": "msm_gone",
             "operation": "attempt.startup",
             "expires_at": time.time() - 1,
@@ -5911,8 +5915,8 @@ def test_a_lapsed_selection_stops_the_broker_recording(monkeypatch):
 
 
 def test_a_selection_for_another_run_is_refused(monkeypatch):
-    """The broker honours only the run configured here."""
-    _enable_broker_profiling(monkeypatch)
+    """The sandbox manager honours only the run configured here."""
+    _enable_sandbox_manager_profiling(monkeypatch)
     manager = _Manager()
     supervisor = SharedChatSessionSupervisor(manager)
 
@@ -5935,8 +5939,8 @@ def test_a_selection_for_another_run_is_refused(monkeypatch):
 
 
 def test_a_live_selection_records_container_sub_stages(monkeypatch):
-    """With a matching, unexpired selection the broker reports its work."""
-    _enable_broker_profiling(monkeypatch)
+    """With a matching, unexpired selection the sandbox manager reports its work."""
+    _enable_sandbox_manager_profiling(monkeypatch)
     manager = _Manager()
     supervisor = SharedChatSessionSupervisor(manager)
 
@@ -5948,7 +5952,7 @@ def test_a_live_selection_records_container_sub_stages(monkeypatch):
         has_settled_context=True,
         manifest=_members(),
         profiling={
-            "run_id": "broker-context-1",
+            "run_id": "sandbox-manager-context-1",
             "measurement_id": "msm_x",
             "operation": "attempt.startup",
             "call_id": "c9",
@@ -5970,14 +5974,14 @@ def test_a_reuse_with_no_stages_still_reports_that_it_collected(monkeypatch):
     """An empty stage list is a completed collection, not a missing one.
 
     Regression: the reuse path runs no `cli_spawn`, so it answers with no
-    stages, and the caller read that as never having heard from the broker.
+    stages, and the caller read that as never having heard from the sandbox manager.
     """
-    _enable_broker_profiling(monkeypatch)
+    _enable_sandbox_manager_profiling(monkeypatch)
     manager = _Manager()
     factory = _TransportFactory()
     supervisor = SharedChatSessionSupervisor(manager, transport_factory=factory)
     live = {
-        "run_id": "broker-context-1",
+        "run_id": "sandbox-manager-context-1",
         "measurement_id": "msm_x",
         "operation": "attempt.startup",
         "call_id": "c1",
@@ -6026,13 +6030,13 @@ def test_a_reuse_with_no_stages_still_reports_that_it_collected(monkeypatch):
 def test_a_collection_cut_short_by_the_deadline_says_so(monkeypatch):
     """An empty answer is only "nothing to time" when collection finished.
 
-    Regression, at the response the runner actually reads: the broker's local
+    Regression, at the response the runner actually reads: the sandbox manager's local
     deadline lapsed while it waited for the member lock, the CLI start was
     never timed, and the lease still reported a completed collection.
     """
-    _enable_broker_profiling(monkeypatch)
+    _enable_sandbox_manager_profiling(monkeypatch)
     live = {
-        "run_id": "broker-context-1",
+        "run_id": "sandbox-manager-context-1",
         "measurement_id": "msm_x",
         "operation": "attempt.startup",
         "call_id": "c1",

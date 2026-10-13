@@ -198,7 +198,7 @@ def test_real_manual_action_keeps_one_execution_after_terminal_eviction_and_rest
     retained_command_container, tmp_path
 ):
     from cloud_agent_host.action_receipts import ActionReceipts
-    from cloud_agent_host.workspace_broker import _TerminalManager
+    from cloud_agent_host.sandbox_manager import _TerminalManager
     from cloud_agent_shared.environment import EnvironmentAction
 
     backend = retained_command_container

@@ -1,7 +1,7 @@
-"""Broker access to the retained per-chat workspace.
+"""Sandbox Manager access to the retained per-chat workspace.
 
-Resolving the owning broker, restoring shared aliases, and mapping private
-broker failures onto the bounded owner-facing errors the workspace, job, turn
+Resolving the owning sandbox manager, restoring shared aliases, and mapping private
+sandbox manager failures onto the bounded owner-facing errors the workspace, job, turn
 and worker surfaces all return. The terminal-id pattern travels with it: the
 path parameters that name a terminal are validated from here.
 """
@@ -12,21 +12,24 @@ from typing import TYPE_CHECKING, Protocol
 
 from fastapi import HTTPException
 
-from cloud_agent.broker_routing import broker_for_job, hydrate_shared_broker
-from cloud_agent.workspace_broker_client import WorkspaceBrokerError
+from cloud_agent.sandbox_manager_client import SandboxManagerError
+from cloud_agent.sandbox_manager_routing import (
+    hydrate_shared_sandbox_manager,
+    sandbox_manager_for_job,
+)
 from cloud_agent.workspace_errors import (
-    _workspace_broker_http_error,
+    _sandbox_manager_http_error,
 )
 
 if TYPE_CHECKING:
     from typing import Any
 
     from cloud_agent.ports import HostPoolRepository
-    from cloud_agent.workspace_broker_client import WorkspaceBrokerClient
+    from cloud_agent.sandbox_manager_client import SandboxManagerClient
 
 
 class _WorkspaceAccessStorage(Protocol):
-    """What resolving a job's broker needs from the storage assembly.
+    """What resolving a job's sandbox manager needs from the storage assembly.
 
     Narrowed to the one capability the shared helpers below actually reach for.
     A helper shared by several routers must not name the aggregator's
@@ -56,16 +59,16 @@ def _workspace_id(job: dict[str, Any]) -> str:
     return str(thread_id)
 
 
-async def _workspace_broker_for_job(
+async def _sandbox_manager_for_job(
     store: _WorkspaceAccessStorage,
     job: dict[str, Any],
-) -> WorkspaceBrokerClient | None:
-    """Resolve the owning broker and restore shared aliases before use."""
-    broker = await broker_for_job(store.host_pool, job["id"])
+) -> SandboxManagerClient | None:
+    """Resolve the owning sandbox manager and restore shared aliases before use."""
+    sandbox_manager = await sandbox_manager_for_job(store.host_pool, job["id"])
     try:
-        return await hydrate_shared_broker(job, broker)
-    except WorkspaceBrokerError as exc:
-        raise _workspace_broker_http_error(exc) from exc
+        return await hydrate_shared_sandbox_manager(job, sandbox_manager)
+    except SandboxManagerError as exc:
+        raise _sandbox_manager_http_error(exc) from exc
 
 
 def _workspace_not_ready() -> HTTPException:

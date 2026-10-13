@@ -286,7 +286,10 @@ async def test_maintenance_retries_after_expiry_failure_and_stops_on_cancel(monk
             swept_twice.set()
 
     expiry = AsyncMock(side_effect=[RuntimeError("database restarting"), 1])
-    store = SimpleNamespace(mcp=SimpleNamespace(expire_mcp_invocations=expiry))
+    remembered = AsyncMock()
+    store = SimpleNamespace(
+        mcp=SimpleNamespace(expire_mcp_invocations=expiry, apply_pending_mcp_allow_rules=remembered)
+    )
     monkeypatch.setattr(mcp_relay, "_HOST_MAINTENANCE_INTERVAL_S", 0.001)
     monkeypatch.setattr(mcp_relay, "reap_host_sessions", reap)
     task = asyncio.create_task(mcp_relay.maintain_host_sessions(store))
@@ -297,6 +300,7 @@ async def test_maintenance_retries_after_expiry_failure_and_stops_on_cancel(monk
         with pytest.raises(asyncio.CancelledError):
             await task
     assert expiry.await_count == 2
+    assert remembered.await_count == 2
 
 
 async def test_relay_lifespan_runs_maintenance_and_releases_upstream_sessions(monkeypatch):

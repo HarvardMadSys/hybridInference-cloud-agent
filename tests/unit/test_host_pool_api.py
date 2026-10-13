@@ -27,16 +27,10 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from tests.support.storage import AllCapabilities
 
-from cloud_agent import broker_routing
+from cloud_agent import sandbox_manager_routing
 from cloud_agent.api import admin_hosts, hosts
 from cloud_agent.api.deps import get_grant_client, get_storage, verify_admin_access
 from cloud_agent.application import residency
-from cloud_agent.broker_routing import (
-    ENV_BROKER_HOSTS,
-    PROBE_FAILED_FOR_HOST,
-    BrokerUrlRefused,
-    validate_broker_url,
-)
 from cloud_agent.host_pool import (
     HOST_DISABLED,
     HOST_DRAINING,
@@ -46,6 +40,12 @@ from cloud_agent.host_pool import (
     hash_secret,
     normalize_capabilities,
     transition_allowed,
+)
+from cloud_agent.sandbox_manager_routing import (
+    ENV_SANDBOX_MANAGER_HOSTS,
+    PROBE_FAILED_FOR_HOST,
+    SandboxManagerUrlRefused,
+    validate_sandbox_manager_url,
 )
 from cloud_agent_shared.host_settings import default_values
 
@@ -127,7 +127,7 @@ class FakeHostPoolStore(AllCapabilities):
             "launch_error": None,
             "slots_used": 0,
             "runner_version": None,
-            "broker_url": None,
+            "sandbox_manager_url": None,
             "last_heartbeat_at": None,
             "drain_fence_token": None,
             "drain_fence_status_before": None,
@@ -157,7 +157,7 @@ class FakeHostPoolStore(AllCapabilities):
         enrollment_token_hash: str | None = None,
         capabilities: list[str] | None = None,
         slots_total: int | None = None,
-        broker_url: str | None = None,
+        sandbox_manager_url: str | None = None,
         runner_version: str | None = None,
         labels: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -169,7 +169,7 @@ class FakeHostPoolStore(AllCapabilities):
             status=HOST_ENROLLING,
             capabilities=normalize_capabilities(capabilities),
             slots_total=slots_total,
-            broker_url=broker_url,
+            sandbox_manager_url=sandbox_manager_url,
             runner_version=runner_version,
             labels=labels or {},
             credential_hash=credential_hash,
@@ -198,7 +198,7 @@ class FakeHostPoolStore(AllCapabilities):
         slots_total: int | None = None,
         launch_error: str | None = None,
         runner_version: str | None = None,
-        broker_url: str | None = None,
+        sandbox_manager_url: str | None = None,
         capabilities: list[str] | None = None,
         sandbox_runtime: str | None = None,
         sandbox_image_digest: str | None = None,
@@ -222,7 +222,7 @@ class FakeHostPoolStore(AllCapabilities):
             # COALESCE the real store applies.
             ("launch_error", launch_error),
             ("runner_version", runner_version),
-            ("broker_url", broker_url),
+            ("sandbox_manager_url", sandbox_manager_url),
             # "" and {} overwrite — only None means "not reported", exactly
             # the COALESCE the real store applies.
             ("sandbox_runtime", sandbox_runtime),
@@ -528,7 +528,7 @@ def _build_app(store: FakeHostPoolStore) -> FastAPI:
 @pytest_asyncio.fixture()
 async def client(monkeypatch):
     monkeypatch.setenv("AGENT_CONTROL_TOKEN_SECRET", "unit-test-control-secret")
-    monkeypatch.setenv("AGENT_WORKSPACE_BROKER_TOKEN", "unit-test-broker-secret")
+    monkeypatch.setenv("AGENT_SANDBOX_MANAGER_TOKEN", "unit-test-sandbox-manager-secret")
 
     async def _no_audit(*_args, **_kwargs):
         return None
@@ -546,7 +546,7 @@ async def client(monkeypatch):
 async def residency_client(monkeypatch):
     """Like ``client``, plus a recording grant client behind the dependency."""
     monkeypatch.setenv("AGENT_CONTROL_TOKEN_SECRET", "unit-test-control-secret")
-    monkeypatch.setenv("AGENT_WORKSPACE_BROKER_TOKEN", "unit-test-broker-secret")
+    monkeypatch.setenv("AGENT_SANDBOX_MANAGER_TOKEN", "unit-test-sandbox-manager-secret")
 
     async def _no_audit(*_args, **_kwargs):
         return None
@@ -569,7 +569,7 @@ def _registration_body(token: str, name: str, **overrides) -> dict[str, Any]:
         "enroll_token": token,
         "name": name,
         "slots_total": 3,
-        "broker_url": "http://broker.test:8092",
+        "sandbox_manager_url": "http://sandbox_manager.test:8092",
         **overrides,
     }
 
@@ -591,17 +591,17 @@ async def _enroll(client, store, name="runner-a", **body) -> str:
 # ── Enrollment ─────────────────────────────────────────────────────────
 
 
-async def test_a_failed_broker_probe_tells_the_host_only_that_it_failed(
+async def test_a_failed_sandbox_manager_probe_tells_the_host_only_that_it_failed(
     client, monkeypatch, caplog
 ):
     """The host chose the address; what answered there stays in the server log."""
     async_client, _store = client
-    broker_routing._PROBE_CACHE.clear()
+    sandbox_manager_routing._PROBE_CACHE.clear()
 
     async def health(self, *, timeout: float = 3) -> None:
-        raise broker_routing.WorkspaceBrokerError(403, "internal-admin-console says hello")
+        raise sandbox_manager_routing.SandboxManagerError(403, "internal-admin-console says hello")
 
-    monkeypatch.setattr(broker_routing.WorkspaceBrokerClient, "health", health)
+    monkeypatch.setattr(sandbox_manager_routing.SandboxManagerClient, "health", health)
     issued = await async_client.post(
         "/admin/agent/runner-hosts/enroll-token", json={"host": "runner-a"}, headers=ADMIN
     )
@@ -609,23 +609,29 @@ async def test_a_failed_broker_probe_tells_the_host_only_that_it_failed(
         response = await async_client.post(
             "/v1/agent/host/register",
             json=_registration_body(
-                issued.json()["enroll_token"], "runner-a", broker_url="http://10.0.0.5:8080"
+                issued.json()["enroll_token"],
+                "runner-a",
+                sandbox_manager_url="http://10.0.0.5:8080",
             ),
         )
     try:
         assert response.status_code == 200, response.text
-        assert response.json()["broker_error"] == PROBE_FAILED_FOR_HOST
+        assert response.json()["sandbox_manager_error"] == PROBE_FAILED_FOR_HOST
         assert "hello" not in response.text and "10.0.0.5" not in response.text
-        [record] = [r for r in caplog.records if r.getMessage() == "agent_host_broker_unreachable"]
-        assert "hello" in record.broker_error and "10.0.0.5" in record.broker_error
+        [record] = [
+            r for r in caplog.records if r.getMessage() == "agent_host_sandbox_manager_unreachable"
+        ]
+        assert (
+            "hello" in record.sandbox_manager_error and "10.0.0.5" in record.sandbox_manager_error
+        )
     finally:
-        broker_routing._PROBE_CACHE.clear()
-        await broker_routing.close_broker_clients()
+        sandbox_manager_routing._PROBE_CACHE.clear()
+        await sandbox_manager_routing.close_sandbox_manager_clients()
 
 
 async def test_a_configuration_probe_answer_still_reaches_the_host(client, monkeypatch):
     async_client, _store = client
-    monkeypatch.delenv("AGENT_WORKSPACE_BROKER_TOKEN")
+    monkeypatch.delenv("AGENT_SANDBOX_MANAGER_TOKEN")
     issued = await async_client.post(
         "/admin/agent/runner-hosts/enroll-token", json={"host": "runner-a"}, headers=ADMIN
     )
@@ -633,7 +639,7 @@ async def test_a_configuration_probe_answer_still_reaches_the_host(client, monke
         "/v1/agent/host/register",
         json=_registration_body(issued.json()["enroll_token"], "runner-a"),
     )
-    assert response.json()["broker_error"] == broker_routing.PROBE_NO_CREDENTIAL
+    assert response.json()["sandbox_manager_error"] == sandbox_manager_routing.PROBE_NO_CREDENTIAL
 
 
 async def test_enrollment_returns_a_credential_and_starts_the_host_enrolling(client):
@@ -706,7 +712,7 @@ async def test_removal_between_token_consumption_and_registration_refuses_enroll
     assert "runner-a" not in store.rows
 
 
-async def test_an_invalid_broker_url_does_not_spend_the_enrollment_token(client):
+async def test_an_invalid_sandbox_manager_url_does_not_spend_the_enrollment_token(client):
     """A retryable host configuration typo must not require a new admin token."""
     async_client, store = client
     issued = await async_client.post(
@@ -716,16 +722,16 @@ async def test_an_invalid_broker_url_does_not_spend_the_enrollment_token(client)
 
     refused = await async_client.post(
         "/v1/agent/host/register",
-        json=_registration_body(token, "runner-a", broker_url="file:///etc/passwd"),
+        json=_registration_body(token, "runner-a", sandbox_manager_url="file:///etc/passwd"),
     )
     retry = await async_client.post(
         "/v1/agent/host/register", json=_registration_body(token, "runner-a")
     )
 
     assert refused.status_code == 400
-    assert refused.json()["detail"]["error"]["type"] == "invalid_broker_url"
+    assert refused.json()["detail"]["error"]["type"] == "invalid_sandbox_manager_url"
     assert retry.status_code == 200
-    assert store.rows["runner-a"]["broker_url"] == "http://broker.test:8092"
+    assert store.rows["runner-a"]["sandbox_manager_url"] == "http://sandbox_manager.test:8092"
 
 
 async def test_a_typo_cannot_evict_a_live_host(client):
@@ -1001,13 +1007,17 @@ async def test_a_heartbeat_can_update_capacity_and_version(client):
 
     response = await async_client.post(
         "/v1/agent/host/heartbeat",
-        json={"slots_total": 6, "runner_version": "1.4.0", "broker_url": "http://broker-a:8092"},
+        json={
+            "slots_total": 6,
+            "runner_version": "1.4.0",
+            "sandbox_manager_url": "http://sandbox-manager-a:8092",
+        },
         headers={"Authorization": f"Bearer {credential}"},
     )
 
     assert response.json()["slots_total"] == 6
     assert store.rows["runner-a"]["runner_version"] == "1.4.0"
-    assert store.rows["runner-a"]["broker_url"] == "http://broker-a:8092"
+    assert store.rows["runner-a"]["sandbox_manager_url"] == "http://sandbox-manager-a:8092"
 
 
 async def test_a_heartbeat_carries_the_version_stamp_to_the_admin_page(client):
@@ -1189,7 +1199,9 @@ async def test_a_host_serving_untrusted_work_without_a_disk_quota_is_flagged(
     assert listed["hosts"][0]["untrusted_without_disk_quota"] is warned
 
 
-async def test_a_heartbeat_delivers_archive_policy_and_tracks_exact_broker_revision(client):
+async def test_a_heartbeat_delivers_archive_policy_and_tracks_exact_sandbox_manager_revision(
+    client,
+):
     async_client, store = client
     credential = await _enroll(async_client, store)
     auth = {"Authorization": f"Bearer {credential}"}
@@ -1361,7 +1373,7 @@ async def claim_client(monkeypatch):
     from cloud_agent.api.deps import get_agent_app_credentials
 
     monkeypatch.setenv("AGENT_CONTROL_TOKEN_SECRET", "unit-test-control-secret")
-    monkeypatch.setenv("AGENT_WORKSPACE_BROKER_TOKEN", "unit-test-broker-secret")
+    monkeypatch.setenv("AGENT_SANDBOX_MANAGER_TOKEN", "unit-test-sandbox-manager-secret")
     monkeypatch.setenv("AGENT_DEPLOYMENT_SHA", "deployment-under-test")
 
     store = ClaimRecorder()
@@ -2144,7 +2156,7 @@ async def test_the_pool_listing_carries_the_new_fields(client):
         capabilities=["kata"],
         slots_total=4,
         slots_used=1,
-        broker_url="http://broker-a:8092",
+        sandbox_manager_url="http://sandbox-manager-a:8092",
         enrolled=True,
     )
 
@@ -2154,7 +2166,7 @@ async def test_the_pool_listing_carries_the_new_fields(client):
     assert row["status"] == HOST_DRAINING
     assert row["capabilities"] == ["kata"]
     assert (row["slots_total"], row["slots_used"]) == (4, 1)
-    assert row["broker_url"] == "http://broker-a:8092"
+    assert row["sandbox_manager_url"] == "http://sandbox-manager-a:8092"
     assert row["enrolled"] is True
 
 
@@ -2187,17 +2199,17 @@ def test_a_row_without_optional_pool_columns_still_renders(row):
     "url",
     ["file:///etc/passwd", "gopher://x/", "not-a-url", "ftp://host-a/"],
 )
-def test_a_broker_url_that_is_not_http_is_refused(url: str) -> None:
+def test_a_sandbox_manager_url_that_is_not_http_is_refused(url: str) -> None:
     """**The control plane sends the pool's shared token to this address.**
 
-    A host proposes its own broker URL and nothing checked it, so a compromised
+    A host proposes its own sandbox manager URL and nothing checked it, so a compromised
     host — or one with a typo — could name anything and be handed a credential
-    good for *every* broker in the pool. The scheme check is the structural
-    half: a `file:` URL is not a broker, and the client would do something
+    good for *every* sandbox manager in the pool. The scheme check is the structural
+    half: a `file:` URL is not a sandbox manager, and the client would do something
     surprising with it.
     """
-    with pytest.raises(BrokerUrlRefused):
-        validate_broker_url(url)
+    with pytest.raises(SandboxManagerUrlRefused):
+        validate_sandbox_manager_url(url)
 
 
 def test_an_allowlist_confines_the_pool_to_named_machines(monkeypatch) -> None:
@@ -2208,60 +2220,73 @@ def test_an_allowlist_confines_the_pool_to_named_machines(monkeypatch) -> None:
     behaves as it did, which is what keeps an upgrade from breaking every
     existing pool.
     """
-    monkeypatch.setenv(ENV_BROKER_HOSTS, "host-a,host-b")
-    assert validate_broker_url("http://host-b:8081") == "http://host-b:8081"
-    with pytest.raises(BrokerUrlRefused):
-        validate_broker_url("http://attacker.example:8081")
+    monkeypatch.setenv(ENV_SANDBOX_MANAGER_HOSTS, "host-a,host-b")
+    assert validate_sandbox_manager_url("http://host-b:8081") == "http://host-b:8081"
+    with pytest.raises(SandboxManagerUrlRefused):
+        validate_sandbox_manager_url("http://attacker.example:8081")
 
-    monkeypatch.delenv(ENV_BROKER_HOSTS)
-    assert validate_broker_url("http://anything:8081") == "http://anything:8081"
+    monkeypatch.delenv(ENV_SANDBOX_MANAGER_HOSTS)
+    assert validate_sandbox_manager_url("http://anything:8081") == "http://anything:8081"
 
 
 @pytest.mark.parametrize(
     "url",
     [
-        "http://broker:8092/admin",
-        "http://broker:8092?next=",
-        "http://broker:8092/?",
-        "http://broker:8092#/workspaces",
-        "http://user:secret@broker:8092",
-        "http://other@broker:8092",
-        "http://broker:99999",
-        "http://broker:8092\\@elsewhere",
+        "http://sandbox_manager:8092/admin",
+        "http://sandbox_manager:8092?next=",
+        "http://sandbox_manager:8092/?",
+        "http://sandbox_manager:8092#/workspaces",
+        "http://user:secret@sandbox_manager:8092",
+        "http://other@sandbox_manager:8092",
+        "http://sandbox_manager:99999",
+        "http://sandbox_manager:8092\\@elsewhere",
         "http://bro ker:8092",
     ],
 )
-def test_a_broker_url_must_be_a_bare_origin(monkeypatch, url: str) -> None:
+def test_a_sandbox_manager_url_must_be_a_bare_origin(monkeypatch, url: str) -> None:
     """Requests append ``/workspaces/...`` to the address; nothing may redirect that."""
-    monkeypatch.delenv(ENV_BROKER_HOSTS, raising=False)
-    with pytest.raises(BrokerUrlRefused):
-        validate_broker_url(url)
+    monkeypatch.delenv(ENV_SANDBOX_MANAGER_HOSTS, raising=False)
+    with pytest.raises(SandboxManagerUrlRefused):
+        validate_sandbox_manager_url(url)
 
 
-def test_a_broker_origin_keeps_its_trailing_slash_and_default_port(monkeypatch) -> None:
-    monkeypatch.delenv(ENV_BROKER_HOSTS, raising=False)
-    assert validate_broker_url("http://broker:8092/") == "http://broker:8092/"
-    assert validate_broker_url("https://[2001:db8::1]") == "https://[2001:db8::1]"
+def test_a_sandbox_manager_origin_keeps_its_trailing_slash_and_default_port(monkeypatch) -> None:
+    monkeypatch.delenv(ENV_SANDBOX_MANAGER_HOSTS, raising=False)
+    assert (
+        validate_sandbox_manager_url("http://sandbox_manager:8092/")
+        == "http://sandbox_manager:8092/"
+    )
+    assert validate_sandbox_manager_url("https://[2001:db8::1]") == "https://[2001:db8::1]"
 
 
 def test_an_origin_allowlist_entry_pins_the_scheme_and_port(monkeypatch) -> None:
     """Brokers behind one tunnel address differ only by port."""
-    monkeypatch.setenv(ENV_BROKER_HOSTS, "http://172.30.0.1:19092,https://broker.example")
-    assert validate_broker_url("http://172.30.0.1:19092") == "http://172.30.0.1:19092"
-    assert validate_broker_url("https://broker.example:443/") == "https://broker.example:443/"
+    monkeypatch.setenv(
+        ENV_SANDBOX_MANAGER_HOSTS, "http://172.30.0.1:19092,https://sandbox-manager.example"
+    )
+    assert validate_sandbox_manager_url("http://172.30.0.1:19092") == "http://172.30.0.1:19092"
+    assert (
+        validate_sandbox_manager_url("https://sandbox-manager.example:443/")
+        == "https://sandbox-manager.example:443/"
+    )
     for refused in (
         "http://172.30.0.1:19093",
         "https://172.30.0.1:19092",
-        "http://broker.example",
-        "https://broker.example:8443",
+        "http://sandbox-manager.example",
+        "https://sandbox-manager.example:8443",
     ):
-        with pytest.raises(BrokerUrlRefused):
-            validate_broker_url(refused)
+        with pytest.raises(SandboxManagerUrlRefused):
+            validate_sandbox_manager_url(refused)
 
     # A bare name still admits that host on any port, as it always did.
-    monkeypatch.setenv(ENV_BROKER_HOSTS, "workspace-broker, http://172.30.0.1:19092")
-    assert validate_broker_url("http://workspace-broker:8092") == "http://workspace-broker:8092"
-    assert validate_broker_url("https://Workspace-Broker:1") == "https://Workspace-Broker:1"
+    monkeypatch.setenv(ENV_SANDBOX_MANAGER_HOSTS, "workspace-broker, http://172.30.0.1:19092")
+    assert (
+        validate_sandbox_manager_url("http://workspace-broker:8092")
+        == "http://workspace-broker:8092"
+    )
+    assert (
+        validate_sandbox_manager_url("https://Workspace-Broker:1") == "https://Workspace-Broker:1"
+    )
 
 
 # ── removed host-level residency control plane ─────────────────────────
@@ -2455,7 +2480,7 @@ async def test_host_heartbeat_returns_only_durable_due_idle_stop_fences(
 
 
 async def test_host_heartbeat_accepts_a_generation_zero_fork_target_idle_stop(residency_client):
-    """A broker-reconstructed pre-turn fork target has no activation yet."""
+    """A sandbox-manager-reconstructed pre-turn fork target has no activation yet."""
     client, store, _grants = residency_client
     credential = await _enroll(client, store)
     store.sandbox_stop_due = {

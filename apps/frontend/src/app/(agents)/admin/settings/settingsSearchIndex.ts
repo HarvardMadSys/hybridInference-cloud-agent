@@ -62,7 +62,7 @@ const ARCHIVE_FIELDS: StaticSearchField[] = [
     key: 'enabled',
     label: 'Enable sandbox archives',
     description:
-      'With an access key, uploads use that key. Without one, brokers use their workload identity and need the bucket owner and KMS key. Bucket versioning is required either way.',
+      'With an access key, uploads use that key. Without one, sandbox managers use their workload identity and need the bucket owner and KMS key. Bucket versioning is required either way.',
   },
   {
     key: 's3_uri',

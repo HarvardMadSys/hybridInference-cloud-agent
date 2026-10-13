@@ -27,7 +27,7 @@ Start with the task you need:
 | Open PostgreSQL administration | [pgAdmin](#pgadmin) |
 | Browse and filter database rows | [Database browser](#database-browser) |
 | Change concurrency, sandbox settings, or placement | [How many runners](#how-many-runners), [which machine runs the jobs](#which-machine-runs-the-jobs) |
-| Add a host on another machine | [Tunnels and broker routing](#running-runners-on-another-machine) |
+| Add a host on another machine | [Tunnels and sandbox manager routing](#running-runners-on-another-machine) |
 | Deploy or roll back a release | [Rolling deployment order](#rolling-deployment-order), [deployment reliability](deployment-reliability.md) |
 | Preserve an old database or apply a maintenance migration | [Old-chain conversion](#preserving-an-old-chain-database), [database rebuild](#rebuilding-the-agent-database), [maintenance migrations](#applying-migrations-that-are-not-backwards-compatible) |
 | Protect workspaces and monitor disk use | [Sandbox archives](#sandbox-archives), [retained Docker storage](#retained-docker-storage-on-a-host), [storage measurement](#how-full-is-the-sandbox-storage) |
@@ -69,7 +69,7 @@ epoch. Rebuild the sandbox image for explicit plugin loading. Then start the
 main control-plane listener with its existing complete environment. It
 imports registered environment settings once,
 while the MCP-only listener waits for initialization and then reads the same
-settings. Newly migrated runtime identity, service keys, broker credentials,
+settings. Newly migrated runtime identity, service keys, sandbox manager credentials,
 and policy fields are imported only when absent, under the same atomic
 preservation rule.
 
@@ -153,7 +153,7 @@ by the bucket, also grant the required KMS permissions, including
 `kms:GenerateDataKey` and `kms:Decrypt` so checksum-enabled HEAD can verify the
 object. The application does not need `s3:DeleteObject` for archive storage.
 Provision these manual-deletion credentials only on the main control plane;
-the owning broker receives a request-specific presigned upload URL. The base Compose
+the owning sandbox manager receives a request-specific presigned upload URL. The base Compose
 does not forward AWS credential variables. For environment credentials, create
 a private override restricted to the main service, for example:
 
@@ -177,7 +177,7 @@ in this service and set `AWS_SHARED_CREDENTIALS_FILE`, `AWS_CONFIG_FILE` and
 archive region setting or provision `AWS_DEFAULT_REGION` in the same override.
 Apply these manual-deletion credential mounts and variables only to the main
 control plane. The automatic lifecycle archive policy separately uses the
-trusted workspace broker's workload identity; neither path provides AWS
+trusted sandbox manager's workload identity; neither path provides AWS
 credentials to sandbox containers, the web application or the MCP relay.
 
 The host receives a 15-minute presigned PUT for exactly one request object, with
@@ -419,7 +419,7 @@ attempt, and request it was read from. The owner API and host both fence that
 identity; stopped, completed, or replaced attempts cannot take a stale answer,
 and question answers are never queued as follow-up turns.
 
-Deploy the broker/runner and rebuilt sandbox image together. The HTTP bridge
+Deploy the sandbox_manager/runner and rebuilt sandbox image together. The HTTP bridge
 helper pin is now `3`; helper `2` cannot execute native question replies and
 does not satisfy the current turn-time attestation. Before starting a
 replacement OpenCode/Kilo process, the host installs its trusted bridge into
@@ -503,15 +503,15 @@ publication work, or a group with open terminals or stale terminal observations.
 The request is recorded in the admin audit log. The host performs its own idle
 check before stopping the container.
 When the terminal report is zero, missing, or older than 90 seconds, opening or
-refreshing details queries the owning workspace broker for that group's census
+refreshing details queries the owning sandbox manager for that group's census
 directly. This inspects only the selected container and counts terminals across
 all its members; unrelated containers and host-wide reconciliation do not delay
 the check. Full inventory reconciliation remains on the host heartbeat path.
 Stop requests also verify terminal activity before closing admission: older
-brokers may report only the origin session's terminals even when another member
+sandbox managers may report only the origin session's terminals even when another member
 is active. This also supports runners that omit terminal counts from their
 heartbeats. The report must match the reviewed container and generation; an
-unavailable broker or unknown activity keeps stopping disabled and shows the
+unavailable sandbox manager or unknown activity keeps stopping disabled and shows the
 required recovery step.
 Resource-stat failures do not discard an otherwise valid terminal report.
 The page shows the pending request until a host observation confirms the stop;
@@ -525,15 +525,15 @@ Settings → Application → Sandbox archives**. [S3 storage setup](#sandbox-arc
 describes permissions, credential provisioning and compatible storage requirements.
 
 Deletion blocks new turns, Fork, and workspace operations while the owning
-broker prepares the archive. The archive contains `manifest.json` and
+sandbox manager prepares the archive. The archive contains `manifest.json` and
 `container-rootfs.tar`, including workspace files and retained native session
 files. Archives larger than 5 GiB are refused before deletion. An immutable S3
 object must match both SHA-256 and byte length, and its receipt must commit to
 the database before the host may remove the exact reviewed stopped container.
 Upload failures retain the container. Once an archive is verified, uncertain
 deletion acknowledgements keep admission blocked and retry the same request.
-The broker stores its deletion receipts on its own persistent volume so an
-acknowledgement can survive a broker restart.
+The sandbox manager stores its deletion receipts on its own persistent volume so an
+acknowledgement can survive a sandbox manager restart.
 
 **Delete without archive** removes the same exact stopped container without
 uploading workspace files or native session history. It does not require an S3
@@ -544,19 +544,19 @@ from. An archive deletion that is already pending or verified is left unchanged;
 wait for it to finish or fail before choosing this action.
 
 **Verify stopped and force delete** recovers a sandbox still recorded as running
-only when the owning broker confirms that the exact reviewed container is
+only when the owning sandbox manager confirms that the exact reviewed container is
 stopped and idle. It does not stop a running container or bypass unavailable
 host proof. If verification fails, the error identifies missing host registration,
-an absent or refused advertised URL, a missing or rejected broker credential,
+an absent or refused advertised URL, a missing or rejected sandbox manager credential,
 a connection failure, a timeout, or unavailable sandbox status. Check the
-indicated configuration or broker readiness before retrying. For a connection
-failure, verify the [reverse broker route](#the-way-back-the-control-plane-reaching-this-hosts-broker).
+indicated configuration or sandbox manager readiness before retrying. For a connection
+failure, verify the [reverse sandbox manager route](#the-way-back-the-control-plane-reaching-this-hosts-sandbox-manager).
 Control-plane logs record `agent_sandbox_delete_verification_failed` with the
-sandbox, owning host, status code, and failure type without raw broker errors.
+sandbox, owning host, status code, and failure type without raw sandbox manager errors.
 
 **Remove stale entry** is available when the owning host has no heartbeat or
 has not reported for more than 90 seconds. It removes the entry from the default
-admin inventory without contacting the broker, so a retired or unreachable host
+admin inventory without contacting the sandbox manager, so a retired or unreachable host
 does not leave an entry that can never be cleared. The server rechecks host
 freshness and the reviewed identity, and refuses active turns, workspace
 operations, snapshots, or a pending deletion. The action is audited and
@@ -565,7 +565,7 @@ the recorded lifecycle state, container identity, native state, and chat history
 without deleting any retained container or files, creating an S3 archive, or
 reclaiming host disk. A matching running host
 observation or new admitted work makes the entry visible again. Restore the
-broker connection to complete S3 archival and physical deletion.
+sandbox manager connection to complete S3 archival and physical deletion.
 
 The details show progress, archive location, checksum, size, and any failure.
 Chat history, memberships, execution records, and audit receipts remain in the
@@ -596,7 +596,7 @@ cover the whole shared container. The details also show process and terminal
 counts, session capacity, active operations, snapshot state, and sandbox age.
 Sandbox age starts at group creation and does not measure container uptime.
 
-The workspace broker samples Docker in a bounded background worker, then sends
+The sandbox manager samples Docker in a bounded background worker, then sends
 cached observations with the host heartbeat. Each sample retains its original
 age through repeated heartbeats. Readings older than 90 seconds are marked
 stale and excluded from the fleet CPU and memory totals; those totals show
@@ -608,10 +608,10 @@ Sandbox controls require migration `0037_admin_sandbox_stop` and matching
 control-plane and host releases. Apply `alembic upgrade head` before starting
 the updated API. Inventory removal additionally requires
 `0044_admin_sandbox_archive`, and S3-backed container deletion requires
-`0045_admin_sandbox_deletion` plus the matching workspace broker release.
+`0045_admin_sandbox_deletion` plus the matching sandbox manager release.
 The append-only admin trajectory requires `0057_admin_sandbox_trajectory`.
 Resource persistence requires migration
-`0034_sandbox_resource_usage` and a host running the updated workspace broker.
+`0034_sandbox_resource_usage` and a host running the updated sandbox manager.
 Older hosts still appear in the inventory with resource usage unavailable.
 Only the latest observation is stored; this view does not provide resource
 history.
@@ -979,7 +979,7 @@ and generation and their host interface names from this deployment's prefix.
 It allocates one `/29` from `AGENT_EGRESS_CHAT_NETWORK_POOL` and lets Docker
 arbitrate concurrent claims. A group's bridge is disconnected and deleted on
 idle or lost stop while Docker keeps the container writable layer, and wake
-creates it again. Broker reconciliation also removes labelled bridges left by an
+creates it again. Sandbox Manager reconciliation also removes labelled bridges left by an
 interrupted create after a five-minute grace period. The grace prevents status
 reconciliation from deleting a bridge between creation and sandbox attachment
 while still reclaiming bridge interfaces and IPAM.
@@ -993,15 +993,15 @@ not an execution or fallback path in this service.
 Deploy at least one host through `deploy/host/deploy.sh`, enroll it with the
 control plane, and let its runner service poll `/v1/agent/worker/claim`. A
 runner cannot claim until its exact replica attests the retained protocol,
-container image/runtime pins, broker configuration, execution profile, and
+container image/runtime pins, sandbox manager configuration, execution profile, and
 host capacity.
 
 Standalone, the host stack needs more than an enrolment credential. Start from
 `deploy/host/.env.example`: `COMPOSE_PROJECT`, `AGENT_SANDBOX_IMAGE`,
 `AGENT_EGRESS_CHAT_NETWORK_POOL` and `AGENT_EGRESS_DNS_SERVER` are required
 (`docker-compose.sandbox.yml` interpolates each with `:?`, so an unset value
-stops the render), alongside `AGENT_WORKSPACE_BROKER_TOKEN`, the three tunnel
-destinations with their own keys and known-hosts files, and the broker
+stops the render), alongside `AGENT_SANDBOX_MANAGER_TOKEN`, the three tunnel
+destinations with their own keys and known-hosts files, and the sandbox manager
 reverse-forward trio for the separate control-plane and host Compose stacks.
 
 ### 2. Credentials
@@ -1018,9 +1018,9 @@ it with a long-lived credential bound to that host and persists the credential
 under `AGENT_HOST_STATE_ROOT`; every heartbeat and claim then authenticates
 with it. A host name in a request is never accepted as identity by itself.
 
-**Workspace broker credential** — generate one
-`AGENT_WORKSPACE_BROKER_TOKEN` per environment and set the same value on the
-control plane and every host broker. It authorizes file, terminal, Git, and
+**Sandbox manager credential** — generate one
+`AGENT_SANDBOX_MANAGER_TOKEN` per environment and set the same value on the
+control plane and every host sandbox_manager. It authorizes file, terminal, Git, and
 session-lifecycle calls. It is not a claim credential and never enters a chat
 container.
 
@@ -1189,14 +1189,14 @@ Existing retained sandboxes remain on their original Host when this selection
 changes; neither Host Remove nor Forget destroys the underlying machine.
 
 Run the host agent as a **standing service** so queued jobs can be claimed after
-crashes and reboots. Configure enrollment and the shared broker token in `.env`.
+crashes and reboots. Configure enrollment and the shared sandbox manager token in `.env`.
 The example below includes the shared-kernel setting for trusted internal
 repositories. For untrusted repositories, use the default `kata` backend and
 complete [Kata provisioning](#provisioning-kata-on-a-runner-host).
 
 ```bash
 AGENT_ENROLL_TOKEN="<single-use token for this host>"
-AGENT_WORKSPACE_BROKER_TOKEN="<same environment value as the control plane>"
+AGENT_SANDBOX_MANAGER_TOKEN="<same environment value as the control plane>"
 AGENT_SANDBOX_BACKEND=container  # explicit trusted-repository downgrade
 ```
 
@@ -1272,7 +1272,7 @@ with no leader and no sharding.
 | `AGENT_RUNNER_HOST` | host name | Enrolled execution environment, shared by every turn it runs — the unit the admin placement switch picks between. `deploy/host/sandbox_host.sh` fills it from the host's own name. Never derived inside the container, where the hostname is a container id. After enrolment the persisted credential is authoritative, so editing this renames nothing. Unset keeps the environment out of the pool and changes nothing else. Distinct from `AGENT_PHYSICAL_HOST`, which is the display-only inventory name grouping environments that share one server |
 | `AGENT_PHYSICAL_HOST` | host name | Physical server this environment runs on, reported at enrolment as the `physical_host` label and used to group the admin inventory. `sandbox_host.sh` defaults it to `hostname -s`; set it explicitly when invoking Compose directly. Never a container hostname or a runtime suffix |
 | `AGENT_HOST_SLOTS` | `3` | Turns at once until an admin sets a number on the Servers page; at least two, at most 128. `AGENT_RUNNER_REPLICAS` is no longer read |
-| `AGENT_RETAINED_DOCKER_DATA_ROOT` | `/var/lib/docker` | Expected daemon `DockerRootDir`. Keep this default. Put the durable disk under it by bind-mounting `<disk>/docker` and `<disk>/containerd` onto `/var/lib/docker` and `/var/lib/containerd`. A custom daemon data root is rejected. Verified by the host and broker, and never mounted into a chat container |
+| `AGENT_RETAINED_DOCKER_DATA_ROOT` | `/var/lib/docker` | Expected daemon `DockerRootDir`. Keep this default. Put the durable disk under it by bind-mounting `<disk>/docker` and `<disk>/containerd` onto `/var/lib/docker` and `/var/lib/containerd`. A custom daemon data root is rejected. Verified by the host and sandbox manager, and never mounted into a chat container |
 | `AGENT_HOST_STORAGE_PROBE` | `overlay_root` | Which probe measures the filesystem holding the sandbox writable layers, shown as the Servers page's Storage column. `off` stops measuring storage on that host and is the rollback; an unrecognized name reports `unsupported` rather than measuring something else. A reading is published only for a topology the host deployment has attested; see _How full is the sandbox storage?_ |
 | `AGENT_STORAGE_MIN_AVAILABLE_MIB` | `1024` | Bootstrap value for **Storage reserve for new sandboxes**; the admin runtime setting replaces it after the host's first settings heartbeat. Fresh verified available space below this reserve declines a new sandbox allocation without spending the turn. Existing sandboxes may resume; unknown capacity does not establish a pressure verdict. This is an admission guard, not a disk quota |
 | `AGENT_SANDBOX_UID` / `_GID` | `10001` | Only for a custom sandbox image; must match its user |
@@ -1415,7 +1415,7 @@ group bridge is refused until it has been stopped.
 #### Existing runc groups and activation checks
 
 When switching a host from runc, keep its retained runc groups on a compatible
-broker or migrate them separately. A backend setting does not change the
+sandbox manager or migrate them separately. A backend setting does not change the
 runtime of a stopped Docker container; the privileged helper fence rejects
 those old containers. Do not delete retained workspaces as part of enabling
 Kata for new jobs.
@@ -1437,7 +1437,7 @@ AGENT_SANDBOX_BACKEND=kata deploy/host/sandbox_host.sh check
 probes under Kata on the relay network (`AGENT_RELAY_NETWORK`) and requires
 HTTP 200 from inference `/health` and MCP `/healthz`. It also checks the live
 runner's full sandbox preflight — which installs and reads back the host
-tables — broker, and control-plane paths. The relay network is only where
+tables — sandbox manager, and control-plane paths. The relay network is only where
 lifecycle finds the two relays; retained groups get their own bridges during
 activation, and the in-guest check at each cold start covers the path from
 there. The compose `..._internal` network is the host services' network and
@@ -1632,11 +1632,11 @@ effect, and clearing an override never restores them.
 and initial variables. They ride the heartbeat
 answer like the slot limit, so nothing is redeployed, and the same rule holds:
 saving is not applying. Each host reports what it applies, the runner's share
-as it hands each turn over and the workspace broker's as the broker confirms
+as it hands each turn over and the sandbox manager's as the sandbox manager confirms
 it, and the page shows _applying_ until the report matches. Nothing running is
 cut short: a turn keeps the time limit it started with, an existing sandbox
 keeps its CPU, memory, disk quota and chat capacity, and a shortened terminal lifetime
-closes terminals already past it on the broker's next sweep. A runner that
+closes terminals already past it on the sandbox manager's next sweep. A runner that
 does not advertise `host-settings-v1` keeps its `.env` values until it is
 redeployed.
 
@@ -1702,20 +1702,20 @@ ORDER BY host;
 ```
 
 Do not put archive policy, the destination, or an AWS access key in `.env`.
-Enter an access key on the Sandbox archives card when the broker has no
+Enter an access key on the Sandbox archives card when the sandbox manager has no
 workload identity. The control plane encrypts the secret before storing it
-and sends it to the broker on the authenticated heartbeat channel. The broker
+and sends it to the sandbox manager on the authenticated heartbeat channel. The sandbox manager
 keeps it in memory for S3. Sandbox markers do not contain it, so it does not
-enter the container. A broker that predates access-key support rejects that
-heartbeat payload and does not confirm the revision; upgrade those brokers
-before relying on the key. With no access key, the workspace broker uses the
+enter the container. A sandbox manager that predates access-key support rejects that
+heartbeat payload and does not confirm the revision; upgrade those sandbox managers
+before relying on the key. With no access key, the sandbox manager uses the
 host's AWS workload identity and the ordinary SDK credential chain. That
 identity needs the narrow S3 multipart/write and exact object-metadata
 permissions for the fixed prefix, plus encrypt access to the configured KMS
 key. The bucket must have versioning enabled. Configure lifecycle retention
 and access logging on the bucket itself.
 
-Concretely, grant the broker role `s3:GetBucketVersioning` on
+Concretely, grant the sandbox manager role `s3:GetBucketVersioning` on
 `arn:aws:s3:::freeinference`; `s3:ListBucket` on that bucket constrained to the
 `cloud-agent/sandbox/*` prefix (so an exact-key `HeadObject` can distinguish a
 missing immutable initial object from an authorization failure); and
@@ -1728,8 +1728,8 @@ rule as defense in depth for a host that disappears before its bounded abort
 request completes.
 
 Enabling archives requires migration `0042_sandbox_archive_settings` and a
-runner/workspace broker advertising `sandbox-archive-settings-v1`. The settings
-card distinguishes the saved database revision from the revision each broker
+runner/sandbox manager advertising `sandbox-archive-settings-v1`. The settings
+card distinguishes the saved database revision from the revision each sandbox manager
 has confirmed applying. While archives are enabled, new claims fail closed on
 hosts or exact runner replicas that have not applied that revision; disabling
 the policy preserves compatibility with older hosts.
@@ -1738,7 +1738,7 @@ This is a lifecycle archive, not a per-turn transcript log:
 
 - the initial object captures `/workspace` once after source/setup and before
   the first Agent process receives a prompt;
-- each broker-managed clean stop flushes native Agent state and stores a final
+- each sandbox-manager-managed clean stop flushes native Agent state and stores a final
   object containing `/workspace`, `/agent-state`, and the optional
   `/home/agent/.freeinference-platform` state;
 - repeated turns while the sandbox remains live do not create objects. A later
@@ -1788,13 +1788,13 @@ deferred, so a batch from one user can occupy every slot.
 
 `AGENT_CHAT_IDLE_TIMEOUT_S` defaults to **1800 seconds (30 minutes)** and is
 the group's sole inactivity timeout. After the latest activity across every
-member has durably settled and no member or broker operation is active, the
+member has durably settled and no member or sandbox manager operation is active, the
 Shared Session Supervisor stops the container and removes its bridge. It never
 issues `docker rm`. A later acquire reinstalls host rules, recreates the bridge,
 and starts and inspects the same labelled container. Supervisor shutdown leaves
 chat containers untouched.
 
-At broker startup, reconciliation stops running orphans before readmission.
+At sandbox manager startup, reconciliation stops running orphans before readmission.
 It never adopts resident processes on the strength of an unproven in-memory
 lease or infers an active turn from an empty lease table. Docker observations
 travel in the enrolled heartbeat. The control plane checks the durable attempt
@@ -1895,9 +1895,9 @@ the probe fails, restore the original `AGENT_POSTGRES_PASSWORD` and
 agent state is intentional.
 
 Terminal freezing is also member-concurrent: each protected job phase owns a
-separate broker suspension token for the shared workspace. Completing or
+separate sandbox manager suspension token for the shared workspace. Completing or
 recovering one sibling releases only that token; interactive PTYs are resumed
-only when no sibling remains in a protected phase. The broker still accepts
+only when no sibling remains in a protected phase. The sandbox manager still accepts
 the previous generation's token-less request shape during a rolling deploy,
 but current control-plane requests always identify the owning job.
 
@@ -1917,13 +1917,13 @@ Compose container IDs, then asks Docker Engine for an unbounded graceful stop.
 The runner stops claiming and waits for every admitted turn. Graceful shutdown
 does not signal its turn children: each child finishes its one turn and exits
 naturally, including a child whose acceptance handover is still uncertain. The
-broker and tunnels remain available until those turns settle. Only then does
-activation replace the broker and runner. After the isolation, tunnel, runtime
+sandbox manager and tunnels remain available until those turns settle. Only then does
+activation replace the sandbox manager and runner. After the isolation, tunnel, runtime
 and retained Docker-root checks pass, it records `.deployed-sha` and only then
 publishes an exact `shared-sandbox-deployment:<sha>` capability. In parallel,
 the control-plane deployment prepares its artifacts and runs migrations. Before
 `compose up` can replace a running API, the deployment waits for a heartbeat
-newer than the start of its readiness check and reverse-probes every broker
+newer than the start of its readiness check and reverse-probes every sandbox manager
 eligible for new-chat placement. The claim route enforces that same exact deployment
 capability. A pending runner registers and heartbeats its base protocol so the
 host checks can inspect them, but does not poll; this also prevents the previous
@@ -2424,22 +2424,22 @@ with `restart=no` stay stopped across that restart and must be started by
 hand. Delete the copies left aside only after a reboot has come back on these
 binds and the host is serving.
 
-The workspace broker compares `AGENT_RETAINED_DOCKER_DATA_ROOT` with the
+The sandbox manager compares `AGENT_RETAINED_DOCKER_DATA_ROOT` with the
 daemon-reported `DockerRootDir` and refuses a mismatch. It deliberately cannot
-prove `findmnt` itself: giving the broker a host-root mount just to inspect
+prove `findmnt` itself: giving the sandbox manager a host-root mount just to inspect
 storage would violate the Docker-only boundary. The mount check belongs in
 host provisioning, as the `RequiresMountsFor=` drop-ins above.
 
 Do not bind `<disk>`, `/var/lib/docker`, `/var/lib/containerd`, `/workspace`,
-or `/agent-state` into the broker or sandbox. Do not use generic `docker system
+or `/agent-state` into the sandbox manager or sandbox. Do not use generic `docker system
 prune`, container TTL cleanup, `docker rm`, or image garbage collection against
 `org.freeinference.chat-sandbox=true` objects. Inspect and operate them through
-Docker (`docker inspect`, `docker exec`, `docker cp`, and the broker RPC), not by
+Docker (`docker inspect`, `docker exec`, `docker cp`, and the sandbox manager RPC), not by
 walking overlay directories. Back up or move both graphs only with Docker and
 containerd stopped, preserving ownership, hard links, extended attributes and
 sparse files.
 
-This makes `docker stop`/`docker start` survive runner, broker, Docker daemon,
+This makes `docker stop`/`docker start` survive runner, sandbox manager, Docker daemon,
 and host reboots as long as the same binds return. It does **not**
 make a missing container recoverable on another host: export to object/cold
 storage and cross-host restore remain the explicitly deferred persistent
@@ -2448,7 +2448,7 @@ checkpoint phase. Until that lands, loss of these graphs is context
 thread→host→container identity needed to locate it.
 
 A missed heartbeat, an offline/disabled host row, or a temporarily unreachable
-broker is not evidence that this Docker state vanished. Keep the chat pinned
+sandbox manager is not evidence that this Docker state vanished. Keep the chat pinned
 and unavailable, recover or re-enrol the same named host, and reconcile its
 exact labelled container. Only an inspection on that owning Docker daemon that
 proves the expected container/data-root is gone may transition the context to
@@ -2623,7 +2623,7 @@ than through a dispatch request from the control plane. These rules apply:
   wait when their own host is unavailable; changing the selection cannot move
   their Docker layer. The admin page warns when the selected host has not
   polled recently, but the authoritative operational signals are its enrolled
-  heartbeat and broker probe, not whether one runner happened to claim recently.
+  heartbeat and sandbox manager probe, not whether one runner happened to claim recently.
 
 Adding a _second_ machine is not only this switch. The configured model and
 MCP endpoints use the two relays on the sandbox's group bridge, with private
@@ -2672,15 +2672,15 @@ service to the lab network puts those capabilities in cleartext on a shared
 segment. The tunnel keeps each service listening on loopback.
 
 ```bash
-deploy/host/sandbox_host.sh up       # relays, broker and the runner
-deploy/host/sandbox_host.sh check    # probe relays and runner/broker paths
+deploy/host/sandbox_host.sh up       # relays, sandbox manager and the runner
+deploy/host/sandbox_host.sh check    # probe relays and runner/sandbox_manager paths
 deploy/host/sandbox_host.sh status
 deploy/host/sandbox_host.sh down
 ```
 
-`deploy/host/docker-compose.sandbox.yml` contains the runner, workspace broker,
+`deploy/host/docker-compose.sandbox.yml` contains the runner, sandbox manager,
 three purpose-scoped tunnels, and two networks: the stack's own network and the
-route-less relay network. Runner and broker create group bridges through Docker.
+route-less relay network. Runner and sandbox manager create group bridges through Docker.
 This is the supported standalone topology. It does not start a gateway
 `backend`, as the source repository's old overlay could do through its
 `depends_on: backend` declaration.
@@ -2727,7 +2727,7 @@ After `restrict`, `port-forwarding` re-enables remote (`-R`) as well as local
 forwarding, and `permitopen` limits only the local destination. On its own,
 any of these keys could open listeners on the far machine. So the control
 key's `permitlisten` names its single reverse listener — the control-plane
-machine's Docker bridge gateway and this host's `AGENT_BROKER_REVERSE_PORT` —
+machine's Docker bridge gateway and this host's `AGENT_SANDBOX_MANAGER_REVERSE_PORT` —
 and each account gets its `Match User` block from
 [`deploy/host/sshd-tunnels.conf.example`](../deploy/host/sshd-tunnels.conf.example).
 The inference and MCP blocks set `AllowTcpForwarding local` and
@@ -2740,24 +2740,24 @@ reloading sshd.
 Run `sandbox_host.sh check` from the host checkout. Sandbox-runtime containers
 on the relay network must receive HTTP 200 from inference `/health` and MCP
 `/healthz`. The live runner must pass full sandbox preflight, including host
-table read-back, and reach the broker and control plane. Requests from the
+table read-back, and reach the sandbox manager and control plane. Requests from the
 host shell do not exercise these container paths.
 
 Once it is up, the machine appears in **Admin → Servers** and can be selected
 there.
 
-#### The way back: the control plane reaching this host's broker
+#### The way back: the control plane reaching this host's sandbox manager
 
-The control plane also needs a route back to this host's workspace broker.
+The control plane also needs a route back to this host's sandbox manager.
 
 File listings, terminal traffic, and `git status` go **control plane → workspace
-broker**. The broker runs beside the Docker daemon owning the workspace; the
+sandbox manager**. The sandbox manager runs beside the Docker daemon owning the workspace; the
 host row holds the address reported at enrollment. The integrated local stack
 shares a network, so
-`http://workspace-broker:8092` works there. The supported standalone host stack
+`http://sandbox-manager:8092` works there. The supported standalone host stack
 does not share a network with the control-plane stack—even when the two
 projects run on one physical machine—so that service name resolves nowhere.
-An unreachable broker address produces **503**, including on
+An unreachable sandbox manager address produces **503**, including on
 `terminals/suspend` during normal execution. The historical first deployment
 failed three attempts at that point. Verify the route before admitting jobs.
 
@@ -2768,7 +2768,7 @@ already opens — a reverse forward on the control-plane tunnel:
 ```text
   runner host                                control plane host
 ┌──────────────────────────┐              ┌──────────────────────────┐
-│ workspace-broker         │◀─── -R ──────│ 172.24.0.1:18092         │
+│ sandbox-manager         │◀─── -R ──────│ 172.24.0.1:18092         │
 │        :8092             │              │  (docker bridge gateway) │
 │                          │              │        ▲                 │
 │ control-plane-tunnel ────┼──── ssh ────▶│        │ control-plane   │
@@ -2777,9 +2777,9 @@ already opens — a reverse forward on the control-plane tunnel:
 
 | variable |  |
 | --- | --- |
-| `AGENT_BROKER_REVERSE_BIND` | The **control plane host's docker bridge gateway**. Not `127.0.0.1`, which its containers cannot see; not `0.0.0.0`, which publishes the broker to that machine's whole network behind one shared token. Find it with `docker network inspect <net> --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}'` |
-| `AGENT_BROKER_REVERSE_PORT` | A free port on that host |
-| `AGENT_WORKSPACE_BROKER_ADVERTISE_URL` | `http://<bind>:<port>` — what the runner reports, and what the control plane will dial |
+| `AGENT_SANDBOX_MANAGER_REVERSE_BIND` | The **control plane host's docker bridge gateway**. Not `127.0.0.1`, which its containers cannot see; not `0.0.0.0`, which publishes the sandbox manager to that machine's whole network behind one shared token. Find it with `docker network inspect <net> --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}'` |
+| `AGENT_SANDBOX_MANAGER_REVERSE_PORT` | A free port on that host |
+| `AGENT_SANDBOX_MANAGER_ADVERTISE_URL` | `http://<bind>:<port>` — what the runner reports, and what the control plane will dial |
 
 The **control plane host's** sshd must apply `GatewayPorts clientspecified` to
 the control account, as its block in
@@ -2787,7 +2787,7 @@ the control account, as its block in
 does, together with that account's `PermitListen` and the key's `permitlisten`
 naming this exact address and port. Never set it to `yes`: that binds every
 remote forward to the wildcard address whatever the client asked for, and
-reports success, so each host's broker is published on all of that machine's
+reports success, so each host's sandbox manager is published on all of that machine's
 interfaces behind one shared token. With the default, `no`, sshd binds the
 forward to loopback instead, where the control plane's containers cannot reach
 it. A listener sshd refuses outright (a port in use, or one `PermitListen` does
@@ -2808,7 +2808,7 @@ iptables -I INPUT -p tcp --dport 18092 ! -i br-0123456789ab -j DROP
 
 Persist the rule the way that machine persists its firewall.
 
-Set all three. The supported standalone host stack never publishes its broker
+Set all three. The supported standalone host stack never publishes its sandbox manager
 and does not share a Compose network with the control plane, even when both
 stacks happen to run on the same physical machine. An advertise URL with no
 tunnel behind it is an address nothing answers on, which is the same 503 with a
@@ -2822,7 +2822,7 @@ docker exec "<control-plane-container>" \
 ```
 
 **HTTP 401 proves this route is reachable.** `urllib` reports it as an HTTPError
-because the broker refuses an unauthenticated request. A DNS error or timeout
+because the sandbox manager refuses an unauthenticated request. A DNS error or timeout
 means the route failed.
 
 ### Three things about this topology that look like details and are not
@@ -2840,7 +2840,7 @@ imports that stream into `/workspace` in the retained container. The temporary
 clone is then deleted. All subsequent edits, provider state, terminals, setup
 results, and fork siblings remain in that same Docker writable layer.
 
-**The Docker socket is the host authority.** Runner and broker can create,
+**The Docker socket is the host authority.** Runner and sandbox manager can create,
 start, stop, inspect, and exec in chat containers, so isolating those services
 from users matters more than changing their Unix uid. The security boundary is
 the retained sandbox (Kata for untrusted multi-tenant work; plain Docker only
@@ -2975,7 +2975,7 @@ digits="$(printf '%s' "$COMPOSE_PROJECT" | sha256sum | cut -c1-5)"
 table="cloud_agent_ca$digits"
 ```
 
-The runner and the broker hold no `NET_ADMIN` and are not in the host's network
+The runner and the sandbox manager hold no `NET_ADMIN` and are not in the host's network
 namespace. They change host rules through a short-lived helper: their own
 image, run with `nft` as its entrypoint in the host's network namespace, with
 `NET_ADMIN` and no other capability and a read-only root filesystem — the
@@ -2983,10 +2983,10 @@ image, run with `nft` as its entrypoint in the host's network namespace, with
 daemon's default runtime is, because a Kata VM would change its own kernel's
 rules, not the host's.
 
-- **Installed before anything joins a bridge.** The runner's and the broker's
+- **Installed before anything joins a bridge.** The runner's and the sandbox manager's
   startup preflight install the tables and read them back — every chain, its
   hook and its rule count, the protected set, the registered pool — and any
-  difference stops the runner claiming and the broker starting. Group network
+  difference stops the runner claiming and the sandbox manager starting. Group network
   work repeats the check and trusts a pass for 60 seconds.
 - **Scoped to this deployment.** The tables recognise traffic by the bridge
   interface prefix. They never flush or edit another deployment's rules, so
@@ -2996,7 +2996,7 @@ rules, not the host's.
   removed with the bridge. The relay's own default route stays on its stack
   network, because it joins every group bridge at gateway priority -1.
 - **Watched while groups run.** While any group of this deployment is
-  running, the broker reads the tables back on every five-second sweep, logs
+  running, the sandbox manager reads the tables back on every five-second sweep, logs
   `network_guard_rules_changed` when they differ from what it installed, and
   reinstalls whatever is missing. If that fails twice in a row, it logs
   `shared_chat_network_unguarded` and stops every running group — workspaces
@@ -3083,7 +3083,7 @@ answers, within three seconds.
 top of the built-in ones — an institution's services on public addresses, for
 example. It can only add protection. The resolver stays reachable on port 53
 even inside an added block, because DNS is checked first. A change reaches the
-host when the runner and broker are redeployed with it: every install replaces
+host when the runner and sandbox manager are redeployed with it: every install replaces
 the protected set, and the read-back compares it with the configuration.
 
 #### When something is refused
@@ -3103,7 +3103,7 @@ these:
   same for `AGENT_SANDBOX_MCP_URL` — each group bridge gives a relay a fresh
   address, so only its name carries over.
 
-Preflight — until it passes, the runner claims nothing and the broker does not
+Preflight — until it passes, the runner claims nothing and the sandbox manager does not
 start:
 
 - `the relay network '…' does not exist` — the stack is not up, or
@@ -3119,7 +3119,7 @@ start:
 - `… is missing chain …`, `… holds N rules, expected M`,
   `… is not hooked on …`, `… protects …, not the configured set` or
   `… registers pool …, not …`, each naming the table — the tables changed
-  after they were installed, or a runner and a broker with different settings
+  after they were installed, or a runner and a sandbox manager with different settings
   are overwriting each other. Redeploy both from one `.env`;
 - `this deployment's pool … overlaps …` — another deployment's pool, or
   `… overlaps the host route … on …` — a network the host already has; see
@@ -3159,11 +3159,11 @@ network; the workspace is kept:
   `/etc/hosts` or `/etc/resolv.conf`;
 - `retained chat is attached to network '…', which is not its group bridge`,
   ending `needs the one-time cleanup` — a chat from the previous network; at
-  broker startup it keeps the broker from starting. See the next section;
+  sandbox manager startup it keeps the sandbox manager from starting. See the next section;
 - `a running retained chat is not on exactly its group bridge` — a running
   guest is never rewired underneath it; stop it first.
 
-In the broker's log, `chat_legacy_network_found` names a bridge of this
+In the sandbox manager's log, `chat_legacy_network_found` names a bridge of this
 deployment from the previous per-phase topology; it is reported, never adopted
 or repaired. `chat_group_relay_exceptions_left` means a removed bridge's relay
 entries could not be withdrawn from the tables. They match nothing once the
@@ -3174,8 +3174,8 @@ bridge is gone, and if the helper still cannot run, the next activation fails.
 Only for a host that ran the previous network — per-phase bridges and the
 Squid proxy. A host that never did needs none of this. The new version adopts
 nothing the old one left. It refuses a retained chat still attached to an old
-network, with the message above, and because the broker stops every retained
-chat of its deployment when it starts, one such container keeps the new broker
+network, with the message above, and because the sandbox manager stops every retained
+chat of its deployment when it starts, one such container keeps the new sandbox manager
 from starting at all; old bridges are only logged. The design treats the switch
 as a step for development and test hosts with no users to carry over (§8), so
 these steps discard the old retained chats. **Export any workspace you need
@@ -3471,7 +3471,7 @@ to date.
 
 ## Reusable cloud environments
 
-Migration `0064_environments` adds owner configuration, immutable encrypted
+Migration `0065_environments` adds owner configuration, immutable encrypted
 versions, fixed workspace bindings, isolated test leases and action results.
 Control plane values use `AGENT_SOURCE_CONTROL_ENCRYPTION_KEY` with a separate
 `hybridinference/environment-variable/v1` domain. Back up this key with the
@@ -3490,8 +3490,8 @@ binding information. After the first binding, do not roll back to binaries that
 cannot read it. To roll back, close those execution entrances, drain environment
 tests/preparation, and keep bound workspaces on compatible hosts or fenced off.
 
-Roll out the environment-capable runner and broker together. A claiming replica
-must attest `environment-v1`, and the actual authenticated broker must advertise
+Roll out the environment-capable runner and sandbox manager together. A claiming replica
+must attest `environment-v1`, and the actual authenticated sandbox manager must advertise
 it before receiving configuration. An older host releases jobs that require
 configuration without consuming an attempt; it must never run them without
 variables. Environment tests also obey the deployment pin, compute admission,
@@ -3501,13 +3501,13 @@ without inference, MCP or repository write grants.
 Preparation receipts live in the host credential directory under
 `environment-preparation`, outside container mounts and source archives. They
 contain binding/container/boot identities and masked steps, never variable values.
-Keep this host state across broker restarts. Installation succeeds once per fixed
+Keep this host state across sandbox manager restarts. Installation succeeds once per fixed
 workspace; startup runs once per actual boot. A failed step remains visible in
 the Environment tab and can be retried against the original binding.
 
 Manual-action receipts live next to preparation state under `environment-actions`.
 They reserve the run before launching a command and retain its masked result after
-PTY eviction. Keep this directory across broker restarts; deleting it removes the
+PTY eviction. Keep this directory across sandbox manager restarts; deleting it removes the
 host's replay fence for requests whose control-plane acknowledgement was lost.
 An interrupted launch without a recoverable result is reported as `unknown` and
 is never automatically replayed. Inspect external effects before starting a new

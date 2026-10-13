@@ -241,7 +241,7 @@ const definitions: HostSettingDefinition[] = [
     default: 1800,
     minimum: 60,
     maximum: 86400,
-    scope: 'broker',
+    scope: 'sandbox_manager',
   },
   {
     key: 'terminal_hard_ttl_s',
@@ -252,7 +252,7 @@ const definitions: HostSettingDefinition[] = [
     default: 28800,
     minimum: 60,
     maximum: 86400,
-    scope: 'broker',
+    scope: 'sandbox_manager',
   },
   {
     key: 'terminal_max_sessions',
@@ -263,7 +263,7 @@ const definitions: HostSettingDefinition[] = [
     default: 64,
     minimum: 1,
     maximum: 4096,
-    scope: 'broker',
+    scope: 'sandbox_manager',
   },
 ];
 
@@ -1461,7 +1461,7 @@ describe('global limits', () => {
     expect(await screen.findByText(/runner-a sets its own \(128\)/)).toBeInTheDocument();
   });
 
-  it('saves archive policy atomically and waits for broker rollout', async () => {
+  it('saves archive policy atomically and waits for sandbox manager rollout', async () => {
     updateArchiveSettings.mockResolvedValue({ ...archiveSettings, enabled: true, revision: 2 });
     renderSettings('Sandbox');
 

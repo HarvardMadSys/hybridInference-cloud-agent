@@ -136,7 +136,7 @@ def test_no_project_name_is_written_into_the_scripts() -> None:
     `deploy.sh` reads the same value `sandbox_host.sh` does and exports it, so
     the stray-stack guard and the bring-up cannot disagree about which
     containers belong to this deployment — which is the disagreement that
-    produced two workspace brokers on this host once already.
+    produced two sandbox managers on this host once already.
     """
     bringup = SANDBOX_HOST.read_text()
     deploy = HOST_DEPLOY.read_text()
@@ -179,10 +179,10 @@ _SHARED_HOST_ENV = "\n".join(
         "AGENT_CONTROL_PLANE_TUNNEL_SSH_DESTINATION=user@control",
         "AGENT_CONTROL_PLANE_TUNNEL_SSH_KEY=/dev/null",
         "AGENT_CONTROL_PLANE_TUNNEL_SSH_KNOWN_HOSTS=/etc/hosts",
-        "AGENT_BROKER_REVERSE_BIND=172.24.0.1",
-        "AGENT_BROKER_REVERSE_PORT=18092",
-        "AGENT_WORKSPACE_BROKER_ADVERTISE_URL=http://172.24.0.1:18092",
-        "AGENT_WORKSPACE_BROKER_TOKEN=test-broker-token",
+        "AGENT_SANDBOX_MANAGER_REVERSE_BIND=172.24.0.1",
+        "AGENT_SANDBOX_MANAGER_REVERSE_PORT=18092",
+        "AGENT_SANDBOX_MANAGER_ADVERTISE_URL=http://172.24.0.1:18092",
+        "AGENT_SANDBOX_MANAGER_TOKEN=test-sandbox-manager-token",
         "AGENT_EGRESS_CHAT_NETWORK_POOL=10.241.0.0/16",
         "AGENT_EGRESS_DNS_SERVER=1.1.1.1",
         "",
@@ -360,10 +360,10 @@ def test_the_stray_matcher_still_recognises_this_stack(tmp_path: Path) -> None:
     listing = "\n".join(
         [
             "ours ours-runner-1",
-            "ours ours-workspace-broker-1",
+            "ours ours-sandbox-manager-1",
             "sibling sibling-runner-1",
             "agenthost agenthost-agent-gateway-tunnel-1",
-            "legacy legacy-agent-workspace-broker-1",
+            "legacy legacy-agent-sandbox-manager-1",
             "unrelated some-postgres",
         ]
     )
@@ -377,7 +377,7 @@ def test_the_stray_matcher_still_recognises_this_stack(tmp_path: Path) -> None:
 
     reported = result.stdout
     assert "agenthost-agent-gateway-tunnel-1" in reported
-    assert "legacy-agent-workspace-broker-1" in reported, "the pre-rename shape must still match"
+    assert "legacy-agent-sandbox-manager-1" in reported, "the pre-rename shape must still match"
     assert "ours-runner-1" not in reported
     assert "sibling-runner-1" not in reported
     assert "some-postgres" not in reported

@@ -1,4 +1,4 @@
-"""Exercise quiet broker streams over real HTTP, including their watchdogs."""
+"""Exercise quiet sandbox manager streams over real HTTP, including their watchdogs."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ from cloud_agent_host.session_supervisor_client import (
 
 
 @pytest.fixture
-def quiet_broker():
+def quiet_sandbox_manager():
     """Emit one event, then stay silent until the test or runner releases it."""
     release = threading.Event()
     interrupted = threading.Event()
@@ -72,7 +72,7 @@ def quiet_broker():
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     client = SessionSupervisorClient(
-        f"http://127.0.0.1:{server.server_port}", "broker-token", timeout=0.1
+        f"http://127.0.0.1:{server.server_port}", "sandbox-manager-token", timeout=0.1
     )
     try:
         yield SimpleNamespace(
@@ -102,9 +102,9 @@ def _run_turn(client, *, heart=None, control=None, timeout_s=5):
     )
 
 
-def test_quiet_turn_outlives_lifecycle_timeout(quiet_broker):
+def test_quiet_turn_outlives_lifecycle_timeout(quiet_sandbox_manager):
     """A model can think longer than the control API timeout and still finish."""
-    timer = threading.Timer(0.5, quiet_broker.release.set)
+    timer = threading.Timer(0.5, quiet_sandbox_manager.release.set)
     events = []
 
     def on_event(event):
@@ -114,7 +114,9 @@ def test_quiet_turn_outlives_lifecycle_timeout(quiet_broker):
 
     control = SimpleNamespace(append_event=on_event)
     try:
-        code, _tail, errors, result, _reported = _run_turn(quiet_broker.client, control=control)
+        code, _tail, errors, result, _reported = _run_turn(
+            quiet_sandbox_manager.client, control=control
+        )
     finally:
         timer.cancel()
         timer.join(timeout=5)
@@ -126,17 +128,17 @@ def test_quiet_turn_outlives_lifecycle_timeout(quiet_broker):
         ("lifecycle", {"phase": "init"}),
     ]
     assert result["status"] == "completed"
-    assert not quiet_broker.interrupted.is_set()
+    assert not quiet_sandbox_manager.interrupted.is_set()
 
     # A stream-specific allowance must not leak to ordinary control requests.
-    quiet_broker.release.clear()
+    quiet_sandbox_manager.release.clear()
     with pytest.raises(SessionSupervisorError) as caught:
-        quiet_broker.client.list()
+        quiet_sandbox_manager.client.list()
     assert isinstance(caught.value.__cause__, httpx.ReadTimeout)
 
 
 @pytest.mark.parametrize("reason", ["deadline", "cancel", "lease_lost"])
-def test_quiet_turn_remains_interruptible(quiet_broker, monkeypatch, reason):
+def test_quiet_turn_remains_interruptible(quiet_sandbox_manager, monkeypatch, reason):
     """Waiting for a quiet model must preserve the runner's active controls."""
     monkeypatch.setattr(runner, "_POLL_INTERVAL_S", 0.01)
     heart = SimpleNamespace(cancel_requested=False, lease_lost=False)
@@ -156,12 +158,12 @@ def test_quiet_turn_remains_interruptible(quiet_broker, monkeypatch, reason):
     }
     if reason == "lease_lost":
         with pytest.raises(LeaseLost):
-            _run_turn(quiet_broker.client, **kwargs)
+            _run_turn(quiet_sandbox_manager.client, **kwargs)
     else:
-        code, _tail, _errors, result, _reported = _run_turn(quiet_broker.client, **kwargs)
+        code, _tail, _errors, result, _reported = _run_turn(quiet_sandbox_manager.client, **kwargs)
         assert code == (124 if reason == "deadline" else 130)
         assert result["resources"]["process_observation_complete"] is True
     # The client can interrupt after consuming init before the server resumes
     # past its flush and records the send. Synchronize with that server thread.
-    assert quiet_broker.event_sent.wait(1)
-    assert quiet_broker.interrupted.is_set()
+    assert quiet_sandbox_manager.event_sent.wait(1)
+    assert quiet_sandbox_manager.interrupted.is_set()

@@ -2,8 +2,8 @@
 
 from alembic import op
 
-revision = "0064_environments"
-down_revision = "0063_user_profiles"
+revision = "0065_environments"
+down_revision = "0064_mcp_remembered_approvals"
 branch_labels = None
 depends_on = None
 

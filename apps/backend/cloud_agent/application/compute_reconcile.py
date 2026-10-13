@@ -16,7 +16,6 @@ from pydantic import SecretStr
 from cloud_agent.application.compute_rotation import ComputeRotation
 from cloud_agent.application.compute_setup import HostRelease, load_control_plane_host_release
 from cloud_agent.application.host_commands import HostCommands
-from cloud_agent.broker_routing import broker_for_host
 from cloud_agent.compute_config import current_observation_seconds, current_registration_url
 from cloud_agent.compute_secrets import ComputeSecretError
 from cloud_agent.domain.compute import ComputeRefusal, fingerprint, provider_resource_absent
@@ -38,8 +37,9 @@ from cloud_agent.ports.external.host_bootstrap import (
     BootstrapResult,
     DeploymentProfile,
 )
+from cloud_agent.sandbox_manager_client import SandboxManagerError
+from cloud_agent.sandbox_manager_routing import sandbox_manager_for_host
 from cloud_agent.schemas_compute import ExtendComputeRequest, RenewalPolicy
-from cloud_agent.workspace_broker_client import WorkspaceBrokerError
 from cloud_agent_shared.shared_protocol import shared_deployment_capability
 
 if TYPE_CHECKING:
@@ -501,19 +501,19 @@ class ComputeReconciler:
         last = _moment(host.get("last_heartbeat_at"))
         if last is None or _now() - last > timedelta(seconds=90):
             raise ProviderError("host_stale", "The Host heartbeat is stale", retryable=True)
-        broker = broker_for_host(host)
-        if broker is None:
+        sandbox_manager = sandbox_manager_for_host(host)
+        if sandbox_manager is None:
             raise ProviderError(
-                "broker_unreachable",
-                "The control plane cannot reach the Host broker",
+                "sandbox_manager_unreachable",
+                "The control plane cannot reach the Host sandbox manager",
                 retryable=True,
             )
         try:
-            await broker.health()
-        except WorkspaceBrokerError:
+            await sandbox_manager.health()
+        except SandboxManagerError:
             raise ProviderError(
-                "broker_unreachable",
-                "The control plane cannot reach the Host broker",
+                "sandbox_manager_unreachable",
+                "The control plane cannot reach the Host sandbox manager",
                 retryable=True,
             ) from None
         if not await self.repository.clear_bootstrap_hold(
@@ -798,19 +798,19 @@ class ComputeReconciler:
         last = None if host is None else _moment(host.get("last_heartbeat_at"))
         if host is None or last is None or _now() - last > timedelta(seconds=90):
             raise ProviderError("host_stale", "The Host heartbeat is stale", retryable=True)
-        broker = broker_for_host(host)
-        if broker is None:
+        sandbox_manager = sandbox_manager_for_host(host)
+        if sandbox_manager is None:
             raise ProviderError(
-                "broker_unreachable",
-                "The control plane cannot reach the Host broker",
+                "sandbox_manager_unreachable",
+                "The control plane cannot reach the Host sandbox manager",
                 retryable=True,
             )
         try:
-            await broker.health()
-        except WorkspaceBrokerError:
+            await sandbox_manager.health()
+        except SandboxManagerError:
             raise ProviderError(
-                "broker_unreachable",
-                "The control plane cannot reach the Host broker",
+                "sandbox_manager_unreachable",
+                "The control plane cannot reach the Host sandbox manager",
                 retryable=True,
             ) from None
 
@@ -1287,15 +1287,16 @@ class ComputeReconciler:
             )
         profile = DeploymentProfile.model_validate(allocation["deployment_profile"])
         for host in allocation.get("hosts", []):
-            broker = broker_for_host(host)
-            if broker is None:
+            sandbox_manager = sandbox_manager_for_host(host)
+            if sandbox_manager is None:
                 continue  # A trusted full-node scan below must prove this host empty.
             try:
-                if await broker.list_sandboxes():
+                if await sandbox_manager.list_sandboxes():
                     raise ProviderError(
-                        "retained_groups_present", "The broker still reports retained sandbox state"
+                        "retained_groups_present",
+                        "The sandbox manager still reports retained sandbox state",
                     )
-            except WorkspaceBrokerError:
+            except SandboxManagerError:
                 continue  # Never infer emptiness; require the full-node scan below.
         for node in allocation["nodes"]:
             proof = await self.bootstrap.inventory(

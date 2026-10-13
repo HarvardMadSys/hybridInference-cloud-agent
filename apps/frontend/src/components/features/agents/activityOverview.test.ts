@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { buildActivityOverview, hasActivityOverview } from './activityOverview';
+import { EMPTY_TOOL_OUTPUT } from './adapt';
 import type { AgentEvent } from './types';
 
 type ToolUseEvent = Extract<AgentEvent, { kind: 'tool_use' }>;
@@ -377,7 +378,7 @@ describe('subagent overview', () => {
   });
 
   it.each(['failed', 'cancelled', 'unknown'] as const)(
-    'ignores %s subagent updates and launches',
+    'ignores %s subagent updates',
     (resultState) => {
       const overview = buildActivityOverview([
         tool('spawn_agent', {
@@ -392,19 +393,159 @@ describe('subagent overview', () => {
             output: [JSON.stringify({ status: { a: 'shutdown' } })],
           },
         ),
-        tool(
-          'spawn_agent',
-          { prompt: 'Failed launch' },
-          {
-            resultState,
-            output: [JSON.stringify({ agent_id: 'b' })],
-          },
-        ),
       ]);
       expect(overview.subagents).toHaveLength(1);
       expect(overview.subagents[0].activity.states).toEqual([{ id: 'a', status: 'running' }]);
     },
   );
+
+  it.each(['failed', 'cancelled'] as const)(
+    'lists a %s launch on its own without the identity its output claims',
+    (resultState) => {
+      const overview = buildActivityOverview([
+        tool('spawn_agent', {
+          receiverThreadIds: ['a'],
+          agentsStates: { a: { status: 'running' } },
+        }),
+        tool(
+          'spawn_agent',
+          { prompt: 'Failed launch', agentsStates: { b: { status: 'running' } } },
+          {
+            sourceEventId: 2,
+            resultState,
+            output: [JSON.stringify({ agent_id: 'b' })],
+          },
+        ),
+      ]);
+      expect(overview.subagents).toHaveLength(2);
+      expect(overview.subagents[0].activity.states).toEqual([{ id: 'a', status: 'running' }]);
+      expect(overview.subagents[1]).toMatchObject({
+        activity: { prompt: 'Failed launch', targets: [], states: [] },
+        reply: { state: resultState },
+      });
+    },
+  );
+
+  it('ignores a launch whose records disagree', () => {
+    const overview = buildActivityOverview([
+      tool('Agent', { prompt: 'Review' }, { resultState: 'unknown', output: ['Reviewed'] }),
+    ]);
+    expect(overview.subagents).toEqual([]);
+  });
+
+  it('reads a delegated answer as the text of the content blocks its call returned', () => {
+    const overview = buildActivityOverview([
+      tool(
+        'Agent',
+        { description: 'Inspect the workspace', subagent_type: 'Explore', prompt: 'Inspect.' },
+        {
+          resultState: 'received',
+          output: [
+            JSON.stringify([
+              { type: 'text', text: '## Findings' },
+              { type: 'image', source: {} },
+              { type: 'text', text: '- inspected' },
+            ]),
+          ],
+          structuredOutput: { status: 'completed', agentId: 'aa9397b543b5f2ff7' },
+        },
+      ),
+    ]);
+    expect(overview.subagents).toHaveLength(1);
+    expect(overview.subagents[0].reply).toEqual({
+      state: 'received',
+      status: 'completed',
+      text: '## Findings\n\n- inspected',
+    });
+    expect(overview.subagents[0].activity).toMatchObject({ targets: [], states: [] });
+  });
+
+  it('keeps a plain result verbatim and claims no status the runtime did not record', () => {
+    const overview = buildActivityOverview([
+      tool(
+        'task',
+        { description: 'Review', prompt: 'Review the change.' },
+        { resultState: 'received', output: ['First line', '[not, blocks]'] },
+      ),
+    ]);
+    expect(overview.subagents[0].reply).toEqual({
+      state: 'received',
+      text: 'First line\n[not, blocks]',
+    });
+  });
+
+  it('does not present a background launch notice as the reply', () => {
+    const notice = JSON.stringify([{ type: 'text', text: 'Async agent launched successfully.' }]);
+    const overview = buildActivityOverview([
+      tool(
+        'Agent',
+        { description: 'Requested', prompt: 'Review.', run_in_background: true },
+        { sourceEventId: 1, resultState: 'received', output: [notice] },
+      ),
+      tool(
+        'Agent',
+        { description: 'Reported', prompt: 'Review.' },
+        {
+          sourceEventId: 2,
+          resultState: 'received',
+          output: [notice],
+          structuredOutput: { isAsync: true, status: 'async_launched' },
+        },
+      ),
+    ]);
+    expect(overview.subagents.map((row) => row.reply)).toEqual([
+      { state: 'background' },
+      { state: 'background', status: 'async_launched' },
+    ]);
+  });
+
+  it('says when a reply is still pending or was never recorded', () => {
+    const overview = buildActivityOverview([
+      tool('Agent', { prompt: 'Live' }, { sourceEventId: 1, resultState: 'waiting' }),
+      tool('Agent', { prompt: 'Ended' }, { sourceEventId: 2, resultState: 'not_recorded' }),
+      tool('Agent', { prompt: 'Unpaired' }, { sourceEventId: 3 }),
+    ]);
+    expect(overview.subagents.map((row) => row.reply)).toEqual([
+      { state: 'waiting' },
+      { state: 'not_recorded' },
+      { state: 'not_recorded' },
+    ]);
+  });
+
+  it('keeps the error a failed delegation returned and reads no text from an empty result', () => {
+    const overview = buildActivityOverview([
+      tool(
+        'Agent',
+        { prompt: 'Review' },
+        {
+          sourceEventId: 1,
+          resultState: 'failed',
+          outputIsError: true,
+          output: ['Agent type not found'],
+        },
+      ),
+      tool(
+        'Agent',
+        { prompt: 'Quiet' },
+        { sourceEventId: 2, resultState: 'received', output: [EMPTY_TOOL_OUTPUT] },
+      ),
+      tool('Agent', { prompt: 'Blank' }, { sourceEventId: 3, ...result([]) }),
+    ]);
+    expect(overview.subagents.map((row) => row.reply)).toEqual([
+      { state: 'failed', text: 'Agent type not found' },
+      { state: 'received' },
+      { state: 'received' },
+    ]);
+  });
+
+  it('reads no reply from a launch whose result only acknowledges it', () => {
+    const overview = buildActivityOverview([
+      tool('spawn_agent', { prompt: 'Review' }, result({ agent_id: 'a' })),
+      tool('wait', { ids: ['a'] }, result({ status: { a: { completed: 'No issues found.' } } })),
+    ]);
+    expect(overview.subagents).toHaveLength(1);
+    expect(overview.subagents[0].reply).toBeUndefined();
+  });
 
   it('keeps unidentified launches separate rather than merging equal descriptions', () => {
     const overview = buildActivityOverview([

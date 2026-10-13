@@ -505,7 +505,7 @@ describe('agents api', () => {
     );
   });
 
-  it('can include the broker session limit without changing the legacy list result', async () => {
+  it('can include the sandbox manager session limit without changing the legacy list result', async () => {
     fetchWithAuth.mockResolvedValueOnce(jsonResponse({ terminals: [], max_sessions: 2 }));
     await expect(listAgentTerminals('job/one', { includeLimits: true })).resolves.toEqual({
       terminals: [],

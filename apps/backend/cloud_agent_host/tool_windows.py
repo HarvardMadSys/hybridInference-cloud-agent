@@ -28,7 +28,7 @@ number of calls it shared with, and never in the ``exclusive`` ones — so a
 reader that only knows about exclusive numbers shows nothing rather than
 showing an overstatement.
 
-Timestamps are taken in the workspace broker's turn loop, where the harness line was read.
+Timestamps are taken in the sandbox manager's turn loop, where the harness line was read.
 That is a different clock from the one the turn footer has shown until now,
 which is the control plane's insert time for the event and therefore carries
 the upload queue inside every duration it displays.
@@ -123,7 +123,7 @@ class ToolWindow:
 class ToolMark:
     """One boundary the sandbox recorded for a tool call.
 
-    ``host_mono`` places the mark on the broker's monotonic axis, where the
+    ``host_mono`` places the mark on the sandbox manager's monotonic axis, where the
     message-level windows live. ``guest_mono_ns`` is the guest's own reading
     and is present only for a mark the trusted guest observer journaled; a
     legacy mark read back from the agent-writable file carries a converted
@@ -164,7 +164,7 @@ class MarkOutcome:
     #: How far the message-level bracket lagged the sandbox's own marks, in
     #: milliseconds: the ``tool_use`` parse time minus the pre mark, and the
     #: ``tool_result`` parse time minus the post mark. Positive means the
-    #: event reached the broker after the boundary it announces, which is the
+    #: event reached the sandbox manager after the boundary it announces, which is the
     #: ordinary case for the opening: the harness runs the hook the moment it
     #: has emitted the message, while the message is still in the pipe.
     open_lag_ms: int | None = None
@@ -173,7 +173,7 @@ class MarkOutcome:
     exact_duration_ms: int | None = None
 
     def describe(self) -> str:
-        """The compact form the broker logs, one entry per call."""
+        """The compact form the sandbox manager logs, one entry per call."""
 
         def lag(value: int | None) -> str:
             return "-" if value is None else f"{value:+d}"
@@ -228,7 +228,7 @@ def _text(value: Any) -> str:
 class ToolWindowTracker:
     """Turns one attempt's driver event stream into one window per call.
 
-    Fed from the workspace broker's turn loop, so it sees exactly the events
+    Fed from the sandbox manager's turn loop, so it sees exactly the events
     the runner will later read, in the order they were parsed. It holds no
     payloads: a window is four scalars, and the arguments and results the call
     carried are already stored once.
@@ -309,7 +309,7 @@ class ToolWindowTracker:
         cannot step. What is checked here is the pairing — the mark names a
         call this turn issued, exactly one pre and one post exist for it, and
         the pre comes first. The message-level window is not a bound on those
-        marks and is not used as one: the broker timestamps an event when it
+        marks and is not used as one: the sandbox manager timestamps an event when it
         reads the line, and a short call can run and finish while the line
         announcing it is still in the pipe. How far the bracket lagged is
         reported per call for diagnosis instead.

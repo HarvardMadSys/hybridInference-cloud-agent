@@ -292,7 +292,7 @@ bash /opt/cloud-agent/release/recipe/deploy/control-plane/deploy.sh --phase aban
 
 This leaves previously serving listeners alone. Image pulls and host Kata checks
 precede runner drain. Migrations, identity-namespace verification, exact-commit
-readiness, reverse-broker probes, and deferred host readiness publication keep
+readiness, reverse-sandbox-manager probes, and deferred host readiness publication keep
 their deployment ordering. A failed readiness check prevents activation of the
 replacement control-plane stack.
 

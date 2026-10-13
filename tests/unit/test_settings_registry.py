@@ -235,7 +235,7 @@ def test_complete_required_setup_and_unused_optional_features_do_not_prompt():
                 "session_redirect_uri": "https://agents.example/callback",
                 "web_base_url": "https://agents.example",
                 "control_signing_secret": "test-control-key-longer-than-thirty-two-bytes",
-                "workspace_broker_token": "test-broker-key",
+                "sandbox_manager_token": "test-sandbox-manager-key",
                 "source_control_encryption_key": "test-user-credential-key",
             }
         )

@@ -5,7 +5,7 @@
 # it at a machine with no gateway does not fail — it *starts one*, along with
 # whatever else the base file brings, on a box that was only ever meant to run
 # jobs. This file contains exactly what a remote runner host needs: the
-# runners, their workspace broker, three purpose-scoped tunnels, and the
+# runners, their sandbox manager, three purpose-scoped tunnels, and the
 # network the sandbox groups discover their two relays on.
 #
 #   sandbox ──→ gateway-tunnel ──ssh──→ inference gateway
@@ -14,7 +14,7 @@
 #   runner  ──→ control-plane-tunnel ─ssh──→ control-plane API
 #
 # Every sandbox group gets its own routable bridge, created outside Compose by
-# the runner and the broker. Before anything joins one, they install this
+# the runner and the sandbox manager. Before anything joins one, they install this
 # deployment's host nftables table, which admits public IPv4 on TCP 80/443,
 # the named resolver, and the two relays' service ports, and refuses the host,
 # private and special-purpose addresses, other groups, and IPv6. There is no
@@ -140,9 +140,9 @@ services:
       # The way back, on this same connection. Required by this standalone
       # topology even when both stacks happen to run on one physical machine:
       # their Compose networks remain separate, so the control plane cannot
-      # resolve or dial `workspace-broker` directly.
+      # resolve or dial `sandbox-manager` directly.
       #
-      # Without it every call that touches the broker (terminal suspend, file
+      # Without it every call that touches the sandbox manager (terminal suspend, file
       # listing, git status) reaches the control plane, which then tries to
       # resolve a compose service name that means nothing on its machine, and
       # answers 503. Jobs die at their first such call, every attempt, until
@@ -150,12 +150,12 @@ services:
       # on this deployment did, three times.
       #
       # Bind the far host's docker bridge gateway, not 0.0.0.0: the audience is
-      # the containers on that bridge, and a broker published to the LAN is one
+      # the containers on that bridge, and a sandbox manager published to the LAN is one
       # shared token away from anyone on it.
-      TUNNEL_REVERSE_BIND: ${AGENT_BROKER_REVERSE_BIND:-}
-      TUNNEL_REVERSE_PORT: ${AGENT_BROKER_REVERSE_PORT:-}
-      TUNNEL_REVERSE_TARGET_HOST: ${AGENT_BROKER_REVERSE_TARGET_HOST:-workspace-broker}
-      TUNNEL_REVERSE_TARGET_PORT: ${AGENT_BROKER_REVERSE_TARGET_PORT:-8092}
+      TUNNEL_REVERSE_BIND: ${AGENT_SANDBOX_MANAGER_REVERSE_BIND:-${AGENT_BROKER_REVERSE_BIND:-}}
+      TUNNEL_REVERSE_PORT: ${AGENT_SANDBOX_MANAGER_REVERSE_PORT:-${AGENT_BROKER_REVERSE_PORT:-}}
+      TUNNEL_REVERSE_TARGET_HOST: ${AGENT_SANDBOX_MANAGER_REVERSE_TARGET_HOST:-${AGENT_BROKER_REVERSE_TARGET_HOST:-sandbox-manager}}
+      TUNNEL_REVERSE_TARGET_PORT: ${AGENT_SANDBOX_MANAGER_REVERSE_TARGET_PORT:-${AGENT_BROKER_REVERSE_TARGET_PORT:-8092}}
     volumes:
       # Its own key again. One key that opens both this and the MCP tunnel
       # would let anything holding it reach 8000 from the sandbox's side. It
@@ -168,7 +168,7 @@ services:
         aliases:
           - ${AGENT_CONTROL_PLANE_HOSTNAME:-agent-control-plane}
 
-  workspace-broker:
+  sandbox-manager:
     build:
       context: ../..
       dockerfile: deploy/host/Dockerfile.agent-runner
@@ -178,7 +178,7 @@ services:
     # Compose replaces or removes it. Keep a longer fallback than Docker's
     # default for direct Compose operations, but do not use it as the archive
     # lifecycle bound: multiple retained groups are finalized serially.
-    stop_grace_period: ${AGENT_BROKER_STOP_GRACE:-30s}
+    stop_grace_period: ${AGENT_SANDBOX_MANAGER_STOP_GRACE:-${AGENT_BROKER_STOP_GRACE:-30s}}
     environment:
       # Both host processes read these, and neither was reachable from this
       # file — setting them in the host's .env was a no-op. `json` renders the
@@ -189,20 +189,20 @@ services:
       AGENT_OPERATION_PROFILING_RUN: ${AGENT_OPERATION_PROFILING_RUN:-}
       AGENT_OPERATION_PROFILING_SINK: ${AGENT_OPERATION_PROFILING_SINK:-}
       # `admin` lets the Admin page's Start and Stop reach this producer
-      # without a redeploy. Unset keeps the legacy semantics. The broker needs
+      # without a redeploy. Unset keeps the legacy semantics. The sandbox manager needs
       # it as well as the runner: it is a separate container, and it will not
       # honour a selection the runner hands it unless its own mode says a
       # control plane may decide what to collect.
       AGENT_OPERATION_PROFILING_MODE: ${AGENT_OPERATION_PROFILING_MODE:-}
-      # A broker-only secret. Host enrollment/claim uses its persisted host
+      # A sandbox-manager-only secret. Host enrollment/claim uses its persisted host
       # credential; neither credential is accepted at the other's surface.
-      AGENT_WORKSPACE_BROKER_TOKEN: ${AGENT_WORKSPACE_BROKER_TOKEN:?a secret for this host's workspace broker}
+      AGENT_SANDBOX_MANAGER_TOKEN: ${AGENT_SANDBOX_MANAGER_TOKEN:?a secret for this host's sandbox manager}
       AGENT_SHARED_RESIDENT_CAPACITY: ${AGENT_SHARED_RESIDENT_CAPACITY:-8}
       # Daemon-side path, observed through `docker info`; it is deliberately
       # not mounted into this container. Leave the default. A durable disk is
       # bind-mounted onto /var/lib/docker, not selected as a custom data-root.
       AGENT_RETAINED_DOCKER_DATA_ROOT: ${AGENT_RETAINED_DOCKER_DATA_ROOT:-/var/lib/docker}
-      # Broker-only archival receipts and temporary exports survive service
+      # Sandbox Manager-only archival receipts and temporary exports survive service
       # replacement. No sandbox or runner mounts this directory.
       AGENT_SANDBOX_ARCHIVE_STATE_DIR: /var/lib/hybridinference/broker-archives
       # Product inactivity timeout: after the latest settled turn (and after
@@ -210,13 +210,13 @@ services:
       # This is distinct from the per-turn AGENT_TIMEOUT_S watchdog.
       AGENT_CHAT_IDLE_TIMEOUT_S: ${AGENT_CHAT_IDLE_TIMEOUT_S:-1800}
       # Fork can wake and native-resume a source without a runner turn.  The
-      # broker therefore needs the same sandbox-reachable relay addresses the
+      # sandbox manager therefore needs the same sandbox-reachable relay addresses the
       # runner hands to ordinary resident processes.
       AGENT_GATEWAY_URL: http://${AGENT_GATEWAY_HOSTNAME:-agent-gateway}:${AGENT_TUNNEL_LISTEN_PORT:-8080}
       AGENT_SANDBOX_MCP_URL: http://${AGENT_MCP_HOSTNAME:-agent-mcp}:${AGENT_MCP_TUNNEL_LISTEN_PORT:-8000}
       AGENT_SANDBOX_BACKEND: ${AGENT_SANDBOX_BACKEND:-kata}
       AGENT_SANDBOX_IMAGE: ${AGENT_SANDBOX_IMAGE:?name the sandbox image this deployment runs}
-      # The broker wakes groups on its own (Fork, files, terminals), so it
+      # The sandbox manager wakes groups on its own (Fork, files, terminals), so it
       # builds and guards group bridges exactly as the runner does, from the
       # same four values. See the runner below for what each one decides.
       AGENT_RELAY_NETWORK: ${AGENT_RELAY_NETWORK:-${COMPOSE_PROJECT:?the unique host Compose project}-agent-relays}
@@ -226,17 +226,19 @@ services:
       # Immutable owner label for daemon-wide retained-container discovery, and
       # the name of this deployment's host rules. Sibling staging/production
       # Compose projects must never adopt each other's chat processes during
-      # broker startup reconciliation, nor rewrite each other's tables.
+      # sandbox manager startup reconciliation, nor rewrite each other's tables.
       AGENT_SANDBOX_NAMESPACE: ${COMPOSE_PROJECT:?the unique host Compose project}
     command:
       - python
       - -m
-      - cloud_agent_host.workspace_broker
+      - cloud_agent_host.sandbox_manager
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ${AGENT_HOST_STATE_ROOT:-/var/lib/hybridinference/agent-host}/sandbox-archives:/var/lib/hybridinference/broker-archives
     networks:
-      - internal
+      internal:
+        # Keep old runner images able to reach the renamed service during upgrades.
+        aliases: [workspace-broker]
 
   runner:
     # Fallback grace period for direct, out-of-band Compose operations. The
@@ -296,16 +298,16 @@ services:
       # enrollment tokens are single-use.
       AGENT_HOST_CREDENTIAL_FILE: ${AGENT_HOST_STATE_ROOT:-/var/lib/hybridinference/agent-host}/credential
       # The host script writes this exact commit only after every runner,
-      # broker, tunnel and Docker storage check succeeds. The control-plane
+      # sandbox manager, tunnel and Docker storage check succeeds. The control-plane
       # deploy waits for the matching heartbeat before replacing its service.
       AGENT_DEPLOYMENT_SHA: ${AGENT_DEPLOYMENT_SHA:-}
       AGENT_SHARED_LIVE_READY_FILE: /run/cloud-agent/shared-live-ready
       # Turns at once until an admin sets a number on the Servers page.
       # At least two: shared native forks run a sibling beside its parent.
       AGENT_HOST_SLOTS: ${AGENT_HOST_SLOTS:-3}
-      # How this runner reaches its own broker: a service name on this stack's
+      # How this runner reaches its own sandbox manager: a service name on this stack's
       # network, which is exactly right here and meaningless anywhere else.
-      AGENT_WORKSPACE_BROKER_URL: http://workspace-broker:8092
+      AGENT_SANDBOX_MANAGER_URL: http://sandbox-manager:8092
       # How the *control plane* reaches it, when that is somewhere else. This
       # is the address the runner reports at enrolment and the one stored on
       # the host row, so it has to be resolvable from the control plane's
@@ -314,13 +316,13 @@ services:
       #
       # Required by the supported standalone topology. Even on the same
       # physical machine, the control-plane stack does not share this Compose
-      # network and cannot resolve `workspace-broker`; the reverse forward is
+      # network and cannot resolve `sandbox-manager`; the reverse forward is
       # its authenticated route back. A reported address with no tunnel behind
-      # it is a 503 on every broker call.
-      AGENT_WORKSPACE_BROKER_ADVERTISE_URL: ${AGENT_WORKSPACE_BROKER_ADVERTISE_URL:-}
-      # Must match the broker service above. It is independent from the
+      # it is a 503 on every sandbox manager call.
+      AGENT_SANDBOX_MANAGER_ADVERTISE_URL: ${AGENT_SANDBOX_MANAGER_ADVERTISE_URL:-${AGENT_WORKSPACE_BROKER_ADVERTISE_URL:-}}
+      # Must match the sandbox manager service above. It is independent from the
       # enrollment-issued host credential used for heartbeat and claim.
-      AGENT_WORKSPACE_BROKER_TOKEN: ${AGENT_WORKSPACE_BROKER_TOKEN:?a secret for this host's workspace broker}
+      AGENT_SANDBOX_MANAGER_TOKEN: ${AGENT_SANDBOX_MANAGER_TOKEN:?a secret for this host's sandbox manager}
 
       # Every registered runtime has an exact pinned native-resume adapter;
       # the host advertises capability only after conformance.

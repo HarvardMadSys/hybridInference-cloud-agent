@@ -3,7 +3,7 @@
 The control plane has had `/v1/agent/host/register` and `/heartbeat` since
 phase G; nothing on the host side called either. Everything hanging off a host
 row was therefore inert — capacity unreported, `drain` unread, `offline`
-meaningless, and the `broker_url` from which files and terminals are served
+meaningless, and the `sandbox_manager_url` from which files and terminals are served
 never supplied.
 
 What is checked here is the part that decides whether work is taken, because
@@ -683,7 +683,7 @@ def test_the_beat_hands_on_the_settings_and_survives_a_failing_handler(monkeypat
 
     def on_settings(settings: dict) -> None:
         seen.append(settings)
-        raise RuntimeError("broker exploded")
+        raise RuntimeError("sandbox manager exploded")
 
     beat = enrollment.HostHeartbeat(
         base_url="http://cp",

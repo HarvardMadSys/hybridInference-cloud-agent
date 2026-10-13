@@ -308,9 +308,9 @@ export default function SandboxArchiveSettingsCard({
         Sandbox archives
       </h2>
       <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-        Save the initial workspace and each broker-managed clean-stop state. An AWS access key is
-        stored encrypted for the workspace broker. Leave it blank to use each broker&apos;s workload
-        identity.
+        Save the initial workspace and each sandbox-manager-managed clean-stop state. An AWS access
+        key is stored encrypted for the sandbox manager. Leave it blank to use each sandbox
+        manager&apos;s workload identity.
       </p>
       <p className="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
         {rolloutText}
@@ -376,9 +376,9 @@ export default function SandboxArchiveSettingsCard({
                   id="archive-enabled-description"
                   className="mt-0.5 block text-xs text-gray-500 dark:text-gray-400"
                 >
-                  With an access key, uploads use that key. Without one, brokers use their workload
-                  identity and need the bucket owner and KMS key. Bucket versioning is required
-                  either way.
+                  With an access key, uploads use that key. Without one, sandbox managers use their
+                  workload identity and need the bucket owner and KMS key. Bucket versioning is
+                  required either way.
                 </span>
               </span>
             </label>

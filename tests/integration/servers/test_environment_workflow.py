@@ -23,7 +23,9 @@ async def test_environment_create_test_bind_rotate_reuse_and_archive_via_http(ap
     monkeypatch.setattr(
         "cloud_agent.environment_source.resolve_test_commit", AsyncMock(return_value="a" * 40)
     )
-    monkeypatch.setattr("cloud_agent.broker_routing.broker_for_job", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        "cloud_agent.sandbox_manager_routing.sandbox_manager_for_job", AsyncMock(return_value=None)
+    )
     http = api.client
     response = await http.patch(
         "/v1/agent/environment-globals",

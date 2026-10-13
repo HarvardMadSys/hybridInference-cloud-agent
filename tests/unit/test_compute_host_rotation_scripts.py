@@ -98,9 +98,10 @@ class Machine:
         self.images: list[str] = []
         self.volumes: list[str] = []
         self.runner: list[str] = []
-        self.broker: list[str] = []
-        # Sandboxes the broker stops itself while it shuts down.
-        self.broker_stops: list[str] = []
+        self.sandbox_manager: list[str] = []
+        self.sandbox_manager_service = "sandbox-manager"
+        # Sandboxes the sandbox manager stops itself while it shuts down.
+        self.sandbox_manager_stops: list[str] = []
         self.active = {"docker": True, "containerd": True}
         self.rsync_codes: list[int] = []
         self.environments: list[dict[str, str]] = []
@@ -144,8 +145,12 @@ class Machine:
                 return subprocess.CompletedProcess(args, 1, "", "daemon stopped")
             if "label=com.docker.compose.service=runner" in args:
                 out = "\n".join(self.runner)
-            elif "label=com.docker.compose.service=workspace-broker" in args:
-                out = "\n".join(self.broker)
+            elif any(
+                f"label=com.docker.compose.service={name}" in args
+                for name in ("sandbox-manager", "workspace-broker")
+            ):
+                if f"label=com.docker.compose.service={self.sandbox_manager_service}" in args:
+                    out = "\n".join(self.sandbox_manager)
             else:
                 out = "\n".join(self.containers)
         elif args[:3] == ["docker", "image", "ls"]:
@@ -154,10 +159,10 @@ class Machine:
             out = "\n".join(self.volumes)
         elif args[:2] == ["docker", "stop"]:
             stopped = set(args[2:])
-            if stopped & set(self.broker):
-                stopped |= set(self.broker_stops)
+            if stopped & set(self.sandbox_manager):
+                stopped |= set(self.sandbox_manager_stops)
             self.runner = [c for c in self.runner if c not in stopped]
-            self.broker = [c for c in self.broker if c not in stopped]
+            self.sandbox_manager = [c for c in self.sandbox_manager if c not in stopped]
             self.containers = [c for c in self.containers if c not in stopped]
         elif args[:2] == ["systemctl", "stop"]:
             for name in args[2:]:
@@ -574,33 +579,36 @@ def _stop_params(root: pathlib.Path) -> dict:
         "root": str(root),
         "project": "ca-nodea",
         "identity": IDENTITY,
-        "broker_drain_seconds": 600,
+        "sandbox_manager_drain_seconds": 600,
     }
 
 
-def test_stop_halts_the_runner_then_lets_the_broker_stop_its_sandboxes(
-    tmp_path, machine, monkeypatch, capsys
+@pytest.mark.parametrize("service_name", ["sandbox-manager", "workspace-broker"])
+def test_stop_halts_the_runner_then_lets_the_sandbox_manager_stop_its_sandboxes(
+    tmp_path, machine, monkeypatch, capsys, service_name
 ):
     root = tmp_path / "deploy"
     root.mkdir()
     (root / ".compute-identity.json").write_text(json.dumps(IDENTITY))
     machine.runner = ["runner-1"]
-    machine.broker = ["broker-1"]
-    machine.broker_stops = ["chat-1"]
-    machine.containers = ["runner-1", "chat-1", "broker-1", "tunnel-1"]
+    machine.sandbox_manager_service = service_name
+    manager_id = f"{service_name}-1"
+    machine.sandbox_manager = [manager_id]
+    machine.sandbox_manager_stops = ["chat-1"]
+    machine.containers = ["runner-1", "chat-1", manager_id, "tunnel-1"]
     result = run_remote(_STOP, _stop_params(root), monkeypatch, capsys)
     assert result == {"stopped": True, "reason": None}
     stops = [
         call for call in machine.calls if call[:2] in (["docker", "stop"], ["systemctl", "stop"])
     ]
-    # Docker never stops a sandbox the broker could still stop cleanly.
+    # Docker never stops a sandbox the sandbox manager could still stop cleanly.
     assert stops == [
         ["docker", "stop", "-t", "60", "runner-1"],
-        ["docker", "stop", "-t", "600", "broker-1"],
+        ["docker", "stop", "-t", "600", manager_id],
         ["docker", "stop", "tunnel-1"],
         ["systemctl", "stop", "docker.socket", "docker", "containerd"],
     ]
-    for service in ("runner", "workspace-broker"):
+    for service in ("runner", "sandbox-manager", "workspace-broker"):
         query = next(
             call for call in machine.calls if f"label=com.docker.compose.service={service}" in call
         )
@@ -609,13 +617,18 @@ def test_stop_halts_the_runner_then_lets_the_broker_stop_its_sandboxes(
     assert ["pgrep", "-x", "containerd-shim"] in machine.calls
 
 
-def test_stop_still_halts_sandboxes_the_broker_left_running(tmp_path, machine, monkeypatch, capsys):
+@pytest.mark.parametrize("service_name", ["sandbox-manager", "workspace-broker"])
+def test_stop_still_halts_sandboxes_the_sandbox_manager_left_running(
+    tmp_path, machine, monkeypatch, capsys, service_name
+):
     root = tmp_path / "deploy"
     root.mkdir()
     (root / ".compute-identity.json").write_text(json.dumps(IDENTITY))
     machine.runner = ["runner-1"]
-    machine.broker = ["broker-1"]
-    machine.containers = ["runner-1", "chat-1", "broker-1", "tunnel-1"]
+    machine.sandbox_manager_service = service_name
+    manager_id = f"{service_name}-1"
+    machine.sandbox_manager = [manager_id]
+    machine.containers = ["runner-1", "chat-1", manager_id, "tunnel-1"]
     result = run_remote(_STOP, _stop_params(root), monkeypatch, capsys)
     assert result == {"stopped": True, "reason": None}
     assert ["docker", "stop", "chat-1", "tunnel-1"] in machine.calls
@@ -822,13 +835,15 @@ async def test_transfer_failures_are_reported_without_remote_output(outputs, cod
     assert failed.value.code == code
 
 
-async def test_stop_bounds_the_broker_drain_inside_its_ssh_deadline():
+async def test_stop_bounds_the_sandbox_manager_drain_inside_its_ssh_deadline():
     transport = AsyncMock()
     transport.run.return_value = json.dumps({"stopped": True, "reason": None})
     bootstrap = SshHostBootstrap(transport=transport, resolver=AsyncMock())
     await bootstrap.stop(SOURCE, PROFILE, INTENT)
-    drain = json.loads(shlex.split(transport.run.call_args.args[1])[-1])["broker_drain_seconds"]
-    # The runner's 60-second stop comes before the broker's drain.
+    drain = json.loads(shlex.split(transport.run.call_args.args[1])[-1])[
+        "sandbox_manager_drain_seconds"
+    ]
+    # The runner's 60-second stop comes before the sandbox manager's drain.
     assert drain > 0 and drain + 60 < transport.run.call_args.kwargs["timeout"]
 
 

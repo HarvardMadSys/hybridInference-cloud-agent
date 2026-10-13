@@ -68,7 +68,7 @@ COPY deploy/sandbox/pi-freeinference deploy/sandbox/pi-mcp-bridge.ts \
      deploy/sandbox/http-agent-live-bridge /usr/local/libexec/mcp-runtime/
 RUN chmod 0555 /usr/local/libexec/mcp-runtime/*
 
-# Root on purpose, and only here. The runner and broker need the host Docker
+# Root on purpose, and only here. The runner and sandbox_manager need the host Docker
 # socket to create/start/stop retained containers. Repository source is cloned
 # into a short-lived runner directory, credential-scrubbed, and streamed into
 # the container; that directory is never bind-mounted into the sandbox.

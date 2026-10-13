@@ -1,6 +1,6 @@
 """Two credential surfaces never resolve to one configured secret.
 
-The broker serves workspace files and terminals; enrollment issues the
+The sandbox manager serves workspace files and terminals; enrollment issues the
 per-host heartbeat/claim credential. They are separate permissions and the
 host credential is not an operator-provided Compose substitution at all.
 
@@ -34,7 +34,7 @@ _SUBSTITUTION = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)")
 #: Pairs that share a variable on purpose, each with the reason. An entry here
 #: is a claim that one secret really does authorize both things.
 _ALLOWED_SHARING: dict[str, str] = {
-    # The broker's token appears in two services of one stack — the broker that
+    # The sandbox manager's token appears in two services of one stack — the sandbox manager that
     # verifies it and the runner that presents it. That is one credential used
     # at both ends of one hop, not two permissions collapsed into one.
 }

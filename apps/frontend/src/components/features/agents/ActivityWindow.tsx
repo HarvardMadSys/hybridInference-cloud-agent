@@ -3,7 +3,7 @@
 import type { HTMLAttributes } from 'react';
 import { hasActivityOverview, type ActivityOverview } from './activityOverview';
 import type { AgentEvent } from './types';
-import { ToolActivityDetails } from './ToolActivityDetails';
+import { DelegationReplyDetails, ToolActivityDetails } from './ToolActivityDetails';
 
 type ToolEvent = Extract<AgentEvent, { kind: 'tool_use' }>;
 
@@ -111,7 +111,9 @@ export function ActivityWindow({
                     className="min-w-0 space-y-2.5 rounded-lg border border-gray-200 p-3 dark:border-white/10"
                   >
                     <ToolActivityDetails activity={agent.activity} />
-                    {agent.activity.states.length === 0 ? (
+                    {agent.reply ? (
+                      <DelegationReplyDetails reply={agent.reply} />
+                    ) : agent.activity.states.length === 0 ? (
                       <p className="text-[11px] text-gray-400 dark:text-gray-500">
                         Agent state not recorded
                       </p>

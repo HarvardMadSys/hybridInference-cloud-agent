@@ -76,6 +76,11 @@ async def settings_api(monkeypatch):
     monkeypatch.setenv("ADMIN_TOKEN", "test-settings-admin")
     monkeypatch.setattr(admin_settings.settings, "encode_changes", _encode)
     monkeypatch.setattr(admin_settings.settings, "settings_response", _view)
+    monkeypatch.setattr(
+        admin_settings.settings,
+        "SETTINGS_BY_STORAGE_KEY",
+        {key: SimpleNamespace(key=key) for key in ("limit", "credential", "name")},
+    )
     applied = []
     monkeypatch.setattr(
         admin_settings.settings,
@@ -290,3 +295,38 @@ async def test_real_registry_encrypts_secrets_and_exposes_only_configured_status
     assert set(repository.values["github_publish_token"]) == {"ciphertext"}
     assert settings.text_setting("github_publish_token") == SECRET
     assert settings.integer_setting("max_attempts") == 2
+
+
+@pytest.mark.parametrize("field", ["sandbox_manager_token", "workspace_broker_token"])
+@pytest.mark.parametrize("value", [SECRET, None])
+async def test_renamed_manager_credential_updates_preserve_storage_and_redact_audit(
+    monkeypatch, field, value
+) -> None:
+    settings = admin_settings.settings
+    monkeypatch.setenv("ADMIN_TOKEN", "test-settings-admin")
+    monkeypatch.setenv("AGENT_SETTINGS_ENCRYPTION_KEY", "settings-test-key-at-least-32-bytes")
+    monkeypatch.setattr(settings, "_values", None)
+    monkeypatch.setattr(settings, "_revision", -1)
+    repository, audit = FakeSettings(), FakeAudit()
+    repository.values = settings.encode_changes({"sandbox_manager_token": "previous-" + SECRET})
+    previous_ciphertext = repository.values["workspace_broker_token"]["ciphertext"]
+    app = FastAPI()
+    app.state.storage = SimpleNamespace(settings=repository, audit=audit)
+    app.include_router(admin_settings.router)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.put(
+            "/admin/agent/settings", headers=ADMIN, json={"settings": {field: value}}
+        )
+    assert response.status_code == 200
+    assert set(repository.values) == {"workspace_broker_token"}
+    assert settings.text_setting("sandbox_manager_token") == (value or "")
+    assert response.json()["values"]["sandbox_manager_token"] is None
+    assert response.json()["secret_configured"]["sandbox_manager_token"] is bool(value)
+    assert audit.calls[0]["details"]["changes"] == {
+        "sandbox_manager_token": {
+            "previous": "[redacted]",
+            "value": "[redacted]" if value else None,
+        }
+    }
+    assert SECRET not in response.text + repr(audit.calls)
+    assert previous_ciphertext not in response.text + repr(audit.calls)

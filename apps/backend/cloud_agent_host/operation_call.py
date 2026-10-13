@@ -1,10 +1,10 @@
-"""One broker call's measurement fragment, and the answer it returns.
+"""One sandbox manager call's measurement fragment, and the answer it returns.
 
-The broker contributes *durations* to a selection the control plane made. It
+The sandbox manager contributes *durations* to a selection the control plane made. It
 never decides on its own that an operation is worth measuring: it sees one call
 at a time and cannot tell which chat or user it belongs to. So the selection
 arrives with the request, is validated against this process's own switch, run
-and deadline, and is answered per call through :class:`BrokerCall`.
+and deadline, and is answered per call through :class:`SandboxManagerCall`.
 
 Two rules shape everything here:
 
@@ -39,14 +39,15 @@ from cloud_agent_shared.operation_profiling import (
     start_stage_recording,
     substage,
 )
+from cloud_agent_shared.sandbox_manager_compat import SANDBOX_MANAGER_PRODUCER
 
 logger = logging.getLogger(__name__)
 
-#: Producer name the broker writes into a fragment it contributes.
-PRODUCER = "broker"
+#: Producer name the sandbox manager writes into a fragment it contributes.
+PRODUCER = SANDBOX_MANAGER_PRODUCER
 
-#: The headers a broker answers in, for the one route whose answer cannot
-#: travel in a body. Name-bound here so the broker route reads as the contract
+#: The headers a sandbox manager answers in, for the one route whose answer cannot
+#: travel in a body. Name-bound here so the sandbox manager route reads as the contract
 #: it is; the wire names themselves stay in the shared collector.
 RESPONSE_CALL_ID_HEADER = PROFILING_ANSWER_CALL_ID_HEADER
 RESPONSE_RECORDED_HEADER = PROFILING_ANSWER_RECORDED_HEADER
@@ -54,15 +55,15 @@ RESPONSE_TRUNCATED_HEADER = PROFILING_ANSWER_TRUNCATED_HEADER
 RESPONSE_STAGES_HEADER = PROFILING_ANSWER_STAGES_HEADER
 RESPONSE_OPERATION_HEADER = PROFILING_ANSWER_OPERATION_HEADER
 
-#: Longest encoded stage list a broker will put in a header. Bounded because a
+#: Longest encoded stage list a sandbox manager will put in a header. Bounded because a
 #: header has no framing to recover from and an oversized one is dropped rather
 #: than sent.
 MAX_STAGES_HEADER_CHARS = 2048
 
 
 @dataclass
-class BrokerCall:
-    """The measurement fragment for one broker call.
+class SandboxManagerCall:
+    """The measurement fragment for one sandbox manager call.
 
     An instance always exists -- :func:`closed` answers for a request that
     carried no usable selection -- so a route can time its work without
@@ -155,7 +156,7 @@ class BrokerCall:
 
 
 #: One shared instance, so the unselected path allocates nothing per request.
-UNSELECTED = BrokerCall()
+UNSELECTED = SandboxManagerCall()
 
 
 def parse_operations(operations: Any) -> frozenset[str]:
@@ -168,14 +169,14 @@ def parse_operations(operations: Any) -> frozenset[str]:
     return frozenset()
 
 
-def open_call(context: Any, *, operations: Any) -> BrokerCall:
+def open_call(context: Any, *, operations: Any) -> SandboxManagerCall:
     """Validate an inherited selection and open a fragment for one call.
 
     ``operations`` are the operations this route may file the call under. A
     selection carried over from a different one is refused rather than reported
     under the wrong name, and when more than one is offered -- a file path is
     collected before its kind is known -- the route files the call itself with
-    :meth:`BrokerCall.set_operation` once its response exists. The run's own
+    :meth:`SandboxManagerCall.set_operation` once its response exists. The run's own
     operation list still decides; this only stops a fragment being filed under
     a name this route does not own.
     """
@@ -194,7 +195,7 @@ def open_call(context: Any, *, operations: Any) -> BrokerCall:
         # context's own list is not enough: the route states what it offers,
         # and a fragment must belong to a call that was actually made here.
         return UNSELECTED
-    call = BrokerCall(recorder=recorder, call_id=context_call_id(parsed))
+    call = SandboxManagerCall(recorder=recorder, call_id=context_call_id(parsed))
     if not recorder.operation and len(recorder.allowed) == 1 and named in offered:
         # The context already named exactly one operation this run selects, so
         # there is nothing left for this route to decide after the call: filing
@@ -203,7 +204,7 @@ def open_call(context: Any, *, operations: Any) -> BrokerCall:
     return call
 
 
-def closed() -> BrokerCall:
+def closed() -> SandboxManagerCall:
     """Return a call that is not collecting."""
     return UNSELECTED
 
@@ -217,7 +218,7 @@ __all__ = [
     "RESPONSE_STAGES_HEADER",
     "RESPONSE_TRUNCATED_HEADER",
     "UNSELECTED",
-    "BrokerCall",
+    "SandboxManagerCall",
     "answer_from_headers",
     "closed",
     "open_call",

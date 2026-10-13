@@ -25,8 +25,8 @@ from cloud_agent_host.drivers import DriverError
 from cloud_agent_host.plugins import install_claude_plugins, run_plugin_command
 from cloud_agent_host.resident_transport import ResidentLaunch, ResidentTransportFactory
 from cloud_agent_host.runner import ClaimedJob
+from cloud_agent_host.sandbox_manager import SharedResidentLaunchConfig
 from cloud_agent_host.session_supervisor_client import SessionSupervisorClient
-from cloud_agent_host.workspace_broker import SharedResidentLaunchConfig
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -341,14 +341,14 @@ def test_claim_validates_runtime_plugin_specs_and_preserves_legacy_claims():
     ).plugins == [{"plugin": "@owner/package@1.2.3"}]
 
 
-def test_plugin_selections_survive_the_client_and_broker_launch_protocol():
+def test_plugin_selections_survive_the_client_and_sandbox_manager_launch_protocol():
     seen: list[httpx.Request] = []
 
     def handler(request):
         seen.append(request)
         return httpx.Response(200, json={"resident_state": "live"})
 
-    client = SessionSupervisorClient("http://broker", "broker-secret")
+    client = SessionSupervisorClient("http://sandbox_manager", "sandbox-manager-secret")
     client._client.close()
     client._client = httpx.Client(transport=httpx.MockTransport(handler))
     try:
@@ -358,8 +358,8 @@ def test_plugin_selections_survive_the_client_and_broker_launch_protocol():
     [request] = seen
     payload = json.loads(request.content)
     assert payload["launch"]["plugins"] == list(_PLUGINS)
-    broker = SharedResidentLaunchConfig.model_validate(payload["launch"])
-    assert [plugin.model_dump() for plugin in broker.plugins] == list(_PLUGINS)
+    sandbox_manager = SharedResidentLaunchConfig.model_validate(payload["launch"])
+    assert [plugin.model_dump() for plugin in sandbox_manager.plugins] == list(_PLUGINS)
     assert request.extensions["timeout"]["read"] == 960.0
     assert json.loads(json.dumps(asdict(_launch())))["plugins"] == list(_PLUGINS)
 

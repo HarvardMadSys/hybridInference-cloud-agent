@@ -1,6 +1,6 @@
 """Bounded workspace file I/O through a retained container's exec boundary.
 
-The broker cannot resolve a host path for retained chats. These helpers run a
+The sandbox manager cannot resolve a host path for retained chats. These helpers run a
 fixed, unprivileged program inside the exact labelled container. Request data
 is passed as argv/stdin, never interpolated into code or a shell command.
 """
@@ -285,7 +285,7 @@ def read_retained_file(
     """Read one normalized path without following a repository symlink.
 
     ``observer`` times the exec that performs the read, so a measured file
-    request can attribute the container round trip separately from the broker's
+    request can attribute the container round trip separately from the sandbox manager's
     own admission and network work. Nothing about the read changes: the helper
     program, its arguments and its bounds are exactly what they were.
     """
@@ -302,7 +302,7 @@ def read_retained_file(
             str(max_directory_entries),
         ],
         # Never import repository-controlled modules while executing this
-        # trusted broker helper. The explicit root argument still addresses
+        # trusted sandbox manager helper. The explicit root argument still addresses
         # the workspace, while isolated Python from / keeps sys.path clean.
         workdir="/",
         timeout_s=60,

@@ -36,7 +36,7 @@ if TYPE_CHECKING:  # pragma: no cover - annotations only, and they are strings
 #: Which release role supplies each service, per stack.
 #:
 #: One image answers several services on purpose — the runner image runs the
-#: broker, the tunnel image runs all three tunnels — and the manifest carries
+#: sandbox manager, the tunnel image runs all three tunnels — and the manifest carries
 #: one entry per role, so this table is what keeps "five roles" from becoming
 #: "six images and nine questions".
 STACKS: dict[str, dict[str, tuple[str, ...]]] = {
@@ -45,7 +45,7 @@ STACKS: dict[str, dict[str, tuple[str, ...]]] = {
         "web": ("web",),
     },
     "host": {
-        "runner": ("runner", "workspace-broker"),
+        "runner": ("runner", "sandbox-manager"),
         "tunnel": ("gateway-tunnel", "mcp-tunnel", "control-plane-tunnel"),
     },
 }

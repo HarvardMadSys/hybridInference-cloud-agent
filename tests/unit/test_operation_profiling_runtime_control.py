@@ -475,12 +475,12 @@ def test_a_record_states_the_configuration_version_that_selected_it(monkeypatch,
 
 
 # ---------------------------------------------------------------------------
-# The broker is offered the configuration again until it holds it
+# The sandbox manager is offered the configuration again until it holds it
 # ---------------------------------------------------------------------------
 
 
-class _FlakyBroker:
-    """A broker client that refuses a fixed number of pushes, then accepts."""
+class _FlakySandboxManager:
+    """A sandbox manager client that refuses a fixed number of pushes, then accepts."""
 
     def __init__(self, *, refuse_first: int = 0) -> None:
         self._refuse_first = refuse_first
@@ -491,7 +491,7 @@ class _FlakyBroker:
         """Refuse while the budget lasts, then accept and remember."""
         self.calls.append(dict(policy))
         if len(self.calls) <= self._refuse_first:
-            raise RuntimeError("broker is not ready")
+            raise RuntimeError("sandbox manager is not ready")
         self.delivered = dict(policy)
         return {"accepted": True, "changed": True, "revision": policy["revision"]}
 
@@ -521,8 +521,8 @@ class _FixedResponse:
         return self._answer
 
 
-def _sync_with_broker(monkeypatch, broker) -> Any:
-    """A real sync, pointed at a fixed control-plane answer and one broker."""
+def _sync_with_sandbox_manager(monkeypatch, sandbox_manager) -> Any:
+    """A real sync, pointed at a fixed control-plane answer and one sandbox manager."""
     from cloud_agent_host.profiling_policy import ProfilingPolicySync
 
     run = _run(run_id=RUN_A, operations=("terminal.open",))
@@ -545,56 +545,56 @@ def _sync_with_broker(monkeypatch, broker) -> Any:
         base_url="http://control-plane.invalid",
         credential="credential",
         host="host-a",
-        broker=broker,
+        sandbox_manager=sandbox_manager,
     )
     monkeypatch.setattr(sync, "_client", _FixedControlPlane(answer))
     return sync
 
 
-def test_a_failed_broker_push_is_offered_again(monkeypatch):
-    """A push that failed must not be the last word, or the broker never hears.
+def test_a_failed_sandbox_manager_push_is_offered_again(monkeypatch):
+    """A push that failed must not be the last word, or the sandbox manager never hears.
 
     The runner records the revision as applied as soon as it reads it, so a
     change-only push gave up permanently after two failed attempts: the
-    experiment ran with the broker contributing nothing, which is worse than
+    experiment ran with the sandbox manager contributing nothing, which is worse than
     not running it at all because the root record still looks like a sample.
     """
     # Two attempts per pass, and four refusals: two whole passes fail before the
-    # broker comes up, which is the case that used to be permanent.
-    broker = _FlakyBroker(refuse_first=4)
-    sync = _sync_with_broker(monkeypatch, broker)
+    # sandbox manager comes up, which is the case that used to be permanent.
+    sandbox_manager = _FlakySandboxManager(refuse_first=4)
+    sync = _sync_with_sandbox_manager(monkeypatch, sandbox_manager)
 
     assert sync._sync_once() == 5.0
-    assert broker.delivered is None
-    assert sync.state()["broker_ok"] is False
+    assert sandbox_manager.delivered is None
+    assert sync.state()["sandbox_manager_ok"] is False
 
     # The configuration did not change, and that is the point: the next pass
     # offers it again anyway, because the runner cannot tell a failed push from
-    # a broker that restarted.
+    # a sandbox manager that restarted.
     assert sync._sync_once() == 5.0
-    assert broker.delivered is None
+    assert sandbox_manager.delivered is None
 
     assert sync._sync_once() == 5.0
-    assert broker.delivered is not None
-    assert broker.delivered["run"]["run_id"] == RUN_A
-    assert sync.state()["broker_ok"] is True
+    assert sandbox_manager.delivered is not None
+    assert sandbox_manager.delivered["run"]["run_id"] == RUN_A
+    assert sync.state()["sandbox_manager_ok"] is True
 
 
-def test_a_restarted_broker_is_given_the_configuration_again(monkeypatch):
-    """The broker's configuration lives in memory, so a restart empties it."""
-    broker = _FlakyBroker()
-    sync = _sync_with_broker(monkeypatch, broker)
+def test_a_restarted_sandbox_manager_is_given_the_configuration_again(monkeypatch):
+    """The sandbox manager's configuration lives in memory, so a restart empties it."""
+    sandbox_manager = _FlakySandboxManager()
+    sync = _sync_with_sandbox_manager(monkeypatch, sandbox_manager)
     assert sync._sync_once() == 5.0
-    assert broker.delivered is not None
+    assert sandbox_manager.delivered is not None
 
-    # The broker restarts: its applied state is gone and it will accept the same
+    # The sandbox manager restarts: its applied state is gone and it will accept the same
     # revision again. Nothing tells the runner, so it has to keep offering.
-    broker.delivered = None
+    sandbox_manager.delivered = None
     for _ in range(3):
         sync._sync_once()
 
-    assert broker.delivered is not None, "a restarted broker must be refilled"
-    assert broker.delivered["run"]["run_id"] == RUN_A
+    assert sandbox_manager.delivered is not None, "a restarted sandbox manager must be refilled"
+    assert sandbox_manager.delivered["run"]["run_id"] == RUN_A
 
 
 # ---------------------------------------------------------------------------
@@ -603,12 +603,12 @@ def test_a_restarted_broker_is_given_the_configuration_again(monkeypatch):
 
 
 def test_a_selected_operation_keeps_its_later_stages_after_a_stop(monkeypatch):
-    """The broker must not refuse the stages of work that was already chosen.
+    """The sandbox manager must not refuse the stages of work that was already chosen.
 
     Disabling stops *selecting*. An attempt that was selected before the switch
-    still calls the broker for its container and its CLI process, and those
+    still calls the sandbox manager for its container and its CLI process, and those
     fragments belong to the experiment that selected the attempt. Refusing them
-    produced a record that was kept but incomplete -- the broker's stages simply
+    produced a record that was kept but incomplete -- the sandbox manager's stages simply
     missing -- which reads as a slow or partial startup rather than as a
     configuration change.
     """
@@ -622,7 +622,7 @@ def test_a_selected_operation_keeps_its_later_stages_after_a_stop(monkeypatch):
     context = profiling.measurement_context(measurement, "c1")
     assert context is not None
 
-    # The switch goes off, in the broker's own store.
+    # The switch goes off, in the sandbox manager's own store.
     profiling.policy_store().publish(_stopped(revision=2))
 
     recorder = profiling.start_stage_recording(context, producer="broker")
@@ -708,7 +708,7 @@ def test_a_disabled_deployment_refuses_a_continuation(monkeypatch):
     assert profiling.profile_mode() == profiling.MODE_DISABLED
     assert profiling.attach_selection(context) is None
     assert profiling.start_stage_recording(context, producer="broker") is None
-    # And through the real parser a broker route uses, not just the helpers.
+    # And through the real parser a sandbox manager route uses, not just the helpers.
     from cloud_agent_host.operation_call import open_call
 
     assert open_call(json.dumps(context), operations=("attempt.startup",)).recording is False
@@ -903,7 +903,7 @@ def test_budget_state_for_an_unselected_run_invents_no_allowance(monkeypatch):
 
 
 def test_admits_answers_only_for_the_configuration_in_force(monkeypatch):
-    """A broker's inherited selection is checked against the current configuration."""
+    """A sandbox manager's inherited selection is checked against the current configuration."""
     run = _run(run_id=RUN_A, operations=("terminal.open",))
     _admin(monkeypatch, _state(run=run, revision=1))
     store = profiling.policy_store()

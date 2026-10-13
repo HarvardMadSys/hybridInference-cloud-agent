@@ -232,7 +232,7 @@ class ComputeResourceRepository(Protocol):
         generation: int,
         worker_id: str,
     ) -> bool:
-        """Accept a trusted broker scan only against the exact fenced topology.
+        """Accept a trusted sandbox manager scan only against the exact fenced topology.
 
         Retirement closes bindings first. A scan must cover every node and its
         Host execution environments; an unbound node is unknown, never empty.

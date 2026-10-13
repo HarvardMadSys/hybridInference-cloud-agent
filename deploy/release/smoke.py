@@ -499,7 +499,7 @@ def _control_environment(dsn: str) -> dict[str, str]:
         "AGENT_SESSION_SECRET": base64.b64encode(os.urandom(32)).decode(),
         "AGENT_CONTROL_TOKEN_SECRET": base64.b64encode(os.urandom(32)).decode(),
         "AGENT_SOURCE_CONTROL_ENCRYPTION_KEY": _fernet_key(),
-        "AGENT_WORKSPACE_BROKER_TOKEN": "smoke-broker-token",
+        "AGENT_SANDBOX_MANAGER_TOKEN": "smoke-sandbox-manager-token",
         # Required once a gateway is configured at all: the app refuses to start
         # without it, because verifying identity is the whole point of the
         # service it fronts. `deploy/control-plane/.env.example` is the
@@ -540,7 +540,7 @@ def verify_runner(image: str, *, suffix: str, keep: bool) -> list[str]:
             entrypoint="python",
             command=(
                 "-c",
-                "import cloud_agent_host.runner, cloud_agent_host.workspace_broker, "
+                "import cloud_agent_host.runner, cloud_agent_host.sandbox_manager, "
                 "cloud_agent_host.sandbox, cloud_agent_host.network_guard; print('imports ok')",
             ),
         )
@@ -654,7 +654,7 @@ def verify_tunnel(image: str, *, suffix: str, keep: bool) -> list[str]:
     a hop open to a specific peer — so the check is that the script in the image
     actually executes and refuses to sit there having forwarded nothing. That is
     the failure mode that matters: a tunnel that appears to run while carrying
-    nothing is how a whole host's jobs fail as "the broker is unreachable".
+    nothing is how a whole host's jobs fail as "the sandbox manager is unreachable".
     """
     probe = Container.for_run("tunnel-ssh", suffix)
     try:

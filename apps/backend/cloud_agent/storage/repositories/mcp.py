@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import TYPE_CHECKING, Any
 
+from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp.errors import McpConnectionCreateConflict
+from cloud_agent.mcp.models import Capability, CapabilityKind
 from cloud_agent.storage._sql.mcp import ensure_mcp_bindings, mcp_binding_row
 from cloud_agent.storage._sql.rows import load_json as _load_json
 
@@ -13,6 +16,8 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
     import asyncpg
+
+logger = get_logger(__name__)
 
 _CREATE_REQUIRED = ("user_id", "label", "transport", "location", "auth_kind", "auth_config")
 _CREATE_OPTIONAL = (
@@ -27,6 +32,38 @@ _CREATE_OPTIONAL = (
     "auth_config_patch",
     "sealed_launch_spec",
 )
+
+
+def _remembered_rule_matches(intent: Any, snapshot: Any) -> bool:
+    """Bind a remembered permission to the current stored capability definition."""
+    if snapshot is None or any(
+        snapshot[key] != intent[key] for key in ("config_revision", "capability_revision")
+    ):
+        return False
+    surfaces = {
+        "tool": "tools",
+        "prompt": "prompts",
+        "resource": "resources",
+        "resource_template": "resource_templates",
+    }
+    kind = intent["capability_kind"]
+    if kind not in surfaces:
+        return False
+    rule = _load_json(intent["always_allow_rule"])
+    if not isinstance(rule, dict) or rule.get("policy") != "allow":
+        return False
+    for entry in _load_json(snapshot[surfaces[kind]]) or []:
+        if not isinstance(entry, dict) or entry.get("name") != intent["capability_name"]:
+            continue
+        schema = entry.get("input_schema")
+        capability = Capability(
+            kind=CapabilityKind(kind),
+            name=str(entry["name"]),
+            description=str(entry.get("description") or ""),
+            input_schema=schema if isinstance(schema, dict) else None,
+        )
+        return rule.get("fingerprint") == capability.fingerprint()
+    return False
 
 
 def _create_kwargs(item: Mapping[str, Any]) -> dict[str, Any]:
@@ -1344,7 +1381,12 @@ class PostgresMcpConnectionRepository:
         return [dict(row) for row in rows]
 
     async def decide_mcp_invocation(
-        self, *, invocation_id: int, approve: bool, decided_by: str
+        self,
+        *,
+        invocation_id: int,
+        approve: bool,
+        decided_by: str,
+        always_allow_rule: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         """Approve or deny one pending call.
 
@@ -1353,6 +1395,8 @@ class PostgresMcpConnectionRepository:
         must not revive it, and a check-then-write would let exactly that race
         through.
         """
+        if always_allow_rule is not None and not approve:
+            raise ValueError("Always allow requires approval")
         target = "approved" if approve else "denied"
         async with self._pool.acquire() as conn, conn.transaction():
             if not await self._lock_invocation(conn, invocation_id):
@@ -1360,13 +1404,16 @@ class PostgresMcpConnectionRepository:
             row = await conn.fetchrow(
                 """
                 UPDATE agent_mcp_invocations
-                SET status = $2, decided_at = NOW(), decided_by = $3
+                SET status = $2, decided_at = NOW(), decided_by = $3,
+                    always_allow_rule = $4::jsonb,
+                    always_allow_status = CASE WHEN $4::jsonb IS NULL THEN NULL ELSE 'pending' END
                 WHERE id = $1 AND status = 'pending' AND expires_at > clock_timestamp()
                 RETURNING *
                 """,
                 invocation_id,
                 target,
                 decided_by,
+                json.dumps(always_allow_rule) if always_allow_rule is not None else None,
             )
             if row is None:
                 # Distinguish "already decided" from "too late" for the caller,
@@ -1377,6 +1424,10 @@ class PostgresMcpConnectionRepository:
                     "AND expires_at <= clock_timestamp()",
                     invocation_id,
                 )
+        if row is not None and not approve:
+            # A denial may release another remembered decision on this binding.
+            # Save now, before the agent's next call enters the approval queue.
+            await self._flush_remembered_approvals(row)
         return dict(row) if row is not None else None
 
     async def claim_mcp_invocation(
@@ -1520,7 +1571,157 @@ class PostgresMcpConnectionRepository:
                     lease_generation=lease_generation,
                 ),
             )
+        if row is not None:
+            try:
+                await self._flush_remembered_approvals(row)
+            except asyncio.CancelledError:
+                # The caller has not received the committed claim yet, so its
+                # normal dispatch cleanup cannot know which record it owns.
+                await asyncio.shield(
+                    self.finish_mcp_invocation(
+                        invocation_id=int(row["id"]),
+                        dispatch_generation=int(row["dispatch_generation"]),
+                        status="outcome_unknown",
+                        result_summary="Dispatcher cancelled after claiming the approval.",
+                    )
+                )
+                raise
         return dict(row) if row is not None else None
+
+    async def _flush_remembered_approvals(self, row: Any) -> None:
+        """Attempt a prompt save without losing an already committed dispatch claim."""
+        try:
+            async with asyncio.timeout(5.0):
+                await self.apply_pending_mcp_allow_rules(
+                    thread_id=str(row["thread_id"]), connection_id=int(row["connection_id"])
+                )
+        except Exception:
+            logger.warning("agent_mcp_remembered_approval_failed", exc_info=True)
+
+    async def apply_pending_mcp_allow_rules(
+        self, *, thread_id: str | None = None, connection_id: int | None = None
+    ) -> int:
+        """Persist remembered approvals after held calls leave the dispatch queue.
+
+        Intents live with their decisions, surviving client and process restarts.
+        The thread lock serializes permission edits; connection and binding locks
+        keep their fences stable. Eligible intents for one binding are merged
+        before moving its policy revision, preserving other rules and defaults.
+        """
+        async with self._pool.acquire() as conn:
+            groups = await conn.fetch(
+                """
+                SELECT DISTINCT thread_id, connection_id FROM agent_mcp_invocations
+                WHERE always_allow_status = 'pending'
+                  AND ($1::text IS NULL OR thread_id = $1)
+                  AND ($2::bigint IS NULL OR connection_id = $2)
+                ORDER BY thread_id, connection_id
+                """,
+                thread_id,
+                connection_id,
+            )
+        applied = 0
+        for group in groups:
+            applied += await self._apply_mcp_allow_group(
+                str(group["thread_id"]), int(group["connection_id"])
+            )
+        return applied
+
+    async def _apply_mcp_allow_group(self, thread_id: str, connection_id: int) -> int:
+        """Recheck fingerprints, ownership and revisions before saving one binding."""
+        async with self._pool.acquire() as conn, conn.transaction():
+            thread = await conn.fetchrow(
+                "SELECT * FROM agent_threads WHERE id = $1 FOR UPDATE SKIP LOCKED", thread_id
+            )
+            if thread is None:
+                # Permission edits and other workers may own the conversation.
+                # Leave its durable intents for a later pass and service others.
+                return 0
+            connection = await conn.fetchrow(
+                "SELECT * FROM agent_mcp_connections WHERE id = $1 FOR SHARE", connection_id
+            )
+            binding = await conn.fetchrow(
+                "SELECT * FROM agent_mcp_thread_bindings "
+                "WHERE thread_id = $1 AND connection_id = $2 FOR UPDATE",
+                thread_id,
+                connection_id,
+            )
+            snapshot = await conn.fetchrow(
+                "SELECT * FROM agent_mcp_capabilities WHERE connection_id = $1 FOR SHARE",
+                connection_id,
+            )
+            intents = await conn.fetch(
+                "SELECT * FROM agent_mcp_invocations "
+                "WHERE thread_id = $1 AND connection_id = $2 "
+                "AND always_allow_status = 'pending' ORDER BY id FOR UPDATE",
+                thread_id,
+                connection_id,
+            )
+            valid = []
+            for intent in intents:
+                live = (
+                    thread is not None
+                    and thread["deleted_at"] is None
+                    and connection is not None
+                    and connection["deleted_at"] is None
+                    and connection["enabled"]
+                    and binding is not None
+                    and binding["enabled"]
+                    and thread["user_id"] == connection["user_id"] == intent["decided_by"]
+                    and all(
+                        connection[key] == intent[key]
+                        for key in ("config_revision", "authorization_epoch", "capability_revision")
+                    )
+                    and binding["policy_revision"] == intent["policy_revision"]
+                    and _remembered_rule_matches(intent, snapshot)
+                )
+                if live:
+                    valid.append(intent)
+                else:
+                    await conn.execute(
+                        "UPDATE agent_mcp_invocations SET always_allow_status = 'discarded' "
+                        "WHERE id = $1",
+                        intent["id"],
+                    )
+            if not valid or await conn.fetchval(
+                "SELECT EXISTS (SELECT 1 FROM agent_mcp_invocations "
+                "WHERE thread_id = $1 AND connection_id = $2 "
+                "AND status IN ('pending', 'approved') AND expires_at > clock_timestamp())",
+                thread_id,
+                connection_id,
+            ):
+                return 0
+            assert binding is not None
+            merged = mcp_binding_row(binding)
+            keys = {
+                "tool": "rules",
+                "prompt": "prompt_rules",
+                "resource": "resource_rules",
+                "resource_template": "resource_rules",
+            }
+            for intent in valid:
+                merged[keys[intent["capability_kind"]]][intent["capability_name"]] = _load_json(
+                    intent["always_allow_rule"]
+                )
+            await conn.execute(
+                """
+                UPDATE agent_mcp_thread_bindings
+                SET rules = $3::jsonb, resource_rules = $4::jsonb, prompt_rules = $5::jsonb,
+                    policy_revision = nextval('agent_mcp_policy_revision_seq'), updated_at = NOW()
+                WHERE thread_id = $1 AND connection_id = $2
+                """,
+                thread_id,
+                connection_id,
+                json.dumps(merged["rules"]),
+                json.dumps(merged["resource_rules"]),
+                json.dumps(merged["prompt_rules"]),
+            )
+            await conn.execute(
+                "UPDATE agent_mcp_invocations SET always_allow_status = 'applied' "
+                "WHERE id = ANY($1::bigint[])",
+                [intent["id"] for intent in valid],
+            )
+            return len(valid)
 
     async def finish_mcp_invocation(
         self,

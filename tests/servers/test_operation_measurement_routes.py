@@ -3,7 +3,7 @@
 Where ``test_agent_operation_profiling.py`` defends the collector's own
 contract, this module defends the *root operation* the control plane owns: an
 HTTP request through the real router, a real selection, and a real fragment
-protocol to a broker stand-in that answers exactly the way the broker does.
+protocol to a sandbox manager stand-in that answers exactly the way the sandbox manager does.
 
 The properties under test are the ones the design promises for this first
 server-side slice:
@@ -39,17 +39,17 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from pydantic import BaseModel, Field
 
-from cloud_agent import broker_routing, operation_measurement
+from cloud_agent import operation_measurement, sandbox_manager_routing
 from cloud_agent.operation_measurement import (
     INTERACTION_HEADER,
     LEGACY_MEASUREMENT_HEADER,
     reset as reset_selections,
     root_scope,
 )
-from cloud_agent.workspace_broker_client import (
-    WorkspaceBrokerClient,
-    WorkspaceBrokerError,
-    WorkspaceBrokerStream,
+from cloud_agent.sandbox_manager_client import (
+    SandboxManagerClient,
+    SandboxManagerError,
+    SandboxManagerStream,
 )
 from cloud_agent_host import operation_call
 from cloud_agent_shared import operation_profiling
@@ -70,8 +70,8 @@ from tests.servers.test_agent_jobs_api import (
     _create_job,
 )
 
-BROKER_URL = "http://broker.test:8092"
-BROKER_HOST = "host-under-test"
+SANDBOX_MANAGER_URL = "http://sandbox_manager.test:8092"
+SANDBOX_MANAGER_HOST = "host-under-test"
 SANDBOX_ID = "asbx_measured"
 
 
@@ -84,7 +84,7 @@ def _deployment_secrets(monkeypatch):
     the repository it uses.
     """
     monkeypatch.setenv("AGENT_CONTROL_TOKEN_SECRET", "api-test-secret")
-    monkeypatch.setenv("AGENT_WORKSPACE_BROKER_TOKEN", "api-test-broker-secret")
+    monkeypatch.setenv("AGENT_SANDBOX_MANAGER_TOKEN", "api-test-sandbox-manager-secret")
     monkeypatch.setenv("AGENT_SESSION_SECRET", "session-test-secret-32-bytes-minimum!")
     monkeypatch.setenv("AGENT_REPO_ALLOWLIST", "owner/name,o/n,private/repo")
 
@@ -195,7 +195,7 @@ def _enable_admin(monkeypatch, **overrides: Any) -> tuple[dict[str, Any], Any]:
 
 
 def _answer(headers: Any) -> dict[str, Any] | None:
-    """Decode the fragment a broker stand-in echoed, as the real client does."""
+    """Decode the fragment a sandbox manager stand-in echoed, as the real client does."""
     return operation_profiling.answer_from_headers(headers)
 
 
@@ -214,7 +214,7 @@ def _context(**overrides: Any) -> dict[str, Any]:
 
 
 def test_candidate_operations_survive_the_real_header_parser(monkeypatch):
-    """A file candidate sent as JSON must not become an unselected broker call."""
+    """A file candidate sent as JSON must not become an unselected sandbox manager call."""
     _enable(monkeypatch, operations=["files.list", "files.open"])
     encoded = json.dumps(
         _context(
@@ -233,9 +233,9 @@ def test_candidate_operations_survive_the_real_header_parser(monkeypatch):
 
 
 class _RecordingClient:
-    """A broker that answers a fragment exactly the way the real broker does.
+    """A sandbox manager that answers a fragment exactly the way the real sandbox manager does.
 
-    It reuses the broker's own :func:`open_call` and :class:`BrokerCall`, so
+    It reuses the sandbox manager's own :func:`open_call` and :class:`SandboxManagerCall`, so
     these tests exercise the wire contract rather than a second implementation
     of it: the request carries a selection, the route validates it against this
     process's switch and run, and the answer echoes the call it belongs to.
@@ -244,23 +244,23 @@ class _RecordingClient:
     def __init__(
         self,
         *,
-        fail: WorkspaceBrokerError | None = None,
+        fail: SandboxManagerError | None = None,
         directories: Mapping[str, str] | None = None,
         truncate: bool = False,
         empty_stages: bool = False,
         delay_s: float = 0.0,
     ) -> None:
         self.fail = fail
-        #: Answer as a broker whose own deadline cut collection short.
+        #: Answer as a sandbox manager whose own deadline cut collection short.
         self.truncate = truncate
         #: Answer with no stages at all -- a legitimate skip when not truncated,
         #: and "every stage was skipped" when it is.
         self.empty_stages = empty_stages
-        #: How long a read takes. A broker stand-in that answers instantly
+        #: How long a read takes. A sandbox manager stand-in that answers instantly
         #: cannot show whether a stage encloses the call or follows it.
         self.delay_s = delay_s
         self.calls: list[dict[str, Any]] = []
-        #: What a non-empty path turns out to be. A real broker learns this
+        #: What a non-empty path turns out to be. A real sandbox manager learns this
         #: from the read; a test states it, which is what makes "a subdirectory
         #: is a listing" testable at all.
         self.directories = dict(directories or {})
@@ -282,11 +282,11 @@ class _RecordingClient:
 
     @staticmethod
     def _file_operation(kind: str) -> str:
-        """Return the operation a read's own kind implies, as the broker does."""
+        """Return the operation a read's own kind implies, as the sandbox manager does."""
         return "files.list" if kind == "directory" else "files.open"
 
-    def _open(self, context: Any, *operations: str) -> operation_call.BrokerCall:
-        """Validate the inherited selection as the broker route does."""
+    def _open(self, context: Any, *operations: str) -> operation_call.SandboxManagerCall:
+        """Validate the inherited selection as the sandbox manager route does."""
         call = operation_call.open_call(context, operations=operations)
         with call.stage("admission"):
             pass
@@ -363,7 +363,7 @@ class _RecordingClient:
         after: int,
         profiling: dict[str, Any] | None = None,
     ) -> Any:
-        """Answer a stream in headers, the way the broker's SSE route does."""
+        """Answer a stream in headers, the way the sandbox manager's SSE route does."""
         self.calls.append({"op": "stream_terminal", "workspace_id": workspace_id})
         call = self._open(profiling, "terminal.open")
         call.set_operation("terminal.open")
@@ -372,21 +372,21 @@ class _RecordingClient:
         if self.truncate:
             call.recorder.truncated += 1
         response = httpx.Response(200, headers=call.headers(), stream=httpx.ByteStream(b""))
-        return WorkspaceBrokerStream(
+        return SandboxManagerStream(
             _UnusedClient(), response, profiling_answer=_answer(response.headers)
         )
 
 
-def _use_broker(monkeypatch, broker: _RecordingClient) -> None:
-    """Point every job's resolved broker at the stand-in."""
-    monkeypatch.setattr(broker_routing, "_client_for", lambda _host: broker)
+def _use_sandbox_manager(monkeypatch, sandbox_manager: _RecordingClient) -> None:
+    """Point every job's resolved sandbox manager at the stand-in."""
+    monkeypatch.setattr(sandbox_manager_routing, "_client_for", lambda _host: sandbox_manager)
 
 
 def _workspace_job(store: FakeStorage, job_id: str) -> None:
     """Give a created job the retained group and sandbox a real host reports."""
     thread_id = _attach_shared_workspace(store, job_id)
     store.jobs[job_id]["thread_sandbox"].update(
-        {"sandbox_id": SANDBOX_ID, "host": BROKER_HOST, "origin_thread_id": thread_id}
+        {"sandbox_id": SANDBOX_ID, "host": SANDBOX_MANAGER_HOST, "origin_thread_id": thread_id}
     )
 
 
@@ -415,8 +415,8 @@ async def test_profiling_off_leaves_the_payload_and_the_call_untouched(
     client: AsyncClient, store: FakeStorage, monkeypatch, records, _running_writer
 ):
     """A switched-off deployment serves exactly what it served before."""
-    broker = _RecordingClient()
-    _use_broker(monkeypatch, broker)
+    sandbox_manager = _RecordingClient()
+    _use_sandbox_manager(monkeypatch, sandbox_manager)
     job_id = await _ready_job(client, store)
 
     listing = await client.get(f"/v1/agent/jobs/{job_id}/files")
@@ -438,7 +438,7 @@ async def test_profiling_off_leaves_the_payload_and_the_call_untouched(
     )
     assert set(body) >= {"content", "size", "status", "omitted_reason"}
     assert body["content"] is None and body["size"] is None
-    assert [call["op"] for call in broker.calls] == ["files"]
+    assert [call["op"] for call in sandbox_manager.calls] == ["files"]
     assert records() == []
     assert _running_writer.running is False
 
@@ -448,8 +448,8 @@ async def test_an_unselected_operation_is_not_measured(
 ):
     """A run that does not name this operation never sees a sample."""
     _enable(monkeypatch, operations=["attempt.startup"])
-    broker = _RecordingClient()
-    _use_broker(monkeypatch, broker)
+    sandbox_manager = _RecordingClient()
+    _use_sandbox_manager(monkeypatch, sandbox_manager)
     job_id = await _ready_job(client, store)
 
     listing = await client.get(f"/v1/agent/jobs/{job_id}/files")
@@ -464,8 +464,8 @@ async def test_another_chats_target_does_not_select_this_one(
 ):
     """A job-scoped experiment does not measure traffic from every other chat."""
     _enable(monkeypatch, target={"job_id": "ajob_somewhere_else"})
-    broker = _RecordingClient()
-    _use_broker(monkeypatch, broker)
+    sandbox_manager = _RecordingClient()
+    _use_sandbox_manager(monkeypatch, sandbox_manager)
     job_id = await _ready_job(client, store)
 
     listing = await client.get(f"/v1/agent/jobs/{job_id}/files")
@@ -480,8 +480,8 @@ async def test_a_target_the_route_cannot_prove_never_matches(
 ):
     """An unknown sandbox is a mismatch, not a wildcard."""
     _enable(monkeypatch, target={"sandbox_id": SANDBOX_ID})
-    broker = _RecordingClient()
-    _use_broker(monkeypatch, broker)
+    sandbox_manager = _RecordingClient()
+    _use_sandbox_manager(monkeypatch, sandbox_manager)
     # A job with no retained sandbox manifest: the route cannot prove the id.
     job_id = await _create_job(client)
     _attach_shared_workspace(store, job_id)
@@ -498,13 +498,13 @@ async def test_a_target_the_route_cannot_prove_never_matches(
 # ---------------------------------------------------------------------------
 
 
-async def test_a_selected_file_read_is_measured_with_its_broker_fragment(
+async def test_a_selected_file_read_is_measured_with_its_sandbox_manager_fragment(
     client: AsyncClient, store: FakeStorage, monkeypatch, records
 ):
-    """The record carries the route's stages and the broker's own durations."""
+    """The record carries the route's stages and the sandbox manager's own durations."""
     _enable(monkeypatch, target={"sandbox_id": SANDBOX_ID})
-    broker = _RecordingClient()
-    _use_broker(monkeypatch, broker)
+    sandbox_manager = _RecordingClient()
+    _use_sandbox_manager(monkeypatch, sandbox_manager)
     job_id = await _ready_job(client, store)
 
     response = await client.get(f"/v1/agent/jobs/{job_id}/files", params={"path": "README.md"})
@@ -539,7 +539,7 @@ async def test_a_selected_file_read_is_measured_with_its_broker_fragment(
     read = next(stage for stage in record["stages"] if stage["stage"] == "read")
     children = {child["stage"]: child["source"] for child in read["children"]}
     assert children == {
-        "broker_call": "control-plane",
+        "sandbox_manager_call": "control-plane",
         "admission": "broker",
         "exec": "broker",
     }
@@ -550,8 +550,8 @@ async def test_the_root_listing_is_measured_as_a_listing(
 ):
     """The root path is files.list; a selected entry is files.open."""
     _enable(monkeypatch)
-    broker = _RecordingClient()
-    _use_broker(monkeypatch, broker)
+    sandbox_manager = _RecordingClient()
+    _use_sandbox_manager(monkeypatch, sandbox_manager)
     job_id = await _ready_job(client, store)
 
     listing = await client.get(f"/v1/agent/jobs/{job_id}/files")
@@ -566,8 +566,8 @@ async def test_the_budget_is_only_spent_by_a_request_that_matches(
 ):
     """A non-matching chat cannot consume the experiment's whole allowance."""
     _enable(monkeypatch, target={"sandbox_id": SANDBOX_ID}, max_operations=1)
-    broker = _RecordingClient()
-    _use_broker(monkeypatch, broker)
+    sandbox_manager = _RecordingClient()
+    _use_sandbox_manager(monkeypatch, sandbox_manager)
     measured = await _ready_job(client, store)
     other = await _create_job(client)
     _attach_shared_workspace(store, other)
@@ -598,8 +598,8 @@ async def test_one_interaction_correlates_its_requests_under_one_id(
     is what lets the three be read as one interaction.
     """
     _enable(monkeypatch)
-    broker = _RecordingClient()
-    _use_broker(monkeypatch, broker)
+    sandbox_manager = _RecordingClient()
+    _use_sandbox_manager(monkeypatch, sandbox_manager)
     job_id = await _ready_job(client, store)
 
     listing = await client.get(f"/v1/agent/jobs/{job_id}/terminals")
@@ -643,15 +643,15 @@ async def test_one_interaction_correlates_its_requests_under_one_id(
     for record in emitted:
         assert record["operation"] == "terminal.open"
         assert record["collection_complete"] is True
-    # Each request's own broker fragment attached to that request's stage.
+    # Each request's own sandbox manager fragment attached to that request's stage.
     by_stage = {stage["stage"]: stage for record in emitted for stage in record["stages"]}
     names = ("terminal.list", "terminal.create", "terminal.stream_attach")
     assert set(names) <= set(by_stage)
     for name in names:
         children = by_stage[name]["children"]
-        # The round trip this process timed, plus whatever the broker timed for
+        # The round trip this process timed, plus whatever the sandbox manager timed for
         # the same call -- at minimum its own admission of the operation.
-        assert "broker_call" in {child["stage"] for child in children}
+        assert "sandbox_manager_call" in {child["stage"] for child in children}
         assert "admission" in {child["stage"] for child in children}
         assert {child["source"] for child in children} == {"control-plane", "broker"}
     assert emitted[0]["facts"]["terminal_count"] == 1
@@ -662,8 +662,8 @@ async def test_a_continuation_still_reports_its_own_time(
 ):
     """Reusing an id does not mean collecting into a record already written."""
     _enable(monkeypatch)
-    broker = _RecordingClient()
-    _use_broker(monkeypatch, broker)
+    sandbox_manager = _RecordingClient()
+    _use_sandbox_manager(monkeypatch, sandbox_manager)
     job_id = await _ready_job(client, store)
 
     first = await client.get(f"/v1/agent/jobs/{job_id}/terminals")
@@ -686,7 +686,7 @@ async def test_a_continuation_still_reports_its_own_time(
         assert record["collection_complete"] is True
         listing = next(item for item in record["stages"] if item["stage"] == "terminal.list")
         children = listing["children"]
-        assert {"broker_call", "admission"} <= {child["stage"] for child in children}
+        assert {"sandbox_manager_call", "admission"} <= {child["stage"] for child in children}
         assert {child["source"] for child in children} == {"control-plane", "broker"}
 
 
@@ -695,8 +695,8 @@ async def test_a_continuation_from_another_chat_is_refused(
 ):
     """An echoed id is a correlation handle, not a way to observe another chat."""
     _enable(monkeypatch)
-    broker = _RecordingClient()
-    _use_broker(monkeypatch, broker)
+    sandbox_manager = _RecordingClient()
+    _use_sandbox_manager(monkeypatch, sandbox_manager)
     owner = await _ready_job(client, store)
     other = await _ready_job(client, store)
 
@@ -724,13 +724,13 @@ async def test_a_continuation_from_another_chat_is_refused(
 # ---------------------------------------------------------------------------
 
 
-async def test_a_broker_that_never_answered_is_named_as_a_missing_fragment(
+async def test_a_sandbox_manager_that_never_answered_is_named_as_a_missing_fragment(
     client: AsyncClient, store: FakeStorage, monkeypatch, records
 ):
     """An unanswerable call is a fragment the record owed, not a complete sample."""
     _enable(monkeypatch)
-    broker = _RecordingClient(fail=WorkspaceBrokerError(503, "unavailable"))
-    _use_broker(monkeypatch, broker)
+    sandbox_manager = _RecordingClient(fail=SandboxManagerError(503, "unavailable"))
+    _use_sandbox_manager(monkeypatch, sandbox_manager)
     job_id = await _ready_job(client, store)
 
     response = await client.get(f"/v1/agent/jobs/{job_id}/files")
@@ -748,8 +748,8 @@ async def test_an_expired_run_collects_nothing_further(
 ):
     """Past its deadline the run stops selecting, and business carries on."""
     run = _enable(monkeypatch)
-    broker = _RecordingClient()
-    _use_broker(monkeypatch, broker)
+    sandbox_manager = _RecordingClient()
+    _use_sandbox_manager(monkeypatch, sandbox_manager)
     job_id = await _ready_job(client, store)
 
     run["expires_at"] = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
@@ -768,8 +768,8 @@ async def test_a_malformed_selection_disables_collection_not_the_read(
 ):
     """Measurement metadata must never turn a file read into an error."""
     _enable(monkeypatch)
-    broker = _RecordingClient()
-    _use_broker(monkeypatch, broker)
+    sandbox_manager = _RecordingClient()
+    _use_sandbox_manager(monkeypatch, sandbox_manager)
     job_id = await _ready_job(client, store)
 
     listed = await client.get(
@@ -792,11 +792,11 @@ async def test_a_malformed_selection_disables_collection_not_the_read(
 
 
 # ---------------------------------------------------------------------------
-# The broker's half of the protocol
+# The sandbox manager's half of the protocol
 # ---------------------------------------------------------------------------
 
 
-def test_a_broker_refuses_a_selection_for_another_operation(monkeypatch):
+def test_a_sandbox_manager_refuses_a_selection_for_another_operation(monkeypatch):
     """A fragment is never filed under an operation this route does not own."""
     _enable(monkeypatch)
     context = _context(operations=["terminal.open"])
@@ -805,8 +805,8 @@ def test_a_broker_refuses_a_selection_for_another_operation(monkeypatch):
     assert operation_call.open_call(context, operations=("terminal.open",)).recording is True
 
 
-def test_a_broker_refuses_an_operation_its_own_run_does_not_select(monkeypatch):
-    """The broker's own run decides, whatever a caller claims was selected."""
+def test_a_sandbox_manager_refuses_an_operation_its_own_run_does_not_select(monkeypatch):
+    """The sandbox manager's own run decides, whatever a caller claims was selected."""
     _enable(monkeypatch, operations=["terminal.open"])
 
     assert (
@@ -817,7 +817,7 @@ def test_a_broker_refuses_an_operation_its_own_run_does_not_select(monkeypatch):
     )
 
 
-def test_a_broker_drops_a_context_it_cannot_validate(monkeypatch):
+def test_a_sandbox_manager_drops_a_context_it_cannot_validate(monkeypatch):
     """Every unusable selection answers "not collecting" and nothing else."""
     _enable(monkeypatch)
     undecodable = [
@@ -876,8 +876,8 @@ def test_a_streaming_answer_round_trips_through_headers(monkeypatch):
     assert operation_profiling.answer_from_headers({"Cache-Control": "no-cache"}) is None
 
 
-def test_an_unselected_broker_call_records_and_answers_nothing(monkeypatch):
-    """Off means off on the broker too, down to the response headers."""
+def test_an_unselected_sandbox_manager_call_records_and_answers_nothing(monkeypatch):
+    """Off means off on the sandbox manager too, down to the response headers."""
     call = operation_call.open_call(None, operations=("files.open",))
 
     assert call.recording is False
@@ -892,7 +892,9 @@ def test_an_unselected_broker_call_records_and_answers_nothing(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-async def test_the_broker_client_sends_the_selection_and_preserves_the_answer(monkeypatch, records):
+async def test_the_sandbox_manager_client_sends_the_selection_and_preserves_the_answer(
+    monkeypatch, records
+):
     """The gateway's client carries the selection and does not eat the answer."""
     _enable(monkeypatch)
     seen: list[dict[str, Any]] = []
@@ -903,7 +905,7 @@ async def test_the_broker_client_sends_the_selection_and_preserves_the_answer(mo
             seen.append({"method": method, "url": url, "headers": headers, "params": params})
             yield httpx.Response(200, json={"path": "", "kind": "directory", "entries": []})
 
-    client = WorkspaceBrokerClient(BROKER_URL, "token")
+    client = SandboxManagerClient(SANDBOX_MANAGER_URL, "token")
     monkeypatch.setattr(client, "_http", _http_for(_Http()))
 
     body = await client.files("athr_1", "", profiling=_context())
@@ -933,19 +935,19 @@ def test_the_outcome_vocabulary_covers_both_kinds_of_root_operation():
 
 def test_a_scoped_run_reports_the_facts_the_route_proved(monkeypatch, records):
     """The record names the scope it matched, so a baseline can be filtered."""
-    _enable(monkeypatch, target={"host": BROKER_HOST})
+    _enable(monkeypatch, target={"host": SANDBOX_MANAGER_HOST})
     scope = root_scope(
         "files.list",
         {
             "id": "ajob_1",
             "thread_id": "athr_1",
-            "thread_sandbox": {"sandbox_id": SANDBOX_ID, "host": BROKER_HOST},
+            "thread_sandbox": {"sandbox_id": SANDBOX_ID, "host": SANDBOX_MANAGER_HOST},
         },
     )
     assert scope.facts == {
         "thread_id": "athr_1",
         "sandbox_id": SANDBOX_ID,
-        "host": BROKER_HOST,
+        "host": SANDBOX_MANAGER_HOST,
     }
 
 
@@ -1019,8 +1021,8 @@ async def test_overlapping_requests_each_get_their_own_measurement(
     own call id and their own fragment.
     """
     _enable(monkeypatch, max_operations=10)
-    broker = _RecordingClient()
-    _use_broker(monkeypatch, broker)
+    sandbox_manager = _RecordingClient()
+    _use_sandbox_manager(monkeypatch, sandbox_manager)
     job_id = await _ready_job(client, store)
 
     first = await client.get(f"/v1/agent/jobs/{job_id}/terminals")
@@ -1077,8 +1079,8 @@ async def test_an_answer_is_recorded_against_the_call_that_made_it(
 ):
     """A second call in one request cannot overwrite the first call's answer."""
     _enable(monkeypatch)
-    broker = _RecordingClient()
-    _use_broker(monkeypatch, broker)
+    sandbox_manager = _RecordingClient()
+    _use_sandbox_manager(monkeypatch, sandbox_manager)
     job_id = await _ready_job(client, store)
 
     with operation_measurement.operation(
@@ -1088,7 +1090,7 @@ async def test_an_answer_is_recorded_against_the_call_that_made_it(
             {
                 "id": job_id,
                 "thread_id": store.jobs[job_id]["thread_id"],
-                "thread_sandbox": {"sandbox_id": SANDBOX_ID, "host": BROKER_HOST},
+                "thread_sandbox": {"sandbox_id": SANDBOX_ID, "host": SANDBOX_MANAGER_HOST},
             },
             service=operation_measurement.ROUTE_TERMINALS,
         ),
@@ -1123,8 +1125,8 @@ async def test_a_legacy_measurement_id_header_still_correlates(
 ):
     """A client that echoes the old header keeps working through the migration."""
     _enable(monkeypatch)
-    broker = _RecordingClient()
-    _use_broker(monkeypatch, broker)
+    sandbox_manager = _RecordingClient()
+    _use_sandbox_manager(monkeypatch, sandbox_manager)
     job_id = await _ready_job(client, store)
 
     first = await client.get(f"/v1/agent/jobs/{job_id}/terminals")
@@ -1150,9 +1152,9 @@ async def test_a_continuation_whose_host_changed_is_not_measured(
     client: AsyncClient, store: FakeStorage, monkeypatch, records
 ):
     """A host that moved ends the interaction instead of being papered over."""
-    _enable(monkeypatch, target={"host": BROKER_HOST})
-    broker = _RecordingClient()
-    _use_broker(monkeypatch, broker)
+    _enable(monkeypatch, target={"host": SANDBOX_MANAGER_HOST})
+    sandbox_manager = _RecordingClient()
+    _use_sandbox_manager(monkeypatch, sandbox_manager)
     job_id = await _ready_job(client, store)
 
     first = await client.get(f"/v1/agent/jobs/{job_id}/files")
@@ -1170,7 +1172,7 @@ async def test_a_continuation_whose_host_changed_is_not_measured(
     # The first request is the only sample, and it is the machine that served it.
     emitted = records()
     assert len(emitted) == 1
-    assert emitted[0]["facts"]["host"] == BROKER_HOST
+    assert emitted[0]["facts"]["host"] == SANDBOX_MANAGER_HOST
 
 
 async def test_a_continuation_whose_sandbox_changed_is_not_measured(
@@ -1178,8 +1180,8 @@ async def test_a_continuation_whose_sandbox_changed_is_not_measured(
 ):
     """A re-provisioned workspace is not the one the experiment selected."""
     _enable(monkeypatch, target={"sandbox_id": SANDBOX_ID})
-    broker = _RecordingClient()
-    _use_broker(monkeypatch, broker)
+    sandbox_manager = _RecordingClient()
+    _use_sandbox_manager(monkeypatch, sandbox_manager)
     job_id = await _ready_job(client, store)
 
     first = await client.get(f"/v1/agent/jobs/{job_id}/files")
@@ -1201,8 +1203,8 @@ async def test_a_continuation_whose_scope_is_no_longer_provable_is_not_measured(
 ):
     """A fact that can no longer be resolved is a mismatch, not a pass."""
     _enable(monkeypatch, target={"sandbox_id": SANDBOX_ID})
-    broker = _RecordingClient()
-    _use_broker(monkeypatch, broker)
+    sandbox_manager = _RecordingClient()
+    _use_sandbox_manager(monkeypatch, sandbox_manager)
     job_id = await _ready_job(client, store)
 
     first = await client.get(f"/v1/agent/jobs/{job_id}/files")
@@ -1240,8 +1242,8 @@ async def test_a_truncated_fragment_is_reported_to_the_client(
     reported a floor as a duration.
     """
     _enable(monkeypatch)
-    broker = _RecordingClient(truncate=True)
-    _use_broker(monkeypatch, broker)
+    sandbox_manager = _RecordingClient(truncate=True)
+    _use_sandbox_manager(monkeypatch, sandbox_manager)
     job_id = await _ready_job(client, store)
 
     response = await client.get(f"/v1/agent/jobs/{job_id}/files")
@@ -1264,8 +1266,8 @@ async def test_an_empty_truncated_answer_is_not_a_complete_one(
 ):
     """No stages plus a truncation is "measured nothing", not "nothing to time"."""
     _enable(monkeypatch)
-    broker = _RecordingClient(truncate=True, empty_stages=True)
-    _use_broker(monkeypatch, broker)
+    sandbox_manager = _RecordingClient(truncate=True, empty_stages=True)
+    _use_sandbox_manager(monkeypatch, sandbox_manager)
     job_id = await _ready_job(client, store)
 
     response = await client.get(f"/v1/agent/jobs/{job_id}/files")
@@ -1281,8 +1283,8 @@ async def test_a_normal_empty_answer_is_complete(
 ):
     """A call that collected and had nothing to time is still a complete one."""
     _enable(monkeypatch)
-    broker = _RecordingClient(empty_stages=True)
-    _use_broker(monkeypatch, broker)
+    sandbox_manager = _RecordingClient(empty_stages=True)
+    _use_sandbox_manager(monkeypatch, sandbox_manager)
     job_id = await _ready_job(client, store)
 
     response = await client.get(f"/v1/agent/jobs/{job_id}/files")
@@ -1299,8 +1301,8 @@ async def test_a_streamed_truncation_reaches_the_client_headers(
 ):
     """A stream answers in headers, and its truncation has to travel too."""
     _enable(monkeypatch)
-    broker = _RecordingClient(truncate=True)
-    _use_broker(monkeypatch, broker)
+    sandbox_manager = _RecordingClient(truncate=True)
+    _use_sandbox_manager(monkeypatch, sandbox_manager)
     job_id = await _ready_job(client, store)
 
     streamed = await client.get(f"/v1/agent/jobs/{job_id}/terminals/term_measured/stream")
@@ -1323,8 +1325,8 @@ async def test_a_request_that_outlived_its_run_reports_incomplete(
     configuration -- a Disable, or the next experiment -- leaves it alone and
     this request would now be complete on purpose.
     """
-    broker = _RecordingClient()
-    _use_broker(monkeypatch, broker)
+    sandbox_manager = _RecordingClient()
+    _use_sandbox_manager(monkeypatch, sandbox_manager)
     job_id = await _ready_job(client, store)
 
     # Advance only the measurement modules' clocks, leaving asyncio and the
@@ -1344,14 +1346,14 @@ async def test_a_request_that_outlived_its_run_reports_incomplete(
 
     # The run lapses mid-request: the deadline judgement has to run before the
     # response body is built, or the response claims a sample the record denies.
-    original = broker.files
+    original = sandbox_manager.files
 
     async def _outlive_the_run(*args: Any, **kwargs: Any) -> dict[str, Any]:
         nonlocal clock_offset
         clock_offset = selected_run.deadline_mono - time.monotonic() + 1.0
         return await original(*args, **kwargs)
 
-    monkeypatch.setattr(broker, "files", _outlive_the_run)
+    monkeypatch.setattr(sandbox_manager, "files", _outlive_the_run)
 
     response = await client.get(f"/v1/agent/jobs/{job_id}/files")
 
@@ -1370,21 +1372,21 @@ async def test_a_disable_does_not_truncate_an_in_flight_request(
     """Disabling collection stops selecting; it does not cut a request short.
 
     Only Admin control changes configuration at runtime, so that is the mode
-    this happens in: the broker's own copy of the configuration is replaced
+    this happens in: the sandbox manager's own copy of the configuration is replaced
     mid-request, which is exactly what a Disable does. The request keeps its own
-    experiment and its own deadline and finishes complete -- and the broker,
+    experiment and its own deadline and finishes complete -- and the sandbox manager,
     which has just been told to stop selecting, still answers the fragment this
     request had already started.
     """
     _enable_admin(monkeypatch)
-    broker = _RecordingClient()
-    _use_broker(monkeypatch, broker)
+    sandbox_manager = _RecordingClient()
+    _use_sandbox_manager(monkeypatch, sandbox_manager)
     job_id = await _ready_job(client, store)
 
-    original = broker.files
+    original = sandbox_manager.files
 
     async def _disable_then_read(*args: Any, **kwargs: Any) -> dict[str, Any]:
-        # The whole deployment stops selecting, including the broker's copy.
+        # The whole deployment stops selecting, including the sandbox manager's copy.
         operation_profiling.policy_store().publish(
             operation_profiling.ControlState(
                 mode=operation_profiling.MODE_ADMIN,
@@ -1395,7 +1397,7 @@ async def test_a_disable_does_not_truncate_an_in_flight_request(
         )
         return await original(*args, **kwargs)
 
-    monkeypatch.setattr(broker, "files", _disable_then_read)
+    monkeypatch.setattr(sandbox_manager, "files", _disable_then_read)
 
     response = await client.get(f"/v1/agent/jobs/{job_id}/files")
 
@@ -1407,7 +1409,7 @@ async def test_a_disable_does_not_truncate_an_in_flight_request(
     assert records()[0]["collection_complete"] is True
     # And a request arriving after the Disable is not selected at all.
     operation_profiling.reset_cache()
-    broker.files = original
+    sandbox_manager.files = original
     after = await client.get(f"/v1/agent/jobs/{job_id}/files")
     assert "profiling" not in after.json()
 
@@ -1447,15 +1449,15 @@ async def test_a_subdirectory_is_a_listing_and_a_file_is_an_open(
 ):
     """The request's own result decides the operation, not the path's shape.
 
-    The review found the opposite: both the control plane and the broker
+    The review found the opposite: both the control plane and the sandbox manager
     classified by "is the path empty", so expanding ``src`` was filed as
     ``files.open`` and an experiment that selected only ``files.list`` lost
     every expansion -- while an experiment that selected only ``files.open``
     absorbed directory listings into its file-preview distribution.
     """
     _enable(monkeypatch, operations=operations, target={"sandbox_id": SANDBOX_ID})
-    broker = _RecordingClient(directories=directories)
-    _use_broker(monkeypatch, broker)
+    sandbox_manager = _RecordingClient(directories=directories)
+    _use_sandbox_manager(monkeypatch, sandbox_manager)
     job_id = await _ready_job(client, store)
 
     response = await client.get(
@@ -1492,14 +1494,14 @@ async def test_a_slow_read_is_charged_to_the_stage_that_encloses_it(
     """The stage a request is timed as starts before the call, not after it.
 
     Timed the other way round, a 50 ms read produced a stage of 84 µs with a
-    50 ms broker child hanging under it and a 1 µs "broker_call" beside it --
+    50 ms sandbox manager child hanging under it and a 1 µs "sandbox_manager_call" beside it --
     the total was right and the attribution was wrong, which is the one thing
     this feature exists to answer.
     """
     _enable(monkeypatch)
     delay_s = 0.05
-    broker = _RecordingClient(delay_s=delay_s)
-    _use_broker(monkeypatch, broker)
+    sandbox_manager = _RecordingClient(delay_s=delay_s)
+    _use_sandbox_manager(monkeypatch, sandbox_manager)
     job_id = await _ready_job(client, store)
 
     response = await client.get(f"/v1/agent/jobs/{job_id}/files", params={"path": "README.md"})
@@ -1514,9 +1516,11 @@ async def test_a_slow_read_is_charged_to_the_stage_that_encloses_it(
     assert read["start_offset_us"] < delay_s * 1_000_000
     # The round trip this process measured is charged to the same stage, and it
     # too covers the delay.
-    round_trip = next(child for child in read["children"] if child["stage"] == "broker_call")
+    round_trip = next(
+        child for child in read["children"] if child["stage"] == "sandbox_manager_call"
+    )
     assert round_trip["duration_us"] >= delay_s * 1_000_000
-    # The broker's own work is a child of the stage, not a sibling of it.
+    # The sandbox manager's own work is a child of the stage, not a sibling of it.
     assert "exec" in {child["stage"] for child in read["children"]}
     # No stage was created after the call returned: the read is the only one.
     assert [stage["stage"] for stage in record["stages"]] == ["read"]
@@ -1531,8 +1535,8 @@ async def test_the_read_stage_is_named_before_the_kind_is_known(
 ):
     """One stage name whatever the result was, so the two remain comparable."""
     _enable(monkeypatch)
-    broker = _RecordingClient(directories={"src": "directory"})
-    _use_broker(monkeypatch, broker)
+    sandbox_manager = _RecordingClient(directories={"src": "directory"})
+    _use_sandbox_manager(monkeypatch, sandbox_manager)
     job_id = await _ready_job(client, store)
 
     listing = await client.get(f"/v1/agent/jobs/{job_id}/files", params={"path": "src"})
@@ -1555,8 +1559,8 @@ async def test_an_evicted_reference_is_not_replaced_by_a_fresh_interaction(
 ):
     """A reference the process no longer holds stops collection, not continues it."""
     _enable(monkeypatch)
-    broker = _RecordingClient()
-    _use_broker(monkeypatch, broker)
+    sandbox_manager = _RecordingClient()
+    _use_sandbox_manager(monkeypatch, sandbox_manager)
     job_id = await _ready_job(client, store)
 
     first = await client.get(f"/v1/agent/jobs/{job_id}/files")
@@ -1588,8 +1592,8 @@ async def test_a_continuation_whose_host_moved_is_refused_without_a_target(
     request's time to the machine that served the first one.
     """
     _enable(monkeypatch)
-    broker = _RecordingClient()
-    _use_broker(monkeypatch, broker)
+    sandbox_manager = _RecordingClient()
+    _use_sandbox_manager(monkeypatch, sandbox_manager)
     job_id = await _ready_job(client, store)
 
     first = await client.get(f"/v1/agent/jobs/{job_id}/files")
@@ -1605,7 +1609,7 @@ async def test_a_continuation_whose_host_moved_is_refused_without_a_target(
     assert "profiling" not in second.json()
     emitted = records()
     assert len(emitted) == 1
-    assert emitted[0]["facts"]["host"] == BROKER_HOST
+    assert emitted[0]["facts"]["host"] == SANDBOX_MANAGER_HOST
     assert emitted[0]["facts"]["sandbox_id"] == SANDBOX_ID
 
 
@@ -1618,8 +1622,8 @@ async def test_a_job_scoped_run_continues_the_interaction_it_started(
     legitimate continuation -- then started a fresh interaction, so the two
     requests of one terminal open could never be correlated.
     """
-    broker = _RecordingClient()
-    _use_broker(monkeypatch, broker)
+    sandbox_manager = _RecordingClient()
+    _use_sandbox_manager(monkeypatch, sandbox_manager)
     job_id = await _ready_job(client, store)
     # The run is scoped by the chat this route resolves, which is the case that
     # used to be rejected: the id lives on the scope, not in its facts.
@@ -1674,8 +1678,8 @@ async def test_a_file_read_is_stored_by_the_control_plane(
     serialization of a record it already holds.
     """
     _enable(monkeypatch, target={"sandbox_id": SANDBOX_ID})
-    broker = _RecordingClient()
-    _use_broker(monkeypatch, broker)
+    sandbox_manager = _RecordingClient()
+    _use_sandbox_manager(monkeypatch, sandbox_manager)
     job_id = await _ready_job(client, store)
 
     response = await client.get(f"/v1/agent/jobs/{job_id}/files", params={"path": "README.md"})
@@ -1701,8 +1705,8 @@ async def test_a_terminal_open_is_stored_once_per_request(
 ):
     """A list and a create are two records, each with its own request kind."""
     _enable(monkeypatch)
-    broker = _RecordingClient()
-    _use_broker(monkeypatch, broker)
+    sandbox_manager = _RecordingClient()
+    _use_sandbox_manager(monkeypatch, sandbox_manager)
     job_id = await _ready_job(client, store)
 
     listing = await client.get(f"/v1/agent/jobs/{job_id}/terminals")
@@ -1735,7 +1739,7 @@ async def test_a_terminal_attach_is_stored_while_its_stream_is_still_open(
         async def aclose(self) -> None:
             """Release no external resource."""
 
-    class _HeldBroker(_RecordingClient):
+    class _HeldSandboxManager(_RecordingClient):
         async def stream_terminal(
             self,
             workspace_id: str,
@@ -1755,14 +1759,14 @@ async def test_a_terminal_attach_is_stored_while_its_stream_is_still_open(
                 headers=call.headers(),
                 stream=_HeldBytes(),
             )
-            return WorkspaceBrokerStream(
+            return SandboxManagerStream(
                 _UnusedClient(),
                 response,
                 profiling_answer=_answer(response.headers),
             )
 
     _enable(monkeypatch)
-    _use_broker(monkeypatch, _HeldBroker())
+    _use_sandbox_manager(monkeypatch, _HeldSandboxManager())
     job_id = await _ready_job(client, store)
     request = asyncio.create_task(
         client.get(f"/v1/agent/jobs/{job_id}/terminals/term_measured/stream")
@@ -1781,8 +1785,8 @@ async def test_a_request_that_was_not_selected_stores_nothing(
     client: AsyncClient, store: FakeStorage, monkeypatch, _running_writer
 ):
     """Off means no row, not an empty one."""
-    broker = _RecordingClient()
-    _use_broker(monkeypatch, broker)
+    sandbox_manager = _RecordingClient()
+    _use_sandbox_manager(monkeypatch, sandbox_manager)
     job_id = await _ready_job(client, store)
 
     response = await client.get(f"/v1/agent/jobs/{job_id}/files")
@@ -1805,7 +1809,9 @@ async def test_a_request_that_failed_is_stored_too(
     not a broken measurement.
     """
     _enable(monkeypatch)
-    _use_broker(monkeypatch, _RecordingClient(fail=WorkspaceBrokerError(503, "unavailable")))
+    _use_sandbox_manager(
+        monkeypatch, _RecordingClient(fail=SandboxManagerError(503, "unavailable"))
+    )
     job_id = await _ready_job(client, store)
 
     response = await client.get(f"/v1/agent/jobs/{job_id}/files")
@@ -1827,9 +1833,9 @@ async def test_a_failed_non_root_read_is_not_misfiled_as_list_or_open(
 ):
     """Without a returned kind, neither candidate operation is evidence."""
     _enable(monkeypatch)
-    _use_broker(
+    _use_sandbox_manager(
         monkeypatch,
-        _RecordingClient(fail=WorkspaceBrokerError(503, "unavailable")),
+        _RecordingClient(fail=SandboxManagerError(503, "unavailable")),
     )
     job_id = await _ready_job(client, store)
 
@@ -1847,7 +1853,7 @@ async def test_a_failed_non_root_read_is_not_misfiled_as_list_or_open(
 async def test_response_validation_failure_cannot_be_stored_as_success(
     store: FakeStorage, monkeypatch, _running_writer
 ):
-    """A malformed broker answer is a failed operation, not a percentile sample."""
+    """A malformed sandbox manager answer is a failed operation, not a percentile sample."""
 
     class _InvalidTerminal(_RecordingClient):
         async def create_terminal(
@@ -1869,7 +1875,7 @@ async def test_response_validation_failure_cannot_be_stored_as_success(
             )
 
     _enable(monkeypatch)
-    _use_broker(monkeypatch, _InvalidTerminal())
+    _use_sandbox_manager(monkeypatch, _InvalidTerminal())
     async with AsyncClient(
         transport=ASGITransport(app=_build_app(store), raise_app_exceptions=False),
         base_url="http://test",
@@ -1897,7 +1903,7 @@ async def test_a_queue_with_no_room_drops_the_record_and_keeps_answering(
     database from turning every request into another pending write.
     """
     _enable(monkeypatch)
-    _use_broker(monkeypatch, _RecordingClient())
+    _use_sandbox_manager(monkeypatch, _RecordingClient())
     job_id = await _ready_job(client, store)
     # A zero-capacity writer models a destination whose bounded queue has no
     # room. It remains running so this tests fullness, not shutdown.
