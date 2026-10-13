@@ -38,5 +38,10 @@ the worktree is clean, the required local gate passes, and the gate leaves the
 worktree clean. Fix the reported problem and retry; do not bypass or disable
 the hook.
 
+The hook checks the checkout the pull request is created from: the directory a
+preceding `cd` enters (`cd <worktree> && gh pr create ...`), or the worktree
+that has the `--head` branch checked out. Without either, it checks the session
+directory. Commands that do not create a pull request pass through unchecked.
+
 The hook enforces the repository-wide gate only. The area-specific checks in
 step 3 remain required and must be run before invoking pull-request creation.
