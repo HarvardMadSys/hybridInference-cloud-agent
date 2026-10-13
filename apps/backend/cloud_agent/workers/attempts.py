@@ -256,17 +256,23 @@ async def _revoke_dead_grants(store: GrantRepository, grants: Any) -> None:
             )
 
 
-async def _abandon_unrenewable_attempt(store: AttemptCommands, row: dict[str, Any]) -> None:
-    """Stop an attempt whose grant the gateway will not renew.
+async def _abandon_unrenewable_attempt(store: AttemptCommands, row: dict[str, Any]) -> bool:
+    """Hand back an attempt whose grant the gateway will not renew, if it never started.
 
-    **Giving up has to be something the attempt notices.** Simply stopping the
-    renewal calls would leave the sandbox running until its capability expired
-    and then failing at a model call, with the cause several minutes and one
-    process away. Releasing the claim is the same answer the claim path already
-    gives when a grant cannot be minted at all: the attempt is aborted, the
-    worker's next heartbeat says ``ok: False`` — stop immediately — and the job
-    goes back to the queue **without spending a retry**, where the next claim
-    asks for a fresh grant rather than nursing a dead one.
+    Releasing the claim is the same answer the claim path already gives when a
+    grant cannot be minted at all: the attempt is aborted, the worker's next
+    heartbeat says ``ok: False`` — stop immediately — and the job goes back to
+    the queue **without spending a retry**, where the next claim asks for a
+    fresh grant rather than nursing a dead one.
+
+    **Only a turn that never started can be handed back.** ``release_claim``
+    refuses once the turn's prompt has been admitted to its CLI, because a
+    replayed admitted turn runs the same instruction twice, and by the time
+    the refusals have been counted the turn usually has been admitted. An
+    admitted turn is left to finish: its member process does not spend this
+    grant but the residency's own credential, which its host's heartbeat
+    renews and which is revoked with the residency. The caller stops renewing
+    this grant instead.
 
     Nothing revokes the grant here. The release makes the attempt non-current,
     which is exactly what ``take_revocable_grants`` selects, so the revocation
@@ -277,6 +283,9 @@ async def _abandon_unrenewable_attempt(store: AttemptCommands, row: dict[str, An
     Args:
         store: The agent store.
         row: A ``list_renewable_grants`` row, carrying the attempt's fence.
+
+    Returns:
+        Whether the attempt was handed back to the queue.
     """
     released = await store.release_claim(
         job_id=row["job_id"],
@@ -292,6 +301,7 @@ async def _abandon_unrenewable_attempt(store: AttemptCommands, row: dict[str, An
             "requeued": released,
         },
     )
+    return released
 
 
 async def _renew_live_grants(
@@ -310,9 +320,10 @@ async def _renew_live_grants(
     A failed renewal is retried on the next pass — one bad minute at the
     gateway must not end a job — but a *definitively refused* one is not
     retried forever. After :data:`GRANT_RENEWAL_GIVE_UP_AFTER` consecutive
-    definitive refusals of the same grant the attempt is abandoned rather than
-    left running toward a capability that is about to expire; see
-    :func:`_abandon_unrenewable_attempt`.
+    definitive refusals the grant is given up on and not asked about again: an
+    attempt whose turn never started is handed back to the queue, and an
+    admitted turn, which runs on its residency's credential rather than on this
+    grant, is left to finish; see :func:`_abandon_unrenewable_attempt`.
 
     **Only a refusal that names this grant counts toward that** — see
     :data:`DEAD_GRANT_REFUSALS`. An unreachable gateway, a rotated dispatch
@@ -329,8 +340,9 @@ async def _renew_live_grants(
         store: The agent store.
         grants: The grant client.
         failures: Consecutive definitive refusals per grant id, owned by the
-            caller so it survives between passes. Pruned here to the grants
-            still live, so a finished job leaves nothing behind.
+            caller so it survives between passes. A count at the give-up
+            threshold marks a grant that was given up on. Pruned here to the
+            grants still live, so a finished job leaves nothing behind.
     """
     seen: set[str] = set()
     renewed: list[str] = []
@@ -348,6 +360,12 @@ async def _renew_live_grants(
     async def _renew_one(row: dict[str, Any]) -> None:
         grant_id = row["grant_id"]
         seen.add(grant_id)
+        if failures.get(grant_id, 0) >= GRANT_RENEWAL_GIVE_UP_AFTER:
+            # Given up on, and its turn could not be handed back: it had been
+            # admitted. The gateway has said this grant is dead, so asking again
+            # would only repeat the refusal -- and, with a count started over,
+            # the futile give-up -- for as long as the turn runs.
+            return
         try:
             await grants.renew(grant_id)
         except Exception as exc:
@@ -372,18 +390,26 @@ async def _renew_live_grants(
             )
             if definitive and refusals >= GRANT_RENEWAL_GIVE_UP_AFTER:
                 try:
-                    await _abandon_unrenewable_attempt(store.attempt_commands, row)
+                    released = await _abandon_unrenewable_attempt(store.attempt_commands, row)
+                except asyncio.CancelledError:
+                    # The pass deadline cut the release short; see below.
+                    failures[grant_id] = GRANT_RENEWAL_GIVE_UP_AFTER - 1
+                    raise
                 except Exception:
-                    # Leave the count at or above the threshold, so the next
-                    # pass that is again definitively refused retries the
-                    # release rather than resuming renewals this one has
-                    # already decided are hopeless. A pass that merely cannot
-                    # reach the gateway retries neither: releasing an attempt
-                    # requires the gateway too, and there is nothing to gain by
-                    # asking a second time in the same outage.
+                    # The give-up did not happen, so the count must not say it
+                    # did. One short of the threshold, the next pass asks once
+                    # more and a definitive refusal retries the release at once,
+                    # rather than after a whole new run of refusals. A pass that
+                    # merely cannot reach the gateway retries neither: there is
+                    # nothing to gain by asking a second time in the same outage.
+                    failures[grant_id] = GRANT_RENEWAL_GIVE_UP_AFTER - 1
                     logger.warning("Abandoning an unrenewable attempt failed", exc_info=True)
                 else:
-                    seen.discard(grant_id)
+                    if released:
+                        # No longer current, so never listed again: its count
+                        # goes with it. An admitted turn keeps its count at the
+                        # threshold, which is what stops the asking above.
+                        seen.discard(grant_id)
             return
         # Consecutive, not cumulative: one refused pass followed by a good one
         # is a gateway blip, and must not accumulate toward a give-up over the

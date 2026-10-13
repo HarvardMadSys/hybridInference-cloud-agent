@@ -61,19 +61,30 @@ class _AttemptStore(AllCapabilities):
     a grant is never offered twice.
 
     ``release_claim`` is the real one's contract too: it aborts the attempt and
-    requeues the job, and refuses when the fence no longer matches.
+    requeues the job, and refuses when the fence no longer matches — or when
+    the turn's prompt was already admitted to its CLI, which the real one reads
+    from the membership's ``admitted_job_id``.
     """
 
     def __init__(self) -> None:
         self.attempts: dict[int, dict[str, Any]] = {}
         self.released: list[tuple[str, int, int]] = []
+        self.release_failures = 0
 
-    def add(self, attempt_id: int, grant_id: str | None, status: str = "running") -> None:
+    def add(
+        self,
+        attempt_id: int,
+        grant_id: str | None,
+        status: str = "running",
+        *,
+        admitted: bool = False,
+    ) -> None:
         self.attempts[attempt_id] = {
             "job_id": f"ajob_{attempt_id}",
             "grant_id": grant_id,
             "status": status,
             "lease_generation": attempt_id,
+            "admitted": admitted,
         }
 
     def supersede(self, attempt_id: int) -> None:
@@ -82,8 +93,13 @@ class _AttemptStore(AllCapabilities):
     async def release_claim(
         self, *, job_id: str, attempt_id: int, lease_generation: int | None = None
     ) -> bool:
+        if self.release_failures:
+            self.release_failures -= 1
+            raise RuntimeError("the database refused the release")
         row = self.attempts.get(attempt_id)
         if row is None or row["status"] != "running" or lease_generation != row["lease_generation"]:
+            return False
+        if row["admitted"]:
             return False
         self.released.append((job_id, attempt_id, lease_generation))
         row["status"] = "aborted"
@@ -321,6 +337,62 @@ async def test_the_abandoned_grant_is_then_revoked_exactly_once() -> None:
     await _revoke_dead_grants(store, grants)
 
     assert grants.revoked == ["agr_1"]
+
+
+async def test_an_admitted_turn_is_given_up_on_once_and_left_to_finish(caplog) -> None:
+    """A turn whose prompt reached its CLI cannot be handed back, and need not be.
+
+    ``release_claim`` refuses it: replaying an admitted turn runs the same
+    instruction twice. Its member process spends the residency's credential,
+    not this grant, so the turn is left to finish. What must not happen is the
+    loop the refusal used to start: the count was dropped, the dead grant asked
+    about again, and the same futile give-up repeated every few passes for as
+    long as the turn ran.
+    """
+    store, grants = _AttemptStore(), _Grants(renew_fails=True)
+    store.add(1, "agr_1", admitted=True)
+    failures: dict[str, int] = {}
+
+    with caplog.at_level(logging.WARNING, logger="cloud_agent.app"):
+        for _ in range(control_plane.GRANT_RENEWAL_GIVE_UP_AFTER * 4):
+            await _renew_live_grants(store, grants, failures=failures)
+
+    assert store.released == []
+    assert store.attempts[1]["status"] == "running"
+    assert len(grants.renewed) == control_plane.GRANT_RENEWAL_GIVE_UP_AFTER, (
+        "a grant already given up on was asked about again"
+    )
+    given_up = [
+        r for r in caplog.records if getattr(r, "event", "") == "agent_grant_renewal_given_up"
+    ]
+    assert len(given_up) == 1 and given_up[0].requeued is False
+
+    store.supersede(1)
+    await _renew_live_grants(store, grants, failures=failures)
+
+    assert failures == {}, "the finished turn's give-up outlived it"
+
+
+async def test_a_release_that_failed_is_retried_on_the_next_refusal() -> None:
+    """A give-up that could not be carried out is not recorded as one.
+
+    The next definitive refusal retries the release at once, rather than after
+    a whole new run of refusals or never.
+    """
+    store, grants = _AttemptStore(), _Grants(renew_fails=True)
+    store.add(1, "agr_1")
+    store.release_failures = 1
+    failures: dict[str, int] = {}
+
+    for _ in range(control_plane.GRANT_RENEWAL_GIVE_UP_AFTER):
+        await _renew_live_grants(store, grants, failures=failures)
+    assert store.released == []
+    assert store.attempts[1]["status"] == "running"
+
+    await _renew_live_grants(store, grants, failures=failures)
+
+    assert store.released == [("ajob_1", 1, 1)]
+    assert len(grants.renewed) == control_plane.GRANT_RENEWAL_GIVE_UP_AFTER + 1
 
 
 async def test_one_bad_pass_does_not_count_toward_a_give_up() -> None:
