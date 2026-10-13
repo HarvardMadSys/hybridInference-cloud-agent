@@ -200,10 +200,11 @@ describe('IntegrationsView', () => {
     expect(screen.getByRole('region', { name: 'Notifications' })).toBeInTheDocument();
     expect(screen.getByRole('checkbox', { name: 'Agent questions' })).toBeInTheDocument();
     expect(screen.getByRole('checkbox', { name: 'Turn completions' })).toBeInTheDocument();
-    expect(screen.getByRole('region', { name: 'User memory' })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { level: 2, name: 'User memory' })).toBeInTheDocument();
-    expect(screen.getByRole('region', { name: 'Project memory' })).toBeInTheDocument();
-    expect(screen.getByRole('combobox', { name: 'Repository (owner/repo)' })).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Memory' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 2, name: 'Memory' })).toBeInTheDocument();
+    expect(screen.getByRole('tabpanel', { name: 'User memory' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('tab', { name: 'Project memory' }));
+    expect(screen.getByRole('combobox', { name: 'Repository' })).toBeInTheDocument();
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     expect(screen.queryByRole('combobox', { name: 'Theme' })).not.toBeInTheDocument();
     expect(screen.queryByRole('combobox', { name: 'Display language' })).not.toBeInTheDocument();
@@ -213,29 +214,28 @@ describe('IntegrationsView', () => {
     mockedGetIntegrations.mockResolvedValue(integrations);
     render(<IntegrationsView />);
 
-    const section = screen.getByRole('region', { name: 'User memory' });
+    const section = screen.getByRole('tabpanel', { name: 'User memory' });
     await within(section).findByRole('switch');
-    expect(within(section).getByRole('combobox', { name: 'Consolidation model' })).toHaveValue(
-      'model-a',
-    );
-    expect(within(section).getByRole('button', { name: 'Consolidate' })).toBeEnabled();
+    fireEvent.click(within(section).getByRole('button', { name: 'Consolidate' }));
+    expect(await within(section).findByRole('combobox', { name: 'Model' })).toHaveValue('model-a');
+    expect(within(section).getByRole('button', { name: 'Consolidate now' })).toBeEnabled();
     expect(within(section).queryByRole('img')).not.toBeInTheDocument();
     expect(within(section).getByText(memory.portrait.summary)).toBeInTheDocument();
-    expect(within(section).getByRole('link', { name: 'View source task' })).toHaveAttribute(
+    expect(within(section).getByRole('link', { name: 'Source task' })).toHaveAttribute(
       'href',
       '/job_memory_source',
     );
     expect(within(section).getByText(memory.suggestions[0].action)).toBeInTheDocument();
-    const toggle = within(section).getByRole('switch', { name: 'Automatically build memory' });
+    const toggle = within(section).getByRole('switch', { name: 'Remember automatically' });
     fireEvent.click(toggle);
     await waitFor(() => expect(toggle).not.toBeChecked());
     expect(updateUserMemory).toHaveBeenCalledWith(false, expect.any(AbortSignal));
     expect(within(section).getByText(memory.memories[0].content)).toBeInTheDocument();
 
-    fireEvent.click(within(section).getByRole('button', { name: 'Clear memory' }));
+    fireEvent.click(within(section).getByRole('button', { name: 'Clear' }));
     expect(clearUserMemory).not.toHaveBeenCalled();
-    fireEvent.click(within(section).getByRole('button', { name: 'Confirm clear memory' }));
-    await within(section).findByText('No saved memory yet.');
+    fireEvent.click(within(section).getByRole('button', { name: 'Yes, clear' }));
+    await within(section).findByText('No memories yet.');
     expect(clearUserMemory).toHaveBeenCalledWith(expect.any(AbortSignal));
     expect(within(section).queryByText(memory.portrait.summary)).not.toBeInTheDocument();
     expect(within(section).queryByText(memory.suggestions[0].title)).not.toBeInTheDocument();
@@ -252,11 +252,12 @@ describe('IntegrationsView', () => {
     );
 
     expect(await screen.findByRole('heading', { level: 1, name: '设置' })).toBeInTheDocument();
-    const section = screen.getByRole('region', { name: '用户记忆' });
-    await within(section).findByRole('switch', { name: '自动建立记忆' });
+    expect(screen.getByRole('region', { name: '记忆' })).toBeInTheDocument();
+    const section = screen.getByRole('tabpanel', { name: '用户记忆' });
+    await within(section).findByRole('switch', { name: '自动记忆' });
     expect(within(section).queryByRole('img')).not.toBeInTheDocument();
-    expect(within(section).getByRole('switch', { name: '自动建立记忆' })).toBeChecked();
-    expect(screen.getByRole('region', { name: '项目记忆' })).toBeInTheDocument();
+    expect(within(section).getByRole('switch', { name: '自动记忆' })).toBeChecked();
+    expect(screen.getByRole('tab', { name: '项目记忆' })).toBeInTheDocument();
     expect(screen.getByText('管理你的连接、技能、记忆和通知。')).toBeInTheDocument();
   });
 
