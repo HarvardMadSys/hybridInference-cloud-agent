@@ -22,9 +22,12 @@ Order of operations is load-bearing:
    later snapshot refreshes the branch's open PR and opens a new draft once
    someone has closed or merged it.
 
-A rejected patch marks the snapshot/group dirty without rewriting successful
-Agent turns. Gate violations are human-review situations, and a retry loop
-would either spam the repository or bury the rejection.
+A rejected patch fails the snapshot and marks its group dirty without
+rewriting successful Agent turns. It is not retried: a retry loop would either
+spam the repository or bury the rejection. The group's next settled turn is
+captured and published in its place. Every capture is the whole diff from the
+published base, so that one carries the rejected changes too, and is refused
+again if it still holds them.
 
 A transient credential, git, or PR failure does not. The branch name and the
 PR lookup are idempotent, so the snapshot returns to ``captured`` until its
