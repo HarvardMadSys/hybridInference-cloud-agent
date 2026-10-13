@@ -231,7 +231,8 @@ async def test_the_proxys_own_answers_are_sandboxed(database_api, path, error, s
     assert response.headers["content-security-policy"] == "sandbox"
     assert response.headers["cache-control"] == "no-store"
     assert "private diagnostics" not in response.text
-    assert len(seen) == (status == 503)
+    # Only the unreachable service was ever asked.
+    assert len(seen) == (1 if status == 503 else 0)
 
 
 @pytest.mark.parametrize("configuration", ["unset", "malformed", "not named"])

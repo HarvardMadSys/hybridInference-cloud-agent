@@ -233,8 +233,9 @@ pgAdmin path without these headers is outside the policy. Only a separate
 origin, with its own hostname, TLS and edge route and a proxy credential other
 than the Agent session cookie, would remove the shared session; this release
 does not provide one. Until then, keep the pinned pgAdmin image and its default
-security headers (its own policy runs only nonce-tagged scripts), enable the
-profile only where it is used, and grant `agent.admin` only to operators.
+security headers (its own policy refuses inline scripts without its per-request
+nonce), enable the profile only where it is used, and grant `agent.admin` only
+to operators.
 
 Enable the optional service in the control-plane deployment's `.env`:
 
@@ -270,8 +271,10 @@ saved URL makes the dashboard, the launch link and the proxy answer 503 without
 contacting it: the proxy forwards every method, path and body and returns the
 reply, so an address an administrator could choose freely would reach a cloud
 metadata endpoint or any other private service the control plane can reach.
-To run pgAdmin elsewhere, keep its address in `AGENT_PGADMIN_URL` after the
-import and restart the control plane.
+To run pgAdmin elsewhere, set its address as `AGENT_PGADMIN_URL` in the
+control plane's environment, restart the control plane, and select the same
+address in **Private pgAdmin URL**. Keep the variable set after it has been
+imported.
 
 Open **Admin → Database** and choose an administrator email and a password of
 at least 12 characters. Only a current Agent administrator can complete setup.
