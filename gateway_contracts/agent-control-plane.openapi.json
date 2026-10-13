@@ -28465,9 +28465,26 @@
     },
     "/v1/agent/service/oncall/jobs": {
       "post": {
-        "description": "Queue one on-call analysis job for the configured service account.\n\nThe body is the owner surface's own :class:`AgentJobCreate`, so the relay\nchooses the runtime, model, repository and prompt — and every one of those\nchoices passes the owner route's checks under the service account: the\nmodel must resolve for that user, the repository must be entitled (for a\nheadless account that means the deployment's ``AGENT_REPO_ALLOWLIST``), and\na ``base_ref`` is pinned to the commit it names right now. Skill selection\nhas the same semantics: omitted IDs use this service account's defaults;\nthe relay can send ``skill_ids=[]`` to opt out explicitly.",
+        "description": "Queue one on-call analysis job for the configured service account.\n\nThe body is the owner surface's own :class:`AgentJobCreate`, so the relay\nchooses the runtime, model, repository and prompt — and every one of those\nchoices passes the owner route's checks under the service account: the\nmodel must resolve for that user, the repository must be entitled (for a\nheadless account that means the deployment's ``AGENT_REPO_ALLOWLIST``), and\na ``base_ref`` is pinned to the commit it names right now. Skill selection\nhas the same semantics: omitted IDs use this service account's defaults;\nthe relay can send ``skill_ids=[]`` to opt out explicitly.\n\nAn optional ``Idempotency-Key`` names one dispatch, as on the owner route:\na relay that retries after a timeout gets the job its first send created,\nnot a second analysis on the service account's quota, and the same key\nwith a different body is a 409 ``idempotency_conflict``. Without the\nheader every request creates a job.",
         "operationId": "create_oncall_job_v1_agent_service_oncall_jobs_post",
         "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 256,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          },
           {
             "in": "header",
             "name": "authorization",
