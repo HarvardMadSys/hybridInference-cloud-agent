@@ -194,14 +194,10 @@ def upgrade() -> None:
         """
         ALTER TABLE agent_threads DROP CONSTRAINT ck_agent_threads_goal_shape,
             ADD CONSTRAINT ck_agent_threads_goal_state
-                CHECK (goal_state IS NULL OR goal_state IN ("""
-        + _STATES
-        + """)),
+                CHECK (goal_state IS NULL OR goal_state IN (""" + _STATES + """)),
             ADD CONSTRAINT ck_agent_threads_goal_pause_reason
                 CHECK (goal_pause_reason IS NULL
-                       OR goal_pause_reason IN ("""
-        + _PAUSE_REASONS
-        + """)),
+                       OR goal_pause_reason IN (""" + _PAUSE_REASONS + """)),
             -- A goal that exists has an objective, an identity and a cap --
             -- all three or none. The *state* pairings are deliberately absent:
             -- these are checked per statement, not per transaction, so tying
