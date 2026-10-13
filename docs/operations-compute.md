@@ -422,7 +422,9 @@ Pool and resource actions have different effects:
 Release requires complete scope, no global placement reference, no running,
 in-flight or retained dependencies, and fresh broker and machine inventory.
 Stopped or unrecognized containers, orphan networks/volumes, offline brokers
-and incomplete inventory block it. There is no force bypass.
+and incomplete inventory block it. There is no force bypass. The only machine
+without an inventory is a CloudLab node whose host-key registration never
+completed: this control plane never connected to it.
 
 ## Automatic CloudLab node replacement
 
@@ -477,9 +479,9 @@ retried for ten minutes; a restart that still fails, or any unexpected error
 after the source began stopping, blocks with the urgent
 `compute_rotation_failed` alert and keeps claims paused. An unexpected error
 before the stop blocks and resumes claims. Cancellation is available before
-the stop begins; later failures use recovery/retry. Cleanup failures retry without interrupting the replacement
-and remain visible as failures. Source release still passes retained-state and
-allocation guards.
+the stop begins; later failures use recovery/retry. Cleanup failures retry
+without interrupting the replacement and remain visible as failures. Source
+release still passes retained-state and allocation guards.
 
 ### Acceptance before enabling production traffic
 
