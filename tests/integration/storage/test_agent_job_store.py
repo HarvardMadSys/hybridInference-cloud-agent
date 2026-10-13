@@ -1954,6 +1954,158 @@ async def test_native_fork_mints_no_residency_on_a_disabled_host(store: Storage)
     )
 
 
+async def test_deleted_fork_child_gives_its_resident_slot_back_once_stopped(
+    pool,
+    store: Storage,
+):
+    """A deleted chat's slot serves a new Fork only after its process is gone."""
+    job, claim, sandbox = await _reserve_shared_chat(store)
+    fence = {
+        "thread_id": job["thread_id"],
+        "attempt_id": claim["attempt_id"],
+        "lease_generation": claim["lease_generation"],
+        "sandbox_generation": sandbox["generation"],
+        "activation_generation": sandbox["activation_generation"],
+    }
+    assert await store.sandbox.mark_thread_sandbox_running(
+        **fence, container_id="container-shared-one", context_status="new"
+    )
+    assert await store.sandbox.admit_thread_sandbox_turn(
+        **fence, residency_generation=sandbox["residency_generation"], job_id=job["id"]
+    )
+    assert await store.sandbox.settle_thread_sandbox(
+        **fence,
+        residency_generation=sandbox["residency_generation"],
+        job_id=job["id"],
+        context_status="live",
+        native_session_id="native-source",
+        idle_timeout_seconds=1800,
+        base_sha=job["base_sha"],
+    )
+    assert await store.attempt_commands.transition(
+        job_id=job["id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        from_states=("running",),
+        to_state="succeeded",
+    )
+    # Origin and one child fill the group, so the second Fork needs slot 1.
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_sandboxes SET resident_slot_capacity = 2 WHERE id = $1",
+            sandbox["sandbox_id"],
+        )
+
+    operation = await store.session_fork.prepare_session_fork(
+        source_job_id=job["id"],
+        user_id=job["user_id"],
+        idempotency_key="native-fork-deleted-child",
+    )
+    assert operation is not None and operation.get("error") is None
+    assert operation["target_resident_slot_id"] == 1
+    assert await store.session_fork.claim_session_fork_materialization(
+        operation_id=operation["id"], coordinator_token="coordinator", lease_seconds=990
+    )
+    residencies = await store.session_fork.establish_session_fork_residencies(
+        operation_id=operation["id"], coordinator_token="coordinator", ttl_seconds=120
+    )
+    assert residencies is not None
+    materialized = await store.session_fork.record_session_fork_materialized(
+        operation_id=operation["id"],
+        coordinator_token="coordinator",
+        receipt={
+            "operation_id": operation["id"],
+            "sandbox_id": operation["sandbox_id"],
+            "sandbox_generation": operation["sandbox_generation"],
+            "container_id": operation["container_id"],
+            "runtime_id": operation["runtime_id"],
+            "runtime_version": operation["runtime_version"],
+            "source_thread_id": operation["source_thread_id"],
+            "source_native_session_id": operation["source_native_session_id"],
+            "target_thread_id": operation["target_thread_id"],
+            "target_native_session_id": "native-child",
+            "target_resident_slot_id": operation["target_resident_slot_id"],
+            "source_residency_generation": residencies["source"]["generation"],
+            "target_residency_generation": residencies["target"]["generation"],
+            "source_process_generation": 2,
+            "target_process_generation": 1,
+        },
+    )
+    assert materialized is not None and materialized["state"] == "materialized"
+    child = await store.session_fork.finalize_session_fork(operation_id=operation["id"])
+    assert child is not None
+
+    assert await store.conversation_commands.set_thread_archived(
+        job_id=child["id"], user_id=job["user_id"], archived=True
+    )
+    assert await store.conversation_commands.delete_sessions(
+        thread_ids=[child["thread_id"]], user_id=job["user_id"]
+    ) == {"thread_ids": [child["thread_id"]]}
+
+    # Deleted but still live: its member UID may still be running, so the
+    # slot must not be handed to a new child yet.
+    assert await store.session_fork.prepare_session_fork(
+        source_job_id=job["id"],
+        user_id=job["user_id"],
+        idempotency_key="native-fork-while-deleted-child-lives",
+    ) == {"error": "resident_capacity_exhausted"}
+
+    # The group's idle stop takes every process down with it, and the host's
+    # stopped heartbeat releases the child's residency.
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_sandboxes SET idle_deadline = NOW() - INTERVAL '1 second' WHERE id = $1",
+            sandbox["sandbox_id"],
+        )
+    assert (
+        await store.sandbox.reconcile_thread_sandbox_observation(
+            thread_id=job["thread_id"],
+            host="shared-runner",
+            sandbox_id=sandbox["sandbox_id"],
+            container_id="container-shared-one",
+            sandbox_generation=sandbox["generation"],
+            running=False,
+            activity_active=False,
+            idle_remaining_seconds=None,
+            members=[],
+        )
+        == "stopped"
+    )
+    assert (
+        await store.residency.release_shared_residency_if_quiescent(
+            thread_id=child["thread_id"],
+            generation=residencies["target"]["generation"],
+            process_generation=1,
+            host="shared-runner",
+            sandbox_id=sandbox["sandbox_id"],
+        )
+        is not None
+    )
+
+    second = await store.session_fork.prepare_session_fork(
+        source_job_id=job["id"],
+        user_id=job["user_id"],
+        idempotency_key="native-fork-after-deleted-child-stopped",
+    )
+    assert second is not None and second.get("error") is None
+    assert second["target_resident_slot_id"] == 1
+    # The deleted chat keeps its audit row but leaves the host manifest.
+    async with pool.acquire() as conn:
+        assert (
+            await conn.fetchval(
+                "SELECT resident_slot_id FROM agent_thread_sandbox_memberships "
+                "WHERE thread_id = $1",
+                child["thread_id"],
+            )
+            is None
+        )
+    source_sandbox = await store.sandbox.thread_sandbox(thread_id=job["thread_id"])
+    assert source_sandbox is not None
+    assert child["thread_id"] not in {
+        member["thread_id"] for member in source_sandbox["group_members"]
+    }
+
+
 async def test_native_fork_ordinal_counts_settlement_even_if_job_finalization_failed(
     store: Storage,
 ):
