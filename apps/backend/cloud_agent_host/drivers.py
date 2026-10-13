@@ -2129,14 +2129,25 @@ class ClaudeCodeDriver(HarnessDriver[ClaudeCodeRuntime]):
 
 
 class ClaudeCodeLiveTurn(HarnessTurn[ClaudeCodeRuntime]):
-    """One turn on a resident process: borrows the shared stdout, ends at result."""
+    """One turn on a resident process: borrows the shared stdout, ends as ``claude -p`` would."""
 
-    def __init__(self, session: ClaudeCodeLiveSession, process: SandboxProcess) -> None:
+    def __init__(
+        self, session: ClaudeCodeLiveSession, process: SandboxProcess, *, prompt: str = ""
+    ) -> None:
         super().__init__(session, process)
         self._session: ClaudeCodeLiveSession = session
+        self._prompt = prompt
         self._saw_result = False
         self._error_result = False
         self._saw_api_retry = False
+        # Ending the turn the way the one-shot CLI ends its run (the pinned
+        # 2.1.220): it holds its result while a background agent runs, and a
+        # finished background task is answered in a turn Claude opens itself,
+        # whose result says ``origin: task-notification``.
+        self._prompt_read = False
+        self._answered = False
+        self._running_agents: set[str] = set()
+        self._unanswered: set[str] = set()
         # Tool calls the model made that have no result yet. Claude folds a
         # message written while one is running into this turn's next model
         # request; written at any other moment it opens a turn of its own.
@@ -2187,13 +2198,63 @@ class ClaudeCodeLiveTurn(HarnessTurn[ClaudeCodeRuntime]):
             self._error_result = True
         return event
 
+    def _settles(self, line: str) -> bool:
+        """Whether this line ends the turn, as the one-shot CLI's run would end.
+
+        Not while a background agent is still running, and not before Claude
+        has answered a finished background task: the notification turn it then
+        opens comes after this turn's result, and read by the next turn it
+        would end that one with this one's answer. A notification turn read
+        before this turn's prompt was answered, left by a task that finished
+        between turns, does not end it either.
+        """
+        record = _json_object(line)
+        if record is None:
+            return False
+        kind = record.get("type")
+        if kind == "user" and record.get("isReplay") and self._prompt:
+            self._prompt_read = self._prompt_read or self._prompt in _record_text(record)
+        if kind == "system" and not record.get("parent_tool_use_id"):
+            subtype = record.get("subtype")
+            if subtype == "background_tasks_changed":
+                tasks = [task for task in record.get("tasks") or [] if isinstance(task, dict)]
+                listed = {str(task["task_id"]): task for task in tasks if task.get("task_id")}
+                self._session._background_tasks |= set(listed)
+                self._running_agents = {
+                    task_id
+                    for task_id, task in listed.items()
+                    if task.get("task_type") == "local_agent"
+                }
+            elif subtype == "task_notification":
+                task_id = str(record.get("task_id") or "")
+                # A stopped task gets no turn of its own; a foreground agent's
+                # notification is answered by its tool result.
+                if task_id in self._session._background_tasks and record.get("status") != "stopped":
+                    self._unanswered.add(task_id)
+            elif subtype == "init":
+                self._unanswered.clear()
+        if kind == "control_response" and self._cancelled and self._answered:
+            # An interrupt stops the background agents and opens no turn.
+            if self._running_agents:
+                self._session.retire_after_turn = True
+            return True
+        if kind != "result":
+            return False
+        origin = record.get("origin")
+        notification = isinstance(origin, dict) and origin.get("kind") == "task-notification"
+        self._answered = self._answered or not notification or self._prompt_read
+        if not self._answered or self._running_agents:
+            return False
+        return self._cancelled or not self._unanswered
+
     def raw_lines(self) -> Iterator[str]:
-        """This turn's slice of the shared stream, up to its result line."""
+        """This turn's slice of the shared stream, up to the line that settles it."""
         for line in self._session.shared_lines():
-            if self._runtime.turn_settled(line):
+            settles = self._settles(line)
+            if settles:
                 self._clear_questions()
             yield line
-            if self._runtime.turn_settled(line):
+            if settles:
                 self._saw_result = True
                 with self._input_lock:
                     self._input_closed = True
@@ -2405,10 +2466,11 @@ class ClaudeCodeLiveTurn(HarnessTurn[ClaudeCodeRuntime]):
         if kind == "result":
             with self._input_lock:
                 self._open_tool_uses.clear()
-                self._input_closed = True
-                # Held messages were never written: the turn answered without
-                # another tool call, so they wait and go as the next turn.
-                self._held.clear()
+                if self._answered:
+                    self._input_closed = True
+                    # Held messages were never written: the turn answered
+                    # without another tool call, so they go as the next turn.
+                    self._held.clear()
             return
         message = record.get("message")
         content = message.get("content") if isinstance(message, dict) else None
@@ -2534,6 +2596,9 @@ class ClaudeCodeLiveSession(HarnessSession[ClaudeCodeRuntime]):
         #: only meaningful once ``_process`` exists.
         self._reasoning_effort: str | None = None
         self._live_turn: ClaudeCodeLiveTurn | None = None
+        # Every task Claude has listed as running in the background. A shell
+        # can outlive the turn that started it, and its end still opens a turn.
+        self._background_tasks: set[str] = set()
         # The turn's prompt, an interrupt and a mid-turn message can come from
         # different threads; stdin takes them one whole line at a time.
         self._write_lock = threading.Lock()
@@ -2654,7 +2719,7 @@ class ClaudeCodeLiveSession(HarnessSession[ClaudeCodeRuntime]):
             # typed refusal, so the caller's fallback ladder catches it the
             # same way it catches every other driver refusal.
             raise DriverError(f"resident process is gone: {exc}") from exc
-        self._live_turn = ClaudeCodeLiveTurn(self, self._process)
+        self._live_turn = ClaudeCodeLiveTurn(self, self._process, prompt=turn_input.prompt)
         return self._live_turn
 
     def ensure_started(self, *, model: str, reasoning_effort: str | None) -> None:
