@@ -454,7 +454,8 @@ describe('TaskComposer source-control onboarding', () => {
       const available = screen.getByRole('button', { name: 'Create repository' });
       expect(available).toBeEnabled();
       fireEvent.click(available);
-      expect(await screen.findByRole('textbox', { name: 'Repository name' })).toHaveFocus();
+      const name = await screen.findByRole('textbox', { name: 'Repository name' });
+      await waitFor(() => expect(name).toHaveFocus());
       expect(screen.getByRole('dialog', { name: 'Create repository' })).toBeInTheDocument();
       expect(createAgentJob).not.toHaveBeenCalled();
     },
