@@ -285,17 +285,25 @@ class GrantClient:
         if not self.configured:
             raise GatewayError(f"{ENV_BASE_URL} and {ENV_DISPATCH_TOKEN} must both be set")
         headers = {"Authorization": f"Bearer {self._token}"}
+        deadline_s = number_setting("gateway_request_timeout_s", _TIMEOUT_S)
         timeout = httpx.Timeout(
-            number_setting("gateway_request_timeout_s", _TIMEOUT_S),
+            deadline_s,
             connect=number_setting("gateway_connect_timeout_s", _CONNECT_TIMEOUT_S),
         )
         url = f"{self._base_url}{path}"
         try:
-            if self._client is not None:
-                response = await self._client.post(url, json=body, headers=headers, timeout=timeout)
-            else:
-                async with httpx.AsyncClient(timeout=timeout) as client:
-                    response = await client.post(url, json=body, headers=headers)
+            async with asyncio.timeout(deadline_s):
+                if self._client is not None:
+                    response = await self._client.post(
+                        url, json=body, headers=headers, timeout=timeout
+                    )
+                else:
+                    async with httpx.AsyncClient(timeout=timeout) as client:
+                        response = await client.post(url, json=body, headers=headers)
+        except TimeoutError as exc:
+            raise GatewayError(
+                f"gateway request timed out for {path}", error_type="gateway_timeout"
+            ) from exc
         except httpx.HTTPError as exc:
             raise GatewayError(f"gateway unreachable: {exc}") from exc
 
