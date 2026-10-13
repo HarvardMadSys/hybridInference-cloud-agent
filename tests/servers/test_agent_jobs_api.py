@@ -8649,10 +8649,80 @@ async def test_session_delete_revokes_and_closes_released_residencies(
     assert response.status_code == 200
     assert response.json() == {"thread_ids": ["athr_1", "athr_2"]}
     assert grants.revoked == ["agr_1"]
-    assert manager.shared_residency_lost.await_args_list == [
+    # Rows are closed concurrently, so only the set of calls is fixed.
+    assert sorted(manager.shared_residency_lost.await_args_list, key=lambda made: made.args[0]) == [
         call("athr_1", generation=4),
         call("athr_2", generation=2),
     ]
+
+
+async def test_session_delete_does_not_wait_on_a_host_that_never_answers(
+    store: FakeStorage, monkeypatch
+):
+    """A silent host cannot hold the owner's delete open; its heartbeat finishes the close."""
+    from cloud_agent.application import residency
+
+    monkeypatch.setattr(residency, "RELEASED_RESIDENCY_CLOSE_TIMEOUT_S", 0.2)
+    released = [
+        {
+            "thread_id": f"athr_{index}",
+            "generation": 1,
+            "host": "runner-a",
+            "grant_id": f"agr_{index}",
+        }
+        for index in range(20)
+    ]
+    thread_ids = [row["thread_id"] for row in released]
+    monkeypatch.setattr(
+        store,
+        "delete_sessions",
+        AsyncMock(return_value={"thread_ids": thread_ids, "released_residencies": released}),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        store, "get_host", AsyncMock(return_value={"host": "runner-a"}), raising=False
+    )
+    never = asyncio.Event()
+
+    async def silent(thread_id: str, *, generation: int) -> dict:
+        await never.wait()
+        return {}
+
+    manager = SimpleNamespace(shared_residency_lost=AsyncMock(side_effect=silent))
+    monkeypatch.setattr(sandbox_manager_routing, "sandbox_manager_for_host", lambda host: manager)
+
+    class RecordingGrants(_FakeGrants):
+        def __init__(self) -> None:
+            super().__init__()
+            self.revoked: list[str] = []
+
+        async def revoke(self, grant_id: str) -> bool:
+            self.revoked.append(grant_id)
+            return True
+
+    grants = RecordingGrants()
+    app = _build_app(store)
+    from cloud_agent.api.deps import get_grant_client
+
+    app.dependency_overrides[get_grant_client] = lambda: grants
+    transport = ASGITransport(app=app)
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await asyncio.wait_for(
+            client.post("/v1/agent/sessions/delete", json={"thread_ids": thread_ids}),
+            timeout=5,
+        )
+    assert response.status_code == 200
+    assert response.json() == {"thread_ids": thread_ids}
+    # One deadline for the whole batch, not one per silent host.
+    assert loop.time() - started < 2
+    # Every grant is revoked even though no host ever answered and every close
+    # slot stayed taken; at most the bounded number of hosts was being waited on.
+    assert sorted(grants.revoked) == sorted(row["grant_id"] for row in released)
+    assert (
+        manager.shared_residency_lost.await_count == residency.RELEASED_RESIDENCY_CLOSE_CONCURRENCY
+    )
 
 
 @pytest.mark.parametrize("thread_ids", [[], [""], ["a", "a"], ["bad\x00id"], ["x" * 129]])

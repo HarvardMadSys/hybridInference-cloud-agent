@@ -102,6 +102,14 @@ class PostgresResidencyRepository:
             )
             if member is None:
                 return None
+            # A deleted chat earns nothing, even from a still-live attempt:
+            # the delete released its residency, and a new generation would
+            # be one it never closes. The check lives in this statement, not
+            # the reads above. Owner deletion updates the running job before
+            # releasing the membership, so either it committed before the
+            # job lock above was granted and this fresh snapshot sees the
+            # tombstone, or it waits for this commit and its release then
+            # takes the generation minted here as well.
             row = await conn.fetchrow(
                 f"""
                 UPDATE agent_thread_sandbox_memberships AS m
@@ -113,8 +121,9 @@ class PostgresResidencyRepository:
                     residency_established_at = NOW(),
                     residency_last_active_at = NOW(),
                     updated_at = NOW()
-                FROM agent_jobs j, agent_attempts a, agent_sandboxes g
+                FROM agent_jobs j, agent_attempts a, agent_sandboxes g, agent_threads t
                 WHERE m.thread_id = $1 AND m.active_attempt_id = $3
+                  AND t.id = m.thread_id AND t.deleted_at IS NULL
                   AND g.id = m.sandbox_id AND g.host = $4
                   AND ($6::text IS NULL OR m.sandbox_id = $6)
                   AND j.thread_id = m.thread_id

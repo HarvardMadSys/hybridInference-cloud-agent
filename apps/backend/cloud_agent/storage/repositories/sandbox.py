@@ -1493,14 +1493,18 @@ class PostgresSandboxRepository:
                 thread_id,
             ):
                 return False
+            # Released residency already refuses a deleted chat; the tombstone
+            # is checked here too, in this statement's own snapshot, so no
+            # prompt is delivered to a chat its owner has deleted.
             shared = await conn.fetchval(
                 """
                 UPDATE agent_thread_sandbox_memberships m
                 SET admitted_job_id = $7,
                     admitted_at = COALESCE(m.admitted_at, NOW()),
                     updated_at = NOW()
-                FROM agent_sandboxes g, agent_attempts a, agent_jobs j
+                FROM agent_sandboxes g, agent_attempts a, agent_jobs j, agent_threads t
                 WHERE m.thread_id = $1 AND g.id = m.sandbox_id
+                  AND t.id = m.thread_id AND t.deleted_at IS NULL
                   AND g.generation = $4 AND g.stop_requested_at IS NULL
                   AND g.deletion_state NOT IN ('pending', 'archived', 'deleted')
                   AND m.activation_generation = $5

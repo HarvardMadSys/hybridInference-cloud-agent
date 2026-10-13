@@ -76,6 +76,23 @@ API 路由（`api/catalog.py`）在事务提交后调用 `application/residency.
 
 这一步失败不影响请求返回。下一次 host 心跳续期时会发现 residency 已失效，在 `residencies_lost` 里带回这一代 residency，host 收到后会调用 `residency_lost` 关闭进程（`api/hosts.py`，`runner._handle_host_residencies_lost`）。
 
+这一步有时间上限，因为用户在等删除结果：
+
+- 各个会话并发处理，吊销和关闭各自最多同时 16 个，两者用不同的并发限制。这样即使 host 不响应、占满了关闭名额，所有 grant 仍然会被吊销。
+- 整个步骤最多等 5 秒（`RELEASED_RESIDENCY_CLOSE_TIMEOUT_S`）。单次 sandbox manager 调用本身的超时是 60 秒；没完成的关闭交给上面的心跳兜底。没来得及吊销的 grant 也无法再续期，会在 TTL 到期时失效。
+
+### 删除和正在启动的 worker
+
+删除可以发生在 worker 还在启动、attempt 仍然有效的时候。如果不加限制，这个 attempt 可以在删除之后再建立一代新的 residency，删除时发出的关闭通知只针对旧的一代，新的一代就会一直运行并续期。
+
+因此 `establish_residency` 和 `admit_thread_sandbox_turn` 都会拒绝已删除的对话。检查写在它们最后的 `UPDATE` 语句里，而不是前面的读取里，原因是加锁顺序：
+
+- 删除按 thread → 运行中的 job → 成员关系的顺序加锁；`establish_residency` 按 attempt → job（共享锁）→ 成员关系的顺序加锁。两边都是先 job 后成员关系，并且都不会在持有成员关系锁的同时等待 job 锁，所以不会死锁。
+- 如果删除先锁住 job，`establish_residency` 会一直等到删除提交；它最后的 `UPDATE` 使用新的快照，能看到 `deleted_at`，于是拒绝。
+- 如果 `establish_residency` 先拿到 job 锁，删除会等它提交；删除释放成员关系时，会连同刚建立的那一代一起释放，并把它交给上面的关闭步骤。
+
+`admit_thread_sandbox_turn` 本来就要求那一代 residency 处于 `hot`，删除之后自然无法通过；`deleted_at` 检查是第二道保护。
+
 ### 已知限制
 
 host 在 `residency_lost` 之后会把这个成员的 `residency_generation` 报成 0，而心跳回写成员状态时要求 `residency_generation <= 上报值`。所以进程虽然已经关闭，数据库里这个成员仍显示 `live`，直到整个 sandbox 停止。影响如下：
@@ -154,5 +171,6 @@ host 在 `residency_lost` 之后会把这个成员的 `residency_generation` 报
   - `test_sandbox_of_deleted_sessions_is_stopped_then_deleted`：分别在有 S3 和没有 S3 时验证：两个对话只删一个时不动 sandbox；最后一个也删掉后请求停止，host 心跳能收到停止指令；停止后发起删除，`deletion_discard` 与 S3 配置一致；轨迹事件来源为 `system`；数据库记录保留。
   - `test_deleting_an_idle_shared_session_keeps_workspace_sibling_and_billing`：改为验证删除会释放 residency，之后的续期返回失效；共享工作区、兄弟对话和计费记录不受影响。
   - #597 的槽位测试改为不先归档直接删除，并验证删除返回已释放的 residency。
-- API 测试：删除后吊销 grant、通知 sandbox manager 关闭进程；sandbox manager 不可达时删除仍然成功。
+  - `test_a_starting_turn_cannot_revive_a_deleted_chats_residency`：删除发生在 worker 启动期间；同一个 attempt 之后既不能建立新的 residency，也不能送达 prompt，被释放的那一代也不能续期。
+- API 测试：删除后吊销 grant、通知 sandbox manager 关闭进程；sandbox manager 报错时删除仍然成功；20 个会话的 host 都不响应时，删除仍在时限内返回，所有 grant 都被吊销，同时等待的 host 不超过并发上限。
 - 前端 vitest：侧边栏删除需要确认，确认后调用接口、隐藏对话并离开当前页面；被拒绝时在弹窗里显示原因；归档页的文案和拒绝原因同步更新。

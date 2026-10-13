@@ -6966,6 +6966,64 @@ async def test_deleting_a_working_session_cancels_its_turns_and_goal(pool, store
     assert (goal["state"], goal["pause_reason"]) == ("paused", "cancelled")
 
 
+async def test_a_starting_turn_cannot_revive_a_deleted_chats_residency(pool, store: Storage):
+    """Deletion that lands while a worker starts leaves it nothing to run under."""
+    job, claim, sandbox = await _reserve_shared_chat(store)
+    fence = {
+        "thread_id": job["thread_id"],
+        "attempt_id": claim["attempt_id"],
+        "lease_generation": claim["lease_generation"],
+        "sandbox_generation": sandbox["generation"],
+        "activation_generation": sandbox["activation_generation"],
+    }
+    assert await store.sandbox.mark_thread_sandbox_running(
+        **fence, container_id="container-deleted-while-starting", context_status="new"
+    )
+    first = sandbox["residency_generation"]
+
+    deleted = await store.conversation_commands.delete_sessions(
+        thread_ids=[job["thread_id"]], user_id=job["user_id"]
+    )
+    assert [row["generation"] for row in deleted["released_residencies"]] == [first]
+
+    # The same, still-live attempt asks for a fresh residency to run the turn.
+    # A new generation would be one the delete never released or closed.
+    assert (
+        await store.residency.establish_residency(
+            thread_id=job["thread_id"],
+            attempt_id=claim["attempt_id"],
+            lease_generation=claim["lease_generation"],
+            host="shared-runner",
+            sandbox_id=sandbox["sandbox_id"],
+            runtime_id="claude-code",
+            runtime_version=sandbox["runtime_version"],
+            ttl_seconds=1800,
+        )
+        is None
+    )
+    # Nor can it deliver the prompt under the generation the delete released.
+    assert not await store.sandbox.admit_thread_sandbox_turn(
+        **fence, residency_generation=first, job_id=job["id"]
+    )
+    assert (
+        await store.residency.heartbeat_residency(
+            thread_id=job["thread_id"], generation=first, host="shared-runner", ttl_seconds=120
+        )
+        is None
+    )
+    async with pool.acquire() as conn:
+        member = await conn.fetchrow(
+            "SELECT residency_generation, residency_status, admitted_job_id "
+            "FROM agent_thread_sandbox_memberships WHERE thread_id = $1",
+            job["thread_id"],
+        )
+    assert dict(member) == {
+        "residency_generation": first,
+        "residency_status": "none",
+        "admitted_job_id": None,
+    }
+
+
 @pytest.mark.parametrize("archive_available", [False, True])
 async def test_sandbox_of_deleted_sessions_is_stopped_then_deleted(
     pool, store: Storage, archive_available: bool
