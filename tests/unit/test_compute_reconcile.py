@@ -482,6 +482,46 @@ async def test_partial_extension_is_not_reported_as_success(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_an_expiration_kept_to_the_minute_is_the_full_extension(monkeypatch):
+    """A provider that stores expirations coarsely has still granted the request."""
+    target = (NOW + timedelta(hours=8)).replace(second=30, microsecond=500000)
+    stored = target.replace(second=0, microsecond=0)
+    h = harness(monkeypatch, kind="extend", identified=True)
+    h.operation["parameters"]["target_expires_at"] = target.isoformat()
+    h.provider.extend.return_value = ProviderReceipt(
+        outcome="pending", resource=REF, observation=observed(expires=stored)
+    )
+    await h.reconciler.execute(h.operation)
+    assert (h.operation["state"], h.operation["step"]) == ("succeeded", "extended")
+    assert h.operation["result"]["actual_expires_at"] == stored.isoformat()
+    # A minute short of the requested minute remains a partial extension.
+    h = harness(monkeypatch, kind="extend", identified=True)
+    h.operation["parameters"]["target_expires_at"] = target.isoformat()
+    short = stored - timedelta(minutes=1)
+    h.provider.extend.return_value = ProviderReceipt(
+        outcome="pending", resource=REF, observation=observed(expires=short)
+    )
+    h.provider.inspect.side_effect = [observed(), observed(expires=short)]
+    await h.reconciler.execute(h.operation)
+    await h.reconciler.execute(h.operation)
+    assert (h.operation["state"], h.operation["step"]) == ("blocked", "partial_extension")
+
+
+@pytest.mark.asyncio
+async def test_automatic_renewal_requests_a_whole_second(monkeypatch):
+    h = harness(monkeypatch, kind="inspect", identified=True)
+    monkeypatch.setattr(compute_reconcile, "_now", lambda: NOW.replace(microsecond=123456))
+    h.allocation.update(
+        expires_at=NOW + timedelta(minutes=10),
+        policy=RenewalPolicy(enabled=True, reason="Keep the sandboxes").model_dump(),
+    )
+    await h.reconciler.schedule()
+    target = h.commands.extend.await_args.args[1].target_expires_at
+    assert target.microsecond == 0
+    assert target == (NOW + timedelta(hours=4)).replace(microsecond=0)
+
+
+@pytest.mark.asyncio
 async def test_committed_release_queries_before_replaying_same_immutable_resource(monkeypatch):
     h = harness(monkeypatch, kind="retire", identified=True)
     h.allocation.update(release_committed_at=NOW, desired_state="retiring")

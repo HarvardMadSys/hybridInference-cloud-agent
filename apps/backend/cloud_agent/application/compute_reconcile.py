@@ -183,7 +183,11 @@ class ComputeReconciler:
                 continue
             request = ExtendComputeRequest(
                 request_id=request_id,
-                target_expires_at=now + timedelta(seconds=policy.extend_to_horizon_seconds),
+                # Whole seconds: a provider that keeps expirations to the
+                # second can then report exactly the target it was sent.
+                target_expires_at=(
+                    now + timedelta(seconds=policy.extend_to_horizon_seconds)
+                ).replace(microsecond=0),
                 reason=policy.reason,
             )
             try:
@@ -727,10 +731,7 @@ class ComputeReconciler:
             {key: operation["parameters"][key] for key in ("target_expires_at", "reason")}
         )
         observation = await self._inspect(operation, allocation)
-        if (
-            observation.expires_at is not None
-            and observation.expires_at >= request.target_expires_at
-        ):
+        if observation.expires_at is not None and request.granted_by(observation.expires_at):
             await self._finish(
                 operation,
                 "succeeded",
@@ -813,7 +814,7 @@ class ComputeReconciler:
         )
         observed = receipt.observation or await provider.inspect(self._ref(allocation))
         await self._save_observation(operation, allocation, observed)
-        if observed.expires_at is not None and observed.expires_at >= request.target_expires_at:
+        if observed.expires_at is not None and request.granted_by(observed.expires_at):
             await self._finish(
                 operation,
                 "succeeded",
