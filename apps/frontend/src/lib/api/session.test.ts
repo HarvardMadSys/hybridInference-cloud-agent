@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { getSessionUser } from './session';
+import { endSession, getSessionUser } from './session';
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -45,4 +45,32 @@ describe('session failure classification', () => {
       await expect(getSessionUser()).rejects.toMatchObject({ code: 'invalid_session_response' });
     },
   );
+});
+
+describe('ending the session', () => {
+  it('resolves once the server has dropped the cookie', async () => {
+    const fetch = vi.fn().mockResolvedValue(new Response('{"ok":true}', { status: 200 }));
+    vi.stubGlobal('fetch', fetch);
+    await expect(endSession()).resolves.toBeUndefined();
+    expect(fetch).toHaveBeenCalledWith(expect.stringMatching(/\/v1\/session\/logout$/), {
+      method: 'POST',
+      credentials: 'include',
+    });
+  });
+
+  // The session is a signed token the server cannot revoke, and only a
+  // successful answer deletes the cookie that carries it. A proxy's error page
+  // means this browser is still signed in, which the caller has to be told.
+  it.each([500, 502, 504])('reports HTTP %i, which left the cookie in place', async (status) => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(new Response('<html>Bad gateway</html>', { status })),
+    );
+    await expect(endSession()).rejects.toMatchObject({ statusCode: status });
+  });
+
+  it('reports a request that never reached the server', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('Failed to fetch')));
+    await expect(endSession()).rejects.toMatchObject({ code: 'NETWORK_ERROR' });
+  });
 });

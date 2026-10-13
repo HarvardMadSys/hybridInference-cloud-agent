@@ -48,6 +48,26 @@ function MarkdownLink({ href, children }: { href?: string; children?: ReactNode 
   );
 }
 
+const InsideLinkContext = createContext(false);
+
+/**
+ * An image, offered as a link to it rather than fetched.
+ *
+ * Model output, tool results and the agent's questions are all rendered here,
+ * and an `<img>` loads as soon as it renders: `![](https://…/p.png?d=…)` would
+ * make the viewer's browser request whatever address the text names — with
+ * the session cookie when that is this origin, which can be the gateway's too.
+ * A link waits for the reader, like every other link in a message.
+ */
+function MarkdownImage({ src, alt }: { src?: unknown; alt?: string }) {
+  const url = typeof src === 'string' ? src : '';
+  const label = alt || url;
+  // Inside a link (a badge), that link is already the way there. A scheme
+  // react-markdown refuses arrives empty, and then the words are all there is.
+  if (useContext(InsideLinkContext) || !url) return <>{label}</>;
+  return <MarkdownLink href={url}>{label}</MarkdownLink>;
+}
+
 // react-markdown gives `code` no way to tell a fenced block from inline code
 // (the `inline` prop went away in v9), so `pre` marks its subtree and `code`
 // reads the mark. Sniffing `language-*` is not enough: an unlabelled fence has
@@ -96,7 +116,12 @@ function Code({ className, children }: { className?: string; children?: ReactNod
 // would otherwise be stripped by the CSS reset (flat lists, unsized headings).
 const components: Components = {
   p: ({ children }) => <p className="mb-2 leading-relaxed">{children}</p>,
-  a: ({ href, children }) => <MarkdownLink href={href}>{children}</MarkdownLink>,
+  a: ({ href, children }) => (
+    <MarkdownLink href={href}>
+      <InsideLinkContext.Provider value={true}>{children}</InsideLinkContext.Provider>
+    </MarkdownLink>
+  ),
+  img: ({ src, alt }) => <MarkdownImage src={src} alt={alt} />,
   ul: ({ children }) => <ul className="mb-2 list-disc space-y-1 pl-5">{children}</ul>,
   ol: ({ children }) => <ol className="mb-2 list-decimal space-y-1 pl-5">{children}</ol>,
   li: ({ children }) => <li className="leading-relaxed">{children}</li>,

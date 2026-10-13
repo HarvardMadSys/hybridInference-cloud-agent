@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
+import toast from 'react-hot-toast';
 import { ProtectedRoute } from '@/components/features/auth/ProtectedRoute';
 import { AgentsSidebar } from '@/components/features/agents/AgentsSidebar';
 import { useAgentChangeStream } from '@/components/features/agents/agentPush';
@@ -45,7 +46,13 @@ function AgentsHeader({ sidebarToggle }: { sidebarToggle?: React.ReactNode }) {
   const onTasks = !pathname.startsWith('/admin') && pathname !== '/approvals';
 
   const handleLogout = async () => {
-    await logout();
+    try {
+      await logout();
+    } catch {
+      // The session cookie is still set, so this browser is still signed in.
+      toast.error(t('nav.logOutFailed'));
+      return;
+    }
     router.replace('/');
   };
 

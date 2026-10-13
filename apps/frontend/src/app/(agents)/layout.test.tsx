@@ -3,6 +3,7 @@ import '@testing-library/jest-dom/vitest';
 
 import Link from 'next/link';
 import { useState } from 'react';
+import toast from 'react-hot-toast';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -16,12 +17,17 @@ import { DARK_CLASS, THEME_STORAGE_KEY } from '@/lib/theme';
 let access: AgentAccessApi | undefined;
 let role = 'internal';
 let userId: string | undefined;
+const router = vi.hoisted(() => ({ replace: vi.fn(), push: vi.fn() }));
+const logout = vi.hoisted(() => vi.fn());
 
 beforeEach(() => {
   access = { allowed: true, permissions: ['agent.use', 'agent.admin'] };
   role = 'internal';
   userId = undefined;
   vi.mocked(listMcpInvocations).mockReset().mockResolvedValue({ invocations: [] });
+  router.replace.mockReset();
+  logout.mockReset();
+  vi.mocked(toast.error).mockReset();
 });
 
 let pathname = '/';
@@ -33,9 +39,11 @@ vi.mock('@/lib/api/mcp', async (original) => ({
 }));
 
 vi.mock('next/navigation', () => ({
-  useRouter: () => ({ replace: vi.fn(), push: vi.fn() }),
+  useRouter: () => router,
   usePathname: () => pathname,
 }));
+
+vi.mock('react-hot-toast', () => ({ default: { error: vi.fn() } }));
 
 vi.mock('@/components/features/auth/ProtectedRoute', () => ({
   ProtectedRoute: ({ children }: { children: React.ReactNode }) => <>{children}</>,
@@ -62,7 +70,7 @@ vi.mock('@/components/providers', async () => {
           agent_access: access,
         },
       },
-      logout: vi.fn(),
+      logout,
     }),
     useT: () => (key: Parameters<typeof translate>[1], vars?: Parameters<typeof translate>[2]) =>
       translate('en', key, vars),
@@ -675,5 +683,38 @@ describe('AgentsLayout owner approval navigation', () => {
     );
     expect(screen.queryByRole('link', { name: 'Approvals' })).not.toBeInTheDocument();
     expect(listMcpInvocations).not.toHaveBeenCalled();
+  });
+});
+
+describe('AgentsLayout sign-out', () => {
+  afterEach(cleanup);
+
+  function signOut() {
+    render(
+      <AgentsLayout>
+        <p>job</p>
+      </AgentsLayout>,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Log out' }));
+  }
+
+  it('leaves for the start page once the session has ended', async () => {
+    logout.mockResolvedValueOnce(undefined);
+    signOut();
+    await waitFor(() => expect(router.replace).toHaveBeenCalledWith('/'));
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  // The server kept the session, so this browser is still signed in. Leaving
+  // the page as though it were not is what told the user they were done.
+  it('says the session is still open when signing out failed', async () => {
+    logout.mockRejectedValueOnce(new Error('HTTP 502: Bad Gateway'));
+    signOut();
+    await waitFor(() =>
+      expect(toast.error).toHaveBeenCalledWith(
+        'Could not log out. You are still signed in; try again.',
+      ),
+    );
+    expect(router.replace).not.toHaveBeenCalled();
   });
 });

@@ -60,12 +60,50 @@ if (rawApiPrefix.startsWith('/') && rawApiPrefix !== derivedApiPrefix) {
   );
 }
 
+// Sent with every page and asset. Mounted under `/agents`, this app shares the
+// gateway's origin, so a page of ours that another site can frame, or a
+// response a browser sniffs into script, is a hole in that origin too. None of
+// these restricts anything the app does itself:
+//
+//   * framing is same-origin only: a page on the shared origin may still frame
+//     the app, every other site is refused (clickjacking). `frame-ancestors`
+//     is the CSP form; `X-Frame-Options` covers browsers that predate it;
+//   * the app renders no plugin and no `<base>`, so `object-src` and
+//     `base-uri` refuse both rather than let an injected one change what loads;
+//   * Next serves every asset with its real type, so nothing needs sniffing;
+//   * the referrer policy is the modern default, stated for older browsers so
+//     they do not send another site the full URL of a task.
+//
+// This is deliberately not a script policy. Refusing inline script needs a
+// per-request nonce on Next's own inline scripts and on the theme boot script
+// in `src/app/layout.tsx`, and `connect-src` would have to name the API origin
+// a cross-origin deployment configures. Neither can be checked without a
+// browser exercising every page, so such a policy belongs in middleware, sent
+// as `Content-Security-Policy-Report-Only` until its reports are clean.
+// `securityHeaders.test.ts` pins these values, and the runtime-config build
+// check asserts that the built server sends them.
+const SECURITY_HEADERS = [
+  {
+    key: 'Content-Security-Policy',
+    value: "frame-ancestors 'self'; object-src 'none'; base-uri 'none'",
+  },
+  { key: 'X-Frame-Options', value: 'SAMEORIGIN' },
+  { key: 'X-Content-Type-Options', value: 'nosniff' },
+  { key: 'Referrer-Policy', value: 'strict-origin-when-cross-origin' },
+];
+
 const nextConfig = {
   reactStrictMode: true,
   output: 'standalone',
+  poweredByHeader: false,
   // Omitted entirely when empty: Next rejects `basePath: ''`, and empty means
   // a deployment that owns its hostname.
   ...(basePath ? { basePath } : {}),
+  // Next prefixes `source` with `basePath`, so this covers the variant's
+  // whole mount and nothing outside it.
+  async headers() {
+    return [{ source: '/:path*', headers: SECURITY_HEADERS }];
+  },
 };
 
 module.exports = nextConfig;
