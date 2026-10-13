@@ -58,7 +58,15 @@ class EventStream(httpx.AsyncByteStream):
 async def test_legacy_connect_cleans_up_every_exit(monkeypatch, owned, outcome):
     endpoint = "https://127.0.0.2:9/messages" if outcome == "off_origin" else "/messages"
     stream = EventStream(None if outcome == "cancel" else endpoint)
-    http = _client(lambda request: httpx.Response(200, stream=stream))
+
+    def serve(request):
+        # The GET opens the stream; the message endpoint accepts what is posted
+        # to it, such as the notification that completes the handshake.
+        if request.method == "POST":
+            return httpx.Response(202)
+        return httpx.Response(200, stream=stream)
+
+    http = _client(serve)
     monkeypatch.setattr(transports, "build_client", lambda config: http)
     handshake = AsyncMock(return_value=protocol.Handshake("2025-11-25"))
     if outcome == "handshake_error":

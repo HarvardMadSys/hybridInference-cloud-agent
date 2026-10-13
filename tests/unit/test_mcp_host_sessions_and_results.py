@@ -69,6 +69,57 @@ async def test_next_explicit_call_reconnects_after_transport_failure_without_rep
 
 
 @pytest.mark.asyncio
+async def test_an_unanticipated_failure_is_a_host_error_that_retires_the_session():
+    """Only host errors reach the relay's record of a dispatched call.
+
+    Anything else left an approved call dispatched with no outcome, and kept
+    the session that produced it in use.
+    """
+
+    class Garbled(Transport):
+        async def request(self, method, params=None):
+            raise AttributeError("'list' object has no attribute 'get'")
+
+    transport = Garbled()
+    current = session(transport)
+    with pytest.raises(host.HostError) as raised:
+        await host.McpHost().call_tool(current, name="search")
+    assert raised.value.kind == "protocol_incompatible"
+    assert "attribute" not in str(raised.value)
+    assert not current.reusable
+    assert transport.closed
+
+
+@pytest.mark.asyncio
+async def test_a_host_error_inside_a_call_keeps_its_meaning_and_the_session():
+    """The host's own refusals pass through as they are, without retiring anything."""
+    transport = Transport(
+        result={
+            "resultType": "input_required",
+            "inputRequests": {"q": {"method": "elicitation/create"}},
+        }
+    )
+    current = session(transport)
+    with pytest.raises(host.HostError, match="cannot supply"):
+        await host.McpHost().call_tool(current, name="search")
+    assert current.reusable
+
+
+@pytest.mark.asyncio
+async def test_connecting_fails_only_with_host_errors(monkeypatch):
+    """Opening a session is part of dispatching a call, so it keeps the same contract."""
+
+    async def garbled(config, **kwargs):
+        raise ValueError("invalid literal for int() with base 10: 'nope'")
+
+    monkeypatch.setattr(host, "connect_streamable", garbled)
+    with pytest.raises(host.HostError) as raised:
+        await host.McpHost()._connect(_connection(), secret=None)
+    assert raised.value.kind == "protocol_incompatible"
+    assert "nope" not in str(raised.value)
+
+
+@pytest.mark.asyncio
 async def test_concurrent_first_calls_share_one_upstream_session(monkeypatch):
     built = host.McpHost()
     entered, release = asyncio.Event(), asyncio.Event()

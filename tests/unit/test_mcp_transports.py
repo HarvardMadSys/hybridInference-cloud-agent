@@ -364,9 +364,58 @@ class TestEraDetection:
 
         client = self._with_discovery(handler)
         transport, handshake = await connect_streamable(_config(), client=client)
-        assert methods == ["server/discover", "initialize"]
+        assert methods == ["server/discover", "initialize", "notifications/initialized"]
         assert handshake.protocol_version == "2025-11-25"
         assert transport.era == "handshake"
+        await client.aclose()
+
+    async def test_the_handshake_is_confirmed_before_any_other_request(self) -> None:
+        """``initialize`` alone does not finish the handshake era's lifecycle.
+
+        A server that enforces it -- the Python SDK in stateful mode -- refuses
+        every request but ``ping`` until ``notifications/initialized`` arrives,
+        so a client that never sends it can discover nothing and call nothing.
+        The notification carries the agreed revision and the session, like
+        every request after initialization.
+        """
+        confirmed: list[httpx.Request] = []
+
+        def refusal(body: dict[str, Any], code: int, message: str) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": body["id"],
+                    "error": {"code": code, "message": message},
+                },
+                headers={"content-type": "application/json"},
+            )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = _json_body(request)
+            method = body.get("method")
+            if method == "server/discover":
+                return refusal(body, -32601, "method not found")
+            if method == "initialize":
+                return _reply(
+                    request,
+                    {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}}},
+                    **{"mcp-session-id": "sess-7"},
+                )
+            if method == "notifications/initialized":
+                confirmed.append(request)
+                return httpx.Response(202)
+            if not confirmed:
+                return refusal(body, -32602, "Received request before initialization was complete")
+            return _reply(request, {"tools": []})
+
+        client = _client(handler)
+        transport, _handshake = await connect_streamable(_config(), client=client)
+        assert await transport.request("tools/list") == {"tools": []}
+        assert len(confirmed) == 1
+        assert "id" not in _json_body(confirmed[0])
+        assert confirmed[0].headers["mcp-protocol-version"] == "2025-06-18"
+        assert confirmed[0].headers["mcp-session-id"] == "sess-7"
         await client.aclose()
 
     async def test_an_unsupported_version_is_retried_once_with_one_it_offers(self) -> None:
@@ -585,6 +634,88 @@ class TestWhatTheTransportIsWillingToRead:
         # hands a live connection back to the pool on every question the
         # server asks.
         assert answer_stream.closed, "the answer's response was never released"
+        await client.aclose()
+
+
+class _KeptAlive(httpx.AsyncByteStream):
+    """A body that sends ``opening`` and then keeps the stream alive forever."""
+
+    def __init__(self, opening: bytes = b"", *, filler: bytes = b": keep-alive\n\n") -> None:
+        self._opening = opening
+        self._filler = filler
+        self.closed = False
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        if self._opening:
+            yield self._opening
+        while True:
+            await asyncio.sleep(0.01)
+            yield self._filler
+
+    async def aclose(self) -> None:
+        """Record that the platform let go of the stream."""
+        self.closed = True
+
+
+class TestTheCallDeadline:
+    """A call ends at its answer, and in any case at the request timeout.
+
+    httpx's timeouts are per read, so a server that keeps a stream alive never
+    trips one: a call that waited for the stream to close held its socket and
+    its session for as long as the server liked.
+    """
+
+    async def test_a_streamed_answer_is_returned_while_the_stream_stays_open(self) -> None:
+        """Reading on after the answer waited for a close the server never sends."""
+        streams: list[_KeptAlive] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            answer = {"jsonrpc": "2.0", "id": _json_body(request)["id"], "result": {"ok": True}}
+            streams.append(_KeptAlive(_frame(answer)))
+            return httpx.Response(
+                200, headers={"content-type": "text/event-stream"}, stream=streams[-1]
+            )
+
+        client = _client(handler)
+        transport = StreamableHttpTransport(_config(request_timeout=30.0), client, owns_client=True)
+        assert await asyncio.wait_for(transport.request("tools/call"), timeout=5) == {"ok": True}
+        assert streams[0].closed, "the answered stream was not released"
+        await client.aclose()
+
+    @pytest.mark.parametrize("shape", ["sse-keep-alive", "trickled-json"])
+    async def test_a_reply_that_never_completes_ends_at_the_request_timeout(
+        self, shape: str
+    ) -> None:
+        """Comments every few milliseconds, or a body a byte at a time."""
+        stream = (
+            _KeptAlive()
+            if shape == "sse-keep-alive"
+            else _KeptAlive(b'{"jsonrpc": "2.0", ', filler=b" ")
+        )
+        content_type = "text/event-stream" if shape == "sse-keep-alive" else "application/json"
+        client = _client(
+            lambda request: httpx.Response(
+                200, headers={"content-type": content_type}, stream=stream
+            )
+        )
+        transport = StreamableHttpTransport(_config(request_timeout=0.2), client, owns_client=True)
+        with pytest.raises(TransportError) as raised:
+            await asyncio.wait_for(transport.request("tools/call"), timeout=5)
+        assert raised.value.kind == "unreachable"
+        assert stream.closed
+        await client.aclose()
+
+    async def test_a_legacy_post_that_never_completes_ends_at_the_request_timeout(self) -> None:
+        """The legacy wait had a limit; the POST in front of it had none."""
+        stream = _KeptAlive(filler=b"x")
+        client = _client(lambda request: httpx.Response(202, stream=stream))
+        transport = LegacySseTransport(
+            _config(request_timeout=0.2), client, message_url="https://127.0.0.1:9/messages"
+        )
+        with pytest.raises(TransportError) as raised:
+            await asyncio.wait_for(transport.request("tools/call"), timeout=5)
+        assert raised.value.kind == "unreachable"
+        assert transport._waiters == {}
         await client.aclose()
 
 

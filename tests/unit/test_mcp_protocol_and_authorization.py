@@ -111,6 +111,33 @@ class TestJsonRpc:
         assert isinstance(error, jsonrpc.UnsupportedProtocolVersion)
         assert error.supported == ["2025-11-25"]
 
+    @pytest.mark.parametrize(
+        "error",
+        ["boom", [1], 7, {"code": "nope", "message": "bad"}, {"code": None}],
+        ids=["string", "list", "number", "text-code", "null-code"],
+    )
+    def test_a_malformed_error_member_is_still_a_failed_call(self, error: object) -> None:
+        """A built-in exception in place of the reply's error skips every
+        caller's handling of a failed call, which is how an approved call was
+        left dispatched with no outcome."""
+        reply = jsonrpc.decode(json.dumps({"jsonrpc": "2.0", "id": 1, "error": error}))[0]
+        with pytest.raises(jsonrpc.JsonRpcError) as raised:
+            reply.result()
+        assert raised.value.code == jsonrpc.INTERNAL_ERROR
+
+    def test_a_payload_that_is_not_utf8_is_a_parse_error(self) -> None:
+        """Not the codec's own exception, which nothing reading a reply handles."""
+        with pytest.raises(jsonrpc.JsonRpcError) as raised:
+            jsonrpc.decode(b'{"jsonrpc":"2.0","id":1,"result":"\xff"}')
+        assert raised.value.code == jsonrpc.PARSE_ERROR
+
+    def test_nesting_deeper_than_the_parser_recurses_is_a_parse_error(self) -> None:
+        """A server chooses how deep its reply nests; the recursion limit is ours."""
+        deep = b'{"jsonrpc":"2.0","id":1,"result":' + b"[" * 100_000 + b"]" * 100_000 + b"}"
+        with pytest.raises(jsonrpc.JsonRpcError) as raised:
+            jsonrpc.decode(deep)
+        assert raised.value.code == jsonrpc.PARSE_ERROR
+
 
 class TestSse:
     """Framing rules a naive split gets wrong."""
@@ -152,6 +179,49 @@ class TestSse:
         decoder = sse.SseDecoder()
         with pytest.raises(sse.SseError):
             decoder.feed(b"x" * (sse.MAX_EVENT_BYTES + 1))
+
+    def test_a_long_line_dripped_in_small_chunks_is_scanned_once(self) -> None:
+        """The server chooses both the line and the size of the pieces.
+
+        Rescanning the line still being assembled on every chunk made a
+        megabyte delivered a kilobyte at a time cost tens of seconds of CPU on
+        the event loop every relay request shares.
+        """
+        import time
+
+        decoder = sse.SseDecoder()
+        started = time.perf_counter()
+        assert decoder.feed(b"data: ") == []
+        for _ in range(1000):
+            assert decoder.feed(b"x" * 1024) == []
+        events = decoder.feed(b"\n\n")
+        elapsed = time.perf_counter() - started
+        assert len(events) == 1
+        assert len(events[0].data) == 1000 * 1024
+        assert elapsed < 1.0, f"feeding one 1000 KiB line took {elapsed:.2f}s"
+
+    def test_one_line_may_carry_a_whole_event(self) -> None:
+        """Servers write a JSON-RPC message as one ``data`` line, so a line bound
+        below the event bound refuses results the event bound allows."""
+        decoder = sse.SseDecoder()
+        payload = b'"' + b"x" * (2 * 1024 * 1024) + b'"'
+        events = decoder.feed(b"data: " + payload[:1024])
+        for offset in range(1024, len(payload), 64 * 1024):
+            events += decoder.feed(payload[offset : offset + 64 * 1024])
+        events += decoder.feed(b"\n\n")
+        assert len(events) == 1
+        assert events[0].json() == payload.decode()[1:-1]
+
+    def test_a_stream_that_ends_on_a_cr_ends_its_line_there(self) -> None:
+        """The CR held back for a possible LF is a terminator once nothing follows."""
+        decoder = sse.SseDecoder()
+        assert decoder.feed(b"data: x\r") == []
+        assert [event.data for event in decoder.close()] == ["x"]
+
+    def test_data_nested_deeper_than_the_parser_recurses_is_not_json(self) -> None:
+        """Skipped like any other event that is not JSON, not raised as a crash."""
+        with pytest.raises(sse.SseError):
+            sse.SseEvent(data="[" * 100_000 + "]" * 100_000).json()
 
 
 class _FakeTransport:

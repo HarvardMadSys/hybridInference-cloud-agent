@@ -172,9 +172,16 @@ class Incoming:
         caller can act on: it carries the versions the server does implement,
         and a retry with one of them is a supported operation rather than a
         guess.
+
+        A reply whose ``error`` is not an object, or whose code is not a number,
+        still says the call failed, so it is read as an internal error rather
+        than raised as whatever building the exception tripped over: that
+        exception escapes every caller's handling of a failed call.
         """
-        error = self.payload.get("error") or {}
-        code = int(error.get("code", INTERNAL_ERROR))
+        error = self.payload.get("error")
+        if not isinstance(error, Mapping):
+            error = {}
+        code = _error_code(error.get("code", INTERNAL_ERROR))
         message = str(error.get("message", "the server reported an error"))
         data = error.get("data")
         if code == UNSUPPORTED_PROTOCOL_VERSION:
@@ -188,14 +195,30 @@ class Incoming:
         return JsonRpcError(code, message, data)
 
 
+def _error_code(value: Any) -> int:
+    """An error's code as an integer, or the internal-error code when it is not one."""
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return INTERNAL_ERROR
+
+
 def decode(body: bytes | str) -> list[Incoming]:
     """Decode one frame into messages, refusing anything malformed.
 
     An empty body is a valid empty batch in neither direction, so it is a
     violation rather than an empty list: silently accepting it would turn a
     truncated stream into "the server had nothing to say".
+
+    Every refusal is a :class:`JsonRpcError`, including bytes that are not
+    UTF-8 and nesting deeper than the parser recurses: a peer's malformed frame
+    is a parse error, and a built-in exception in its place skips the handling
+    every caller has for one.
     """
-    text = body.decode() if isinstance(body, bytes) else body
+    try:
+        text = body.decode() if isinstance(body, bytes) else body
+    except UnicodeDecodeError as exc:
+        raise JsonRpcError(PARSE_ERROR, "the payload is not UTF-8 text") from exc
     if not text.strip():
         raise ProtocolViolation("an empty payload is not a JSON-RPC message")
     if len(text.encode()) > MAX_MESSAGE_BYTES:
@@ -204,6 +227,10 @@ def decode(body: bytes | str) -> list[Incoming]:
         document = json.loads(text)
     except (json.JSONDecodeError, ValueError) as exc:
         raise JsonRpcError(PARSE_ERROR, f"invalid JSON: {exc}") from exc
+    except RecursionError as exc:
+        raise JsonRpcError(
+            PARSE_ERROR, "the payload nests deeper than this platform parses"
+        ) from exc
     items = document if isinstance(document, list) else [document]
     if not items:
         raise ProtocolViolation("an empty batch is not a JSON-RPC message")
