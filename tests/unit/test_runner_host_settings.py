@@ -118,7 +118,7 @@ def test_a_turn_runs_with_the_settings_it_was_handed(monkeypatch):
             "_host_settings": {
                 "agent_timeout_s": 900,
                 "source_import_max_mib": 4096,
-                # The broker's, not the runner's, and a value no turn can use:
+                # The sandbox manager's, not the runner's, and a value no turn can use:
                 # both are dropped rather than acted on.
                 "terminal_max_sessions": 16,
                 "chat_idle_timeout_s": -5,

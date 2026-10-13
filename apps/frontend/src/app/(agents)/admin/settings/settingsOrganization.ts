@@ -148,7 +148,7 @@ const SETTING_GROUPS: SettingGroup[] = [
   {
     title: 'Sandbox execution',
     important: ['default_execution_profile'],
-    advanced: ['workspace_broker_token', 'broker_url_allowed_hosts'],
+    advanced: ['sandbox_manager_token', 'sandbox_manager_url_allowed_hosts'],
   },
   {
     title: 'Logging',

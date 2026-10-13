@@ -51,7 +51,7 @@ async def _save_profile(repo, profile_id, *, request_id=_REQUEST, slot=0, finger
         "deployment_profile",
         json.dumps(
             {
-                "environment": "AGENT_WORKSPACE_BROKER_TOKEN='fixture-broker-token'\n",
+                "environment": "AGENT_SANDBOX_MANAGER_TOKEN='fixture-sandbox-manager-token'\n",
                 "files": {".compute-secrets/gateway.key": "fixture-key-for-" + profile_id},
             }
         ),

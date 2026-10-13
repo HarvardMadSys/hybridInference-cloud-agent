@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from pydantic_core import CoreSchema
 
 from pydantic import (
+    AliasChoices,
     BaseModel,
     ConfigDict,
     Field,
@@ -1399,7 +1400,7 @@ class AgentOperationProfilingFragment(BaseModel):
     #: Which local request this was, so a distribution does not mix a listing
     #: with a file preview or a terminal attach.
     request_kind: str = Field("", max_length=128)
-    #: Whether the broker finished collecting for that call. Distinct from
+    #: Whether the sandbox manager finished collecting for that call. Distinct from
     #: having timed something: a stage that legitimately did no timed work --
     #: a reuse, an empty directory -- answers without stages and is complete.
     fragment_recorded: bool = False
@@ -1475,7 +1476,7 @@ class AgentTerminalSessionInputRequest(BaseModel):
     @field_validator("data")
     @classmethod
     def valid_bounded_base64(cls, value: str) -> str:
-        """Reject malformed or oversized input before it reaches the broker."""
+        """Reject malformed or oversized input before it reaches the sandbox manager."""
         try:
             decoded = base64.b64decode(value, validate=True)
         except (binascii.Error, ValueError) as exc:
@@ -1514,10 +1515,10 @@ class AgentTerminalSessionListResponse(BaseModel):
     """Interactive terminal sessions retained by one live workspace."""
 
     terminals: list[AgentTerminalSessionResponse] = Field(default_factory=list)
-    #: The owning broker's per-workspace terminal limit. Absent when the broker
+    #: The owning sandbox manager's per-workspace terminal limit. Absent when the sandbox manager
     #: predates advertising it; the browser then assumes its own default.
     max_sessions: int | None = None
-    #: The most input bytes the owning broker accepts in one request.
+    #: The most input bytes the owning sandbox manager accepts in one request.
     max_input_bytes: int | None = None
     #: Present only on a measured list request; the instrumented handler adds
     #: it after serializing, so an unmeasured reply has no key at all.
@@ -2039,7 +2040,7 @@ class WorkerToolCallResources(BaseModel):
 
 
 class WorkerProcessObservation(BaseModel):
-    """One bounded guest-kernel process identity reported by the broker."""
+    """One bounded guest-kernel process identity reported by the sandbox manager."""
 
     process_seq: int = Field(..., ge=1)
     uid: int = Field(..., ge=0)
@@ -2566,7 +2567,21 @@ class RepoBranchesResponse(BaseModel):
 # split. Copied unchanged.
 
 
-class AgentRunnerHost(BaseModel):
+class _SandboxManagerWireNames(BaseModel):
+    """Expose current names while keeping older host clients interoperable."""
+
+    @model_validator(mode="after")
+    def _legacy_manager_fields(self) -> _SandboxManagerWireNames:
+        for current, previous in (
+            ("sandbox_manager_url", "broker_url"),
+            ("sandbox_manager_error", "broker_error"),
+        ):
+            if current in type(self).model_fields:
+                setattr(self, previous, getattr(self, current))
+        return self
+
+
+class AgentRunnerHost(_SandboxManagerWireNames):
     """One machine in the agent runner pool.
 
     Most fields below ``seconds_since_seen`` arrived with the dynamic pool
@@ -2632,9 +2647,12 @@ class AgentRunnerHost(BaseModel):
         ),
     )
     runner_version: str | None = None
-    broker_url: str | None = Field(
+    sandbox_manager_url: str | None = Field(
         None,
-        description="Where this host's workspace broker listens, as the control plane reaches it.",
+        description="Where this host's sandbox manager listens, as the control plane reaches it.",
+    )
+    broker_url: str | None = Field(
+        default=None, deprecated=True, description="Compatibility alias for sandbox_manager_url."
     )
     last_heartbeat_at: datetime | None = None
     drain_fence_token: UUID | None = Field(
@@ -2735,7 +2753,7 @@ class AgentRunnerHost(BaseModel):
         None,
         ge=0,
         description=(
-            "Archive-policy revision this host's broker confirmed applying. Null means "
+            "Archive-policy revision this host's sandbox manager confirmed applying. Null means "
             "the host predates database-backed archive settings or has not synchronized yet."
         ),
     )
@@ -2803,7 +2821,7 @@ class HostSettingDefinition(BaseModel):
         ...,
         description=(
             "Which host process applies it: the runner, as it starts each turn; "
-            "the workspace broker, which runs terminals and the idle sweep; or both."
+            "the sandbox manager, which runs terminals and the idle sweep; or both."
         ),
     )
 
@@ -2996,8 +3014,8 @@ class SandboxArchiveSettingsResponse(BaseModel):
 class HostSandboxArchiveSettings(SandboxArchiveSettingsResponse):
     """Heartbeat copy. Includes the secret and omits empty credential fields.
 
-    Older brokers reject unknown policy keys. An unset access key must not
-    appear on the wire; a set key is delivered only to a broker that can
+    Older sandbox managers reject unknown policy keys. An unset access key must not
+    appear on the wire; a set key is delivered only to a sandbox manager that can
     apply it. The admin configured flag is not part of this payload.
     """
 
@@ -3030,7 +3048,7 @@ class HostSandboxArchiveSettings(SandboxArchiveSettingsResponse):
         return {
             **schema,
             "title": "HostSandboxArchiveSettings",
-            "description": "Archive policy delivered to a broker. Empty access-key fields are omitted.",
+            "description": "Archive policy delivered to a sandbox manager. Empty access-key fields are omitted.",
             "properties": properties,
         }
 
@@ -3183,13 +3201,14 @@ class HostRegisterRequest(BaseModel):
         le=1024,
         description="Concurrent attempts this enrolled host accepts.",
     )
-    broker_url: str = Field(
+    sandbox_manager_url: str = Field(
         ...,
+        validation_alias=AliasChoices("sandbox_manager_url", "broker_url"),
         max_length=2048,
         description=(
-            "Where this host's workspace broker listens, as the control plane "
+            "Where this host's sandbox manager listens, as the control plane "
             "reaches it. Every executable attempt records an enrolled host, and "
-            "files, terminals and Git resolve the broker from that host row. "
+            "files, terminals and Git resolve the sandbox manager from that host row. "
             "Omitting it leaves the host unready and unable to serve chats."
         ),
     )
@@ -3199,7 +3218,7 @@ class HostRegisterRequest(BaseModel):
     )
 
 
-class HostRegisterResponse(BaseModel):
+class HostRegisterResponse(_SandboxManagerWireNames):
     """The host's identity and the credential it authenticates with."""
 
     host: str
@@ -3212,11 +3231,14 @@ class HostRegisterResponse(BaseModel):
     )
     status: str
     broker_error: str | None = Field(
+        default=None, deprecated=True, description="Compatibility alias for sandbox_manager_error."
+    )
+    sandbox_manager_error: str | None = Field(
         None,
         description=(
-            "Set when the control plane could not use the broker_url this host "
-            "reported: unreachable from here, or refusing the shared broker "
-            "credential. Enrolment still succeeds — a broker is often still "
+            "Set when the control plane could not use the sandbox_manager_url this host "
+            "reported: unreachable from here, or refusing the shared sandbox manager "
+            "credential. Enrolment still succeeds — a sandbox manager is often still "
             "starting — but every file, terminal and git request for this "
             "host's jobs will fail until it is fixed."
         ),
@@ -3244,7 +3266,7 @@ class RetainedSandboxBeat(BaseModel):
         description=(
             "Whether this exact supervisor generation currently has a turn, "
             "terminal, or bounded workspace operation open. Null means the "
-            "broker could not prove activity state after reconstruction."
+            "sandbox manager could not prove activity state after reconstruction."
         ),
     )
     idle_remaining_seconds: float | None = Field(
@@ -3283,7 +3305,7 @@ class RetainedSandboxStop(BaseModel):
 
     thread_id: str = Field(..., min_length=1, max_length=128)
     generation: int = Field(..., ge=1)
-    # A fork target is born stopped at generation zero. If the broker starts
+    # A fork target is born stopped at generation zero. If the sandbox manager starts
     # it for a file/terminal operation and then restarts before the first agent
     # turn, the durable idle-stop fence still legitimately names generation
     # zero. Rejecting it here leaks that reconstructed container in RUNNING.
@@ -3323,7 +3345,11 @@ class HostHeartbeatRequest(BaseModel):
         ),
     )
     runner_version: str | None = Field(None, max_length=128)
-    broker_url: str | None = Field(None, max_length=2048)
+    sandbox_manager_url: str | None = Field(
+        None,
+        max_length=2048,
+        validation_alias=AliasChoices("sandbox_manager_url", "broker_url"),
+    )
     capabilities: list[_HostCapability] | None = Field(None, max_length=64)
     sandbox_runtime: str | None = Field(
         None,
@@ -3399,7 +3425,7 @@ class HostHeartbeatRequest(BaseModel):
         max_length=MAX_SETTINGS_KEYS,
         description=(
             "The runtime settings this host is applying now, by key — the "
-            "workspace broker's as it last confirmed them. Null means not "
+            "sandbox manager's as it last confirmed them. Null means not "
             "reported and keeps what is stored."
         ),
     )
@@ -3415,7 +3441,7 @@ class HostHeartbeatRequest(BaseModel):
         None,
         ge=0,
         description=(
-            "The archive-policy revision the authenticated workspace broker confirmed. "
+            "The archive-policy revision the authenticated sandbox manager confirmed. "
             "Explicit null clears a stale confirmation after restart; omitting the field "
             "keeps the last observation for compatibility with older runners."
         ),
@@ -3452,7 +3478,7 @@ class HostResidencyEstablishResponse(BaseModel):
     model: str | None = None
 
 
-class HostHeartbeatResponse(BaseModel):
+class HostHeartbeatResponse(_SandboxManagerWireNames):
     """What the control plane thinks of this host after the heartbeat."""
 
     host: str
@@ -3495,9 +3521,12 @@ class HostHeartbeatResponse(BaseModel):
         ),
     )
     broker_error: str | None = Field(
+        default=None, deprecated=True, description="Compatibility alias for sandbox_manager_error."
+    )
+    sandbox_manager_error: str | None = Field(
         None,
         description=(
-            "Set when the control plane could not use the broker_url this host "
+            "Set when the control plane could not use the sandbox_manager_url this host "
             "reported. Checked at most once a minute, and always when the "
             "reported address changes."
         ),

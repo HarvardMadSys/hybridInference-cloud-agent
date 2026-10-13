@@ -24,7 +24,7 @@ What else this module guarantees, and why each one is here:
 
 * **Selection happens after the existing checks, never instead of them.** The
   caller authenticates, resolves ownership and entitlement, and resolves the
-  broker exactly as before; only then does :func:`observe` decide whether to
+  sandbox manager exactly as before; only then does :func:`observe` decide whether to
   measure. Profiling adds no permission exemption and no extra probe request.
 * **The current request's own facts are the only evidence.** A continuation is
   re-validated against what *this* request resolved -- run, operation, chat,
@@ -57,6 +57,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent_shared import operation_profiling
+from cloud_agent_shared.sandbox_manager_compat import SANDBOX_MANAGER_PRODUCER
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -73,9 +74,6 @@ PRODUCER = "control-plane"
 FILES_LIST = "files.list"
 FILES_OPEN = "files.open"
 TERMINAL_OPEN = "terminal.open"
-
-#: Producer a downstream broker is expected to contribute under.
-BROKER_PRODUCER = "broker"
 
 #: Route hints, so a caller inside the same process can name what is being
 #: measured without restating the operation string.
@@ -248,7 +246,7 @@ class Selection:
             self.measurement, parent, name, producer=producer or PRODUCER
         )
 
-    def begin_call(self, stage: str, *, producer: str = BROKER_PRODUCER) -> str | None:
+    def begin_call(self, stage: str, *, producer: str = SANDBOX_MANAGER_PRODUCER) -> str | None:
         """Register one downstream call and return the id that identifies it.
 
         Always a fresh id. A request that makes two calls -- a terminal open
@@ -270,7 +268,7 @@ class Selection:
         context["interaction_id"] = self.interaction_id
         # The *candidate operation strings* this request may be filed under,
         # intersected with what the run selects here. Deliberately not a list of
-        # measurement objects: the broker is told which operations are in play,
+        # measurement objects: the sandbox manager is told which operations are in play,
         # not asked to choose one before its result exists.
         context["operations"] = sorted(self.interaction.allowed)
         context.pop("operation", None)
@@ -300,7 +298,7 @@ class Selection:
     def result_operation(self, response: Any, *, default: str) -> str:
         """Return the operation this request's result turned out to be.
 
-        The operation comes from the broker's answer when it named one, and
+        The operation comes from the sandbox manager's answer when it named one, and
         otherwise from the response body's own ``kind`` -- the same evidence,
         read where the answer could not carry it. A request that already had a
         single candidate keeps it. This only answers the question; the caller
@@ -324,7 +322,7 @@ class Selection:
         """
         recorded = operation_profiling.record_fragment(
             self.measurement,
-            producer=BROKER_PRODUCER,
+            producer=SANDBOX_MANAGER_PRODUCER,
             call_id=call_id,
             stage=stage,
             response=response,
@@ -491,7 +489,7 @@ def continuation(request_headers: Mapping[str, str] | None) -> str | None:
     return None
 
 
-#: What a workspace read reports it found. The broker is the only component
+#: What a workspace read reports it found. The sandbox manager is the only component
 #: that knows, because it performs the read; a path alone cannot say.
 FILE_KINDS = {
     "directory": FILES_LIST,
@@ -714,7 +712,6 @@ def reset() -> None:
 
 
 __all__ = [
-    "BROKER_PRODUCER",
     "FILES_LIST",
     "FILES_OPEN",
     "FILE_CANDIDATES",
@@ -726,6 +723,7 @@ __all__ = [
     "REQUEST_KINDS",
     "ROUTE_FILES",
     "ROUTE_TERMINALS",
+    "SANDBOX_MANAGER_PRODUCER",
     "TERMINAL_CREATE",
     "TERMINAL_LIST",
     "TERMINAL_OPEN",

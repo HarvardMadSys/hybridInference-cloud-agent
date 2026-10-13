@@ -1,7 +1,7 @@
 """Lifecycle orchestration for export-only retained-sandbox S3 archives.
 
-Only the trusted workspace broker constructs this service.  A runner can ask
-for the one pre-prompt baseline over the broker API, and the shared-session
+Only the trusted sandbox manager constructs this service.  A runner can ask
+for the one pre-prompt baseline over the sandbox manager API, and the shared-session
 supervisor can hand it a stopped container for a final capture.  Neither path
 puts S3 credentials or an S3 client in the agent container.
 """
@@ -220,7 +220,7 @@ class SandboxArchiveService:
 
     Final capture deliberately has no in-memory work queue. The stop hook
     returns only after S3 accepted the final object, so a successful clean stop
-    cannot silently lose an archive to queue pressure or a later broker
+    cannot silently lose an archive to queue pressure or a later sandbox manager
     shutdown. A small deadline-bounded semaphore applies backpressure
     *before* Docker starts copying bytes.
     """
@@ -311,7 +311,7 @@ class SandboxArchiveService:
         }
 
     def start(self) -> None:
-        """Allow archive captures before the broker accepts requests."""
+        """Allow archive captures before the sandbox manager accepts requests."""
         with self._lock:
             if self._closed or self._closing:
                 raise RuntimeError("sandbox archive service is closed")
@@ -700,7 +700,7 @@ class SandboxArchiveService:
     ) -> _BuiltArchive:
         self._check_deadline(deadline)
         # Membership is an admission-time fence, not durable archive identity.
-        # A replacement broker can reconstruct a stopped container before the
+        # A replacement sandbox manager can reconstruct a stopped container before the
         # control plane sends its full fork manifest, and retries must not
         # replace an otherwise identical archive with origin-only metadata.
         # The selected /agent-state payload still contains every runtime's

@@ -11,8 +11,8 @@ from fastapi import HTTPException
 
 from cloud_agent.api import worker
 from cloud_agent.application import residency, session_fork
+from cloud_agent.sandbox_manager_client import SandboxManagerError
 from cloud_agent.schemas import WorkerSandboxResidencyRequest
-from cloud_agent.workspace_broker_client import WorkspaceBrokerError
 
 
 class IdempotentGrants:
@@ -214,13 +214,13 @@ async def test_fork_after_an_unacknowledged_host_failure_mints_two_live_replacem
         current = tuple(kwargs[f"{role}_launch"]["credential"] for role in ("source", "target"))
         credentials.append(current)
         if len(credentials) == 1:
-            raise WorkspaceBrokerError(503, "host response was lost")
+            raise SandboxManagerError(503, "host response was lost")
         assert all(grants.live(token) for token in current)
         return {"operation_id": kwargs["operation_id"]}
 
     monkeypatch.setattr(
         session_fork,
-        "broker_for_job",
+        "sandbox_manager_for_job",
         AsyncMock(return_value=SimpleNamespace(fork_shared_session=fork)),
     )
     operation = {

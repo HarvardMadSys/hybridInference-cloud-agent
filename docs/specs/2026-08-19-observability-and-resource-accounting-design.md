@@ -40,7 +40,7 @@ Every current attempt instead stores this honest shape:
 - `sample_count = 0`, `coverage = 0`, and
   `sampler_version = shared-member-v1` mean “group totals intentionally not
   attributed”, not “the turn used zero resources”;
-- the broker records bounded message-level tool windows for all normalized
+- the sandbox manager records bounded message-level tool windows for all normalized
   `tool_use` / `tool_result` pairs;
 - Claude Code can narrow those windows to `exact` with the passive, pinned
   marker helper;
@@ -51,9 +51,9 @@ Every current attempt instead stores this honest shape:
   process accounting remains unavailable. It is not fabricated from the group
   container.
 
-The workspace broker owns the observation cursor and tool-window tracker. It
+The sandbox manager owns the observation cursor and tool-window tracker. It
 closes observation before the member reaper and permission normalizer run, so
-platform cleanup is never billed to the user call. The broker includes resource
+platform cleanup is never billed to the user call. The sandbox manager includes resource
 telemetry in both result and boundary-error frames; after cancellation or turn
 timeout, the runner interrupts the member and drains the terminal frame before
 reporting the attempt. A disconnected or lease-lost runner still aborts and
@@ -314,7 +314,7 @@ Consequences:
 Current per-turn path:
 
 ```text
-retained group container                 workspace broker                 control plane
+retained group container                 sandbox manager                 control plane
 ────────────────────────                 ────────────────                 ─────────────
 member A live CLI (UID A) ─┐
                             ├─ shared /workspace
@@ -346,7 +346,7 @@ squid egress                         │                                    agen
 gateway api_logs (exists, billing authority) ───────── joined by grant attribution / attempt window ──► #57 read path
 ```
 
-The current broker→runner→CP path uses the existing worker-report pattern
+The current sandbox manager→runner→CP path uses the existing worker-report pattern
 (`worker_report_continuity` is the precedent): a small authenticated POST at
 window close, idempotent per `(attempt_id, kind)`. The emit() seam may be
 lossy by contract; Postgres rows are the facts (O1).
@@ -363,8 +363,8 @@ member's consumption.
 
 | Window | Boundaries | Rollup destination |
 |---|---|---|
-| Attempt | broker turn admission → terminal boundary | `attempt_resources` metadata; aggregate counters unavailable |
-| Tool call | hook markers (`exact`) or broker event arrival (`message`) | `tool_call_resources` timing + optional process accounting |
+| Attempt | sandbox manager turn admission → terminal boundary | `attempt_resources` metadata; aggregate counters unavailable |
+| Tool call | hook markers (`exact`) or sandbox manager event arrival (`message`) | `tool_call_resources` timing + optional process accounting |
 | Guest process | member cursor → terminal boundary, filtered by fixed UID | `agent_process_observations` |
 | Running-idle / stopped residency | group lifecycle boundaries | deferred group-scoped residency series |
 
@@ -522,7 +522,7 @@ or stopped-container disk/admission saturation.
 | Guest observer unavailable | Tool timing remains; process observer is null/incomplete and no process use is fabricated |
 | Guest journal loss/truncation | Observation and affected process-resource rows are explicitly partial |
 | Cancel/timeout after admission | Member is interrupted and terminal telemetry is drained; context becomes LOST per the session design |
-| Broker stream disappears | Member is aborted/reaped; runner persists the explicit unavailable aggregate if no terminal frame arrived |
+| Sandbox Manager stream disappears | Member is aborted/reaped; runner persists the explicit unavailable aggregate if no terminal frame arrived |
 | RUNNING residency with no attempt | No member resource row is invented; future group accounting remains deferred |
 | STOPPED residency | Docker stop preserves the writable layer; no workload measurement is attributed to a member |
 | Clock skew runner↔CP | Windows are runner-local monotonic; only display joins use wall clock |
@@ -543,7 +543,7 @@ or stopped-container disk/admission saturation.
    missing BTF/accounting fields remain null.
 7. Observation closes before reaper/normalizer work and is returned on both
    success and activation-boundary failure.
-8. Cancel/timeout drains a broker terminal resource frame, while lease loss
+8. Cancel/timeout drains a sandbox manager terminal resource frame, while lease loss
    interrupts and fences the member.
 9. Re-posting one attempt rollup replaces its bounded child rows atomically and
    never doubles them.

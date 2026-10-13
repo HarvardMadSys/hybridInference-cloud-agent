@@ -1,4 +1,4 @@
-"""Revision and lifecycle tests for the broker's live archive controller."""
+"""Revision and lifecycle tests for the sandbox manager's live archive controller."""
 
 from __future__ import annotations
 

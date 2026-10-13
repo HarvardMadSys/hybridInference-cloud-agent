@@ -2,7 +2,7 @@
 
 The first supported bootstrap OS is Ubuntu 22.04/24.04 amd64 with passwordless
 sudo and KVM. Docker/Compose and pinned Kata can be installed by the trusted
-profile. Tunnel permissions and broker routing must already be provisioned on
+profile. Tunnel permissions and sandbox manager routing must already be provisioned on
 the stable control-plane/gateway machines and supplied through the profile.
 """
 
@@ -29,6 +29,7 @@ from cloud_agent.ports.external.host_bootstrap import (
     TransferResult,
 )
 from cloud_agent.providers.compute.ssh import known_hosts_line
+from cloud_agent_shared.sandbox_manager_compat import manager_environment
 
 if TYPE_CHECKING:
     from pydantic import SecretStr
@@ -562,7 +563,7 @@ with open(lock_path, 'a') as lock:
         if credential.is_symlink():
             blocked('host_deployment_failed')
         credential.unlink(missing_ok=True)
-    # This invokes the existing Kata, relay, broker, observer, network-guard
+    # This invokes the existing Kata, relay, sandbox manager, observer, network-guard
     # and retained-state checks, then writes the actual shared-ready marker.
     run('host_deployment_failed', ['bash', 'deploy/host/sandbox_host.sh', 'up'])
     run('host_readiness_failed', ['bash', 'deploy/host/sandbox_host.sh', 'check'])
@@ -593,7 +594,7 @@ print(json.dumps({'ready': ready, 'blocked_reasons': [] if ready else ['host_rea
 
 _REQUIRED_ENV = {
     "AGENT_SANDBOX_IMAGE",
-    "AGENT_WORKSPACE_BROKER_TOKEN",
+    "AGENT_SANDBOX_MANAGER_TOKEN",
     "AGENT_TUNNEL_SSH_DESTINATION",
     "AGENT_TUNNEL_SSH_KEY",
     "AGENT_TUNNEL_SSH_KNOWN_HOSTS",
@@ -603,9 +604,9 @@ _REQUIRED_ENV = {
     "AGENT_CONTROL_PLANE_TUNNEL_SSH_DESTINATION",
     "AGENT_CONTROL_PLANE_TUNNEL_SSH_KEY",
     "AGENT_CONTROL_PLANE_TUNNEL_SSH_KNOWN_HOSTS",
-    "AGENT_BROKER_REVERSE_BIND",
-    "AGENT_BROKER_REVERSE_PORT",
-    "AGENT_WORKSPACE_BROKER_ADVERTISE_URL",
+    "AGENT_SANDBOX_MANAGER_REVERSE_BIND",
+    "AGENT_SANDBOX_MANAGER_REVERSE_PORT",
+    "AGENT_SANDBOX_MANAGER_ADVERTISE_URL",
     "AGENT_EGRESS_CHAT_NETWORK_POOL",
     "AGENT_EGRESS_DNS_SERVER",
 }
@@ -808,7 +809,7 @@ class SshHostBootstrap:
             "deploy_root": profile.deploy_root,
         }.items():
             template = template.replace("{" + key + "}", value)
-        values = dotenv_values(stream=io.StringIO(template), interpolate=False)
+        values = manager_environment(dotenv_values(stream=io.StringIO(template), interpolate=False))
         if (
             any(
                 not name.startswith("AGENT_") and name not in _ALLOWED_NON_AGENT_ENV
@@ -824,7 +825,7 @@ class SshHostBootstrap:
         if any(not values.get(name) for name in _REQUIRED_ENV):
             raise ProviderError(
                 "deployment_profile_invalid",
-                "Deployment profile is missing required relay, broker or network settings",
+                "Deployment profile is missing required relay, sandbox manager or network settings",
             )
         values.update(
             {
@@ -837,7 +838,7 @@ class SshHostBootstrap:
         )
         if profile.sandbox_storage_path is not None:
             # Both daemon stores are bound from the selected disk to their
-            # standard paths. Broker and runner must attest that same daemon.
+            # standard paths. Sandbox Manager and runner must attest that same daemon.
             values["AGENT_RETAINED_DOCKER_DATA_ROOT"] = "/var/lib/docker"
         # A persisted runner credential takes precedence in the existing host
         # recipe. A retry never deletes that file to spend another token.
@@ -1014,7 +1015,7 @@ class SshHostBootstrap:
     async def readiness(
         self, node: NodeObservation, profile: DeploymentProfile, intent: BootstrapIntent
     ) -> BootstrapResult:
-        """Recheck deployment identity and the full host and broker readiness gates."""
+        """Recheck deployment identity and the full host and sandbox manager readiness gates."""
         command = (
             "sudo -n python3 -c "
             + shlex.quote(_READINESS)
@@ -1048,7 +1049,10 @@ class SshHostBootstrap:
         self, node: NodeObservation, profile: DeploymentProfile, intent: BootstrapIntent
     ) -> None:
         """Stop the Host stack, its sandboxes and the container daemons, keeping all state."""
-        params = {**self._params(profile, intent), "broker_drain_seconds": _BROKER_DRAIN_SECONDS}
+        params = {
+            **self._params(profile, intent),
+            "sandbox_manager_drain_seconds": _SANDBOX_MANAGER_DRAIN_SECONDS,
+        }
         script = "sudo -n python3 -c " + shlex.quote(_STOP) + " " + shlex.quote(json.dumps(params))
         result = self._json(
             await self._transport.run(self._connection(node), script, timeout=_STOP_TIMEOUT_SECONDS)
@@ -1172,10 +1176,10 @@ class SshHostBootstrap:
 _TRANSFER_STREAMS = 6
 _TRANSFER_TIMEOUT_SECONDS = 4 * 3600
 
-# The broker's drain must end early enough inside the stop's SSH deadline to
+# The sandbox manager's drain must end early enough inside the stop's SSH deadline to
 # leave time for the runner, the remaining containers and the daemons.
 _STOP_TIMEOUT_SECONDS = 900
-_BROKER_DRAIN_SECONDS = 600
+_SANDBOX_MANAGER_DRAIN_SECONDS = 600
 
 _STOP = r"""
 import json, subprocess, sys
@@ -1197,13 +1201,14 @@ if subprocess.run(['systemctl', 'is-active', '--quiet', 'docker'], **quiet).retu
     runner = service('runner')
     if runner:
         subprocess.run(['docker', 'stop', '-t', '60', *runner], **quiet)
-    # Then the broker, alone: its shutdown stops each running sandbox cleanly.
-    # While lifecycle archives are enabled, the next node's broker quarantines
-    # a sandbox that Docker stopped behind the broker's back.
-    broker = service('workspace-broker')
-    if broker:
-        drain = str(params['broker_drain_seconds'])
-        subprocess.run(['docker', 'stop', '-t', drain, *broker], **quiet)
+    # Then the sandbox manager, alone: its shutdown stops each running sandbox cleanly.
+    # While lifecycle archives are enabled, the next node's sandbox manager quarantines
+    # a sandbox that Docker stopped behind the sandbox manager's back.
+    # Retained source nodes may still run the service under its previous name.
+    sandbox_manager = service('sandbox-manager') + service('workspace-broker')
+    if sandbox_manager:
+        drain = str(params['sandbox_manager_drain_seconds'])
+        subprocess.run(['docker', 'stop', '-t', drain, *sandbox_manager], **quiet)
     # Explicitly stopped containers stay stopped when a daemon starts again,
     # including on the node that receives this state. The CLI stops them in
     # parallel, each with its own configured grace period.

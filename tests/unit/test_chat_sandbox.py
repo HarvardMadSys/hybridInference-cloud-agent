@@ -718,7 +718,7 @@ def test_retained_tool_hooks_are_installed_inside_docker_owned_state(monkeypatch
     assert marks.stat().st_mode & 0o777 == 0o660
 
 
-def test_foreign_namespace_is_not_inspected_during_broker_startup(monkeypatch) -> None:
+def test_foreign_namespace_is_not_inspected_during_sandbox_manager_startup(monkeypatch) -> None:
     manager = ChatSandboxManager(ContainerBackend(image="img", sandbox_namespace="this-stack"))
 
     def run(argv, **_kwargs):
@@ -2379,7 +2379,7 @@ def _git_probe() -> SandboxSpec:
 
 
 def test_a_backend_without_a_proof_checks_the_bridge_before_every_command(monkeypatch):
-    """The broker's own backends, and a turn whose broker did not say it checked."""
+    """The sandbox manager's own backends, and a turn whose sandbox manager did not say it checked."""
     backend, checks = _proving_backend(monkeypatch, proved_at=None)
 
     for _ in range(3):
@@ -2389,7 +2389,7 @@ def test_a_backend_without_a_proof_checks_the_bridge_before_every_command(monkey
 
 
 def test_a_turn_relies_on_its_activation_proof_for_a_minute(monkeypatch):
-    """The broker proved the bridge when it acquired the turn; repeating it adds nothing."""
+    """The sandbox manager proved the bridge when it acquired the turn; repeating it adds nothing."""
     clock = {"now": 1000.0}
     monkeypatch.setattr(chat_sandbox_mod, "time", SimpleNamespace(monotonic=lambda: clock["now"]))
     backend, checks = _proving_backend(monkeypatch, proved_at=1000.0)

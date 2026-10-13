@@ -47,14 +47,16 @@ def _host(now: datetime, **overrides: Any) -> dict[str, Any]:
         ],
         "slots_total": 3,
         "last_heartbeat_at": now,
-        "broker_url": "http://broker-a:8092",
+        "sandbox_manager_url": "http://sandbox-manager-a:8092",
     }
     row.update(overrides)
     return row
 
 
 @pytest.mark.asyncio
-async def test_ready_requires_a_post_start_heartbeat_and_authoritative_broker_probe() -> None:
+async def test_ready_requires_a_post_start_heartbeat_and_authoritative_sandbox_manager_probe() -> (
+    None
+):
     started = datetime.now(UTC)
     calls: list[tuple[str, str, bool]] = []
 
@@ -64,18 +66,18 @@ async def test_ready_requires_a_post_start_heartbeat_and_authoritative_broker_pr
     verdict = await shared_live_readiness(
         _Store([_host(started + timedelta(seconds=1))]),
         not_before=started,
-        broker_token="broker-token",
+        sandbox_manager_token="sandbox-manager-token",
         expected_deployment_sha=DEPLOYMENT_SHA,
-        broker_probe=probe,
+        sandbox_manager_probe=probe,
     )
 
     assert verdict.ready is True
     assert verdict.host == "runner-a"
-    assert calls == [("runner-a", "http://broker-a:8092", True)]
+    assert calls == [("runner-a", "http://sandbox-manager-a:8092", True)]
 
 
 @pytest.mark.asyncio
-async def test_marker_change_during_broker_probe_keeps_the_barrier_closed() -> None:
+async def test_marker_change_during_sandbox_manager_probe_keeps_the_barrier_closed() -> None:
     started = datetime.now(UTC)
     ready = _host(started + timedelta(seconds=1))
     pending = _host(
@@ -96,13 +98,13 @@ async def test_marker_change_during_broker_probe_keeps_the_barrier_closed() -> N
     verdict = await shared_live_readiness(
         ChangingStore(),
         not_before=started,
-        broker_token="broker-token",
+        sandbox_manager_token="sandbox-manager-token",
         expected_deployment_sha=DEPLOYMENT_SHA,
-        broker_probe=lambda *_args, **_kwargs: _async_none(),
+        sandbox_manager_probe=lambda *_args, **_kwargs: _async_none(),
     )
 
     assert verdict.ready is False
-    assert "changed while its broker was probed" in verdict.detail
+    assert "changed while its sandbox manager was probed" in verdict.detail
 
 
 async def _async_none() -> None:
@@ -128,14 +130,14 @@ async def test_an_explicit_idle_draining_host_can_satisfy_the_deploy_barrier() -
             ]
         ),
         not_before=started,
-        broker_token="broker-token",
+        sandbox_manager_token="sandbox-manager-token",
         expected_deployment_sha=DEPLOYMENT_SHA,
         draining_host="runner-a",
-        broker_probe=probe,
+        sandbox_manager_probe=probe,
     )
 
     assert verdict.ready is True
-    assert calls == [("runner-a", "http://broker-a:8092", True)]
+    assert calls == [("runner-a", "http://sandbox-manager-a:8092", True)]
 
 
 @pytest.mark.asyncio
@@ -153,7 +155,7 @@ async def test_draining_host_is_still_rejected_without_the_explicit_mode() -> No
             ]
         ),
         not_before=started,
-        broker_token="broker-token",
+        sandbox_manager_token="sandbox-manager-token",
         expected_deployment_sha=DEPLOYMENT_SHA,
     )
 
@@ -176,7 +178,7 @@ async def test_explicit_draining_host_must_be_idle() -> None:
             ]
         ),
         not_before=started,
-        broker_token="broker-token",
+        sandbox_manager_token="sandbox-manager-token",
         expected_deployment_sha=DEPLOYMENT_SHA,
         draining_host="runner-a",
     )
@@ -201,7 +203,7 @@ async def test_explicit_draining_mode_never_accepts_a_different_host() -> None:
             ]
         ),
         not_before=started,
-        broker_token="broker-token",
+        sandbox_manager_token="sandbox-manager-token",
         expected_deployment_sha=DEPLOYMENT_SHA,
         draining_host="runner-a",
     )
@@ -227,24 +229,24 @@ async def test_a_pinned_host_and_a_different_idle_draining_host_both_pass() -> N
                     host="rolled-host",
                     status="draining",
                     slots_used=0,
-                    broker_url="http://broker-b:8092",
+                    sandbox_manager_url="http://sandbox-manager-b:8092",
                 ),
             ],
             active_host="pinned-host",
         ),
         not_before=started,
-        broker_token="broker-token",
+        sandbox_manager_token="sandbox-manager-token",
         expected_deployment_sha=DEPLOYMENT_SHA,
         draining_host="rolled-host",
-        broker_probe=probe,
+        sandbox_manager_probe=probe,
     )
 
     assert verdict.ready is True
     assert "pinned-host" in verdict.detail
     assert "rolled-host" in verdict.detail
     assert calls == [
-        ("pinned-host", "http://broker-a:8092", True),
-        ("rolled-host", "http://broker-b:8092", True),
+        ("pinned-host", "http://sandbox-manager-a:8092", True),
+        ("rolled-host", "http://sandbox-manager-b:8092", True),
     ]
 
 
@@ -268,7 +270,7 @@ async def test_a_different_draining_host_does_not_excuse_an_unready_pin() -> Non
             active_host="pinned-host",
         ),
         not_before=started,
-        broker_token="broker-token",
+        sandbox_manager_token="sandbox-manager-token",
         expected_deployment_sha=DEPLOYMENT_SHA,
         draining_host="rolled-host",
     )
@@ -294,10 +296,10 @@ async def test_the_pinned_host_can_itself_be_the_idle_draining_host() -> None:
             active_host="runner-a",
         ),
         not_before=started,
-        broker_token="broker-token",
+        sandbox_manager_token="sandbox-manager-token",
         expected_deployment_sha=DEPLOYMENT_SHA,
         draining_host="runner-a",
-        broker_probe=lambda *_args, **_kwargs: _async_none(),
+        sandbox_manager_probe=lambda *_args, **_kwargs: _async_none(),
     )
 
     assert verdict.ready is True
@@ -319,7 +321,7 @@ async def test_explicit_draining_host_must_not_transition_online() -> None:
             ]
         ),
         not_before=started,
-        broker_token="broker-token",
+        sandbox_manager_token="sandbox-manager-token",
         expected_deployment_sha=DEPLOYMENT_SHA,
         draining_host="runner-a",
     )
@@ -336,7 +338,7 @@ async def test_explicit_draining_host_must_not_transition_online() -> None:
         ({"slots_used": 1}, "slots_used is 1"),
     ],
 )
-async def test_explicit_draining_host_is_rechecked_after_the_broker_probe(
+async def test_explicit_draining_host_is_rechecked_after_the_sandbox_manager_probe(
     changed: dict[str, Any],
     message: str,
 ) -> None:
@@ -361,14 +363,14 @@ async def test_explicit_draining_host_is_rechecked_after_the_broker_probe(
     verdict = await shared_live_readiness(
         ChangingStore(),
         not_before=started,
-        broker_token="broker-token",
+        sandbox_manager_token="sandbox-manager-token",
         expected_deployment_sha=DEPLOYMENT_SHA,
         draining_host="runner-a",
-        broker_probe=lambda *_args, **_kwargs: _async_none(),
+        sandbox_manager_probe=lambda *_args, **_kwargs: _async_none(),
     )
 
     assert verdict.ready is False
-    assert "changed while its broker was probed" in verdict.detail
+    assert "changed while its sandbox manager was probed" in verdict.detail
     assert message in verdict.detail
 
 
@@ -384,9 +386,9 @@ async def test_a_stale_capability_row_cannot_release_the_deploy_barrier() -> Non
     verdict = await shared_live_readiness(
         _Store([_host(started - timedelta(seconds=1))]),
         not_before=started,
-        broker_token="broker-token",
+        sandbox_manager_token="sandbox-manager-token",
         expected_deployment_sha=DEPLOYMENT_SHA,
-        broker_probe=probe,
+        sandbox_manager_probe=probe,
     )
 
     assert verdict.ready is False
@@ -395,22 +397,22 @@ async def test_a_stale_capability_row_cannot_release_the_deploy_barrier() -> Non
 
 
 @pytest.mark.asyncio
-async def test_a_control_plane_that_cannot_use_the_broker_stays_closed() -> None:
+async def test_a_control_plane_that_cannot_use_the_sandbox_manager_stays_closed() -> None:
     started = datetime.now(UTC)
 
     async def probe(*_args: Any, **_kwargs: Any) -> str:
-        return "401 from broker health"
+        return "401 from sandbox manager health"
 
     verdict = await shared_live_readiness(
         _Store([_host(started + timedelta(seconds=1))]),
         not_before=started,
-        broker_token="broker-token",
+        sandbox_manager_token="sandbox-manager-token",
         expected_deployment_sha=DEPLOYMENT_SHA,
-        broker_probe=probe,
+        sandbox_manager_probe=probe,
     )
 
     assert verdict.ready is False
-    assert "control plane cannot use its broker" in verdict.detail
+    assert "control plane cannot use its sandbox manager" in verdict.detail
 
 
 @pytest.mark.asyncio
@@ -428,7 +430,7 @@ async def test_the_active_host_pin_cannot_be_bypassed_by_another_ready_host() ->
     verdict = await shared_live_readiness(
         _Store(rows, active_host="pinned-host"),
         not_before=started,
-        broker_token="broker-token",
+        sandbox_manager_token="sandbox-manager-token",
         expected_deployment_sha=DEPLOYMENT_SHA,
     )
 
@@ -448,7 +450,7 @@ async def test_an_online_retained_owner_is_probed_after_new_chat_placement_moves
     old_owner = _host(
         started + timedelta(seconds=1),
         host="old-owner",
-        broker_url="http://old-broker:8092",
+        sandbox_manager_url="http://old-sandbox-manager:8092",
         # An older compatible generation may serve normal retained follow-ups
         # without this target SHA or historical-fork capability.
         capabilities=[SHARED_SANDBOX_CAPABILITY],
@@ -463,22 +465,24 @@ async def test_an_online_retained_owner_is_probed_after_new_chat_placement_moves
             retained_hosts={"old-owner"},
         ),
         not_before=started,
-        broker_token="broker-token",
+        sandbox_manager_token="sandbox-manager-token",
         expected_deployment_sha=DEPLOYMENT_SHA,
-        broker_probe=probe,
+        sandbox_manager_probe=probe,
     )
 
     assert verdict.ready is True
     assert "new-chat placement hosts new-placement completed target deployment" in verdict.detail
     assert "compatible retained owners also answered: old-owner" in verdict.detail
     assert calls == [
-        ("new-placement", "http://broker-a:8092", True),
-        ("old-owner", "http://old-broker:8092", True),
+        ("new-placement", "http://sandbox-manager-a:8092", True),
+        ("old-owner", "http://old-sandbox-manager:8092", True),
     ]
 
 
 @pytest.mark.asyncio
-async def test_an_online_retained_owner_with_an_unreachable_broker_blocks_rollout() -> None:
+async def test_an_online_retained_owner_with_an_unreachable_sandbox_manager_blocks_rollout() -> (
+    None
+):
     started = datetime.now(UTC)
 
     async def probe(host: str, *_args: Any, **_kwargs: Any) -> str | None:
@@ -498,9 +502,9 @@ async def test_an_online_retained_owner_with_an_unreachable_broker_blocks_rollou
             retained_hosts={"old-owner"},
         ),
         not_before=started,
-        broker_token="broker-token",
+        sandbox_manager_token="sandbox-manager-token",
         expected_deployment_sha=DEPLOYMENT_SHA,
-        broker_probe=probe,
+        sandbox_manager_probe=probe,
     )
 
     assert verdict.ready is False
@@ -540,9 +544,9 @@ async def test_every_unpinned_schedulable_host_must_finish_the_target_deploy() -
     verdict = await shared_live_readiness(
         _Store(rows),
         not_before=started,
-        broker_token="broker-token",
+        sandbox_manager_token="sandbox-manager-token",
         expected_deployment_sha=DEPLOYMENT_SHA,
-        broker_probe=probe,
+        sandbox_manager_probe=probe,
     )
 
     assert verdict.ready is False
@@ -569,22 +573,22 @@ async def test_unpinned_v1_host_is_only_a_compatible_retained_owner() -> None:
                 _host(
                     started + timedelta(seconds=1),
                     host="v1-owner",
-                    broker_url="http://v1-broker:8092",
+                    sandbox_manager_url="http://v1-sandbox-manager:8092",
                     capabilities=[SHARED_SANDBOX_CAPABILITY],
                 ),
             ],
             retained_hosts={"v1-owner"},
         ),
         not_before=started,
-        broker_token="broker-token",
+        sandbox_manager_token="sandbox-manager-token",
         expected_deployment_sha=DEPLOYMENT_SHA,
-        broker_probe=probe,
+        sandbox_manager_probe=probe,
     )
 
     assert verdict.ready is True
     assert calls == [
-        ("v2-placement", "http://broker-a:8092", True),
-        ("v1-owner", "http://v1-broker:8092", True),
+        ("v2-placement", "http://sandbox-manager-a:8092", True),
+        ("v1-owner", "http://v1-sandbox-manager:8092", True),
     ]
 
 
@@ -608,17 +612,17 @@ async def test_unpinned_v1_host_without_retained_state_is_not_a_rollout_target()
             ]
         ),
         not_before=started,
-        broker_token="broker-token",
+        sandbox_manager_token="sandbox-manager-token",
         expected_deployment_sha=DEPLOYMENT_SHA,
-        broker_probe=probe,
+        sandbox_manager_probe=probe,
     )
 
     assert verdict.ready is True
-    assert calls == [("v2-placement", "http://broker-a:8092", True)]
+    assert calls == [("v2-placement", "http://sandbox-manager-a:8092", True)]
 
 
 @pytest.mark.asyncio
-async def test_every_unpinned_target_broker_must_answer() -> None:
+async def test_every_unpinned_target_sandbox_manager_must_answer() -> None:
     started = datetime.now(UTC)
 
     async def probe(host: str, *_args: Any, **_kwargs: Any) -> str | None:
@@ -632,27 +636,27 @@ async def test_every_unpinned_target_broker_must_answer() -> None:
             ]
         ),
         not_before=started,
-        broker_token="broker-token",
+        sandbox_manager_token="sandbox-manager-token",
         expected_deployment_sha=DEPLOYMENT_SHA,
-        broker_probe=probe,
+        sandbox_manager_probe=probe,
     )
 
     assert verdict.ready is False
-    assert "runner-b: control plane cannot use its broker" in verdict.detail
+    assert "runner-b: control plane cannot use its sandbox manager" in verdict.detail
 
 
 @pytest.mark.asyncio
-async def test_missing_control_plane_broker_credential_fails_closed() -> None:
+async def test_missing_control_plane_sandbox_manager_credential_fails_closed() -> None:
     started = datetime.now(UTC)
     verdict = await shared_live_readiness(
         _Store([_host(started + timedelta(seconds=1))]),
         not_before=started,
-        broker_token="",
+        sandbox_manager_token="",
         expected_deployment_sha=DEPLOYMENT_SHA,
     )
 
     assert verdict.ready is False
-    assert "AGENT_WORKSPACE_BROKER_TOKEN" in verdict.detail
+    assert "AGENT_SANDBOX_MANAGER_TOKEN" in verdict.detail
 
 
 @pytest.mark.asyncio
@@ -661,7 +665,7 @@ async def test_missing_target_commit_fails_closed() -> None:
     verdict = await shared_live_readiness(
         _Store([_host(started + timedelta(seconds=1))]),
         not_before=started,
-        broker_token="broker-token",
+        sandbox_manager_token="sandbox-manager-token",
         expected_deployment_sha="  ",
     )
 
@@ -685,7 +689,7 @@ async def test_missing_target_commit_fails_closed() -> None:
             NATIVE_FORK_AT_ANCHOR_CAPABILITY,
         ),
         ({"slots_total": 1}, "fewer than two"),
-        ({"broker_url": ""}, "no control-plane-reachable broker URL"),
+        ({"sandbox_manager_url": ""}, "no control-plane-reachable sandbox manager URL"),
     ],
 )
 async def test_incomplete_host_attestation_does_not_release_the_barrier(
@@ -696,7 +700,7 @@ async def test_incomplete_host_attestation_does_not_release_the_barrier(
     verdict = await shared_live_readiness(
         _Store([_host(started + timedelta(seconds=1), **overrides)]),
         not_before=started,
-        broker_token="broker-token",
+        sandbox_manager_token="sandbox-manager-token",
         expected_deployment_sha=DEPLOYMENT_SHA,
     )
 
@@ -720,7 +724,7 @@ async def test_a_runner_that_started_but_did_not_finish_target_deploy_stays_clos
             ]
         ),
         not_before=started,
-        broker_token="broker-token",
+        sandbox_manager_token="sandbox-manager-token",
         expected_deployment_sha=DEPLOYMENT_SHA,
     )
 

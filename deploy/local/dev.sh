@@ -20,8 +20,13 @@ compose() {
   LOCAL_HOST_SLOTS=$(local_host_slots)
   AGENT_DEPLOYMENT_SHA=$(local_deployment_sha)
   export LOCAL_SANDBOX_IMAGE LOCAL_HOST_SLOTS AGENT_DEPLOYMENT_SHA
+  manager_token=$(env_file_value AGENT_SANDBOX_MANAGER_TOKEN)
+  if [ -z "$manager_token" ]; then
+    manager_token=$(env_file_value AGENT_WORKSPACE_BROKER_TOKEN)
+  fi
   # Intentional word splitting: COMPOSE is either one command or `docker compose`.
   # shellcheck disable=SC2086
+  AGENT_SANDBOX_MANAGER_TOKEN="$manager_token" \
   $COMPOSE --env-file "$ENV_FILE" --project-name "$(local_project_name)" \
     -f "$REPO_ROOT/deploy/control-plane/docker-compose.yml" \
     -f "$SCRIPT_DIR/docker-compose.yml" "$@"
@@ -204,7 +209,14 @@ upgrade_existing_env() {
   # checkout fail Compose interpolation after an update.
   edge_port=$(sed -n 's/^LOCAL_EDGE_PORT=//p' "$ENV_FILE" | tail -n 1)
   edge_port=${edge_port:-13002}
-  append_env_if_missing AGENT_WORKSPACE_BROKER_TOKEN "$(random_hex)"
+  manager_token=$(env_file_value AGENT_SANDBOX_MANAGER_TOKEN)
+  if [ -z "$manager_token" ]; then
+    manager_token=$(env_file_value AGENT_WORKSPACE_BROKER_TOKEN)
+  fi
+  if [ -z "$manager_token" ]; then
+    manager_token=$(random_hex)
+  fi
+  append_env_if_missing AGENT_SANDBOX_MANAGER_TOKEN "$manager_token"
   append_env_if_missing LOCAL_PROJECT_NAME freeinference-local
   append_env_if_missing LOCAL_SANDBOX_IMAGE "$(local_sandbox_image)"
   append_env_if_missing LOCAL_HOST_SLOTS 2
@@ -235,7 +247,7 @@ ensure_env() {
   session_secret=$(random_hex)
   control_secret=$(random_hex)
   source_secret=$(random_hex)
-  broker_token=$(random_hex)
+  sandbox_manager_token=$(random_hex)
 
   {
     printf '%s\n' \
@@ -251,12 +263,12 @@ ensure_env() {
       "AGENT_SESSION_SECRET=$session_secret" \
       "AGENT_CONTROL_TOKEN_SECRET=$control_secret" \
       "AGENT_SOURCE_CONTROL_ENCRYPTION_KEY=$source_secret" \
-      "AGENT_WORKSPACE_BROKER_TOKEN=$broker_token" \
+      "AGENT_SANDBOX_MANAGER_TOKEN=$sandbox_manager_token" \
       "LOCAL_ENROLL_TOKEN=$enroll_token" \
       "LOCAL_ENROLL_TOKEN_SHA256=$enroll_hash" \
       'AGENT_SESSION_COOKIE_SECURE=false' \
       'AGENT_REPO_ALLOWLIST=local/demo' \
-      'AGENT_BROKER_URL_ALLOWED_HOSTS=workspace-broker' \
+      'AGENT_SANDBOX_MANAGER_URL_ALLOWED_HOSTS=sandbox-manager' \
       'AGENT_NETWORK_NAME=freeinference-local-control' \
       'AGENT_CONTROL_PLANE_BIND=127.0.0.1' \
       'AGENT_CONTROL_PLANE_PORT=18000' \
@@ -387,6 +399,19 @@ wait_ready() {
 }
 
 command=${1:-up}
+retire_legacy_sandbox_manager() {
+  legacy_ids=$(docker ps -aq \
+    --filter "label=com.docker.compose.project=$(local_project_name)" \
+    --filter 'label=com.docker.compose.service=workspace-broker')
+  if [ -n "$legacy_ids" ]; then
+    compose stop --timeout -1 runner
+    for container_id in $legacy_ids; do
+      docker stop --time=-1 "$container_id"
+      docker rm "$container_id"
+    done
+  fi
+}
+
 case "$command" in
   build)
     ensure_env
@@ -409,6 +434,7 @@ case "$command" in
       compose build sandbox-image migrate
     fi
     start_database_and_probe
+    retire_legacy_sandbox_manager
     compose up --detach "$build_flag"
     wait_ready
     echo "Local Cloud Agent is ready: $(local_base_url)"

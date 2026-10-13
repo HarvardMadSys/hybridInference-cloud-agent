@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 # Single-object S3 PUT maximum. A larger sandbox needs a separate multipart
 # workflow; it must remain retained instead of silently creating a partial backup.
 MAX_ARCHIVE_BYTES = 5 * 1024**3
+# Preserve existing deletion receipts across the Sandbox Manager service rename.
 DEFAULT_ARCHIVE_STATE_DIR = "/var/lib/hybridinference/broker-archives"
 _HASH_CHUNK_BYTES = 1024 * 1024
 
@@ -46,7 +47,7 @@ class SandboxArchiveService:
     """Prepare, upload, and remove a stopped group through explicit receipts.
 
     Each phase appends its own immutable JSON record. The commit record is
-    fsynced before Docker removal, allowing a lost response or broker restart
+    fsynced before Docker removal, allowing a lost response or sandbox manager restart
     to finish the exact operation safely. S3 verification is the authenticated
     control plane's responsibility and must happen before it requests commit.
     """

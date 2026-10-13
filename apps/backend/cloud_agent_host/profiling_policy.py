@@ -3,7 +3,7 @@
 The runner parent process is where a turn is *selected*, so it is where the
 configuration has to arrive. This module owns that: it reads the deployment's
 current configuration from the control plane, publishes it into this process's
-policy store, and hands the same answer to the workspace broker -- a separate
+policy store, and hands the same answer to the sandbox manager -- a separate
 container that shares no memory with the runner.
 
 Four things are deliberate.
@@ -17,12 +17,12 @@ configuration version, and an answer older than the one already applied is
 ignored by the store. That is the whole anti-rollback protocol: a delayed or
 reordered reply cannot put a stopped experiment back into force.
 
-**The broker is told on every pass, and its answer is not assumed.** The runner
-pushes the configuration over the broker's existing authenticated channel and
+**The sandbox manager is told on every pass, and its answer is not assumed.** The runner
+pushes the configuration over the sandbox manager's existing authenticated channel and
 records only whether the push was accepted. It does not wait for, invent or
-report a confirmation the broker did not give. It re-sends even when the
-configuration has not changed, because the two ways a broker can be missing one
--- a failed first push, and the broker's own restart -- are both invisible from
+report a confirmation the sandbox manager did not give. It re-sends even when the
+configuration has not changed, because the two ways a sandbox manager can be missing one
+-- a failed first push, and the sandbox manager's own restart -- are both invisible from
 here, and the receiver is idempotent by revision.
 
 **Failure is neither fatal nor silent.** A control plane that cannot be reached
@@ -83,10 +83,10 @@ REQUEST_TIMEOUT_S = 2.0
 #: to matter against a 30-second promise.
 JITTER_FRACTION = 0.1
 
-#: Bounded retries for the broker push. The configuration is one small message
-#: and the broker is on the same machine; more than a couple of tries means it
-#: is down, and a down broker has its own path back.
-BROKER_PUSH_ATTEMPTS = 2
+#: Bounded retries for the sandbox manager push. The configuration is one small message
+#: and the sandbox manager is on the same machine; more than a couple of tries means it
+#: is down, and a down sandbox manager has its own path back.
+SANDBOX_MANAGER_PUSH_ATTEMPTS = 2
 
 
 def _instance_id() -> str:
@@ -128,18 +128,18 @@ class ProfilingPolicySync:
         base_url: str,
         credential: str,
         host: str,
-        broker: Any = None,
+        sandbox_manager: Any = None,
     ) -> None:
-        """Bind the sync to one host's credential and one broker client.
+        """Bind the sync to one host's credential and one sandbox manager client.
 
-        ``broker`` is the host's authenticated supervisor client, or ``None``
-        when this host has none configured. A host without a broker still syncs
+        ``sandbox_manager`` is the host's authenticated supervisor client, or ``None``
+        when this host has none configured. A host without a sandbox manager still syncs
         its own configuration; it just cannot hand it on.
         """
         self._base_url = base_url.rstrip("/")
         self._credential = credential
         self._host = host
-        self._broker = broker
+        self._sandbox_manager = sandbox_manager
         self._instance_id = _instance_id()
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -150,10 +150,10 @@ class ProfilingPolicySync:
         #: branches on them.
         self._applied_revision = 0
         self._applied_run_id: str | None = None
-        #: Whether the last broker push was accepted, and why not when it was
+        #: Whether the last sandbox manager push was accepted, and why not when it was
         #: not. Local diagnostics only.
-        self._broker_ok: bool | None = None
-        self._broker_detail = ""
+        self._sandbox_manager_ok: bool | None = None
+        self._sandbox_manager_detail = ""
         self._interval = IDLE_INTERVAL_S
         self._client = httpx.Client(timeout=REQUEST_TIMEOUT_S)
 
@@ -187,9 +187,9 @@ class ProfilingPolicySync:
         if thread is not None:
             thread.join(timeout)
         self._client.close()
-        # The broker client was handed over for this loop's exclusive use, so
+        # The sandbox manager client was handed over for this loop's exclusive use, so
         # closing it here is the same ownership statement the constructor makes.
-        close = getattr(self._broker, "close", None)
+        close = getattr(self._sandbox_manager, "close", None)
         if callable(close):
             close()
 
@@ -206,8 +206,8 @@ class ProfilingPolicySync:
                 "instance": self._instance_id,
                 "applied_revision": self._applied_revision,
                 "run_id": self._applied_run_id,
-                "broker_ok": self._broker_ok,
-                "broker_detail": self._broker_detail,
+                "sandbox_manager_ok": self._sandbox_manager_ok,
+                "sandbox_manager_detail": self._sandbox_manager_detail,
                 "budget": budget_state(self._applied_run_id) if self._applied_run_id else {},
             }
 
@@ -252,23 +252,23 @@ class ProfilingPolicySync:
         except Exception:
             logger.debug("agent_profiling_policy_unreachable", exc_info=True)
             return ERROR_INTERVAL_S
-        # The broker hears every pass, not only every *change*.
+        # The sandbox manager hears every pass, not only every *change*.
         #
         # A change-only push looks cheaper and is wrong twice over. The first
-        # push of a configuration can fail -- the broker is still starting, the
+        # push of a configuration can fail -- the sandbox manager is still starting, the
         # connection was reset -- and if the runner then records the revision as
         # applied, no later pass ever tries again: the experiment runs with the
-        # broker contributing nothing, which shows up as a root record whose
-        # container stages are simply missing. And the broker holds its
+        # sandbox manager contributing nothing, which shows up as a root record whose
+        # container stages are simply missing. And the sandbox manager holds its
         # configuration in memory, so its own restart silently empties it; the
         # runner has no way to learn that except by offering it again.
         #
-        # Re-sending is safe because the broker's route is idempotent by
+        # Re-sending is safe because the sandbox manager's route is idempotent by
         # revision: an equal revision answers with what it already holds and
         # writes nothing. This is not an acknowledgement protocol -- the runner
         # does not wait for one, and nothing upstream depends on it -- it is a
         # periodic re-offer of a value the receiver already knows how to ignore.
-        self._push_to_broker(answer)
+        self._push_to_sandbox_manager(answer)
         return ACTIVE_INTERVAL_S if answer["run_id"] else IDLE_INTERVAL_S
 
     def _fetch(self) -> dict[str, Any]:
@@ -318,35 +318,35 @@ class ProfilingPolicySync:
             or (parsed.run_id if parsed is not None else None) != previous_run,
         }
 
-    def _push_to_broker(self, answer: Mapping[str, Any]) -> None:
-        """Hand the broker the same configuration, and record what it answered."""
-        if self._broker is None:
+    def _push_to_sandbox_manager(self, answer: Mapping[str, Any]) -> None:
+        """Hand the sandbox manager the same configuration, and record what it answered."""
+        if self._sandbox_manager is None:
             with self._lock:
-                self._broker_ok = None
-                self._broker_detail = "this host has no workspace broker client"
+                self._sandbox_manager_ok = None
+                self._sandbox_manager_detail = "this host has no sandbox manager client"
             return
         message = {
             "mode": answer["mode"],
             "revision": answer["revision"],
             "run": answer["run"],
         }
-        for attempt in range(1, BROKER_PUSH_ATTEMPTS + 1):
+        for attempt in range(1, SANDBOX_MANAGER_PUSH_ATTEMPTS + 1):
             try:
-                accepted = self._broker.apply_profiling_policy(message)
+                accepted = self._sandbox_manager.apply_profiling_policy(message)
             except Exception as exc:
-                if attempt == BROKER_PUSH_ATTEMPTS:
+                if attempt == SANDBOX_MANAGER_PUSH_ATTEMPTS:
                     with self._lock:
-                        self._broker_ok = False
-                        self._broker_detail = f"{type(exc).__name__}: {exc}"
+                        self._sandbox_manager_ok = False
+                        self._sandbox_manager_detail = f"{type(exc).__name__}: {exc}"
                     logger.warning(
-                        "agent_profiling_broker_policy_failed",
-                        extra={"event": "agent_profiling_broker_policy_failed"},
+                        "agent_profiling_sandbox_manager_policy_failed",
+                        extra={"event": "agent_profiling_sandbox_manager_policy_failed"},
                         exc_info=True,
                     )
                 continue
             with self._lock:
-                self._broker_ok = bool(accepted.get("accepted", True))
-                self._broker_detail = ""
+                self._sandbox_manager_ok = bool(accepted.get("accepted", True))
+                self._sandbox_manager_detail = ""
             return
 
 
@@ -394,12 +394,12 @@ def _jitter_fraction() -> float:
 
 __all__ = [
     "ACTIVE_INTERVAL_S",
-    "BROKER_PUSH_ATTEMPTS",
     "ERROR_INTERVAL_S",
     "IDLE_INTERVAL_S",
     "JITTER_FRACTION",
     "PROFILING_POLICY_HEADER",
     "REQUEST_TIMEOUT_S",
+    "SANDBOX_MANAGER_PUSH_ATTEMPTS",
     "PolicyProvider",
     "ProfilingPolicySync",
 ]

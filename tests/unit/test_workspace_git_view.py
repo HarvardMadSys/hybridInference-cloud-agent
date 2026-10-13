@@ -19,7 +19,7 @@ from fastapi import HTTPException
 from cloud_agent_host import chat_sandbox
 from cloud_agent_host.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
 from cloud_agent_host.sandbox import ContainerBackend, ProcessBackend, SandboxError
-from cloud_agent_host.workspace_broker import (
+from cloud_agent_host.sandbox_manager import (
     _GIT_VIEW_ENV,
     _NEUTRALIZE_GIT_FILTERS,
     _run_git,

@@ -90,7 +90,7 @@ def setup(tmp_path, *, unsafe_member=None):
             env[prefix + "_" + suffix] = "{deploy_root}/" + filename
             files[filename] = ref
             secrets[ref] = "DEDICATED TUNNEL KEY" if suffix == "SSH_KEY" else "verified-host-key"
-    env["AGENT_WORKSPACE_BROKER_TOKEN"] = "broker-secret-$literal"
+    env["AGENT_SANDBOX_MANAGER_TOKEN"] = "sandbox-manager-secret-$literal"
     secrets["deployment:env"] = "\n".join(f"{key}={value}" for key, value in env.items())
     profile = DeploymentProfile(
         id="pilot",
@@ -112,13 +112,21 @@ def setup(tmp_path, *, unsafe_member=None):
 
 
 @pytest.mark.asyncio
-async def test_vanilla_node_bootstrap_uses_one_recipe_and_secrets_stay_out_of_arguments(tmp_path):
-    bootstrap, profile, transport, _ = setup(tmp_path)
+@pytest.mark.parametrize("legacy_names", [False, True])
+async def test_vanilla_node_bootstrap_uses_one_recipe_and_secrets_stay_out_of_arguments(
+    tmp_path, legacy_names
+):
+    from cloud_agent_shared.sandbox_manager_compat import LEGACY_ENV_NAMES
+
+    bootstrap, profile, transport, secrets = setup(tmp_path)
+    if legacy_names:
+        for current, legacy in LEGACY_ENV_NAMES.items():
+            secrets["deployment:env"] = secrets["deployment:env"].replace(current, legacy)
     result = await bootstrap.deploy(NODE, profile, INTENT, SecretStr("one-time-enrollment"))
     assert result.ready
     deploy_call = transport.run.call_args
     command = deploy_call.args[1]
-    assert "one-time-enrollment" not in command and "broker-secret" not in command
+    assert "one-time-enrollment" not in command and "sandbox-manager-secret" not in command
     assert "StrictHostKeyChecking=no" not in command
     assert "sandbox_host.sh" in command and "setup_kata_runtime.sh" in command
     assert deploy_call.kwargs["timeout"] == profile.timeout_seconds
@@ -129,7 +137,10 @@ async def test_vanilla_node_bootstrap_uses_one_recipe_and_secrets_stay_out_of_ar
         assert env["AGENT_ENROLL_TOKEN"] == "one-time-enrollment"
         assert env["AGENT_RUNNER_HOST"] == INTENT.host
         assert env["AGENT_SANDBOX_BACKEND"] == "kata"
-        assert env["AGENT_WORKSPACE_BROKER_TOKEN"] == "broker-secret-$literal"
+        assert env["AGENT_SANDBOX_MANAGER_TOKEN"] == "sandbox-manager-secret-$literal"
+        if legacy_names:
+            assert env["AGENT_WORKSPACE_BROKER_TOKEN"] == env["AGENT_SANDBOX_MANAGER_TOKEN"]
+            assert env["AGENT_BROKER_REVERSE_PORT"] == env["AGENT_SANDBOX_MANAGER_REVERSE_PORT"]
         assert archive.getmember(".env").mode == 0o600
         assert b".compute-secrets" in archive.extractfile(".dockerignore").read()
         assert all(name.startswith(".compute-secrets/") for name in profile.files)
@@ -503,7 +514,7 @@ async def test_checked_operator_example_loads_and_renders_real_bootstrap_payload
         assert env["AGENT_MCP_TUNNEL_REMOTE_PORT"] == "8001"
         assert env["AGENT_CONTROL_PLANE_TUNNEL_REMOTE_PORT"] == "8000"
         assert env["AGENT_TUNNEL_SSH_KEY"] == "/opt/cloud-agent-pilot/.compute-secrets/gateway.key"
-        assert env["AGENT_BROKER_REVERSE_PORT"] == "19092"
+        assert env["AGENT_SANDBOX_MANAGER_REVERSE_PORT"] == "19092"
         assert "{" not in archive.extractfile(".env").read().decode()
         assert len([m for m in archive.getmembers() if m.name.startswith(".compute-secrets/")]) == 6
 

@@ -264,7 +264,7 @@ async def cancel_oncall_job(
     the reaper stops renewing the attempt's grant and the sandbox credential
     dies on its own TTL. Unlike the owner route there is no terminal-resume
     settling here: on-call jobs open no interactive terminals, and reaching for
-    the workspace broker would couple this door to a service it never needs.
+    the sandbox manager would couple this door to a service it never needs.
     """
     job_store = _require_store(store)
     user = _oncall_owner()

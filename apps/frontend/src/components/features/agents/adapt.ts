@@ -107,6 +107,13 @@ function commandText(value: unknown): string {
   return readableValue(value);
 }
 
+/** Stands in for a paired result that carried no text; it is not the tool's output. */
+export const EMPTY_TOOL_OUTPUT = 'Command completed with no output.';
+
+function markedTruncated(payload: Record<string, unknown>): boolean {
+  return payload.truncated === true || typeof payload.truncation_notice === 'string';
+}
+
 function toolOutput(payload: Record<string, unknown>): string[] | undefined {
   const output =
     readableValue(payload.output) ||
@@ -193,6 +200,7 @@ export function toDisplayEvent(event: AgentJobEventApi): AgentEvent | null {
         ? { structuredOutput: payload.structured_output }
         : {}),
       ...(outputIsError ? { outputIsError: true } : {}),
+      ...(output && markedTruncated(payload) ? { outputTruncated: true } : {}),
       sourceEventId,
     };
   }
@@ -214,6 +222,7 @@ export function toDisplayEvent(event: AgentJobEventApi): AgentEvent | null {
         : {}),
       ...(payload.native_tool_status === 'cancelled' ? { cancelled: true } : {}),
       isError: payload.is_error === true,
+      ...(markedTruncated(payload) ? { truncated: true } : {}),
       ...(event.created_at ? { at: event.created_at } : {}),
       sourceEventId,
     };
@@ -654,8 +663,9 @@ function displayEvents(events: AgentJobEventApi[], job?: AgentJobApi): AgentEven
       ) {
         rows[targetIndex] = {
           ...target,
-          output: row.text ? row.text.split('\n') : ['Command completed with no output.'],
+          output: row.text ? row.text.split('\n') : [EMPTY_TOOL_OUTPUT],
           outputIsError: row.isError,
+          ...(row.truncated ? { outputTruncated: true } : {}),
           ...(row.structuredOutput !== undefined ? { structuredOutput: row.structuredOutput } : {}),
           resultState: row.cancelled ? 'cancelled' : row.isError ? 'failed' : 'received',
           // Folding is where the pair still exists. Downstream only sees the

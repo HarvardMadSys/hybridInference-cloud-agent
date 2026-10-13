@@ -28,7 +28,7 @@ logger = get_logger("cloud_agent.app")
 
 
 class _SnapshotCapture(Protocol):
-    """Capturing a due shared-workspace snapshot, through its host's broker."""
+    """Capturing a due shared-workspace snapshot, through its host's sandbox manager."""
 
     host_pool: HostPoolRepository
     snapshot: SnapshotRepository
@@ -58,21 +58,21 @@ async def _capture_due_shared_snapshot(store: _SnapshotCapture) -> bool:
     if snapshot is None:
         return False
 
-    from cloud_agent.broker_routing import broker_for_job
-    from cloud_agent.workspace_broker_client import WorkspaceBrokerError
+    from cloud_agent.sandbox_manager_client import SandboxManagerError
+    from cloud_agent.sandbox_manager_routing import sandbox_manager_for_job
 
     try:
-        broker = await broker_for_job(store.host_pool, snapshot["anchor_job_id"])
-        if broker is None:
+        sandbox_manager = await sandbox_manager_for_job(store.host_pool, snapshot["anchor_job_id"])
+        if sandbox_manager is None:
             await store.snapshot.defer_sandbox_snapshot_capture(
                 snapshot_id=int(snapshot["snapshot_id"]),
                 sandbox_id=str(snapshot["sandbox_id"]),
                 sandbox_generation=int(snapshot["generation"]),
                 container_id=str(snapshot["container_id"]),
-                detail="the owning workspace broker is unavailable",
+                detail="the owning sandbox manager is unavailable",
             )
             return True
-        receipt = await broker.capture_shared_snapshot(snapshot)
+        receipt = await sandbox_manager.capture_shared_snapshot(snapshot)
         expected = {
             "snapshot_id": int(snapshot["snapshot_id"]),
             "sandbox_id": snapshot["sandbox_id"],
@@ -101,7 +101,7 @@ async def _capture_due_shared_snapshot(store: _SnapshotCapture) -> bool:
         )
         if recorded is None:
             raise ValueError("shared snapshot receipt lost its durable generation fence")
-    except WorkspaceBrokerError as exc:
+    except SandboxManagerError as exc:
         await store.snapshot.defer_sandbox_snapshot_capture(
             snapshot_id=int(snapshot["snapshot_id"]),
             sandbox_id=str(snapshot["sandbox_id"]),

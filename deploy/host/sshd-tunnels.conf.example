@@ -13,7 +13,7 @@
 #   cloud-agent-inference  gateway machine        -L to the inference port
 #   cloud-agent-mcp        control-plane machine  -L to the MCP-only listener
 #   cloud-agent-control    control-plane machine  -L to the main API, and one
-#                                                 -R for the broker route back
+#                                                 -R for the sandbox manager route back
 #
 # Each account's ~/.ssh/authorized_keys holds exactly one line. `port-forwarding`
 # re-enables remote as well as local forwarding after `restrict`, and
@@ -83,7 +83,7 @@ Match User cloud-agent-mcp
     PermitUserRC no
     PermitTunnel no
 
-# Host control: the main API, plus the one reverse listener for the broker.
+# Host control: the main API, plus the one reverse listener for the sandbox manager.
 # `clientspecified` binds exactly the requested address; PermitListen and the
 # key's permitlisten both hold that to the bridge gateway and this host's port.
 Match User cloud-agent-control

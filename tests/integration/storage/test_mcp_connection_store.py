@@ -169,6 +169,8 @@ async def _invocation(
     expires_in: timedelta = timedelta(minutes=10),
     policy_revision: int = 1,
     arguments_ciphertext: str | None = None,
+    capability_name: str = "get_issue",
+    capability_kind: str = "tool",
 ) -> dict[str, Any]:
     """One held call, pending and undecided."""
     return await store.mcp.create_mcp_invocation(
@@ -177,7 +179,8 @@ async def _invocation(
         lease_generation=0,
         thread_id=str(job["thread_id"]),
         connection_id=int(connection["id"]),
-        capability_name="get_issue",
+        capability_name=capability_name,
+        capability_kind=capability_kind,
         arguments_digest="digest-1",
         arguments_ciphertext=arguments_ciphertext,
         config_revision=int(connection["config_revision"]),
@@ -3189,3 +3192,349 @@ async def test_pausing_server_keeps_credentials_and_diagnostics_cannot_reenable_
     )
     assert resumed["enabled"]
     assert resumed["access_token_ciphertext"] == connection["access_token_ciphertext"]
+
+
+async def _remembered_setup(store):
+    """A live binding and catalogue with unrelated rules worth preserving."""
+    from cloud_agent.mcp.models import Capability, CapabilityKind
+
+    job = await _create_job(store)
+    connection = await _connect(store, _OWNER)
+    entry = {
+        "name": "get_issue",
+        "description": "Read an issue",
+        "input_schema": {"type": "object"},
+    }
+    await store.mcp.save_mcp_capabilities(
+        connection_id=connection["id"],
+        config_revision=connection["config_revision"],
+        protocol_version="2025-11-25",
+        server_name="test",
+        server_version="1",
+        tools=[entry],
+        resources=[entry],
+        resource_templates=[entry],
+        prompts=[entry],
+        support={},
+    )
+    connection = await store.mcp.get_mcp_connection(connection_id=connection["id"])
+    await store.mcp.replace_mcp_bindings(
+        thread_id=job["thread_id"],
+        bindings=[
+            {
+                "connection_id": connection["id"],
+                "alias": "github",
+                "enabled": True,
+                "selection_pending": True,
+                "config_revision": connection["config_revision"],
+                "authorization_epoch": connection["authorization_epoch"],
+                "capability_revision": connection["capability_revision"],
+                "rules": {"other": {"policy": "deny", "fingerprint": "other"}},
+                "resource_rules": {"docs": {"policy": "allow", "fingerprint": "docs"}},
+                "prompt_rules": {"summary": {"policy": "confirm", "fingerprint": "summary"}},
+            }
+        ],
+    )
+    binding = (await store.mcp.list_mcp_bindings(thread_id=job["thread_id"]))[0]
+    rules = {
+        kind.value: {
+            "policy": "allow",
+            "fingerprint": Capability(
+                kind=kind,
+                name="get_issue",
+                description=entry["description"],
+                input_schema=entry["input_schema"],
+            ).fingerprint(),
+        }
+        for kind in CapabilityKind
+    }
+    return job, connection, binding, rules
+
+
+@pytest.mark.parametrize(
+    "kind,key",
+    [
+        ("tool", "rules"),
+        ("prompt", "prompt_rules"),
+        ("resource", "resource_rules"),
+        ("resource_template", "resource_rules"),
+    ],
+)
+async def test_remembered_permission_survives_restart_and_preserves_rules(
+    store, pool, monkeypatch, kind, key
+):
+    """A committed decision needs no browser or original process to save its rule."""
+    job, connection, binding, rules = await _remembered_setup(store)
+    invocation = await _invocation(
+        store,
+        job,
+        connection,
+        policy_revision=binding["policy_revision"],
+        capability_kind=kind,
+    )
+    decided = await store.mcp.decide_mcp_invocation(
+        invocation_id=invocation["id"],
+        approve=True,
+        decided_by=_OWNER,
+        always_allow_rule=rules[kind],
+    )
+    assert decided["always_allow_status"] == "pending"
+    assert await store.mcp.apply_pending_mcp_allow_rules() == 0
+    # Simulate a process ending after its dispatch claim commits, before saving.
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr(store.mcp, "_flush_remembered_approvals", AsyncMock())
+    claimed = await store.mcp.claim_mcp_invocation(invocation_id=invocation["id"])
+    assert claimed["status"] == "dispatching"
+    restarted = Storage(pool)
+    outcomes = await asyncio.gather(
+        restarted.mcp.apply_pending_mcp_allow_rules(),
+        store.mcp.apply_pending_mcp_allow_rules(),
+    )
+    assert sorted(outcomes) == [0, 1]
+    saved = (await restarted.mcp.list_mcp_bindings(thread_id=job["thread_id"]))[0]
+    for field in ("rules", "resource_rules", "prompt_rules"):
+        expected = {**binding[field], **({"get_issue": rules[kind]} if field == key else {})}
+        assert saved[field] == expected
+    assert saved["selection_pending"] is True
+    assert saved["policy_revision"] != binding["policy_revision"]
+    assert (await restarted.mcp.get_mcp_invocation(invocation_id=invocation["id"]))[
+        "always_allow_status"
+    ] == "applied"
+    assert await restarted.mcp.apply_pending_mcp_allow_rules() == 0
+
+
+async def test_remembered_permissions_merge_after_all_held_calls_advance(store):
+    """Saving one approval must neither expire another nor overwrite its intent."""
+    job, connection, binding, rules = await _remembered_setup(store)
+    ids = []
+    for kind in ("tool", "prompt"):
+        invocation = await _invocation(
+            store, job, connection, policy_revision=binding["policy_revision"], capability_kind=kind
+        )
+        ids.append(invocation["id"])
+        await store.mcp.decide_mcp_invocation(
+            invocation_id=invocation["id"],
+            approve=True,
+            decided_by=_OWNER,
+            always_allow_rule=rules[kind],
+        )
+    other = await _invocation(store, job, connection, policy_revision=binding["policy_revision"])
+    await store.mcp.claim_mcp_invocation(invocation_id=ids[0])
+    assert (await store.mcp.list_mcp_bindings(thread_id=job["thread_id"]))[0][
+        "policy_revision"
+    ] == binding["policy_revision"]
+    await store.mcp.claim_mcp_invocation(invocation_id=ids[1])
+    assert (
+        await store.mcp.apply_pending_mcp_allow_rules() == 0
+    )  # the third pending call still blocks
+    await store.mcp.decide_mcp_invocation(
+        invocation_id=other["id"], approve=False, decided_by=_OWNER
+    )
+    assert await store.mcp.apply_pending_mcp_allow_rules() == 0
+    saved = (await store.mcp.list_mcp_bindings(thread_id=job["thread_id"]))[0]
+    assert saved["rules"] == {**binding["rules"], "get_issue": rules["tool"]}
+    assert saved["prompt_rules"] == {**binding["prompt_rules"], "get_issue": rules["prompt"]}
+    for invocation_id in ids:
+        row = await store.mcp.get_mcp_invocation(invocation_id=invocation_id)
+        assert row["status"] == "dispatching"
+        assert row["always_allow_status"] == "applied"
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "permission",
+        "config_revision",
+        "authorization_epoch",
+        "capability_revision",
+        "connection-disabled",
+        "connection-deleted",
+        "thread-deleted",
+        "owner",
+        "fingerprint",
+        "missing-capability",
+        "bad-rule",
+    ],
+)
+async def test_remembered_permission_never_restores_stale_authority(store, pool, change):
+    """Recheck every owner/definition/revocation fence when applying the durable intent."""
+    job, connection, binding, rules = await _remembered_setup(store)
+    invocation = await _invocation(
+        store, job, connection, policy_revision=binding["policy_revision"]
+    )
+    rule = {**rules["tool"], "fingerprint": "wrong"} if change == "bad-rule" else rules["tool"]
+    await store.mcp.decide_mcp_invocation(
+        invocation_id=invocation["id"], approve=True, decided_by=_OWNER, always_allow_rule=rule
+    )
+    async with pool.acquire() as conn:
+        if change in ("config_revision", "authorization_epoch", "capability_revision"):
+            await conn.execute(
+                f"UPDATE agent_mcp_connections SET {change} = {change} + 1 WHERE id = $1",
+                connection["id"],
+            )
+        elif change == "permission":
+            await conn.execute(
+                'UPDATE agent_mcp_thread_bindings SET policy_revision = nextval(\'agent_mcp_policy_revision_seq\'), rules = \'{"get_issue": {"policy": "deny"}}\'::jsonb WHERE thread_id = $1',
+                job["thread_id"],
+            )
+        elif change.startswith("connection-"):
+            column = "enabled = FALSE" if change.endswith("disabled") else "deleted_at = NOW()"
+            await conn.execute(
+                f"UPDATE agent_mcp_connections SET {column} WHERE id = $1", connection["id"]
+            )
+        elif change == "thread-deleted":
+            await conn.execute(
+                "UPDATE agent_threads SET deleted_at = NOW() WHERE id = $1", job["thread_id"]
+            )
+        elif change == "owner":
+            await conn.execute(
+                "UPDATE agent_mcp_connections SET user_id = $2 WHERE id = $1",
+                connection["id"],
+                _OTHER,
+            )
+        elif change in ("fingerprint", "missing-capability"):
+            tools = (
+                "[]"
+                if change == "missing-capability"
+                else '[{"name": "get_issue", "description": "Now deletes issues"}]'
+            )
+            await conn.execute(
+                "UPDATE agent_mcp_capabilities SET tools = $2::jsonb WHERE connection_id = $1",
+                connection["id"],
+                tools,
+            )
+        before = dict(
+            await conn.fetchrow(
+                "SELECT * FROM agent_mcp_thread_bindings WHERE thread_id = $1", job["thread_id"]
+            )
+        )
+    assert await store.mcp.apply_pending_mcp_allow_rules() == 0
+    assert (await store.mcp.get_mcp_invocation(invocation_id=invocation["id"]))[
+        "always_allow_status"
+    ] == "discarded"
+    async with pool.acquire() as conn:
+        after = dict(
+            await conn.fetchrow(
+                "SELECT * FROM agent_mcp_thread_bindings WHERE thread_id = $1", job["thread_id"]
+            )
+        )
+    assert after == before
+
+
+async def test_expired_decision_cannot_record_remembered_permission(store):
+    job, connection, binding, rules = await _remembered_setup(store)
+    invocation = await _invocation(
+        store,
+        job,
+        connection,
+        policy_revision=binding["policy_revision"],
+        expires_in=timedelta(seconds=-1),
+    )
+    assert (
+        await store.mcp.decide_mcp_invocation(
+            invocation_id=invocation["id"],
+            approve=True,
+            decided_by=_OWNER,
+            always_allow_rule=rules["tool"],
+        )
+        is None
+    )
+    assert (await store.mcp.get_mcp_invocation(invocation_id=invocation["id"]))[
+        "always_allow_status"
+    ] is None
+    assert await store.mcp.apply_pending_mcp_allow_rules() == 0
+
+
+async def test_permission_save_failure_does_not_lose_or_replay_claim(store, monkeypatch):
+    """A failed permission save can retry independently of an exclusive dispatch."""
+    from unittest.mock import AsyncMock
+
+    job, connection, binding, rules = await _remembered_setup(store)
+    invocation = await _invocation(
+        store, job, connection, policy_revision=binding["policy_revision"]
+    )
+    await store.mcp.decide_mcp_invocation(
+        invocation_id=invocation["id"],
+        approve=True,
+        decided_by=_OWNER,
+        always_allow_rule=rules["tool"],
+    )
+    apply = store.mcp.apply_pending_mcp_allow_rules
+    monkeypatch.setattr(
+        store.mcp,
+        "apply_pending_mcp_allow_rules",
+        AsyncMock(side_effect=RuntimeError("database restarting")),
+    )
+    claimed = await store.mcp.claim_mcp_invocation(invocation_id=invocation["id"])
+    assert claimed["status"] == "dispatching"
+    assert await store.mcp.claim_mcp_invocation(invocation_id=invocation["id"]) is None
+    assert (await store.mcp.get_mcp_invocation(invocation_id=invocation["id"]))[
+        "always_allow_status"
+    ] == "pending"
+    monkeypatch.setattr(store.mcp, "apply_pending_mcp_allow_rules", apply)
+    assert await apply() == 1
+    assert (await store.mcp.get_mcp_invocation(invocation_id=invocation["id"]))[
+        "dispatch_generation"
+    ] == claimed["dispatch_generation"]
+
+
+async def test_remembered_worker_skips_a_locked_thread_without_discarding(store, pool, monkeypatch):
+    """An ongoing permission edit cannot stall all queues or invalidate an intent early."""
+    from unittest.mock import AsyncMock
+
+    job, connection, binding, rules = await _remembered_setup(store)
+    invocation = await _invocation(
+        store, job, connection, policy_revision=binding["policy_revision"]
+    )
+    await store.mcp.decide_mcp_invocation(
+        invocation_id=invocation["id"],
+        approve=True,
+        decided_by=_OWNER,
+        always_allow_rule=rules["tool"],
+    )
+    monkeypatch.setattr(store.mcp, "_flush_remembered_approvals", AsyncMock())
+    await store.mcp.claim_mcp_invocation(invocation_id=invocation["id"])
+    async with pool.acquire() as conn, conn.transaction():
+        await conn.fetchval(
+            "SELECT id FROM agent_threads WHERE id = $1 FOR UPDATE", job["thread_id"]
+        )
+        assert await asyncio.wait_for(store.mcp.apply_pending_mcp_allow_rules(), timeout=1) == 0
+        assert (await store.mcp.get_mcp_invocation(invocation_id=invocation["id"]))[
+            "always_allow_status"
+        ] == "pending"
+    assert await store.mcp.apply_pending_mcp_allow_rules() == 1
+
+
+async def test_cancel_during_permission_save_does_not_orphan_dispatch_claim(store, monkeypatch):
+    """A cancellation between commit and claim return must retain a terminal outcome."""
+    job, connection, binding, rules = await _remembered_setup(store)
+    invocation = await _invocation(
+        store, job, connection, policy_revision=binding["policy_revision"]
+    )
+    await store.mcp.decide_mcp_invocation(
+        invocation_id=invocation["id"],
+        approve=True,
+        decided_by=_OWNER,
+        always_allow_rule=rules["tool"],
+    )
+    entered = asyncio.Event()
+
+    async def paused(row):
+        entered.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(store.mcp, "_flush_remembered_approvals", paused)
+    claim = asyncio.create_task(store.mcp.claim_mcp_invocation(invocation_id=invocation["id"]))
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=1)
+    finally:
+        claim.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await claim
+    row = await store.mcp.get_mcp_invocation(invocation_id=invocation["id"])
+    assert row["status"] == "outcome_unknown"
+    assert row["always_allow_status"] == "pending"
+    assert row["dispatch_generation"] == 1
+    assert await store.mcp.claim_mcp_invocation(invocation_id=invocation["id"]) is None
+    assert await store.mcp.apply_pending_mcp_allow_rules() == 1

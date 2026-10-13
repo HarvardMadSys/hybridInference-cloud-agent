@@ -1,10 +1,10 @@
-"""The retained workspace: files, terminals and git state, through the broker.
+"""The retained workspace: files, terminals and git state, through the sandbox manager.
 
-Every handler resolves the owning broker for the job (`_terminal_owner_workspace`,
-`_terminal_broker_http_error`) and fences retained mutations through the durable
+Every handler resolves the owning sandbox manager for the job (`_terminal_owner_workspace`,
+`_terminal_sandbox_manager_http_error`) and fences retained mutations through the durable
 thread-wide barrier (`_require_mutable_workspace_ready`). Two of the helpers are
 general enough to be shared with the job and worker surfaces — `_workspace_id`,
-`_workspace_not_ready` and `_workspace_broker_for_job` already live in
+`_workspace_not_ready` and `_sandbox_manager_for_job` already live in
 `_workspace_access` — but these four are reached only from here.
 
 `_require_workspace_entitlement` is one of them: it re-checks, at use time, that
@@ -29,7 +29,7 @@ from cloud_agent.api._operation_measurements import (
 from cloud_agent.api._owner_auth import _owned_job, require_agent_owner
 from cloud_agent.api._workspace_access import (
     _TERMINAL_ID_PATTERN,
-    _workspace_broker_for_job,
+    _sandbox_manager_for_job,
     _workspace_id,
     _workspace_not_ready,
 )
@@ -50,6 +50,7 @@ from cloud_agent.operation_measurement import (
     operation as measured_operation,
     root_scope,
 )
+from cloud_agent.sandbox_manager_client import SandboxManagerError
 from cloud_agent.schemas import (
     AgentGitWorkspaceResponse,
     AgentTerminalRequest,
@@ -63,9 +64,8 @@ from cloud_agent.schemas import (
     AgentWorkspaceWriteRequest,
 )
 from cloud_agent.terminal_coordination import resume_settled_terminal
-from cloud_agent.workspace_broker_client import WorkspaceBrokerError
 from cloud_agent.workspace_errors import (
-    _workspace_broker_http_error,
+    _sandbox_manager_http_error,
     _workspace_not_materialized,
 )
 from cloud_agent_shared.workspace_browser import WorkspacePathError, normalize_workspace_path
@@ -105,7 +105,7 @@ def _require_store(store: _WorkspaceStorage | None) -> _WorkspaceStorage:
     return require_store(store)
 
 
-def _terminal_broker_http_error(exc: WorkspaceBrokerError) -> HTTPException:
+def _terminal_sandbox_manager_http_error(exc: SandboxManagerError) -> HTTPException:
     """Preserve terminal errors while presenting a missing workspace as a conflict."""
     if _workspace_not_materialized(exc):
         return HTTPException(
@@ -117,7 +117,7 @@ def _terminal_broker_http_error(exc: WorkspaceBrokerError) -> HTTPException:
                 }
             },
         )
-    return _workspace_broker_http_error(exc)
+    return _sandbox_manager_http_error(exc)
 
 
 async def _require_mutable_workspace_ready(
@@ -162,13 +162,13 @@ async def _terminal_owner_workspace(
     require_ready: bool = False,
     recheck_entitlement: bool = True,
 ) -> tuple[dict[str, Any], Any]:
-    """Authorize one terminal operation and return its private broker.
+    """Authorize one terminal operation and return its private sandbox manager.
 
     Creating or attaching to a terminal rechecks repository entitlement. Once
     attached, the opaque terminal id acts as a short-lived capability scoped
     to the already-authenticated job owner. Input and resize must not enumerate
     GitHub installations for every keystroke; they still recheck ownership and
-    the broker-side workspace/session binding. Delete skips entitlement as well
+    the sandbox-manager-side workspace/session binding. Delete skips entitlement as well
     so a revoked owner can always clean up a live process.
     """
     job_store = _require_store(store)
@@ -188,25 +188,25 @@ async def _terminal_owner_workspace(
             store=job_store,
             app_credentials=app_credentials,
         )
-    broker = await _workspace_broker_for_job(job_store, job)
-    if broker is None:
+    sandbox_manager = await _sandbox_manager_for_job(job_store, job)
+    if sandbox_manager is None:
         raise HTTPException(
             status_code=409,
             detail={
                 "error": {
                     "type": "workspace_unavailable",
-                    "message": "This deployment has no live workspace broker.",
+                    "message": "This deployment has no live sandbox manager.",
                 }
             },
         )
     if job.get("terminal_resume_pending"):
-        # The broker resolved a few lines up is this job's own host's, so the
+        # The sandbox manager resolved a few lines up is this job's own host's, so the
         # resume goes to the machine holding the retained workspace rather than to
         # whatever the deployment's single-host variable names.
         if not await resume_settled_terminal(
             _workspace_id(job),
             job_id=job_id,
-            broker=broker,
+            sandbox_manager=sandbox_manager,
         ):
             raise HTTPException(
                 status_code=503,
@@ -219,7 +219,7 @@ async def _terminal_owner_workspace(
             )
         await job_store.sandbox.mark_terminal_resume_complete(job_id=job_id)
         job["terminal_resume_pending"] = False
-    return job, broker
+    return job, sandbox_manager
 
 
 @router.get("/jobs/{job_id}/files", response_model=AgentWorkspaceResponse)
@@ -231,7 +231,7 @@ async def get_agent_job_workspace_file(
     store: _WorkspaceStorage | None = Depends(get_storage),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
 ) -> Response:
-    """Browse the chat's retained workspace through its owning host broker."""
+    """Browse the chat's retained workspace through its owning host sandbox manager."""
     job_store = _require_store(store)
     job = await _owned_job(job_store.conversation_queries, job_id, user)
     try:
@@ -248,14 +248,14 @@ async def get_agent_job_workspace_file(
 
     candidates = frozenset(FILE_CANDIDATES if safe_path else (FILES_LIST,))
     scope = root_scope(FILES_LIST, job, service=ROUTE_FILES, candidates=candidates)
-    broker = await _workspace_broker_for_job(job_store, job)
-    if broker is None:
+    sandbox_manager = await _sandbox_manager_for_job(job_store, job)
+    if sandbox_manager is None:
         raise HTTPException(
             status_code=409,
             detail={
                 "error": {
                     "type": "workspace_unavailable",
-                    "message": "This chat has no owning workspace broker.",
+                    "message": "This chat has no owning sandbox manager.",
                 }
             },
         )
@@ -273,13 +273,13 @@ async def get_agent_job_workspace_file(
                 body = await measured_call(
                     measure,
                     FILE_READ_STAGE,
-                    call=lambda profiling: broker.files(
+                    call=lambda profiling: sandbox_manager.files(
                         _workspace_id(job), safe_path, profiling=profiling
                     ),
                     record=False,
                     call_id=frame,
                 )
-            except WorkspaceBrokerError as exc:
+            except SandboxManagerError as exc:
                 if _workspace_not_materialized(exc):
                     raise HTTPException(
                         status_code=409,
@@ -290,14 +290,14 @@ async def get_agent_job_workspace_file(
                             }
                         },
                     ) from exc
-                raise _workspace_broker_http_error(exc) from exc
+                raise _sandbox_manager_http_error(exc) from exc
             if measure is not None:
                 kind = str(body.get("kind") or "")
                 kind_operation = measure.result_operation(body, default=FILES_LIST)
-                broker_operation = str(body.get("profiling_operation") or "").strip()
+                sandbox_manager_operation = str(body.get("profiling_operation") or "").strip()
                 result_operation = (
                     ""
-                    if broker_operation and broker_operation != kind_operation
+                    if sandbox_manager_operation and sandbox_manager_operation != kind_operation
                     else kind_operation
                 )
                 if not measure.confirm(result_operation):
@@ -364,22 +364,22 @@ async def write_agent_job_workspace_file(
         job=job, user=user, store=job_store, app_credentials=app_credentials
     )
     await _require_mutable_workspace_ready(job=job, store=job_store.sandbox)
-    broker = await _workspace_broker_for_job(job_store, job)
-    if broker is None:
+    sandbox_manager = await _sandbox_manager_for_job(job_store, job)
+    if sandbox_manager is None:
         raise HTTPException(
             status_code=409,
             detail={
                 "error": {
                     "type": "workspace_unavailable",
-                    "message": "This deployment has no live workspace broker.",
+                    "message": "This deployment has no live sandbox manager.",
                 }
             },
         )
     try:
         return AgentWorkspaceResponse(
-            **(await broker.write_file(_workspace_id(job), safe_path, body.content))
+            **(await sandbox_manager.write_file(_workspace_id(job), safe_path, body.content))
         )
-    except WorkspaceBrokerError as exc:
+    except SandboxManagerError as exc:
         if _workspace_not_materialized(exc):
             raise HTTPException(
                 status_code=409,
@@ -390,7 +390,7 @@ async def write_agent_job_workspace_file(
                     }
                 },
             ) from exc
-        raise _workspace_broker_http_error(exc) from exc
+        raise _sandbox_manager_http_error(exc) from exc
 
 
 @router.post("/jobs/{job_id}/terminal", response_model=AgentTerminalResponse)
@@ -408,24 +408,24 @@ async def run_agent_job_terminal_command(
         job=job, user=user, store=job_store, app_credentials=app_credentials
     )
     await _require_mutable_workspace_ready(job=job, store=job_store.sandbox)
-    broker = await _workspace_broker_for_job(job_store, job)
-    if broker is None:
-        raise HTTPException(status_code=409, detail="This deployment has no live workspace broker.")
+    sandbox_manager = await _sandbox_manager_for_job(job_store, job)
+    if sandbox_manager is None:
+        raise HTTPException(status_code=409, detail="This deployment has no live sandbox manager.")
     try:
-        result = await broker.terminal(
+        result = await sandbox_manager.terminal(
             _workspace_id(job),
             command=body.command,
             cwd=body.cwd,
             timeout_seconds=body.timeout_seconds,
         )
         return AgentTerminalResponse(**result)
-    except WorkspaceBrokerError as exc:
+    except SandboxManagerError as exc:
         if _workspace_not_materialized(exc):
             raise HTTPException(
                 status_code=409,
                 detail="This retained terminal workspace is not materialized.",
             ) from exc
-        raise _workspace_broker_http_error(exc) from exc
+        raise _sandbox_manager_http_error(exc) from exc
 
 
 @router.post(
@@ -441,7 +441,7 @@ async def create_agent_job_terminal(
     app_credentials: Any | None = Depends(get_agent_app_credentials),
 ) -> Response:
     """Open an interactive PTY in the agent's workspace."""
-    job, broker = await _terminal_owner_workspace(
+    job, sandbox_manager = await _terminal_owner_workspace(
         job_id=job_id,
         user=user,
         store=store,
@@ -460,15 +460,15 @@ async def create_agent_job_terminal(
                 payload = await measured_call(
                     measure,
                     TERMINAL_CREATE,
-                    call=lambda profiling: broker.create_terminal(
+                    call=lambda profiling: sandbox_manager.create_terminal(
                         _workspace_id(job),
                         rows=body.rows,
                         cols=body.cols,
                         profiling=profiling,
                     ),
                 )
-            except WorkspaceBrokerError as exc:
-                raise _terminal_broker_http_error(exc) from exc
+            except SandboxManagerError as exc:
+                raise _terminal_sandbox_manager_http_error(exc) from exc
             if measure is not None:
                 measure.outcome = "completed"
             response = measured_response(AgentTerminalSessionResponse, measure, payload)
@@ -500,7 +500,7 @@ async def list_agent_job_terminals(
     app_credentials: Any | None = Depends(get_agent_app_credentials),
 ) -> Response:
     """List interactive terminals, including exited sessions kept for replay."""
-    job, broker = await _terminal_owner_workspace(
+    job, sandbox_manager = await _terminal_owner_workspace(
         job_id=job_id,
         user=user,
         store=store,
@@ -519,17 +519,17 @@ async def list_agent_job_terminals(
                 payload = await measured_call(
                     measure,
                     TERMINAL_LIST,
-                    call=lambda profiling: broker.list_terminals(
+                    call=lambda profiling: sandbox_manager.list_terminals(
                         _workspace_id(job), profiling=profiling
                     ),
                 )
-            except WorkspaceBrokerError as exc:
-                raise _terminal_broker_http_error(exc) from exc
+            except SandboxManagerError as exc:
+                raise _terminal_sandbox_manager_http_error(exc) from exc
             if measure is not None:
                 measure.outcome = "completed"
                 measure.measurement.facts["terminal_count"] = len(payload.get("terminals") or [])
-            # The broker's advertised limits are what the browser enforces
-            # before asking; an older broker that sends none keeps the old shape.
+            # The sandbox manager's advertised limits are what the browser enforces
+            # before asking; an older sandbox manager that sends none keeps the old shape.
             response = measured_response(
                 AgentTerminalSessionListResponse,
                 measure,
@@ -562,8 +562,8 @@ async def stream_agent_job_terminal(
     store: _WorkspaceStorage | None = Depends(get_storage),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
 ) -> StreamingResponse:
-    """Relay a resumable private PTY stream without exposing its broker token."""
-    job, broker = await _terminal_owner_workspace(
+    """Relay a resumable private PTY stream without exposing its sandbox manager token."""
+    job, sandbox_manager = await _terminal_owner_workspace(
         job_id=job_id,
         user=user,
         store=store,
@@ -582,14 +582,14 @@ async def stream_agent_job_terminal(
                 upstream = await measured_call(
                     measure,
                     TERMINAL_STREAM,
-                    call=lambda profiling: broker.stream_terminal(
+                    call=lambda profiling: sandbox_manager.stream_terminal(
                         _workspace_id(job), terminal_id, after=after, profiling=profiling
                     ),
                     record=False,
                     call_id=stream_call,
                 )
-            except WorkspaceBrokerError as exc:
-                raise _terminal_broker_http_error(exc) from exc
+            except SandboxManagerError as exc:
+                raise _terminal_sandbox_manager_http_error(exc) from exc
             if measure is not None:
                 measure.record_answer_from_headers(
                     TERMINAL_STREAM, stream_call, upstream.profiling_answer
@@ -646,7 +646,7 @@ async def write_agent_job_terminal_input(
     app_credentials: Any | None = Depends(get_agent_app_credentials),
 ) -> AgentTerminalSessionResponse:
     """Write bounded base64 input to an active interactive terminal."""
-    job, broker = await _terminal_owner_workspace(
+    job, sandbox_manager = await _terminal_owner_workspace(
         job_id=job_id,
         user=user,
         store=store,
@@ -656,10 +656,14 @@ async def write_agent_job_terminal_input(
     )
     try:
         return AgentTerminalSessionResponse(
-            **(await broker.terminal_input(_workspace_id(job), terminal_id, data=body.data))
+            **(
+                await sandbox_manager.terminal_input(
+                    _workspace_id(job), terminal_id, data=body.data
+                )
+            )
         )
-    except WorkspaceBrokerError as exc:
-        raise _terminal_broker_http_error(exc) from exc
+    except SandboxManagerError as exc:
+        raise _terminal_sandbox_manager_http_error(exc) from exc
 
 
 @router.post(
@@ -675,7 +679,7 @@ async def resize_agent_job_terminal(
     app_credentials: Any | None = Depends(get_agent_app_credentials),
 ) -> AgentTerminalSessionResponse:
     """Resize an active interactive terminal."""
-    job, broker = await _terminal_owner_workspace(
+    job, sandbox_manager = await _terminal_owner_workspace(
         job_id=job_id,
         user=user,
         store=store,
@@ -686,13 +690,13 @@ async def resize_agent_job_terminal(
     try:
         return AgentTerminalSessionResponse(
             **(
-                await broker.resize_terminal(
+                await sandbox_manager.resize_terminal(
                     _workspace_id(job), terminal_id, rows=body.rows, cols=body.cols
                 )
             )
         )
-    except WorkspaceBrokerError as exc:
-        raise _terminal_broker_http_error(exc) from exc
+    except SandboxManagerError as exc:
+        raise _terminal_sandbox_manager_http_error(exc) from exc
 
 
 @router.delete(
@@ -707,7 +711,7 @@ async def delete_agent_job_terminal(
     app_credentials: Any | None = Depends(get_agent_app_credentials),
 ) -> AgentTerminalSessionResponse:
     """Idempotently kill an interactive terminal, even while a new job runs."""
-    job, broker = await _terminal_owner_workspace(
+    job, sandbox_manager = await _terminal_owner_workspace(
         job_id=job_id,
         user=user,
         store=store,
@@ -716,10 +720,10 @@ async def delete_agent_job_terminal(
     )
     try:
         return AgentTerminalSessionResponse(
-            **(await broker.delete_terminal(_workspace_id(job), terminal_id))
+            **(await sandbox_manager.delete_terminal(_workspace_id(job), terminal_id))
         )
-    except WorkspaceBrokerError as exc:
-        raise _terminal_broker_http_error(exc) from exc
+    except SandboxManagerError as exc:
+        raise _terminal_sandbox_manager_http_error(exc) from exc
 
 
 @router.get("/jobs/{job_id}/git", response_model=AgentGitWorkspaceResponse)
@@ -735,14 +739,14 @@ async def get_agent_job_git_workspace(
     await _require_workspace_entitlement(
         job=job, user=user, store=job_store, app_credentials=app_credentials
     )
-    broker = await _workspace_broker_for_job(job_store, job)
-    if broker is None:
+    sandbox_manager = await _sandbox_manager_for_job(job_store, job)
+    if sandbox_manager is None:
         return AgentGitWorkspaceResponse(available=False)
     try:
         return AgentGitWorkspaceResponse(
-            **(await broker.git(_workspace_id(job), base_sha=job.get("base_sha")))
+            **(await sandbox_manager.git(_workspace_id(job), base_sha=job.get("base_sha")))
         )
-    except WorkspaceBrokerError as exc:
+    except SandboxManagerError as exc:
         if _workspace_not_materialized(exc):
             return AgentGitWorkspaceResponse(available=False)
-        raise _workspace_broker_http_error(exc) from exc
+        raise _sandbox_manager_http_error(exc) from exc

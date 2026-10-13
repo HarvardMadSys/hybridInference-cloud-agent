@@ -75,7 +75,7 @@ class PublishStorage(Protocol):
     """What publishing a group snapshot reaches the storage layer for.
 
     Two capabilities and no more: the snapshot rows it claims and records,
-    and the host pool, which it needs only to find the broker holding the
+    and the host pool, which it needs only to find the sandbox manager holding the
     workspace it is publishing from.
     """
 
@@ -430,17 +430,17 @@ async def _import_snapshot_base(
             detail="the publisher produced no retained base bundle",
         )
         return False
-    from cloud_agent.broker_routing import broker_for_job
+    from cloud_agent.sandbox_manager_routing import sandbox_manager_for_job
 
-    broker = await broker_for_job(store.host_pool, snapshot["anchor_job_id"])
-    if broker is None:
+    sandbox_manager = await sandbox_manager_for_job(store.host_pool, snapshot["anchor_job_id"])
+    if sandbox_manager is None:
         await store.snapshot.record_snapshot_base_import_failure(
             snapshot_id=snapshot_id,
-            detail="the owning workspace broker is unavailable for base import",
+            detail="the owning sandbox manager is unavailable for base import",
         )
         return False
     try:
-        await broker.import_shared_base(snapshot, commit_sha=commit_sha, bundle=bundle)
+        await sandbox_manager.import_shared_base(snapshot, commit_sha=commit_sha, bundle=bundle)
     except Exception as exc:
         await store.snapshot.record_snapshot_base_import_failure(
             snapshot_id=snapshot_id,

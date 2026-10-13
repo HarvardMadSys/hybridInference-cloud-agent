@@ -582,7 +582,7 @@ class Measurement:
     #: is this instant, derived from the run's configured expiry.
     deadline_mono: float
     #: The configuration version this measurement was selected under. It travels
-    #: with the selection so a child or a broker can check that the selection it
+    #: with the selection so a child or a sandbox manager can check that the selection it
     #: was handed belongs to the configuration they hold, and so a record says
     #: which version of the switch produced it.
     control_revision: int = 0
@@ -1390,7 +1390,7 @@ def _clamp_to_deadline(measurement: Measurement, end_us: int) -> tuple[int, bool
 class StageRecorder:
     """Collects sub-stage durations, for reporting back over a process boundary.
 
-    Only durations cross the boundary. A sub-stage measured in the broker
+    Only durations cross the boundary. A sub-stage measured in the sandbox manager
     process cannot be placed on the runner's monotonic timeline, so it is
     reported as a duration attributed to its producer instead of as an offset
     that would look precise and mean nothing.
@@ -1567,7 +1567,7 @@ def stage_observer(
     """Return an observer that records sub-stages onto a live measurement.
 
     ``producer`` attributes the observed work to a caller sharing someone
-    else's measurement, such as a broker timing its own work under a selection
+    else's measurement, such as a sandbox manager timing its own work under a selection
     the control plane rooted. It changes nothing about who owns the record:
     ``measurement.producer`` stays the producer that rooted the operation.
     """
@@ -1581,7 +1581,7 @@ def measurement_context(
 ) -> dict[str, Any] | None:
     """Return the selection a downstream producer needs to inherit.
 
-    The runner decides whether an operation is selected; a broker cannot make
+    The runner decides whether an operation is selected; a sandbox manager cannot make
     that decision for itself, because it sees one call at a time and does not
     know which attempt it belongs to. So the selected measurement travels with
     the request: run id, operation, and an absolute wall-clock expiry, since
@@ -1630,7 +1630,7 @@ def measurement_context(
         "started_mono_ns": measurement.started_mono_ns,
         # The candidate operations this caller says are in play. Deliberately
         # *not* the experiment's manifest: a caller may narrow the candidates it
-        # offers, and a broker must never let that claim override what its own
+        # offers, and a sandbox manager must never let that claim override what its own
         # configuration selects. The manifest is the nested object below.
         "operations": sorted(measurement.run_operations),
         # The immutable experiment, as one object. Its presence is what tells a
@@ -1652,7 +1652,7 @@ def _context_run(measurement: Measurement) -> dict[str, Any]:
         "max_operations": measurement.run_max_operations,
         "control_revision": measurement.control_revision,
         # Which control source rooted the experiment. It travels so a process
-        # that only continues the selection -- a child, a broker -- reports the
+        # that only continues the selection -- a child, a sandbox manager -- reports the
         # same provenance its parent proved instead of inferring one.
         "source": measurement.run_source,
     }
@@ -1801,7 +1801,7 @@ def _manifest_for_continuation(context: Mapping[str, Any]) -> dict[str, Any] | N
     """Return the manifest that lets this process continue a selection.
 
     The continuation arm exists because a selection may outlive the
-    configuration that made it -- a child starting after a Sync, a broker
+    configuration that made it -- a child starting after a Sync, a sandbox manager
     answering a stage of an attempt that was chosen before a Disable. It is
     available **only under Admin control**, which is where "the configuration
     may change while work is in flight" is the whole point.
@@ -1810,7 +1810,7 @@ def _manifest_for_continuation(context: Mapping[str, Any]) -> dict[str, Any] | N
     collection outright, so a process configured that way must not be talked
     into collecting by an upstream context, however well formed -- otherwise a
     staged rollout or a deliberately silenced producer could be made to allocate
-    recorders and measurements by whoever holds the broker token. Explicit
+    recorders and measurements by whoever holds the sandbox manager token. Explicit
     disabled remains a deployment-level override.
 
     ``environment`` follows its own static descriptor, and it is the same
@@ -2095,9 +2095,9 @@ def start_stage_recording(
     """Return a recorder when this process should record for that selection.
 
     Recording requires an inherited selection, never just a local switch. A
-    broker sees one call at a time and cannot tell which attempt it belongs to,
+    sandbox manager sees one call at a time and cannot tell which attempt it belongs to,
     so on its own it cannot know whether the operation was selected -- and a
-    broker that kept measuring after the configuration moved on would report
+    sandbox manager that kept measuring after the configuration moved on would report
     time the experiment was not collecting for. ``None`` therefore means "not
     selected" and records nothing.
 
@@ -2112,13 +2112,13 @@ def start_stage_recording(
       collection off (or moved to another experiment), and its later stages
       still belong to it. Refusing those is what made a root operation that was
       allowed to run to completion deliver an incomplete record -- the record
-      was kept, but the broker's stages went missing, which is worse than
+      was kept, but the sandbox manager's stages went missing, which is worse than
       either.
 
     The continuation arm is safe because of the channel rather than a local
     re-check: a manifest-bearing context is produced by a control-plane or
-    runner process that had already proved the selection, it reaches the broker
-    over the broker's own shared-token channel, and the experiment it names must
+    runner process that had already proved the selection, it reaches the sandbox manager
+    over the sandbox manager's own shared-token channel, and the experiment it names must
     still be unexpired. A caller that cannot reach that channel cannot assert
     one.
 
@@ -2276,7 +2276,7 @@ def parse_context(raw: Any) -> dict[str, Any] | None:
             _bounded_context_str(item) for item in operations[:8] if _bounded_context_str(item)
         ]
     # The immutable experiment travels as one nested object, and it is carried
-    # through the header boundary intact: a broker that received a selection it
+    # through the header boundary intact: a sandbox manager that received a selection it
     # cannot identify could only refuse it. ``_inherited_manifest`` is what
     # decides whether the object is usable, so this only bounds its size.
     run = body.get("run")
@@ -2289,7 +2289,7 @@ def _bounded_context_run(run: Mapping[str, Any]) -> dict[str, Any]:
     """Return the bounded, deliberately unvalidated form of an inherited run.
 
     Unvalidated here on purpose: two different readers want different things
-    from it -- a broker needs the operation list and the deadline, a child needs
+    from it -- a sandbox manager needs the operation list and the deadline, a child needs
     the whole identity -- and each validates what it uses. This bounds the
     values so a hostile or truncated value cannot become an unbounded record.
     """
@@ -2438,7 +2438,7 @@ def attributed_stage(
     """Time one in-process sub-stage under a named parent.
 
     This is how a root producer reports its own internal work in the same shape
-    the broker reports its durations: ``{"name", "duration_us", "outcome",
+    the sandbox manager reports its durations: ``{"name", "duration_us", "outcome",
     "source"}`` hung under a stage of the local timeline. Unlike
     :func:`_observed_stage` the parent is named explicitly rather than taken
     from the last mark, so a producer can time the work it does before the first
@@ -2727,7 +2727,7 @@ def to_record(
         "producer": root,
         "producer_instance_id": measurement.producer_instance_id,
         "clock_domain_id": measurement.clock_domain_id,
-        # Who actually contributed to this record. A run needs the broker's
+        # Who actually contributed to this record. A run needs the sandbox manager's
         # switch as well as the runner's for the container sub-stages, and a
         # missing producer is reported here rather than silently absent.
         "producers": contributors,

@@ -20,7 +20,7 @@ c1，后一次调用没有登记新的期望；先结束的请求 finish 整个 
 ```text
 same_mutable_selection = true
 call_ids = ["c1", "c1"]
-expected_fragments = [["broker", "c1", "create"]]
+expected_fragments = [["sandbox manager", "c1", "create"]]
 second_answer_accepted = false
 last_record_complete = true
 ```
@@ -77,13 +77,13 @@ terminal input/resize/delete 等路由会默认序列化 profiling:null。
 metadata 放入通用 terminal item 后泄漏到未接入路由。用 parent 的实际 HTTP 形状
 做回归基线，覆盖文件读写、目录 entries、终端 list/create/input/resize/delete。
 
-## R4 · P2：公共响应丢掉 broker 截断状态
+## R4 · P2：公共响应丢掉 sandbox manager 截断状态
 
 位置：[routes.py:2872](../../cloud_agent/api/routes.py#L2872)。
 
 record_answer 正确把 profiling_truncated 留在 measurement 内；但
 `_profiling_fragment()` 只传 recorded，没有传 truncated，metadata 默认 false。
-SSE 响应头也复用这个 helper。broker 已应答但过期截断时，实际得到：
+SSE 响应头也复用这个 helper。sandbox manager 已应答但过期截断时，实际得到：
 
 ```text
 public fragment: recorded=true, truncated=false
@@ -91,17 +91,17 @@ stored/log record: truncated=true, measurement_complete=false
 ```
 
 下一步浏览器或 Admin 聚合会从公共响应得到与根记录相反的完整性信号。
-修复：明确 fragment 与根记录的完整性字段，保留 broker 截断/过期跳过，并在响应
+修复：明确 fragment 与根记录的完整性字段，保留 sandbox manager 截断/过期跳过，并在响应
 构建前完成根的截止判定。测试 JSON 和 SSE 两条路径，包含空 stages + truncated、
 有 stages + truncated、正常空应答，以及 CP 自身期限先到的情况。
 
 ## R5 · P2：子目录被当作 files.open，files.list 实验漏测展开
 
 位置：[routes.py:2979](../../cloud_agent/api/routes.py#L2979) 与
-[workspace_broker.py:1926](../../apps/backend/cloud_agent_host/workspace_broker.py#L1926)。
+[sandbox_manager.py:1926](../../apps/backend/cloud_agent_host/sandbox_manager.py#L1926)。
 
-CP 和 broker 都按 path 是否为空分类。配置只选 `files.list`，依次请求根目录与
-`path=src`，让 broker 对两者都返回 kind=directory，真实 CP HTTP 路由复现：
+CP 和 sandbox manager 都按 path 是否为空分类。配置只选 `files.list`，依次请求根目录与
+`path=src`，让 sandbox manager 对两者都返回 kind=directory，真实 CP HTTP 路由复现：
 
 ```text
 statuses = [200, 200]
@@ -128,7 +128,7 @@ python -m pytest -q tests/servers/test_operation_measurement_routes.py \
 ```
 
 此外分别执行了上述五项定向复现：R1/R2/R4 调用真实选择器和响应 helper；R3 用
-parent 版本响应模型经过 FastAPI 序列化作对照；R5 走真实 CP HTTP 路由、broker
+parent 版本响应模型经过 FastAPI 序列化作对照；R5 走真实 CP HTTP 路由、sandbox manager
 使用返回子目录的测试替身。没有把现有 89 个通过测试说成五项问题已修复。
 
 本轮没有重跑全量 make check、真实 Docker/Kata、浏览器或数据库测试。作者报告的

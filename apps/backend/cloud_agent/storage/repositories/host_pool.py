@@ -69,7 +69,7 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-_LEGACY_BROKER_KEYS = frozenset(
+_LEGACY_SANDBOX_MANAGER_KEYS = frozenset(
     {"terminal_idle_ttl_s", "terminal_hard_ttl_s", "terminal_max_sessions"}
 )
 
@@ -267,7 +267,7 @@ class PostgresHostPoolRepository:
         enrollment_token_hash: str | None = None,
         capabilities: list[str] | None = None,
         slots_total: int | None = None,
-        broker_url: str | None = None,
+        sandbox_manager_url: str | None = None,
         runner_version: str | None = None,
         labels: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -362,7 +362,7 @@ class PostgresHostPoolRepository:
                 host,
                 json.dumps(normalize_capabilities(capabilities)),
                 slots_total,
-                broker_url,
+                sandbox_manager_url,
                 runner_version,
                 json.dumps(labels or {}),
                 credential_hash,
@@ -401,7 +401,7 @@ class PostgresHostPoolRepository:
         slots_total: int | None = None,
         launch_error: str | None = None,
         runner_version: str | None = None,
-        broker_url: str | None = None,
+        sandbox_manager_url: str | None = None,
         capabilities: list[str] | None = None,
         sandbox_runtime: str | None = None,
         sandbox_image_digest: str | None = None,
@@ -459,7 +459,7 @@ class PostgresHostPoolRepository:
                 leaves whatever is stored in place, the same way an unreported
                 runtime does.
             runner_version: Runner build the host is running.
-            broker_url: Address the control plane reaches this host's broker.
+            sandbox_manager_url: Address the control plane reaches this host's sandbox manager.
             capabilities: What this host can run.
             sandbox_runtime: Attested container runtime.
             sandbox_image_digest: Digest of the sandbox image it launches.
@@ -521,7 +521,7 @@ class PostgresHostPoolRepository:
                 host,
                 slots_total,
                 runner_version,
-                broker_url,
+                sandbox_manager_url,
                 None if capabilities is None else json.dumps(normalize_capabilities(capabilities)),
                 # "" survives COALESCE deliberately: an empty runtime is the
                 # host attesting shared-kernel runc, not declining to answer.
@@ -567,7 +567,7 @@ class PostgresHostPoolRepository:
                     and key not in excluded
                 }
                 expected = RUNNER_SETTING_KEYS | (
-                    _LEGACY_BROKER_KEYS if row["broker_url"] else frozenset()
+                    _LEGACY_SANDBOX_MANAGER_KEYS if row["sandbox_manager_url"] else frozenset()
                 )
                 complete = expected <= observed.keys()
                 row = await conn.fetchrow(
@@ -917,8 +917,8 @@ class PostgresHostPoolRepository:
             return None
         host = self._host_row_to_dict(row)
         # A retained sandbox remains hard-pinned even if its host row was
-        # administratively forgotten. Returning a placeholder (with no broker
-        # URL) makes broker routing fail closed instead of falling back to a
+        # administratively forgotten. Returning a placeholder (with no sandbox manager
+        # URL) makes sandbox manager routing fail closed instead of falling back to a
         # different machine's single-host environment setting.
         host["host"] = row["owner_host"]
         return host
@@ -983,7 +983,7 @@ class PostgresHostPoolRepository:
 
         The admin pin governs only chats with no sandbox. A control-plane
         rollout must also know which other hosts still own shared-live Docker
-        layers so it can reverse-probe their brokers. Read the policy under a
+        layers so it can reverse-probe their sandbox managers. Read the policy under a
         shared lock and the owners in the same transaction: a concurrent host
         switch cannot make the snapshot describe two different placement
         policies, and any newly claimed group while this lock is held belongs

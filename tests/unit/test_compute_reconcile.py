@@ -212,8 +212,10 @@ def harness(monkeypatch, *, kind="acquire", identified=False):
     host_pool = SimpleNamespace(
         get_host=AsyncMock(return_value=allocation["hosts"][0]), issue_enroll_token=AsyncMock()
     )
-    broker = SimpleNamespace(health=AsyncMock(), list_sandboxes=AsyncMock(return_value=[]))
-    monkeypatch.setattr(compute_reconcile, "broker_for_host", lambda _host: broker)
+    sandbox_manager = SimpleNamespace(health=AsyncMock(), list_sandboxes=AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        compute_reconcile, "sandbox_manager_for_host", lambda _host: sandbox_manager
+    )
     reconciler = ComputeReconciler(commands=commands, host_pool=host_pool, bootstrap=bootstrap)
     return SimpleNamespace(
         operation=operation,
@@ -223,7 +225,7 @@ def harness(monkeypatch, *, kind="acquire", identified=False):
         commands=commands,
         bootstrap=bootstrap,
         host_pool=host_pool,
-        broker=broker,
+        sandbox_manager=sandbox_manager,
         reconciler=reconciler,
     )
 
@@ -235,7 +237,7 @@ async def test_ready_host_uses_public_enrolled_fact_and_opens_only_its_bootstrap
     await h.reconciler.execute(h.operation)
     assert h.operation["state"] == "succeeded"
     assert h.operation["step"] == "ready"
-    h.broker.health.assert_awaited_once()
+    h.sandbox_manager.health.assert_awaited_once()
     h.host_pool.issue_enroll_token.assert_not_awaited()
     h.repository.clear_bootstrap_hold.assert_awaited_once_with(
         node_id="node-id",

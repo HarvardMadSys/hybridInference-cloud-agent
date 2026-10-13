@@ -133,7 +133,7 @@ function host(over: Partial<AgentRunnerHost> = {}): AgentRunnerHost {
     slots_total: 3,
     slots_used: 2,
     runner_version: null,
-    broker_url: null,
+    sandbox_manager_url: null,
     last_heartbeat_at: null,
     sandbox_runtime: 'io.containerd.kata.v2',
     sandbox_image_digest: null,

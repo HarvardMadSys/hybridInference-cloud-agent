@@ -783,7 +783,7 @@ class ResidentTransportFactory:
         def spawn_live(argv: list[str], env: dict[str, str]) -> SandboxProcess:
             nonlocal reaped
             if not reaped:
-                # A broker restart cannot reattach Docker-exec pipes. Remove
+                # A sandbox manager restart cannot reattach Docker-exec pipes. Remove
                 # any prior tree in this member's distinct uid before native
                 # resume opens the replacement transport.
                 if not member_processes_reaped:

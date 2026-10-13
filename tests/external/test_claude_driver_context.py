@@ -209,7 +209,7 @@ def test_successful_internal_api_retry_preserves_native_parent_chain(native_driv
         expected.extend([("user", prompt), ("assistant", result.final_output)])
         if index == retry_turn:
             retirement_requested = session.retire_after_turn
-        # Mirror broker settlement: save the locator, then EOF the flagged
+        # Mirror sandbox manager settlement: save the locator, then EOF the flagged
         # process and follow the normal native restoration path.
         if session.retire_after_turn:
             session.close()

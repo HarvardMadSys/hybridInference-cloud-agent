@@ -94,7 +94,7 @@ class HostPoolRepository(Protocol):
         enrollment_token_hash: str | None = None,
         capabilities: list[str] | None = None,
         slots_total: int | None = None,
-        broker_url: str | None = None,
+        sandbox_manager_url: str | None = None,
         runner_version: str | None = None,
         labels: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -147,7 +147,7 @@ class HostPoolRepository(Protocol):
         slots_total: int | None = None,
         launch_error: str | None = None,
         runner_version: str | None = None,
-        broker_url: str | None = None,
+        sandbox_manager_url: str | None = None,
         capabilities: list[str] | None = None,
         sandbox_runtime: str | None = None,
         sandbox_image_digest: str | None = None,
@@ -202,7 +202,7 @@ class HostPoolRepository(Protocol):
                 leaves whatever is stored in place, the same way an unreported
                 runtime does.
             runner_version: Runner build the host is running.
-            broker_url: Address the control plane reaches this host's broker.
+            sandbox_manager_url: Address the control plane reaches this host's sandbox manager.
             capabilities: What this host can run.
             sandbox_runtime: Attested container runtime.
             sandbox_image_digest: Digest of the sandbox image it launches.
@@ -394,7 +394,7 @@ class HostPoolRepository(Protocol):
 
         The admin pin governs only chats with no sandbox. A control-plane
         rollout must also know which other hosts still own shared-live Docker
-        layers so it can reverse-probe their brokers. Read the policy under a
+        layers so it can reverse-probe their sandbox managers. Read the policy under a
         shared lock and the owners in the same transaction: a concurrent host
         switch cannot make the snapshot describe two different placement
         policies, and any newly claimed group while this lock is held belongs

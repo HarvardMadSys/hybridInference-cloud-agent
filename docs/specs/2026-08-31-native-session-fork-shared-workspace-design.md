@@ -15,7 +15,7 @@ a shared retained sandbox are non-runnable and fail closed; they are not
 silently upgraded, replayed, or routed through an older worker.
 
 Host capability attestation remains mandatory. It is a safety proof that a
-runner, broker, image, runtime pin, and protocol version match this design; it
+runner, sandbox manager, image, runtime pin, and protocol version match this design; it
 does not select between old and new behavior.
 
 ## 1. Product topology
@@ -113,12 +113,12 @@ recovery from database event text.
 
 An optional deployment-wide archive policy is stored in the Agent database and
 configured in **Admin → Settings → Sandbox**, not in the host environment. Its
-destination is fixed at `s3://freeinference/cloud-agent/sandbox`; brokers use
+destination is fixed at `s3://freeinference/cloud-agent/sandbox`; sandbox managers use
 their AWS workload identity, and no AWS credential enters the database,
-runner-delivered policy, or sandbox. When enabled, the broker stores one
+runner-delivered policy, or sandbox. When enabled, the sandbox manager stores one
 immutable initial `/workspace` archive after source setup and before the first
 prompt, then a final `/workspace` plus native `/agent-state` archive after each
-broker-managed clean stop. It does not archive individual turns. Versioned S3
+sandbox-manager-managed clean stop. It does not archive individual turns. Versioned S3
 objects are an export/forensics boundary only and are not a recovery path in
 this design; the retained container remains authoritative. Policy transitions
 are forward-only: enabling cannot manufacture a pre-prompt baseline for an
@@ -131,7 +131,7 @@ before disabling it.
 
 ## 3. Live Agent CLI sessions
 
-The workspace broker owns one group supervisor. The supervisor owns one
+The sandbox manager owns one group supervisor. The supervisor owns one
 resident transport per active member, rather than a short-lived runner owning
 the process for one turn.
 
@@ -151,7 +151,7 @@ The five supported adapters are pinned and attested as a unit:
 | Kilo | authenticated serve bridge and native session fork |
 
 A runtime is claimable only when the exact sandbox image labels, runtime
-versions, helper versions, live driver capability, broker configuration, and
+versions, helper versions, live driver capability, sandbox manager configuration, and
 host slot capacity match the protocol attestation. Version mismatch or missing
 native state fails closed.
 
@@ -280,7 +280,7 @@ zero-coverage `shared-member-v1` aggregate plus tool timing; Kata additionally
 records fork/exec/exit and settled resource counters through a guest-root
 observer filtered by the member's fixed UID. Trusted non-Kata mode degrades to
 timing without process totals. Observation closes before member reaping and
-permission normalization, and cancellation/timeout drains the broker's terminal
+permission normalization, and cancellation/timeout drains the sandbox manager's terminal
 telemetry frame when the stream remains reachable.
 
 Turn cleanup uses the root-owned, mode-0555 `member-process-reaper` embedded in
@@ -306,7 +306,7 @@ the host, private and special-purpose addresses, other groups, other ports and
 IPv6. Docker's own network flags are not the boundary. The relay network the
 two relays are discovered on is never joined by a sandbox. Docker atomically
 allocates each sandbox generation's bridge as a `/29` from
-`AGENT_EGRESS_CHAT_NETWORK_POOL`; stop removes it, wake recreates it, and broker
+`AGENT_EGRESS_CHAT_NETWORK_POOL`; stop removes it, wake recreates it, and sandbox manager
 reconciliation prunes labelled orphans after a five-minute grace period so it
 cannot race an in-flight bridge attachment. Setup and the agent never switch
 networks, so there is no bridge swap and no Kata guest restart between them.
@@ -315,7 +315,7 @@ networks, so there is no bridge swap and no Kata guest restart between them.
 
 Every chat, including an unforked chat, belongs to a sandbox group. The idle
 deadline is computed from the group's latest real activity, which is the
-maximum across its members and broker operations.
+maximum across its members and sandbox manager operations.
 
 Activity includes admitted Agent turns and owner file, terminal, Git, Fork,
 and publication operations. An idle resident process alone is not activity and
@@ -324,7 +324,7 @@ does not keep a group alive forever.
 At the inactivity deadline (1800 seconds by default):
 
 1. the host supervisor verifies under the group admission fence that no member
-   turn, terminal, or broker operation is active;
+   turn, terminal, or sandbox manager operation is active;
 2. it flushes native state, closes all resident processes, suspends protected
    terminal activity, and performs `docker stop` on the exact fenced container;
 3. when the database-backed archive policy is enabled, it synchronously stores
@@ -335,14 +335,14 @@ At the inactivity deadline (1800 seconds by default):
    that bridge, while retaining the same container writable layer;
 5. the next authenticated host heartbeat records the group as stopped without
    deleting it;
-6. after a broker restart, when the in-memory deadline is unavailable, the
+6. after a sandbox manager restart, when the in-memory deadline is unavailable, the
    control plane applies the same durable activity/admission fences and a
    bounded recovery window before issuing the exact-generation stop command.
 
 Any later interaction with any member recreates the group's one bridge, host
 rules first, starts the same container, restores only the member transport(s)
 needed for that interaction, and refreshes the common group deadline. A stopped
-sibling need not be eagerly restored. Broker startup stops running containers
+sibling need not be eagerly restored. Sandbox Manager startup stops running containers
 whose resident process ownership cannot be reconstructed before allowing a
 fenced wake.
 
@@ -375,7 +375,7 @@ rows. It does not choose an executor:
 ## 9. Workspace APIs and runner responsibilities
 
 The control plane owns job, attempt, lease, group, membership, residency, and
-fork fencing. It routes a workspace request only to the broker registered by
+fork fencing. It routes a workspace request only to the sandbox manager registered by
 the group's owning host.
 
 The host runner claims one turn, prepares the first checkout or imports an
@@ -383,7 +383,7 @@ approved published base, obtains attempt/residency grants, and streams the
 turn through the group supervisor. It does not own chat files on its own
 filesystem and does not manufacture context.
 
-The workspace broker is the authenticated Docker authority for:
+The sandbox manager is the authenticated Docker authority for:
 
 - file browsing and writes;
 - interactive terminals and bounded workspace commands;
@@ -391,7 +391,7 @@ The workspace broker is the authenticated Docker authority for:
 - group/member start, stop, resume, native Fork, and resident transport;
 - quiescent workspace capture for publication.
 
-Missing broker credentials or a broker address fail readiness/claim instead of
+Missing sandbox manager credentials or a sandbox manager address fail readiness/claim instead of
 silently falling back to a host worktree or GitHub snapshot.
 
 ## 10. Publication snapshot
@@ -439,7 +439,7 @@ The topology is unconditional in local, staging, and production code. A usable
 host must provide:
 
 - an enrolled host credential and fresh heartbeat;
-- an authenticated workspace broker URL reachable by the control plane;
+- an authenticated sandbox manager URL reachable by the control plane;
 - the expected Docker data root and sandbox image digest;
 - exact runtime/helper versions;
 - `native-fork-at-anchor-v1` from the current host image, and for each
@@ -454,7 +454,7 @@ host must provide:
 The host and control-plane GitHub Actions jobs start in parallel during a
 rolling deployment. The control job may build images, start/health-check its
 database, and run a backwards-compatible migration while the old API remains
-live. After the host's runners, broker, tunnel, isolation configuration, and
+live. After the host's runners, sandbox manager, tunnel, isolation configuration, and
 Docker data root pass local checks, it publishes a capability containing the
 exact target commit. Before replacing any running API container, the
 control-plane deploy requires a fresh heartbeat carrying that commit from every
@@ -553,16 +553,16 @@ The implementation is ready only when these properties hold:
    fork recovery, stale generations, and historical non-shared rows fail
    closed.
 9. File, terminal, Git, MCP, reasoning effort, cancellation, publication,
-   auth, egress, and frontend flows continue through the owning broker and
+   auth, egress, and frontend flows continue through the owning sandbox manager and
    shared group.
 10. Docker inspection shows no chat-state bind or volume mount and the
-    configured Docker data root is the one the broker actually controls. Two
+    configured Docker data root is the one the sandbox manager actually controls. Two
     unrelated sandbox groups do not share a Docker network; a group's one
     bridge, used by setup and the agent alike, contains only its container and
     the fixed inference/MCP relays. Stop releases the bridge, wake recreates
     one from the configured pool, and startup removes abandoned labelled
     allocations.
-11. Staging deployment requires broker credentials, enrolled host identity,
+11. Staging deployment requires sandbox manager credentials, enrolled host identity,
     exact attestation, and matching executor/slot capacity before a claim.
 12. `NEW`, `LIVE`, `RESTORED`, and `LOST` match native context truth; no replay
     is presented as recovery.
@@ -571,7 +571,7 @@ The implementation is ready only when these properties hold:
     distinguishable on success, cancellation, timeout, and boundary failure.
 
 The repository suite and Docker-only local smoke cover the deterministic
-control-plane, host, broker, all-five-runtime, stop/restore, historical
+control-plane, host, sandbox manager, all-five-runtime, stop/restore, historical
 immediate Fork, and concurrent-turn paths. Real-provider traffic, production
 isolation under Kata/gVisor, adversarial multi-process tests,
 OOM/container-exit stress, and disk-pressure operations remain deployment

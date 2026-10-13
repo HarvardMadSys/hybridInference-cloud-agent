@@ -10,7 +10,7 @@ init reap do not count as surviving command writers.
 Host readers drain stdout and stderr in 64 KiB chunks. Command stdout limits
 apply while those chunks arrive; stderr keeps at most 256 KiB of diagnostic
 bytes. Queues hold at most four items and apply backpressure, with cancellation
-when their consumer exits. Native CLI records have an 8 MiB byte limit; broker
+when their consumer exits. Native CLI records have an 8 MiB byte limit; sandbox manager
 NDJSON frames have a 32 MiB limit to account for normalized content, the raw
 record, and JSON escaping. An oversized native record stops its member process
 through the same scoped cleanup path. Setup and runner diagnostic tails are

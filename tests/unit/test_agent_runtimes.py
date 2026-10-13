@@ -996,7 +996,7 @@ def test_mcp_config_fails_closed_without_an_isolated_relay(runtime):
     assert "mcp-secret-must-not-leak" not in str(raised.value)
 
 
-def test_a_brokered_runtime_emits_only_relay_endpoints_and_no_credential():
+def test_a_sandbox_managered_runtime_emits_only_relay_endpoints_and_no_credential():
     """The same rule, for the adapter that does resolve servers.
 
     "Fails closed" was only ever a stand-in for this: a requested server must
@@ -1030,6 +1030,27 @@ def test_a_brokered_runtime_emits_only_relay_endpoints_and_no_credential():
     servers = json.loads(argv[argv.index("--mcp-config") + 1])["mcpServers"]
     assert servers[MERGED_MCP_SERVER_NAME]["url"] == "http://agent-mcp:8000/v1/agent/mcp"
     assert "--strict-mcp-config" in argv
+
+
+def test_claude_idle_timeout_covers_owner_approval_and_returns_its_outcome():
+    """The remote idle timer must not cancel a call before the approval window."""
+    from cloud_agent.mcp.invocations import DEFAULT_DECISION_WINDOW
+
+    argv, env = ClaudeCodeRuntime().prepare(
+        workdir="/tmp/x",
+        task_prompt="do it",
+        model="glm-5.1",
+        gateway_base_url="http://backend:8080",
+        credential="test-grant",
+        mcp_config=RuntimeMCPConfig(
+            server_ids=("github",), base_url="http://agent-mcp:8000", credential="test-mcp-token"
+        ),
+    )
+    idle_ms = int(env["CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT"])
+    assert idle_ms > DEFAULT_DECISION_WINDOW.total_seconds() * 1000
+    assert idle_ms <= int(env["MCP_TOOL_TIMEOUT"])
+    server = _mcp_config_of(argv)["mcpServers"][MERGED_MCP_SERVER_NAME]
+    assert server["timeout"] >= idle_ms
 
 
 @pytest.mark.parametrize(
@@ -1310,7 +1331,7 @@ def test_suppression_does_not_leak_between_jobs():
 # out a repository's own servers when a job requests none, the one-normalisation
 # of the gateway base url, and which runtimes may claim MCP at all. The other
 # three cases in that section were already covered here under different names
-# (``test_a_brokered_runtime_emits_only_relay_endpoints_and_no_credential``,
+# (``test_a_sandbox_managered_runtime_emits_only_relay_endpoints_and_no_credential``,
 # ``test_runtime_credentials_stay_out_of_process_arguments``,
 # ``test_mcp_config_fails_closed_without_an_isolated_relay``) and were not
 # duplicated.

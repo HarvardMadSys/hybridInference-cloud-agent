@@ -238,15 +238,15 @@ services:
       AGENT_MCP_ALLOW_PLAIN_HTTP: ${AGENT_MCP_ALLOW_PLAIN_HTTP:-}
 
       # --- Workspaces -------------------------------------------------------
-      # Authorizes this service to the hosts' workspace brokers. Per-host
-      # broker addresses come from each host's registration row, not from here.
-      AGENT_WORKSPACE_BROKER_TOKEN: ${AGENT_WORKSPACE_BROKER_TOKEN:-}
-      # Which hosts a registering machine may name as its broker. The token
+      # Authorizes this service to the hosts' sandbox managers. Per-host
+      # sandbox manager addresses come from each host's registration row, not from here.
+      AGENT_SANDBOX_MANAGER_TOKEN: ${AGENT_SANDBOX_MANAGER_TOKEN:-${AGENT_WORKSPACE_BROKER_TOKEN:-}}
+      # Which hosts a registering machine may name as its sandbox manager. The token
       # above is shared across the pool, so an address accepted at
       # registration is an address that receives a credential good for every
-      # broker in it. Unset means any host, which is what this did before the
+      # sandbox manager in it. Unset means any host, which is what this did before the
       # check existed — a multi-host pool should name its machines here.
-      AGENT_BROKER_URL_ALLOWED_HOSTS: ${AGENT_BROKER_URL_ALLOWED_HOSTS:-}
+      AGENT_SANDBOX_MANAGER_URL_ALLOWED_HOSTS: ${AGENT_SANDBOX_MANAGER_URL_ALLOWED_HOSTS:-${AGENT_BROKER_URL_ALLOWED_HOSTS:-}}
     volumes:
       - agent-pgadmin-bootstrap:/var/lib/cloud-agent/pgadmin-bootstrap
       # The GitHub App key, read-only, as a file. `AGENT_GITHUB_APP_PRIVATE_KEY_PATH`

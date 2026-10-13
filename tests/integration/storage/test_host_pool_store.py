@@ -373,7 +373,7 @@ async def test_registration_stores_what_the_host_declared(store, hosts: Postgres
         credential_hash=hash_secret("cred"),
         capabilities=["runc", "kata", "kata"],
         slots_total=3,
-        broker_url="http://broker-a:8092",
+        sandbox_manager_url="http://sandbox-manager-a:8092",
         runner_version="1.2.3",
         labels={"region": "cambridge"},
     )
@@ -382,7 +382,7 @@ async def test_registration_stores_what_the_host_declared(store, hosts: Postgres
     assert row["status"] == HOST_ENROLLING
     assert row["capabilities"] == ["kata", "runc"]
     assert row["slots_total"] == 3
-    assert row["broker_url"] == "http://broker-a:8092"
+    assert row["sandbox_manager_url"] == "http://sandbox-manager-a:8092"
     assert row["labels"] == {"region": "cambridge"}
     assert row["enrolled"] is True
 
@@ -1555,11 +1555,11 @@ async def test_a_beat_that_authenticated_before_a_removal_changes_nothing(
 
     The beat below authenticated while the credential was live and reached
     the store after the removal committed. It must not stamp the removed row
-    with liveness, a broker address or capabilities.
+    with liveness, a sandbox manager address or capabilities.
     """
     digest = hash_secret("cred-runner-a")
     await hosts.register_host(
-        host="runner-a", credential_hash=digest, broker_url="http://runner-a:8787"
+        host="runner-a", credential_hash=digest, sandbox_manager_url="http://runner-a:8787"
     )
     assert await hosts.record_host_heartbeat(host="runner-a", credential_hash=digest) is not None
     before = await hosts.get_host(host="runner-a")
@@ -1568,14 +1568,14 @@ async def test_a_beat_that_authenticated_before_a_removal_changes_nothing(
     late = await hosts.record_host_heartbeat(
         host="runner-a",
         credential_hash=digest,
-        broker_url="http://elsewhere:8787",
+        sandbox_manager_url="http://elsewhere:8787",
         capabilities=["shared-sandbox-v1"],
     )
 
     assert late is None
     after = await hosts.get_host(host="runner-a")
     assert after["status"] == HOST_DISABLED
-    assert after["broker_url"] == "http://runner-a:8787"
+    assert after["sandbox_manager_url"] == "http://runner-a:8787"
     assert after["last_heartbeat_at"] == before["last_heartbeat_at"]
     assert after["capabilities"] == before["capabilities"]
 
@@ -3006,12 +3006,12 @@ async def test_a_selection_the_image_lost_falls_back_instead_of_parking(
 async def test_physical_server_grouping_preserves_deployment_identity_and_labels(
     store, hosts: PostgresHostPoolRepository
 ):
-    """Display metadata cannot merge credentials, brokers, capacity or placement."""
+    """Display metadata cannot merge credentials, sandbox managers, capacity or placement."""
     for name in ("gpu-box", "gpu-box-kata"):
         await hosts.register_host(
             host=name,
             credential_hash=hash_secret(name),
-            broker_url=f"http://{name}:8092",
+            sandbox_manager_url=f"http://{name}:8092",
             slots_total=3,
             labels={"zone": "test"},
         )
@@ -3025,7 +3025,7 @@ async def test_physical_server_grouping_preserves_deployment_identity_and_labels
     assert len(rows) == 2
     for row in rows:
         assert row["labels"] == {"zone": "test", "physical_host": "gpu-box"}
-        assert row["broker_url"] == f"http://{row['host']}:8092"
+        assert row["sandbox_manager_url"] == f"http://{row['host']}:8092"
         assert row["slots_total"] == 3
         assert row["status"] == (HOST_DRAINING if row["host"] == active else HOST_ONLINE)
     assert (

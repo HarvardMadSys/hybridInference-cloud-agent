@@ -1226,7 +1226,7 @@ async def test_reaped_fork_does_not_poison_the_surviving_member_manifest(
 ):
     """A failed hidden child remains history but cannot occupy the host manifest."""
     from cloud_agent_host.runner import _shared_group_manifest
-    from cloud_agent_host.workspace_broker import SharedSandboxMemberRequest
+    from cloud_agent_host.sandbox_manager import SharedSandboxMemberRequest
 
     job, claim, sandbox = await _reserve_shared_chat(store)
     fence = {
@@ -4137,7 +4137,7 @@ async def test_retained_admission_settlement_and_job_finish_share_one_boundary(
     rearmed = await store.sandbox.thread_sandbox(thread_id=job["thread_id"])
     assert rearmed["idle_deadline"] > datetime.now(timezone.utc)
 
-    # A broker can restart between turns, reconstruct the immutable container
+    # A sandbox manager can restart between turns, reconstruct the immutable container
     # identity from Docker, and know no activation generation. A terminal that
     # wakes the stopped container must still promote the durable row and own
     # its idle clock, but only while no worker attempt owns it.
@@ -4163,7 +4163,7 @@ async def test_retained_admission_settlement_and_job_finish_share_one_boundary(
     assert rearmed_after_restart["state"] == "running"
     assert rearmed_after_restart["idle_deadline"] > datetime.now(timezone.utc)
 
-    # When a replacement broker has neither activity tokens nor a monotonic
+    # When a replacement sandbox manager has neither activity tokens nor a monotonic
     # deadline, it reports activity as unknown. The control plane grants one
     # recovery window only; repeated healthy heartbeats must not keep an idle
     # container alive forever by moving that deadline forward.

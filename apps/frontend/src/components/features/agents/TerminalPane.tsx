@@ -211,7 +211,7 @@ export function TerminalPane({
   // Set once the shell has exited or its stream is gone for good.
   const endedRef = useRef(terminal.state !== 'running');
   // How much output the listing reported: where the history ends, for a
-  // broker too old to say so when the stream attaches.
+  // sandbox manager too old to say so when the stream attaches.
   const listedSeqRef = useRef(terminal.last_seq);
   listedSeqRef.current = terminal.last_seq;
   const resizeRef = useRef<(() => void) | null>(null);

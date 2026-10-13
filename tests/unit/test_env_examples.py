@@ -17,12 +17,95 @@ somebody remembers to update.
 
 from __future__ import annotations
 
+import json
+import os
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
 
 REPO = Path(__file__).resolve().parents[2]
+
+
+@pytest.mark.parametrize(
+    "stack_files",
+    [
+        ("deploy/host/docker-compose.sandbox.yml",),
+        ("deploy/control-plane/docker-compose.yml", "deploy/local/docker-compose.yml"),
+    ],
+    ids=["host", "local"],
+)
+def test_compose_accepts_the_new_token_alone_and_still_rejects_missing_credentials(
+    tmp_path, stack_files
+):
+    docker = shutil.which("docker")
+    if (
+        docker is None
+        or subprocess.run(
+            [docker, "compose", "version"], capture_output=True, check=False
+        ).returncode
+    ):
+        pytest.skip("Docker Compose is needed to validate required interpolation")
+    paths = [REPO / name for name in stack_files]
+    values = dict.fromkeys(
+        (
+            name
+            for path in paths
+            for name in re.findall(r"\$\{([A-Z_][A-Z0-9_]*):?\?", path.read_text())
+        ),
+        "test-placeholder",
+    )
+    for name in values:
+        if name.endswith(("_SSH_KEY", "_SSH_KNOWN_HOSTS")):
+            values[name] = "/dev/null"
+    values.update(
+        COMPOSE_PROJECT="sandbox-manager-rename-test",
+        AGENT_SANDBOX_MANAGER_TOKEN="test-manager-credential",
+        AGENT_EGRESS_CHAT_NETWORK_POOL="10.240.0.0/16",
+        AGENT_EGRESS_DNS_SERVER="192.0.2.53",
+    )
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith(("AGENT_", "COMPOSE_"))
+    }
+    env_file = tmp_path / ".env"
+
+    def render():
+        env_file.write_text("".join(f"{key}={value}\n" for key, value in values.items()))
+        return subprocess.run(
+            [
+                docker,
+                "compose",
+                *(arg for path in paths for arg in ("-f", str(path))),
+                "--env-file",
+                str(env_file),
+                "config",
+                "--format",
+                "json",
+            ],
+            cwd=tmp_path,
+            env=environment,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    rendered = render()
+    assert rendered.returncode == 0, rendered.stderr
+    services = json.loads(rendered.stdout)["services"]
+    for name in ("sandbox-manager", "runner"):
+        assert (
+            services[name]["environment"]["AGENT_SANDBOX_MANAGER_TOKEN"]
+            == "test-manager-credential"
+        )
+    values.pop("AGENT_SANDBOX_MANAGER_TOKEN")
+    refused = render()
+    assert refused.returncode != 0
+    assert "AGENT_SANDBOX_MANAGER_TOKEN" in refused.stderr
+
 
 #: (compose file, its example) — one pair per machine in the deployment.
 STACKS = [

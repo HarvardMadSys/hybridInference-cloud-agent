@@ -21,6 +21,12 @@ from urllib.parse import urlsplit
 
 from pydantic import AnyHttpUrl, ValidationError
 
+from cloud_agent_shared.sandbox_manager_compat import (
+    STORED_SETTING_KEYS,
+    manager_env,
+    manager_environment,
+)
+
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
@@ -52,6 +58,11 @@ class Setting:
     #: it: refusing it would stop the control plane before the settings page
     #: that replaces it could open. Every new value is held to the floor.
     minimum_bytes_new_values_only: bool = False
+
+    @property
+    def storage_key(self) -> str:
+        """Keep existing saved secrets readable across the service rename."""
+        return STORED_SETTING_KEYS.get(self.key, self.key)
 
     def validate(self, value: Any, *, saved: bool = False) -> SettingValue:
         """Return a checked value, raising a message that contains no supplied data.
@@ -929,21 +940,21 @@ MIGRATED_SETTINGS: tuple[Setting, ...] = (
         description="A random key of at least 32 bytes. Once configured, rotation requires a separate re-encryption procedure.",
     ),
     Setting(
-        "workspace_broker_token",
-        "Workspace broker credential",
+        "sandbox_manager_token",
+        "Sandbox manager credential",
         "Execution",
         "",
-        env="AGENT_WORKSPACE_BROKER_TOKEN",
+        env="AGENT_SANDBOX_MANAGER_TOKEN",
         secret=True,
-        description="Must match the credential provisioned on each host's workspace broker. Coordinate changes with those hosts.",
+        description="Must match the credential provisioned on each host's sandbox manager. Coordinate changes with those hosts.",
     ),
     Setting(
-        "broker_url_allowed_hosts",
-        "Workspace broker host allowlist",
+        "sandbox_manager_url_allowed_hosts",
+        "Sandbox manager host allowlist",
         "Execution",
         "",
-        env="AGENT_BROKER_URL_ALLOWED_HOSTS",
-        description="Comma-separated hostnames, or scheme://host:port origins that also pin the scheme and port, allowed to receive the workspace broker credential. Empty retains unrestricted host selection.",
+        env="AGENT_SANDBOX_MANAGER_URL_ALLOWED_HOSTS",
+        description="Comma-separated hostnames, or scheme://host:port origins that also pin the scheme and port, allowed to receive the sandbox manager credential. Empty retains unrestricted host selection.",
     ),
     Setting(
         "default_execution_profile",
@@ -993,6 +1004,7 @@ MIGRATED_SETTINGS: tuple[Setting, ...] = (
 )
 SETTINGS += MIGRATED_SETTINGS
 SETTINGS_BY_KEY = {setting.key: setting for setting in SETTINGS}
+SETTINGS_BY_STORAGE_KEY = {setting.storage_key: setting for setting in SETTINGS}
 _SETTINGS_BY_ENV = {setting.env: setting for setting in SETTINGS if setting.env}
 
 BOOTSTRAP = (
@@ -1055,16 +1067,16 @@ def _cipher(key: str) -> Any:
 
 def _encode(setting: Setting, value: SettingValue) -> Any:
     if setting.secret and value:
-        return {"ciphertext": _cipher(setting.key).encrypt(str(value))}
+        return {"ciphertext": _cipher(setting.storage_key).encrypt(str(value))}
     return value
 
 
 def _decode(encoded: Mapping[str, Any]) -> dict[str, SettingValue]:
     values: dict[str, SettingValue] = {}
     for setting in SETTINGS:
-        value = encoded.get(setting.key, setting.default)
+        value = encoded.get(setting.storage_key, setting.default)
         if setting.secret and isinstance(value, dict) and set(value) == {"ciphertext"}:
-            value = _cipher(setting.key).decrypt(value["ciphertext"])
+            value = _cipher(setting.storage_key).decrypt(value["ciphertext"])
         elif setting.secret and value:
             raise ValueError(f"Unencrypted stored secret for {setting.label}")
         values[setting.key] = setting.validate(value, saved=True)
@@ -1092,11 +1104,16 @@ def encode_changes(changes: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError("Supply one or more known settings")
     checked: dict[str, SettingValue] = {}
     for key, value in changes.items():
-        setting = SETTINGS_BY_KEY.get(key)
+        setting = SETTINGS_BY_KEY.get(key) or SETTINGS_BY_STORAGE_KEY.get(key)
         if setting is None:
             raise ValueError("Unknown setting")
-        checked[key] = setting.validate(setting.default if value is None else value)
-    return {key: _encode(SETTINGS_BY_KEY[key], value) for key, value in checked.items()}
+        if setting.key in checked:
+            raise ValueError("Supply each setting only once")
+        checked[setting.key] = setting.validate(setting.default if value is None else value)
+    return {
+        SETTINGS_BY_KEY[key].storage_key: _encode(SETTINGS_BY_KEY[key], value)
+        for key, value in checked.items()
+    }
 
 
 def validate_stored_settings(encoded: Mapping[str, Any]) -> None:
@@ -1150,10 +1167,10 @@ def initial_settings(*, keys: set[str] | None = None) -> dict[str, Any]:
             "compute.observation_seconds": configuration.observation_seconds,
         }
     for setting in SETTINGS:
-        if keys is not None and setting.key not in keys:
+        if keys is not None and setting.key not in keys and setting.storage_key not in keys:
             continue
         value: Any = imported.get(setting.key, setting.default)
-        raw = os.environ.get(setting.env, "") if setting.env else ""
+        raw = manager_env(setting.env, "") if setting.env else ""
         if raw:
             try:
                 if setting.kind == "integer":
@@ -1176,7 +1193,7 @@ def initial_settings(*, keys: set[str] | None = None) -> dict[str, Any]:
             except (ValueError, OverflowError):
                 raise ValueError(f"Invalid initial configuration for {setting.label}") from None
         values[setting.key] = value
-        result[setting.key] = _encode(setting, value)
+        result[setting.storage_key] = _encode(setting, value)
     _validate_relations(values)
     return result
 
@@ -1248,7 +1265,7 @@ def setup_status(values: Mapping[str, SettingValue]) -> dict[str, Any]:
             "execution",
             "Agent execution",
             True,
-            ("control_signing_secret", "workspace_broker_token"),
+            ("control_signing_secret", "sandbox_manager_token"),
         ),
         ("credentials", "User connections", True, ("source_control_encryption_key",)),
         (
@@ -1326,7 +1343,7 @@ def get_setting(key: str, fallback: SettingValue | None = None) -> SettingValue:
         if _values is not None:
             return _values[key]
     if setting.env:
-        raw = os.environ.get(setting.env)
+        raw = manager_env(setting.env)
         if raw:
             if setting.kind == "integer":
                 return int(raw)
@@ -1365,12 +1382,12 @@ def setting_env(name: str, default: str | None = None) -> str | None:
         if _values is not None and setting is not None:
             value = _values[setting.key]
             return str(value).lower() if isinstance(value, bool) else str(value)
-    return os.environ.get(name, default)
+    return manager_env(name, default)
 
 
 def settings_environment() -> dict[str, str]:
     """Build a provider configuration mapping from bootstrap and saved settings."""
-    result = dict(os.environ)
+    result = manager_environment(os.environ)
     with _lock:
         if _values is not None:
             for env, setting in _SETTINGS_BY_ENV.items():
@@ -1401,7 +1418,7 @@ def weak_credentials() -> list[str]:
 async def initialize_settings(repository: SettingsRepository, *, seed: bool = True) -> None:
     """Seed once, then adopt the database rather than reimporting the environment."""
     revision, encoded = await repository.read_settings()
-    missing = {setting.key for setting in MIGRATED_SETTINGS} - encoded.keys()
+    missing = {setting.storage_key for setting in MIGRATED_SETTINGS} - encoded.keys()
     if revision < 0 or missing:
         if seed:
             revision, encoded = await repository.seed_settings(
@@ -1413,7 +1430,9 @@ async def initialize_settings(repository: SettingsRepository, *, seed: bool = Tr
             for _ in range(300):
                 await asyncio.sleep(0.1)
                 revision, encoded = await repository.read_settings()
-                if revision >= 0 and all(setting.key in encoded for setting in MIGRATED_SETTINGS):
+                if revision >= 0 and all(
+                    setting.storage_key in encoded for setting in MIGRATED_SETTINGS
+                ):
                     break
             else:
                 raise RuntimeError(

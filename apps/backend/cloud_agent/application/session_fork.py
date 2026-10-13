@@ -17,7 +17,7 @@ parameters, and the call inside the block would stop being the same line.
 
 The reaper reaches `finalize_session_fork` too, and does something different
 with it — it collects ids instead of refusing, and releases residencies through
-the broker rather than the store. §5.2 keeps that difference: only steps whose
+the sandbox manager rather than the store. §5.2 keeps that difference: only steps whose
 semantics really match are shared, and these do not.
 """
 
@@ -30,13 +30,13 @@ from typing import TYPE_CHECKING, Any, Protocol
 from fastapi import HTTPException
 
 from cloud_agent.application.residency import _mint_residency_grant, residency_ttl_s
-from cloud_agent.broker_routing import broker_for_job
-from cloud_agent.workspace_broker_client import (
+from cloud_agent.sandbox_manager_client import (
     SHARED_PLUGIN_SESSION_FORK_TIMEOUT_S,
     SHARED_SESSION_FORK_TIMEOUT_S,
-    WorkspaceBrokerError,
+    SandboxManagerError,
 )
-from cloud_agent.workspace_errors import _workspace_broker_http_error
+from cloud_agent.sandbox_manager_routing import sandbox_manager_for_job
+from cloud_agent.workspace_errors import _sandbox_manager_http_error
 
 if TYPE_CHECKING:
     from cloud_agent.ports import (
@@ -92,8 +92,8 @@ async def materialize_session_fork(
                 with contextlib.suppress(Exception):
                     await grants.revoke(grant_id)
 
-    broker = await broker_for_job(job_store.host_pool, job_id)
-    if broker is None:
+    sandbox_manager = await sandbox_manager_for_job(job_store.host_pool, job_id)
+    if sandbox_manager is None:
         raise HTTPException(
             status_code=503,
             detail={
@@ -145,7 +145,7 @@ async def materialize_session_fork(
         "model": str(source_job.get("model") or ""),
         "reasoning_effort": source_job.get("reasoning_effort"),
         "plugins": source_job.get("plugins") or [],
-        # Replaced by the broker's host-local, sandbox-reachable relay.
+        # Replaced by the sandbox manager's host-local, sandbox-reachable relay.
         "gateway_base_url": "",
         # Fork-only does not need a tool credential. A later turn whose
         # MCP set is non-empty performs a member-only native restart.
@@ -227,7 +227,7 @@ async def materialize_session_fork(
     source_member["residency_generation"] = int(residencies["source"]["generation"])
     source_member["resident_state"] = "restarting"
     try:
-        receipt = await broker.fork_shared_session(
+        receipt = await sandbox_manager.fork_shared_session(
             source_thread_id,
             sandbox_id=str(operation["sandbox_id"]),
             generation=int(operation["sandbox_generation"]),
@@ -262,11 +262,11 @@ async def materialize_session_fork(
                 "residency_generation": int(residencies["target"]["generation"]),
             },
         )
-    except WorkspaceBrokerError as exc:
+    except SandboxManagerError as exc:
         # PREPARING is intentionally retained: a retry with the same key
         # recovers the in-container journal or safely resumes before the
         # native mutation was reached.
-        raise _workspace_broker_http_error(exc) from exc
+        raise _sandbox_manager_http_error(exc) from exc
     materialized = await job_store.session_fork.record_session_fork_materialized(
         operation_id=operation_id,
         coordinator_token=coordinator_token,

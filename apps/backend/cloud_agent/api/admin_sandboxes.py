@@ -26,14 +26,14 @@ from cloud_agent.api.deps import (
     require_store,
     verify_admin_access,
 )
-from cloud_agent.broker_routing import (
-    BrokerUrlRefused,
-    broker_configuration_error,
-    broker_for_host,
-)
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.sandbox_archive import S3SandboxArchiveStore
-from cloud_agent.workspace_broker_client import WorkspaceBrokerError
+from cloud_agent.sandbox_manager_client import SandboxManagerError
+from cloud_agent.sandbox_manager_routing import (
+    SandboxManagerUrlRefused,
+    sandbox_manager_configuration_error,
+    sandbox_manager_for_host,
+)
 
 if TYPE_CHECKING:
     from cloud_agent.ports import HostPoolRepository, SandboxRepository
@@ -54,10 +54,10 @@ class _AdminSandboxesStorage(Protocol):
 async def _refresh_terminal_activity(
     detail: AdminSandboxDetail, storage: _AdminSandboxesStorage
 ) -> str | None:
-    """Read a fenced broker census before trusting heartbeat terminal data.
+    """Read a fenced sandbox manager census before trusting heartbeat terminal data.
 
-    Older runners omit terminal counts even though their broker knows them.
-    Older brokers count only the origin member, so even a fresh zero must be
+    Older runners omit terminal counts even though their sandbox manager knows them.
+    Older sandbox managers count only the origin member, so even a fresh zero must be
     checked against the group's activity flag before closing admission.
     Keep this recovery independent of the optional Docker resource collector.
     A failed probe leaves terminal activity unknown and stopping disabled.
@@ -65,15 +65,17 @@ async def _refresh_terminal_activity(
     sandbox = detail.sandbox
     host = await storage.host_pool.get_host(host=sandbox.host)
     try:
-        broker = None if host is None else broker_for_host(host)
-    except BrokerUrlRefused:
-        broker = None
-    if broker is None:
-        return "Terminal activity is unavailable. Check the host's workspace broker connection."
+        sandbox_manager = None if host is None else sandbox_manager_for_host(host)
+    except SandboxManagerUrlRefused:
+        sandbox_manager = None
+    if sandbox_manager is None:
+        return "Terminal activity is unavailable. Check the host's sandbox manager connection."
     try:
-        rows = await broker.list_sandboxes(thread_id=sandbox.origin_thread_id, timeout=5)
-    except WorkspaceBrokerError:
-        return "The host's workspace broker is unavailable. Restore its connection and refresh details."
+        rows = await sandbox_manager.list_sandboxes(thread_id=sandbox.origin_thread_id, timeout=5)
+    except SandboxManagerError:
+        return (
+            "The host's sandbox manager is unavailable. Restore its connection and refresh details."
+        )
     row = next((row for row in rows if row.get("sandbox_id") == sandbox.id), None)
     if (
         row is None
@@ -86,8 +88,8 @@ async def _refresh_terminal_activity(
         return "The host's container changed. Refresh details before stopping it."
     count = row.get("terminal_count")
     if isinstance(count, bool) or not isinstance(count, int) or not 0 <= count <= 4096:
-        return "The host cannot report terminal activity. Update its workspace broker and refresh details."
-    # Older brokers count only the origin member's terminals. Their group
+        return "The host cannot report terminal activity. Update its sandbox manager and refresh details."
+    # Older sandbox managers count only the origin member's terminals. Their group
     # activity flag still prevents a sibling's terminal from looking idle.
     if count == 0 and row.get("group_busy") is not False:
         return "The host reports active sandbox work. Wait until it is idle and refresh details."
@@ -122,28 +124,28 @@ async def _confirm_force_delete_stopped(
     sandbox = detail.sandbox
     host = await storage.host_pool.get_host(host=sandbox.host)
     try:
-        broker = None if host is None else broker_for_host(host)
-    except BrokerUrlRefused:
-        broker = None
-    if broker is None:
+        sandbox_manager = None if host is None else sandbox_manager_for_host(host)
+    except SandboxManagerUrlRefused:
+        sandbox_manager = None
+    if sandbox_manager is None:
         logger.warning(
-            "Force deletion has no configured owning broker",
+            "Force deletion has no configured owning sandbox manager",
             extra={
                 "event": "agent_sandbox_delete_verification_failed",
                 "sandbox_id": sandbox.id,
                 "host": sandbox.host,
-                "broker_status": 503,
+                "sandbox_manager_status": 503,
                 "failure_type": "configuration",
             },
         )
         raise HTTPException(
             status_code=503,
-            detail=broker_configuration_error(host)
-            or "The owning host's workspace broker is unavailable. Check its configuration and retry deletion.",
+            detail=sandbox_manager_configuration_error(host)
+            or "The owning host's sandbox manager is unavailable. Check its configuration and retry deletion.",
         )
     try:
-        row = await broker.shared_chat_sandbox_status(sandbox.origin_thread_id, timeout=5)
-    except WorkspaceBrokerError as exc:
+        row = await sandbox_manager.shared_chat_sandbox_status(sandbox.origin_thread_id, timeout=5)
+    except SandboxManagerError as exc:
         if exc.status_code in {404, 410}:
             raise HTTPException(
                 status_code=409,
@@ -151,24 +153,24 @@ async def _confirm_force_delete_stopped(
             ) from None
         if exc.status_code in {401, 403}:
             message = (
-                "The owning host's workspace broker rejected the control plane's credential. "
-                "Match Workspace broker credential in Admin Settings with the host's broker token."
+                "The owning host's sandbox manager rejected the control plane's credential. "
+                "Match Sandbox manager credential in Admin Settings with the host's sandbox manager token."
             )
         elif isinstance(exc.__cause__, httpx.TimeoutException):
             message = (
-                "The owning host's workspace broker timed out while checking the sandbox. "
-                "Check the broker and Docker responsiveness, then refresh details and retry deletion."
+                "The owning host's sandbox manager timed out while checking the sandbox. "
+                "Check the sandbox manager and Docker responsiveness, then refresh details and retry deletion."
             )
         elif isinstance(exc.__cause__, httpx.HTTPError):
             message = (
-                "The control plane cannot connect to the owning host's workspace broker. "
+                "The control plane cannot connect to the owning host's sandbox manager. "
                 "Check its advertised URL and reverse SSH tunnel, then retry deletion. "
                 "If the host is gone, use Remove stale entry once its heartbeat is stale."
             )
         else:
             message = (
-                "The owning host's workspace broker could not report the sandbox's stopped and idle "
-                "status. Check broker readiness and host logs, then refresh details and retry deletion."
+                "The owning host's sandbox manager could not report the sandbox's stopped and idle "
+                "status. Check sandbox manager readiness and host logs, then refresh details and retry deletion."
             )
         logger.warning(
             "Force deletion could not verify the owning sandbox",
@@ -176,7 +178,7 @@ async def _confirm_force_delete_stopped(
                 "event": "agent_sandbox_delete_verification_failed",
                 "sandbox_id": sandbox.id,
                 "host": sandbox.host,
-                "broker_status": exc.status_code,
+                "sandbox_manager_status": exc.status_code,
                 "failure_type": type(exc.__cause__).__name__
                 if exc.__cause__
                 else type(exc).__name__,
@@ -409,7 +411,7 @@ async def stop_admin_sandbox(
             and sandbox.container_id == payload.container_id
             and sandbox.last_activity_at == payload.last_activity_at
         ):
-            # A legacy broker can heartbeat a fresh origin-only zero while a
+            # A legacy sandbox manager can heartbeat a fresh origin-only zero while a
             # sibling has an open terminal. Check the whole group before the
             # database closes admission, retaining every original stop fence.
             error = await _refresh_terminal_activity(reviewed, storage)
@@ -483,7 +485,7 @@ async def delete_admin_sandbox(
             detail="Configure a sandbox archive S3 bucket in Admin Settings before deleting sandboxes.",
         )
     storage = require_store(store)
-    broker_confirmed_stopped = False
+    sandbox_manager_confirmed_stopped = False
     if force:
         current = await storage.admin_sandboxes.detail(sandbox_id)
         if current is None:
@@ -501,7 +503,7 @@ async def delete_admin_sandbox(
             )
         if sandbox.state == "running":
             await _confirm_force_delete_stopped(reviewed, storage)
-            broker_confirmed_stopped = True
+            sandbox_manager_confirmed_stopped = True
         elif sandbox.state != "stopped":
             raise HTTPException(
                 status_code=409,
@@ -514,7 +516,7 @@ async def delete_admin_sandbox(
         last_activity_at=payload.last_activity_at,
         actor_id=admin,
         admin_ip=get_client_ip(request),
-        broker_confirmed_stopped=broker_confirmed_stopped,
+        sandbox_manager_confirmed_stopped=sandbox_manager_confirmed_stopped,
         discard=discard,
     )
     errors = {

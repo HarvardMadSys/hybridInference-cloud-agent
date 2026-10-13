@@ -75,7 +75,7 @@ describe('application settings organization', () => {
     ['attachments.max_file_bytes', 'Attachments', 'important'],
     ['task_titles.timeout_seconds', 'Task titles', 'advanced'],
     ['default_execution_profile', 'Sandbox execution', 'important'],
-    ['workspace_broker_token', 'Sandbox execution', 'advanced'],
+    ['sandbox_manager_token', 'Sandbox execution', 'advanced'],
     ['site.feature_rag', 'Branding', 'important'],
     ['log_level', 'Logging', 'advanced'],
     ['mcp_allow_private_targets', 'MCP connections', 'advanced'],

@@ -339,6 +339,7 @@ class TestTheRuntimeRelayEntry:
             MERGED_MCP_SERVER_NAME: {
                 "type": "http",
                 "url": f"{self._BASE}/v1/agent/mcp",
+                "timeout": 1560000,
                 "headers": {"Authorization": "Bearer ${AGENT_MCP_TOKEN}"},
             }
         }

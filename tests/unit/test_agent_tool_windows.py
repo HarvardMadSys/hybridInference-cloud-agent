@@ -432,7 +432,7 @@ def test_a_legacy_mark_outside_the_window_it_would_narrow_is_refused():
 
 def test_guest_marks_are_taken_even_when_the_message_arrived_after_the_call_ran():
     """The pipe, not the clock: a 21 ms call can run and finish before the
-    broker reads the line announcing it. Guest marks are fenced by the
+    sandbox manager reads the line announcing it. Guest marks are fenced by the
     observer, so the message bracket is diagnostics, never a bound."""
     tracker = ToolWindowTracker()
     tracker.observe("tool_use", {"id": "t1", "name": "Read"}, mono=1.050)
@@ -488,7 +488,7 @@ def test_a_misordered_pair_is_refused_and_named():
 def test_a_call_the_turn_never_closed_keeps_its_open_row():
     """A cancel or timeout mid-call: the sandbox may still have seen the
     call finish, and the log says so, but the row stays the record of a
-    result the broker never received."""
+    result the sandbox manager never received."""
     tracker = ToolWindowTracker()
     tracker.observe("tool_use", {"id": "t1", "name": "Bash"}, mono=1.0)
 

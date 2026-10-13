@@ -736,6 +736,62 @@ def test_reply_excludes_user_unknown_and_stale_turn_parts(
 @pytest.mark.parametrize(
     "driver,runtime", [(OpenCodeDriver, OpencodeRuntime), (KiloDriver, KiloRuntime)]
 )
+def test_a_task_result_keeps_its_whole_answer_and_other_clipped_results_say_so(
+    tmp_path, driver, runtime
+):
+    """A subagent's answer is its task result; a shortened tool result is marked."""
+    process = _LiveProcess()
+    context, _ = _protocol_context(process, tmp_path)
+    process.feed = _turn_lines({"bridge": "ready", "session_id": "session-a"})
+    session = driver(runtime()).launch_live(context)
+    session.ensure_started(model="deepseek-v4-flash", reasoning_effort=None)
+    turn = session.start_turn(TurnInput(prompt="delegate", model="deepseek-v4-flash"))
+    turn_id = json.loads(process.sent[-1])["id"]
+    # The pinned 1.18.9 (and Kilo) wrap a foreground task's answer this way.
+    envelope = (
+        '<task id="ses_child" state="completed">\n<task_result>\n'
+        + "finding\n" * 1000
+        + "</task_result>\n</task>"
+    )
+
+    def tool(call_id, name, output):
+        return {
+            "bridge": "event",
+            "turn_id": turn_id,
+            "event": {
+                "type": "message.part.updated",
+                "properties": {
+                    "part": {
+                        "id": f"part-{call_id}",
+                        "callID": call_id,
+                        "type": "tool",
+                        "tool": name,
+                        "state": {"status": "completed", "input": {}, "output": output},
+                    }
+                },
+            },
+        }
+
+    process.feed = _turn_lines(
+        tool("task-call", "task", envelope),
+        tool("bash-call", "bash", "x" * 5000),
+        {"bridge": "settled", "turn_id": turn_id, "status": "completed"},
+    )
+    results = {
+        event.payload["tool_use_id"]: event.payload
+        for event in turn.iter_events()
+        if event.event_type == "tool_result"
+    }
+
+    assert results["task-call"]["content"] == envelope
+    assert "truncated" not in results["task-call"]
+    assert results["bash-call"]["content"] == "x" * 4000
+    assert results["bash-call"]["truncated"] is True
+
+
+@pytest.mark.parametrize(
+    "driver,runtime", [(OpenCodeDriver, OpencodeRuntime), (KiloDriver, KiloRuntime)]
+)
 def test_the_answer_is_previewed_and_each_part_completes_in_its_place(tmp_path, driver, runtime):
     """The pinned 1.18.9 shape: an empty part, a delta per token, the whole part."""
     process = _LiveProcess()

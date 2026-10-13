@@ -6,7 +6,7 @@ production accounts or credentials. This Docker topology includes:
 - the web app and a same-origin reverse proxy;
 - a fixture Gateway serving PKCE/JWKS, account and model lookups, inference
   grants, and deterministic model responses;
-- Postgres, migrations, host enrollment, and the workspace broker;
+- Postgres, migrations, host enrollment, and the sandbox manager;
 - the sandbox image with pinned Claude Code, Codex, Pi, OpenCode, and Kilo CLIs;
 - a read-only `local/demo` Git repository on the private control-plane network.
 
@@ -60,7 +60,7 @@ Useful commands:
 
 `stop` uses Compose's `stop` command. Service containers, named volumes,
 networks, and retained chat containers remain available. The stack has no host
-workspace or database bind mounts. The runner and broker control Docker through
+workspace or database bind mounts. The runner and sandbox manager control Docker through
 its socket, and Docker's data root holds the retained state.
 
 ### Ports and parallel stacks
@@ -94,7 +94,7 @@ wrong stack.
 
 Each retained sandbox group gets a routable, labelled
 `freeinference-chat-net-*` bridge. Before a sandbox joins it, the runner or
-broker installs and verifies this stack's nftables rules on the Docker engine.
+sandbox manager installs and verifies this stack's nftables rules on the Docker engine.
 The rules allow public IPv4 on TCP 80/443, DNS through
 `LOCAL_EGRESS_DNS_SERVER` on TCP/UDP 53, and that group's inference and MCP
 relays on their service ports. They block the engine's own addresses, private

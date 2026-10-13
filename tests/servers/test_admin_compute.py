@@ -830,7 +830,7 @@ async def test_automatic_setup_parses_targets_and_audits_only_profile_ids(comput
     service = SimpleNamespace(
         read_status=AsyncMock(),
         create=AsyncMock(return_value=public_result),
-        broker_token="broker-token-canary",
+        sandbox_manager_token="sandbox-manager-token-canary",
         private_key="generated-private-key-canary",
     )
     app.state.compute_commands.automatic_setup = service
@@ -865,7 +865,7 @@ async def test_automatic_setup_parses_targets_and_audits_only_profile_ids(comput
     for canary in (
         body["gateway"]["address"],
         body["control"]["address"],
-        service.broker_token,
+        service.sandbox_manager_token,
         service.private_key,
     ):
         assert canary not in response.text

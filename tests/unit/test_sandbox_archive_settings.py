@@ -98,12 +98,12 @@ def test_access_key_replaces_bucket_owner_and_kms_and_stays_out_of_markers() -> 
     assert policy.uses_access_key is True
     assert "aws_access_key_id" not in policy.as_dict()
     assert "aws_secret_access_key" not in policy.as_dict()
-    assert policy.as_broker_dict()["aws_access_key_id"] == _ACCESS_KEY_ID
-    assert policy.as_broker_dict()["aws_secret_access_key"] == _SECRET_ACCESS_KEY
+    assert policy.as_sandbox_manager_dict()["aws_access_key_id"] == _ACCESS_KEY_ID
+    assert policy.as_sandbox_manager_dict()["aws_secret_access_key"] == _SECRET_ACCESS_KEY
     assert policy.as_storage_dict()["aws_secret_access_key"] == _SECRET_ACCESS_KEY
     restored = SandboxArchivePolicy.from_mapping(policy.as_dict())
     assert restored == policy
     assert restored.access_key_auth is True
     assert restored.aws_secret_access_key == ""
     assert not restored.equivalent(policy)
-    assert SandboxArchivePolicy.from_mapping(policy.as_broker_dict()).equivalent(policy)
+    assert SandboxArchivePolicy.from_mapping(policy.as_sandbox_manager_dict()).equivalent(policy)

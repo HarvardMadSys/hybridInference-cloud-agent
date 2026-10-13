@@ -54,6 +54,7 @@ from cloud_agent.mcp.http_body import IDENTITY_ENCODING_HEADERS
 from cloud_agent.mcp.launch import LaunchPlanError, ManagedLaunchPolicy, build_launch_plan
 from cloud_agent.mcp.models import (
     AuthKind,
+    Capability,
     CapabilityKind,
     ConnectionErrorKind,
     ConnectionStatus,
@@ -511,6 +512,7 @@ class InvocationView(BaseModel):
     #: for display only; they never decide authorization.
     capability_annotations: dict[str, Any] = Field(default_factory=dict)
     status: str
+    always_allow_status: str | None = None
     arguments_digest: str
     arguments: dict[str, Any] | None = None
     created_at: datetime | None = None
@@ -534,6 +536,7 @@ class DecisionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     approve: bool
+    always_allow: bool = False
 
 
 # --------------------------------------------------------------------------
@@ -2064,9 +2067,33 @@ async def decide_invocation(
         or job.get("deleted_at") is not None
     ):
         raise _not_found("no such MCP call")
-    decided = await job_store.mcp.decide_mcp_invocation(
-        invocation_id=invocation_id, approve=body.approve, decided_by=user["user_id"]
-    )
+    rule: dict[str, Any] | None = None
+    if body.always_allow:
+        if not body.approve:
+            raise HTTPException(status_code=422, detail="Always allow requires approval")
+        snapshot = await job_store.mcp.get_mcp_capabilities(
+            connection_id=int(existing["connection_id"])
+        )
+        kind = str(existing.get("capability_kind") or "tool")
+        entry = _held_capability(snapshot, existing, kind)
+        if entry is None:
+            raise _conflict("the capability changed; review the current permissions")
+        schema = entry.get("input_schema")
+        capability = Capability(
+            kind=CapabilityKind(kind),
+            name=str(entry["name"]),
+            description=str(entry.get("description") or ""),
+            input_schema=schema if isinstance(schema, Mapping) else None,
+        )
+        rule = {"policy": "allow", "fingerprint": capability.fingerprint()}
+    decision_args: dict[str, Any] = {
+        "invocation_id": invocation_id,
+        "approve": body.approve,
+        "decided_by": user["user_id"],
+    }
+    if rule is not None:
+        decision_args["always_allow_rule"] = rule
+    decided = await job_store.mcp.decide_mcp_invocation(**decision_args)
     if decided is None:
         raise _conflict("this call was already decided, or it expired")
     return await _invocation_view(job_store, decided, user["user_id"])
@@ -2154,6 +2181,7 @@ async def _invocation_view(
             dict(capability.get("annotations") or {}) if capability is not None else {}
         ),
         status=status.value,
+        always_allow_status=row.get("always_allow_status"),
         arguments_digest=str(row["arguments_digest"]),
         arguments=arguments,
         created_at=row.get("created_at"),

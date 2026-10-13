@@ -7,7 +7,7 @@ either alone would pass while the pair disagreed.
 What is real here: the FastAPI applications, their routers, their dependencies,
 the host credential check, the request and response models, and the transport.
 What is stated rather than performed: storage (an in-memory capability) and the
-broker's own container, which the policy-push test replaces with the real
+sandbox manager's own container, which the policy-push test replaces with the real
 application served in-process.
 """
 
@@ -724,22 +724,22 @@ def test_a_stopped_deployment_hands_the_host_no_run() -> None:
     assert policy["run"] is None
 
 
-# ── the broker's own policy endpoint ───────────────────────────────────
+# ── the sandbox manager's own policy endpoint ───────────────────────────────────
 
 
-def test_the_broker_applies_a_policy_and_refuses_a_lower_revision() -> None:
+def test_the_sandbox_manager_applies_a_policy_and_refuses_a_lower_revision() -> None:
     """Reordered pushes cannot undo a Stop, and a repeat is idempotent."""
-    from cloud_agent_host import broker_profiling_policy
+    from cloud_agent_host import sandbox_manager_profiling_policy
     from cloud_agent_host.sandbox import ProcessBackend
-    from cloud_agent_host.workspace_broker import create_app
+    from cloud_agent_host.sandbox_manager import create_app
 
-    monkeypatch_token = "broker-token"
+    monkeypatch_token = "sandbox-manager-token"
     app = create_app(
         backend=ProcessBackend(acknowledged_unsafe=True),
         token=monkeypatch_token,
         shared_session_supervisor=_IdleSupervisor(),  # type: ignore[arg-type]
     )
-    broker_profiling_policy.reset_applied_state()
+    sandbox_manager_profiling_policy.reset_applied_state()
     operation_profiling.reset_policy()
     headers = {"X-Agent-Workspace-Token": monkeypatch_token}
     run = {
@@ -781,11 +781,11 @@ def test_the_broker_applies_a_policy_and_refuses_a_lower_revision() -> None:
     assert operation_profiling.policy_store().run() is None
 
 
-def test_a_broker_without_a_policy_records_nothing() -> None:
-    """A policy message is the only thing that lets a broker collect."""
-    from cloud_agent_host import broker_profiling_policy
+def test_a_sandbox_manager_without_a_policy_records_nothing() -> None:
+    """A policy message is the only thing that lets a sandbox manager collect."""
+    from cloud_agent_host import sandbox_manager_profiling_policy
 
-    broker_profiling_policy.reset_applied_state()
+    sandbox_manager_profiling_policy.reset_applied_state()
     operation_profiling.reset_policy()
     context = {
         "run_id": "admin-a",
@@ -798,10 +798,10 @@ def test_a_broker_without_a_policy_records_nothing() -> None:
 
 
 class _IdleSupervisor:
-    """The smallest supervisor the broker's lifespan will start.
+    """The smallest supervisor the sandbox manager's lifespan will start.
 
     The policy route owns no container and reaches no workspace, so the
-    supervisor is never asked for one. It exists because the broker refuses to
+    supervisor is never asked for one. It exists because the sandbox manager refuses to
     start without one beside a process backend, which is a real product rule --
     not something this test should work around by reaching into the app.
     """

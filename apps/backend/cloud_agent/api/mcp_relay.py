@@ -139,6 +139,7 @@ _CONNECT_TIMEOUT_S = 10.0
 #: at least this often anyway: its caller leaving, its attempt being superseded
 #: and its connection changing announce nothing.
 _APPROVAL_IDLE_S = 5.0
+_HOST_KEEPALIVE_S = 15.0
 #: How often it looks where nothing would wake it: no listener in this process,
 #: or the listening connection lost.
 _APPROVAL_POLL_S = 1.0
@@ -734,6 +735,9 @@ async def _wait_for_approval(
     decision wakes the wait; otherwise it looks again on a clock.
     """
     invocation_id = int(invocation["id"])
+    message = (
+        "MCP session authorization changed while waiting for approval; this call was not sent."
+    )
     signal = get_mcp_decision_signal(request) if request is not None else None
     subscription = (
         signal.subscribe(str(invocation_id)) if signal is not None else contextlib.nullcontext()
@@ -744,6 +748,11 @@ async def _wait_for_approval(
                 if request is not None and await request.is_disconnected():
                     raise asyncio.CancelledError
                 if datetime.now(timezone.utc) >= invocation["expires_at"]:
+                    message = (
+                        "MCP approval expired while waiting for the owner's decision; "
+                        "this call was not sent to the server. Ask the owner to review "
+                        "Approvals or this conversation's Tools permissions before requesting it again."
+                    )
                     break
                 attempt_id = fence["attempt_id"]
                 if attempt_id is None:
@@ -791,8 +800,26 @@ async def _wait_for_approval(
                             (invocation_id, int(claimed["dispatch_generation"]))
                         )
                         return None
+                    message = (
+                        "MCP approval could not be claimed; another caller may already have sent it. "
+                        "Check the external state before retrying a write."
+                    )
                     break
                 if row["status"] != "pending":
+                    if row["status"] == "expired":
+                        return _error_reply(
+                            request_id,
+                            "MCP approval expired before dispatch; this call was not sent to the server. "
+                            "Ask the owner to review Approvals or this conversation's Tools permissions "
+                            "before requesting it again.",
+                        )
+                    if row["status"] in {"dispatching", "completed", "failed", "outcome_unknown"}:
+                        return _error_reply(
+                            request_id,
+                            f"MCP call {row['status']}; its approval was already claimed for dispatch. "
+                            "This caller cannot confirm the result. Check the external state "
+                            "before retrying a write.",
+                        )
                     return _error_reply(
                         request_id, f"MCP call {row['status']}; it was not dispatched."
                     )
@@ -801,7 +828,7 @@ async def _wait_for_approval(
             await asyncio.shield(store.mcp.expire_mcp_invocation(invocation_id=invocation_id))
             raise
     await store.mcp.expire_mcp_invocation(invocation_id=invocation_id)
-    return _error_reply(request_id, "MCP approval expired or the session authorization changed.")
+    return _error_reply(request_id, message)
 
 
 async def _until_decided(
@@ -1269,6 +1296,11 @@ async def maintain_host_sessions(store: _McpRelayStorage) -> None:
                 await store.mcp.expire_mcp_invocations()
         except Exception:
             logger.warning("agent_mcp_invocation_expiry_failed", exc_info=True)
+        try:
+            async with asyncio.timeout(5.0):
+                await store.mcp.apply_pending_mcp_allow_rules()
+        except Exception:
+            logger.warning("agent_mcp_remembered_approval_failed", exc_info=True)
         await reap_host_sessions(store)
 
 
@@ -1436,6 +1468,9 @@ async def _host_initialize(payload: dict[str, Any], identity: dict[str, Any]) ->
         "instructions": (
             "Use the exact tool names returned by tools/list. This session's connections: "
             + (", ".join(alias for alias in aliases if alias) or "none")
+            + ". Calls requiring confirmation wait for the owner in Approvals or the conversation's "
+            "Tools panel. An approval expiry means the call was not sent; ask the owner to review "
+            "the request or permissions before retrying."
         ),
     }
 
@@ -1459,6 +1494,114 @@ async def _host_post(
     except _BodyRefused as exc:
         return exc.response
 
+    # The native HTTP stack can give up on a completely silent request even
+    # when the CLI's MCP timers cover the approval window. Stream a response
+    # immediately and keep its socket alive while the original fenced call
+    # waits. JSON-only callers and batches retain their response shape.
+    if (
+        isinstance(document, dict)
+        and "id" in document
+        and document.get("method")
+        in {protocol.TOOLS_CALL, protocol.RESOURCES_READ, protocol.PROMPTS_GET}
+        and _accepts_event_stream(request)
+    ):
+        return StreamingResponse(
+            _host_call_stream(
+                document=document,
+                identity=identity,
+                store=store,
+                request=request,
+                authorization=authorization,
+            ),
+            media_type="text/event-stream",
+            headers=_SSE_HEADERS,
+        )
+    return await _host_document(
+        document=document,
+        identity=identity,
+        store=store,
+        request=request,
+        authorization=authorization,
+    )
+
+
+def _accepts_event_stream(request: Request) -> bool:
+    """Select SSE only when the caller explicitly accepts it with positive quality."""
+    for offered in request.headers.get("accept", "").lower().split(","):
+        media_type, *parameters = offered.strip().split(";")
+        if media_type != "text/event-stream":
+            continue
+        quality = "1"
+        for parameter in parameters:
+            key, _, value = parameter.strip().partition("=")
+            if key == "q":
+                quality = value
+        try:
+            if float(quality) > 0:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+async def _host_call_stream(
+    *,
+    document: dict[str, Any],
+    identity: dict[str, Any],
+    store: _McpRelayStorage,
+    request: Request,
+    authorization: str | None,
+) -> AsyncIterator[bytes]:
+    """Keep one request alive without dispatching it again or retaining it after disconnect."""
+    task = asyncio.create_task(
+        _host_document(
+            document=document,
+            identity=identity,
+            store=store,
+            request=request,
+            authorization=authorization,
+        )
+    )
+    try:
+        yield b": MCP call in progress\n\n"
+        while True:
+            done, _ = await asyncio.wait({task}, timeout=_HOST_KEEPALIVE_S)
+            if done:
+                try:
+                    response = task.result()
+                    body = response.body
+                except HTTPException as exc:
+                    body = json.dumps(_binding_error(document["id"], exc)).encode()
+                except Exception:
+                    logger.exception("agent_mcp_stream_call_failed")
+                    body = json.dumps(
+                        _error_reply(
+                            document["id"],
+                            "MCP relay could not confirm this call's result. Check external state before retrying a write.",
+                            INTERNAL_ERROR,
+                        )
+                    ).encode()
+                yield b"event: message\ndata: " + body + b"\n\n"
+                return
+            yield b": MCP call in progress\n\n"
+    finally:
+        if not task.done():
+            task.cancel()
+        # Cancelling the dispatcher expires a pending approval, or marks an
+        # already-dispatched write's outcome unknown. It must finish before
+        # this request disappears; never leave a detached background write.
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def _host_document(
+    *,
+    document: Any,
+    identity: dict[str, Any],
+    store: _McpRelayStorage,
+    request: Request,
+    authorization: str | None,
+) -> Any:
+    """Handle the already-bounded document for either JSON or SSE replies."""
     payloads = document if isinstance(document, list) else [document]
     replies: list[dict[str, Any]] = []
     stateless = False

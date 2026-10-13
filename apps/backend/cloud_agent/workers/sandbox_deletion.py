@@ -10,10 +10,13 @@ from urllib.parse import urlparse
 
 import httpx
 
-from cloud_agent.broker_routing import broker_configuration_error, broker_for_host
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.sandbox_archive import S3SandboxArchiveStore
-from cloud_agent.workspace_broker_client import WorkspaceBrokerError
+from cloud_agent.sandbox_manager_client import SandboxManagerError
+from cloud_agent.sandbox_manager_routing import (
+    sandbox_manager_configuration_error,
+    sandbox_manager_for_host,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -47,23 +50,23 @@ def _validate_receipt(receipt: dict[str, Any], expected: dict[str, Any]) -> None
 
 
 def _discard_failure_reason(cause: BaseException) -> str:
-    """Classify broker failures without persisting their text or request URLs."""
-    transport = cause.__cause__ if isinstance(cause, WorkspaceBrokerError) else cause
+    """Classify sandbox manager failures without persisting their text or request URLs."""
+    transport = cause.__cause__ if isinstance(cause, SandboxManagerError) else cause
     if isinstance(transport, httpx.TimeoutException):
-        return "The owning host's workspace broker timed out before confirming removal."
+        return "The owning host's sandbox manager timed out before confirming removal."
     if isinstance(transport, httpx.TransportError):
-        return "The owning host's workspace broker could not be reached. Check its connectivity."
-    if not isinstance(cause, WorkspaceBrokerError):
+        return "The owning host's sandbox manager could not be reached. Check its connectivity."
+    if not isinstance(cause, SandboxManagerError):
         return ""
     if cause.status_code in {401, 403}:
         return (
-            "The owning host rejected the workspace broker credential. "
+            "The owning host rejected the sandbox manager credential. "
             "Check that the control plane and host use the same credential."
         )
     if cause.status_code == 404:
         return (
             "The owning host could not find the sandbox or deletion endpoint. "
-            "Check its container inventory and workspace broker version."
+            "Check its container inventory and sandbox manager version."
         )
     if cause.status_code == 409:
         return (
@@ -78,14 +81,14 @@ def _discard_failure_reason(cause: BaseException) -> str:
     if cause.status_code == 422:
         return (
             "The owning host rejected the deletion request. "
-            "Check that its workspace broker is up to date."
+            "Check that its sandbox manager is up to date."
         )
     if cause.status_code == 429:
-        return "The owning host's workspace broker is busy."
+        return "The owning host's sandbox manager is busy."
     if cause.status_code >= 500:
         return (
-            "The owning host's workspace broker failed while processing deletion. "
-            "Check its broker logs."
+            "The owning host's sandbox manager failed while processing deletion. "
+            "Check its sandbox manager logs."
         )
     return "The owning host rejected the deletion request."
 
@@ -97,7 +100,7 @@ async def delete_one_archived_sandbox(
 ) -> bool:
     """Process one fenced request, retaining archives across interrupted deletion.
 
-    The database receipt commits before the broker receives permission to
+    The database receipt commits before the sandbox manager receives permission to
     remove Docker. Once that checkpoint exists, an error keeps admission
     blocked and retries the same deletion; it never reopens a possibly removed
     native session. A verified object is checked again on every retry.
@@ -112,20 +115,20 @@ async def delete_one_archived_sandbox(
         "generation": int(claim["generation"]),
         "container_id": str(claim["container_id"]),
     }
-    broker = None
+    sandbox_manager = None
     payload: dict[str, Any] | None = None
     discarding = bool(claim.get("deletion_discard"))
     verified = claim["deletion_state"] == "archived"
     archive_verified = verified
     configuration_error = None
-    request_phase = "resolve_broker"
+    request_phase = "resolve_sandbox_manager"
     try:
         if discarding:
             host = await store.host_pool.get_host(host=str(claim["host"]))
-            broker = broker_for_host(host) if host is not None else None
-            if broker is None:
-                configuration_error = broker_configuration_error(host)
-                raise ValueError("The owning workspace broker is unavailable.")
+            sandbox_manager = sandbox_manager_for_host(host) if host is not None else None
+            if sandbox_manager is None:
+                configuration_error = sandbox_manager_configuration_error(host)
+                raise ValueError("The owning sandbox manager is unavailable.")
             payload = {
                 "request_id": fence["request_id"],
                 "generation": fence["generation"],
@@ -133,7 +136,9 @@ async def delete_one_archived_sandbox(
                 "sandbox_id": fence["sandbox_id"],
             }
             request_phase = "discard"
-            deleted = await broker.discard_sandbox_deletion(str(claim["origin_thread_id"]), payload)
+            deleted = await sandbox_manager.discard_sandbox_deletion(
+                str(claim["origin_thread_id"]), payload
+            )
             request_phase = "validate_discard_receipt"
             _validate_receipt(
                 deleted,
@@ -150,9 +155,9 @@ async def delete_one_archived_sandbox(
                 raise ValueError("Container deletion lost its durable request fence.")
             return True
         host = await store.host_pool.get_host(host=str(claim["host"]))
-        broker = broker_for_host(host) if host is not None else None
-        if broker is None:
-            raise ValueError("The owning workspace broker is unavailable.")
+        sandbox_manager = sandbox_manager_for_host(host) if host is not None else None
+        if sandbox_manager is None:
+            raise ValueError("The owning sandbox manager is unavailable.")
         thread_id = str(claim["origin_thread_id"])
         if claim.get("deletion_cleanup_required"):
             payload = {
@@ -188,7 +193,7 @@ async def delete_one_archived_sandbox(
             sha256 = str(claim["deletion_sha256"])
             size_bytes = int(claim["deletion_size_bytes"])
         else:
-            prepared = await broker.prepare_sandbox_deletion(thread_id, payload)
+            prepared = await sandbox_manager.prepare_sandbox_deletion(thread_id, payload)
             _validate_receipt(prepared, expected)
             sha256 = str(prepared.get("sha256") or "")
             raw_size = prepared.get("size_bytes")
@@ -202,7 +207,7 @@ async def delete_one_archived_sandbox(
             )
             if upload.key != key:
                 raise ValueError("Sandbox archive upload destination changed.")
-            uploaded = await broker.upload_sandbox_deletion_archive(
+            uploaded = await sandbox_manager.upload_sandbox_deletion_archive(
                 thread_id,
                 {
                     **payload,
@@ -228,7 +233,7 @@ async def delete_one_archived_sandbox(
             if not recorded:
                 raise ValueError("The sandbox archive lost its durable request fence.")
             verified = True
-        deleted = await broker.commit_sandbox_deletion(
+        deleted = await sandbox_manager.commit_sandbox_deletion(
             thread_id, {**payload, "sha256": sha256, "size_bytes": size_bytes}
         )
         _validate_receipt(deleted, {**expected, "sha256": sha256, "size_bytes": size_bytes})
@@ -241,7 +246,12 @@ async def delete_one_archived_sandbox(
         # Upload URLs are credentials. Never persist arbitrary SDK/HTTP errors
         # containing request URLs in user-visible state or operational logs.
         abort_acknowledged = False
-        if not discarding and not archive_verified and broker is not None and payload is not None:
+        if (
+            not discarding
+            and not archive_verified
+            and sandbox_manager is not None
+            and payload is not None
+        ):
             with contextlib.suppress(Exception):
                 # Renew before touching the host barrier. An expired claimant
                 # must not abort a newer worker's operation for this request.
@@ -252,7 +262,7 @@ async def delete_one_archived_sandbox(
                     cleanup_archive_key=str(payload["archive_key"]),
                 )
                 if owned:
-                    aborted = await broker.abort_sandbox_deletion(
+                    aborted = await sandbox_manager.abort_sandbox_deletion(
                         str(claim["origin_thread_id"]), payload
                     )
                     _validate_receipt(
@@ -298,8 +308,8 @@ async def delete_one_archived_sandbox(
                 "sandbox_id": fence["sandbox_id"],
                 "failure_type": type(cause).__name__,
                 "request_phase": request_phase if discarding else "archive_delete",
-                "broker_status": cause.status_code
-                if isinstance(cause, WorkspaceBrokerError)
+                "sandbox_manager_status": cause.status_code
+                if isinstance(cause, SandboxManagerError)
                 else None,
             },
         )

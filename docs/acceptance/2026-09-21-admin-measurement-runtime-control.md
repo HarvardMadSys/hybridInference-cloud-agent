@@ -29,7 +29,7 @@
 | 对应的测试（参与者、ACK、租约、复合状态）与文档章节 | 同上 |
 
 保留并加强的是**配置版本**：`RuntimePolicyStore.publish()` 拒绝比已应用版本更旧的快照，
-broker 也拒绝更低 revision 的推送。这是防"旧配置覆盖新配置"的全部机制，没有第二套续租
+sandbox manager 也拒绝更低 revision 的推送。这是防"旧配置覆盖新配置"的全部机制，没有第二套续租
 协议。
 
 ## 0.1 复核修复（`52b6505` 复核后的三项）
@@ -40,8 +40,8 @@ ACK 或复杂状态机。**
 | 问题 | 根因 | 修复 | 回归证据 |
 | --- | --- | --- | --- |
 | **[P1] 全新 runner 子进程接不上 Admin 选择** | `attach_selection()` 在解析继承 manifest 之前要求 `_load().run` 非空且 run id 相同；真实子进程是新解释器，Admin 模式下没有本地配置 | 子进程**从 context 自带的不可变 manifest 恢复**该次测量，不再要求它自己选中实验；仍强制实验未过期、操作列表合法、不占第二个名额 | `test_a_real_child_process_continues_an_admin_selection`——**真实 subprocess 新解释器**，Admin 模式、无 provider、无静态 descriptor，断言 attached、同 measurement_id、同计时起点、同 run/target、预算未增加，且写出的记录 `profiling_run_id` 正确 |
-| **[P2] broker 推送失败后不再同步** | 只在 `changed` 时推送；失败后 revision 已记为 applied，后续轮询不再重发；broker 独立重启同样收不到 | 每次同步都重发当前配置（receiver 按 revision 幂等，同 revision 直接返回不改状态）；推送结果仍只作本地诊断，不构成 ACK | `test_a_failed_broker_push_is_offered_again`（连续两轮共 4 次失败后第三轮送达）、`test_a_restarted_broker_is_given_the_configuration_again` |
-| **[P2] Disable 后丢掉在途操作的后续片段** | `start_stage_recording()` 要求 broker 本地配置里的 run 与上下文一致，Disable 后为空即拒绝；于是"记录在、阶段缺" | 区分**延续**与**新选择**：带不可变 manifest 的 context 是延续，按原实验身份继续；只声明操作的 context 仍要求本地配置匹配，调用方不能靠声明覆盖 broker 配置 | `test_a_selected_operation_keeps_its_later_stages_after_a_stop`、`test_a_continuation_cannot_widen_the_operations_it_was_given`、`test_a_context_without_a_manifest_still_needs_the_local_configuration`，以及 HTTP 级 `test_a_configuration_change_does_not_truncate_an_in_flight_request` 与验收链里新增的 post-switch broker 片段断言（`missing_fragments` 不存在，`admission` 阶段在记录里） |
+| **[P2] sandbox manager 推送失败后不再同步** | 只在 `changed` 时推送；失败后 revision 已记为 applied，后续轮询不再重发；sandbox manager 独立重启同样收不到 | 每次同步都重发当前配置（receiver 按 revision 幂等，同 revision 直接返回不改状态）；推送结果仍只作本地诊断，不构成 ACK | `test_a_failed_sandbox_manager_push_is_offered_again`（连续两轮共 4 次失败后第三轮送达）、`test_a_restarted_sandbox_manager_is_given_the_configuration_again` |
+| **[P2] Disable 后丢掉在途操作的后续片段** | `start_stage_recording()` 要求 sandbox manager 本地配置里的 run 与上下文一致，Disable 后为空即拒绝；于是"记录在、阶段缺" | 区分**延续**与**新选择**：带不可变 manifest 的 context 是延续，按原实验身份继续；只声明操作的 context 仍要求本地配置匹配，调用方不能靠声明覆盖 sandbox manager 配置 | `test_a_selected_operation_keeps_its_later_stages_after_a_stop`、`test_a_continuation_cannot_widen_the_operations_it_was_given`、`test_a_context_without_a_manifest_still_needs_the_local_configuration`，以及 HTTP 级 `test_a_configuration_change_does_not_truncate_an_in_flight_request` 与验收链里新增的 post-switch sandbox manager 片段断言（`missing_fragments` 不存在，`admission` 阶段在记录里） |
 
 展示收尾（非阻断）：状态词统一为 **Enabled / Disabled**；停用说明写清"停止选择新操作，
 已开始的测量会继续完成"；同步提示改为"正常约 30 秒"而非硬保证。
@@ -54,7 +54,7 @@ ACK 或复杂状态机。**
 | 问题 | 根因 | 修复 | 回归证据 |
 | --- | --- | --- | --- |
 | **[P2] 接续绕过部署级 `disabled`** | 接续分支只看 `_load().run`，不看进程的控制模式；`MODE=disabled`（当时也包括未配置的默认值；2026-09-22 起未配置改为 Admin）下仍会分配 measurement 与 recorder | 接续**只在 `MODE=admin` 下可用**：`disabled` 是"本部署禁止采集"，与 Admin 卡片上的 Disable 是两件事；`environment` 继续由自己的静态 descriptor 决定（父子环境相同，走原有 `_load()` 路径） | `test_a_disabled_deployment_refuses_a_continuation`（含真实 `open_call` 解析路径）、`test_a_default_off_deployment_refuses_a_continuation`、`test_environment_mode_still_follows_its_own_descriptor`；subprocess 测试追加"同一份真实 handoff 交给 `MODE=disabled` 的新解释器 → `attached=false` 且 sink 无新行" |
-| **[P2] manifest 的 `expires_at` 被解析却未用于截止** | 子进程与 broker 的 deadline 只取顶层 `context.expires_at`；`run.expires_at` 只有在本地 run 恰好同名时才参与取最小值 | 接续时用**原实验的绝对到期时刻**建立本地单调截止，与传输上下文的截止、以及（同名时）本地同实验截止**三者取较早者**；manifest 已过期则直接拒绝 | `test_an_inherited_manifest_that_has_expired_is_refused`（manifest 过期 60 s、顶层还剩 300 s → 两处都拒绝）、`test_the_earlier_of_the_two_deadlines_wins`（manifest 剩 2 s、顶层剩 300 s → 两处剩余均 ≤3 s，而不是 300 s）、`test_a_context_cannot_outlive_the_experiment_it_names`（反向） |
+| **[P2] manifest 的 `expires_at` 被解析却未用于截止** | 子进程与 sandbox manager 的 deadline 只取顶层 `context.expires_at`；`run.expires_at` 只有在本地 run 恰好同名时才参与取最小值 | 接续时用**原实验的绝对到期时刻**建立本地单调截止，与传输上下文的截止、以及（同名时）本地同实验截止**三者取较早者**；manifest 已过期则直接拒绝 | `test_an_inherited_manifest_that_has_expired_is_refused`（manifest 过期 60 s、顶层还剩 300 s → 两处都拒绝）、`test_the_earlier_of_the_two_deadlines_wins`（manifest 剩 2 s、顶层剩 300 s → 两处剩余均 ≤3 s，而不是 300 s）、`test_a_context_cannot_outlive_the_experiment_it_names`（反向） |
 
 `test_a_configuration_change_does_not_truncate_an_in_flight_request` 更名为
 `test_a_disable_does_not_truncate_an_in_flight_request` 并改用 **Admin 模式**驱动——
@@ -74,7 +74,7 @@ Disable measurement**（**同一个按钮**，文字随状态切换），即可�
 | 控制能力 | `apps/backend/cloud_agent/ports/profiling_control.py`、`domain/profiling_control.py`、`storage/repositories/profiling_control.py`、`application/profiling_control.py` |
 | 持久化 | `migrations/versions/0018_profiling_control.py`：控制单例行（含 revision 与停止墓碑）+ 命令幂等表 + run 生命周期列 |
 | Admin 接口 | `apps/backend/cloud_agent/api/admin_profiling_control.py` |
-| 配置传播 | `workers/profiling_control.py`（CP 每进程快照）、`api/host_profiling.py`（host 配置读取）、`cloud_agent_host/profiling_policy.py`（runner 同步 + broker 下发）、`cloud_agent_host/broker_profiling_policy.py`（broker 接收） |
+| 配置传播 | `workers/profiling_control.py`（CP 每进程快照）、`api/host_profiling.py`（host 配置读取）、`cloud_agent_host/profiling_policy.py`（runner 同步 + sandbox manager 下发）、`cloud_agent_host/sandbox_manager_profiling_policy.py`（sandbox manager 接收） |
 | 前端 | `apps/frontend/src/app/(agents)/admin/measurements/MeasurementControlPanel.tsx`、`src/lib/api/adminMeasurements.ts` |
 | 部署 | `deploy/{control-plane,host,local}` 三个 compose + 两个 `.env.example` + `ENVIRONMENT.md` |
 
@@ -82,7 +82,7 @@ Disable measurement**（**同一个按钮**，文字随状态切换），即可�
 
 ### 2.1 部署默认行为（2026-09-22 更新）
 
-正常升级 CP、runner、broker 并完成 `alembic upgrade head` 后，无需设置 profiling 环境
+正常升级 CP、runner、sandbox manager 并完成 `alembic upgrade head` 后，无需设置 profiling 环境
 变量。Admin 默认可控制；新数据库没有活动实验，页面显示 Disabled 与 Enable measurement。
 旧部署的显式 `MODE=admin` 可保留。旧 `ENABLED=true` 保持静态实验兼容；显式
 `MODE=disabled` 仍禁止采集。详见 [默认行为设计](../specs/2026-09-22-measurement-admin-default.zh-CN.md)。
@@ -148,14 +148,14 @@ Alembic 迁移、真实 `asyncpg` 连接池、两个真实 FastAPI 应用各自�
 1. **启用**：`POST /admin/agent/profiling-runs` → PostgreSQL 创建实验与控制行 → CP 自己的
    同步循环把配置发布到采集器（断言 `source == "admin"`、`config_version == 1`、
    `deadline_mono > now`，且**没有租约**）。
-2. **配置真的到了 broker**（本轮新增，修的就是这条）：测试用一个**真实的
+2. **配置真的到了 sandbox manager**（本轮新增，修的就是这条）：测试用一个**真实的
    `ProfilingPolicySync`**，配**真实的 `SessionSupervisorClient`** 与**真实 mint 的 host
-   凭据**，先打真实 CP 端点、再打**单独 serve 的 broker 应用**。断言：同步返回 5 s 活跃
-   间隔、`state()["run_id"] == run_id`、`broker_ok is True`，且 **broker 自己的
+   凭据**，先打真实 CP 端点、再打**单独 serve 的 sandbox manager 应用**。断言：同步返回 5 s 活跃
+   间隔、`state()["run_id"] == run_id`、`sandbox_manager_ok is True`，且 **sandbox manager 自己的
    `applied_state()` 里 revision 与 run id 都对**。这条链路在上一版是断的（同步器建的时候
-   没接 broker client），所以它现在是显式断言而不是"应该会通"。
+   没接 sandbox manager client），所以它现在是显式断言而不是"应该会通"。
 3. **真实根入口产生样本**：真实属主会话读一个文件 → 真实 `operation_measurement` 选根 →
-   真实 broker 片段协议 → 有界投递 → PostgreSQL；断言落库行的 run/target/operation 与
+   真实 sandbox manager 片段协议 → 有界投递 → PostgreSQL；断言落库行的 run/target/operation 与
    `record.control_revision == 1`。
 4. **读回**：`GET /admin/agent/profiling-control` 给出 `status == "on"`、
    `stored_samples == 1`、`run_active is True`、`bounds`、`sync_note` 含 "30 seconds"；
@@ -168,7 +168,7 @@ Alembic 迁移、真实 `asyncpg` 连接池、两个真实 FastAPI 应用各自�
 8. **在途测量照常完成入库**：请求 A 在实验进行时选根并把 block 保持打开，期间用真实 HTTP
    停用，然后 A 走**真实进程内持久化路径** `record_measurement`。断言行已入库、
    `outcome == "completed"`、`collection_complete is True`、没有 `profiling_stopped`。
-9. **停用之后发出的 broker 片段仍然收齐**（复核补充）：同一个 block 里，停用之后再用 A 的
+9. **停用之后发出的 sandbox manager 片段仍然收齐**（复核补充）：同一个 block 里，停用之后再用 A 的
    context 调 `start_stage_recording`，断言 recorder 非空、阶段被记录，最终记录里
    `missing_fragments` 不存在且 `admission` 阶段出现在 `stages[].children`。
 
@@ -186,7 +186,7 @@ Alembic 迁移、真实 `asyncpg` 连接池、两个真实 FastAPI 应用各自�
 - host 配置交换：回答里有 run/operations/target/`max_operations`/`server_time`，**没有
   `lease`**、不记录任何关于该 host 的状态；**请求体里写另一台机器的名字也不会改变答案**
   （断言 builder 收到的 host 来自凭据而不是请求体）。
-- broker 端点：同 revision 幂等、**更低 revision 被 409 拒绝**、没有配置时
+- sandbox manager 端点：同 revision 幂等、**更低 revision 被 409 拒绝**、没有配置时
   `start_stage_recording` 返回 `None`。
 
 ### 3.5 采集器与父子进程
@@ -204,14 +204,14 @@ Alembic 迁移、真实 `asyncpg` 连接池、两个真实 FastAPI 应用各自�
 ### 3.6 部署配置
 
 `tests/unit/deploy/test_artifact_compose.py`、`tests/unit/test_deploy_config.py` 覆盖：
-三个 compose 都把 `AGENT_OPERATION_PROFILING_MODE` 传给 CP、runner、workspace broker，
+三个 compose 都把 `AGENT_OPERATION_PROFILING_MODE` 传给 CP、runner、sandbox manager，
 本地栈的 deployment 命名空间按 `${...:-default}` 透传。
 
 ## 4. 模拟通过（替身代替了真实组件）
 
 | 用例 | 真实部分 | 替身部分 | 为什么 |
 | --- | --- | --- | --- |
-| 3.3 的 broker 片段 | 真实 `operation_call.open_call` / `BrokerCall`、真实 runner↔broker HTTP、真实投递与入库 | 工作区内容由 fixture 提供；没有真实容器 | 本机没有可用的容器运行时 |
+| 3.3 的 sandbox manager 片段 | 真实 `operation_call.open_call` / `SandboxManagerCall`、真实 runner↔sandbox manager HTTP、真实投递与入库 | 工作区内容由 fixture 提供；没有真实容器 | 本机没有可用的容器运行时 |
 | 3.4 的存储 | 真实路由/依赖/模型/传输 | 内存版 control capability | 该文件测 HTTP 语义；SQL 语义由 3.3 的真实 PostgreSQL 覆盖 |
 | 3.5 的 admin 服务 | 真实服务类 | 内存版 capability | 同上 |
 
@@ -227,7 +227,7 @@ Alembic 迁移、真实 `asyncpg` 连接池、两个真实 FastAPI 应用各自�
 | 一次变更在所有进程生效上限 | 30 s（UI 写出该数字） | 同上 + `sync_note` |
 | 断联节点停止选取的边界 | 实验自己的 `expires_at` | 采集器 |
 | 接续可用的控制模式 | 仅 `MODE=admin`；`disabled`（含默认未配置）拒绝，`environment` 走本地 descriptor | `operation_profiling._manifest_for_continuation` |
-| broker 配置重发 | 每次同步（活动 5 s / 空闲 30 s） | `cloud_agent_host/profiling_policy.py` |
+| sandbox manager 配置重发 | 每次同步（活动 5 s / 空闲 30 s） | `cloud_agent_host/profiling_policy.py` |
 
 **没有** 15 秒租约，也**没有** 20 秒全量失效承诺 —— 那套机制已随本次简化删除。
 
@@ -236,7 +236,7 @@ Alembic 迁移、真实 `asyncpg` 连接池、两个真实 FastAPI 应用各自�
 1. **`tests/unit/test_chat_sandbox.py::test_retained_terminal_keeps_the_shell_in_the_docker_tty_process_group`
    在本机失败**：`os.openpty()` 被本机沙箱拒绝（`PermissionError: [Errno 1]`），与本 PR
    无关（该文件未被修改），CI 上通过。
-2. **没有真实 Docker/Kata 容器参与验收**：`attempt.startup` 的 broker 子阶段只有单元与
+2. **没有真实 Docker/Kata 容器参与验收**：`attempt.startup` 的 sandbox manager 子阶段只有单元与
    路由级证据。
 3. **没有跨 CP replica 的真实并发验证**：控制行的 `FOR UPDATE` + 事务级 advisory lock 保证
    互斥，有真实 PostgreSQL 的顺序 409 路径，但没有两个 replica 同时启用的实测。

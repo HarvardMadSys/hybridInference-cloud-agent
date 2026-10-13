@@ -96,15 +96,16 @@ async def update_settings(
         definition["key"]: definition["default"] for definition in current_view["definitions"]
     }
     safe_changes = {}
-    for key in changes:
+    for stored_key in changes:
+        key = settings.SETTINGS_BY_STORAGE_KEY[stored_key].key
         if key in current_view["secret_configured"]:
             safe_changes[key] = {
-                "previous": "[redacted]" if previous.get(key) else None,
+                "previous": "[redacted]" if previous.get(stored_key) else None,
                 "value": "[redacted]" if current_view["secret_configured"].get(key) else None,
             }
         else:
             safe_changes[key] = {
-                "previous": previous.get(key, defaults.get(key)),
+                "previous": previous.get(stored_key, defaults.get(key)),
                 "value": current_view["values"].get(key),
             }
     await log_admin_action(

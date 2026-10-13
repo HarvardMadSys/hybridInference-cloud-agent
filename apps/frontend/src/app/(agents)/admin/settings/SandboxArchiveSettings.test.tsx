@@ -61,7 +61,7 @@ describe('sandbox archive settings card', () => {
     expect(advanced).toContainElement(screen.getByLabelText('Multipart part bytes'));
   });
 
-  it('separates saved policy from broker rollout by revision and capability', () => {
+  it('separates saved policy from sandbox manager rollout by revision and capability', () => {
     const hosts = [
       {
         host: 'runner-a',

@@ -805,7 +805,7 @@ def test_final_spools_and_uploads_before_the_stop_hook_returns() -> None:
 
 @pytest.mark.parametrize("phase", ["initial", "final"])
 def test_transient_member_state_cannot_change_archive_bytes(phase: str) -> None:
-    """Broker reconstruction must not degrade or fork a deterministic object."""
+    """Sandbox Manager reconstruction must not degrade or fork a deterministic object."""
     payloads: list[bytes] = []
     member_sets = (
         _members(),

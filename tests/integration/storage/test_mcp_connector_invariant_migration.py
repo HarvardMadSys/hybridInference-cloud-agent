@@ -19,7 +19,7 @@ pytestmark = pytest.mark.dbtest
 _BEFORE = "0057_admin_sandbox_trajectory"
 _THIS = "0058_mcp_connector_invariant"
 _NEXT = "0059_counter_constraints"
-_HEAD = "0063_user_profiles"
+_HEAD = "0064_mcp_remembered_approvals"
 _OWNER = "user-owner"
 _OTHER = "user-other"
 _PRESERVED_AUTHORIZED_AT = datetime(2001, 2, 3, 4, 5, 6, tzinfo=timezone.utc)
@@ -41,7 +41,8 @@ def test_mcp_connector_invariant_revision_follows_trajectory_merge() -> None:
     assert script.get_revision("0062_native_session_locator").down_revision == (
         "0061_mcp_catalog_sync_fence"
     )
-    assert script.get_revision(_HEAD).down_revision == "0062_native_session_locator"
+    assert script.get_revision("0063_user_profiles").down_revision == "0062_native_session_locator"
+    assert script.get_revision(_HEAD).down_revision == "0063_user_profiles"
 
 
 async def _local_connection(

@@ -1,7 +1,7 @@
-"""Live, revision-fenced sandbox archive policy inside the workspace broker.
+"""Live, revision-fenced sandbox archive policy inside the sandbox manager.
 
 The control plane owns the policy in Postgres.  A host runner receives the
-complete desired revision on every heartbeat and relays it over the broker's
+complete desired revision on every heartbeat and relays it over the sandbox manager's
 authenticated private channel.  This controller is the stable lifecycle hook:
 the shared-session supervisor binds it once, while the controller atomically
 swaps the immutable S3 service behind that hook.
@@ -314,7 +314,7 @@ class SandboxArchiveController:
         """Build an uploader config for one pinned policy.
 
         Markers inside the sandbox omit credentials. A recovered upload uses
-        the access key the broker currently holds; the marker still chooses
+        the access key the sandbox manager currently holds; the marker still chooses
         the region, KMS key, owner and size limits.
         """
         current = self._policy
@@ -353,7 +353,7 @@ class SandboxArchiveController:
 
     @property
     def applied_revision(self) -> int | None:
-        """The exact desired revision this broker accepted."""
+        """The exact desired revision this sandbox manager accepted."""
         with self._condition:
             return None if self._policy is None else self._policy.revision
 
@@ -582,7 +582,7 @@ class SandboxArchiveController:
         """Fence a recovered markerless lifecycle so it can finish without upload.
 
         A running group normally has no final marker: ``complete_start`` removes
-        its start fail-stop fence.  After a broker restart, a reboot or a stop
+        its start fail-stop fence.  After a sandbox manager restart, a reboot or a stop
         that bypassed the broker, its native history is unknown. Under a
         disabled policy this writes the ordinary disabled marker; under an
         enabled one it writes an explicit ``skipped`` final, never an archive of
@@ -749,8 +749,8 @@ class SandboxArchiveController:
                 services_to_close = self._closable_locked()
                 self._condition.notify_all()
             elif existing is not None:
-                # A marker that made it to the broker-private filesystem is
-                # the durable revision fence. A replacement broker may see a
+                # A marker that made it to the sandbox-manager-private filesystem is
+                # the durable revision fence. A replacement sandbox manager may see a
                 # newer (or disabled) DB policy before it finishes stopping a
                 # running orphan; never overwrite the already-fsynced policy.
                 marker_policy = existing.policy
@@ -900,7 +900,7 @@ class SandboxArchiveController:
                 slot.active += 1
                 return slot
 
-        # No in-memory pin means this is recovery after broker restart. The
+        # No in-memory pin means this is recovery after sandbox manager restart. The
         # retained bridge says completion is pending; only the root-owned marker
         # may choose a policy. Never substitute the current DB revision.
         marker = _FinalArchiveMarker.decode(

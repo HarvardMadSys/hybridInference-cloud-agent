@@ -49,11 +49,12 @@ from cloud_agent.application.follow_ups import (
 from cloud_agent.application.job_admission import _idempotency_conflict
 from cloud_agent.application.pending_messages import prepared_head, settle_queue
 from cloud_agent.application.session_fork import materialize_session_fork
-from cloud_agent.broker_routing import broker_for_attempt
 from cloud_agent.domain.execution import RUNNING, SUCCEEDED, TERMINAL_STATES
 from cloud_agent.domain.pending_messages import PreparedHead, SettleOutcome
 from cloud_agent.domain.requests import request_fingerprint
 from cloud_agent.logging_utils import get_logger
+from cloud_agent.sandbox_manager_client import SandboxManagerError
+from cloud_agent.sandbox_manager_routing import sandbox_manager_for_attempt
 from cloud_agent.schemas import (
     AgentJobResponse,
     AgentPendingMessageSendNow,
@@ -68,7 +69,6 @@ from cloud_agent.schemas import (
 from cloud_agent.workers.job_event_signal import (  # noqa: TC001 — FastAPI resolves it.
     JobEventSignal,
 )
-from cloud_agent.workspace_broker_client import WorkspaceBrokerError
 
 if TYPE_CHECKING:
     from cloud_agent.ports import (
@@ -235,12 +235,14 @@ async def get_thread_questions(
     result = AgentThreadQuestionsResponse(job_id=str(latest["id"]), attempt_id=attempt_id)
     if latest.get("state") != RUNNING or latest.get("cancel_requested") or attempt_id is None:
         return result
-    broker = await broker_for_attempt(job_store.host_pool, int(attempt_id))
-    if broker is None:
+    sandbox_manager = await sandbox_manager_for_attempt(job_store.host_pool, int(attempt_id))
+    if sandbox_manager is None:
         raise _question_unreachable()
     try:
-        pending = await broker.pending_shared_questions(thread_id, owner=f"attempt:{attempt_id}")
-    except WorkspaceBrokerError as exc:
+        pending = await sandbox_manager.pending_shared_questions(
+            thread_id, owner=f"attempt:{attempt_id}"
+        )
+    except SandboxManagerError as exc:
         raise _question_unreachable() from exc
     try:
         return AgentThreadQuestionsResponse.model_validate(
@@ -283,18 +285,18 @@ async def answer_thread_question(
                 }
             },
         )
-    broker = await broker_for_attempt(job_store.host_pool, body.attempt_id)
-    if broker is None:
+    sandbox_manager = await sandbox_manager_for_attempt(job_store.host_pool, body.attempt_id)
+    if sandbox_manager is None:
         raise _question_unreachable()
     try:
-        answer = await broker.answer_shared_question(
+        answer = await sandbox_manager.answer_shared_question(
             thread_id,
             owner=f"attempt:{body.attempt_id}",
             request_id=body.request_id,
             answers=body.answers,
             reject=body.reject,
         )
-    except WorkspaceBrokerError as exc:
+    except SandboxManagerError as exc:
         raise _question_unreachable() from exc
     return AgentQuestionAnswerResponse(
         accepted=answer.get("accepted") is True,
@@ -702,7 +704,7 @@ async def close_send_now_handovers() -> None:
             await asyncio.shield(joined)
         except asyncio.CancelledError:
             # The owner still has to wait for task cleanup before closing the
-            # store and broker clients; propagate its cancellation afterwards.
+            # store and sandbox manager clients; propagate its cancellation afterwards.
             await joined
             raise
 
@@ -814,7 +816,7 @@ async def send_pending_message_now(
             revision=int(message["revision"]),
         )
     except Exception:
-        # The durable row has committed.  A transient database or broker error
+        # The durable row has committed.  A transient database or sandbox manager error
         # must not make the owner retry the request; the recovery worker owns it.
         logger.warning(
             "agent_send_now_hand_over_failed",

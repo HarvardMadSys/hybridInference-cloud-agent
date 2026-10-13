@@ -1,6 +1,6 @@
 """Prove the candidate sandbox on the real host before draining live runners.
 
-This process has no enrollment or broker credentials and never polls for work.
+This process has no enrollment or sandbox manager credentials and never polls for work.
 Its only sandbox is a temporary, network-isolated guest removed by preflight.
 It runs no group, so it builds no group network and installs no host rules:
 those belong to a live stack and are proved by that stack's own preflight.

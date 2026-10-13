@@ -180,6 +180,197 @@ def test_claude_child_reply_stays_in_the_stream_without_becoming_the_final_answe
     )
 
 
+# Background work as the pinned 2.1.220 reports it on stdout.
+_INIT = {"type": "system", "subtype": "init"}
+_NOTIFIED = {"type": "result", "subtype": "success", "origin": {"kind": "task-notification"}}
+
+
+def _say(text: str) -> dict:
+    return {"type": "assistant", "message": {"content": [{"type": "text", "text": text}]}}
+
+
+def _running(*tasks: tuple[str, str]) -> dict:
+    return {
+        "type": "system",
+        "subtype": "background_tasks_changed",
+        "tasks": [{"task_id": task_id, "task_type": kind} for task_id, kind in tasks],
+    }
+
+
+def _finished(task_id: str, status: str = "completed") -> dict:
+    return {"type": "system", "subtype": "task_notification", "task_id": task_id, "status": status}
+
+
+def _read(prompt: str) -> dict:
+    """The CLI echoing a stdin message at the moment it reads it."""
+    return {
+        "type": "user",
+        "isReplay": True,
+        "message": {"role": "user", "content": [{"type": "text", "text": prompt}]},
+    }
+
+
+@pytest.mark.parametrize("finished_before_the_answer", [False, True])
+def test_claude_turn_ends_once_its_background_agent_is_answered(
+    tmp_path, finished_before_the_answer
+):
+    """As the one-shot CLI holds its result, the turn waits for its background agent.
+
+    The answer to the finished agent comes in a turn Claude opens itself after
+    the prompt's result; read by the next turn, it would be taken as its answer.
+    """
+    process = _LiveProcess()
+    session = ClaudeCodeDriver(ClaudeCodeRuntime()).launch_live(_live(process, tmp_path)[0])
+    finished = [_running(), _finished("agent-1")]
+    process.feed = _turn_lines(
+        _running(("agent-1", "local_agent")),
+        *(finished if finished_before_the_answer else []),
+        _say("launched"),
+        _RESULT,
+        *([] if finished_before_the_answer else finished),
+        _INIT,
+        _say("the agent found it"),
+        _NOTIFIED,
+    )
+    first = session.start_turn(TurnInput(prompt="look into it", model="m"))
+
+    result = first.wait()
+    assert result.status == "completed"
+    assert result.final_output == "launched\n\nthe agent found it"
+    assert process.feed == []
+
+    process.feed = _turn_lines(_say("next answer"), _RESULT)
+    assert session.start_turn(TurnInput(prompt="next", model="m")).wait().final_output == (
+        "next answer"
+    )
+
+
+def test_claude_turn_waits_for_every_background_agent(tmp_path):
+    process = _LiveProcess()
+    session = ClaudeCodeDriver(ClaudeCodeRuntime()).launch_live(_live(process, tmp_path)[0])
+    process.feed = _turn_lines(
+        _running(("a", "local_agent"), ("b", "local_agent")),
+        _say("launched two"),
+        _RESULT,
+        _running(("b", "local_agent")),
+        _finished("a"),
+        _INIT,
+        _say("a is done"),
+        _NOTIFIED,
+        _running(),
+        _finished("b"),
+        _INIT,
+        _say("b is done"),
+        _NOTIFIED,
+    )
+    result = session.start_turn(TurnInput(prompt="split it", model="m")).wait()
+
+    assert result.final_output == "launched two\n\na is done\n\nb is done"
+    assert process.feed == []
+
+
+def test_claude_turn_does_not_wait_for_a_background_shell_or_take_its_answer_as_the_next(
+    tmp_path,
+):
+    """A shell may never end, so the turn does not wait for it.
+
+    It finishing between turns still opens a notification turn. The next turn
+    reads that turn but ends only with the answer to its own prompt.
+    """
+    process = _LiveProcess()
+    session = ClaudeCodeDriver(ClaudeCodeRuntime()).launch_live(_live(process, tmp_path)[0])
+    process.feed = _turn_lines(_running(("shell-1", "local_bash")), _say("server up"), _RESULT)
+    assert session.start_turn(TurnInput(prompt="serve", model="m")).wait().final_output == (
+        "server up"
+    )
+
+    process.feed = _turn_lines(
+        _running(),
+        _finished("shell-1"),
+        _INIT,
+        _say("the server exited"),
+        _NOTIFIED,
+        _read("is it up?"),
+        _INIT,
+        _say("no, it exited"),
+        _RESULT,
+    )
+    second = session.start_turn(TurnInput(prompt="is it up?", model="m"))
+
+    assert second.wait().final_output == "the server exited\n\nno, it exited"
+    assert process.feed == []
+
+
+def test_claude_turn_ends_with_a_notification_turn_that_took_its_prompt(tmp_path):
+    """Read while Claude answers a notification, the prompt is answered in that turn."""
+    process = _LiveProcess()
+    session = ClaudeCodeDriver(ClaudeCodeRuntime()).launch_live(_live(process, tmp_path)[0])
+    process.feed = _turn_lines(_running(("shell-1", "local_bash")), _RESULT)
+    session.start_turn(TurnInput(prompt="serve", model="m")).wait()
+
+    process.feed = _turn_lines(
+        _running(),
+        _finished("shell-1"),
+        _INIT,
+        _read("is it up?"),
+        _say("it exited just now"),
+        _NOTIFIED,
+    )
+    second = session.start_turn(TurnInput(prompt="is it up?", model="m"))
+
+    assert second.wait().final_output == "it exited just now"
+    assert process.feed == []
+
+
+@pytest.mark.parametrize("stopped", [True, False])
+def test_claude_cancel_while_waiting_stops_the_background_agents(tmp_path, stopped):
+    """The interrupt stops background agents and opens no turn; its reply ends this one.
+
+    Should an agent still be listed, the process retires so it ends with it.
+    """
+    process = _LiveProcess()
+    session = ClaudeCodeDriver(ClaudeCodeRuntime()).launch_live(_live(process, tmp_path)[0])
+    killed = [_running(), _finished("agent-1", "stopped")] if stopped else []
+    process.feed = _turn_lines(
+        _running(("agent-1", "local_agent")),
+        _say("launched"),
+        _RESULT,
+        *killed,
+        {"type": "control_response", "response": {"subtype": "success"}},
+    )
+    turn = session.start_turn(TurnInput(prompt="look into it", model="m"))
+    for event in turn.iter_events():
+        if event.payload.get("phase") == "result":
+            turn.cancel()
+
+    assert turn.wait().status == "cancelled"
+    assert json.loads(process.sent[-1])["request"]["subtype"] == "interrupt"
+    assert process.feed == []
+    assert session.retire_after_turn is not stopped
+
+
+def test_claude_message_sent_while_waiting_goes_as_the_next_turn(tmp_path):
+    process = _LiveProcess()
+    session = ClaudeCodeDriver(ClaudeCodeRuntime()).launch_live(_live(process, tmp_path)[0])
+    process.feed = _turn_lines(
+        _running(("agent-1", "local_agent")),
+        _RESULT,
+        _running(),
+        _finished("agent-1"),
+        _INIT,
+        _NOTIFIED,
+    )
+    turn = session.start_turn(TurnInput(prompt="look into it", model="m"))
+    outcomes = []
+    for event in turn.iter_events():
+        if event.payload.get("phase") == "result" and not outcomes:
+            outcomes.append(turn.inject("and the tests too", message_id="m-1"))
+
+    assert [outcome.accepted for outcome in outcomes] == [False]
+    assert turn.wait().status == "completed"
+    assert all("and the tests too" not in line for line in process.sent)
+
+
 def test_a_model_switch_mid_session_is_a_restart_not_a_lie(tmp_path):
     process = _LiveProcess()
     session = ClaudeCodeDriver(ClaudeCodeRuntime()).launch_live(_live(process, tmp_path)[0])

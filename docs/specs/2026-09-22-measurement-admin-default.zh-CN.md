@@ -22,7 +22,7 @@
 现在区分**控制方式**和**采集状态**：默认控制方式是 Admin；初始持久化状态没有活动实验，
 所以采集仍然 Disabled。不是把 profiling 默认打开，也不是由前端伪造一个可点击按钮。
 
-CP、runner、broker、turn 子进程都通过共享模块的 `profile_mode()` 解析相同默认值。
+CP、runner、sandbox manager、turn 子进程都通过共享模块的 `profile_mode()` 解析相同默认值。
 Compose 已将空值透传给该函数，空串与未设置必须行为一致。无需新增表、API、状态机或配置
 分发协议；迁移 0018 已提供初始关闭的控制状态。
 
@@ -44,12 +44,12 @@ Compose 已将空值透传给该函数，空串与未设置必须行为一致。
 
 ## 进程与边界
 
-- CP 从数据库读取配置，runner 经已有认证端点同步，broker 接收 runner 的配置。
+- CP 从数据库读取配置，runner 经已有认证端点同步，sandbox manager 接收 runner 的配置。
 - 新根操作只从当前有效快照选取。无活动实验、未获取策略或策略不合法，都不创建测量。
-- 默认模式下，子进程及 broker 可以延续可信通道传来的合法选择；不要求它们先自行选中
+- 默认模式下，子进程及 sandbox manager 可以延续可信通道传来的合法选择；不要求它们先自行选中
   实验。仍校验原 manifest、操作范围和截止时间，不占第二份名额。
 - 显式部署级 `disabled` 继续拒绝接续，与 Admin 上的 Disable 保持区别。
-- 权限不变：Admin 写接口仍需管理员身份；runner 与 broker 仍走既有认证通道。
+- 权限不变：Admin 写接口仍需管理员身份；runner 与 sandbox manager 仍走既有认证通道。
 - 数据库不可用或迁移缺失时不伪造 Disabled，接口继续报告真实错误。
 
 ## 关闭时成本
@@ -67,8 +67,8 @@ Compose 已将空值透传给该函数，空串与未设置必须行为一致。
    Disable、权限拒绝仍有效。
 3. 真实新解释器不设置 MODE 也能接续父进程选择；显式 disabled 拒绝同一选择。
 4. 真实 Postgres + HTTP 验收链清除 MODE 和 deployment 配置：初始关闭 → Enable →
-   CP/runner/broker 同步 → 样本落库 → Disable → 新操作不采集，在途记录仍可入库。
-   broker 的文件执行用测试替身，不能据此声称真实容器性能已验收。
+   CP/runner/sandbox_manager 同步 → 样本落库 → Disable → 新操作不采集，在途记录仍可入库。
+   sandbox manager 的文件执行用测试替身，不能据此声称真实容器性能已验收。
 5. 运行仓库 `make check`，保持静态实验、过期边界和明确禁用的回归断言。
 
 发布只需常规升级四类进程到包含本改动的版本，沿用标准数据库迁移；不需要新增运行配置。

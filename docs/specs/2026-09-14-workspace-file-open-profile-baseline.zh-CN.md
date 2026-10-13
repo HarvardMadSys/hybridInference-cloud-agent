@@ -15,12 +15,12 @@
 ```text
 浏览器 → CP GET /v1/agent/jobs/{job}/files
        → owner.operation_opened()            # 可能唤醒已停止的容器
-       → broker GET /workspaces/{id}/files
+       → sandbox manager GET /workspaces/{id}/files
        → require_network_phase(spec, "agent") # 每次重新校验 Docker 状态
        → read_retained_file()                 # docker exec + 新起 python3
 ```
 
-`cloud_agent/api/routes.py:2838`、`cloud_agent_host/workspace_broker.py:1329`、
+`cloud_agent/api/routes.py:2838`、`cloud_agent_host/sandbox_manager.py:1329`、
 `cloud_agent_host/chat_sandbox.py:1716`、`cloud_agent_host/retained_workspace.py:260`。
 
 ## 2. 测量方法与环境
@@ -54,8 +54,8 @@
 | 64 KiB | 172.3 | 203.6 | |
 | 512 KiB | 173.2 | 185.5 | 预览上限 |
 
-拆成 broker 的两步（p50）：`require_network_phase` **107–116 ms**，`read_retained_file`
-（docker exec + helper）**53–59 ms**。前面再套一层 broker 形状的 HTTP 路由只加 ~10 ms。
+拆成 sandbox manager 的两步（p50）：`require_network_phase` **107–116 ms**，`read_retained_file`
+（docker exec + helper）**53–59 ms**。前面再套一层 sandbox manager 形状的 HTTP 路由只加 ~10 ms。
 另一轮 20 次采样得到 178–183 ms p50，运行间波动约 ±10%。
 
 **约 2/3 的时间花在校验 Docker 状态，而不是读文件。**
@@ -127,10 +127,10 @@ read    2 calls   55 ms   1× container inspect (11.6) + 1× exec python3 (43.7)
 
 ## 6. 覆盖范围与未测项
 
-已测：broker 侧暖/冷两步耗时、docker CLI 调用次数、原语成本、并发劣化。
+已测：sandbox manager 侧暖/冷两步耗时、docker CLI 调用次数、原语成本、并发劣化。
 未测：Kata 运行时（VM 穿越 + guest `/etc/hosts` 特权 exec）；CP 侧（`_owned_job`、
-`broker_for_job` 两次 DB 查询；未配 `AGENT_REPO_ALLOWLIST` 时每次打开还会去 GitHub 列
-installation repositories，`github_app.py:405`）；共享 chat 每次打开的第二次 CP→broker 请求
+`sandbox_manager_for_job` 两次 DB 查询；未配 `AGENT_REPO_ALLOWLIST` 时每次打开还会去 GitHub 列
+installation repositories，`github_app.py:405`）；共享 chat 每次打开的第二次 CP→sandbox manager 请求
 （`POST /shared-sandboxes/{id}/register`）；CP↔host 真实 RTT；浏览器渲染。
 
 ## 7. 优化候选（按证据排序，**尚未实施、收益未验证**）

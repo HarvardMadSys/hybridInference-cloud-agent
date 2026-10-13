@@ -489,16 +489,16 @@ fi
 # The retained/shared-live topology is the only executable path, so there is
 # no old control-plane/runner protocol to fall back to during a rolling
 # deployment. The host and control jobs start in parallel. The host publishes
-# the exact target SHA only after its runners, broker, tunnel and Docker data
+# the exact target SHA only after its runners, sandbox manager, tunnel and Docker data
 # root pass their local checks; this reverse probe then waits for that fact and
-# proves the control plane can dial every eligible broker before replacing live
+# proves the control plane can dial every eligible sandbox manager before replacing live
 # API containers. It is a compatibility fence, not a feature switch.
 # Adopt what an earlier phase of this deployment started, and restore anything a
 # previous attempt's cleanup stopped. Both before the fence, because the fence
 # wants a heartbeat that only a running API can accept.
 ensure_bootstrap_listeners
 
-log "waiting for target ${SHA} host readiness and reverse broker probes"
+log "waiting for target ${SHA} host readiness and reverse sandbox_manager probes"
 READINESS_CONTAINER="${COMPOSE_PROJECT}-readiness-${GITHUB_RUN_ID:-manual}-${GITHUB_RUN_ATTEMPT:-1}"
 READINESS_ARGS=()
 if [[ -n "${DEPLOY_PEER_JOB:-}" ]]; then

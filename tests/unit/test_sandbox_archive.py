@@ -20,12 +20,12 @@ from cloud_agent_host.chat_sandbox import (
 )
 from cloud_agent_host.sandbox import ProcessBackend, SandboxError
 from cloud_agent_host.sandbox_archive import ArchiveIdentity, SandboxArchiveService
+from cloud_agent_host.sandbox_manager import create_app
 from cloud_agent_host.session_lifecycle import SessionBusy, SessionLeaseLost
 from cloud_agent_host.shared_session_supervisor import (
     SharedChatSessionSupervisor,
     SharedMemberManifest,
 )
-from cloud_agent_host.workspace_broker import create_app
 
 
 class _Manager:
@@ -468,7 +468,7 @@ def test_durable_commit_receipt_recovers_crash_after_container_removal(archive_s
 
 
 @pytest.mark.asyncio
-async def test_internal_archive_routes_require_host_broker_auth(archive_setup):
+async def test_internal_archive_routes_require_host_sandbox_manager_auth(archive_setup):
     manager, supervisor, service, identity, *_ = archive_setup
     app = create_app(
         token="host-secret",
@@ -483,7 +483,7 @@ async def test_internal_archive_routes_require_host_broker_auth(archive_setup):
         "archive_key": identity.archive_key,
     }
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://broker"
+        transport=httpx.ASGITransport(app=app), base_url="http://sandbox_manager"
     ) as client:
         response = await client.post(
             "/shared-sandboxes/thread-origin/admin-delete/prepare", json=body

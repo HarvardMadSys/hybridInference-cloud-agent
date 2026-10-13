@@ -220,7 +220,7 @@ def _app(store: _ClaimStore, grants: _Grants, gateway: _Gateway | None = None) -
 @pytest.fixture(autouse=True)
 def _env(monkeypatch):
     monkeypatch.setenv("AGENT_CONTROL_TOKEN_SECRET", "claim-test-secret")
-    monkeypatch.setenv("AGENT_WORKSPACE_BROKER_TOKEN", "claim-test-broker-secret")
+    monkeypatch.setenv("AGENT_SANDBOX_MANAGER_TOKEN", "claim-test-sandbox-manager-secret")
     monkeypatch.setenv("AGENT_REPO_ALLOWLIST", "owner/name")
     yield
 

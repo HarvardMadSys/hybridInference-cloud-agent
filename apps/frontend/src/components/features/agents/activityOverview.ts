@@ -2,8 +2,10 @@ import {
   parseToolActivity,
   recordedAgentStates,
   recordedAgentTargets,
+  recordedDelegationReply,
   recordedTasks,
   type ActivityTask,
+  type DelegationReply,
   type ToolActivity,
 } from './toolActivity';
 import type { AgentEvent } from './types';
@@ -17,6 +19,7 @@ export interface OverviewSubagent {
   activity: DelegationActivity;
   sourceEvent: ToolUseEvent;
   lastEvent?: ToolUseEvent;
+  reply?: DelegationReply;
 }
 
 export interface ActivityOverview {
@@ -87,6 +90,18 @@ function isLaunch(event: ToolUseEvent): boolean {
   return ['agent', 'task', 'spawn_agent'].includes(toolKey(event));
 }
 
+function replyOf(event: ToolUseEvent): DelegationReply | undefined {
+  return recordedDelegationReply({
+    tool: event.tool,
+    input: event.input,
+    resultState: event.resultState,
+    output: event.output?.join('\n'),
+    isError: event.outputIsError,
+    structuredOutput: event.structuredOutput,
+    outputTruncated: event.outputTruncated,
+  });
+}
+
 function mergeTask(previous: ActivityTask | undefined, raw: Record<string, unknown>): ActivityTask {
   const task = recordedTasks({ tasks: [raw] })[0];
   if (!previous) return task;
@@ -123,9 +138,29 @@ export function buildActivityOverview(events: AgentEvent[]): ActivityOverview {
   const subagents = new Map<string, OverviewSubagent>();
 
   for (const [index, event] of events.entries()) {
-    if (event.kind !== 'tool_use' || !accepted(event)) continue;
+    if (event.kind !== 'tool_use') continue;
     const activity = parseToolActivity(event.tool, event.input);
     if (!activity) continue;
+    if (!accepted(event)) {
+      // A launch that failed or was interrupted is still delegated work. It
+      // claims no agent identity or state, so it cannot change another row.
+      if (activity.kind === 'delegation' && isLaunch(event) && event.resultState !== 'unknown') {
+        const id = JSON.stringify([
+          event.attemptNo ?? null,
+          'call',
+          event.activityKey ?? event.sourceEventId ?? index,
+        ]);
+        subagents.set(id, {
+          key: id,
+          activity: { ...activity, targets: [], states: [] },
+          sourceEvent: event,
+          reply: replyOf(event) ?? {
+            state: event.resultState === 'cancelled' ? 'cancelled' : 'failed',
+          },
+        });
+      }
+      continue;
+    }
     const output =
       event.resultState === 'waiting' || event.resultState === 'not_recorded'
         ? undefined
@@ -254,11 +289,13 @@ export function buildActivityOverview(events: AgentEvent[]): ActivityOverview {
         if (activity[field] !== undefined) Object.assign(merged, { [field]: activity[field] });
       }
       if (activity.prompt !== undefined) merged.promptLabel = activity.promptLabel;
+      const reply = replyOf(event) ?? previous?.reply;
       subagents.set(id, {
         key: id,
         activity: merged,
         sourceEvent: firstLaunch ? event : (previous?.sourceEvent ?? event),
         ...(previous ? { lastEvent: event } : {}),
+        ...(reply ? { reply } : {}),
       });
     }
   }

@@ -802,7 +802,7 @@ class PostgresComputeResourceRepository:
                 dict(r)
                 for r in await conn.fetch(
                     """SELECT h.host,h.status,h.compute_node_id,
-                h.slots_used,h.last_heartbeat_at,h.broker_url,h.drain_fence_active,
+                h.slots_used,h.last_heartbeat_at,h.broker_url AS sandbox_manager_url,h.drain_fence_active,
                 (SELECT count(*) FROM agent_sandboxes g
                  WHERE g.host=h.host AND g.deletion_state<>'deleted') AS retained_groups
                 FROM agent_runner_hosts h JOIN agent_compute_nodes n ON n.id=h.compute_node_id
@@ -853,7 +853,7 @@ class PostgresComputeResourceRepository:
                 dict(r)
                 for r in await conn.fetch("""SELECT h.host,h.status,h.compute_node_id,
                 n.allocation_id,h.slots_used,h.slots_total,h.slots_desired,h.last_heartbeat_at,
-                h.labels->>'physical_host' AS physical_host,h.broker_url,
+                h.labels->>'physical_host' AS physical_host,h.broker_url AS sandbox_manager_url,
                 (SELECT count(*) FROM agent_sandboxes g
                  WHERE g.host=h.host AND g.deletion_state<>'deleted') AS retained_groups
                 FROM agent_runner_hosts h LEFT JOIN agent_compute_nodes n ON n.id=h.compute_node_id
@@ -1060,7 +1060,7 @@ class PostgresComputeResourceRepository:
         profile_snapshots: dict[str, dict[str, Any]],
         requested_by: str | None,
     ) -> dict[str, Any]:
-        """Compare-and-swap policy and reserve every selected broker route."""
+        """Compare-and-swap policy and reserve every selected sandbox manager route."""
         selected = list(policy["deployment_profiles"])
         async with self._pool.acquire() as conn, conn.transaction():
             await lock_compute_entry(conn, exclusive=True)
@@ -1628,7 +1628,7 @@ class PostgresComputeResourceRepository:
         generation: int,
         worker_id: str,
     ) -> bool:
-        """Accept a trusted broker scan only against the exact fenced topology.
+        """Accept a trusted sandbox manager scan only against the exact fenced topology.
 
         Retirement closes bindings first. A scan must cover every node and its
         Host execution environments; an unbound node is unknown, never empty.
@@ -2871,7 +2871,7 @@ class PostgresComputeResourceRepository:
         )
         if forks:
             reasons.append("forks_present")
-        # Inventory verification comes from a trusted provider + broker scan,
+        # Inventory verification comes from a trusted provider + sandbox manager scan,
         # not from heartbeat slot counts. Even zero registered hosts may hide
         # unadopted containers, so absence is not proof of an empty resource.
         now = await conn.fetchval("SELECT NOW()")

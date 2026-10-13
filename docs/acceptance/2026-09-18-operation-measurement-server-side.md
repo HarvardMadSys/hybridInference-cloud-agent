@@ -13,7 +13,7 @@
 | 操作 | 起点 | 终点 | 覆盖标签 |
 | --- | --- | --- | --- |
 | `attempt.startup` | runner 发起 claim 之前 | prompt 交给 supervisor 之后 | `host_startup` |
-| `files.list` / `files.open` | CP 完成认证/归属/entitlement/broker 解析 | 业务结果校验完成 | `server_request` |
+| `files.list` / `files.open` | CP 完成认证/归属/entitlement/sandbox_manager 解析 | 业务结果校验完成 | `server_request` |
 | `terminal.open`（list/create/stream_attach 各一条） | 同上 | 同上 | `server_request` |
 
 完整流程：配置实验 → 正常执行操作 → 分阶段计时 → 后台有界持久化 → Admin 查看原始
@@ -62,7 +62,7 @@ group 都被记成 `resume_stopped`**；四条声明路径实际只剩三条，�
 
 ### 2.4 本地栈补上 profiling 透传
 
-`deploy/local/docker-compose.yml` 的 runner/broker 没有 `AGENT_OPERATION_PROFILING_*`，
+`deploy/local/docker-compose.yml` 的 runner/sandbox_manager 没有 `AGENT_OPERATION_PROFILING_*`，
 只有 control-plane 有。本地开实验会**静默**只采到 CP 侧的文件/终端请求，没有任何
 startup 记录。已补上三个变量并由 `tests/unit/test_deploy_config.py` 固定。
 
@@ -123,8 +123,8 @@ host/job/claim/sandbox/membership 行（`reserve_thread_sandbox` 加真实
 运行时、真实 worker ingest 路由、真实有界 `measurement_writer`、真实 Admin 路由。run
 descriptor 按路由从 Postgres 读出的 sandbox 行做 target 限定。
 
-**仍然是替身的**只有三处，且都是外部进程边界：workspace broker（用真实
-`operation_call.open_call`/`BrokerCall` 片段协议应答，只有工作区内容由测试给出）、
+**仍然是替身的**只有三处，且都是外部进程边界：sandbox manager（用真实
+`operation_call.open_call`/`SandboxManagerCall` 片段协议应答，只有工作区内容由测试给出）、
 session supervisor（挂起的 supervisor/stream）、heartbeat。没有假的 `get_job`/
 `get_attempt`，没有存储替身，没有手写的测量行。
 
@@ -369,7 +369,7 @@ run D on-persist drops: {'stored': 4080, 'duplicate': 0, 'rejected': 0, 'conflic
 
 - 不是端到端延迟：浏览器、网络、host agent 与沙箱都不在任何数字里，没有跑 agent CLI
   或模型。
-- 服务端请求的 broker 是 in-process 替身，只讲真实片段协议；文件/终端请求背后没有
+- 服务端请求的 sandbox manager 是 in-process 替身，只讲真实片段协议；文件/终端请求背后没有
   容器工作。
 - 服务端操作的 `bare` 是同应用上未埋点的兄弟路由，不是把被测路由的埋点删掉。
 - `on-local` 用 bench-local JSONL 替身，因为部署里没有"去掉 Postgres 仓储"的开关。

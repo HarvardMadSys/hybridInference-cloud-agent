@@ -650,21 +650,21 @@ async def test_a_deployment_without_grants_still_lapses_residencies() -> None:
 async def test_reaped_shared_members_close_processes_and_grants_independently(
     monkeypatch,
 ) -> None:
-    """One unreachable broker cannot block another cleanup or grant revoke."""
-    broker_calls: list[tuple[str, int]] = []
+    """One unreachable sandbox manager cannot block another cleanup or grant revoke."""
+    sandbox_manager_calls: list[tuple[str, int]] = []
 
-    class _Broker:
+    class _SandboxManager:
         async def shared_residency_lost(self, thread_id: str, *, generation: int) -> None:
-            broker_calls.append((thread_id, generation))
+            sandbox_manager_calls.append((thread_id, generation))
 
     async def route(_store, job_id: str):
         if job_id == "job-unreachable":
             raise RuntimeError("host unavailable")
-        return _Broker()
+        return _SandboxManager()
 
-    from cloud_agent import broker_routing
+    from cloud_agent import sandbox_manager_routing
 
-    monkeypatch.setattr(broker_routing, "broker_for_job", route)
+    monkeypatch.setattr(sandbox_manager_routing, "sandbox_manager_for_job", route)
     grants = _Grants()
     actions = [
         {
@@ -687,5 +687,5 @@ async def test_reaped_shared_members_close_processes_and_grants_independently(
 
     await _cleanup_reaped_shared_residencies(object(), actions, grants)
 
-    assert broker_calls == [("thread-two", 4)]
+    assert sandbox_manager_calls == [("thread-two", 4)]
     assert grants.revoked == ["grant-one", "grant-two"]

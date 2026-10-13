@@ -1560,9 +1560,9 @@ export interface AgentTerminalApi {
 
 export interface AgentTerminalListApi {
   terminals: AgentTerminalApi[];
-  /** Per-workspace creation limit advertised by the owning broker. */
+  /** Per-workspace creation limit advertised by the owning sandbox manager. */
   max_sessions?: number | null;
-  /** Maximum input bytes in one request, advertised by the owning broker. */
+  /** Maximum input bytes in one request, advertised by the owning sandbox manager. */
   max_input_bytes?: number | null;
 }
 
@@ -1713,7 +1713,7 @@ export interface StreamAgentTerminalOptions {
   onOutput: (event: AgentTerminalOutputEvent) => void;
   onReset: (event: AgentTerminalResetEvent) => void;
   onExit: (event: AgentTerminalExitEvent) => void;
-  /** Where the terminal's history ends; brokers that predate it never call this. */
+  /** Where the terminal's history ends; sandbox managers that predate it never call this. */
   onAttached?: (event: AgentTerminalAttachedEvent) => void;
 }
 
