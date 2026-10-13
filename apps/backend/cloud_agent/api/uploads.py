@@ -47,7 +47,7 @@ router = APIRouter(prefix="/v1/agent/uploads", tags=["agent-uploads"])
 #: upload is refused before its base64 is decoded. That does not bound what is
 #: read: FastAPI reads and parses the whole JSON body before validation or the
 #: owner check runs, so the request's own size is limited in front of this
-#: service, by the proxy's body limit.
+#: service — the shipped nginx configs allow this route 8 MiB.
 _MAX_ENCODED = (MAX_ATTACHMENT_FILE_BYTES // 3 + 1) * 4 + 16
 
 
