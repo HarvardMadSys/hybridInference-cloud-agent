@@ -10,9 +10,9 @@ properties worth pinning are different:
 - **The schema is Alembic's.** Nothing creates a table at startup, so an API
   container that can start before migrations have run is a crash loop against
   tables that do not exist.
-- **The image ships the host package.** `patch_gate` crosses the host/control
-  boundary; without it this image builds, starts, serves, and fails at the
-  first publish.
+- **The image ships the host package.** The control plane still imports the
+  runtime registry from `cloud_agent_host.runtimes`; without it this image
+  builds and then cannot start.
 - **Every variable it sets is one the code reads.** A compose that configures
   something nothing consumes is documentation that lies — and two such
   variables were found and removed while writing it.
@@ -167,16 +167,17 @@ def test_the_cookie_and_proxy_switches_default_to_the_safe_answer(
 
 
 def test_the_image_ships_the_host_package() -> None:
-    """`patch_gate` is imported by the publisher and the publish worker here
-    and by the runner and the snapshotter on a host. The manifest called it
-    host-only, which was wrong; an image without it builds, starts, serves, and
-    fails at the first publish."""
+    """`api/config.py`, `api/worker.py` and `application/job_admission.py`
+    import the runtime registry from `cloud_agent_host.runtimes`, and
+    `create_app()` mounts the first two. An image without it builds and then
+    cannot start. (`patch_gate` was the first reason; it moved to
+    `cloud_agent_shared/git/`, which this image ships on its own.)"""
     dockerfile = DOCKERFILE_PATH.read_text()
     assert re.search(
         r"^COPY apps/backend/cloud_agent_host/ apps/backend/cloud_agent_host/",
         dockerfile,
         re.MULTILINE,
-    ), "the control-plane image drops cloud_agent_host/, so publishing will fail at runtime"
+    ), "the control-plane image drops cloud_agent_host/, so the control plane cannot start"
 
 
 def test_the_image_ships_the_migrations_it_is_told_to_run() -> None:

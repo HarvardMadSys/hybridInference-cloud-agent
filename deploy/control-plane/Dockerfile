@@ -2,14 +2,20 @@
 # The control plane: the API, the reaper, the publisher.
 #
 # **It ships the host package too, and that is not an oversight.**
-# `cloud_agent/api/routes.py` still imports the runtime registry —
-# `registered_runtimes`, `runtime_reasoning_efforts` and
-# `runtimes_supporting_mcp` — from `cloud_agent_host.runtimes`, and
-# `create_app()` imports that router, so dropping `cloud_agent_host/` here
-# produces an image whose control plane cannot start. The publisher's patch
-# gate and archive builders are no longer part of that reach: they live in
-# `cloud_agent_shared/git/`, which this image and the runner image both ship. See
-# MIGRATION.md, "Manifest corrections".
+# Three control-plane modules still import the runtime registry from
+# `cloud_agent_host.runtimes`: `cloud_agent/api/config.py` publishes it
+# (`registered_runtimes`, `runtime_reasoning_efforts`,
+# `runtimes_supporting_mcp`), `cloud_agent/api/worker.py` checks MCP support
+# at claim time (`runtimes_supporting_mcp`), and
+# `cloud_agent/application/job_admission.py` validates a new job against all
+# three. `create_app()` mounts the first two through `cloud_agent/api/routes.py`,
+# so dropping `cloud_agent_host/` here produces an image whose control plane
+# cannot start. Those three names are the whole reach —
+# tests/unit/test_import_boundary.py pins them — and `runtimes.py` itself
+# imports only the standard library and `cloud_agent_shared`. The publisher's
+# patch gate and archive builders are no longer part of that reach: they live
+# in `cloud_agent_shared/git/`, which this image and the runner image both
+# ship. See MIGRATION.md, "Manifest corrections".
 #
 # **No agent runtimes, no docker socket, no git credentials at build time.**
 # This image never executes an agent and never checks a repository out.
