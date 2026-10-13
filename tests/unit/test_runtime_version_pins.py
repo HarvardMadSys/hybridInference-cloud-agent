@@ -25,14 +25,18 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import subprocess
 from pathlib import Path
+
+import pytest
 
 from cloud_agent_host.runtimes import registered_runtimes
 
 REPO = Path(__file__).resolve().parents[2]
 DOCKERFILE = REPO / "deploy/sandbox/Dockerfile.agent-sandbox"
 SANDBOX_HOST = REPO / "deploy/host/sandbox_host.sh"
+INSTALL_RUNTIMES = REPO / "deploy/sandbox/install-runtimes.sh"
 
 #: `ARG NAME_VERSION=1.2.3` — a pin, with the default that makes it optional.
 _ARG_PIN = re.compile(r"^ARG ([A-Z0-9_]+_VERSION)=(\S+)$", re.MULTILINE)
@@ -289,6 +293,144 @@ def test_a_per_host_default_override_is_refused_before_build(tmp_path: Path) -> 
     assert result.returncode != 0
     assert "source-level shared protocol pin" in result.stderr
     assert not any(line.startswith("build ") for line in docker_log.read_text().splitlines())
+
+
+def test_a_partial_extra_version_is_refused_before_build(tmp_path: Path) -> None:
+    """npm reads `2.1` as a range; an image labelled `2.1` holds any 2.1.x."""
+    app_dir = tmp_path / "app"
+    app_dir.mkdir()
+    (app_dir / ".env").write_text(_BASE_ENV + "CLAUDE_CODE_EXTRA_VERSIONS=2.2.0,2.1\n")
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    docker_log = tmp_path / "docker.log"
+    docker = fake_bin / "docker"
+    docker.write_text(
+        "#!/bin/sh\n"
+        'printf "%s\\n" "$*" >> "$DOCKER_LOG"\n'
+        'case " $* " in *" config --environment "*) cat >/dev/null; cat .env; exit 0 ;; esac\n'
+        'if [ "$*" = "info --format {{.DockerRootDir}}" ]; then echo /var/lib/docker; fi\n'
+        "exit 0\n"
+    )
+    docker.chmod(0o755)
+    environment = {
+        **os.environ,
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "APP_DIR": str(app_dir),
+        "DOCKER_LOG": str(docker_log),
+        "AGENT_DEPLOYMENT_SHA": "test-deployment-sha",
+        "AGENT_HOST_STATE_ROOT": str(tmp_path / "host-state"),
+    }
+    for name in ("COMPOSE_PROJECT", *_pins(), *_extras()):
+        environment.pop(name, None)
+
+    result = subprocess.run(
+        ["bash", str(SANDBOX_HOST), "up"],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "CLAUDE_CODE_EXTRA_VERSIONS entry '2.1' is not an exact version" in result.stderr
+    invocations = docker_log.read_text() if docker_log.exists() else ""
+    assert not any(line.startswith("build ") for line in invocations.splitlines())
+
+
+@pytest.mark.parametrize(
+    "versions",
+    ["2.1", "latest", "^2.1.220", "~2.1.220", "2.1.x", "v2.1.220", "2.1.220 ", "2.1.220+b1"],
+)
+def test_the_runtime_install_refuses_a_version_that_is_not_exact(
+    tmp_path: Path, versions: str
+) -> None:
+    """Refused before npm runs, so nothing is installed under a misleading label."""
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    npm_log = tmp_path / "npm.log"
+    npm = fake_bin / "npm"
+    npm.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$NPM_LOG"\nexit 1\n')
+    npm.chmod(0o755)
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(INSTALL_RUNTIMES),
+            "claude-code",
+            "@anthropic-ai/claude-code",
+            "claude",
+            versions,
+        ],
+        env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}", "NPM_LOG": str(npm_log)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "is not an exact version" in result.stderr
+    assert not npm_log.exists()
+
+
+def _install_version_match() -> str:
+    """``reports_version`` exactly as install-runtimes.sh defines it."""
+    script = INSTALL_RUNTIMES.read_text()
+    start = script.index("reports_version() {")
+    return script[start : script.index("\n}\n", start) + 3]
+
+
+def _image_version_check() -> str:
+    """The image's final ``check`` function, with its line continuations undone."""
+    dockerfile = DOCKERFILE.read_text()
+    start = dockerfile.index("    check() { \\\n")
+    end = dockerfile.index("    }; \\\n", start) + len("    }; \\\n")
+    return "\n".join(line.removesuffix(" \\") for line in dockerfile[start:end].splitlines())
+
+
+@pytest.mark.parametrize(
+    ("reported", "version", "matches"),
+    [
+        ("2.1.220 (Claude Code)", "2.1.220", True),
+        ("codex-cli 0.145.0", "0.145.0", True),
+        ("0.73.1", "0.73.1", True),
+        ("v1.18.9", "1.18.9", True),
+        ("2.1.220 (Claude Code)", "2.1", False),
+        ("2.1.220 (Claude Code)", "1.220", False),
+        ("codex-cli 10.145.0", "0.145.0", False),
+        ("codex-cli 0.145.0-alpha.1", "0.145.0", False),
+        ("1.18.90", "1.18.9", False),
+    ],
+)
+def test_a_binary_must_report_its_version_as_a_whole_token(
+    tmp_path: Path, reported: str, version: str, matches: bool
+) -> None:
+    """A substring match took `2.1` from `2.1.220` and labelled a range exact."""
+    binary = tmp_path / "cli"
+    binary.write_text(f"#!/bin/sh\necho 'a banner line'\necho {shlex.quote(reported)}\n")
+    binary.chmod(0o755)
+
+    by_install = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _install_version_match() + 'reports_version "$1" "$2"',
+            "-",
+            reported,
+            version,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    by_image = subprocess.run(
+        ["sh", "-c", _image_version_check() + '\ncheck "$1" "$2"', "-", str(binary), version],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert (by_install.returncode == 0) is matches, by_install.stderr
+    assert (by_image.returncode == 0) is matches, by_image.stderr
 
 
 # ── The menu ─────────────────────────────────────────────────────────────
