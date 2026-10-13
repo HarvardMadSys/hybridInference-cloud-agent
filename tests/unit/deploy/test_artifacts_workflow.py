@@ -443,6 +443,21 @@ def test_new_external_tests_select_image_checks() -> None:
     assert _runs_the_image_jobs("tests/external/test_new_container_integration.py")
 
 
+def test_the_default_test_tier_runs_whatever_changed() -> None:
+    """Its tests read files the classifier counts as docs or the web app.
+
+    The credential backstop scans every tracked file, the environment
+    inventory reads apps/frontend/ and ENVIRONMENT.md, and the deployment tests
+    read every Markdown file under docs/. Gated on `backend`, a docs- or
+    frontend-only change that broke one of them skipped this job, passed the
+    gate, and left the failure to the next backend change.
+    """
+    jobs = workflow()["jobs"]
+    assert "if" not in jobs["test"], jobs["test"]["if"]
+    assert jobs["test"]["needs"] == "changes"
+    assert "test" in jobs["ci-gate"]["needs"]
+
+
 def _git(repository: Path, *args: str) -> str:
     return subprocess.run(
         ["git", *args], cwd=repository, check=True, capture_output=True, text=True

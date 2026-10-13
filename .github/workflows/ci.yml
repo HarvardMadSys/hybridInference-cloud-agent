@@ -274,10 +274,16 @@ jobs:
   # persistent pool, whose few runners a second job would only queue for.
   # `scripts/ci_shard.py` deals whole files, so `--dist loadfile` and the
   # isolation it buys are unchanged, and the shards cover each file once.
+  #
+  # Unlike the other backend jobs, this one runs whatever changed: its tests
+  # read files the classifier counts as docs or web app. The credential
+  # backstop scans every tracked file, the environment inventory reads
+  # apps/frontend/ and ENVIRONMENT.md, and the deployment tests read every
+  # Markdown file under docs/. Filtered by `backend`, a docs- or frontend-only
+  # change that broke one of them passed here and failed the next backend one.
   test:
     name: Tests (${{ matrix.shard }}/${{ github.event_name == 'pull_request' && 2 || 1 }})
     needs: changes
-    if: needs.changes.outputs.backend == 'true'
     runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-24.04"]' || '["self-hosted","Linux","ci-general"]') }}
     strategy:
       fail-fast: false
