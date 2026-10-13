@@ -64,6 +64,7 @@ import { BackToBottom, TurnRail } from './TurnNavigator';
 import { ThreadStatsBar } from './ThreadStatsBar';
 import { LiveAgentStatus } from './LiveAgentStatus';
 import { ActivityIcon, ActivityWindow } from './ActivityWindow';
+import { FloatingActivityWindow } from './FloatingActivityWindow';
 import { buildActivityOverview, hasActivityOverview } from './activityOverview';
 import { ThreadActions } from './ThreadActions';
 import { McpSessionPanel } from './mcp/McpSessionPanel';
@@ -2554,31 +2555,22 @@ export function JobDetail({
             </div>
           </div>
 
-          {activityVisible ? (
-            <div
-              className="pointer-events-none absolute inset-x-0 top-0 z-10 flex justify-end px-4 pt-4 sm:px-6"
-              style={{ bottom: composerHeight + 64 }}
-            >
-              <aside
-                id="job-activity-window"
-                role="region"
-                aria-label="Tasks and subagents"
-                className="pointer-events-auto flex max-h-full w-full max-w-sm flex-col overflow-hidden rounded-xl bg-white/95 shadow-xl ring-1 ring-gray-200/90 backdrop-blur-sm dark:bg-gray-900/95 dark:ring-white/10"
-              >
-                <ActivityWindow
-                  overview={activityOverview}
-                  turnNo={currentTurn.displayNo}
-                  attemptNo={attemptNo}
-                  onClose={closeActivity}
-                  stepKeyForEvent={activityStepKey}
-                  onSelectStep={(stepKey) => {
-                    setTab('trajectory');
-                    selectStep(stepKey);
-                  }}
-                />
-              </aside>
-            </div>
-          ) : null}
+          <FloatingActivityWindow visible={activityVisible} bottom={composerHeight + 64}>
+            {(moveHandleProps) => (
+              <ActivityWindow
+                moveHandleProps={moveHandleProps}
+                overview={activityOverview}
+                turnNo={currentTurn.displayNo}
+                attemptNo={attemptNo}
+                onClose={closeActivity}
+                stepKeyForEvent={activityStepKey}
+                onSelectStep={(stepKey) => {
+                  setTab('trajectory');
+                  selectStep(stepKey);
+                }}
+              />
+            )}
+          </FloatingActivityWindow>
 
           {/* Above the transcript, below its composer and the page header:
               the design's order is body, rail preview, composer, header. */}

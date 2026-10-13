@@ -3453,7 +3453,8 @@ describe('JobDetail', () => {
       let activity = screen.getByRole('region', { name: 'Tasks and subagents' });
       expect(activity).toHaveAttribute('id', 'job-activity-window');
       expect(activity.parentElement).toHaveClass('absolute', 'pointer-events-none');
-      expect(activity).toHaveClass('pointer-events-auto', 'max-w-sm', 'shadow-xl');
+      expect(activity).toHaveClass('pointer-events-auto', 'absolute', 'shadow-xl');
+      expect(activity.style.width).toBe('384px');
       expect(screen.getByRole('region', { name: 'Task progress' })).toBeVisible();
       expect(within(activity).getByRole('region', { name: 'Tasks overview' })).toBeVisible();
       expect(within(activity).getByRole('region', { name: 'Subagents overview' })).toBeVisible();
