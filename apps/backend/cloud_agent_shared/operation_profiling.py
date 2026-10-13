@@ -757,6 +757,11 @@ _MODE_LOCK = threading.Lock()
 #: names. Both are deployment configuration, which a restart is what changes.
 _MODE: str | None = None
 _INVALID_MODE = ""
+#: Whether the refused mode above has been reported. The refusal is kept for
+#: as long as the process runs, but it is said once: every request and claim
+#: poll asks for the mode, and a warning on each would be a log write on the
+#: path this module promises to keep cheap.
+_INVALID_MODE_REPORTED = False
 _ENV_RUN: ProfilingRun | None = None
 _ENV_RUN_READ = False
 _BUDGET_LOCK = threading.Lock()
@@ -992,14 +997,18 @@ def profile_mode() -> str:
     An unrecognized value is reported as ``disabled`` with a warning rather
     than guessed at. "Refuse to collect until somebody fixes the spelling" is
     the safe reading of a typo; treating it as ``environment`` could silently
-    enable collection from a stale descriptor.
+    enable collection from a stale descriptor. The warning is written once per
+    process, by whichever caller asks first.
     """
-    global _MODE
+    global _MODE, _INVALID_MODE_REPORTED
     with _MODE_LOCK:
         if _MODE is None:
             _MODE = _read_mode()
         mode = _MODE
-        invalid = _INVALID_MODE
+        # Claimed under the lock, so concurrent first callers report it once.
+        invalid = "" if _INVALID_MODE_REPORTED else _INVALID_MODE
+        if invalid:
+            _INVALID_MODE_REPORTED = True
     if invalid:
         # Reported outside the lock: a log handler that itself asked about
         # profiling would deadlock the process it is reporting on.
@@ -3030,7 +3039,8 @@ def discard(measurement: Measurement | None) -> None:
 
 def reset_cache() -> None:
     """Drop every cached policy answer and stop the sink. Tests call this."""
-    global _CACHE, _MODE, _ENV_RUN, _ENV_RUN_READ, _INVALID_MODE, _REFRESHED
+    global _CACHE, _MODE, _ENV_RUN, _ENV_RUN_READ, _INVALID_MODE, _INVALID_MODE_REPORTED
+    global _REFRESHED
     with _CACHE_LOCK:
         _CACHE = None
     with _MODE_LOCK:
@@ -3038,6 +3048,7 @@ def reset_cache() -> None:
         _ENV_RUN = None
         _ENV_RUN_READ = False
         _INVALID_MODE = ""
+        _INVALID_MODE_REPORTED = False
     with _STORE_LOCK:
         _REFRESHED = 0
     with _BUDGET_LOCK:

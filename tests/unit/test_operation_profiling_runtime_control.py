@@ -269,6 +269,29 @@ def test_an_unrecognised_mode_is_disabled_and_says_so(monkeypatch, caplog):
     assert "is not a profiling mode" in caplog.text
 
 
+def test_an_unrecognised_mode_is_reported_once_not_on_every_check(monkeypatch, caplog):
+    """Every request asks for the mode, so the refusal must not be said on each.
+
+    ``profile_mode`` runs inside every ``active_run`` and ``start_operation`` --
+    every file and terminal request, every claim poll, every policy poll.
+    Regression: the refused value was never marked as reported, so each of those
+    wrote the same warning again.
+    """
+    monkeypatch.setenv(profiling.ENV_PROFILING_MODE, "admn")
+    profiling.reset_cache()
+    caplog.set_level(logging.WARNING, logger=profiling.__name__)
+
+    for _ in range(3):
+        assert profiling.active_run() is None
+        assert profiling.start_operation(operation="attempt.startup", host="host-a") is None
+    assert profiling.profile_mode() == profiling.MODE_DISABLED
+
+    refusals = [r for r in caplog.records if "is not a profiling mode" in r.getMessage()]
+    assert len(refusals) == 1
+    # Still refused, and still disabled: only the repetition is gone.
+    assert "'admn'" in refusals[0].getMessage()
+
+
 def test_the_mode_is_read_once_per_process(monkeypatch):
     """Changing how a deployment may be controlled is a redeploy, not a request."""
     assert profiling.profile_mode() == profiling.MODE_ADMIN
