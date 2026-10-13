@@ -8,17 +8,28 @@ the design keeps the host credential out of the sandbox side entirely.
 So the runner tells it. This module is the receiving half: it accepts a policy
 message over the broker's existing authenticated channel, validates it, and
 publishes it into the broker's own policy store. That store is what
-``start_stage_recording`` reads, so a fragment is only ever contributed for a
-selection this deployment is currently collecting for.
+``start_stage_recording`` reads for a *new* selection, so a call that was not
+already selected upstream contributes a fragment only while this deployment is
+collecting for its run.
 
-Three rules, and each closes a way the broker could keep measuring after a Stop:
+Three rules. The first says who may tell the broker anything, and what a Stop
+deliberately does not end; the other two close ways the broker could keep
+measuring after one:
 
-**A policy only ever comes from the runner.** The route sits behind the same
-shared-token guard as every other broker route, and the message is bounded and
-re-parsed rather than trusted. A browser or a sandbox that forges the profiling
-*header* on a file read changes nothing: the header states a selection, and the
-selection is only honoured when the broker's own policy already says that run is
-in force.
+**A policy only ever comes from the runner, and a selection only from a token
+holder.** The route sits behind the same shared-token guard as every other
+broker route, and the message is bounded and re-parsed rather than trusted.
+The policy does not gate every profiling *header*, though. A header that names
+an operation without a manifest is a new selection, honoured only when this
+broker's policy says that run is in force and selects it. A header that carries
+the run's manifest is a continuation (see ``start_stage_recording``): under
+``MODE=admin`` it is honoured whatever this policy says -- after a Stop, or for a
+run this broker was never told about -- bounded only by the manifest's own
+deadline, which a continuous run does not have. That is on purpose: it is how
+the later stages of work selected before a Stop still land. What keeps a forged
+continuation out is the channel, not this policy: only the control plane and the
+runner hold the broker token, each builds the header from a selection it made
+itself, and neither a browser nor a sandbox holds that token.
 
 **Revisions only move forwards.** A lower revision is refused rather than
 applied, so a delayed or reordered push cannot resurrect a configuration the
