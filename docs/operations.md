@@ -219,6 +219,23 @@ gateway and standalone edge need no new public route or port. Every request
 requires current `agent.admin` permission. pgAdmin retains its own login and
 CSRF checks; Agent cookies and bearer credentials are never sent upstream.
 
+pgAdmin's pages run on the Agent's own origin, where the administrator's Agent
+session authorizes every admin route. The proxy therefore adds a second
+`Content-Security-Policy` to each pgAdmin response, enforced alongside
+pgAdmin's own: pgAdmin may fetch, submit forms, open frames and start workers
+only under the public pgAdmin path. It also sends
+`Cross-Origin-Opener-Policy: same-origin`, so a pgAdmin page holds no handle on
+another Agent page it opens, and the proxy's own error answers are sandboxed.
+This narrows what a script injected into pgAdmin could do with the session; it
+is not an origin boundary. pgAdmin still shares the origin's browser storage,
+and an error page that an edge in front of the control plane serves under the
+pgAdmin path without these headers is outside the policy. Only a separate
+origin, with its own hostname, TLS and edge route and a proxy credential other
+than the Agent session cookie, would remove the shared session; this release
+does not provide one. Until then, keep the pinned pgAdmin image and its default
+security headers (its own policy runs only nonce-tagged scripts), enable the
+profile only where it is used, and grant `agent.admin` only to operators.
+
 Enable the optional service in the control-plane deployment's `.env`:
 
 ```dotenv

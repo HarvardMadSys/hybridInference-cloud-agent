@@ -15,14 +15,14 @@ from dataclasses import dataclass
 from http.cookies import SimpleCookie
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import quote, urlsplit, urlunsplit
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, EmailStr, Field, SecretStr, field_validator
 from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
-from starlette.responses import RedirectResponse, StreamingResponse
+from starlette.responses import JSONResponse, RedirectResponse, StreamingResponse
 
 from cloud_agent import settings
 from cloud_agent.api.deps import (
@@ -290,6 +290,51 @@ def _location(location: str, config: PgAdminConfig) -> str:
     return urlunsplit(("", "", path, parsed.query, parsed.fragment))
 
 
+def _isolation(config: PgAdminConfig) -> list[tuple[bytes, bytes]]:
+    """Confine pgAdmin's pages to the pgAdmin path of the origin they share.
+
+    pgAdmin is served on the Agent's own origin, where the administrator's
+    session cookie authorizes every admin route, so a script running in a
+    pgAdmin page could call them. This policy is enforced alongside pgAdmin's
+    own: its fetches, form posts, frames and workers stay under the pgAdmin
+    path, and COOP denies it a handle on a page it opens that does not send
+    the same COOP, as the Agent's other pages do not. It narrows that reach;
+    only a separate origin removes it.
+    """
+    host = config.host
+    if host.isascii() and not host.startswith("["):
+        # A CSP path ends at ";" or ",", so those are escaped.
+        path = quote(config.public_path, safe="/%:@!$&'()*+=-._~")
+        page = f"{config.scheme}://{host}{path}/"
+        sockets = f"{'wss' if config.scheme == 'https' else 'ws'}://{host}{path}/"
+        connect = f"{page} {sockets}"
+    else:
+        # A CSP host cannot spell an IP literal or an IDN; keep the origin bound.
+        page = connect = "'self'"
+    policy = (
+        f"connect-src {connect} blob: data:; form-action {page}; "
+        f"frame-src {page} blob: data:; worker-src {page} blob:"
+    )
+    return [
+        (b"content-security-policy", policy.encode("latin-1")),
+        (b"cross-origin-opener-policy", b"same-origin"),
+    ]
+
+
+def _refusal(status_code: int, detail: str) -> JSONResponse:
+    """Answer for pgAdmin without becoming a page that could borrow the session.
+
+    The proxy's own answers are served under the pgAdmin path, where a pgAdmin
+    page may frame them. Sandboxed, such a document has an opaque origin and
+    offers that page no same-origin window to make requests from.
+    """
+    return JSONResponse(
+        {"detail": detail},
+        status_code=status_code,
+        headers={"Cache-Control": "no-store", "Content-Security-Policy": "sandbox"},
+    )
+
+
 @router.get("/database-tools", response_model=DatabaseTools)
 async def database_tools(
     response: Response,
@@ -416,13 +461,20 @@ async def pgadmin_proxy(
     request: Request,
     admin: str = Depends(verify_admin_access),
     store: Storage | None = Depends(get_storage),
-) -> StreamingResponse:
+) -> Response:
     """Authorize every pgAdmin page, asset, upload, and SQL request."""
-    config = pgadmin_config()
+    try:
+        config = pgadmin_config()
+    except HTTPException as refused:
+        return _refusal(refused.status_code, refused.detail)
     if config is None:
-        raise HTTPException(status_code=503, detail="pgAdmin is not configured.")
-    # copy_with retains the configured host even for a path beginning with //.
-    url = config.upstream.copy_with(path=f"/{path}", query=request.url.query.encode())
+        return _refusal(503, "pgAdmin is not configured.")
+    try:
+        # copy_with retains the configured host even for a path beginning with //.
+        url = config.upstream.copy_with(path=f"/{path}", query=request.url.query.encode())
+    except httpx.InvalidURL:
+        # A control character, for one, cannot be sent upstream at all.
+        return _refusal(404, "pgAdmin has no page at this address.")
     client = pgadmin_client()
     try:
         upstream = await client.send(
@@ -436,7 +488,7 @@ async def pgadmin_proxy(
         )
     except httpx.HTTPError:
         await client.aclose()
-        raise HTTPException(status_code=503, detail="pgAdmin is temporarily unavailable.") from None
+        return _refusal(503, "pgAdmin is temporarily unavailable.")
     except BaseException:
         await client.aclose()
         raise
@@ -455,7 +507,8 @@ async def pgadmin_proxy(
     }
     headers = []
     for name, value in upstream.headers.multi_items():
-        if name in excluded or name == "cache-control":
+        # pgAdmin's own Content-Security-Policy is kept and enforced beside ours.
+        if name in excluded or name in {"cache-control", "cross-origin-opener-policy"}:
             continue
         if name == "set-cookie":
             headers.extend(_cookie(value, config))
@@ -463,7 +516,7 @@ async def pgadmin_proxy(
             if name == "location":
                 value = _location(value, config)
             headers.append((name.encode("latin-1"), value.encode("latin-1")))
-    response.raw_headers = [*headers, (b"cache-control", b"no-store")]
+    response.raw_headers = [*headers, (b"cache-control", b"no-store"), *_isolation(config)]
     if not path and request.method == "GET":
         await log_admin_action(
             store,

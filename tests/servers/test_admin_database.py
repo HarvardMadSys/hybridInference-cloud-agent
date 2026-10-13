@@ -173,6 +173,85 @@ async def test_cookie_scope_and_redirect_keep_the_public_proxy_prefix(database_a
     assert audit.record_admin_action.call_args.kwargs["actor_id"] == "admin-token"
 
 
+PGADMIN_ONLY = (
+    f"connect-src {PUBLIC}/ wss://agents.example.org/agents/api{ROOT}/ blob: data:; "
+    f"form-action {PUBLIC}/; frame-src {PUBLIC}/ blob: data:; worker-src {PUBLIC}/ blob:"
+)
+
+
+@pytest.mark.parametrize("status", [200, 404, 500])
+async def test_pgadmin_pages_cannot_reach_the_rest_of_the_shared_origin(database_api, status):
+    """pgAdmin shares the Agent origin and its session; its pages stay on its path."""
+    client, _, result, _, _, _ = database_api
+    own = "default-src 'self' ws: http: data: blob:; script-src 'self' 'nonce-abc'"
+    result["status"] = status
+    result["headers"] = [
+        ("content-type", "text/html"),
+        ("content-security-policy", own),
+        ("cross-origin-opener-policy", "unsafe-none"),
+    ]
+    response = await client.get(f"{ROOT}/browser/", headers=ADMIN)
+    assert response.status_code == status
+    # Both policies are enforced; pgAdmin's own is not replaced.
+    assert response.headers.get_list("content-security-policy") == [own, PGADMIN_ONLY]
+    assert response.headers.get_list("cross-origin-opener-policy") == ["same-origin"]
+
+
+async def test_the_isolation_policy_follows_the_public_proxy_url(database_api, monkeypatch):
+    client, _, _, _, _, _ = database_api
+    monkeypatch.setenv("AGENT_PGADMIN_PUBLIC_URL", "http://localhost:3003/a;b,c/api" + ROOT)
+    response = await client.get(f"{ROOT}/", headers=ADMIN)
+    page = f"http://localhost:3003/a%3Bb%2Cc/api{ROOT}/"
+    assert response.headers["content-security-policy"] == (
+        f"connect-src {page} ws://localhost:3003/a%3Bb%2Cc/api{ROOT}/ blob: data:; "
+        f"form-action {page}; frame-src {page} blob: data:; worker-src {page} blob:"
+    )
+    monkeypatch.setenv("AGENT_PGADMIN_PUBLIC_URL", "http://[::1]:3003/api" + ROOT)
+    response = await client.get(f"{ROOT}/", headers=ADMIN)
+    assert response.headers["content-security-policy"] == (
+        "connect-src 'self' blob: data:; form-action 'self'; "
+        "frame-src 'self' blob: data:; worker-src 'self' blob:"
+    )
+
+
+@pytest.mark.parametrize(
+    ("path", "error", "status"),
+    [
+        # A control character cannot be sent upstream at all.
+        (f"{ROOT}/%7F", None, 404),
+        (f"{ROOT}/browser/", httpx.ConnectError("private diagnostics"), 503),
+    ],
+)
+async def test_the_proxys_own_answers_are_sandboxed(database_api, path, error, status):
+    """A pgAdmin page may frame these; sandboxed, they lend it no same-origin window."""
+    client, seen, result, _, _, _ = database_api
+    result["error"] = error
+    response = await client.get(path, headers=ADMIN)
+    assert response.status_code == status
+    assert response.headers["content-security-policy"] == "sandbox"
+    assert response.headers["cache-control"] == "no-store"
+    assert "private diagnostics" not in response.text
+    assert len(seen) == (status == 503)
+
+
+@pytest.mark.parametrize("configuration", ["unset", "malformed", "not named"])
+async def test_refusals_for_the_configuration_are_sandboxed_too(
+    database_api, monkeypatch, configuration
+):
+    client, seen, _, _, _, _ = database_api
+    if configuration == "unset":
+        monkeypatch.delenv("AGENT_PGADMIN_URL")
+    elif configuration == "malformed":
+        monkeypatch.setenv("AGENT_PGADMIN_URL", "http://pgadmin/bad")
+    else:
+        save_pgadmin_url("http://169.254.169.254")
+    response = await client.get(f"{ROOT}/browser/", headers=ADMIN)
+    assert response.status_code == 503
+    assert response.headers["content-security-policy"] == "sandbox"
+    assert response.headers["cache-control"] == "no-store"
+    assert seen == []
+
+
 async def test_pgadmin_sessions_are_separate_for_each_request(database_api):
     client, seen, result, _, clients, _ = database_api
     result["headers"] = [("set-cookie", "pga4_session=admin-a; Path=/")]
