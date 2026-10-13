@@ -1771,8 +1771,9 @@ class WorkerClaimResponse(BaseModel):
     sandbox_token: str = Field(
         "",
         description=(
-            "The inference credential that enters the sandbox: a gateway grant, "
-            "scoped to the models this attempt may call."
+            "This attempt's gateway grant, scoped to the models it may call. It does "
+            "not enter the sandbox: each member's CLI runs on its own residency grant "
+            "from the sandbox residency route."
         ),
     )
     mcp_token: str = Field(

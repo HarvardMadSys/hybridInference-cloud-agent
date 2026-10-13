@@ -304,7 +304,8 @@ class ClaimedJob:
     runtime: str
     model: str
     worker_token: str
-    # The inference credential that enters the sandbox: a gateway grant.
+    # The attempt's gateway grant. It does not enter the sandbox: each member's
+    # CLI runs on its own residency grant from `establish_shared_residency`.
     sandbox_token: str
     execution_profile: str = "trusted-v1"
     # The MCP credential. A *second* credential, because tools and inference
