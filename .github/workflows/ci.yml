@@ -1691,16 +1691,33 @@ jobs:
                   if key.startswith(retired):
                       failures.append(f"{name} still passes the retired {key}")
 
+          # The Docker socket is the host's authority. `:ro` on the bind mount
+          # does not narrow the API: whatever can connect can start a privileged
+          # container with the host's root mounted. What this check can pin is
+          # who holds it — the runner, which starts each sandbox, and the
+          # broker, which execs into one — named, like the relays. Read-only
+          # stays their mount convention, and is not presented as more.
+          holders = set()
           for name, svc in stack["services"].items():
               for mount in svc.get("volumes") or []:
-                  target = mount.get("target") if isinstance(mount, dict) else str(mount)
-                  ro = mount.get("read_only") if isinstance(mount, dict) else ":ro" in str(mount)
-                  if "docker.sock" in str(target) and not ro:
-                      failures.append(f"{name} mounts the docker socket writable")
+                  if isinstance(mount, dict):
+                      paths = f"{mount.get('source', '')} {mount.get('target', '')}"
+                      ro = mount.get("read_only")
+                  else:
+                      paths, ro = str(mount), ":ro" in str(mount)
+                  if "docker.sock" in paths:
+                      holders.add(name)
+                      if not ro:
+                          failures.append(f"{name} mounts the docker socket without the holders' :ro convention")
+          if holders != {"runner", "workspace-broker"}:
+              failures.append(
+                  "the docker socket is the host's authority; only runner and workspace-broker "
+                  f"may hold it, not {sorted(holders)}"
+              )
 
           if failures:
               print("\n".join(failures)); sys.exit(1)
-          print("rendered stack: one sandbox network, relays discoverable only, docker socket read-only")
+          print("rendered stack: one sandbox network, relays discoverable only, docker socket held by runner and broker only")
           PY
 
       - name: Upload limits match encoded attachments through nginx

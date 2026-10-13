@@ -13,6 +13,7 @@ table, and the job is only the wiring that runs it.
 
 from __future__ import annotations
 
+import copy
 import os
 import re
 import shlex
@@ -30,6 +31,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 CI = REPO_ROOT / ".github/workflows/ci.yml"
 CONSOLE_DOCKERFILE = REPO_ROOT / "deploy/control-plane/Dockerfile"
 RUNNER_DOCKERFILE = REPO_ROOT / "deploy/host/Dockerfile.agent-runner"
+HOST_STACK = REPO_ROOT / "deploy/host/docker-compose.sandbox.yml"
 
 
 def workflow() -> dict[str, Any]:
@@ -569,6 +571,56 @@ def test_real_upload_limits_are_checked_by_compose_ci() -> None:
     assert check["env"]["AGENT_UPLOAD_TEST_NGINX_IMAGE"] == "nginx:1.27.5-alpine"
     assert "docker --host=unix:///var/run/docker.sock pull" in check["run"]
     assert "pytest -q -m external tests/external/test_upload_edge_limits.py" in check["run"]
+
+
+def _check_rendered_stack(tmp_path: Path, stack: dict[str, Any]) -> subprocess.CompletedProcess:
+    """Run the compose job's security check on ``stack``, as the job runs it."""
+    run = str(step("The rendered stack keeps its security properties", job="compose")["run"])
+    source = run.split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+    (tmp_path / "rendered.yml").write_text(yaml.safe_dump(stack))
+    return subprocess.run(
+        [sys.executable, "-c", source],
+        env={**os.environ, "RUNNER_TEMP": str(tmp_path)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_the_compose_job_pins_who_holds_the_docker_socket(tmp_path: Path) -> None:
+    """`:ro` does not narrow the Docker API; the holders are what CI can pin.
+
+    Whatever can connect to the socket can start a privileged container with
+    the host's root mounted. The check used to fail only a writable mount and
+    report "docker socket read-only" as the property, so a third service
+    holding the socket read-only passed. The shipped stack is the positive
+    control: its values are uninterpolated, and every comparison still holds.
+    """
+    shipped = yaml.safe_load(HOST_STACK.read_text())
+    passed = _check_rendered_stack(tmp_path, shipped)
+    assert passed.returncode == 0, passed.stdout + passed.stderr
+    assert "held by runner and broker only" in passed.stdout
+    assert "read-only" not in passed.stdout
+
+    third = copy.deepcopy(shipped)
+    tunnel = third["services"]["control-plane-tunnel"]
+    tunnel["volumes"].append("/var/run/docker.sock:/var/run/docker.sock:ro")
+    refused = _check_rendered_stack(tmp_path, third)
+    assert refused.returncode == 1
+    assert "control-plane-tunnel" in refused.stdout
+
+    renamed = copy.deepcopy(shipped)
+    renamed["services"]["control-plane-tunnel"]["volumes"].append(
+        {
+            "type": "bind",
+            "source": "/var/run/docker.sock",
+            "target": "/run/engine.sock",
+            "read_only": True,
+        }
+    )
+    refused = _check_rendered_stack(tmp_path, renamed)
+    assert refused.returncode == 1, "a socket mounted under another name is still the socket"
+    assert "control-plane-tunnel" in refused.stdout
 
 
 def test_real_command_cleanup_is_checked_by_compose_ci() -> None:
