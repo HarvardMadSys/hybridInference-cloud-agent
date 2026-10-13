@@ -221,6 +221,70 @@ def test_binary_new_or_duplicated_credential_is_blocked(origin, tmp_path, duplic
     assert _branches(origin[0]) == ["main"]
 
 
+@pytest.mark.parametrize("operation", ["rename", "copy", "modified_rename", "duplicate"])
+def test_only_exact_secret_blob_rename_is_allowed(origin, tmp_path, operation):
+    """Only an exact, source-consuming rename may inherit the old blob baseline."""
+    credential = ("gh" + "p_" + "a" * 36).encode()
+    content = b"\0" + credential + b"\0existing binary asset"
+    seed = tmp_path / "seed"
+    _git(["clone", "--quiet", origin[0], str(seed)], cwd=tmp_path)
+    (seed / "asset.bin").write_bytes(content)
+    _git(["add", "--all"], cwd=seed)
+    _git(["commit", "--quiet", "-m", "seed credential-bearing asset"], cwd=seed)
+    _git(["push", "--quiet", "origin", "main"], cwd=seed)
+    base_sha = _git(["rev-parse", "HEAD"], cwd=seed).strip()
+
+    editor = tmp_path / "editor"
+    _git(["clone", "--quiet", origin[0], str(editor)], cwd=tmp_path)
+    destination = "copied.bin" if operation == "copy" else "renamed.bin"
+    if operation == "rename":
+        _git(["mv", "asset.bin", destination], cwd=editor)
+    elif operation == "modified_rename":
+        _git(["mv", "asset.bin", destination], cwd=editor)
+        (editor / destination).write_bytes(content + b"\0innocuous edit")
+    elif operation == "duplicate":
+        (editor / "asset.bin").unlink()
+        (editor / destination).write_bytes(content)
+        (editor / "second-copy.bin").write_bytes(content)
+    else:
+        (editor / destination).write_bytes(content)
+    _git(["add", "--all"], cwd=editor)
+    source_blob = _git(["rev-parse", f"{base_sha}:asset.bin"], cwd=editor).strip()
+    destination_blob = _git(["hash-object", destination], cwd=editor).strip()
+    assert (source_blob == destination_blob) is (operation != "modified_rename")
+    if operation == "duplicate":
+        assert _git(["hash-object", "second-copy.bin"], cwd=editor).strip() == source_blob
+    if operation in {"modified_rename", "duplicate"}:
+        assert not (editor / "asset.bin").exists()
+    patch = _git(["diff", "--cached", "--binary", "--full-index"], cwd=editor)
+
+    if operation == "rename":
+        result = publish_patch(
+            job_id="ajob_secret_rename",
+            patch=patch,
+            clone_url=origin[0],
+            base_sha=base_sha,
+            commit_message="agent: rename existing binary asset",
+        )
+        assert _published_blob(origin[0], result.branch, destination) == content
+        assert (
+            _git(["rev-parse", f"{result.branch}:{destination}"], cwd=origin[0]).strip()
+            == source_blob
+        )
+        assert "asset.bin" not in _git(["ls-tree", "--name-only", result.branch], cwd=origin[0])
+        assert _branches(origin[0]) == ["agent/ajob_secret_rename", "main"]
+    else:
+        with pytest.raises(PublishError, match="github_token"):
+            publish_patch(
+                job_id="ajob_secret_copy",
+                patch=patch,
+                clone_url=origin[0],
+                base_sha=base_sha,
+                commit_message="agent: rename existing binary asset",
+            )
+        assert _branches(origin[0]) == ["main"]
+
+
 def test_binary_expansion_limit_refuses_before_git(origin, tmp_path, monkeypatch):
     """A compressed literal exceeding the decoded cap cannot reach Git apply."""
     from cloud_agent import publisher
