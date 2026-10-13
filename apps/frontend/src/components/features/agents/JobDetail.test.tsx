@@ -94,7 +94,19 @@ const renderingWork = vi.hoisted(() => ({
   trajectory: vi.fn(),
   history: vi.fn(),
   current: vi.fn(),
+  storedTurn: vi.fn(),
 }));
+
+vi.mock('./ChatMessages', async (importOriginal) => {
+  const original = await importOriginal<typeof import('./ChatMessages')>();
+  return {
+    ...original,
+    HistoryTurn: (props: Parameters<typeof original.HistoryTurn>[0]) => {
+      renderingWork.storedTurn(props.turn.jobId);
+      return original.HistoryTurn(props);
+    },
+  };
+});
 
 vi.mock('./trajectorySteps', async (importOriginal) => {
   const original = await importOriginal<typeof import('./trajectorySteps')>();
@@ -4002,6 +4014,100 @@ describe('JobDetail', () => {
     await within(inspector).findByRole('button', { name: 'Close details' });
     expect(inspector).toHaveTextContent('Review finished');
     expect(renderingWork.trajectory).toHaveBeenCalledTimes(3);
+  });
+
+  it('leaves stored turns undrawn while the owner types and the current turn streams', async () => {
+    renderingWork.storedTurn.mockClear();
+    const lint: AgentThreadEventApi = {
+      id: 40,
+      job_id: 'past-1',
+      turn_no: 1,
+      attempt_id: 7,
+      seq: 1,
+      event_type: 'tool_use',
+      payload: { id: 'lint-call', name: 'Bash', input: { command: 'npm run lint' } },
+      created_at: null,
+    };
+    const threadJobs = [
+      {
+        id: 'past-1',
+        state: 'succeeded',
+        turn_no: 1,
+        current_attempt_id: 7,
+        task_prompt: 'Lint it',
+        published_pr_url: null,
+      },
+      {
+        id: 'ajob_1',
+        state: 'running',
+        turn_no: 2,
+        current_attempt_id: 1,
+        task_prompt: 'Current task',
+        published_pr_url: null,
+      },
+    ] as AgentJobApi[];
+    const job = makeJob({
+      threadId: 'stored-turns',
+      turnNo: 2,
+      historyTurns: [
+        {
+          jobId: 'past-1',
+          turnNo: 1,
+          forkable: false,
+          state: 'done',
+          events: [
+            {
+              kind: 'tool_use',
+              tool: 'Bash',
+              id: 'lint-call',
+              input: { command: 'npm run lint' },
+              detail: 'npm run lint',
+              attemptNo: 1,
+              sourceEventId: lint.id,
+            },
+          ],
+          messages: [],
+        },
+      ],
+    });
+    const { rerender } = render(<JobDetail job={job} events={[lint]} threadJobs={threadJobs} />);
+    await screen.findByLabelText('Model for this turn');
+    const drawn = renderingWork.storedTurn.mock.calls.length;
+    expect(drawn).toBeGreaterThan(0);
+
+    const composer = screen.getByRole('textbox', { name: 'Add a follow-up' });
+    for (const value of ['h', 'he', 'hel']) {
+      fireEvent.change(composer, { target: { value } });
+    }
+    const reply: AgentThreadEventApi = {
+      ...lint,
+      id: 41,
+      job_id: 'ajob_1',
+      turn_no: 2,
+      attempt_id: 1,
+      event_type: 'message',
+      payload: { text: 'Still going' },
+    };
+    const streamed = {
+      ...job,
+      events: [
+        ...job.events,
+        { kind: 'message' as const, text: 'Still going', attemptNo: 1, sourceEventId: reply.id },
+      ],
+    };
+    rerender(<JobDetail job={streamed} events={[lint, reply]} threadJobs={threadJobs} />);
+    expect(screen.getByText('Still going')).toBeInTheDocument();
+    expect(renderingWork.storedTurn).toHaveBeenCalledTimes(drawn);
+
+    // Its actions still read the conversation as it is now.
+    fireEvent.click(
+      within(screen.getByRole('region', { name: 'Turn 1' })).getByRole('button', {
+        name: /^Inspect /,
+      }),
+    );
+    const inspector = screen.getByRole('region', { name: 'Step details' });
+    await within(inspector).findByRole('button', { name: 'Close details' });
+    expect(inspector).toHaveTextContent('npm run lint');
   });
 
   it('initializes terminal and file panels only when selected and preserves them across closing', async () => {
