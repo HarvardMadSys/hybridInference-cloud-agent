@@ -2,7 +2,7 @@
 
 > 2026-09-22 更新：Admin 页面已改为持续采集直到 Disable，移除时长选择和 Details。
 > 本文的定时实验说明及旧验收结果保留为历史记录；当前行为见
-> [持续采集设计](../specs/2026-09-22-continuous-admin-measurement.zh-CN.md)。
+> [持续采集设计](2026-09-22-continuous-admin-measurement.zh-CN.md)。
 
 
 日期：2026-09-21（2026-09-21 修订：按简化后的需求重写 §3–§8；短期授权续租、

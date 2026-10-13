@@ -140,7 +140,7 @@ Connector 注册、连接绑定、心跳、路由与撤销由 Agent 管理。用
 
 ## 6. 连接模型与授权版本
 
-使用 Agent 数据库和现有[最小身份 / issuer 命名空间](../minimal-identity.md)，不复制 Gateway 用户表。
+使用 Agent 数据库和现有[最小身份 / issuer 命名空间](../developer/minimal-identity.md)，不复制 Gateway 用户表。
 
 | 记录 | 主要内容 |
 | --- | --- |

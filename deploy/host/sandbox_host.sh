@@ -820,7 +820,7 @@ storage_host_helper() {
   # rejects the whole `--mount` with "use bind-recursive=disabled instead" and
   # exits 125. Trying to reach older hosts with the old key therefore breaks
   # every host that is not old, which is all of them; this deployment needs
-  # Docker 25 or newer for the helper path, and `docs/operations.md` says so.
+  # Docker 25 or newer for the helper path, and `docs/developer/operations.md` says so.
   # A host below that gets `unverified` and a warning quoting the CLI's own
   # complaint, which is the honest outcome. Nothing here requires root: the
   # helper opens its two binds with `O_PATH`, which needs no permission on the

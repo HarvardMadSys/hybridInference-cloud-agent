@@ -41,7 +41,7 @@ Not every module is worth a line here; these are the ones a newcomer needs to
 find early. The control plane's database schema is **one baseline revision plus
 additive ones** (`migrations/versions/0001_schema_baseline.py` and on), not a
 long chain — `MIGRATION.md` § *Schema baseline rewrite* explains why, and
-`docs/operations.md` § *Rebuilding the agent database* is the runbook for a
+`docs/developer/operations.md` § *Rebuilding the agent database* is the runbook for a
 database stamped with the chain that predates it.
 
 | Module | What it owns |
@@ -68,7 +68,7 @@ database stamped with the chain that predates it.
 | `apps/backend/cloud_agent_shared/egress.py`, `apps/backend/cloud_agent_host/network_guard.py` | The one sandbox network: its configuration and host rules, and the helper that installs and verifies them |
 | `apps/backend/cloud_agent_host/runtimes/`, `cloud_agent_shared/runtime_catalog.py`, `shared_protocol.py` | The five Agent CLI adapters, shared discovery facts, and version pins |
 
-[Code structure](docs/code-structure.md) maps module responsibilities and
+[Code structure](docs/developer/code-structure.md) maps module responsibilities and
 dependency direction, including the shared profiler and frontend API/UI modules.
 Neither implementation package imports the other; shared facts live in
 `cloud_agent_shared`. Lifecycle wiring must not import HTTP routers, and callers

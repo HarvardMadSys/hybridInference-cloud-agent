@@ -183,7 +183,7 @@ export AGENT_DEPLOY_PYTHON=/opt/cloud-agent/deployer/bin/python
 export DEPLOY_ROOT=/path/to/this-machines/persistent-deployment
 ```
 
-Run the [phased deployment sequence](../deploy/release/README.md#deploying-the-two-in-the-order-the-design-specifies)
+Run the [phased deployment sequence](../../deploy/release/README.md#deploying-the-two-in-the-order-the-design-specifies)
 using `"${RECOVERY_RELEASE}/recipe/deploy/control-plane/deploy.sh"` on the
 control-plane machine and `"${RECOVERY_RELEASE}/recipe/deploy/host/deploy.sh"`
 on its execution host: prepare both, prepare the database, activate the host,

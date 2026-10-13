@@ -5,7 +5,7 @@ Gateway sign-in to a real pull request. The check covers a Cloud Agent control
 plane, one runner host, and a disposable GitHub repository.
 
 If you only need a local product check without provider keys, start with the
-[complete local Docker stack](../deploy/local/README.md):
+[complete local Docker stack](../../deploy/local/README.md):
 
 ```bash
 ./deploy/local/dev.sh up
@@ -22,8 +22,8 @@ verified enrollment, job creation and remote claim, sandbox manager workspace ac
 tool-calling execution, success, four grant renewals, and revocation after
 settlement. That record did not verify real PR publication, mid-run
 cancellation, or the full fail-closed sequence. See
-[MIGRATION.md](../MIGRATION.md),
-[cutover.md](cutover.md) and the dated baseline below. Newer local lifecycle
+[MIGRATION.md](../../MIGRATION.md),
+[cutover.md](../cutover.md) and the dated baseline below. Newer local lifecycle
 checks do not fill those staging acceptance gaps.
 
 ## What a passing run proves
@@ -34,7 +34,7 @@ revision and environment. A successful job alone does not prove publication,
 because the publisher processes an immutable workspace snapshot asynchronously.
 
 The run does not cover migrated ownership/data, concurrency, host loss, or every
-isolation boundary. Use [cutover](cutover.md),
+isolation boundary. Use [cutover](../cutover.md),
 [deployment reliability](deployment-reliability.md) and
 [native context recall](context-recall.md) for those separate checks. The Gateway
 contracts belong to the Gateway; verify its deployed routes before starting.
@@ -68,8 +68,8 @@ contracts belong to the Gateway; verify its deployed routes before starting.
 ## 1. Configure
 
 Use separate, private environment files for the control plane and host. Start
-from [`control-plane/.env.example`](../deploy/control-plane/.env.example) and
-[`host/.env.example`](../deploy/host/.env.example); [ENVIRONMENT.md](../ENVIRONMENT.md)
+from [`control-plane/.env.example`](../../deploy/control-plane/.env.example) and
+[`host/.env.example`](../../deploy/host/.env.example); [ENVIRONMENT.md](../../ENVIRONMENT.md)
 is the reference. Keep the Agent database separate from the Gateway database.
 
 Generate deployment-owned secrets once and keep them out of version control:

@@ -1,7 +1,7 @@
 # Reference sshd policy for hand-provisioned tunnel accounts.
 #
 # Prefer automatic setup (Admin → Servers → Server setup, described in
-# docs/operations-compute.md). It creates one account per relay, writes this
+# docs/developer/operations-compute.md). It creates one account per relay, writes this
 # policy for each into /etc/ssh/sshd_config.d, reads it back with `sshd -T`,
 # and refuses an existing policy that would widen it. This file mirrors what
 # that setup writes, for a tunnel authorized by hand; a unit test keeps the two

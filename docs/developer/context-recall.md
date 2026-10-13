@@ -11,7 +11,7 @@ found models claiming that history was missing even when the request was
 complete.
 
 For session architecture, see the
-[native Fork/shared-workspace design](specs/2026-08-31-native-session-fork-shared-workspace-design.md).
+[native Fork/shared-workspace design](../specs/2026-08-31-native-session-fork-shared-workspace-design.md).
 The dated findings below are local acceptance evidence. They do not describe
 the current state of a remote deployment.
 
@@ -141,12 +141,12 @@ deployment or CLI pins change. Finite samples test the reported failure without
 guaranteeing that a model never makes another incorrect claim.
 
 Implementation and checks:
-[`runner.py`](../apps/backend/cloud_agent_host/runner.py),
-[`drivers.py`](../apps/backend/cloud_agent_host/drivers.py),
-[`shared_session_supervisor.py`](../apps/backend/cloud_agent_host/shared_session_supervisor.py),
-[`shared_protocol.py`](../apps/backend/cloud_agent_shared/shared_protocol.py),
-[`check_model_context.py`](../deploy/preflight/check_model_context.py) and
-[`test_claude_driver_context.py`](../tests/external/test_claude_driver_context.py).
+[`runner.py`](../../apps/backend/cloud_agent_host/runner.py),
+[`drivers.py`](../../apps/backend/cloud_agent_host/drivers.py),
+[`shared_session_supervisor.py`](../../apps/backend/cloud_agent_host/shared_session_supervisor.py),
+[`shared_protocol.py`](../../apps/backend/cloud_agent_shared/shared_protocol.py),
+[`check_model_context.py`](../../deploy/preflight/check_model_context.py) and
+[`test_claude_driver_context.py`](../../tests/external/test_claude_driver_context.py).
 
 ## Current investigation evidence (2026-09-07)
 

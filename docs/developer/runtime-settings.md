@@ -8,7 +8,7 @@ Environment variables supply bootstrap values only until the first settings
 answer arrives.
 
 The complete registry, labels, units, scopes, and validation ranges live in
-[`cloud_agent_shared/host_settings.py`](../apps/backend/cloud_agent_shared/host_settings.py).
+[`cloud_agent_shared/host_settings.py`](../../apps/backend/cloud_agent_shared/host_settings.py).
 The admin UI reads that registry rather than maintaining another list.
 
 **Storage reserve for new sandboxes** (`storage_min_available_mib`) is a runner

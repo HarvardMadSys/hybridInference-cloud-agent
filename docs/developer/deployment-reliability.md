@@ -6,7 +6,7 @@ fence. The control-plane wait has a 900-second budget for cold host builds;
 host-local checks retain a 120-second budget after the build.
 
 When an Actions deployment sets `DEPLOY_PEER_JOB`,
-[`deploy/watch_peer.py`](../deploy/watch_peer.py) supervises only the read-only
+[`deploy/watch_peer.py`](../../deploy/watch_peer.py) supervises only the read-only
 readiness wait. It reads the peer host job from the **current run attempt** with
 an Actions read token. A failed or cancelled job ends the wait and removes its
 named one-off container. If the Actions API is unavailable, the bounded
@@ -97,7 +97,7 @@ per-turn probe; deployment canaries without a payload always run it. The probe
 reads the guest kernel from the same temporary container used for member
 isolation and observer delivery.
 
-See [Kata runtime qualification generation](../ENVIRONMENT.md#kata-runtime-qualification-generation)
+See [Kata runtime qualification generation](../../ENVIRONMENT.md#kata-runtime-qualification-generation)
 for the marker format and installer requirements.
 
 ### Network verification and startup work
@@ -148,7 +148,7 @@ result as evidence.
 ## Old process, candidate schema
 
 The Postgres CI job finds the latest `agent-*` release tag reachable from the
-change's base and runs [`scripts/check_rolling_upgrade.py`](../scripts/check_rolling_upgrade.py).
+change's base and runs [`scripts/check_rolling_upgrade.py`](../../scripts/check_rolling_upgrade.py).
 It creates a random `rolling_test_*` database, migrates it with the previous
 release's Alembic graph, and warms that release's storage pool with conversation
 reads and writes and with the writes a runner's turn makes through the worker
@@ -238,9 +238,9 @@ earlier snapshot in that group to be `published`, and later turn settlement
 preserves `dirty`. A transient publication failure can therefore stop all
 subsequent snapshots in the same retained workspace. Capture retries and
 published-commit import retries do not recover this state. See
-[`publish_worker.py`](../apps/backend/cloud_agent/publish_worker.py),
-[`snapshot.py`](../apps/backend/cloud_agent/storage/repositories/snapshot.py)
-and [`sandbox.py`](../apps/backend/cloud_agent/storage/repositories/sandbox.py).
+[`publish_worker.py`](../../apps/backend/cloud_agent/publish_worker.py),
+[`snapshot.py`](../../apps/backend/cloud_agent/storage/repositories/snapshot.py)
+and [`sandbox.py`](../../apps/backend/cloud_agent/storage/repositories/sandbox.py).
 
 Inspect the snapshot's `last_error`, the anchor job's
 `shared_snapshot_publish_rejected` event, and GitHub's branch/PR state while

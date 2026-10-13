@@ -2,7 +2,7 @@
 
 This guide explains where behavior belongs and how to follow it through the
 repository. Use [development.md](development.md) for setup and checks, and
-[AGENTS.md](../AGENTS.md) for service and security boundaries.
+[AGENTS.md](../../AGENTS.md) for service and security boundaries.
 
 ## Start with the deployment boundary
 
@@ -131,7 +131,7 @@ Producers continue to import `cloud_agent_shared.operation_profiling`. The
 implementation is organized under `cloud_agent_shared/profiling/` by schema,
 models, run parsing, policy, measurement collection, stage observers, process
 context, export, and clock access. See the package's
-[responsibility and contract guide](../apps/backend/cloud_agent_shared/profiling/README.md).
+[responsibility and contract guide](../../apps/backend/cloud_agent_shared/profiling/README.md).
 
 The facade keeps the existing producer API and operational diagnostics. Clock
 access respects its replaceable `time` object, keeping deterministic tests and

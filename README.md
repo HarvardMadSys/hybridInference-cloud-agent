@@ -48,9 +48,9 @@ Choose the path that matches what you want to do:
 | Goal | Start here |
 |---|---|
 | Run the browser, API, host, and sandboxes locally | [Local Docker stack](deploy/local/README.md) |
-| Change the backend or frontend | [Developer guide](docs/development.md) |
-| Understand module ownership and dependencies | [Code structure](docs/code-structure.md) |
-| Operate a self-hosted deployment | [Operations runbook](docs/operations.md) |
+| Change the backend or frontend | [Developer guide](docs/developer/development.md) |
+| Understand module ownership and dependencies | [Code structure](docs/developer/code-structure.md) |
+| Operate a self-hosted deployment | [Operations runbook](docs/developer/operations.md) |
 | Build or deploy a release | [Release guide](deploy/release/README.md) |
 | Find configuration or a feature guide | [Documentation index](docs/README.md) |
 
@@ -68,7 +68,7 @@ The package supports Python 3.12 and 3.13. Setup and CI use Python 3.12 by
 default. `make check` formats the backend, checks lint and types, and runs tests
 not marked `external` or `dbtest`. Frontend development uses Node.js 22 and
 npm; its checks are documented separately in the
-[developer guide](docs/development.md#run-the-relevant-checks).
+[developer guide](docs/developer/development.md#run-the-relevant-checks).
 
 | Command | Purpose |
 |---|---|
@@ -105,12 +105,12 @@ web appearance, and sandbox/workspace limits from **Admin → Settings**. Saved
 values survive restarts. Existing environment values are imported once, and
 Reset restores the built-in defaults. Database access, identity, encryption,
 security, and deployment infrastructure remain bootstrap configuration. The
-[Settings runbook](docs/operations.md#admin-settings) explains migration and key
+[Settings runbook](docs/developer/operations.md#admin-settings) explains migration and key
 setup.
 
 **Admin → Database** opens the optional pgAdmin website for PostgreSQL
 administration. The first administrator chooses the pgAdmin login from the
-dashboard. Follow the [pgAdmin runbook](docs/operations.md#pgadmin) to enable
+dashboard. Follow the [pgAdmin runbook](docs/developer/operations.md#pgadmin) to enable
 the private service.
 
 ## Architecture
@@ -184,7 +184,7 @@ After publication, select the button again to continue watching.
 Stopping a container preserves its writable layer. Losing the container or the
 Docker data root also loses the required native state. Transcript replay and
 cross-host restoration are not recovery paths. See
-[native conversation recall](docs/context-recall.md) for verification details
+[native conversation recall](docs/developer/context-recall.md) for verification details
 and limits.
 
 ## Powered by a HybridInference gateway
@@ -209,8 +209,8 @@ revocation fails.
 Protected owner and admin requests check the gateway's current Agent access
 decision. An unavailable or invalid gateway response never grants access. Each
 Agent database is bound to a single gateway identity issuer. See the
-[admission policy](docs/agent-access-policy.md) and
-[identity configuration](docs/minimal-identity.md) for details.
+[admission policy](docs/developer/agent-access-policy.md) and
+[identity configuration](docs/developer/minimal-identity.md) for details.
 
 MCP connections belong to individual users and are resolved by the control
 plane. Sandboxes call tools through the MCP-only listener with a separate,
@@ -236,7 +236,7 @@ short-lived inference grants can still be exfiltrated and replayed through the
 gateway's public inference API until they expire or are revoked. Those calls
 remain subject to the owner's model permissions and quota. Before deployment,
 read the [security guidance](SECURITY.md) and the
-[operations runbook](docs/operations.md#the-sandbox-network).
+[operations runbook](docs/developer/operations.md#the-sandbox-network).
 
 ## Repository layout
 
@@ -254,7 +254,7 @@ docs/                             Feature guides, runbooks, designs, and accepta
 
 ## Contributing
 
-Start with the [developer guide](docs/development.md),
+Start with the [developer guide](docs/developer/development.md),
 [contribution workflow](CONTRIBUTING.md), and [repository rules](AGENTS.md).
 Create branches from `dev` using `<user>/<scope>/<name>`, and target pull
 requests at `dev`. Before opening a PR, run `make check` along with any frontend

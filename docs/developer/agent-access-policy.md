@@ -76,7 +76,7 @@ upgrade constraints.
 ## Verify the Gateway contract
 
 The schema is in
-[`internal-lookups.openapi.yaml`](../gateway_contracts/internal-lookups.openapi.yaml).
+[`internal-lookups.openapi.yaml`](../../gateway_contracts/internal-lookups.openapi.yaml).
 Local tests validate its error types against the Agent client and permission
 resolver. To validate an isolated or otherwise authorized Gateway over HTTP:
 
@@ -115,9 +115,9 @@ cookies require a fresh login. Source changes alone do not update pinned images
 or deploy either service.
 
 The implementation is in
-[`agent_access.py`](../apps/backend/cloud_agent/agent_access.py),
-[`deps.py`](../apps/backend/cloud_agent/api/deps.py) and
-[`session.py`](../apps/backend/cloud_agent/api/session.py).
+[`agent_access.py`](../../apps/backend/cloud_agent/agent_access.py),
+[`deps.py`](../../apps/backend/cloud_agent/api/deps.py) and
+[`session.py`](../../apps/backend/cloud_agent/api/session.py).
 
 ## Local verification (2026-09-10)
 

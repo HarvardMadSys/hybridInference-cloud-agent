@@ -41,7 +41,7 @@ Repository creation requires the GitHub App's **Repository creation: write**
 permission (or **Administration: Read and write**). Existing task execution and
 repository-access checks still apply; creating a repository does not itself
 grant the agent access. See the
-[GitHub App setup](operations.md) for operator configuration.
+[GitHub App setup](developer/operations.md) for operator configuration.
 
 ## Grouping and ordering
 

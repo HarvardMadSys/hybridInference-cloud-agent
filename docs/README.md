@@ -9,8 +9,8 @@ otherwise.
 
 | Guide | Use it to |
 |---|---|
-| [Developer guide](development.md) | Set up a checkout, find the code that owns a change, and run checks |
-| [Code structure](code-structure.md) | Follow dependencies, locate domain modules, and extend the codebase |
+| [Developer guide](developer/development.md) | Set up a checkout, find the code that owns a change, and run checks |
+| [Code structure](developer/code-structure.md) | Follow dependencies, locate domain modules, and extend the codebase |
 | [Contributing](../CONTRIBUTING.md) | Follow branch, pull-request, and CI requirements |
 | [Repository rules](../AGENTS.md) | Understand package boundaries, execution concepts, and security requirements |
 | [Local Docker stack](../deploy/local/README.md) | Run the browser, API, gateway fixture, hosts, and retained sandboxes locally |
@@ -22,28 +22,28 @@ otherwise.
 | Guide | Use it to |
 |---|---|
 | [Environment inventory](../ENVIRONMENT.md) | Look up configuration names, defaults, owning components, and provisioning requirements |
-| [Admin Settings](operations.md#admin-settings) | Manage saved settings, integrations, appearance, and runtime limits; initialize settings and preserve encryption keys |
-| [Operations runbook](operations.md) | Configure credentials, enroll hosts, qualify Kata, deploy, migrate databases, and manage storage and networking |
+| [Admin Settings](developer/operations.md#admin-settings) | Manage saved settings, integrations, appearance, and runtime limits; initialize settings and preserve encryption keys |
+| [Operations runbook](developer/operations.md) | Configure credentials, enroll hosts, qualify Kata, deploy, migrate databases, and manage storage and networking |
 | [Release guide](../deploy/release/README.md) | Build immutable release artifacts and deploy their recipes in the required order |
-| [Compute resources](operations-compute.md) | Configure optional server provisioning, global sandbox placement, and CloudLab node replacement |
-| [Deployment reliability](deployment-reliability.md) | Drain runners safely, check schema compatibility, and detect stalled queues |
-| [Backup and recovery](disaster-recovery.md) | Define retention and recovery targets, preserve keys and coherent host state, and recover a previous artifact release |
-| [Automatic PR archiving](automatic-pr-archiving.md) | Configure merge detection, understand session mapping, and verify or recover automatic archival |
-| [Runner lease troubleshooting](runner-lease-troubleshooting.md) | Diagnose expired attempts and repeated lease failures |
-| [Host runtime settings](runtime-settings.md) | Configure host defaults, server overrides, and the storage reserve |
-| [Host execution limits](host-execution-limits.md) | Understand command cleanup, output bounds, checkpoints, and storage admission |
-| [Single-host smoke](smoke.md) | Verify a deployment against a gateway and review the original smoke evidence |
+| [Compute resources](developer/operations-compute.md) | Configure optional server provisioning, global sandbox placement, and CloudLab node replacement |
+| [Deployment reliability](developer/deployment-reliability.md) | Drain runners safely, check schema compatibility, and detect stalled queues |
+| [Backup and recovery](developer/disaster-recovery.md) | Define retention and recovery targets, preserve keys and coherent host state, and recover a previous artifact release |
+| [Automatic PR archiving](developer/automatic-pr-archiving.md) | Configure merge detection, understand session mapping, and verify or recover automatic archival |
+| [Runner lease troubleshooting](developer/runner-lease-troubleshooting.md) | Diagnose expired attempts and repeated lease failures |
+| [Host runtime settings](developer/runtime-settings.md) | Configure host defaults, server overrides, and the storage reserve |
+| [Host execution limits](developer/host-execution-limits.md) | Understand command cleanup, output bounds, checkpoints, and storage admission |
+| [Single-host smoke](developer/smoke.md) | Verify a deployment against a gateway and review the original smoke evidence |
 | [Security](../SECURITY.md) | Review deployment trust assumptions and report vulnerabilities privately |
 
 ## Identity and user-facing behavior
 
 | Guide | Use it to |
 |---|---|
-| [Agent admission policy](agent-access-policy.md) | Understand permissions, gateway checks, refusals, and compatible rollout |
-| [Minimal Agent identity](minimal-identity.md) | Configure the gateway issuer and safely bind an existing database to it |
-| [Native conversation recall](context-recall.md) | Understand retained sessions, runtime-specific behavior, and recall verification |
+| [Agent admission policy](developer/agent-access-policy.md) | Understand permissions, gateway checks, refusals, and compatible rollout |
+| [Minimal Agent identity](developer/minimal-identity.md) | Configure the gateway issuer and safely bind an existing database to it |
+| [Native conversation recall](developer/context-recall.md) | Understand retained sessions, runtime-specific behavior, and recall verification |
 | [Avatars and personal memory](user-memory.md) | View automatic avatars, manage saved preferences, and improve future requests |
-| [Native agent questions](operations.md#native-agent-questions) | Answer a waiting agent request and understand reload, skip, and stale-answer handling |
+| [Native agent questions](developer/operations.md#native-agent-questions) | Answer a waiting agent request and understand reload, skip, and stale-answer handling |
 | [Tool approvals](mcp-approvals.md) | Review pending calls across conversations and browse older request history |
 | [Conversation navigation](conversation-navigation.md) | Understand the turn rail, previews, jumps, and reading position |
 | [Workspace files](workspace-files.md) | Open repository files by path, retry reads, and copy or download previews |

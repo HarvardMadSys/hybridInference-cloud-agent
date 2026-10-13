@@ -2,10 +2,10 @@
 
 This guide will help you get a checkout running, find the code that owns your
 change, and choose the right checks for it. Start with
-[AGENTS.md](../AGENTS.md) for the repository rules and
-[CONTRIBUTING.md](../CONTRIBUTING.md) for the pull-request workflow. For an
+[AGENTS.md](../../AGENTS.md) for the repository rules and
+[CONTRIBUTING.md](../../CONTRIBUTING.md) for the pull-request workflow. For an
 overview of the product and its deployment topology, see the
-[README](../README.md).
+[README](../../README.md).
 
 ## Set up a checkout
 
@@ -34,7 +34,7 @@ npm ci
 
 When you need to exercise sign-in, migrations, host enrollment, and real Agent
 CLIs together, use the
-[complete local Docker stack](../deploy/local/README.md). Run it from the
+[complete local Docker stack](../../deploy/local/README.md). Run it from the
 repository root:
 
 ```bash
@@ -52,9 +52,9 @@ Choose the package based on who should own the behavior you are changing:
 
 | Package | Owns |
 |---|---|
-| [`cloud_agent/`](../apps/backend/cloud_agent/) | Control plane: HTTP APIs, admission and scheduling, persistence, Gateway adapters, and publication. |
-| [`cloud_agent_host/`](../apps/backend/cloud_agent_host/) | Host execution: claims, retained sandboxes, workspace/session sandbox manager, and Agent CLI adapters. |
-| [`cloud_agent_shared/`](../apps/backend/cloud_agent_shared/) | Protocol versions, capability names, shared payloads and errors, profiling collection, and shared Git/archive algorithms. |
+| [`cloud_agent/`](../../apps/backend/cloud_agent/) | Control plane: HTTP APIs, admission and scheduling, persistence, Gateway adapters, and publication. |
+| [`cloud_agent_host/`](../../apps/backend/cloud_agent_host/) | Host execution: claims, retained sandboxes, workspace/session sandbox manager, and Agent CLI adapters. |
+| [`cloud_agent_shared/`](../../apps/backend/cloud_agent_shared/) | Protocol versions, capability names, shared payloads and errors, profiling collection, and shared Git/archive algorithms. |
 
 Inside the control plane, look in `api/` for HTTP handlers, `application/` for
 reusable flows, `ports/` for persistence interfaces, and `storage/` for their
@@ -106,7 +106,7 @@ checkout can still fail in production. Follow these boundaries:
 - The control plane must not import the host implementation. Runtime discovery
   facts live in `cloud_agent_shared/runtime_catalog.py`; host adapters and the
   control plane both consume them. The
-  [import-boundary tests](../tests/unit/test_import_boundary.py) enforce both
+  [import-boundary tests](../../tests/unit/test_import_boundary.py) enforce both
   directions of the service boundary.
 - The Gateway is reached over HTTP only. Use the contracts in
   `gateway_contracts/`; do not import `serving.*`, access the Gateway database,
@@ -122,7 +122,7 @@ must not import `storage/repositories/`; shared policies belong to their domain
 or owning service.
 
 Changes to sandbox networking, credential scope, or isolation also need review
-against [the security boundaries in AGENTS.md](../AGENTS.md#7-security-boundaries--do-not-relax-without-review).
+against [the security boundaries in AGENTS.md](../../AGENTS.md#7-security-boundaries--do-not-relax-without-review).
 Keep MCP tool calls on the MCP-only listener and long-lived credentials out of
 sandboxes. Inference spend remains subject to Gateway per-user quota; there is
 no per-task dollar budget.
@@ -257,7 +257,7 @@ database. Fixtures read `TEST_DB_HOST`, `TEST_DB_PORT`, `TEST_DB_NAME`,
 `TEST_DB_USER`, and `TEST_DB_PASSWORD`; `TEST_DB_NAME` must contain `_test_`.
 Check the result for skipped tests, because an unavailable database can cause
 fixtures to skip rather than fail. Parallel workers need separate pre-created
-databases. See [ENVIRONMENT.md](../ENVIRONMENT.md#database) for defaults and
+databases. See [ENVIRONMENT.md](../../ENVIRONMENT.md#database) for defaults and
 worker naming.
 
 Deployment tests read the sandbox CLI version settings. If your development
@@ -290,7 +290,7 @@ node scripts/check-runtime-site-config.mjs
 The `make ci-frontend` target runs all six frontend checks above. Hosted CI also
 builds and smoke-tests both the root and `/agents` web variants when image
 changes are selected. See
-[CONTRIBUTING.md](../CONTRIBUTING.md#continuous-integration) for the wider CI gate.
+[CONTRIBUTING.md](../../CONTRIBUTING.md#continuous-integration) for the wider CI gate.
 
 ## Changing an API
 
@@ -324,7 +324,7 @@ Review the generated diff and explain any compatibility implications. The
 surface tests also reject duplicate registrations and overlaps between the
 agent surface routers. A snapshot update records a change; the behavioral tests
 and review establish whether it is compatible. The
-[contract guide](../gateway_contracts/README.md) explains what these checks can
+[contract guide](../../gateway_contracts/README.md) explains what these checks can
 verify and what still needs comparison with Gateway source.
 
 ## Packaging and documentation
@@ -346,10 +346,10 @@ Update the guide that owns any changed configuration, command, or behavior:
 
 | Topic | Document |
 |---|---|
-| Environment variables and runtime pins | [ENVIRONMENT.md](../ENVIRONMENT.md) |
+| Environment variables and runtime pins | [ENVIRONMENT.md](../../ENVIRONMENT.md) |
 | Operation and troubleshooting | [operations.md](operations.md) |
-| Local development stack | [Local-stack guide](../deploy/local/README.md) |
-| Release artifacts and validation | [Release guide](../deploy/release/README.md) |
+| Local development stack | [Local-stack guide](../../deploy/local/README.md) |
+| Release artifacts and validation | [Release guide](../../deploy/release/README.md) |
 
 Designs, completed migration checklists, and acceptance records document their
 own baseline. Preserve that history and update current-use guides when the

@@ -54,7 +54,7 @@
 
 `OPENAI_API_KEY` 与 `ANTHROPIC_API_KEY` 保留，用户自带 agent 账号不在设计范围内。Secret 是用户主动授予其代码和 agent 的能力；已知值脱敏及受信发布扫描不保证阻止编码外发、原始终端/文件读取、模型上下文或直接 Git push。安装和操作使用 /workspace/.cloud-agent-tools 下持久、可执行且组共享的工具 HOME 和数据目录；成员平台凭据 HOME 保持私有。PID 和状态文件仍在 noexec 私有 tmpfs。
 
-控制面所有副本升级后才可新建绑定，runner/Sandbox Manager 要共同支持 `environment-v1`；已有绑定不支持直接回退到不理解绑定的旧程序。完整升级/回滚及 key 备份要求见[运维说明](../operations.md#reusable-cloud-environments)。
+控制面所有副本升级后才可新建绑定，runner/Sandbox Manager 要共同支持 `environment-v1`；已有绑定不支持直接回退到不理解绑定的旧程序。完整升级/回滚及 key 备份要求见[运维说明](../developer/operations.md#reusable-cloud-environments)。
 
 ## 后续评审回归与产品恢复入口
 

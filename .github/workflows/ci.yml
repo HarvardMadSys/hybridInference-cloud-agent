@@ -33,7 +33,7 @@ on:
 # dispatches, which also publish and synchronise. PRs keep a read-only token,
 # checkout never persists it, and no PR job receives secrets. A fork can edit
 # this file, so these expressions are not the boundary: the runner-group
-# restrictions in docs/development.md (#464) are.
+# restrictions in docs/developer/development.md (#464) are.
 permissions:
   contents: read
 

@@ -451,7 +451,7 @@ def test_every_release_image_input_selects_image_checks(entry: str) -> None:
     assert _runs_the_image_jobs(probe), f"image input {entry} selects no image checks"
 
 
-@pytest.mark.parametrize("path", ["docs/operations.md", "tests/unit/test_identity.py"])
+@pytest.mark.parametrize("path", ["docs/developer/operations.md", "tests/unit/test_identity.py"])
 def test_non_image_inputs_do_not_select_image_checks(path: str) -> None:
     """Full input coverage should preserve useful classification of unrelated changes."""
     assert not _runs_the_image_jobs(path)

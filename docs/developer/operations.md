@@ -37,7 +37,7 @@ Start with the task you need:
 | Investigate a task | [Recorded events and audit](#reading-a-tasks-recorded-events) |
 | Review test coverage and historical evidence | [Runtime verification](#runtime-verification), [verified](#verified), [not verified](#not-verified) |
 
-[ENVIRONMENT.md](../ENVIRONMENT.md) documents configuration, and the
+[ENVIRONMENT.md](../../ENVIRONMENT.md) documents configuration, and the
 [compute-resource runbook](operations-compute.md) covers administrator-managed
 SSH and CloudLab hosts. For pre-drain checks, migration regression, failed peers,
 and queue alerts, use [deployment reliability](deployment-reliability.md).
@@ -163,7 +163,7 @@ Database access, the settings encryption root, recovery authentication,
 host provisioning, networking/listeners, actual host isolation,
 build routing, mounted files, and trusted compute
 deployment profiles remain deployment configuration. These bootstrap names
-appear on the page with hidden values. See [the environment inventory](../ENVIRONMENT.md#settings-and-bootstrap-configuration).
+appear on the page with hidden values. See [the environment inventory](../../ENVIRONMENT.md#settings-and-bootstrap-configuration).
 
 ## Sandbox archive storage
 
@@ -719,7 +719,7 @@ history.
 The admin console shows tool-call measurements in Resources and model records
 in LLM requests. To inspect raw runtime events for support or abuse
 investigations, use the two admin routes below. See the amendment in
-[the admin observability spec](specs/2026-09-10-admin-observability-v1.md).
+[the admin observability spec](../specs/2026-09-10-admin-observability-v1.md).
 
 **Metadata.** `GET /admin/agent/runs/{job_id}/activity` returns event
 envelopes ordered by execution: `event_type`, `created_at`, `is_error`,
@@ -800,7 +800,7 @@ user to Test to discover the connection's tools.
 The relay, connection API, discovery path and all five coding-agent adapters
 are implemented and tested for remote MCP. The remaining stdio and optional
 protocol capabilities are described below and in the
-[conformance record](specs/2026-09-11-per-user-mcp-v1-conformance.md).
+[conformance record](../specs/2026-09-11-per-user-mcp-v1-conformance.md).
 
 ### Authorization and routing
 
@@ -817,7 +817,7 @@ The relay enforces these rules:
   treated as an aged approval.
 - **`confirm` holds the original call.** The relay records a pending invocation
   and waits for the owner's decision in the conversation's Tools panel or the
-  account's [Approvals inbox](mcp-approvals.md). Approval
+  account's [Approvals inbox](../mcp-approvals.md). Approval
   dispatches that request once under the current attempt and permission fence;
   the CLI receives the result without asking the model to retry. Denial, expiry
   or changed authorization prevents dispatch.
@@ -1322,7 +1322,7 @@ deploy/host/sandbox_host.sh activate # drain, replace, prove
 
 Use the standalone host stack even on the gateway's machine, with tunnel
 destinations pointing to its local listeners. The old co-located
-`agent_runner.sh` overlay did not move; [MIGRATION.md](../MIGRATION.md) records
+`agent_runner.sh` overlay did not move; [MIGRATION.md](../../MIGRATION.md) records
 that decision. `preflight` checks Docker, retained-session configuration, host
 isolation, and the configured image. `up` repeats those checks against the image
 it deploys.
@@ -2029,7 +2029,7 @@ Downstream deployment automation coordinates the host and control-plane
 scripts. This repository publishes neutral artifacts; it does not contain a
 named environment's deployment Actions jobs. The two deployment tracks can run
 in parallel under the exact-SHA readiness fence described here. See
-[the release contract](../deploy/release/README.md) for artifact deployments.
+[the release contract](../../deploy/release/README.md) for artifact deployments.
 
 #### Host and control-plane readiness
 
@@ -2223,7 +2223,7 @@ transaction. It refuses active jobs, other clients and an already-converted copy
    and reconcile the new data. Prefer a tested compatible artifact recovery.
 
 The complete conversion contract is
-[the legacy database copy plan](plans/2026-09-18-legacy-database-copy.md).
+[the legacy database copy plan](../plans/2026-09-18-legacy-database-copy.md).
 
 ### Rebuilding the agent database
 
@@ -2851,7 +2851,7 @@ any of these keys could open listeners on the far machine. So the control
 key's `permitlisten` names its single reverse listener — the control-plane
 machine's Docker bridge gateway and this host's `AGENT_SANDBOX_MANAGER_REVERSE_PORT` —
 and each account gets its `Match User` block from
-[`deploy/host/sshd-tunnels.conf.example`](../deploy/host/sshd-tunnels.conf.example).
+[`deploy/host/sshd-tunnels.conf.example`](../../deploy/host/sshd-tunnels.conf.example).
 The inference and MCP blocks set `AllowTcpForwarding local` and
 `PermitListen none`. The control block allows that one `PermitListen` with
 `GatewayPorts clientspecified`. Install the blocks before any other `Match`
@@ -2905,7 +2905,7 @@ already opens — a reverse forward on the control-plane tunnel:
 
 The **control plane host's** sshd must apply `GatewayPorts clientspecified` to
 the control account, as its block in
-[`deploy/host/sshd-tunnels.conf.example`](../deploy/host/sshd-tunnels.conf.example)
+[`deploy/host/sshd-tunnels.conf.example`](../../deploy/host/sshd-tunnels.conf.example)
 does, together with that account's `PermitListen` and the key's `permitlisten`
 naming this exact address and port. Never set it to `yes`: that binds every
 remote forward to the wildcard address whatever the client asked for, and
@@ -3004,7 +3004,7 @@ supports those guards; explicitly selected plugins are loaded through the native
 runtime mechanism, alongside the platform's MCP configuration.
 
 There is one network, the same for every task and every phase, and nothing
-selects it ([design](specs/2026-09-23-agent-public-egress-design.zh-CN.md)).
+selects it ([design](../specs/2026-09-23-agent-public-egress-design.zh-CN.md)).
 Each sandbox group — setup, the agent and every Fork sibling — gets one
 routable Docker bridge, a `/29` from `AGENT_EGRESS_CHAT_NETWORK_POOL`. Its host
 interface is named with this deployment's prefix, `ca` and five hex digits
@@ -3495,8 +3495,8 @@ deployment that performs those checks.
   its downstream distribution. The gateway's former `/v1/agent/*` 404 was
   about routes deleted on 2026-08-09, not this service. Use the distribution's
   deployment records and the artifact contract in
-  [the release README](../deploy/release/README.md) and
-  [`deploy/DEPLOY_PROTOCOL`](../deploy/DEPLOY_PROTOCOL).
+  [the release README](../../deploy/release/README.md) and
+  [`deploy/DEPLOY_PROTOCOL`](../../deploy/DEPLOY_PROTOCOL).
 - **Historical staging model availability.** Of the 15 models then listed by
   `/v1/models`, only `glm-5.1` and `qwen3.6-35b` resolved for an agent-job
   token, and both reached `qwen3.6-35b`. The others returned
@@ -3587,7 +3587,7 @@ to date.
   a claim that a new deployment gate has been exercised. Current component
   ownership and operating instructions use the post-split topology.
 - **Cutover inventory.** Secret provenance and one-time migration steps remain
-  in [cutover.md](cutover.md) and `ENVIRONMENT.md`; this page documents the
+  in [cutover.md](../cutover.md) and `ENVIRONMENT.md`; this page documents the
   resulting runtime topology.
 
 

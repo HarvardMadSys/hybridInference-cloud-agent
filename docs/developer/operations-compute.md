@@ -3,8 +3,8 @@
 Use Admin → Servers to deploy existing SSH machines or CloudLab allocations,
 manage their leases, and choose where new sandboxes run. Durable operations and
 renewal run in the control plane, so closing the browser does not stop them.
-The [compute lifecycle design](specs/2026-10-04-compute-resource-lifecycle-design.zh-CN.md)
-records the underlying protocol; [ENVIRONMENT.md](../ENVIRONMENT.md#optional-compute-resource-management)
+The [compute lifecycle design](../specs/2026-10-04-compute-resource-lifecycle-design.zh-CN.md)
+records the underlying protocol; [ENVIRONMENT.md](../../ENVIRONMENT.md#optional-compute-resource-management)
 lists its configuration.
 
 The global location applies to **all new, still-unassigned sandbox groups**.
@@ -191,9 +191,9 @@ previous bundle; it does not rewrite a file-backed profile.
 File-backed configuration remains supported for existing deployments and
 recovery. Start with these operator templates:
 
-- [`compute.example.json`](../deploy/control-plane/compute.example.json)
-- [`compute-host.env.example`](../deploy/control-plane/compute-host.env.example)
-- [Host field descriptions](../deploy/host/.env.example)
+- [`compute.example.json`](../../deploy/control-plane/compute.example.json)
+- [`compute-host.env.example`](../../deploy/control-plane/compute-host.env.example)
+- [Host field descriptions](../../deploy/host/.env.example)
 
 Copy them to a private configuration directory. Replace every example address,
 token, network and all-zero digest/revision. Keep these files outside Git.
@@ -304,7 +304,7 @@ node at first boot** in the CloudLab server's advanced options. This applies
 only to
 experiments created by this control plane from the Cloud Agent profile:
 
-1. Publish [`deploy/cloudlab/cloud-agent-node.py`](../deploy/cloudlab/cloud-agent-node.py)
+1. Publish [`deploy/cloudlab/cloud-agent-node.py`](../../deploy/cloudlab/cloud-agent-node.py)
    as a **project-private** CloudLab profile. Set its project and name as the
    server template. Its node, image and data-disk parameters replace
    `small-lan`'s `phystype`, `osImage`, `dataMount` and `dataSize`.
@@ -548,7 +548,7 @@ without credentials.
   alerts, cleanup and retained chats. Unit tests and a manual migration do not
   replace elapsed-time acceptance.
 
-The [2026-10-10 manual staging drill](specs/2026-10-10-cloudlab-node-rotation-design.zh-CN.md#验证二结果2026-10-10staging)
+The [2026-10-10 manual staging drill](../specs/2026-10-10-cloudlab-node-rotation-design.zh-CN.md#验证二结果2026-10-10staging)
 moved real sessions from Clemson to Utah with a 161-second pause. It preceded
 the automatic workflow. Abrupt loss of the only source disk or unavailable
 replacement capacity before expiry can still lose sessions; keep separate

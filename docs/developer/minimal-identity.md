@@ -157,9 +157,9 @@ Prefer a compatible forward fix, or stop Agent while keeping the Gateway
 available. Back up and restore the binding with the data whose owners it names.
 
 The implementation is in
-[`identity.py`](../apps/backend/cloud_agent/identity.py),
-[`identity_namespace.py`](../apps/backend/cloud_agent/identity_namespace.py) and
-[`lifespan.py`](../apps/backend/cloud_agent/bootstrap/lifespan.py).
+[`identity.py`](../../apps/backend/cloud_agent/identity.py),
+[`identity_namespace.py`](../../apps/backend/cloud_agent/identity_namespace.py) and
+[`lifespan.py`](../../apps/backend/cloud_agent/bootstrap/lifespan.py).
 
 ## Local verification (2026-09-10)
 
