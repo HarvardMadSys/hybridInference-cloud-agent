@@ -192,7 +192,8 @@ class FakeWakeups:
             return
         row["lease_expires_at"] = None
         row["lease_owner"] = None
-        if restore_attempt:
+        # Only a backoff keeps the attempt the claim spent, as in the store.
+        if restore_attempt or retry_in_seconds is None:
             row["attempts"] = max(0, row["attempts"] - 1)
         if retry_in_seconds is not None:
             # A backoff defers ``not_before``, never the lease: "do not touch

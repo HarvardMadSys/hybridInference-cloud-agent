@@ -69,7 +69,8 @@ class GoalWakeupRepository(Protocol):
         """Lease up to ``limit`` due wakeups and return them.
 
         A lease is short and the work under it is one decision against the
-        database, never a network call.
+        database, never a network call. Each claim spends one attempt, which
+        stays spent only if the consumer backs off or its lease expires.
         """
         ...
 
@@ -91,8 +92,13 @@ class GoalWakeupRepository(Protocol):
         will clear ``waiting_job_id``. ``retry_in_seconds`` is for the other
         case — a temporary scheduling failure — and it defers the row's
         ``not_before`` rather than its lease, so a backoff and a dead worker's
-        expiry never look alike. ``lease_owner`` fences a consumer's write;
-        ``restore_attempt`` preserves scheduling retries during access-service outages.
+        expiry never look alike. ``lease_owner`` fences a consumer's write.
+
+        Only a backoff keeps the attempt its claim spent. A release without
+        ``retry_in_seconds`` gives it back, so a goal that waited behind its
+        owner's turns still has its retries for a real failure;
+        ``restore_attempt`` gives it back for a backoff that is not the
+        wakeup's failure either, such as an access-service outage.
         """
         ...
 

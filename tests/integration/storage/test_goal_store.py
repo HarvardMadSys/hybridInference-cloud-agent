@@ -832,6 +832,56 @@ async def test_the_backoff_and_the_attempt_cap_are_bounded():
     assert is_exhausted(MAX_WAKEUP_ATTEMPTS) is True
 
 
+async def test_waiting_behind_turns_leaves_the_retry_budget_for_a_real_failure(store, pool):
+    """A wakeup that parked behind its owner's turns still gets its retries.
+
+    Every claim spends an attempt, and a parked wakeup is the same row each
+    time a finish releases it. Parking, and handing the lease back because
+    the turn had already ended, are the ordinary answers rather than
+    failures, so they give the attempt back: after more of them than a real
+    failure is allowed, one transient error still backs off instead of
+    pausing the goal as ``scheduling_failed``.
+    """
+    from cloud_agent.goals.controller import _retry_or_pause
+    from cloud_agent.storage._sql.goals import arm_finish_wakeup
+
+    job, _ = await _goal_job(store)
+    thread_id = str(job["thread_id"])
+    persons_turn = {"thread_id": thread_id, "turn_source": "human", "goal_id": None}
+    for _ in range(MAX_WAKEUP_ATTEMPTS + 1):
+        parked = (await store.goal_wakeups.claim_wakeups(limit=1))[0]
+        await store.goal_wakeups.release_wakeup(
+            wakeup_id=parked["id"],
+            lease_owner=parked["lease_owner"],
+            waiting_job_id=job["id"],
+            detail="waiting for the turn already in this conversation",
+        )
+        # The person's turn ends, and its finish releases what waited on it.
+        async with pool.acquire() as conn:
+            await arm_finish_wakeup(conn, persons_turn, job_id=job["id"])
+        handed_back = (await store.goal_wakeups.claim_wakeups(limit=1))[0]
+        await store.goal_wakeups.release_wakeup(
+            wakeup_id=handed_back["id"],
+            lease_owner=handed_back["lease_owner"],
+            detail="the turn it was waiting for had already ended",
+        )
+
+    failing = (await store.goal_wakeups.claim_wakeups(limit=1))[0]
+    assert failing["attempts"] == 1
+    await _retry_or_pause(store, failing)
+
+    goal = await store.goals.get_goal(thread_id=thread_id)
+    assert goal["state"] == "active"
+    retried = await store.goal_wakeups.pending_wakeup(thread_id=thread_id)
+    assert (retried["id"], retried["attempts"], retried["detail"]) == (
+        failing["id"],
+        1,
+        "scheduling failed; retrying",
+    )
+    # The failure itself is still counted, and its backoff is real.
+    assert await store.goal_wakeups.claim_wakeups(limit=1) == []
+
+
 async def test_a_finished_round_commits_its_report_and_its_wakeup(store, pool):
     """The crash boundary: the report, the outcome and the obligation are one commit."""
     job, first, goal = await _live_goal_job(store)
