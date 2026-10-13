@@ -94,7 +94,19 @@ const renderingWork = vi.hoisted(() => ({
   trajectory: vi.fn(),
   history: vi.fn(),
   current: vi.fn(),
+  storedTurn: vi.fn(),
 }));
+
+vi.mock('./ChatMessages', async (importOriginal) => {
+  const original = await importOriginal<typeof import('./ChatMessages')>();
+  return {
+    ...original,
+    HistoryTurn: (props: Parameters<typeof original.HistoryTurn>[0]) => {
+      renderingWork.storedTurn(props.turn.jobId);
+      return original.HistoryTurn(props);
+    },
+  };
+});
 
 vi.mock('./trajectorySteps', async (importOriginal) => {
   const original = await importOriginal<typeof import('./trajectorySteps')>();
@@ -254,6 +266,32 @@ function makeJob(overrides: Partial<AgentJob> = {}): AgentJob {
     diffStat: { add: 1, del: 0 },
     gates: [],
     usage: { tokensIn: '1.2k', tokensOut: '80', cachePct: 0, turns: 2 },
+    ...overrides,
+  };
+}
+
+/** A later turn of the conversation, as the thread read returns it. */
+function laterTurn(overrides: Partial<AgentJobApi> = {}): AgentJobApi {
+  return {
+    id: 'ajob_later',
+    repo: 'owner/repository',
+    base_sha: 'abcdef1',
+    cancel_requested: false,
+    current_attempt_id: null,
+    published_pr_url: null,
+    detail: null,
+    metadata: null,
+    created_at: null,
+    updated_at: null,
+    spent_usd: null,
+    tokens_in: null,
+    tokens_out: null,
+    model_calls: null,
+    turn_no: 2,
+    state: 'succeeded',
+    task_prompt: 'Later',
+    runtime: 'claude-code',
+    model: 'qwen-test',
     ...overrides,
   };
 }
@@ -1748,6 +1786,100 @@ describe('JobDetail', () => {
     // (The control moved into the attach menu; what it reports did not change.)
     fireEvent.click(screen.getByRole('button', { name: 'Add to message' }));
     expect(screen.getByRole('menuitem', { name: /Skills\s*0/ })).toBeInTheDocument();
+  });
+
+  it('shows and inherits the latest turn’s model when following up from an older URL', async () => {
+    vi.mocked(submitThreadMessage).mockResolvedValue({
+      pending: null,
+      job: { id: 'ajob_child' },
+    } as never);
+    // The URL names the first turn, which ran qwen-test. The newest turn ran
+    // glm-test, and that is what a message without a model inherits.
+    render(
+      <JobDetail
+        job={makeJob({ state: 'done' })}
+        threadJobs={[laterTurn({ model: 'glm-test' })]}
+      />,
+    );
+
+    expect(await screen.findByLabelText('Model for this turn')).toHaveValue('glm-test');
+    fireEvent.change(screen.getByLabelText('Add a follow-up'), { target: { value: 'Carry on' } });
+    fireEvent.click(screen.getByRole('button', { name: /^(Send|Queue)$/ }));
+    await waitFor(() =>
+      expect(submitThreadMessage).toHaveBeenCalledWith('ajob_1', { prompt: 'Carry on' }),
+    );
+  });
+
+  it('names the latest turn’s model from an older URL when the model list will not load', async () => {
+    vi.mocked(getAgentConfig).mockRejectedValue(new Error('config unavailable'));
+    render(
+      <JobDetail
+        job={makeJob({ state: 'done' })}
+        threadJobs={[laterTurn({ model: 'glm-test' })]}
+      />,
+    );
+
+    await waitFor(() => expect(getAgentConfig).toHaveBeenCalled());
+    expect(screen.getByText(/Inherits claude-code · glm-test/)).toBeInTheDocument();
+  });
+
+  it('sends the viewed turn’s model when it is chosen over the latest turn’s', async () => {
+    vi.mocked(submitThreadMessage).mockResolvedValue({
+      pending: null,
+      job: { id: 'ajob_child' },
+    } as never);
+    render(
+      <JobDetail
+        job={makeJob({ state: 'done' })}
+        threadJobs={[laterTurn({ model: 'glm-test' })]}
+      />,
+    );
+
+    // Equal to the turn on screen, but not to the one the message follows.
+    fireEvent.change(await screen.findByLabelText('Model for this turn'), {
+      target: { value: 'qwen-test' },
+    });
+    fireEvent.change(screen.getByLabelText('Add a follow-up'), {
+      target: { value: 'Back to the first model' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /^(Send|Queue)$/ }));
+    await waitFor(() =>
+      expect(submitThreadMessage).toHaveBeenCalledWith('ajob_1', {
+        prompt: 'Back to the first model',
+        model: 'qwen-test',
+      }),
+    );
+  });
+
+  it('follows the model of a turn that replaces the one on screen', async () => {
+    vi.mocked(submitThreadMessage).mockResolvedValue({
+      pending: null,
+      job: { id: 'ajob_3' },
+    } as never);
+    const { rerender } = render(
+      <JobDetail job={makeJob({ state: 'done', threadId: 'thread-models' })} />,
+    );
+    expect(await screen.findByLabelText('Model for this turn')).toHaveValue('qwen-test');
+
+    // The conversation moved on in place to a turn that ran another model,
+    // chosen in another tab, say. Nothing was picked here, so nothing is pinned.
+    rerender(
+      <JobDetail
+        job={makeJob({
+          id: 'ajob_2',
+          turnNo: 2,
+          state: 'done',
+          threadId: 'thread-models',
+          model: 'glm-test',
+        })}
+      />,
+    );
+    expect(screen.getByLabelText('Model for this turn')).toHaveValue('glm-test');
+    fireEvent.change(screen.getByLabelText('Add a follow-up'), { target: { value: 'Carry on' } });
+    fireEvent.click(screen.getByRole('button', { name: /^(Send|Queue)$/ }));
+    await waitFor(() =>
+      expect(submitThreadMessage).toHaveBeenCalledWith('thread-models', { prompt: 'Carry on' }),
+    );
   });
 
   it('allows clearing saved skills for the next follow-up', async () => {
@@ -3884,6 +4016,100 @@ describe('JobDetail', () => {
     expect(renderingWork.trajectory).toHaveBeenCalledTimes(3);
   });
 
+  it('leaves stored turns undrawn while the owner types and the current turn streams', async () => {
+    renderingWork.storedTurn.mockClear();
+    const lint: AgentThreadEventApi = {
+      id: 40,
+      job_id: 'past-1',
+      turn_no: 1,
+      attempt_id: 7,
+      seq: 1,
+      event_type: 'tool_use',
+      payload: { id: 'lint-call', name: 'Bash', input: { command: 'npm run lint' } },
+      created_at: null,
+    };
+    const threadJobs = [
+      {
+        id: 'past-1',
+        state: 'succeeded',
+        turn_no: 1,
+        current_attempt_id: 7,
+        task_prompt: 'Lint it',
+        published_pr_url: null,
+      },
+      {
+        id: 'ajob_1',
+        state: 'running',
+        turn_no: 2,
+        current_attempt_id: 1,
+        task_prompt: 'Current task',
+        published_pr_url: null,
+      },
+    ] as AgentJobApi[];
+    const job = makeJob({
+      threadId: 'stored-turns',
+      turnNo: 2,
+      historyTurns: [
+        {
+          jobId: 'past-1',
+          turnNo: 1,
+          forkable: false,
+          state: 'done',
+          events: [
+            {
+              kind: 'tool_use',
+              tool: 'Bash',
+              id: 'lint-call',
+              input: { command: 'npm run lint' },
+              detail: 'npm run lint',
+              attemptNo: 1,
+              sourceEventId: lint.id,
+            },
+          ],
+          messages: [],
+        },
+      ],
+    });
+    const { rerender } = render(<JobDetail job={job} events={[lint]} threadJobs={threadJobs} />);
+    await screen.findByLabelText('Model for this turn');
+    const drawn = renderingWork.storedTurn.mock.calls.length;
+    expect(drawn).toBeGreaterThan(0);
+
+    const composer = screen.getByRole('textbox', { name: 'Add a follow-up' });
+    for (const value of ['h', 'he', 'hel']) {
+      fireEvent.change(composer, { target: { value } });
+    }
+    const reply: AgentThreadEventApi = {
+      ...lint,
+      id: 41,
+      job_id: 'ajob_1',
+      turn_no: 2,
+      attempt_id: 1,
+      event_type: 'message',
+      payload: { text: 'Still going' },
+    };
+    const streamed = {
+      ...job,
+      events: [
+        ...job.events,
+        { kind: 'message' as const, text: 'Still going', attemptNo: 1, sourceEventId: reply.id },
+      ],
+    };
+    rerender(<JobDetail job={streamed} events={[lint, reply]} threadJobs={threadJobs} />);
+    expect(screen.getByText('Still going')).toBeInTheDocument();
+    expect(renderingWork.storedTurn).toHaveBeenCalledTimes(drawn);
+
+    // Its actions still read the conversation as it is now.
+    fireEvent.click(
+      within(screen.getByRole('region', { name: 'Turn 1' })).getByRole('button', {
+        name: /^Inspect /,
+      }),
+    );
+    const inspector = screen.getByRole('region', { name: 'Step details' });
+    await within(inspector).findByRole('button', { name: 'Close details' });
+    expect(inspector).toHaveTextContent('npm run lint');
+  });
+
   it('initializes terminal and file panels only when selected and preserves them across closing', async () => {
     vi.mocked(getAgentJobFiles).mockImplementation(async (_jobId, path = '') => {
       if (path === '') {
@@ -5412,6 +5638,22 @@ describe('JobDetail reasoning effort', () => {
 
     render(<JobDetail job={makeJob()} />);
     expect(await screen.findByLabelText('Reasoning for this turn')).toHaveValue('max');
+  });
+
+  it('shows and inherits the latest turn’s level when following up from an older URL', async () => {
+    render(
+      <JobDetail
+        job={makeJob({ state: 'done', reasoningEffort: 'low' })}
+        threadJobs={[laterTurn({ reasoning_effort: 'high' })]}
+      />,
+    );
+
+    expect(await screen.findByLabelText('Reasoning for this turn')).toHaveValue('high');
+    fireEvent.change(screen.getByLabelText('Add a follow-up'), { target: { value: 'again' } });
+    fireEvent.click(screen.getByRole('button', { name: /^(Send|Queue)$/ }));
+    await waitFor(() =>
+      expect(submitThreadMessage).toHaveBeenCalledWith('ajob_1', { prompt: 'again' }),
+    );
   });
 
   it('inherits silently when untouched, and sends an actual change', async () => {

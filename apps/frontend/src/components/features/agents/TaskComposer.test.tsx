@@ -1145,6 +1145,95 @@ describe('TaskComposer source-control onboarding', () => {
     expect(vi.mocked(uploadAttachment).mock.calls[0]![1]).toBe('specs/api.md');
   });
 
+  it('will not start a task while a dropped folder is still being read', async () => {
+    vi.mocked(getAgentConfig).mockResolvedValue(config());
+    vi.mocked(createAgentJob).mockResolvedValue({ id: 'ajob_1' } as never);
+    vi.mocked(uploadAttachment).mockImplementation(async (_file, path) => ({
+      id: 3,
+      path: path!,
+      size_bytes: 4,
+      content_type: 'text/plain',
+    }));
+    render(<TaskComposer />);
+    await chooseRepository();
+    const textbox = screen.getByRole('textbox');
+    fireEvent.change(textbox, { target: { value: 'Read my notes' } });
+
+    // A folder is walked one file at a time, and this file has not been read.
+    let readFile: () => void = () => {};
+    const slow = {
+      ...droppedFile('/specs/api.md'),
+      file: (ok: (file: File) => void) => {
+        readFile = () => ok(new File(['data'], 'api.md'));
+      },
+    };
+    const entry = droppedFolder('/specs', slow);
+    await act(async () => {
+      fireEvent.drop(textbox.closest('div')!, {
+        dataTransfer: {
+          types: ['Files'],
+          items: [{ kind: 'file', webkitGetAsEntry: () => entry }],
+          files: [],
+        },
+      });
+    });
+
+    // Running now would create the task without the folder being dropped.
+    const run = screen.getByRole('button', { name: /Run/ });
+    expect(run).toBeDisabled();
+    fireEvent.keyDown(textbox, { key: 'Enter' });
+    await act(async () => {});
+    expect(createAgentJob).not.toHaveBeenCalled();
+
+    await act(async () => readFile());
+    expect(await screen.findByText('specs/')).toBeInTheDocument();
+    await waitFor(() => expect(run).toBeEnabled());
+    fireEvent.click(run);
+    await waitFor(() => expect(createAgentJob).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(createAgentJob).mock.calls[0][0]).toMatchObject({ attachment_ids: [3] });
+  });
+
+  it('waits for every dropped folder, not just the first one read', async () => {
+    vi.mocked(getAgentConfig).mockResolvedValue(config());
+    vi.mocked(uploadAttachment).mockImplementation(async (_file, path) => ({
+      id: 3,
+      path: path!,
+      size_bytes: 4,
+      content_type: 'text/plain',
+    }));
+    render(<TaskComposer />);
+    await chooseRepository();
+    const textbox = screen.getByRole('textbox');
+    fireEvent.change(textbox, { target: { value: 'Read my notes' } });
+    const reads: Array<() => void> = [];
+    for (const folder of ['/specs', '/notes']) {
+      const slow = {
+        ...droppedFile(`${folder}/readme.md`),
+        file: (ok: (file: File) => void) => {
+          reads.push(() => ok(new File(['data'], 'readme.md')));
+        },
+      };
+      const entry = droppedFolder(folder, slow);
+      await act(async () => {
+        fireEvent.drop(textbox.closest('div')!, {
+          dataTransfer: {
+            types: ['Files'],
+            items: [{ kind: 'file', webkitGetAsEntry: () => entry }],
+            files: [],
+          },
+        });
+      });
+    }
+
+    const run = screen.getByRole('button', { name: /Run/ });
+    await act(async () => reads[0]());
+    expect(await screen.findByText('specs/')).toBeInTheDocument();
+    expect(run).toBeDisabled();
+    await act(async () => reads[1]());
+    expect(await screen.findByText('notes/')).toBeInTheDocument();
+    await waitFor(() => expect(run).toBeEnabled());
+  });
+
   it('lets a task call a chosen MCP server, naming its tools rather than binding it blank', async () => {
     vi.mocked(getAgentConfig).mockResolvedValue(config({ mcp_runtimes: ['claude-code'] }));
     vi.mocked(createAgentJob).mockResolvedValue({ id: 'ajob_1' } as never);

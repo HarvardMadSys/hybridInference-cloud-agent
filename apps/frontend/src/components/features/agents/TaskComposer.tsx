@@ -120,6 +120,8 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
   // failure: nothing was created and nothing was sent.
   const [goalHint, setGoalHint] = useState<string | null>(null);
   const [dropping, setDropping] = useState(false);
+  // Drops whose folders are still being walked; their files are not attached yet.
+  const [readingDrops, setReadingDrops] = useState(0);
   const taskBox = useRef<HTMLTextAreaElement>(null);
   const [config, setConfig] = useState<AgentConfigApi | null>(null);
   const [models, setModels] = useState<string[]>([]);
@@ -377,6 +379,8 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
     // A file still in flight has no id yet. Running now would queue a job
     // without the attachment the user can see on screen.
     !attachments.uploading &&
+    // Nor while a dropped folder is still being read, before its files exist.
+    readingDrops === 0 &&
     !pluginsBlocked &&
     Boolean(repo && runtime && model);
 
@@ -649,9 +653,12 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
           if (disconnected) return;
           event.preventDefault();
           setDropping(false);
-          void filesFromDataTransfer(event.dataTransfer).then((files) => {
-            if (files.length) attachments.add(files);
-          });
+          setReadingDrops((count) => count + 1);
+          void filesFromDataTransfer(event.dataTransfer)
+            .then((files) => {
+              if (files.length) attachments.add(files);
+            })
+            .finally(() => setReadingDrops((count) => count - 1));
         }}
         className={`ui-composer ${
           dropping ? 'border-accent/40 ring-4 ring-accent/[0.08]' : ''

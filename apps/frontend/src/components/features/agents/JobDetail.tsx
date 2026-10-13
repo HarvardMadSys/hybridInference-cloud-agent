@@ -1,12 +1,14 @@
 'use client';
 
 import {
+  memo,
   useCallback,
   useEffect,
   useId,
   useMemo,
   useRef,
   useState,
+  type ComponentProps,
   type CSSProperties,
   type FormEvent,
 } from 'react';
@@ -90,7 +92,11 @@ import {
 import { useComposerDraft } from './useComposerDraft';
 import { useTranscriptPresentation, TranscriptPresentationControl } from './transcriptPresentation';
 import { TurnDeliverables } from './TurnDeliverables';
-import { createRecordedOutputsSelector, type RecordedFileSelection } from './turnDeliverables';
+import {
+  createRecordedOutputsSelector,
+  type RecordedFileSelection,
+  type RecordedTurnOutputs,
+} from './turnDeliverables';
 import {
   hasLostContext,
   isActiveConversationState,
@@ -123,6 +129,33 @@ function PanelLoading({ children }: { children: string }) {
     </p>
   );
 }
+
+/** A stored turn of the transcript, with the results it recorded. */
+function StoredTurnView({
+  outputs,
+  onOpenFile,
+  ...props
+}: Omit<ComponentProps<typeof HistoryTurn>, 'results'> & {
+  outputs?: RecordedTurnOutputs | null;
+  onOpenFile: (selection: RecordedFileSelection) => void;
+}) {
+  return (
+    <HistoryTurn
+      {...props}
+      results={
+        <TurnDeliverables
+          job={{ id: props.turn.jobId, state: props.turn.state }}
+          outputs={outputs}
+          onOpenFile={onOpenFile}
+        />
+      }
+    />
+  );
+}
+
+// A stored turn does not change while the current one streams or the owner
+// types, so it is drawn again only when its own description or actions do.
+const StoredTurn = memo(StoredTurnView);
 
 // These panels are optional: loading a conversation should not also load its
 // terminal, file browser, side chats, and execution inspectors. Each loading
@@ -911,6 +944,9 @@ export function JobDetail({
     [recordedOutputsSelector, threadJobs, events],
   );
   const [chosenSkills, setChosenSkills] = useState<SelectedSkillApi[] | null>(null);
+  // The model and effort the owner picked; `null` inherits the latest turn's.
+  const [chosenModel, setChosenModel] = useState<string | null>(null);
+  const [chosenEffort, setChosenEffort] = useState<string | null>(null);
   // What to say when `/goal` was typed with nothing after it. Guidance, not a
   // failure: nothing was created and nothing was sent.
   const [goalHint, setGoalHint] = useState<string | null>(null);
@@ -918,17 +954,23 @@ export function JobDetail({
   const [skillsOpen, setSkillsOpen] = useState(false);
   const [dropping, setDropping] = useState(false);
   const [readingFiles, setReadingFiles] = useState(false);
-  // Follow-ups append to the thread's latest turn, even from an older URL.
-  const inheritedSkills = threadJobs.reduce(
-    (latest, turn) =>
-      (turn.turn_no ?? 1) > latest.turnNo
-        ? { turnNo: turn.turn_no ?? 1, skills: turn.skills ?? [] }
-        : latest,
-    { turnNo: job.turnNo ?? 1, skills: job.skills ?? [] },
-  ).skills;
+  // Follow-ups append to the thread's latest turn, even from an older URL, and
+  // an omitted skill set, model or effort is inherited from that turn.
+  const newestTurn = latestJob(threadJobs);
+  const parentTurn =
+    newestTurn && (newestTurn.turn_no ?? 1) > (job.turnNo ?? 1) ? newestTurn : undefined;
+  const inheritedSkills = parentTurn ? (parentTurn.skills ?? []) : (job.skills ?? []);
+  const inherited = {
+    model: parentTurn ? parentTurn.model : job.model,
+    reasoningEffort: parentTurn ? (parentTurn.reasoning_effort ?? undefined) : job.reasoningEffort,
+  };
   // Unsent composer choices belong to the conversation, including when a PR
   // action advances it to another turn without sending the owner's draft.
-  useEffect(() => setChosenSkills(null), [threadId]);
+  useEffect(() => {
+    setChosenSkills(null);
+    setChosenModel(null);
+    setChosenEffort(null);
+  }, [threadId]);
   // The same rule for the goal guidance. This component is deliberately not
   // remounted when the conversation moves to its next turn, so anything that
   // belongs to *one* message has to be reset explicitly when that turn does.
@@ -942,8 +984,7 @@ export function JobDetail({
       ? t('attach.mcpUnsupported', { runtime: job.runtime })
       : undefined;
   const [models, setModels] = useState<string[]>([]);
-  const [model, setModel] = useState(job.model);
-  const [effort, setEffort] = useState(job.reasoningEffort ?? '');
+  const model = chosenModel ?? inherited.model;
   const [submitting, setSubmitting] = useState(false);
   const [rewriting, setRewriting] = useState(false);
   const sendRequestedRef = useRef(false);
@@ -1031,25 +1072,23 @@ export function JobDetail({
   // it, so the control cannot show one model while the turn would run another.
   const modelOptions = useMemo(() => {
     if (models.length === 0) return [];
-    return composerModels(models, job.model);
-  }, [job.model, models]);
+    return composerModels(models, inherited.model);
+  }, [inherited.model, models]);
 
   // Against the model this turn would run — the switched-to one, or the
   // inherited one — because a pair offered last turn need not be offered now.
   const efforts = useMemo(
-    () => offeredEfforts(config, job.runtime, model || job.model),
-    [config, job.runtime, job.model, model],
+    () => offeredEfforts(config, job.runtime, model),
+    [config, job.runtime, model],
   );
-  useEffect(() => {
-    // Only once the config has arrived. Before that the offered set is empty
-    // because nothing is *known*, not because nothing is offered — and acting
-    // on it would wipe the inherited level a moment before the answer lands.
-    if (!config) return;
-    // The inherited level leads; a turn that inherited nothing, or one whose
-    // switched-to model does not offer what it inherited, falls to the deepest
-    // the new pair has.
-    if (!efforts.includes(effort)) setEffort(highestEffort(efforts));
-  }, [config, efforts, effort]);
+  // The chosen level leads, then the inherited one; a turn that inherited
+  // nothing, or one whose switched-to model does not offer that level, falls to
+  // the deepest the new pair has. Only once the config has arrived. Before that
+  // the offered set is empty because nothing is *known*, not because nothing is
+  // offered — and acting on it would wipe the inherited level a moment before
+  // the answer lands.
+  const wantedEffort = chosenEffort ?? inherited.reasoningEffort ?? '';
+  const effort = !config || efforts.includes(wantedEffort) ? wantedEffort : highestEffort(efforts);
 
   // Edit & rewind creates the native child immediately, then leaves the
   // replacement prompt as a one-shot draft on that child's landing page.
@@ -1431,7 +1470,8 @@ export function JobDetail({
         ...(chosenSkills !== null ? { skill_ids: chosenSkills.map((skill) => skill.id) } : {}),
         ...(attachments.ids.length ? { attachment_ids: attachments.ids } : {}),
         // Omitted controls inherit the parent's validated model and effort.
-        ...composerOverrides(job, model, effort),
+        // The parent is the latest turn, which need not be the one on screen.
+        ...composerOverrides(inherited, model, effort),
       });
       draft.acknowledge(snapshot);
       if (!composerMounted.current || currentDraftScope.current !== snapshot.scope) return result;
@@ -1547,6 +1587,28 @@ export function JobDetail({
   const historyTurns = useMemo(
     () => describeHistoryTurns({ historyTurns: historicalRows }),
     [historicalRows],
+  );
+  // Stored turns are memoized, so their actions keep one identity and reach
+  // the latest state through this ref instead of changing with every render.
+  const storedTurnActions = useRef({ forkFrom, inspectTranscriptEvent, openRecordedFile });
+  storedTurnActions.current = { forkFrom, inspectTranscriptEvent, openRecordedFile };
+  const forkStoredTurn = useCallback(
+    (anchorJobId: string) => void storedTurnActions.current.forkFrom(anchorJobId),
+    [],
+  );
+  const rewindStoredTurn = useCallback(
+    (anchorJobId: string, prompt: string) =>
+      void storedTurnActions.current.forkFrom(anchorJobId, prompt),
+    [],
+  );
+  const inspectStoredEvent = useCallback(
+    (event: AgentEvent, eventJobId: string) =>
+      storedTurnActions.current.inspectTranscriptEvent(event, eventJobId),
+    [],
+  );
+  const openStoredFile = useCallback(
+    (selection: RecordedFileSelection) => storedTurnActions.current.openRecordedFile(selection),
+    [],
   );
   const currentTurn = useMemo(
     () => describeCurrentTurn(job, { attemptNo, currentAttemptNo }),
@@ -2013,30 +2075,19 @@ export function JobDetail({
                       .reverse()
                       .find((candidate) => candidate.forkable)?.jobId;
                     return (
-                      <HistoryTurn
+                      <StoredTurn
                         key={turn.key}
                         turn={turn}
                         presentation={presentation}
-                        onInspectEvent={events.length ? inspectTranscriptEvent : undefined}
-                        results={
-                          <TurnDeliverables
-                            job={{ id: turn.jobId, state: turn.state }}
-                            outputs={recordedOutputs.get(turn.jobId)}
-                            onOpenFile={openRecordedFile}
-                          />
-                        }
+                        onInspectEvent={events.length ? inspectStoredEvent : undefined}
+                        outputs={recordedOutputs.get(turn.jobId)}
+                        onOpenFile={openStoredFile}
                         showActivityDetails={false}
                         rewindAnchorJobId={rewindAnchorJobId}
                         busy={forking}
-                        onFork={
-                          turn.forkable && canForkWorkspace
-                            ? (anchorJobId) => void forkFrom(anchorJobId)
-                            : undefined
-                        }
+                        onFork={turn.forkable && canForkWorkspace ? forkStoredTurn : undefined}
                         onRewind={
-                          rewindAnchorJobId && canForkWorkspace
-                            ? (anchorJobId, prompt) => void forkFrom(anchorJobId, prompt)
-                            : undefined
+                          rewindAnchorJobId && canForkWorkspace ? rewindStoredTurn : undefined
                         }
                         onOpenRun={openRun}
                       />
@@ -2450,13 +2501,13 @@ export function JobDetail({
                               label="Model for this turn"
                               value={model}
                               options={modelOptions}
-                              onChange={setModel}
+                              onChange={setChosenModel}
                             />
                             <Picker
                               label="Reasoning for this turn"
                               value={effort}
                               options={efforts}
-                              onChange={setEffort}
+                              onChange={setChosenEffort}
                             />
                           </>
                         ) : null}
@@ -2504,7 +2555,7 @@ export function JobDetail({
                           : job.state === 'cancelled'
                             ? `Restores any saved changes · ${job.runtime}`
                             : `Inherits ${job.runtime}`}
-                        {modelOptions.length === 0 ? ` · ${job.model}` : ''}
+                        {modelOptions.length === 0 ? ` · ${inherited.model}` : ''}
                         {isActive ? ` · ${t('queue.afterThisTurn')}` : ''}
                         {queue.canSendNow ? ` · ${t('queue.steerHint')}` : ''}
                       </p>

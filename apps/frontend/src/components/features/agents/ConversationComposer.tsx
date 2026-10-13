@@ -6,10 +6,15 @@ import type { AgentJob } from './types';
 export function composerModels(models: string[], currentModel: string) {
   return models.length && !models.includes(currentModel) ? [currentModel, ...models] : models;
 }
-export function composerOverrides(job: AgentJob, model: string, effort: string) {
+/** What differs from `parent`, the turn the message inherits from when a field is omitted. */
+export function composerOverrides(
+  parent: Pick<AgentJob, 'model' | 'reasoningEffort'>,
+  model: string,
+  effort: string,
+) {
   return {
-    ...(model && model !== job.model ? { model } : {}),
-    ...(effort && effort !== job.reasoningEffort ? { reasoning_effort: effort } : {}),
+    ...(model && model !== parent.model ? { model } : {}),
+    ...(effort && effort !== parent.reasoningEffort ? { reasoning_effort: effort } : {}),
   };
 }
 export function ComposerTextarea({

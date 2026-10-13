@@ -381,6 +381,11 @@ export function useAgentJob(
     const controller = new AbortController();
     let finished = false;
     let retry: ReturnType<typeof setTimeout> | undefined;
+    // This opening follows one that could not connect, and the read made
+    // then may have failed too. Once the server answers again, read the
+    // conversation once more rather than leave that failure on screen for
+    // the rest of the turn.
+    let recovering = streamFailures.current > 0;
     streaming.current = true;
     void streamAgentJob(jobId, {
       signal: controller.signal,
@@ -388,6 +393,11 @@ export function useAgentJob(
         loadedStreamCursor.current?.jobId === jobId && loadedStreamCursor.current.reads === reads
           ? loadedStreamCursor.current.cursor
           : 0,
+      onOpen: () => {
+        if (!recovering) return;
+        recovering = false;
+        reload();
+      },
       onEvent: (event) => {
         streamFailures.current = 0;
         const threadEvent = { ...event, job_id: jobId, turn_no: currentTurnNo };
@@ -462,9 +472,12 @@ export function useAgentJob(
       if (!touched) return;
       setApi((current) => (current?.id === jobId ? overlayPushed(current) : current));
       const read = ++latestRead;
+      // A reload that starts while this read is out reads the row again, and
+      // may already have ended the turn: this older answer must not reopen it.
+      const version = generation.current;
       void getAgentJob(jobId)
         .then((latest) => {
-          if (cancelled || read !== latestRead) return;
+          if (cancelled || read !== latestRead || generation.current !== version) return;
           if (!streaming.current && endsStreamingTurn(shownApi.current, latest)) {
             reload();
             return;
