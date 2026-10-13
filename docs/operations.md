@@ -1991,8 +1991,9 @@ captured when a later turn settles, supersedes it: every snapshot is the whole
 diff from the last published commit, so it carries the failed changes too, and
 is refused in turn if it still holds what was refused. Snapshots still publish
 in epoch order; only a failed one stops holding the later ones back. If the
-failed attempt had already pushed its commit to the `agent/<thread>` branch,
-the next snapshot is refused as a moved branch until that branch is deleted.
+failed attempt had already pushed its commit to the `agent/<thread>` branch, a
+later snapshot with different changes is refused as a moved branch until that
+branch is deleted; the platform never force-pushes.
 
 Disk-pressure admission and alerting and a non-mutating pre-prompt context
 fingerprint remain deferred. Local functional checks do not establish production
