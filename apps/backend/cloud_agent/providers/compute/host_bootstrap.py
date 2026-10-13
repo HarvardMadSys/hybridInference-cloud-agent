@@ -377,6 +377,11 @@ from pathlib import Path
 params = json.loads(sys.argv[1])
 root = Path(params['root'])
 identity = params['identity']
+# Every refusal is a reason code on stdout with exit status 0: the transport
+# reports any other exit as an opaque failure and never returns stderr.
+def blocked(step):
+    print(json.dumps({'ready': False, 'blocked_reasons': [step]}))
+    raise SystemExit(0)
 owned_storage = deployment_storage_owned({'root': str(root), 'identity': identity})
 def storage_available(base):
     try:
@@ -399,10 +404,10 @@ if params.get('data_mount') and not storage_state_compatible(Path(params['data_m
     raise SystemExit(0)
 root.parent.mkdir(parents=True, exist_ok=True)
 if root.is_symlink() or root.resolve() != root:
-    raise SystemExit('unsafe deployment root')
+    blocked('unsafe_deployment_path')
 lock_path = root.parent / ('.' + root.name + '.compute-lock')
 if lock_path.is_symlink():
-    raise SystemExit('unsafe lock')
+    blocked('unsafe_deployment_path')
 with open(lock_path, 'a') as lock:
     fcntl.flock(lock, fcntl.LOCK_EX)
     marker = root / '.compute-identity.json'
@@ -413,7 +418,7 @@ with open(lock_path, 'a') as lock:
         raise SystemExit(0)
     if root.exists() and any(root.iterdir()):
         if not marker.is_file() or marker.is_symlink() or json.loads(marker.read_text()) != identity:
-            raise SystemExit('existing deployment identity conflict')
+            blocked('deployment_identity_conflict')
     root.mkdir(mode=0o700, exist_ok=True)
     root.chmod(0o700)
     marker.write_text(json.dumps(identity))
@@ -422,20 +427,17 @@ with open(lock_path, 'a') as lock:
         for member in archive.getmembers():
             parts = Path(member.name).parts
             if member.name.startswith('/') or '..' in parts or not (member.isfile() or member.isdir()):
-                raise SystemExit('invalid deployment archive')
+                blocked('invalid_deployment_archive')
             target = root / member.name
             # Never traverse a link from an earlier, unexpected remote change.
             if target.resolve() != target or target.is_symlink():
-                raise SystemExit('unsafe existing deployment path')
+                blocked('unsafe_deployment_path')
         archive.extractall(root, filter='data')
     environment = os.environ.copy()
     environment.update({'DEBIAN_FRONTEND': 'noninteractive', 'AGENT_DEPLOYMENT_SHA': params['sha'], 'DOCKER_HOST': 'unix:///var/run/docker.sock', 'DOCKER_CONTEXT': 'default'})
     for name in ('DOCKER_TLS', 'DOCKER_TLS_VERIFY', 'DOCKER_CERT_PATH'):
         environment.pop(name, None)
     quiet = {'stdout': subprocess.DEVNULL, 'stderr': subprocess.DEVNULL}
-    def blocked(step):
-        print(json.dumps({'ready': False, 'blocked_reasons': [step]}))
-        raise SystemExit(0)
     def run(step, args):
         if subprocess.run(args, cwd=root, env=environment, **quiet).returncode:
             blocked(step)

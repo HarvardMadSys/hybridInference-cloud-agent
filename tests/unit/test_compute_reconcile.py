@@ -722,6 +722,10 @@ async def test_pending_extension_with_increased_but_short_deadline_requires_revi
     [
         (("kvm", "secret-looking-remote-output"), "kvm"),
         (("secret-looking-remote-output",), "bootstrap_not_ready"),
+        # Safety refusals of the deployment script are named, not opaque.
+        (("deployment_identity_conflict",), "deployment_identity_conflict"),
+        (("unsafe_deployment_path",), "unsafe_deployment_path"),
+        (("invalid_deployment_archive",), "invalid_deployment_archive"),
     ],
 )
 async def test_bootstrap_refusal_reports_only_public_diagnostics(

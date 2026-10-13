@@ -307,7 +307,9 @@ async def test_inventory_includes_stopped_containers_and_orphans(tmp_path):
     assert "['docker', 'volume', 'ls', '-q']" in script
 
 
-def test_remote_scripts_compile_and_deployment_refuses_existing_unowned_root(tmp_path, monkeypatch):
+def test_remote_scripts_compile_and_deployment_refuses_existing_unowned_root(
+    tmp_path, monkeypatch, capsys
+):
     for script in (_PREFLIGHT, _DEPLOY, _READINESS, _INVENTORY):
         compile(script, "remote-bootstrap", "exec")
     root = tmp_path / "existing-host"
@@ -316,9 +318,70 @@ def test_remote_scripts_compile_and_deployment_refuses_existing_unowned_root(tmp
     original.write_text("existing secret")
     params = {"root": str(root), "sha": "a" * 40, "install": True, "identity": {"host": "other"}}
     monkeypatch.setattr("sys.argv", ["remote", json.dumps(params)])
-    with pytest.raises(SystemExit, match="identity conflict"):
+    # A refusal exits cleanly with its reason: the transport drops stderr and
+    # reports any other exit only as an opaque remote failure.
+    with pytest.raises(SystemExit) as refused:
         exec(_DEPLOY, {})
+    assert refused.value.code == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "ready": False,
+        "blocked_reasons": ["deployment_identity_conflict"],
+    }
     assert original.read_text() == "existing secret"
+
+
+def _deploy_refusal(tmp_path, monkeypatch, capsys, root, archive: bytes) -> dict:
+    from types import SimpleNamespace
+
+    params = {"root": str(root), "sha": "a" * 40, "install": False, "identity": {"host": "h"}}
+    monkeypatch.setattr("sys.argv", ["remote", json.dumps(params)])
+    monkeypatch.setattr("sys.stdin", SimpleNamespace(buffer=io.BytesIO(archive)))
+    with pytest.raises(SystemExit) as refused:
+        exec(_DEPLOY, {})
+    assert refused.value.code == 0
+    return json.loads(capsys.readouterr().out)
+
+
+def _payload(member: tarfile.TarInfo) -> bytes:
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+        archive.addfile(member, io.BytesIO(b"") if member.isfile() else None)
+    return buffer.getvalue()
+
+
+def test_remote_deployment_reports_each_unsafe_state_as_a_reason(tmp_path, monkeypatch, capsys):
+    """Unsafe paths and archives are named, so an operator need not log in to tell them apart."""
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    linked_root = tmp_path / "linked"
+    linked_root.symlink_to(elsewhere)
+    harmless = _payload(tarfile.TarInfo("pyproject.toml"))
+    assert _deploy_refusal(tmp_path, monkeypatch, capsys, linked_root, harmless) == {
+        "ready": False,
+        "blocked_reasons": ["unsafe_deployment_path"],
+    }
+    lock_root = tmp_path / "locked"
+    (tmp_path / ".locked.compute-lock").symlink_to(elsewhere / "lock")
+    assert _deploy_refusal(tmp_path, monkeypatch, capsys, lock_root, harmless) == {
+        "ready": False,
+        "blocked_reasons": ["unsafe_deployment_path"],
+    }
+    link = tarfile.TarInfo("escape")
+    link.type, link.linkname = tarfile.SYMTYPE, "/etc/passwd"
+    assert _deploy_refusal(tmp_path, monkeypatch, capsys, tmp_path / "archive", _payload(link)) == {
+        "ready": False,
+        "blocked_reasons": ["invalid_deployment_archive"],
+    }
+    planted = tmp_path / "planted"
+    planted.mkdir()
+    (planted / ".compute-identity.json").write_text(json.dumps({"host": "h"}))
+    (planted / "deploy").symlink_to(elsewhere)
+    nested = _payload(tarfile.TarInfo("deploy/host/sandbox_host.sh"))
+    assert _deploy_refusal(tmp_path, monkeypatch, capsys, planted, nested) == {
+        "ready": False,
+        "blocked_reasons": ["unsafe_deployment_path"],
+    }
+    assert not any(elsewhere.iterdir())
 
 
 @pytest.mark.parametrize("install", [False, True])

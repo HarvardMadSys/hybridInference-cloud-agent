@@ -54,6 +54,15 @@ _BOOTSTRAP_REASONS = {
     "data_mount_conflict": "Sandbox storage conflicts with an existing mount or retained daemon data.",
     "data_mount_failed": "The selected sandbox storage could not be prepared.",
     "machine_identity_changed": "The verified machine identity has changed.",
+    "deployment_identity_conflict": (
+        "The node already holds a different deployment. Inspect the node; a retry will not replace it."
+    ),
+    "unsafe_deployment_path": (
+        "The deployment directory on the node is a link or unsafe path. Repair it before retrying."
+    ),
+    "invalid_deployment_archive": (
+        "The deployment bundle contains an unsafe entry. Fix the deployment profile before retrying."
+    ),
     "prerequisites_update_failed": "The node could not refresh its package repositories.",
     "prerequisites_install_failed": "The node could not install the required packages.",
     "docker_start_failed": "Docker could not be started.",
