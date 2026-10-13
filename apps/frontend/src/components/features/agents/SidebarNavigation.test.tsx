@@ -12,6 +12,7 @@ const api = vi.hoisted(() => ({
   get: vi.fn(),
   thread: vi.fn(),
   archive: vi.fn(),
+  deleteSessions: vi.fn(),
   restore: vi.fn(),
   sessions: vi.fn(),
   setArchived: vi.fn(),
@@ -50,6 +51,7 @@ vi.mock('@/lib/api/agents', async (importOriginal) => ({
   getAgentJobGit: api.git,
   streamAgentJob: api.stream,
   archiveAgentJob: api.archive,
+  deleteAgentSessions: api.deleteSessions,
   restoreAgentJob: api.restore,
   listAgentSessions: api.sessions,
   setAgentSessionsArchived: api.setArchived,
@@ -944,6 +946,44 @@ describe('sidebar navigation interactions', () => {
     expect(
       await screen.findByRole('link', { name: 'Task a · owner/repo · Archived' }),
     ).toHaveAttribute('href', '/a');
+  });
+  it('permanently deletes an unarchived conversation after confirmation', async () => {
+    api.pathname = '/a';
+    let deleted = false;
+    api.deleteSessions.mockImplementation(async (threadIds: string[]) => {
+      deleted = true;
+      return { thread_ids: threadIds };
+    });
+    api.list.mockImplementation(async () => ({
+      conversations: deleted ? [base[1]] : base,
+      next_cursor: null,
+    }));
+    render(<AgentsSidebar />);
+    await screen.findByText('Task a');
+    fireEvent.click(screen.getByRole('button', { name: 'Permanently delete Task a' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Permanently delete this session?' });
+    expect(within(dialog).getByText(/no longer be able to view or restore/)).toBeVisible();
+    expect(within(dialog).getByText('Session: Task a')).toBeVisible();
+    // Nothing is sent before the owner confirms.
+    expect(api.deleteSessions).not.toHaveBeenCalled();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Permanently delete 1 session' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(api.deleteSessions).toHaveBeenCalledWith(['thread-a']);
+    await waitFor(() => expect(screen.queryByText('Task a')).not.toBeInTheDocument());
+    expect(api.replace).toHaveBeenCalledWith('/');
+  });
+  it('keeps the confirmation open with the reason when deletion is refused', async () => {
+    const { APIError } = await import('@/lib/utils/errors');
+    api.deleteSessions.mockRejectedValueOnce(
+      new APIError('fork_in_progress', 'Server conflict', 409),
+    );
+    render(<AgentsSidebar />);
+    await screen.findByText('Task a');
+    fireEvent.click(screen.getByRole('button', { name: 'Permanently delete Task a' }));
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Permanently delete 1 session' }));
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('being forked');
+    expect(screen.getByText('Task a')).toBeInTheDocument();
   });
   it('loads pins and only expanded project pages, and records no history IDs before manual order', async () => {
     render(<AgentsSidebar />);

@@ -4,8 +4,10 @@ import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useAuth, useT } from '@/components/providers';
 import { GearIcon } from '@/components/features/settings/icons';
-import { archiveAgentJob, pinAgentJob, unpinAgentJob } from '@/lib/api/agents';
+import { archiveAgentJob, deleteAgentSessions, pinAgentJob, unpinAgentJob } from '@/lib/api/agents';
+import { APIError } from '@/lib/utils/errors';
 import { useAgentReads } from './AgentReadProvider';
+import { ArchiveDeleteDialog, SESSION_ERROR_KEYS } from './ArchiveControls';
 import { CONVERSATION_RESTORED_EVENT, type ConversationRestoredDetail } from './conversationEvents';
 import { latestJob } from './conversationJob';
 import { onAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
@@ -102,6 +104,9 @@ export function AgentsSidebar({
   const [hiddenThreads, setHiddenThreads] = useState<Set<string>>(new Set());
   const [archiving, setArchiving] = useState<string | null>(null);
   const [pinning, setPinning] = useState<string | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<SidebarConversation | null>(null);
+  const [deletingBusy, setDeletingBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState('');
@@ -508,6 +513,32 @@ export function AgentsSidebar({
       setArchiving(null);
     }
   }
+  function requestDelete(row: SidebarConversation) {
+    setDeleteError(null);
+    setPendingDelete(row);
+  }
+  async function confirmDelete() {
+    if (!pendingDelete) return;
+    const { key } = pendingDelete;
+    setDeletingBusy(true);
+    setDeleteError(null);
+    try {
+      await deleteAgentSessions([key]);
+      setHiddenThreads((old) => new Set(old).add(key));
+      setPendingDelete(null);
+      reload();
+      reloadProjects();
+      if (activeKey === key) router.replace('/');
+    } catch (cause) {
+      const code = cause instanceof APIError ? cause.code : undefined;
+      const reason = SESSION_ERROR_KEYS[code as keyof typeof SESSION_ERROR_KEYS];
+      setDeleteError(
+        reason ? t(reason) : cause instanceof Error ? cause.message : t('archive.deleteFailed'),
+      );
+    } finally {
+      setDeletingBusy(false);
+    }
+  }
   async function setConversationPinned(key: string, jobId: string, _repo: string, pinned: boolean) {
     setPinning(key);
     setActionError(null);
@@ -541,8 +572,10 @@ export function AgentsSidebar({
     onRead: markRead,
     archiving,
     pinning,
+    deleting: pendingDelete?.key ?? null,
     onArchive: archiveConversation,
     onSetPinned: setConversationPinned,
+    onDelete: requestDelete,
   };
   const visible = (rows: SidebarConversation[]) =>
     rows.filter((row) => row.archived || !hiddenThreads.has(row.key));
@@ -916,6 +949,19 @@ export function AgentsSidebar({
         </div>
       </aside>
       <PaneResizer pane={pane} label={t('sidebar.resize')} controls="agents-sidebar" />
+      {pendingDelete ? (
+        <ArchiveDeleteDialog
+          count={1}
+          skipped={0}
+          scope={t('archive.scopeSession', { title: pendingDelete.job.title })}
+          titles={[]}
+          busy={deletingBusy}
+          limitExceeded={false}
+          error={deleteError}
+          onCancel={() => setPendingDelete(null)}
+          onConfirm={() => void confirmDelete()}
+        />
+      ) : null}
     </>
   );
 }

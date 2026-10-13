@@ -541,7 +541,7 @@ function ConversationsTable({
                   </span>
                   {(conversation.deleted_at || conversation.archived_at) && (
                     <span className="shrink-0 text-xs text-gray-400 dark:text-gray-500">
-                      {conversation.deleted_at ? 'Deleted' : 'Archived'}
+                      {conversation.deleted_at ? 'Deleted by user' : 'Archived'}
                     </span>
                   )}
                 </div>

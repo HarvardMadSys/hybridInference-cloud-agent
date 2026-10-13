@@ -31,8 +31,9 @@ import hashlib
 import json
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Any, ClassVar
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, call
 
 import pytest
 import pytest_asyncio
@@ -8486,7 +8487,7 @@ async def test_session_listing_exposes_stable_titles_facets_and_archive_state(
                     "archived_at": job["archived_at"],
                     "job": job,
                     "can_delete": False,
-                    "delete_block_reason": "session_active",
+                    "delete_block_reason": "fork_in_progress",
                 }
             ],
             "total": 51,
@@ -8511,7 +8512,7 @@ async def test_session_listing_exposes_stable_titles_facets_and_archive_state(
     body = response.json()
     assert body["sessions"][0]["title"] == "Stable conversation title"
     assert body["sessions"][0]["archived_at"] == body["sessions"][0]["job"]["archived_at"]
-    assert body["sessions"][0]["delete_block_reason"] == "session_active"
+    assert body["sessions"][0]["delete_block_reason"] == "fork_in_progress"
     assert body["total"] == 51 and body["next_cursor"] == "opaque-next-page"
     assert body["projects"] == [{"repo": "owner/name", "count": 51}]
     listing.assert_awaited_once_with(
@@ -8587,8 +8588,6 @@ async def test_session_mutations_use_explicit_owner_snapshot(
     ("error", "status"),
     [
         ("not_found", 404),
-        ("not_archived", 409),
-        ("session_active", 409),
         ("fork_in_progress", 409),
         ("publication_pending", 409),
     ],
@@ -8601,6 +8600,59 @@ async def test_session_delete_conflicts_have_actionable_types(
     response = await client.post("/v1/agent/sessions/delete", json={"thread_ids": ["athr_1"]})
     assert response.status_code == status
     assert response.json()["detail"]["error"]["type"] == error
+
+
+@pytest.mark.parametrize("manager_fails", [False, True])
+async def test_session_delete_revokes_and_closes_released_residencies(
+    store: FakeStorage, monkeypatch, manager_fails: bool
+):
+    """A deleted chat's credential ends now; its host is told to close the process."""
+    released = [
+        {"thread_id": "athr_1", "generation": 4, "host": "runner-a", "grant_id": "agr_1"},
+        {"thread_id": "athr_2", "generation": 2, "host": "runner-a", "grant_id": ""},
+    ]
+    delete = AsyncMock(
+        return_value={"thread_ids": ["athr_1", "athr_2"], "released_residencies": released}
+    )
+    monkeypatch.setattr(store, "delete_sessions", delete, raising=False)
+    monkeypatch.setattr(
+        store, "get_host", AsyncMock(return_value={"host": "runner-a"}), raising=False
+    )
+    manager = SimpleNamespace(
+        shared_residency_lost=AsyncMock(
+            side_effect=RuntimeError("unreachable") if manager_fails else None
+        )
+    )
+    monkeypatch.setattr(sandbox_manager_routing, "sandbox_manager_for_host", lambda host: manager)
+
+    class RecordingGrants(_FakeGrants):
+        def __init__(self) -> None:
+            super().__init__()
+            self.revoked: list[str] = []
+
+        async def revoke(self, grant_id: str) -> bool:
+            self.revoked.append(grant_id)
+            return True
+
+    grants = RecordingGrants()
+    app = _build_app(store)
+    from cloud_agent.api.deps import get_grant_client
+
+    app.dependency_overrides[get_grant_client] = lambda: grants
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/v1/agent/sessions/delete", json={"thread_ids": ["athr_1", "athr_2"]}
+        )
+    # The delete has committed; a host that cannot be reached now closes the
+    # process on its next residency heartbeat instead.
+    assert response.status_code == 200
+    assert response.json() == {"thread_ids": ["athr_1", "athr_2"]}
+    assert grants.revoked == ["agr_1"]
+    assert manager.shared_residency_lost.await_args_list == [
+        call("athr_1", generation=4),
+        call("athr_2", generation=2),
+    ]
 
 
 @pytest.mark.parametrize("thread_ids", [[], [""], ["a", "a"], ["bad\x00id"], ["x" * 129]])

@@ -104,27 +104,13 @@ QUALIFIED_JOB_SUMMARY_COLUMNS = QUALIFIED_JOB_COLUMNS.replace("j.skills", SKILL_
 JOB_SUMMARY_SELECT = JOB_SELECT.replace(QUALIFIED_JOB_COLUMNS, QUALIFIED_JOB_SUMMARY_COLUMNS)
 
 
-# An idle native process and its HOT credential lease outlive the completed
-# turn. Removing a chat from owner history must not tear down that process or
-# its shared workspace. Actual work and unfinished publication remain visible
-# until they settle; the retained rows keep lineage and billing attributable.
+# Permanent deletion hides a chat from its owner whether or not it is archived
+# or working: the delete itself cancels its turns and revokes its residency.
+# Only a Fork or a publication in flight still refuses, because each is a
+# short shared-workspace transition another chat may depend on. The retained
+# rows keep lineage and billing attributable.
 SESSION_DELETE_BLOCK_SQL = """
 CASE
-    WHEN t.archived_at IS NULL THEN 'not_archived'
-    WHEN EXISTS (
-        SELECT 1 FROM agent_jobs busy_job
-        WHERE busy_job.thread_id = t.session_id
-          AND busy_job.state NOT IN ('succeeded', 'failed', 'cancelled')
-    ) OR EXISTS (
-        SELECT 1 FROM agent_attempts a
-        JOIN agent_jobs busy_job ON busy_job.id = a.job_id
-        WHERE busy_job.thread_id = t.session_id
-          AND a.status = 'running' AND a.lease_expires_at > clock_timestamp()
-    ) OR EXISTS (
-        SELECT 1 FROM agent_thread_sandbox_memberships m
-        WHERE m.thread_id = t.session_id
-          AND (m.active_attempt_id IS NOT NULL OR m.resident_state IN ('starting', 'restarting'))
-    ) THEN 'session_active'
     WHEN EXISTS (
         SELECT 1 FROM agent_session_forks f
         WHERE (f.source_thread_id = t.session_id OR f.target_thread_id = t.session_id)

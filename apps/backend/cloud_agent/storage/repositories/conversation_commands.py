@@ -433,12 +433,20 @@ class PostgresConversationCommands:
         return {"sessions": [dict(row) for row in updated]}
 
     async def delete_sessions(self, *, thread_ids: list[str], user_id: str) -> dict[str, Any]:
-        """Irreversibly hide settled archived history while retaining audit rows.
+        """Irreversibly hide chats from their owner while retaining audit rows.
 
-        The thread lock serializes owner deletion against follow-up insertion,
-        native-fork preparation and archive changes. Worker lifecycle access
-        deliberately keeps the immutable job, residency and sandbox ledgers.
-        A fork's shared workspace is never removed by a chat-history action.
+        A chat need not be archived or idle. The thread lock serializes owner
+        deletion against follow-up insertion, native-fork preparation and
+        archive changes, so the same commit can end everything the chat would
+        otherwise keep doing: queued turns are cancelled, a running turn is
+        asked to stop, an active goal is paused, and the chat's residency is
+        released. The caller revokes each returned grant and asks the owning
+        host to close that member's process; a missed request is repeated by
+        the host's next residency heartbeat, which now finds it lost.
+
+        The job, residency and sandbox ledgers are kept. A fork's shared
+        workspace is never removed here; the sandbox deletion worker removes a
+        stopped sandbox once every chat in it is deleted.
 
         Files the owner uploaded are the exception: those rows are deleted
         rather than hidden, because they are the owner's content rather than an
@@ -476,6 +484,39 @@ class PostgresConversationCommands:
                 thread_ids,
                 user_id,
             )
+            # Claims do not read the thread tombstone, so a turn left queued
+            # would still run. Cancel it the way a cancelled goal round is
+            # cancelled; a running turn is asked to stop and reaches its
+            # terminal state through the worker's fenced transition.
+            await conn.execute(
+                "UPDATE agent_jobs SET state = 'cancelled', cancel_requested = TRUE, "
+                "terminal_resume_pending = TRUE, updated_at = NOW() "
+                "WHERE thread_id = ANY($1::text[]) AND state = 'queued'",
+                thread_ids,
+            )
+            await conn.execute(
+                "UPDATE agent_jobs SET cancel_requested = TRUE, updated_at = NOW() "
+                "WHERE thread_id = ANY($1::text[]) AND state = 'running'",
+                thread_ids,
+            )
+            await conn.execute(
+                PAUSE_GOALS_SQL, thread_ids, "cancelled", "the conversation was deleted"
+            )
+            # Thread -> membership, the order Fork preparation also takes. A
+            # released generation opens nothing more: no heartbeat extends it
+            # and no credential is renewed for it.
+            released = await conn.fetch(
+                """
+                UPDATE agent_thread_sandbox_memberships m
+                SET residency_status = 'none', residency_last_active_at = NOW()
+                FROM agent_sandboxes g
+                WHERE m.thread_id = ANY($1::text[]) AND m.residency_status <> 'none'
+                  AND g.id = m.sandbox_id
+                RETURNING m.thread_id, m.residency_generation AS generation, g.host,
+                          COALESCE(m.residency_grant_id, '') AS grant_id
+                """,
+                thread_ids,
+            )
             # Uploaded bytes are removed outright, not soft-deleted with the
             # rest. A soft delete keeps the ledger — jobs, residency, sandbox
             # history — because those are audit rows. A file the owner attached
@@ -506,7 +547,10 @@ class PostgresConversationCommands:
                 "DELETE FROM agent_pending_messages WHERE thread_id = ANY($1::text[])",
                 thread_ids,
             )
-        return {"thread_ids": thread_ids}
+        return {
+            "thread_ids": thread_ids,
+            "released_residencies": [dict(row) for row in released],
+        }
 
     async def set_thread_archived(
         self, *, job_id: str, user_id: str, archived: bool

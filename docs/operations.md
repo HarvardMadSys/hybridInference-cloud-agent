@@ -543,6 +543,18 @@ Chat history and the lifecycle audit remain. There is no S3 object to restore
 from. An archive deletion that is already pending or verified is left unchanged;
 wait for it to finish or fail before choosing this action.
 
+**Sandboxes of deleted chats are removed automatically.** When an owner
+permanently deletes the last chat in a sandbox, the deletion worker asks the
+owning host to stop it, then queues its deletion through the same two paths:
+archived to S3 first when a bucket is configured, discarded otherwise. Only
+sandboxes on online hosts are considered, a sweep runs every minute, and its
+events and audit rows name `user-deletion-sweeper` as the actor with source
+`system`. Database records of the deleted chats remain. A sandbox that another
+chat still uses is never touched. The first sweep after an upgrade also picks
+up every older sandbox whose chats were all deleted before, so expect a batch
+of stops and deletions; configure the archive bucket first if those sandboxes
+should be kept in S3.
+
 **Verify stopped and force delete** recovers a sandbox still recorded as running
 only when the owning sandbox manager confirms that the exact reviewed container is
 stopped or dead, and idle. It does not stop a running container or bypass unavailable

@@ -18,7 +18,9 @@ from cloud_agent.logging_utils import get_logger
 from cloud_agent.settings import number_setting, setting_env
 
 if TYPE_CHECKING:
-    from cloud_agent.ports import GrantRepository
+    from collections.abc import Iterable
+
+    from cloud_agent.ports import GrantRepository, HostPoolRepository
 
 #: The moved helper keeps logging under the module it came from: the
 #: deployment's log selection is on ``cloud_agent.api.hosts``.
@@ -93,3 +95,41 @@ async def _mint_residency_grant(
             await grants.revoke(grant_id)
         return None
     return token
+
+
+async def close_released_residencies(
+    host_pool: HostPoolRepository,
+    grants: Any,
+    released: Iterable[dict[str, Any]],
+) -> None:
+    """Revoke each released grant and close its member process, best-effort.
+
+    The release has already committed, so its generation authorizes nothing
+    more. Revoking ends the credential now rather than at its TTL, and the
+    sandbox manager call closes the process now rather than at the host's
+    next residency heartbeat, which retries the same close by itself.
+    """
+    from cloud_agent.sandbox_manager_routing import sandbox_manager_for_host
+
+    for row in released:
+        grant_id = str(row.get("grant_id") or "")
+        if grant_id and grants is not None:
+            with contextlib.suppress(Exception):
+                await grants.revoke(grant_id)
+        try:
+            host = await host_pool.get_host(host=str(row["host"]))
+            manager = sandbox_manager_for_host(host) if host is not None else None
+            if manager is not None:
+                await manager.shared_residency_lost(
+                    str(row["thread_id"]), generation=int(row["generation"])
+                )
+        except Exception:
+            logger.warning(
+                "agent_released_residency_close_failed",
+                exc_info=True,
+                extra={
+                    "event": "agent_released_residency_close_failed",
+                    "thread_id": row.get("thread_id"),
+                    "generation": row.get("generation"),
+                },
+            )

@@ -964,12 +964,7 @@ export interface AgentSessionApi {
   archived_at: string | null;
   job: AgentJobApi;
   can_delete: boolean;
-  delete_block_reason?:
-    | 'session_active'
-    | 'fork_in_progress'
-    | 'publication_pending'
-    | 'not_archived'
-    | null;
+  delete_block_reason?: 'fork_in_progress' | 'publication_pending' | null;
 }
 
 export interface AgentSessionProjectApi {

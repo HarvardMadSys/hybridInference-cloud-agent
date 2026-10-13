@@ -28,6 +28,36 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+#: Work a stop or deletion must wait for: a member turn or Fork, a running job,
+#: or a workspace snapshot on its way to publication. ``$1`` is the sandbox.
+_GROUP_WORK_PENDING_SQL = """
+SELECT EXISTS (
+    SELECT 1 FROM agent_thread_sandbox_memberships m
+    WHERE m.sandbox_id = $1 AND (
+        m.active_attempt_id IS NOT NULL OR m.fork_operation_id IS NOT NULL
+        OR EXISTS (
+            SELECT 1 FROM agent_jobs j
+            WHERE j.thread_id = m.thread_id AND j.state = 'running'
+        )
+    )
+) OR EXISTS (
+    SELECT 1 FROM agent_sandbox_snapshots s
+    WHERE s.sandbox_id = $1
+      AND s.state IN ('pending', 'capturing', 'captured', 'publishing')
+)
+"""
+
+#: True when sandbox ``g`` has members and its owner deleted every one of
+#: their chats. A failed Fork's placeholder is tombstoned the same way.
+_EVERY_CHAT_DELETED_SQL = """
+EXISTS (SELECT 1 FROM agent_thread_sandbox_memberships m WHERE m.sandbox_id = g.id)
+AND NOT EXISTS (
+    SELECT 1 FROM agent_thread_sandbox_memberships m
+    JOIN agent_threads t ON t.id = m.thread_id
+    WHERE m.sandbox_id = g.id AND t.deleted_at IS NULL
+)
+"""
+
 
 class PostgresSandboxRepository:
     """One chat, one restartable sandbox: reserve, admit, settle, abandon."""
@@ -128,25 +158,7 @@ class PostgresSandboxRepository:
                         return "host_online"
                 elif group["state"] != "stopped" and group["deletion_state"] != "deleted":
                     return "not_stopped"
-                busy = await conn.fetchval(
-                    """
-                    SELECT EXISTS (
-                        SELECT 1 FROM agent_thread_sandbox_memberships m
-                        WHERE m.sandbox_id = $1 AND (
-                            m.active_attempt_id IS NOT NULL OR m.fork_operation_id IS NOT NULL
-                            OR EXISTS (
-                                SELECT 1 FROM agent_jobs j
-                                WHERE j.thread_id = m.thread_id AND j.state = 'running'
-                            )
-                        )
-                    ) OR EXISTS (
-                        SELECT 1 FROM agent_sandbox_snapshots s
-                        WHERE s.sandbox_id = $1
-                          AND s.state IN ('pending', 'capturing', 'captured', 'publishing')
-                    )
-                    """,
-                    sandbox_id,
-                )
+                busy = await conn.fetchval(_GROUP_WORK_PENDING_SQL, sandbox_id)
                 if (
                     busy
                     or group["active_operation_count"]
@@ -205,6 +217,7 @@ class PostgresSandboxRepository:
         sandbox_manager_confirmed_stopped: bool = False,
         confirmed_docker_status: str | None = None,
         discard: bool = False,
+        source: str = "admin",
     ) -> str:
         """Fence an idle stopped sandbox for deletion.
 
@@ -213,7 +226,8 @@ class PostgresSandboxRepository:
         removes the exact stopped or dead container without uploading it. No native
         state or ledger row is removed until the host confirms that removal.
         A stale RUNNING row may be repaired only after the API proves the exact
-        host container is stopped or dead, and idle.
+        host container is stopped or dead, and idle. ``source`` is ``system`` when
+        the request removes the sandbox of chats their owner deleted.
         """
         async with self._pool.acquire() as conn, conn.transaction():
             await conn.execute("SET LOCAL statement_timeout = '5s'")
@@ -242,25 +256,7 @@ class PostgresSandboxRepository:
             )
             if group["state"] != "stopped" and not forced_stopped_recovery:
                 return "not_stopped"
-            busy = await conn.fetchval(
-                """
-                SELECT EXISTS (
-                    SELECT 1 FROM agent_thread_sandbox_memberships m
-                    WHERE m.sandbox_id = $1 AND (
-                        m.active_attempt_id IS NOT NULL OR m.fork_operation_id IS NOT NULL
-                        OR EXISTS (
-                            SELECT 1 FROM agent_jobs j
-                            WHERE j.thread_id = m.thread_id AND j.state = 'running'
-                        )
-                    )
-                ) OR EXISTS (
-                    SELECT 1 FROM agent_sandbox_snapshots s
-                    WHERE s.sandbox_id = $1
-                      AND s.state IN ('pending', 'capturing', 'captured', 'publishing')
-                )
-                """,
-                sandbox_id,
-            )
+            busy = await conn.fetchval(_GROUP_WORK_PENDING_SQL, sandbox_id)
             if (
                 busy
                 or group["active_operation_count"]
@@ -283,7 +279,7 @@ class PostgresSandboxRepository:
                 conn,
                 group=group,
                 event_type="admin_delete_requested",
-                source="admin",
+                source=source,
                 actor_id=actor_id,
                 from_state=str(group["deletion_state"]),
                 to_state="pending",
@@ -902,25 +898,7 @@ class PostgresSandboxRepository:
                 return "accepted"
             if group["state"] != "running":
                 return "not_running"
-            busy = await conn.fetchval(
-                """
-                SELECT EXISTS (
-                    SELECT 1 FROM agent_thread_sandbox_memberships m
-                    WHERE m.sandbox_id = $1 AND (
-                        m.active_attempt_id IS NOT NULL OR m.fork_operation_id IS NOT NULL
-                        OR EXISTS (
-                            SELECT 1 FROM agent_jobs j
-                            WHERE j.thread_id = m.thread_id AND j.state = 'running'
-                        )
-                    )
-                ) OR EXISTS (
-                    SELECT 1 FROM agent_sandbox_snapshots s
-                    WHERE s.sandbox_id = $1
-                      AND s.state IN ('pending', 'capturing', 'captured', 'publishing')
-                )
-                """,
-                sandbox_id,
-            )
+            busy = await conn.fetchval(_GROUP_WORK_PENDING_SQL, sandbox_id)
             if (
                 busy
                 or group["active_operation_count"]
@@ -968,6 +946,90 @@ class PostgresSandboxRepository:
                         "container_id": container_id,
                     }
                 ),
+            )
+        return "accepted"
+
+    async def sandboxes_of_deleted_sessions(self, *, limit: int = 20) -> list[dict[str, Any]]:
+        """List live sandboxes on online hosts whose every chat was deleted.
+
+        Read without locks. The stop and deletion requests that act on a row
+        lock the group and check its own fence again.
+        """
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"""
+                SELECT g.id AS sandbox_id, g.generation, g.container_id,
+                       g.last_activity_at, g.state
+                FROM agent_sandboxes g
+                WHERE g.deletion_state = 'none' AND g.state IN ('running', 'stopped')
+                  AND g.container_id IS NOT NULL
+                  AND EXISTS (
+                      SELECT 1 FROM agent_runner_hosts h
+                      WHERE h.host = g.host AND h.status = 'online'
+                  )
+                  AND {_EVERY_CHAT_DELETED_SQL}
+                ORDER BY g.updated_at, g.id
+                LIMIT $1
+                """,
+                limit,
+            )
+        return [dict(row) for row in rows]
+
+    async def request_deleted_sessions_stop(
+        self, *, sandbox_id: str, generation: int, container_id: str, actor_id: str
+    ) -> str:
+        """Ask the host to stop a running sandbox whose every chat was deleted.
+
+        The same durable marker an administrator's stop writes, so admission
+        stays closed and the host's next heartbeat receives the stop. The host
+        still refuses while a terminal or operation is open there, and the
+        heartbeat retries. Nothing is deleted here: once the stop is observed,
+        the sandbox deletion request takes over.
+        """
+        async with self._pool.acquire() as conn, conn.transaction():
+            await conn.execute("SET LOCAL statement_timeout = '5s'")
+            await conn.fetch(
+                "SELECT thread_id FROM agent_thread_sandbox_memberships "
+                "WHERE sandbox_id = $1 ORDER BY thread_id FOR UPDATE",
+                sandbox_id,
+            )
+            group = await conn.fetchrow(
+                f"""
+                SELECT g.*, ({_EVERY_CHAT_DELETED_SQL}) AS every_chat_deleted
+                FROM agent_sandboxes g WHERE g.id = $1 FOR UPDATE
+                """,
+                sandbox_id,
+            )
+            if group is None:
+                return "not_found"
+            if group["generation"] != generation or group["container_id"] != container_id:
+                return "stale"
+            if not group["every_chat_deleted"] or group["deletion_state"] != "none":
+                return "stale"
+            if group["state"] == "stopping" and group["stop_requested_at"] is not None:
+                return "accepted"
+            if group["state"] != "running":
+                return "not_running"
+            busy = await conn.fetchval(_GROUP_WORK_PENDING_SQL, sandbox_id)
+            if (
+                busy
+                or group["active_operation_count"]
+                or group["snapshot_state"] in {"pending", "snapshotting", "importing"}
+            ):
+                return "busy"
+            await self._record_trajectory_event(
+                conn,
+                group=group,
+                event_type="deleted_sessions_stop_requested",
+                source="system",
+                actor_id=actor_id,
+                from_state="running",
+                to_state="stopping",
+            )
+            await conn.execute(
+                "UPDATE agent_sandboxes SET state = 'stopping', "
+                "stop_requested_at = NOW(), idle_deadline = NULL, updated_at = NOW() WHERE id = $1",
+                sandbox_id,
             )
         return "accepted"
 

@@ -30,6 +30,7 @@ class SandboxRepository(Protocol):
         sandbox_manager_confirmed_stopped: bool = False,
         confirmed_docker_status: str | None = None,
         discard: bool = False,
+        source: str = "admin",
     ) -> str:
         """Fence an idle stopped sandbox for deletion.
 
@@ -39,6 +40,7 @@ class SandboxRepository(Protocol):
         state or ledger row is removed until the host confirms that removal.
         An admin recovery may also repair a stale RUNNING row, but only after
         the API independently proves the exact host container is stopped or dead, and idle.
+        ``source`` is ``system`` when it removes the sandbox of deleted chats.
         """
         ...
 
@@ -167,6 +169,16 @@ class SandboxRepository(Protocol):
         The database marker survives observations and excludes new admission
         until Docker confirms the stop. No container or workspace is deleted.
         """
+        ...
+
+    async def sandboxes_of_deleted_sessions(self, *, limit: int = 20) -> list[dict[str, Any]]:
+        """List live sandboxes on online hosts whose every chat was deleted."""
+        ...
+
+    async def request_deleted_sessions_stop(
+        self, *, sandbox_id: str, generation: int, container_id: str, actor_id: str
+    ) -> str:
+        """Ask the host to stop a running sandbox whose every chat was deleted."""
         ...
 
     async def thread_workspace_ready(self, *, thread_id: str) -> bool:

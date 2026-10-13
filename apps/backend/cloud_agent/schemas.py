@@ -880,9 +880,7 @@ class GoalClearedResponse(BaseModel):
 AgentSessionState = Literal[
     "running", "queued", "idle", "needs_review", "done", "failed", "cancelled"
 ]
-AgentSessionDeleteBlockReason = Literal[
-    "not_archived", "session_active", "fork_in_progress", "publication_pending"
-]
+AgentSessionDeleteBlockReason = Literal["fork_in_progress", "publication_pending"]
 
 
 class AgentSessionResponse(BaseModel):

@@ -26,6 +26,12 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 CLAIM_TTL_SECONDS = 3900
 POLL_SECONDS = 5.0
+#: How often to look for sandboxes whose every chat was deleted, and how many
+#: to act on per pass. Neither is urgent: the chats are already hidden.
+DELETED_SESSIONS_SWEEP_SECONDS = 60.0
+DELETED_SESSIONS_BATCH = 20
+#: Who stops and deletes those sandboxes, in their trajectory and audit rows.
+DELETED_SESSIONS_ACTOR = "user-deletion-sweeper"
 
 
 class _DeletionStorage(Protocol):
@@ -316,13 +322,67 @@ async def delete_one_archived_sandbox(
     return True
 
 
+async def retire_deleted_session_sandboxes(
+    store: _DeletionStorage,
+    *,
+    archive_available: Callable[[], bool] = lambda: S3SandboxArchiveStore.from_settings().available,
+    limit: int = DELETED_SESSIONS_BATCH,
+) -> int:
+    """Stop, then queue deletion of, each sandbox whose every chat was deleted.
+
+    A running sandbox is asked to stop first; a later pass finds it stopped.
+    Deletion then takes the administrator's path: archived to S3 first when
+    this deployment has an archive bucket, discarded otherwise. Database
+    records are kept either way. Returns how many requests were accepted.
+    """
+    accepted = 0
+    discard = not archive_available()
+    for row in await store.sandbox.sandboxes_of_deleted_sessions(limit=limit):
+        if row["state"] == "running":
+            result = await store.sandbox.request_deleted_sessions_stop(
+                sandbox_id=str(row["sandbox_id"]),
+                generation=int(row["generation"]),
+                container_id=str(row["container_id"]),
+                actor_id=DELETED_SESSIONS_ACTOR,
+            )
+        else:
+            result = await store.sandbox.request_admin_delete(
+                sandbox_id=str(row["sandbox_id"]),
+                generation=int(row["generation"]),
+                container_id=str(row["container_id"]),
+                last_activity_at=row["last_activity_at"],
+                actor_id=DELETED_SESSIONS_ACTOR,
+                admin_ip="internal",
+                discard=discard,
+                source="system",
+            )
+        if result == "accepted":
+            accepted += 1
+    return accepted
+
+
 async def coordinate_sandbox_deletions(
-    store: _DeletionStorage, *, interval_seconds: float = POLL_SECONDS
+    store: _DeletionStorage,
+    *,
+    interval_seconds: float = POLL_SECONDS,
+    deleted_sessions_interval_seconds: float = DELETED_SESSIONS_SWEEP_SECONDS,
 ) -> None:
-    """Retry durable deletion requests independently of host heartbeats."""
+    """Retry durable deletion requests independently of host heartbeats.
+
+    Less often, also request the stop and deletion of sandboxes whose chats
+    were all deleted; those requests then flow through the same retries.
+    """
     if interval_seconds <= 0:
         raise ValueError("Sandbox deletion interval must be positive.")
+    loop = asyncio.get_running_loop()
+    next_sweep = loop.time()
     while True:
+        if loop.time() >= next_sweep:
+            next_sweep = loop.time() + deleted_sessions_interval_seconds
+            try:
+                await retire_deleted_session_sandboxes(store)
+            except Exception:
+                logger.warning("Deleted-session sandbox sweep failed")
         try:
             while await delete_one_archived_sandbox(store):
                 pass

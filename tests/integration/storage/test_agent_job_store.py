@@ -2074,23 +2074,30 @@ async def test_deleted_fork_child_gives_its_resident_slot_back_once_stopped(
     child = await store.session_fork.finalize_session_fork(operation_id=operation["id"])
     assert child is not None
 
-    assert await store.conversation_commands.set_thread_archived(
-        job_id=child["id"], user_id=job["user_id"], archived=True
-    )
+    # No archive first: deletion releases the child's residency itself.
     assert await store.conversation_commands.delete_sessions(
         thread_ids=[child["thread_id"]], user_id=job["user_id"]
-    ) == {"thread_ids": [child["thread_id"]]}
+    ) == {
+        "thread_ids": [child["thread_id"]],
+        "released_residencies": [
+            {
+                "thread_id": child["thread_id"],
+                "generation": residencies["target"]["generation"],
+                "host": "shared-runner",
+                "grant_id": "",
+            }
+        ],
+    }
 
-    # Deleted but still live: its member UID may still be running, so the
-    # slot must not be handed to a new child yet.
+    # Deleted but not yet observed stopped: its member UID may still be
+    # running, so the slot must not be handed to a new child yet.
     assert await store.session_fork.prepare_session_fork(
         source_job_id=job["id"],
         user_id=job["user_id"],
         idempotency_key="native-fork-while-deleted-child-lives",
     ) == {"error": "resident_capacity_exhausted"}
 
-    # The group's idle stop takes every process down with it, and the host's
-    # stopped heartbeat releases the child's residency.
+    # The group's stop takes every process down with it.
     async with pool.acquire() as conn:
         await conn.execute(
             "UPDATE agent_sandboxes SET idle_deadline = NOW() - INTERVAL '1 second' WHERE id = $1",
@@ -2109,16 +2116,6 @@ async def test_deleted_fork_child_gives_its_resident_slot_back_once_stopped(
             members=[],
         )
         == "stopped"
-    )
-    assert (
-        await store.residency.release_shared_residency_if_quiescent(
-            thread_id=child["thread_id"],
-            generation=residencies["target"]["generation"],
-            process_generation=1,
-            host="shared-runner",
-            sandbox_id=sandbox["sandbox_id"],
-        )
-        is not None
     )
 
     second = await store.session_fork.prepare_session_fork(
@@ -6667,9 +6664,6 @@ async def test_session_mutations_are_atomic_owner_scoped_and_irreversible(pool, 
         thread_ids=[mine["thread_id"], foreign["thread_id"]], user_id="user-1", archived=True
     ) == {"error": "not_found"}
     assert (await store.conversation_queries.get_job(mine["id"]))["archived_at"] is None
-    assert await store.conversation_commands.delete_sessions(
-        thread_ids=[mine["thread_id"]], user_id="user-1"
-    ) == {"error": "not_archived"}
     selection = [mine["thread_id"], busy["thread_id"]]
     archived = await store.conversation_commands.set_sessions_archived(
         thread_ids=selection, user_id="user-1", archived=True
@@ -6677,15 +6671,12 @@ async def test_session_mutations_are_atomic_owner_scoped_and_irreversible(pool, 
     assert len(archived["sessions"]) == 2
     assert len({row["archived_at"] for row in archived["sessions"]}) == 1
     assert await store.conversation_commands.delete_sessions(
-        thread_ids=selection, user_id="user-1"
-    ) == {"error": "session_active"}
-    assert await store.conversation_commands.delete_sessions(
         thread_ids=[mine["thread_id"], foreign["thread_id"]], user_id="user-1"
     ) == {"error": "not_found"}
     assert (await store.conversation_queries.get_job(mine["id"]))["deleted_at"] is None
     assert await store.conversation_commands.delete_sessions(
         thread_ids=[mine["thread_id"]], user_id="user-1"
-    ) == {"thread_ids": [mine["thread_id"]]}
+    ) == {"thread_ids": [mine["thread_id"]], "released_residencies": []}
     retained = await store.conversation_queries.get_job(mine["id"])
     assert retained is not None and retained["deleted_at"] is not None
     assert retained["task_prompt"] == mine["task_prompt"]
@@ -6786,7 +6777,7 @@ async def test_deleting_an_idle_shared_session_keeps_workspace_sibling_and_billi
     pool,
     store: Storage,
 ):
-    """History deletion is independent of the shared container's lifetime."""
+    """Deleting a chat ends its residency but not the shared container's lifetime."""
     source, claim, sandbox = await _reserve_shared_chat(store)
     fence = {
         "thread_id": source["thread_id"],
@@ -6883,7 +6874,17 @@ async def test_deleting_an_idle_shared_session_keeps_workspace_sibling_and_billi
     ][0]["can_delete"]
     assert await store.conversation_commands.delete_sessions(
         thread_ids=[source["thread_id"]], user_id="user-1"
-    ) == {"thread_ids": [source["thread_id"]]}
+    ) == {
+        "thread_ids": [source["thread_id"]],
+        "released_residencies": [
+            {
+                "thread_id": source["thread_id"],
+                "generation": 1,
+                "host": "shared-runner",
+                "grant_id": "grant-history",
+            }
+        ],
+    }
     assert await store.sandbox.thread_sandbox(thread_id=source["thread_id"]) == before
     assert (await store.conversation_queries.get_job(sibling_turn["id"]))["state"] == "queued"
     assert (
@@ -6911,12 +6912,193 @@ async def test_deleting_an_idle_shared_session_keeps_workspace_sibling_and_billi
             )
             > 0
         )
+    # The deleted chat's process loses its credential with the chat: the
+    # host's next beat for that generation extends nothing, and comes back in
+    # residencies_lost so the host closes the process.
     assert (
         await store.residency.heartbeat_residency(
             thread_id=source["thread_id"], generation=1, host="shared-runner", ttl_seconds=120
         )
-        == "grant-history"
+        is None
     )
+
+
+async def test_deleting_a_working_session_cancels_its_turns_and_goal(pool, store: Storage):
+    """Permanent deletion need not wait for archive or idleness; it ends the work."""
+    from cloud_agent.goals.models import GoalInput
+
+    queued = await _create_job(store)
+    running = await _create_job(store)
+    assert await store.goals.set_goal(
+        thread_id=queued["thread_id"],
+        user_id="user-1",
+        goal=GoalInput(objective="ship it", max_rounds=5),
+    )
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE agent_jobs SET state = 'running' WHERE id = $1", running["id"])
+
+    # Neither chat is archived, and one has a turn running.
+    selection = [queued["thread_id"], running["thread_id"]]
+    assert await store.conversation_commands.delete_sessions(
+        thread_ids=selection, user_id="user-1"
+    ) == {"thread_ids": selection, "released_residencies": []}
+
+    async with pool.acquire() as conn:
+        jobs = {
+            row["id"]: row
+            for row in await conn.fetch(
+                "SELECT id, state, cancel_requested FROM agent_jobs WHERE id = ANY($1::text[])",
+                [queued["id"], running["id"]],
+            )
+        }
+    # A claim does not read the thread tombstone, so the queued turn must not
+    # stay queued; the running one stops through the worker's own transition.
+    assert (jobs[queued["id"]]["state"], jobs[queued["id"]]["cancel_requested"]) == (
+        "cancelled",
+        True,
+    )
+    assert (jobs[running["id"]]["state"], jobs[running["id"]]["cancel_requested"]) == (
+        "running",
+        True,
+    )
+    goal = await store.goals.get_goal(thread_id=queued["thread_id"])
+    assert goal is not None
+    assert (goal["state"], goal["pause_reason"]) == ("paused", "cancelled")
+
+
+@pytest.mark.parametrize("archive_available", [False, True])
+async def test_sandbox_of_deleted_sessions_is_stopped_then_deleted(
+    pool, store: Storage, archive_available: bool
+):
+    """The last deleted chat takes its sandbox with it; the records stay."""
+    from cloud_agent.workers.sandbox_deletion import retire_deleted_session_sandboxes
+
+    source, claim, sandbox = await _reserve_shared_chat(store)
+    fence = {
+        "thread_id": source["thread_id"],
+        "attempt_id": claim["attempt_id"],
+        "lease_generation": claim["lease_generation"],
+        "sandbox_generation": sandbox["generation"],
+        "activation_generation": sandbox["activation_generation"],
+    }
+    assert await store.sandbox.mark_thread_sandbox_running(
+        **fence, container_id="container-deleted-chats", context_status="new"
+    )
+    assert await store.sandbox.admit_thread_sandbox_turn(
+        **fence, residency_generation=sandbox["residency_generation"], job_id=source["id"]
+    )
+    assert await store.sandbox.settle_thread_sandbox(
+        **fence,
+        residency_generation=sandbox["residency_generation"],
+        job_id=source["id"],
+        context_status="live",
+        native_session_id="native-source",
+        idle_timeout_seconds=1800,
+        base_sha=source["base_sha"],
+    )
+    assert await store.attempt_commands.transition(
+        job_id=source["id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        from_states=("running",),
+        to_state="succeeded",
+    )
+    sibling = await _create_job(store, task_prompt="forked sibling")
+    async with pool.acquire() as conn:
+        # The settled turn's publication finished, as it would before a
+        # sandbox can stop.
+        await conn.execute("UPDATE agent_sandbox_snapshots SET state = 'published'")
+        await conn.execute(
+            "UPDATE agent_sandboxes SET snapshot_state = 'quiescent' WHERE id = $1",
+            sandbox["sandbox_id"],
+        )
+        await conn.execute(
+            """
+            INSERT INTO agent_thread_sandbox_memberships (
+                thread_id, user_id, sandbox_id, native_session_id, native_state,
+                context_status, resident_state
+            ) VALUES ($1, 'user-1', $2, 'native-sibling', 'ready', 'live', 'stopped')
+            """,
+            sibling["thread_id"],
+            sandbox["sandbox_id"],
+        )
+
+    async def sweep() -> int:
+        return await retire_deleted_session_sandboxes(
+            store, archive_available=lambda: archive_available
+        )
+
+    async def group() -> dict:
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT state, stop_requested_at, deletion_state, deletion_discard "
+                "FROM agent_sandboxes WHERE id = $1",
+                sandbox["sandbox_id"],
+            )
+        assert row is not None
+        return dict(row)
+
+    # One of its two chats remains: the sandbox is still in use.
+    await store.conversation_commands.delete_sessions(
+        thread_ids=[source["thread_id"]], user_id="user-1"
+    )
+    assert await sweep() == 0
+    assert (await group())["state"] == "running"
+
+    # The last chat goes. The running sandbox is asked to stop, and the host's
+    # next heartbeat receives that stop; nothing is deleted yet.
+    await store.conversation_commands.delete_sessions(
+        thread_ids=[sibling["thread_id"]], user_id="user-1"
+    )
+    assert await sweep() == 1
+    stopping = await group()
+    assert stopping["state"] == "stopping" and stopping["stop_requested_at"] is not None
+    assert stopping["deletion_state"] == "none"
+    due = await store.sandbox.due_thread_sandbox_stop(
+        thread_id=source["thread_id"],
+        host="shared-runner",
+        sandbox_id=sandbox["sandbox_id"],
+        container_id="container-deleted-chats",
+        sandbox_generation=sandbox["generation"],
+    )
+    assert due is not None and due["reason"] == "idle"
+
+    # Once Docker reports it stopped, deletion is queued through the
+    # administrator's path: archived first when a bucket exists.
+    assert (
+        await store.sandbox.reconcile_thread_sandbox_observation(
+            thread_id=source["thread_id"],
+            host="shared-runner",
+            sandbox_id=sandbox["sandbox_id"],
+            container_id="container-deleted-chats",
+            sandbox_generation=sandbox["generation"],
+            running=False,
+            activity_active=False,
+            idle_remaining_seconds=None,
+            members=[],
+        )
+        == "stopped"
+    )
+    assert await sweep() == 1
+    deleting = await group()
+    assert deleting["deletion_state"] == "pending"
+    assert deleting["deletion_discard"] is (not archive_available)
+    assert await sweep() == 0
+
+    async with pool.acquire() as conn:
+        events = await conn.fetch(
+            "SELECT event_type, source, actor_id FROM agent_sandbox_events "
+            "WHERE sandbox_id = $1 AND event_type IN "
+            "('deleted_sessions_stop_requested', 'admin_delete_requested') ORDER BY id",
+            sandbox["sandbox_id"],
+        )
+    assert [tuple(row) for row in events] == [
+        ("deleted_sessions_stop_requested", "system", "user-deletion-sweeper"),
+        ("admin_delete_requested", "system", "user-deletion-sweeper"),
+    ]
+    # Hidden from the owner, kept in the database.
+    retained = await store.conversation_queries.get_job(source["id"])
+    assert retained is not None and retained["task_prompt"] == source["task_prompt"]
 
 
 async def test_generated_title_is_canonical_and_stable_across_turns(store: Storage):

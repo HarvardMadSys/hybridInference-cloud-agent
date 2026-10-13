@@ -2025,7 +2025,7 @@ async def test_deleting_the_conversation_removes_its_waiting_messages_and_their_
         thread_ids=[thread_id], user_id=_OWNER
     )
 
-    assert deleted == {"thread_ids": [thread_id]}
+    assert deleted["thread_ids"] == [thread_id]
     async with api.pool.acquire() as conn:
         assert (
             await conn.fetchval(

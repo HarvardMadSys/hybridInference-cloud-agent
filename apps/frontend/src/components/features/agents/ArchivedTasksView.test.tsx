@@ -197,7 +197,9 @@ describe('archived session management', () => {
     expect(title).toHaveAttribute('href', '/job-running');
     expect(within(title).getByText('Running')).toBeVisible();
     expect(title.querySelector('time')).toHaveAttribute('datetime', '2026-09-09T16:27:00Z');
-    expect(screen.getByRole('button', { name: 'Delete Session running' })).toBeDisabled();
+    expect(
+      screen.getByRole('button', { name: 'Permanently delete Session running' }),
+    ).toBeDisabled();
     expect(mocks.list).toHaveBeenCalledWith(
       expect.objectContaining({ repo: 'owner/alpha', includeSummary: false }),
       expect.any(AbortSignal),
@@ -360,7 +362,7 @@ describe('archived session management', () => {
     expect(search).toHaveFocus();
     expect(status).toBeEnabled();
     expect(project).toBeEnabled();
-    expect(screen.getByRole('button', { name: 'Delete filtered' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Permanently delete filtered' })).toBeDisabled();
 
     fireEvent.change(search, { target: { value: 'failure' } });
     await waitFor(() => expect(pending).toHaveLength(2));
@@ -387,7 +389,7 @@ describe('archived session management', () => {
 
     expect(screen.getByRole('link', { name: /Deployment failure/ })).toBeVisible();
     expect(screen.queryByRole('link', { name: /Session latest/ })).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Delete filtered' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Permanently delete filtered' })).toBeEnabled();
     expect(mocks.deleteSessions).not.toHaveBeenCalled();
   });
 
@@ -408,18 +410,22 @@ describe('archived session management', () => {
       target: { value: 'owner/alpha' },
     });
     await waitFor(() =>
-      expect(screen.getByRole('button', { name: 'Delete filtered' })).toBeEnabled(),
+      expect(screen.getByRole('button', { name: 'Permanently delete filtered' })).toBeEnabled(),
     );
-    fireEvent.click(screen.getByRole('button', { name: 'Delete filtered' }));
-    const dialog = await screen.findByRole('dialog', { name: 'Delete 100 archived sessions?' });
+    fireEvent.click(screen.getByRole('button', { name: 'Permanently delete filtered' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Permanently delete 100 sessions?' });
     expect(within(dialog).getByText('Scope: current search and filters')).toBeVisible();
-    expect(within(dialog).getByText(/2 active sessions are excluded/)).toBeVisible();
+    expect(
+      within(dialog).getByText(/2 sessions preparing a fork or publishing are excluded/),
+    ).toBeVisible();
     expect(mocks.list).toHaveBeenCalledWith(
       expect.objectContaining({ repo: 'owner/alpha', limit: 100, cursor: '100' }),
       expect.any(AbortSignal),
     );
     expect(mocks.deleteSessions).not.toHaveBeenCalled();
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Delete 100 sessions' }));
+    fireEvent.click(
+      within(dialog).getByRole('button', { name: 'Permanently delete 100 sessions' }),
+    );
     await waitFor(() => expect(mocks.deleteSessions).toHaveBeenCalledOnce());
     const deleted = mocks.deleteSessions.mock.calls[0][0] as string[];
     expect(deleted).toHaveLength(100);
@@ -434,7 +440,7 @@ describe('archived session management', () => {
     sessions = [session('one'), session('two', {}, { repo: 'other/beta' })];
     render(<ArchivedTasksView />);
     fireEvent.click(await screen.findByRole('button', { name: 'Actions for owner/alpha' }));
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Delete group (1)' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Permanently delete group (1)' }));
     const dialog = await screen.findByRole('dialog');
     expect(within(dialog).getByText('Scope: archived sessions in owner/alpha')).toBeVisible();
     expect(within(dialog).getByRole('button', { name: 'Cancel' })).toHaveFocus();
@@ -451,7 +457,7 @@ describe('archived session management', () => {
       render(<ArchivedTasksView />);
       await screen.findByRole('link', { name: /Session 0 / });
       if (action === 'delete') {
-        fireEvent.click(screen.getByRole('button', { name: 'Delete all' }));
+        fireEvent.click(screen.getByRole('button', { name: 'Permanently delete all' }));
       } else {
         fireEvent.click(screen.getByRole('button', { name: 'Actions for owner/alpha' }));
         fireEvent.click(screen.getByRole('menuitem', { name: /Unarchive group/ }));
@@ -476,7 +482,7 @@ describe('archived session management', () => {
     });
     render(<ArchivedTasksView />);
     await screen.findByRole('link', { name: /Session 0 / });
-    fireEvent.click(screen.getByRole('button', { name: 'Delete all' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Permanently delete all' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('Select at most 1000 sessions');
     const bulkCalls = mocks.list.mock.calls.filter(([options]) => options.limit === 100);
     expect(bulkCalls).toHaveLength(11);
@@ -486,10 +492,8 @@ describe('archived session management', () => {
   });
 
   it.each([
-    ['session_active', 'still active'],
     ['fork_in_progress', 'being forked'],
     ['publication_pending', 'unfinished publication'],
-    ['not_archived', 'was unarchived'],
     ['not_found', 'no longer available'],
   ])(
     'discards a stale delete selection on %s and retries with refreshed IDs',
@@ -497,22 +501,27 @@ describe('archived session management', () => {
       sessions = [session('one'), session('two')];
       render(<ArchivedTasksView />);
       await screen.findByRole('link', { name: /Session one/ });
-      fireEvent.click(screen.getByRole('button', { name: 'Delete all' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Permanently delete all' }));
       const dialog = await screen.findByRole('dialog');
       if (code === 'not_found') sessions = [session('two')];
-      else if (code === 'not_archived') sessions[0] = session('one', { archived_at: null });
       else sessions[0] = session('one', { can_delete: false });
       mocks.deleteSessions.mockRejectedValueOnce(
         new APIError(code, 'Server conflict', code === 'not_found' ? 404 : 409),
       );
-      fireEvent.click(within(dialog).getByRole('button', { name: 'Delete 2 sessions' }));
+      fireEvent.click(
+        within(dialog).getByRole('button', { name: 'Permanently delete 2 sessions' }),
+      );
       expect(await screen.findByRole('alert')).toHaveTextContent(message);
       expect(screen.getByRole('alert')).toHaveTextContent('Review the refreshed list');
       expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
-      await waitFor(() => expect(screen.getByRole('button', { name: 'Delete all' })).toBeEnabled());
-      fireEvent.click(screen.getByRole('button', { name: 'Delete all' }));
+      await waitFor(() =>
+        expect(screen.getByRole('button', { name: 'Permanently delete all' })).toBeEnabled(),
+      );
+      fireEvent.click(screen.getByRole('button', { name: 'Permanently delete all' }));
       const refreshed = await screen.findByRole('dialog');
-      fireEvent.click(within(refreshed).getByRole('button', { name: 'Delete 1 session' }));
+      fireEvent.click(
+        within(refreshed).getByRole('button', { name: 'Permanently delete 1 session' }),
+      );
       await waitFor(() => expect(mocks.deleteSessions).toHaveBeenLastCalledWith(['thread-two']));
     },
   );
@@ -541,10 +550,10 @@ describe('archived session management', () => {
     mocks.list.mockRejectedValueOnce(new Error('connection unavailable'));
     render(<ArchivedTasksView />);
     fireEvent.click(await screen.findByRole('button', { name: 'Try again' }));
-    fireEvent.click(await screen.findByRole('button', { name: 'Delete Session one' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Permanently delete Session one' }));
     const dialog = await screen.findByRole('dialog');
     mocks.deleteSessions.mockRejectedValueOnce(new Error('connection unavailable'));
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Delete 1 session' }));
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Permanently delete 1 session' }));
     expect(await within(dialog).findByRole('alert')).toHaveTextContent(
       'Could not delete these sessions',
     );
@@ -587,12 +596,16 @@ describe('archived session management', () => {
     await act(async () => {
       render(<ArchivedTasksView />);
     });
-    expect(screen.getByRole('button', { name: 'Delete Session running' })).toBeDisabled();
+    expect(
+      screen.getByRole('button', { name: 'Permanently delete Session running' }),
+    ).toBeDisabled();
     sessions = [session('running')];
     await act(async () => {
       await vi.advanceTimersByTimeAsync(10_000);
     });
-    expect(screen.getByRole('button', { name: 'Delete Session running' })).toBeEnabled();
+    expect(
+      screen.getByRole('button', { name: 'Permanently delete Session running' }),
+    ).toBeEnabled();
     expect(
       within(screen.getByRole('link', { name: /Session running/ })).queryByText('Running'),
     ).not.toBeInTheDocument();
@@ -620,7 +633,7 @@ describe('archived session management', () => {
       await vi.advanceTimersByTimeAsync(10_000);
     });
     expect(screen.getByText('No matching sessions')).toBeVisible();
-    expect(screen.getByRole('button', { name: 'Delete filtered' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Permanently delete filtered' })).toBeDisabled();
   });
 
   it('keeps existing groups mounted when a background index refresh fails', async () => {

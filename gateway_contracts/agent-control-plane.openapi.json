@@ -6267,8 +6267,6 @@
             "anyOf": [
               {
                 "enum": [
-                  "not_archived",
-                  "session_active",
                   "fork_in_progress",
                   "publication_pending"
                 ],
@@ -31791,7 +31789,7 @@
     },
     "/v1/agent/sessions/delete": {
       "post": {
-        "description": "Permanently remove archived sessions from owner history, retaining audit data.",
+        "description": "Permanently hide sessions from their owner, retaining audit data.\n\nArchived or not, idle or working: the delete cancels each chat's turns and\nreleases its residency, then revokes the released grants and closes the\nmember processes on their hosts.",
         "operationId": "delete_agent_sessions_v1_agent_sessions_delete_post",
         "parameters": [
           {

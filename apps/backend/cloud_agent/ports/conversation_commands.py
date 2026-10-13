@@ -158,16 +158,14 @@ class ConversationCommands(Protocol):
         ...
 
     async def delete_sessions(self, *, thread_ids: list[str], user_id: str) -> dict[str, Any]:
-        """Irreversibly hide settled archived history while retaining audit rows.
+        """Irreversibly hide chats from their owner while retaining audit rows.
 
-        The thread lock serializes owner deletion against follow-up insertion,
-        native-fork preparation and archive changes. Worker lifecycle access
-        deliberately keeps the immutable job, residency and sandbox ledgers.
-        A fork's shared workspace is never removed by a chat-history action.
-
-        Files the owner uploaded are the exception: those rows are deleted
-        rather than hidden, because they are the owner's content rather than an
-        audit trail, and nothing else would ever remove them.
+        A chat need not be archived or idle: the same commit cancels its
+        queued turns, asks a running turn to stop, pauses its goal and
+        releases its residency. ``released_residencies`` lists each released
+        generation with its host and grant id for the caller to revoke and to
+        close on the owning host. The job, residency and sandbox ledgers are
+        kept; uploaded files and unsent messages are deleted outright.
         """
         ...
 
