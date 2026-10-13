@@ -13,6 +13,7 @@ application served in-process.
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -20,6 +21,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from cloud_agent import profiling_control_config
 from cloud_agent.api import admin_profiling_control, host_profiling
 from cloud_agent.application.profiling_control import ProfilingControlService
 from cloud_agent.domain.profiling_control import (
@@ -298,6 +300,33 @@ def test_default_control_is_available_but_collection_is_disabled(monkeypatch) ->
     assert control["run"] is None
     assert control["run_active"] is False
     assert control["stored_samples"] == 0
+
+
+def test_a_malformed_deployment_name_falls_back_and_says_so(monkeypatch, caplog) -> None:
+    """A typo must not quietly merge two deployments' control namespaces.
+
+    Regression: a name that failed the pattern fell back to ``default`` without
+    a word, so a stack configured as ``staging/eu`` commanded -- and could stop
+    -- the experiment of whichever deployment really is ``default``.
+    """
+    monkeypatch.setenv("AGENT_OPERATION_PROFILING_DEPLOYMENT", "staging/eu")
+    # Forget an earlier test's report of the same value: the warning is once
+    # per value per process.
+    monkeypatch.setattr(profiling_control_config, "_REPORTED_REFUSAL", None, raising=False)
+    caplog.set_level(logging.WARNING, logger=profiling_control_config.__name__)
+    with _client(_FakeStorage()) as client:
+        for _ in range(3):
+            response = client.get("/admin/agent/profiling-control")
+            assert response.status_code == 200
+            assert response.json()["deployment"] == "default"
+    refusals = [
+        record.getMessage()
+        for record in caplog.records
+        if "is not a usable deployment name" in record.getMessage()
+    ]
+    # Once, not on every read that asks for the name, and naming both.
+    assert len(refusals) == 1
+    assert "'staging/eu'" in refusals[0] and "'default'" in refusals[0]
 
 
 def test_a_start_creates_the_experiment_and_reports_it() -> None:
