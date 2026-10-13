@@ -28,7 +28,7 @@ import CloudLabSettings from './CloudLabSettings';
 import SandboxArchiveSettingsCard from './SandboxArchiveSettings';
 import { SettingsSearch } from './SettingsSearch';
 import { applicationCategoryName } from './settingsOrganization';
-import { buildSettingsSearchItems, type SettingsSearchItem } from './settingsSearch';
+import { buildSettingsSearchItems, type SettingsSearchItem } from './settingsSearchIndex';
 import { AdminNavigation } from '../AdminNavigation';
 import { ADMIN_PAGE, AdminPageHeader } from '../AdminPageHeader';
 import { GlobalSettingsCard, type NamedHost } from '../hosts/HostSettings';

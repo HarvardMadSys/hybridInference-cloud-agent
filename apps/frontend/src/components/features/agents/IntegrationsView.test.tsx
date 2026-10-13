@@ -10,6 +10,7 @@ import {
   type UserMemoryView,
 } from '@/lib/api/userMemory';
 import { getMemoryProjects } from '@/lib/api/projectMemory';
+import { getUserProfile } from '@/lib/api/userProfile';
 import { LOCALE_STORAGE_KEY } from '@/lib/i18n/locales';
 import { IntegrationsView } from './IntegrationsView';
 import type { AgentIntegrationProviderApi, AgentIntegrationsApi } from '@/lib/api/agents';
@@ -20,6 +21,7 @@ vi.mock('@/components/providers/AuthProvider', () => ({
 
 import { listSkills } from '@/lib/api/skills';
 vi.mock('@/lib/api/skills', () => ({ listSkills: vi.fn() }));
+vi.mock('@/lib/api/userProfile', () => ({ getUserProfile: vi.fn(), saveUserProfile: vi.fn() }));
 
 vi.mock('@/lib/api/agents', () => ({
   getAgentConfig: vi.fn(),
@@ -154,6 +156,13 @@ function unloadedGithub(
 }
 
 beforeEach(() => {
+  vi.mocked(getUserProfile).mockResolvedValue({
+    email: 'owner@example.com',
+    first_name: '',
+    last_name: '',
+    image_data_url: null,
+    revision: 0,
+  });
   localStorage.clear();
   document.documentElement.lang = 'en';
   vi.mocked(getAgentConfig).mockResolvedValue({
@@ -182,7 +191,8 @@ describe('IntegrationsView', () => {
 
     render(<IntegrationsView connectedProvider="github" />);
 
-    expect(screen.getByRole('heading', { level: 1, name: 'Setting' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 1, name: 'My Settings' })).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Profile' })).toBeInTheDocument();
     expect(screen.queryByText('Integrations & MCP')).not.toBeInTheDocument();
     expect(screen.getByRole('heading', { level: 2, name: 'MCP servers' })).toBeInTheDocument();
     expect(
@@ -256,7 +266,8 @@ describe('IntegrationsView', () => {
       </LocaleProvider>,
     );
 
-    expect(await screen.findByRole('heading', { level: 1, name: '设置' })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { level: 1, name: '我的设置' })).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: '个人资料' })).toBeInTheDocument();
     const section = screen.getByRole('region', { name: '用户记忆' });
     await within(section).findByRole('switch', { name: '自动建立记忆' });
     expect(within(section).queryByRole('img')).not.toBeInTheDocument();
@@ -265,7 +276,7 @@ describe('IntegrationsView', () => {
       within(section).queryByRole('heading', { name: '未来任务建议' }),
     ).not.toBeInTheDocument();
     expect(screen.getByRole('region', { name: '项目记忆' })).toBeInTheDocument();
-    expect(screen.getByText('管理你的连接、技能、记忆和通知。')).toBeInTheDocument();
+    expect(screen.getByText('管理你的个人资料、连接、技能、记忆和通知。')).toBeInTheDocument();
   });
 
   it('marks providers that need operator configuration', async () => {

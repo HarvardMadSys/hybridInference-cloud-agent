@@ -1,8 +1,8 @@
 # Minimal Agent identity
 
 Cloud Agent deliberately keeps identity small. It stores the Gateway user ID
-and the issuer that minted it, but it does not copy an account profile or derive
-permissions from account roles. The Gateway makes the current access decision,
+and the issuer that minted it, but it does not copy Gateway account metadata into
+identity claims or derive permissions from account roles. The Gateway makes the current access decision,
 and Cloud Agent rechecks that decision instead of reading permissions from the
 session. The [Agent admission contract](agent-access-policy.md) defines those
 checks.
@@ -25,10 +25,24 @@ the access-required page. A missing/inactive account is refused through the
 access contract's typed `subject_unavailable` error. Unreadable responses and
 proxy failures cannot establish access.
 
-`GET /v1/session/me` returns `id` and `agent_access`. Settings offer theme and
-interface-language preferences; account profiles belong to the Gateway. Tasks,
-messages, connection identifiers and encrypted Git/MCP credentials remain
-Agent-owned data. User-authored content is unaffected.
+`GET /v1/session/me` returns `id` and `agent_access`. My Settings offers a Profile
+section with a read-only account email, editable first and last names, and an
+uploaded profile picture. Email is read on demand from the Gateway's existing
+`/internal/users/{user_id}/status` lookup and is never stored in Agent or added
+to session claims. That response's role and account-status fields do not confer
+Agent permissions; current admission is still checked through `agent-access`.
+
+The names and picture are owner-authored Cloud Agent display data, separate
+from Gateway login identity and the automatically generated homepage companion.
+`GET` and revision-checked `PATCH /v1/agent/profile` require current Agent admission
+and return `Cache-Control: no-store`. Names allow up to 100 characters each.
+PNG, JPEG, and WebP uploads are limited to 2 MiB and 16 million pixels; the server
+re-encodes them as metadata-free PNGs up to 512 by 512 pixels before saving.
+Migration `0063_user_profiles` adds `agent_user_profiles`; it contains no email,
+roles, or credentials. Profile editing does not modify Gateway account details.
+
+Tasks, messages, connection identifiers, encrypted Git/MCP credentials, and
+other user-authored content remain Agent-owned data.
 
 There is no individual session-revocation table. A copied cookie remains valid
 until expiry; protected requests still require current Gateway access. Rotating

@@ -17,6 +17,16 @@ vi.mock('next/navigation', () => ({
 }));
 import { listSkills } from '@/lib/api/skills';
 vi.mock('@/lib/api/skills', () => ({ listSkills: vi.fn() }));
+vi.mock('@/lib/api/userProfile', () => ({
+  getUserProfile: async () => ({
+    email: 'owner@example.com',
+    first_name: '',
+    last_name: '',
+    image_data_url: null,
+    revision: 0,
+  }),
+  saveUserProfile: vi.fn(),
+}));
 
 vi.mock('@/lib/api/agents', () => ({
   getAgentConfig: vi.fn(),

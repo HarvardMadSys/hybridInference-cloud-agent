@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useT } from '@/components/providers';
 import { GettingStartedSettings } from '@/components/features/settings/GettingStartedSettings';
+import { ProfileSettings } from '@/components/features/settings/ProfileSettings';
 import { NotificationSettings } from '@/components/features/settings/NotificationSettings';
 import { UserMemorySettings } from '@/components/features/settings/UserMemorySettings';
 import { ProjectMemorySettings } from '@/components/features/settings/ProjectMemorySettings';
@@ -365,6 +366,8 @@ export function IntegrationsView({
           </button>
         </div>
       ) : null}
+
+      <ProfileSettings />
 
       <section
         aria-labelledby="source-control-heading"

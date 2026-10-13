@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import type { HostSettingDefinition } from '@/lib/api/admin';
 import type { AgentAdminSettings } from '@/lib/api/adminSettings';
 
-import { buildSettingsSearchItems, searchSettingsItems } from './settingsSearch';
+import { buildSettingsSearchItems, searchSettingsItems } from './settingsSearchIndex';
 
 const snapshot: AgentAdminSettings = {
   revision: 1,

@@ -181,8 +181,8 @@ describe('sidebar navigation interactions', () => {
   it('shows one Setting link and highlights it on the integrations route', async () => {
     const view = render(<AgentsSidebar />);
     await screen.findByText('Task a');
-    const setting = screen.getByRole('link', { name: 'Setting' });
-    expect(screen.getAllByText('Setting')).toHaveLength(1);
+    const setting = screen.getByRole('link', { name: 'My Settings' });
+    expect(screen.getAllByText('My Settings')).toHaveLength(1);
     expect(setting).toHaveAttribute('href', '/integrations');
     expect(setting).not.toHaveAttribute('aria-current');
     expect(screen.queryByRole('link', { name: /^Integrations?$/ })).not.toBeInTheDocument();
@@ -191,8 +191,11 @@ describe('sidebar navigation interactions', () => {
 
     api.pathname = '/integrations';
     view.rerender(<AgentsSidebar />);
-    expect(screen.getByRole('link', { name: 'Setting' })).toHaveAttribute('aria-current', 'page');
-    expect(screen.getAllByRole('link', { name: 'Setting' })).toHaveLength(1);
+    expect(screen.getByRole('link', { name: 'My Settings' })).toHaveAttribute(
+      'aria-current',
+      'page',
+    );
+    expect(screen.getAllByRole('link', { name: 'My Settings' })).toHaveLength(1);
     expect(api.get).not.toHaveBeenCalled();
     expect(api.thread).not.toHaveBeenCalled();
   });

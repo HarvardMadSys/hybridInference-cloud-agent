@@ -92,7 +92,7 @@ import {
 import { useComposerDraft } from './useComposerDraft';
 import { useTranscriptPresentation, TranscriptPresentationControl } from './transcriptPresentation';
 import { TurnDeliverables } from './TurnDeliverables';
-import { createRecordedOutputsSelector, type RecordedFileSelection } from './turnDeliverables';
+import { createRecordedOutputsSelector, type RecordedFileSelection } from './recordedTurnOutputs';
 import {
   hasLostContext,
   isActiveConversationState,

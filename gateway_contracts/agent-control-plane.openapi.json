@@ -12289,6 +12289,46 @@
         "title": "ProcessObservation",
         "type": "object"
       },
+      "ProfileResponse": {
+        "description": "Combine Agent-owned display fields with a read-only account email.",
+        "properties": {
+          "email": {
+            "title": "Email",
+            "type": "string"
+          },
+          "first_name": {
+            "default": "",
+            "title": "First Name",
+            "type": "string"
+          },
+          "image_data_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Image Data Url"
+          },
+          "last_name": {
+            "default": "",
+            "title": "Last Name",
+            "type": "string"
+          },
+          "revision": {
+            "default": 0,
+            "title": "Revision",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "email"
+        ],
+        "title": "ProfileResponse",
+        "type": "object"
+      },
       "ProjectMemoryView": {
         "description": "An owner's independently controlled memory for one exact repository.",
         "properties": {
@@ -15114,6 +15154,46 @@
           }
         },
         "title": "UpdateMemorySettings",
+        "type": "object"
+      },
+      "UpdateProfile": {
+        "additionalProperties": false,
+        "description": "Save names and optionally replace or remove the profile picture.",
+        "properties": {
+          "expected_revision": {
+            "minimum": 0.0,
+            "title": "Expected Revision",
+            "type": "integer"
+          },
+          "first_name": {
+            "maxLength": 100,
+            "title": "First Name",
+            "type": "string"
+          },
+          "image_data_url": {
+            "anyOf": [
+              {
+                "maxLength": 2796236,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Image Data Url"
+          },
+          "last_name": {
+            "maxLength": 100,
+            "title": "Last Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "first_name",
+          "last_name",
+          "expected_revision"
+        ],
+        "title": "UpdateProfile",
         "type": "object"
       },
       "UpdateSettingsRequest": {
@@ -27919,6 +27999,114 @@
         "summary": "Update Thread Binding",
         "tags": [
           "agent-mcp"
+        ]
+      }
+    },
+    "/v1/agent/profile": {
+      "get": {
+        "description": "Read the signed-in owner's display profile and current account email.",
+        "operationId": "read_profile_v1_agent_profile_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProfileResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Read Profile",
+        "tags": [
+          "profile"
+        ]
+      },
+      "patch": {
+        "description": "Persist names and a sanitized picture at the profile revision the owner read.",
+        "operationId": "save_profile_v1_agent_profile_patch",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateProfile"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProfileResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Save Profile",
+        "tags": [
+          "profile"
         ]
       }
     },

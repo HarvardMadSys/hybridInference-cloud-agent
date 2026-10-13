@@ -192,6 +192,7 @@ def create_app() -> FastAPI:
         uploads,
         usage,
         user_memory,
+        user_profile,
     )
 
     app = FastAPI(
@@ -215,6 +216,7 @@ def create_app() -> FastAPI:
     app.include_router(skills.router)
     app.include_router(user_memory.router)
     app.include_router(user_memory.project_router)
+    app.include_router(user_profile.router)
     app.include_router(uploads.router)
     app.include_router(mcp_connections.router)
     app.include_router(hosts.router)
@@ -252,7 +254,12 @@ def create_app() -> FastAPI:
     app.include_router(admin_audit.router)
     install_admin_no_store(
         app,
-        prefixes=(*ADMIN_READ_PREFIXES, "/v1/agent/user-memory", "/v1/agent/project-memory"),
+        prefixes=(
+            *ADMIN_READ_PREFIXES,
+            "/v1/agent/user-memory",
+            "/v1/agent/project-memory",
+            "/v1/agent/profile",
+        ),
     )
     install_repository_access_errors(app)
     # The gateway alert relay's way in: machine-to-machine on-call jobs, pinned
