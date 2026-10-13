@@ -12,6 +12,8 @@ from cloud_agent.application.compute_autoscale import (
     CloudLabAutoscaler,
     desired_slots_v1,
 )
+from cloud_agent.domain.cloudlab import DEFAULT_CLOUDLAB_NODE_TYPES
+from cloud_agent.domain.compute import fingerprint
 
 if TYPE_CHECKING:
     from cloud_agent.ports.compute_resources import ComputeResourceRepository
@@ -133,6 +135,7 @@ class Repository:
         configured_runtime: dict[str, Any],
         members: list[dict[str, Any]],
         slot_results: dict[str, dict[str, Any]] | None = None,
+        cloudlab_defaults: dict[str, Any] | None = None,
     ) -> None:
         self.state: dict[str, Any] = {
             "policy": configured_policy,
@@ -145,6 +148,11 @@ class Repository:
         self.scale_downs: list[dict[str, Any]] = []
         self.slot_target_writes: list[dict[str, Any]] = []
         self.slot_results = slot_results or {}
+        self.cloudlab_defaults = cloudlab_defaults or {}
+
+    async def provider_defaults(self, provider_id: str) -> dict[str, Any]:
+        assert provider_id == "cloudlab"
+        return deepcopy(self.cloudlab_defaults)
 
     async def get_cloudlab_autoscaling(self) -> dict[str, Any]:
         return deepcopy(self.state)
@@ -292,6 +300,67 @@ async def test_below_minimum_queues_one_acquire_immediately() -> None:
     assert queued["decision"] == {"action": "scale_up_minimum"}
     assert queued["expected_generation"] == 1
     assert queued["allocation"]["configuration"]["host_key_source"] == "registration"
+    assert queued["allocation"]["configuration"]["node_types"] == list(DEFAULT_CLOUDLAB_NODE_TYPES)
+    assert queued["parameters"]["configuration"]["node_types"] == list(DEFAULT_CLOUDLAB_NODE_TYPES)
+    assert queued["parameters"]["configuration"]["node_type_binding"] == "phystype"
+    assert queued["fingerprint"] == fingerprint("acquire", queued["parameters"])
+
+
+@pytest.mark.asyncio
+async def test_existing_policy_snapshots_current_defaults_for_each_new_allocation() -> None:
+    configured_policy = policy(min_hosts=1)
+    repository = Repository(
+        configured_policy=configured_policy,
+        configured_runtime=runtime(),
+        members=[],
+        cloudlab_defaults={"node_types": ["r650", "c6620"], "node_type_binding": "hardware"},
+    )
+    controller = autoscaler(repository, HostPool())
+
+    await controller.reconcile()
+    repository.cloudlab_defaults = {
+        "node_types": ["c6620", "r6615"],
+        "node_type_binding": "nodeType",
+    }
+    await controller.reconcile()
+
+    assert len(repository.scale_ups) == 2
+    first, second = repository.scale_ups
+    for snapshot_name in ("allocation", "parameters"):
+        assert first[snapshot_name]["configuration"]["node_types"] == ["r650", "c6620"]
+        assert first[snapshot_name]["configuration"]["node_type_binding"] == "hardware"
+        assert second[snapshot_name]["configuration"]["node_types"] == ["c6620", "r6615"]
+        assert second[snapshot_name]["configuration"]["node_type_binding"] == "nodeType"
+    assert "node_types" not in configured_policy["configuration"]
+    assert first["fingerprint"] == fingerprint("acquire", first["parameters"])
+    assert second["fingerprint"] == fingerprint("acquire", second["parameters"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("node_types", [["r650"], []])
+async def test_explicit_policy_preferences_override_saved_defaults(node_types: list[str]) -> None:
+    configuration = {
+        **policy()["configuration"],
+        "node_types": node_types,
+        "node_type_binding": "customType",
+        "bindings": {"phystype": "c6525-25g"},
+    }
+    repository = Repository(
+        configured_policy=policy(min_hosts=1, configuration=configuration),
+        configured_runtime=runtime(),
+        members=[],
+        cloudlab_defaults={"node_types": ["c6620"], "node_type_binding": "hardware"},
+    )
+
+    await autoscaler(repository, HostPool()).reconcile()
+
+    assert len(repository.scale_ups) == 1
+    queued = repository.scale_ups[0]
+    for snapshot_name in ("allocation", "parameters"):
+        supplied = queued[snapshot_name]["configuration"]
+        assert supplied["node_types"] == node_types
+        assert supplied["node_type_binding"] == "customType"
+        assert supplied["bindings"] == {"phystype": "c6525-25g"}
 
 
 @pytest.mark.asyncio

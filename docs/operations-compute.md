@@ -16,7 +16,7 @@ selected unavailable Host keeps work waiting; it never triggers a fallback.
 
 Keep the control plane, Postgres, background worker, deployment profiles,
 provider credentials and compute encryption key on stable infrastructure. A
-managed resource runs only the Host, workspace broker, tunnels and sandboxes.
+managed resource runs only the Host, sandbox manager, tunnels and sandboxes.
 Provider expiry remains a hard limit; renewal does not guarantee uptime.
 
 Stored API tokens and management SSH keys are encrypted with
@@ -24,13 +24,13 @@ Stored API tokens and management SSH keys are encrypted with
 value in its persistent `.env` when none is configured; other deployment
 systems must provide equivalent stable key material. Back it up with the
 encrypted database: restoring the database without this key cannot recover
-compute connections. Do not reuse gateway, session, enrollment or broker keys.
+compute connections. Do not reuse gateway, session, enrollment or sandbox manager keys.
 Compute management credentials never enter sandboxes or the deployed Host.
 
 The Host separately needs purpose-scoped tunnel credentials and
-`AGENT_WORKSPACE_BROKER_TOKEN`. The broker token is currently pool-wide: every
+`AGENT_SANDBOX_MANAGER_TOKEN`. The sandbox manager token is currently pool-wide: every
 deployment profile must use the same value as the stable control plane.
-Management SSH keys and broker authentication serve different purposes.
+Management SSH keys and sandbox manager authentication serve different purposes.
 
 ## Supported initial deployment
 
@@ -49,14 +49,41 @@ Both paths require Kata.
 
 The node does not need Cloud Agent preinstalled. Bootstrap transfers a reviewed
 source bundle and configuration, then runs `deploy/host/sandbox_host.sh up`
-and `check`. These checks verify Kata, the guest observer, broker, relays and
+and `check`. These checks verify Kata, the guest observer, sandbox manager, relays and
 nftables. Admission stays closed until deployment checks, an enrolled Host
-heartbeat and a control-plane-to-broker health check succeed.
+heartbeat and a control-plane-to-sandbox-manager health check succeed.
 
 Automatic initial deployment supports one node per allocation. Multi-node
 CloudLab experiments can be observed, but automatic deployment refuses them
 rather than selecting one node. Failed or unsupported installation leaves the
 resource visible and does not destroy it.
+
+### Preferred CloudLab node types
+
+New CloudLab allocations try the following default list from top to bottom.
+These general-purpose families were introduced in 2021 or later, have at least
+16 physical cores and 128 GiB RAM, and each has more than 20 total nodes.
+Hardware and totals were checked against the [CloudLab hardware catalog](https://docs.cloudlab.us/hardware.html)
+and [public inventory](https://www.cloudlab.us/portal-hardware.php) on October 12, 2026.
+
+| Preference | Type | Introduced | Total nodes | Physical cores | RAM (GiB) |
+|---|---|---|---|---|---|
+| 1 | `r6615` | 2025 | 80 | 32 | 192 |
+| 2 | `c6620` | 2025 | 132 | 28 | 128 |
+| 3 | `r650` | 2022 | 32 | 72 | 256 |
+| 4 | `r6525` | 2022 | 32 | 64 | 256 |
+| 5 | `c6525-100g` | 2021 | 36 | 24 | 128 |
+| 6 | `c6525-25g` | 2021 | 144 | 16 | 128 |
+
+Change the ordered list in **Admin → Settings → CloudLab**, or override it for
+a particular server or autoscaling policy. The list is saved with each new
+allocation. Currently free counts are shown separately and do not change the
+preference order. A confirmed capacity rejection advances to the next type;
+an uncertain response pauses acquisition for review. If all types lack
+capacity, the operation waits and retries from the top. An explicit nonempty
+`phystype` profile parameter selects only that type; clear it to resume ordered
+selection. Profiles with a different hardware parameter can use
+`node_type_binding`; an empty list uses the profile's own choice.
 
 ### Sandbox storage path
 
@@ -86,7 +113,9 @@ Preflight does not query or start these daemons, and bootstrap never deletes or
 moves existing sandbox data to a different disk. Docker and containerd must use
 their default `/var/lib/docker`
 and `/var/lib/containerd` data directories. Setup rejects custom daemon storage
-configuration before restarting services.
+configuration before restarting services. A host installed by hand uses the
+same binds, `/etc/fstab` lines and systemd drop-ins; see
+[Retained Docker storage on a host](operations.md#retained-docker-storage-on-a-host).
 Daemon startup requires the configured disk and bind mount after
 a reboot. Older API clients that omit `sandbox_storage_path` continue to
 use the operator profile's `data_mount` configuration.
@@ -97,7 +126,7 @@ use the operator profile's `data_mount` configuration.
 
 Open **Admin → Servers → Server setup** and use **Automatic setup**. The
 control-plane image includes the Host source bundle for its own release; the
-application supplies the revision, environment and existing workspace broker
+application supplies the revision, environment and existing sandbox manager
 token, generates three separate tunnel keys per setup slot, and discovers the
 control-plane listener ports and Docker bridge.
 
@@ -119,12 +148,12 @@ Supply the infrastructure inputs once:
    resolver outside that pool, and the protected infrastructure CIDRs. These
    values depend on your network and require an administrator's decision.
 4. Choose the number of setup slots and prepare the setups. Two slots allow
-   separate broker routes for a current node and its replacement.
+   separate sandbox manager routes for a current node and its replacement.
 
 The application creates dedicated restricted SSH accounts on the two stable
 machines. Inference and MCP credentials permit only their respective local
 service destinations; the control credential permits the main API and its
-assigned reverse broker route. Management credentials stay in the control
+assigned reverse sandbox manager route. Management credentials stay in the control
 plane. Existing SSH policies must permit these restricted accounts; setup
 refuses incompatible policies instead of broadening them. Co-located gateway
 and control services must use separate inference, MCP and main API ports.
@@ -135,11 +164,15 @@ finish. If a request fails or the browser closes, reopen Server setup and retry
 the pending setup to reuse its exact credentials and routes. Infrastructure
 defaults are saved for future setups. **Start new setup** retains those inputs
 and creates a new request on submission; it leaves an unfinished setup
-unavailable. Profiles are immutable so later deployment operations keep their
-exact inputs.
+unavailable. Tunnel credentials, the install directory, and enrollment stay
+fixed. A control-plane release rolls managed hosts forward: stored profiles
+that share the previous commit and bundle, and the live allocations using
+them, advance together so a later node replacement still sees one revision.
+A rollout that takes the running generation down and then fails restores the
+previous stored bundle. File-backed profile files are not rewritten.
 
 Automatic setup requires a control-plane image built with its full release
-revision, the compute encryption key and the existing broker token. The form
+revision, the compute encryption key and the existing sandbox manager token. The form
 shows missing prerequisites. Rebuild or update older images to include the
 Host bundle, or use advanced manual setup.
 
@@ -151,7 +184,9 @@ Host environment, and provide the three tunnel keys and verified known-hosts
 files. The control plane validates the archive, encrypts all environment and
 credential values, and stores them in Postgres. Profile read APIs expose only
 IDs and labels, never generated credentials. Create a new profile to replace
-immutable inputs.
+tunnel credentials, the install directory, or the Host environment. A
+control-plane release moves the commit of stored profiles that still pin the
+previous bundle; it does not rewrite a file-backed profile.
 
 File-backed configuration remains supported for existing deployments and
 recovery. Start with these operator templates:
@@ -201,7 +236,7 @@ credential. A different marker or an unmarked existing installation is refused.
 Manually enrolled Hosts remain manageable through the original interface;
 bootstrap does not adopt their files.
 
-Each present allocation reserves a profile because the broker reverse endpoint
+Each present allocation reserves a profile because the sandbox manager reverse endpoint
 is fixed. Overlapping old/new Hosts need separate profiles with different
 reverse ports, installation directories and tunnel authorizations. Renaming a
 profile while reusing its endpoint does not separate it. Selection skips live
@@ -216,7 +251,7 @@ per-group nftables policy. Environment values must be single-line dotenv data;
 they are never sourced as shell code. Supported substitutions are
 `{deploy_root}`, `{host}`, `{node_id}` and `{allocation_id}`.
 
-### Three tunnels and the broker route
+### Three tunnels and the sandbox manager route
 
 Provision tunnel authorization on the stable gateway/control-plane machines
 before adding a server. Bootstrap cannot grant access to them. Use three
@@ -229,17 +264,17 @@ distinct keys with no shell authority and narrowly permitted forwarding:
 | Host control | Main API, default `127.0.0.1:8000` | Trusted runner only |
 
 The Host control connection also reverse-forwards from the stable
-control-plane machine to `workspace-broker:8092`. Bind its listener to the
+control-plane machine to `sandbox-manager:8092`. Bind its listener to the
 actual control-plane Docker bridge gateway address, never loopback or
 `0.0.0.0`. Configure `GatewayPorts clientspecified`, restricting both the
 key's reverse listen address/port and forward destination; never `yes`, which
 binds every remote forward to the wildcard address. Firewall the reverse ports
 on that machine so they answer only on its Docker bridge interface
-([broker route](operations.md#the-way-back-the-control-plane-reaching-this-hosts-broker)).
+([sandbox manager route](operations.md#the-way-back-the-control-plane-reaching-this-hosts-sandbox-manager)).
 Set
-`AGENT_WORKSPACE_BROKER_ADVERTISE_URL` to the resulting URL reachable from the
+`AGENT_SANDBOX_MANAGER_ADVERTISE_URL` to the resulting URL reachable from the
 control-plane container. Add its hostname/IP to
-`AGENT_BROKER_URL_ALLOWED_HOSTS` when that allowlist is enabled. Every
+`AGENT_SANDBOX_MANAGER_URL_ALLOWED_HOSTS` when that allowlist is enabled. Every
 simultaneously deployed Host needs a distinct reverse port.
 
 Verify existing-server and tunnel-server host keys through a trusted source
@@ -420,8 +455,8 @@ Pool and resource actions have different effects:
 | `Retire/release` | Releases the complete allocation; for CloudLab, the whole experiment. Existing SSH has no cloud-destruction capability. |
 
 Release requires complete scope, no global placement reference, no running,
-in-flight or retained dependencies, and fresh broker and machine inventory.
-Stopped or unrecognized containers, orphan networks/volumes, offline brokers
+in-flight or retained dependencies, and fresh sandbox manager and machine inventory.
+Stopped or unrecognized containers, orphan networks/volumes, offline sandbox managers
 and incomplete inventory block it. There is no force bypass. The only machine
 without an inventory is a CloudLab node whose host-key registration never
 completed: this control plane never connected to it.
@@ -438,8 +473,12 @@ Before enabling replacement:
 1. Use a **provisioned, managed** single-Host CloudLab allocation with
    `host_key_source=registration` and the private Cloud Agent profile.
 2. Prepare two alternating deployment profiles with distinct tunnel keys and
-   reverse broker ports. Both must pin the same `deployment_sha` and
+   reverse sandbox manager ports. Both must pin the same `deployment_sha` and
    `source_sha256`; replacement never selects a profile from another release.
+   A control-plane host rollout advances every stored profile and live
+   snapshot that still pin that pair, including the spare, so the two slots
+   stay on one revision. A profile another deployment is installing is left
+   until its own rollout.
    Keep Docker/containerd versions compatible. Set `data_mount` to the
    profile's local disk, for example `/mydata`; both daemons use it through
    bind mounts.
@@ -468,7 +507,12 @@ expiry.
 
 The worker stops the source Host and container daemons, copies final changes,
 transfers the database binding, starts the replacement and verifies deployment,
-fresh heartbeat and broker access. Claims resume only after successful takeover
+fresh heartbeat and sandbox manager access. The stop takes the runner first,
+then the sandbox manager alone for up to 10 minutes: its shutdown stops each running
+sandbox cleanly and, when lifecycle archives are enabled, stores its final
+archive. Remaining containers stop afterwards. A sandbox that Docker stopped
+without the sandbox manager gets no final archive for that stop, but its chat continues
+on the replacement. Claims resume only after successful takeover
 is recorded durably. Recovery after that boundary can clean up the source; it
 cannot restore its stale copy over new work.
 

@@ -82,8 +82,10 @@ describe('conversation status in sidebar rows', () => {
           onRead={vi.fn()}
           archiving={null}
           pinning={null}
+          deleting={null}
           onArchive={vi.fn()}
           onSetPinned={vi.fn()}
+          onDelete={vi.fn()}
         />,
       );
       expect(screen.getByLabelText(label)).toHaveAttribute('title', label);
@@ -116,8 +118,10 @@ describe('sessions waiting for human review', () => {
       onRead,
       archiving: null,
       pinning: null,
+      deleting: null,
       onArchive: vi.fn(),
       onSetPinned: vi.fn(),
+      onDelete: vi.fn(),
     };
     const { rerender } = render(<TaskRow {...props} />);
     const marker = screen.getByRole('status', { name: reason });

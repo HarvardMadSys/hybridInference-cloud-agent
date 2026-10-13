@@ -113,7 +113,9 @@ class Client:
         except urllib.error.HTTPError as exc:
             if exc.code not in (302, 303):
                 raise
-        if not any(cookie.name == "cloud_agent_session" for cookie in self.cookies):
+        # The plain name over this stack's plain HTTP; ``__Host-`` with Secure.
+        names = {"cloud_agent_session", "__Host-cloud_agent_session"}
+        if not any(cookie.name in names for cookie in self.cookies):
             raise RuntimeError("sign-in completed without setting a session cookie")
 
         return self.request("/api/v1/session/me")

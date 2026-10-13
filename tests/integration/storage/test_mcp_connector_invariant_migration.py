@@ -19,7 +19,7 @@ pytestmark = pytest.mark.dbtest
 _BEFORE = "0057_admin_sandbox_trajectory"
 _THIS = "0058_mcp_connector_invariant"
 _NEXT = "0059_counter_constraints"
-_HEAD = "0060_admin_job_listing_index"
+_HEAD = "0066_admin_job_listing_index"
 _OWNER = "user-owner"
 _OTHER = "user-other"
 _PRESERVED_AUTHORIZED_AT = datetime(2001, 2, 3, 4, 5, 6, tzinfo=timezone.utc)
@@ -32,9 +32,21 @@ def test_mcp_connector_invariant_revision_follows_trajectory_merge() -> None:
     script = ScriptDirectory.from_config(config)
 
     assert script.get_revision(_THIS).down_revision == _BEFORE
-    assert script.get_current_head() == _HEAD
     assert script.get_revision(_NEXT).down_revision == _THIS
-    assert script.get_revision(_HEAD).down_revision == _NEXT
+    assert script.get_revision("0060_admin_sandbox_discard").down_revision == _NEXT
+    assert script.get_current_head() == _HEAD
+    assert script.get_revision("0061_mcp_catalog_sync_fence").down_revision == (
+        "0060_admin_sandbox_discard"
+    )
+    assert script.get_revision("0062_native_session_locator").down_revision == (
+        "0061_mcp_catalog_sync_fence"
+    )
+    assert script.get_revision("0063_user_profiles").down_revision == "0062_native_session_locator"
+    assert (
+        script.get_revision("0064_mcp_remembered_approvals").down_revision == "0063_user_profiles"
+    )
+    assert script.get_revision("0065_environments").down_revision == "0064_mcp_remembered_approvals"
+    assert script.get_revision(_HEAD).down_revision == "0065_environments"
 
 
 async def _local_connection(

@@ -73,7 +73,7 @@ export function TranscriptPresentationControl({
         aria-label={t('transcript.details')}
         value={value}
         onChange={(event) => onChange(parsePresentation(event.target.value))}
-        className="ui-input ui-focus-ring rounded-md px-2 py-1 text-xs"
+        className="ui-input ui-focus-ring min-h-9 rounded-md px-2 py-1 text-xs [@media(pointer:coarse)]:min-h-11"
       >
         <option value="compact">{t('transcript.compact')}</option>
         <option value="standard">{t('transcript.standard')}</option>

@@ -217,19 +217,19 @@ def test_every_docker_socket_holder_is_known_and_read_only(compose: dict) -> Non
     """The socket is the host's keys — the holder list is pinned, not open.
 
     Two services legitimately hold it: the runner starts each sandbox, and the
-    broker execs into a running one to serve terminals. Both mount it `:ro`,
-    which is their convention and nothing more: a read-only bind mount does not
-    narrow the Docker API, and either holder can start a privileged container.
-    The *set* is the control, so a third service acquiring the socket fails
-    here rather than being noticed later; the convention is asserted per holder
-    rather than only for the runner.
+    sandbox manager execs into a running one to serve terminals. Both mount it
+    `:ro`, which is their convention and nothing more: a read-only bind mount
+    does not narrow the Docker API, and either holder can start a privileged
+    container. The *set* is the control, so a third service acquiring the
+    socket fails here rather than being noticed later; the convention is
+    asserted per holder rather than only for the runner.
     """
     holders = {
         name: [m for m in _mounts(svc) if "docker.sock" in m]
         for name, svc in compose["services"].items()
         if any("docker.sock" in m for m in _mounts(svc))
     }
-    assert set(holders) == {"runner", "workspace-broker"}, sorted(holders)
+    assert set(holders) == {"runner", "sandbox-manager"}, sorted(holders)
     for name, mounts in holders.items():
         assert all(m.endswith(":ro") for m in mounts), f"{name}: {mounts}"
 

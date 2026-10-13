@@ -4,7 +4,7 @@
 closes its residencies in its own commit, and it never returns that operation
 again. The reaper's cleanup of what it hands back is therefore the only one
 those processes and grants get, so an error on one operation must not skip the
-operations after it -- and a broker that cannot be found must not skip the
+operations after it -- and a sandbox manager that cannot be found must not skip the
 revocations, which do not need it.
 """
 
@@ -36,15 +36,17 @@ def _failed_fork(number: int) -> dict[str, Any]:
 
 
 async def test_one_failing_fork_cleanup_does_not_strand_the_ones_after_it(monkeypatch) -> None:
-    """A finalize that raises and a broker that cannot be found are each contained."""
-    broker = SimpleNamespace(shared_residency_lost=AsyncMock(return_value={}))
+    """A finalize that raises and a sandbox manager that cannot be found are each contained."""
+    sandbox_manager = SimpleNamespace(shared_residency_lost=AsyncMock(return_value={}))
 
-    async def broker_for_job(_store: Any, job_id: str | None) -> Any:
+    async def sandbox_manager_for_job(_store: Any, job_id: str | None) -> Any:
         if job_id == "ajob_2":
             raise RuntimeError("host lookup failed")
-        return broker
+        return sandbox_manager
 
-    monkeypatch.setattr("cloud_agent.broker_routing.broker_for_job", broker_for_job)
+    monkeypatch.setattr(
+        "cloud_agent.sandbox_manager_routing.sandbox_manager_for_job", sandbox_manager_for_job
+    )
     handed_out = [
         {"id": "afork_1", "recovery_action": "finalize"},
         _failed_fork(2),
@@ -74,6 +76,6 @@ async def test_one_failing_fork_cleanup_does_not_strand_the_ones_after_it(monkey
             await task
 
     inner.finalize_session_fork.assert_awaited_once_with(operation_id="afork_1")
-    # The fork whose broker could not be found still loses its credential.
+    # The fork whose sandbox manager could not be found still loses its credential.
     assert sorted(call.args[0] for call in grants.revoke.await_args_list) == ["agr_2", "agr_3"]
-    broker.shared_residency_lost.assert_awaited_once_with("athr_3", generation=3)
+    sandbox_manager.shared_residency_lost.assert_awaited_once_with("athr_3", generation=3)

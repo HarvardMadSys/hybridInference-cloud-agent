@@ -12,6 +12,7 @@ import io
 import json
 import os
 import re
+import tarfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -27,6 +28,7 @@ from cloud_agent.providers.compute.setup_tunnels import (
     tunnel_username,
 )
 from cloud_agent.settings import text_setting
+from cloud_agent_shared.sandbox_manager_compat import manager_environment
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -40,11 +42,108 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class HostRelease:
-    """One immutable, build-produced archive shared by every route slot."""
+    """One build-produced archive shared by every route slot of this release."""
 
     sha: str
     digest: str
     bundle: bytes
+    path: Path
+
+
+class HostReleaseError(Exception):
+    """The embedded host bundle is missing or belongs to another commit."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+_RELEASE_UNAVAILABLE = (
+    "automatic_release_unavailable",
+    "Automatic setup needs the Host bundle included in the control-plane release. Update the deployment or use advanced manual setup.",
+)
+_RELEASE_MISMATCH = (
+    "automatic_release_mismatch",
+    "The Host bundle does not match the running control-plane release. Update the deployment before preparing servers.",
+)
+_HOST_BUNDLE_FILES = {
+    "deploy/host/sandbox_host.sh",
+    "deploy/host/setup_kata_runtime.sh",
+    "deploy/host/docker-compose.sandbox.yml",
+    "pyproject.toml",
+}
+
+
+def validate_host_bundle(bundle: bytes) -> None:
+    """Reject an unsafe or incomplete host archive.
+
+    Raises ``ValueError('invalid')`` or ``ValueError('incomplete')``.
+    """
+    try:
+        with tarfile.open(fileobj=io.BytesIO(bundle), mode="r:*") as archive:
+            names: set[str] = set()
+            for member in archive.getmembers():
+                name = member.name.removeprefix("./")
+                if (
+                    not name
+                    or name.startswith("/")
+                    or ".." in name.split("/")
+                    or not (member.isdir() or member.isfile())
+                    or name in {".env", ".compute-identity.json"}
+                    or name.startswith((".compute-secrets/", ".git/"))
+                ):
+                    raise ValueError("invalid")
+                names.add(name)
+    except (tarfile.TarError, OSError, ValueError) as exc:
+        raise ValueError("invalid") from exc
+    if not names >= _HOST_BUNDLE_FILES:
+        raise ValueError("incomplete")
+
+
+def load_host_release(directory: Path, *, expected_sha: str) -> HostRelease:
+    """Read the host archive shipped beside this control plane."""
+    try:
+        manifest_path = directory / "release.json"
+        if manifest_path.is_symlink() or manifest_path.stat().st_size > 4096:
+            raise ValueError
+        manifest = json.loads(manifest_path.read_text())
+        sha = manifest["source_commit"]
+        digest = manifest["source_sha256"]
+        if (
+            manifest.get("format_version") != 1
+            or manifest.get("bundle") != "source.tar.gz"
+            or not isinstance(sha, str)
+            or not re.fullmatch(r"[a-f0-9]{40}", sha)
+            or not isinstance(digest, str)
+            or not re.fullmatch(r"[a-f0-9]{64}", digest)
+        ):
+            raise ValueError
+        bundle_path = directory / "source.tar.gz"
+        if bundle_path.is_symlink() or not 0 < bundle_path.stat().st_size <= 64 * 1024 * 1024:
+            raise ValueError
+        bundle = bundle_path.read_bytes()
+        if hashlib.sha256(bundle).hexdigest() != digest:
+            raise ValueError
+    except (OSError, ValueError, KeyError, TypeError):
+        raise HostReleaseError(*_RELEASE_UNAVAILABLE) from None
+    if sha != expected_sha:
+        raise HostReleaseError(*_RELEASE_MISMATCH)
+    return HostRelease(sha, digest, bundle, bundle_path)
+
+
+def load_control_plane_host_release(directory: Path | None = None) -> HostRelease | None:
+    """Return this process's host bundle, or None when it cannot be deployed."""
+    directory = directory or Path("/app/compute-host-release")
+    if not directory.is_dir():
+        return None
+    try:
+        release = load_host_release(
+            directory, expected_sha=os.environ.get("AGENT_DEPLOYMENT_SHA", "")
+        )
+        validate_host_bundle(release.bundle)
+    except (HostReleaseError, ValueError):
+        return None
+    return release
 
 
 class AutomaticComputeSetup:
@@ -71,41 +170,14 @@ class AutomaticComputeSetup:
 
     def _release(self) -> HostRelease:
         try:
-            manifest_path = self.release_directory / "release.json"
-            if manifest_path.is_symlink() or manifest_path.stat().st_size > 4096:
-                raise ValueError
-            manifest = json.loads(manifest_path.read_text())
-            sha = manifest["source_commit"]
-            digest = manifest["source_sha256"]
-            if (
-                manifest.get("format_version") != 1
-                or manifest.get("bundle") != "source.tar.gz"
-                or not isinstance(sha, str)
-                or not re.fullmatch(r"[a-f0-9]{40}", sha)
-                or not isinstance(digest, str)
-                or not re.fullmatch(r"[a-f0-9]{64}", digest)
-            ):
-                raise ValueError
-            bundle_path = self.release_directory / "source.tar.gz"
-            if bundle_path.is_symlink() or not 0 < bundle_path.stat().st_size <= 64 * 1024 * 1024:
-                raise ValueError
-            bundle = bundle_path.read_bytes()
-            if hashlib.sha256(bundle).hexdigest() != digest:
-                raise ValueError
-        except (OSError, ValueError, KeyError, TypeError):
-            raise ComputeRefusal(
-                "automatic_release_unavailable",
-                "Automatic setup needs the Host bundle included in the control-plane release. Update the deployment or use advanced manual setup.",
-                status=503,
-            ) from None
-        if sha != os.environ.get("AGENT_DEPLOYMENT_SHA", ""):
-            raise ComputeRefusal(
-                "automatic_release_mismatch",
-                "The Host bundle does not match the running control-plane release. Update the deployment before preparing servers.",
-                status=503,
+            release = load_host_release(
+                self.release_directory,
+                expected_sha=os.environ.get("AGENT_DEPLOYMENT_SHA", ""),
             )
-        self.validate_bundle(bundle)
-        return HostRelease(sha, digest, bundle)
+        except HostReleaseError as exc:
+            raise ComputeRefusal(exc.code, str(exc), status=503) from None
+        self.validate_bundle(release.bundle)
+        return release
 
     def status(self) -> dict[str, Any]:
         """Return only release readiness and actionable non-secret prerequisites."""
@@ -122,11 +194,11 @@ class AutomaticComputeSetup:
                     "message": "Configure the compute credential encryption key in this deployment.",
                 }
             )
-        if not text_setting("workspace_broker_token"):
+        if not text_setting("sandbox_manager_token"):
             blocked.append(
                 {
-                    "code": "broker_credential_missing",
-                    "message": "Configure the existing workspace broker credential in Admin Settings.",
+                    "code": "sandbox_manager_credential_missing",
+                    "message": "Configure the existing sandbox manager credential in Admin Settings.",
                 }
             )
         return {"available": not blocked, "deployment_sha": sha, "blocked_reasons": blocked}
@@ -207,14 +279,30 @@ class AutomaticComputeSetup:
                 ports.add(int(automatic["reverse_port"]))
             elif not automatic:
                 template = await self.resolver.resolve(f"stored-profile:{row['id']}:environment")
-                values = dotenv_values(stream=io.StringIO(template), interpolate=False)
-                if values.get("AGENT_BROKER_REVERSE_BIND") == bind:
-                    ports.add(int(values.get("AGENT_BROKER_REVERSE_PORT") or 0))
+                values = manager_environment(
+                    {
+                        key: value
+                        for key, value in dotenv_values(
+                            stream=io.StringIO(template), interpolate=False
+                        ).items()
+                        if value is not None
+                    }
+                )
+                if values.get("AGENT_SANDBOX_MANAGER_REVERSE_BIND") == bind:
+                    ports.add(int(values.get("AGENT_SANDBOX_MANAGER_REVERSE_PORT") or 0))
         for profile in profiles:
             template = await self.resolver.resolve(profile.environment_ref)
-            values = dotenv_values(stream=io.StringIO(template), interpolate=False)
-            if values.get("AGENT_BROKER_REVERSE_BIND") == bind:
-                ports.add(int(values.get("AGENT_BROKER_REVERSE_PORT") or 0))
+            values = manager_environment(
+                {
+                    key: value
+                    for key, value in dotenv_values(
+                        stream=io.StringIO(template), interpolate=False
+                    ).items()
+                    if value is not None
+                }
+            )
+            if values.get("AGENT_SANDBOX_MANAGER_REVERSE_BIND") == bind:
+                ports.add(int(values.get("AGENT_SANDBOX_MANAGER_REVERSE_PORT") or 0))
         return ports
 
     def _assets(
@@ -228,10 +316,10 @@ class AutomaticComputeSetup:
     ) -> dict[str, Any]:
         environment = {
             "AGENT_SANDBOX_IMAGE": "cloud-agent-sandbox:" + profile_id,
-            "AGENT_WORKSPACE_BROKER_TOKEN": text_setting("workspace_broker_token"),
-            "AGENT_BROKER_REVERSE_BIND": endpoint.gateway_ip,
-            "AGENT_BROKER_REVERSE_PORT": str(reverse_port),
-            "AGENT_WORKSPACE_BROKER_ADVERTISE_URL": f"http://{endpoint.gateway_ip}:{reverse_port}",
+            "AGENT_SANDBOX_MANAGER_TOKEN": text_setting("sandbox_manager_token"),
+            "AGENT_SANDBOX_MANAGER_REVERSE_BIND": endpoint.gateway_ip,
+            "AGENT_SANDBOX_MANAGER_REVERSE_PORT": str(reverse_port),
+            "AGENT_SANDBOX_MANAGER_ADVERTISE_URL": f"http://{endpoint.gateway_ip}:{reverse_port}",
             "AGENT_EGRESS_CHAT_NETWORK_POOL": request.chat_network_pool,
             "AGENT_EGRESS_DNS_SERVER": request.dns_server,
             "AGENT_EGRESS_PROTECTED_CIDRS": ",".join(request.protected_cidrs),
@@ -394,7 +482,7 @@ class AutomaticComputeSetup:
             return row
         raise ComputeRefusal(
             "automatic_capacity_unavailable",
-            "No unreserved broker route remains for this stable machine.",
+            "No unreserved sandbox manager route remains for this stable machine.",
             status=409,
         )
 
@@ -434,11 +522,11 @@ class AutomaticComputeSetup:
         gateway = await self._connection(request.gateway)
         control = await self._connection(request.control)
         endpoint = await self.tunnels.discover_control_plane(control, release.sha)
-        allowed = text_setting("broker_url_allowed_hosts").strip()
+        allowed = text_setting("sandbox_manager_url_allowed_hosts").strip()
         if allowed and endpoint.gateway_ip not in {host.strip() for host in allowed.split(",")}:
             raise ComputeRefusal(
-                "broker_route_not_allowed",
-                "The detected control-plane bridge address must be included in the workspace broker host allowlist.",
+                "sandbox_manager_route_not_allowed",
+                "The detected control-plane bridge address must be included in the sandbox manager host allowlist.",
                 status=422,
             )
         gateway_identity = await self.tunnels.check_gateway(gateway, request.gateway_port)

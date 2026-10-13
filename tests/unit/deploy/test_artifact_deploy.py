@@ -188,10 +188,10 @@ def deployment(tmp_path: Path, stack: str, *, real_compose: bool = False) -> tup
         "AGENT_HOST_SLOTS": "3",
         "AGENT_SANDBOX_BACKEND": "kata",
         "AGENT_RETAINED_DOCKER_DATA_ROOT": "/var/lib/docker",
-        "AGENT_WORKSPACE_BROKER_TOKEN": "fixture-broker-token",
-        "AGENT_BROKER_REVERSE_BIND": "172.24.0.1",
-        "AGENT_BROKER_REVERSE_PORT": "18092",
-        "AGENT_WORKSPACE_BROKER_ADVERTISE_URL": "http://172.24.0.1:18092",
+        "AGENT_SANDBOX_MANAGER_TOKEN": "fixture-sandbox-manager-token",
+        "AGENT_SANDBOX_MANAGER_REVERSE_BIND": "172.24.0.1",
+        "AGENT_SANDBOX_MANAGER_REVERSE_PORT": "18092",
+        "AGENT_SANDBOX_MANAGER_ADVERTISE_URL": "http://172.24.0.1:18092",
         "AGENT_EGRESS_CHAT_NETWORK_POOL": "10.240.0.0/16",
         "AGENT_EGRESS_DNS_SERVER": "1.1.1.1",
     }
@@ -907,6 +907,34 @@ def test_compute_overlay_is_packaged_and_enabled_by_persistent_configuration(tmp
     assert compose_calls
     assert all(overlay in args for args in compose_calls if "config" not in args)
     assert (script.parent / "compute.example.json").is_file()
+
+
+def test_private_override_is_last_for_every_artifact_stack_compose_call(tmp_path: Path):
+    script, env = deployment(tmp_path, "control-plane")
+    private_compute = tmp_path / "private-compute"
+    private_compute.mkdir()
+    override = tmp_path / "control-plane-private.yml"
+    override.write_text("services:\n  control-plane:\n    environment:\n      TEST_OVERRIDE: set\n")
+    configuration = Path(env["DEPLOY_ROOT"]) / ".env"
+    with configuration.open("a") as output:
+        output.write(
+            f"AGENT_COMPUTE_DIRECTORY={private_compute}\n"
+            f"AGENT_CONTROL_PLANE_COMPOSE_OVERRIDE_FILE={override}\n"
+        )
+
+    result, calls = run(script, env)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    compose_calls = [
+        call["args"] for call in calls if call["args"][:1] == ["compose"] and "-p" in call["args"]
+    ]
+    assert compose_calls
+    compute_overlay = str(script.parent / "docker-compose.compute.yml")
+    for arguments in compose_calls:
+        compose_files = [
+            arguments[index + 1] for index, argument in enumerate(arguments) if argument == "-f"
+        ]
+        assert compose_files[-2:] == [compute_overlay, str(override)]
 
 
 def test_control_plane_generates_one_persistent_compute_encryption_key(tmp_path: Path):

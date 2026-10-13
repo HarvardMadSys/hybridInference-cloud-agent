@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-from datetime import UTC, datetime
 
 import pytest
 from tests.integration.storage.test_agent_job_store import (
@@ -235,7 +234,10 @@ async def test_entitlement_outage_preserves_snapshot_and_later_work_then_retries
     assert pushed == [later["id"]]
     assert len(opened) == 1
     due = await store.snapshot.next_snapshot_publish_retry_due()
-    assert due is not None and 25 < (due - datetime.now(UTC)).total_seconds() <= 30
+    assert (
+        due is not None
+        and 25 < (due - await pool.fetchval("SELECT clock_timestamp()")).total_seconds() <= 30
+    )
     assert 0 < await publish_worker._next_look_s(store) <= 30
     async with pool.acquire() as conn:
         retained = await conn.fetchrow(
@@ -339,7 +341,11 @@ async def test_transient_pr_failure_is_claimable_again_after_retry_at(store, poo
     assert retained["patch_content"] == patch
     assert "502" in retained["last_error"]
     assert retained["retry_at"] is not None
-    assert 25 < (retained["retry_at"] - datetime.now(UTC)).total_seconds() <= 30
+    assert (
+        25
+        < (retained["retry_at"] - await pool.fetchval("SELECT clock_timestamp()")).total_seconds()
+        <= 30
+    )
     assert await store.snapshot.claim_for_publish() is None
 
     async with pool.acquire() as conn:

@@ -36,6 +36,8 @@ const defaults = {
   profile_name: 'kata-node',
   ssh_username: 'researcher',
   ssh_public_key: '',
+  node_types: ['r6615', 'c6620', 'r650', 'r6525', 'c6525-100g', 'c6525-25g'],
+  node_type_binding: 'phystype',
 };
 
 beforeEach(() => {
@@ -64,6 +66,13 @@ describe('admin CloudLab settings', () => {
     expect(screen.getByLabelText('Template project')).toHaveValue('cloud-agent');
     expect(screen.getByLabelText('Template name')).toHaveValue('kata-node');
     expect(screen.getByLabelText('CloudLab SSH user')).toHaveValue('researcher');
+    expect(screen.getByLabelText('Preferred node types (top to bottom)')).toHaveValue(
+      defaults.node_types.join('\n'),
+    );
+    expect(screen.getByLabelText('Node type profile parameter')).toHaveValue('phystype');
+    expect(
+      screen.getByLabelText('Preferred node types (top to bottom)').closest('details'),
+    ).toBeNull();
     expect(screen.getByLabelText('CloudLab project').closest('details')).toBeNull();
     expect(screen.getByLabelText('Initial duration (hours)').closest('details')).toBeNull();
     const advanced = screen.getByText('Advanced').closest('details');
@@ -72,8 +81,45 @@ describe('admin CloudLab settings', () => {
     expect(advanced).toContainElement(screen.getByLabelText('Template name'));
     expect(advanced).toContainElement(screen.getByLabelText('CloudLab SSH user'));
     expect(advanced).toContainElement(screen.getByLabelText('CloudLab SSH public key'));
+    expect(advanced).toContainElement(screen.getByLabelText('Node type profile parameter'));
     expect(screen.getByLabelText('CloudLab SSH public key')).toHaveValue('');
     expect(screen.getByRole('button', { name: 'Save defaults' })).toBeDisabled();
+  });
+
+  it('saves preferred node types in the entered order and removes repeated entries', async () => {
+    const updated = {
+      ...defaults,
+      node_types: ['r650', 'r6615', 'c6620'],
+      node_type_binding: 'hardware',
+    };
+    saveDefaults.mockResolvedValue({ defaults: updated });
+    render(<CloudLabSettings />);
+
+    const preferences = await screen.findByLabelText('Preferred node types (top to bottom)');
+    fireEvent.change(preferences, {
+      target: { value: ' r650, r6615\nc6620\nr650 ' },
+    });
+    fireEvent.change(screen.getByLabelText('Node type profile parameter'), {
+      target: { value: 'hardware' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save defaults' }));
+
+    await waitFor(() => expect(saveDefaults).toHaveBeenCalledWith(updated));
+    expect(preferences).toHaveValue('r650\nr6615\nc6620');
+    expect(screen.getByRole('button', { name: 'Save defaults' })).toBeDisabled();
+  });
+
+  it('saves an explicitly cleared preferred list as empty', async () => {
+    const updated = { ...defaults, node_types: [] };
+    saveDefaults.mockResolvedValue({ defaults: updated });
+    render(<CloudLabSettings />);
+
+    fireEvent.change(await screen.findByLabelText('Preferred node types (top to bottom)'), {
+      target: { value: ' \n ' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save defaults' }));
+
+    await waitFor(() => expect(saveDefaults).toHaveBeenCalledWith(updated));
   });
 
   it('preserves advanced edits when collapsed and submits them with important defaults', async () => {
@@ -149,7 +195,7 @@ describe('admin CloudLab settings', () => {
 
     await waitFor(() => expect(saveDefaults).toHaveBeenCalledWith(updated));
     expect(await screen.findByRole('status')).toHaveTextContent(
-      'CloudLab defaults saved. New server forms use them immediately.',
+      'CloudLab defaults saved. New allocations use the preferred order immediately.',
     );
     expect(screen.getByRole('button', { name: 'Save defaults' })).toBeDisabled();
   });

@@ -4,7 +4,7 @@
 Opening a file in the chat's Files panel walks this path::
 
     browser -> CP GET /v1/agent/jobs/{job}/files
-            -> broker GET /workspaces/{workspace}/files   (httpx, host network)
+            -> sandbox manager GET /workspaces/{workspace}/files   (httpx, host network)
             -> Supervisor.operation_opened()               (in-memory lock)
             -> ChatSandboxManager.require_network()         (docker CLI: network
                                                             + container inspect,
@@ -29,8 +29,8 @@ Three modes, in increasing fidelity:
     treat it as a floor, not the guest's own number.
 
 ``stack``
-    Serves a broker-shaped FastAPI route in-process and calls it with the real
-    :class:`WorkspaceBrokerClient`.  A fake manager swaps ``docker exec`` for a
+    Serves a sandbox-manager-shaped FastAPI route in-process and calls it with the real
+    :class:`SandboxManagerClient`.  A fake manager swaps ``docker exec`` for a
     local subprocess, so this measures *everything except* the Docker/Kata
     boundary, the real network, and the control plane's database work.
 
@@ -38,7 +38,7 @@ Three modes, in increasing fidelity:
     Builds a real retained container with the platform's own
     :class:`ChatSandboxManager` — the relay network, listening gateway/MCP relay
     stand-ins, this run's host rules and a group bridge — then times the two
-    steps one open actually costs on the broker: ``require_network()`` and
+    steps one open actually costs on the sandbox manager: ``require_network()`` and
     ``read_retained_file()``.  This is the only mode that measures the Docker
     boundary, and it reports how many ``docker`` CLI invocations one open made.
     It needs a working Docker daemon and ``--image`` (see ``--build-image``).
@@ -204,7 +204,7 @@ def run_stack(python: str, root: Path, iterations: int, warmup: int) -> list[Sam
     import uvicorn
     from fastapi import FastAPI, Header, HTTPException, Query
 
-    from cloud_agent.workspace_broker_client import WorkspaceBrokerClient
+    from cloud_agent.sandbox_manager_client import SandboxManagerClient
     from cloud_agent_host.retained_workspace import read_retained_file
 
     backend = SimpleNamespace(manager=_LocalExecManager(python, root), spec=object())
@@ -220,7 +220,7 @@ def run_stack(python: str, root: Path, iterations: int, warmup: int) -> list[Sam
         if not x_agent_workspace_token or not secrets.compare_digest(
             expected_token, x_agent_workspace_token
         ):
-            raise HTTPException(status_code=401, detail="invalid workspace broker credential")
+            raise HTTPException(status_code=401, detail="invalid sandbox manager credential")
         return read_retained_file(
             backend,
             path,
@@ -234,10 +234,10 @@ def run_stack(python: str, root: Path, iterations: int, warmup: int) -> list[Sam
     deadline = time.monotonic() + 10
     while not server.started:
         if time.monotonic() > deadline:
-            raise SystemExit("local broker-shaped server did not start")
+            raise SystemExit("local sandbox-manager-shaped server did not start")
         time.sleep(0.02)
 
-    client = WorkspaceBrokerClient(f"http://127.0.0.1:{port}", "bench")
+    client = SandboxManagerClient(f"http://127.0.0.1:{port}", "bench")
     try:
         return asyncio.run(_stack_samples(client, iterations, warmup))
     finally:
@@ -255,7 +255,7 @@ async def _stack_samples(client, iterations: int, warmup: int, cases=CASES) -> l
             payload = await client.files("bench-workspace", relative)
             values.append((time.perf_counter() - started) * 1000.0)
             if "kind" not in payload:
-                raise SystemExit(f"unexpected broker payload: {payload!r}")
+                raise SystemExit(f"unexpected sandbox manager payload: {payload!r}")
         samples.append(Sample(label, description, values))
     return samples
 
@@ -430,7 +430,7 @@ class DockerSandbox:
             )
 
     def verify_and_read(self, relative: str) -> dict[str, float]:
-        """One open, split into the broker's two steps."""
+        """One open, split into the sandbox manager's two steps."""
         from cloud_agent_host.retained_workspace import read_retained_file
 
         started = time.perf_counter()
@@ -468,7 +468,7 @@ class DockerSandbox:
         )
 
     def cold_open(self, relative: str) -> dict[str, float]:
-        """One open after an idle stop, split the way the broker's wake sees it.
+        """One open after an idle stop, split the way the sandbox manager's wake sees it.
 
         Emulates ``operation_opened()`` on a stopped group: inspect, then the
         supervisor's ``manager.start(...)`` wake, then the ordinary verify and
@@ -618,13 +618,13 @@ def _stats(values: list[float]) -> dict[str, float]:
 def _docker_http_samples(
     sandbox: DockerSandbox, iterations: int, warmup: int
 ) -> list[dict[str, float | int | str]]:
-    """Serve the broker-shaped route over the real container and time the client."""
+    """Serve the sandbox-manager-shaped route over the real container and time the client."""
     import secrets
 
     import uvicorn
     from fastapi import FastAPI, Header, HTTPException, Query
 
-    from cloud_agent.workspace_broker_client import WorkspaceBrokerClient
+    from cloud_agent.sandbox_manager_client import SandboxManagerClient
     from cloud_agent_host.retained_workspace import read_retained_file
 
     app = FastAPI()
@@ -639,7 +639,7 @@ def _docker_http_samples(
         if not x_agent_workspace_token or not secrets.compare_digest(
             expected_token, x_agent_workspace_token
         ):
-            raise HTTPException(status_code=401, detail="invalid workspace broker credential")
+            raise HTTPException(status_code=401, detail="invalid sandbox manager credential")
         sandbox.manager.require_network(sandbox.spec)
         return read_retained_file(
             sandbox.backend,
@@ -654,9 +654,9 @@ def _docker_http_samples(
     deadline = time.monotonic() + 10
     while not server.started:
         if time.monotonic() > deadline:
-            raise SystemExit("local broker-shaped server did not start")
+            raise SystemExit("local sandbox-manager-shaped server did not start")
         time.sleep(0.02)
-    client = WorkspaceBrokerClient(f"http://127.0.0.1:{port}", expected_token)
+    client = SandboxManagerClient(f"http://127.0.0.1:{port}", expected_token)
     try:
         samples = asyncio.run(_stack_samples(client, iterations, warmup, cases=CASES[:2]))
         return [sample.as_dict() for sample in samples]
@@ -747,7 +747,7 @@ def report(
         )
     print("(all values in milliseconds)")
     if breakdown:
-        print("\nbroker steps, milliseconds")
+        print("\nsandbox manager steps, milliseconds")
         print(f"{'case':<11} {'verify p50':>11} {'verify p95':>11} {'read p50':>9} {'read p95':>9}")
         for row in breakdown:
             verify = row["verify_ms"]
@@ -772,7 +772,7 @@ def report(
                     f"{row['min_ms']:>8} {row['max_ms']:>8}"
                 )
         elif key == "http":
-            print("\nwith the broker-shaped HTTP route in front, milliseconds")
+            print("\nwith the sandbox-manager-shaped HTTP route in front, milliseconds")
             for row in value:
                 print(f"  {row['case']:<11} p50 {row['p50_ms']:>7}  p95 {row['p95_ms']:>7}")
         else:
@@ -815,7 +815,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--http",
         action="store_true",
-        help="docker: also time the broker-shaped HTTP route in front of the container",
+        help="docker: also time the sandbox-manager-shaped HTTP route in front of the container",
     )
     parser.add_argument(
         "--cold",

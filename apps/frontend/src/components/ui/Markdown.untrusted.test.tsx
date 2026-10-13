@@ -19,10 +19,13 @@
 // of anything we wrote, which is exactly why it is pinned here: the day
 // someone adds `rehype-raw` for a legitimate-looking reason, this fails
 // instead of quietly handing over the gateway's session.
-import { render } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
+import '@testing-library/jest-dom/vitest';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { Markdown } from '@/components/ui/Markdown';
+import { Markdown, WorkspaceLinkProvider } from '@/components/ui/Markdown';
+
+afterEach(cleanup);
 
 describe('untrusted model output cannot become script', () => {
   it('escapes raw HTML rather than rendering it', () => {
@@ -57,39 +60,64 @@ describe('untrusted model output cannot become script', () => {
   });
 });
 
-// Not script, but the same text: an <img> is fetched the moment it renders, so
-// an image in model output made the viewer's browser call any address the text
-// named, with the session cookie when that address was this origin.
-describe('untrusted model output cannot make the browser fetch', () => {
-  it('offers an image as a link instead of loading it', () => {
+// An image in model output or repository content is fetched by the reader's
+// browser the moment the conversation opens, which tells whoever chose the URL
+// when and from where it was read. So no Markdown image is ever an `<img>`: it
+// is a link the reader may choose to follow.
+describe('untrusted images are not fetched', () => {
+  it('renders a remote image as a link to it, never as an image', () => {
     const { container } = render(
-      <Markdown text={'![build log](https://collector.example/p.png?d=secret)'} />,
+      <Markdown text={'Done. ![build status](https://tracker.example/p.gif?u=42)'} />,
     );
 
     expect(container.querySelectorAll('img')).toHaveLength(0);
-    const link = container.querySelector('a');
-    expect(link?.getAttribute('href')).toBe('https://collector.example/p.png?d=secret');
-    expect(link?.textContent).toBe('build log');
+    const link = screen.getByRole('link', { name: 'Image: build status' });
+    expect(link).toHaveAttribute('href', 'https://tracker.example/p.gif?u=42');
+    expect(link).toHaveAttribute('target', '_blank');
+    expect(link.getAttribute('rel')).toContain('noreferrer');
   });
 
-  it('keeps an image inside a link as that link’s text, without nesting links', () => {
+  it('does not request a same-origin path either', () => {
+    const { container } = render(<Markdown text={'![](/agents/api/v1/session/logout)'} />);
+
+    expect(container.querySelectorAll('img')).toHaveLength(0);
+    expect(screen.getByRole('link', { name: 'Image' })).toHaveAttribute(
+      'href',
+      '/agents/api/v1/session/logout',
+    );
+  });
+
+  it('keeps a linked image a single link', () => {
     const { container } = render(
-      <Markdown
-        text={'[![build passing](https://ci.example/badge.svg)](https://ci.example/run)'}
-      />,
+      <Markdown text={'[![CI](https://ci.example/badge.svg)](https://ci.example/run/1)'} />,
     );
 
     expect(container.querySelectorAll('img')).toHaveLength(0);
-    const links = container.querySelectorAll('a');
-    expect(links).toHaveLength(1);
-    expect(links[0].getAttribute('href')).toBe('https://ci.example/run');
-    expect(links[0].textContent).toBe('build passing');
+    expect(container.querySelectorAll('a')).toHaveLength(1);
+    expect(screen.getByRole('link', { name: 'Image: CI' })).toHaveAttribute(
+      'href',
+      'https://ci.example/run/1',
+    );
   });
 
-  it('shows only the words of an image whose address was refused', () => {
-    const { container } = render(<Markdown text={'![diagram](javascript:alert(1))'} />);
+  it('offers nothing to follow for a source with a dangerous scheme', () => {
+    const { container } = render(<Markdown text={'![x](javascript:alert(1))'} />);
 
-    expect(container.querySelectorAll('img, a')).toHaveLength(0);
-    expect(container.textContent).toBe('diagram');
+    expect(container.querySelectorAll('img')).toHaveLength(0);
+    expect(container.querySelectorAll('a')).toHaveLength(0);
+    expect(container.textContent).toContain('Image: x');
+  });
+
+  it('opens an image that names a workspace file in the workspace pane', () => {
+    const openFile = vi.fn();
+    const { container } = render(
+      <WorkspaceLinkProvider onOpenFile={openFile}>
+        <Markdown text={'![chart](out/chart.png)'} />
+      </WorkspaceLinkProvider>,
+    );
+
+    expect(container.querySelectorAll('img')).toHaveLength(0);
+    fireEvent.click(screen.getByRole('button', { name: 'Image: chart' }));
+    expect(openFile).toHaveBeenCalledWith('out/chart.png');
   });
 });

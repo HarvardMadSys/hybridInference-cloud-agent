@@ -90,12 +90,17 @@ class PostgresSnapshotRepository:
         """Wrap the pool the control plane already owns."""
         self._pool = pool
 
+    async def snapshot_database_time(self) -> datetime:
+        """Use the database clock for deadlines written by database transactions."""
+        async with self._pool.acquire() as conn:
+            return await conn.fetchval("SELECT clock_timestamp()")
+
     async def claim_due_sandbox_snapshot(self) -> dict[str, Any] | None:
         """Fence one quiescent shared workspace for bounded patch capture.
 
         This claim never waits for publication and never changes a job state.
         The host revalidates quiescence against its live operation ledger; a
-        turn that entered between this transaction and the broker call simply
+        turn that entered between this transaction and the sandbox manager call simply
         makes the capture retry later.
         """
         async with self._pool.acquire() as conn, conn.transaction():
@@ -195,7 +200,7 @@ class PostgresSnapshotRepository:
         patch: str,
         content_sha256: str,
     ) -> str | None:
-        """Store one immutable broker receipt and release the capture barrier.
+        """Store one immutable sandbox manager receipt and release the capture barrier.
 
         Returns ``captured`` or ``published`` (for an empty no-op snapshot),
         and ``None`` for a stale/mismatched receipt.
@@ -822,7 +827,7 @@ class PostgresSnapshotRepository:
 
         Included Agent turns stay succeeded throughout.  Publication is a
         group artifact and must never rewrite a successful model turn as a
-        failure merely because GitHub or the broker was unavailable later.
+        failure merely because GitHub or the sandbox manager was unavailable later.
         """
         async with self._pool.acquire() as conn, conn.transaction():
             row = await conn.fetchrow(

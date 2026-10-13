@@ -49,7 +49,7 @@ Docker 单次只读 list ── 容器清点 ─┘                      ↓
                                                       单服务器历史 API → 折线图
 ```
 
-浏览器轮询只读 Postgres，不触发 Docker、SSH、网关请求或 broker reconciliation。
+浏览器轮询只读 Postgres，不触发 Docker、SSH、网关请求或 sandbox manager reconciliation。
 
 ## 3. 数据口径
 
@@ -74,7 +74,7 @@ busy_percent = 100 × (Δtotal − Δidle − Δiowait) / Δtotal
 
 ### 3.2 沙箱清点必须是只读 Docker inventory
 
-**不要复用 broker `/sandboxes` 或 `SharedChatSessionSupervisor.list()` 来采容量。** 当前 `list()` 会调用 `reconcile()`；它可能停止孤儿容器、清理网络，并返回包含旧 group 的内存缓存。`ChatSandboxManager.list()` 也包含逐容器 inspect。它们用于生命周期协调，不能当成无副作用的轻量容量探测。
+**不要复用 sandbox manager `/sandboxes` 或 `SharedChatSessionSupervisor.list()` 来采容量。** 当前 `list()` 会调用 `reconcile()`；它可能停止孤儿容器、清理网络，并返回包含旧 group 的内存缓存。`ChatSandboxManager.list()` 也包含逐容器 inspect。它们用于生命周期协调，不能当成无副作用的轻量容量探测。
 
 新增一次独立 `docker container ls --all --no-trunc`，只筛 `org.freeinference.chat-sandbox=true`，用 JSON Go template 输出四个字段：完整 container ID、namespace label、sandbox ID label、`.State`。参数使用数组，不走 shell，不使用 `--size`、inspect、stats、reconcile、stop 或 prune。[Docker 支持的列表字段](https://docs.docker.com/reference/cli/docker/container/ls/#format-the-output---format)。
 
@@ -313,7 +313,7 @@ gpu-worker   online          2/3 · 1 free       37%     33% · 42/128 GiB  3 ru
 
 性能验收使用合成 100 个 pool host、1,000 个 Docker 清点行及约 144,000 行历史；记录实际大小、耗时与查询数。容量块 ≤8 KiB、pool 增量线性；历史按 host/epoch/时间索引读取，单次 ≤1,500 点 / 2 MiB；主表不预载每台机器的曲线。DB 读取不随事件数/任务数增长；不存在逐容器 RPC 或逐 host 网络调用。没有测量前不声称延迟已达标。
 
-staging 验收：按现有 host 发布流程逐步升级，保留真实会话；使用受控只读/轻量任务观察 slots 上升再下降、CPU/RAM 随负载变化；任务完成后保留容器数可以不下降。另测一个 Fork，确认容器数不翻倍。至少积累 10 分钟真实历史，关闭浏览器后重新打开核对曲线仍在；切换 1h/6h/24h，已采集片段一致、空白时段无虚构数据。使用测试替身/隔离测试实例模拟 Docker 卡住、collector 失效和过期，不为验收停止共享 broker 或删除保留容器。生产不动。
+staging 验收：按现有 host 发布流程逐步升级，保留真实会话；使用受控只读/轻量任务观察 slots 上升再下降、CPU/RAM 随负载变化；任务完成后保留容器数可以不下降。另测一个 Fork，确认容器数不翻倍。至少积累 10 分钟真实历史，关闭浏览器后重新打开核对曲线仍在；切换 1h/6h/24h，已采集片段一致、空白时段无虚构数据。使用测试替身/隔离测试实例模拟 Docker 卡住、collector 失效和过期，不为验收停止共享 sandbox manager 或删除保留容器。生产不动。
 
 交付报告记录实际 deployed SHA、迁移、runner 副本是否已换版、物理分组覆盖、浏览器截图与缺测原因。合并不等于所有 runner 已采集成功；不以 CI 替代这一步。
 

@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
+from cloud_agent_shared.event_payloads import subagent_owned
 from cloud_agent_shared.shared_protocol import USER_MESSAGE_EVENT
 
 if TYPE_CHECKING:
@@ -58,8 +59,7 @@ async def insert_event(
         client_seq,
     )
     text = (payload or {}).get("text")
-    parent_tool_use_id = (payload or {}).get("parent_tool_use_id")
-    is_subagent = isinstance(parent_tool_use_id, str) and bool(parent_tool_use_id)
+    is_subagent = subagent_owned(payload)
     if event_type == "message" and isinstance(text, str) and text.strip() and not is_subagent:
         # A child agent's reply stays in the recorded trajectory. Mirroring it
         # into the assistant transcript would expose it as the main answer in

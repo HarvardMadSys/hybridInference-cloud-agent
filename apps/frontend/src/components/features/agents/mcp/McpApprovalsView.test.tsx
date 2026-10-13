@@ -76,9 +76,72 @@ afterEach(() => {
   cleanup();
   resetAgentPush();
   vi.useRealTimers();
+  vi.restoreAllMocks();
 });
 
 describe('owner tool approvals', () => {
+  it.each([false, true])(
+    'pauses hidden-tab polls, pushes, and expiry reads and refreshes on return with push live %s',
+    async (pushLive) => {
+      vi.useFakeTimers();
+      const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+      setAgentPushLive(pushLive);
+      list
+        .mockResolvedValueOnce(
+          page([{ ...call, expires_at: new Date(Date.now() + 1000).toISOString() }]),
+        )
+        .mockResolvedValue(page([]));
+      await act(async () => render(<App />));
+      expect(list).toHaveBeenCalledTimes(1);
+
+      visibility.mockReturnValue('hidden');
+      fireEvent(document, new Event('visibilitychange'));
+      await act(async () => {
+        receiveHint('mcp', 'hidden-job');
+        await vi.advanceTimersByTimeAsync(pushLive ? 120_000 : 9000);
+      });
+      expect(list).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        visibility.mockReturnValue('visible');
+        fireEvent(document, new Event('visibilitychange'));
+      });
+      expect(list).toHaveBeenCalledTimes(2);
+      expect(
+        screen.getByText('No tool requests are waiting for your approval.'),
+      ).toBeInTheDocument();
+    },
+  );
+
+  it('allows explicit refresh and decisions while the tab is hidden', async () => {
+    vi.useFakeTimers();
+    const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+    list.mockResolvedValue(page([call]));
+    decide.mockResolvedValue({ ...call, status: 'approved' });
+    await act(async () => render(<App />));
+    visibility.mockReturnValue('hidden');
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Refresh' })));
+    expect(list).toHaveBeenCalledTimes(2);
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Approve' })));
+    expect(decide).toHaveBeenCalledWith(call.id, true);
+    expect(list).toHaveBeenCalledTimes(3);
+    expect(screen.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument();
+  });
+
+  it('waits for visibility before reading a newly mounted hidden approval inbox', async () => {
+    vi.useFakeTimers();
+    const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
+    await act(async () => render(<App />));
+    await act(async () => vi.advanceTimersByTimeAsync(9000));
+    expect(list).not.toHaveBeenCalled();
+    await act(async () => {
+      visibility.mockReturnValue('visible');
+      fireEvent(document, new Event('visibilitychange'));
+    });
+    expect(list).toHaveBeenCalledTimes(1);
+    expect(screen.getByText('No tool requests are waiting for your approval.')).toBeInTheDocument();
+  });
+
   it('shows background conversation requests, exact arguments, and one-time decisions', async () => {
     list.mockResolvedValue(page([call]));
     decide.mockResolvedValue({ ...call, status: 'approved' });

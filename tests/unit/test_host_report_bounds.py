@@ -47,7 +47,7 @@ def _register(**overrides) -> HostRegisterRequest:
         "enroll_token": "token",
         "name": "runner-a",
         "slots_total": 4,
-        "broker_url": "http://runner-a:8787",
+        "sandbox_manager_url": "http://runner-a:8787",
         "capabilities": _REAL_CAPABILITIES,
         "labels": {"physical_host": "rack-1-node-7"},
     }

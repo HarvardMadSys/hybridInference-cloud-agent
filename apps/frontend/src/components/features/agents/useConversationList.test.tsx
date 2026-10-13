@@ -107,6 +107,7 @@ describe('conversation navigation queries', () => {
     expect(result.current.loadedRefresh).toBe(2);
     expect(api.list).toHaveBeenLastCalledWith(
       expect.objectContaining({ pinned: true, cursor: undefined }),
+      expect.any(AbortSignal),
     );
   });
 
@@ -122,7 +123,9 @@ describe('conversation navigation queries', () => {
     const { result } = renderHook(() =>
       useConversationList({ includeArchived: true, q: 'deleted' }),
     );
+    const signal = api.list.mock.calls[0][1] as AbortSignal;
     act(() => announceAgentSessionsChanged({ threadIds: ['deleted'], deleted: true }));
+    expect(signal.aborted).toBe(true);
     await waitFor(() => expect(api.list).toHaveBeenCalledTimes(2));
     await act(async () =>
       resolveOld({ conversations: [{ ...row('deleted'), archived: true }], next_cursor: null }),
@@ -164,6 +167,7 @@ describe('conversation navigation queries', () => {
     expect(api.list).toHaveBeenCalledTimes(1);
     expect(api.list).toHaveBeenCalledWith(
       expect.objectContaining({ limit: 200, cursor: undefined }),
+      expect.any(AbortSignal),
     );
     expect(result.current.rows).toHaveLength(200);
     expect(result.current.rows[160].job.title).toBe('Updated historical title');
@@ -172,6 +176,7 @@ describe('conversation navigation queries', () => {
     await waitFor(() => expect(result.current.rows).toHaveLength(250));
     expect(api.list).toHaveBeenLastCalledWith(
       expect.objectContaining({ limit: 50, cursor: '200' }),
+      expect.any(AbortSignal),
     );
     expect(new Set(result.current.rows.map((item) => item.key)).size).toBe(250);
     api.list.mockClear();
@@ -203,7 +208,10 @@ describe('conversation navigation queries', () => {
     await waitFor(() => expect(result.current.loading).toBe(false));
     expect(result.current.rows.map((row) => row.key)).toEqual(['a', 'b']);
     expect(api.list).toHaveBeenCalledTimes(2);
-    expect(api.list).toHaveBeenLastCalledWith(expect.objectContaining({ cursor: 'page-2' }));
+    expect(api.list).toHaveBeenLastCalledWith(
+      expect.objectContaining({ cursor: 'page-2' }),
+      expect.any(AbortSignal),
+    );
   });
   it('ignores late responses after changing query, archive scope, and account', async () => {
     let resolveOld!: (value: unknown) => void;
@@ -219,15 +227,105 @@ describe('conversation navigation queries', () => {
         useConversationList({ q, userId, includeArchived, repo: 'owner/repo' }),
       { initialProps: { q: 'old', userId: 'alice', includeArchived: false } },
     );
+    const oldSignal = api.list.mock.calls[0][1] as AbortSignal;
     rerender({ q: 'new', userId: 'bob', includeArchived: true });
+    expect(oldSignal.aborted).toBe(true);
     await waitFor(() => expect(result.current.rows[0]?.key).toBe('new'));
     await act(async () => resolveOld({ conversations: [row('old')], next_cursor: 'obsolete' }));
     expect(result.current.rows.map((row) => row.key)).toEqual(['new']);
     expect(result.current.cursor).toBeNull();
     expect(api.list).toHaveBeenLastCalledWith(
       expect.objectContaining({ q: 'new', repo: 'owner/repo', includeArchived: true }),
+      expect.any(AbortSignal),
     );
   });
+
+  it('aborts pagination on unmount without reporting its cancellation as an error', async () => {
+    api.list.mockResolvedValueOnce({ conversations: [row('first')], next_cursor: 'next' });
+    let signal!: AbortSignal;
+    let rejectPage!: (cause: unknown) => void;
+    api.list.mockImplementationOnce(
+      (_options, requestSignal: AbortSignal) =>
+        new Promise((_resolve, reject) => {
+          signal = requestSignal;
+          rejectPage = reject;
+        }),
+    );
+    const { result, unmount } = renderHook(() => useConversationList());
+    await waitFor(() => expect(result.current.cursor).toBe('next'));
+    act(() => result.current.loadMore());
+    expect(signal.aborted).toBe(false);
+    unmount();
+    expect(signal.aborted).toBe(true);
+    await act(async () => rejectPage(signal.reason));
+    expect(result.current.error).toBeNull();
+    expect(api.list).toHaveBeenCalledTimes(2);
+  });
+
+  it('aborts a disabled list and waits for it to be enabled before loading more', async () => {
+    api.list.mockResolvedValueOnce({ conversations: [row('first')], next_cursor: 'next' });
+    api.list.mockImplementationOnce(
+      (_options, signal: AbortSignal) =>
+        new Promise((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+        }),
+    );
+    const { result, rerender } = renderHook(({ enabled }) => useConversationList({ enabled }), {
+      initialProps: { enabled: true },
+    });
+    await waitFor(() => expect(result.current.cursor).toBe('next'));
+    act(() => result.current.loadMore());
+    const pageSignal = api.list.mock.calls[1][1] as AbortSignal;
+    rerender({ enabled: false });
+    expect(pageSignal.aborted).toBe(true);
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.error).toBeNull();
+    act(() => result.current.loadMore());
+    expect(api.list).toHaveBeenCalledTimes(2);
+    expect(result.current.rows.map((row) => row.key)).toEqual(['first']);
+    api.list.mockResolvedValue({ conversations: [row('updated')], next_cursor: null });
+    rerender({ enabled: true });
+    await waitFor(() => expect(result.current.rows[0]?.key).toBe('updated'));
+  });
+
+  it('stops an obsolete multi-page refresh before fetching another page', async () => {
+    const all = Array.from({ length: 250 }, (_, index) => row(String(index)));
+    api.list.mockImplementation(async ({ cursor, limit }: { cursor?: string; limit: number }) => {
+      const start = Number(cursor ?? 0);
+      return {
+        conversations: all.slice(start, start + limit),
+        next_cursor: start + limit < all.length ? String(start + limit) : null,
+      };
+    });
+    const { result, rerender } = renderHook(
+      ({ q, refresh }) => useConversationList({ q, refresh }),
+      { initialProps: { q: '', refresh: 0 } },
+    );
+    await waitFor(() => expect(result.current.rows).toHaveLength(50));
+    for (const count of [100, 150, 200, 250]) {
+      act(() => result.current.loadMore());
+      await waitFor(() => expect(result.current.rows).toHaveLength(count));
+    }
+    api.list.mockClear();
+    let resolveRefresh!: (value: unknown) => void;
+    api.list.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveRefresh = resolve;
+        }),
+    );
+    rerender({ q: '', refresh: 1 });
+    const refreshSignal = api.list.mock.calls[0][1] as AbortSignal;
+    api.list.mockResolvedValue({ conversations: [row('new search')], next_cursor: null });
+    rerender({ q: 'new search', refresh: 1 });
+    expect(refreshSignal.aborted).toBe(true);
+    await waitFor(() => expect(result.current.rows[0]?.key).toBe('new search'));
+    await act(async () => resolveRefresh({ conversations: all.slice(0, 200), next_cursor: '200' }));
+    expect(api.list).toHaveBeenCalledTimes(2);
+    expect(result.current.rows.map((row) => row.key)).toEqual(['new search']);
+    expect(result.current.loading).toBe(false);
+  });
+
   it('keeps earlier pages after a failed next page and supports retrying it', async () => {
     api.list.mockResolvedValueOnce({ conversations: [row('first')], next_cursor: 'next' });
     api.list.mockRejectedValueOnce(new Error('Offline'));

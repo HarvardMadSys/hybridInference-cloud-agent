@@ -42,7 +42,7 @@ from cloud_agent.capacity_protocol import (
     history_point_grid,
     resolve_history_range,
 )
-from cloud_agent.execution_profiles import default_execution_profile
+from cloud_agent.execution_profiles import KATA_RUNTIME, default_execution_profile
 from cloud_agent.host_pool import (
     HOST_DRAINING,
     HOST_ONLINE,
@@ -129,6 +129,19 @@ def _require_store(store: _AdminHostsStorage | None) -> _AdminHostsStorage:
     return store
 
 
+def _untrusted_without_disk_quota(row: dict[str, Any]) -> bool:
+    """Whether a host that can take untrusted work reports applying no disk quota.
+
+    Only the Kata runtime is handed ``untrusted-kata-v1`` work, so only it is
+    named. The applied report is the host's own word for what a new sandbox
+    gets; a host that has not reported the setting is not guessed about.
+    """
+    if row.get("sandbox_runtime") != KATA_RUNTIME:
+        return False
+    applied = reported_values(row.get("settings_applied")) or {}
+    return applied.get("sandbox_disk_mib") == 0
+
+
 def _to_item(row: dict[str, Any], *, now: datetime | None = None) -> AgentRunnerHost:
     last_seen: datetime = row["last_seen_at"]
     read_at = datetime.now(UTC) if now is None else now
@@ -157,7 +170,7 @@ def _to_item(row: dict[str, Any], *, now: datetime | None = None) -> AgentRunner
         slots_desired=row.get("slots_desired"),
         launch_error=row.get("launch_error"),
         runner_version=row.get("runner_version"),
-        broker_url=row.get("broker_url"),
+        sandbox_manager_url=row.get("sandbox_manager_url"),
         last_heartbeat_at=row.get("last_heartbeat_at"),
         drain_fence_token=row.get("drain_fence_token"),
         drain_fence_status_before=row.get("drain_fence_status_before"),
@@ -187,6 +200,7 @@ def _to_item(row: dict[str, Any], *, now: datetime | None = None) -> AgentRunner
         sandbox_archive_settings_applied_revision=row.get(
             "sandbox_archive_settings_applied_revision"
         ),
+        untrusted_without_disk_quota=_untrusted_without_disk_quota(row),
     )
 
 
@@ -318,7 +332,7 @@ async def set_agent_host_settings(
     shows the hosts that have not caught up yet. Nothing running is
     interrupted: a turn keeps the time limit it started with, an existing
     sandbox keeps its chat capacity, and the terminal limits apply from the
-    broker's next sweep.
+    sandbox manager's next sweep.
     """
     job_store = _require_store(store)
     previous = await _apply(HostCommands(job_store.host_pool).global_settings(payload.settings))
@@ -385,7 +399,7 @@ async def set_sandbox_archive_settings(
     """Atomically replace the archive policy; hosts apply it on their next beat.
 
     The destination is fixed in server code. A saved access key is encrypted
-    at rest and is not returned. With no key, brokers authenticate with their
+    at rest and is not returned. With no key, sandbox managers authenticate with their
     workload identity and still require the bucket owner and KMS key.
     """
     job_store = _require_store(store)
@@ -490,11 +504,12 @@ async def forget_agent_runner_host(
 ) -> ListAgentRunnerHostsResponse:
     """Drop a decommissioned host from the list.
 
-    Housekeeping only: a runner still polling on that machine re-adds itself
-    within seconds. The active host cannot be dropped, because doing so would
+    Housekeeping only: removal invalidates its credential and enrollment tokens;
+    the machine needs a fresh administrator-issued token to register again.
+    The active host cannot be dropped, because doing so would
     silently unpin new-chat placement, which is the opposite of what removing a
     host from a list looks like it does. Existing retained owners are not moved
-    by forgetting their pool row; their broker routing continues to fail closed
+    by forgetting their pool row; their sandbox manager routing continues to fail closed
     until the same named host is enrolled again. The active-host refusal is
     decided inside the store's transaction, not by a check here: a check here
     is a read a concurrent switch can outrun.

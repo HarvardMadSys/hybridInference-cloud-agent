@@ -405,6 +405,8 @@ describe('admin sandbox trajectory', () => {
         last_activity_at: '2026-10-10T09:59:00Z',
       },
       expect.any(AbortSignal),
+      false,
+      false,
     );
     expect(
       await screen.findByText(/The retained container will be deleted only/),
@@ -459,6 +461,40 @@ describe('admin sandbox trajectory', () => {
     expect(deleteAdminSandbox).not.toHaveBeenCalled();
   });
 
+  it('deletes the stopped sandbox without an archive after confirmation', async () => {
+    vi.mocked(deleteAdminSandbox).mockResolvedValue({
+      sandbox: sandbox({
+        deletion_state: 'pending',
+        deletion_discard: true,
+        deletion_requested_at: '2026-10-10T10:01:00Z',
+      }),
+      members: [],
+      observed_at: '2026-10-10T10:01:00Z',
+    });
+    render(<AdminSandboxTrajectoryPage />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Delete without archive' }));
+    expect(window.confirm).toHaveBeenCalledWith(
+      expect.stringMatching(/without uploading it to S3/),
+    );
+    expect(window.confirm).toHaveBeenCalledWith(expect.stringMatching(/cannot be restored/));
+    expect(deleteAdminSandbox).toHaveBeenCalledWith(
+      'sandbox/one',
+      {
+        generation: 4,
+        container_id: 'container-one',
+        last_activity_at: '2026-10-10T09:59:00Z',
+      },
+      expect.any(AbortSignal),
+      false,
+      true,
+    );
+    expect(await screen.findByText(/without an S3 archive/)).toBeInTheDocument();
+    expect(screen.getByText(/No S3 archive is being uploaded/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Deleting without archive…' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Deletion in progress' })).toBeDisabled();
+  });
+
   it('allows a safely failed archive request to be confirmed and retried', async () => {
     vi.mocked(getAdminSandboxTrajectory).mockResolvedValue(
       trajectory({
@@ -483,6 +519,8 @@ describe('admin sandbox trajectory', () => {
         last_activity_at: '2026-10-10T09:59:00Z',
       },
       expect.any(AbortSignal),
+      false,
+      false,
     );
     expect(
       await screen.findByText(/The retained container will be deleted only/),
@@ -490,15 +528,46 @@ describe('admin sandbox trajectory', () => {
     expect(screen.queryByText(/Deletion failed:/)).not.toBeInTheDocument();
   });
 
-  it('does not offer deletion while the sandbox is running', async () => {
+  it.each([false, true])(
+    'verifies a stale running record before deletion (discard=%s)',
+    async (discard) => {
+      vi.mocked(getAdminSandboxTrajectory).mockResolvedValue(
+        trajectory({ sandbox: sandbox({ state: 'running' }) }),
+      );
+      render(<AdminSandboxTrajectoryPage />);
+
+      fireEvent.click(
+        await screen.findByRole('button', {
+          name: discard ? 'Delete without archive' : 'Verify stopped and force delete',
+        }),
+      );
+      expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining('stopped or dead'));
+      expect(window.confirm).toHaveBeenCalledWith(
+        expect.stringContaining('does not stop a running container'),
+      );
+      expect(deleteAdminSandbox).toHaveBeenCalledWith(
+        'sandbox/one',
+        {
+          generation: 4,
+          container_id: 'container-one',
+          last_activity_at: '2026-10-10T09:59:00Z',
+        },
+        expect.any(AbortSignal),
+        true,
+        discard,
+      );
+    },
+  );
+
+  it('does not force-delete a running sandbox that still has active work', async () => {
     vi.mocked(getAdminSandboxTrajectory).mockResolvedValue(
-      trajectory({ sandbox: sandbox({ state: 'running' }) }),
+      trajectory({ sandbox: sandbox({ state: 'running', active_attempt_count: 1 }) }),
     );
     render(<AdminSandboxTrajectoryPage />);
-    expect(await screen.findByRole('button', { name: 'Archive to S3 and delete' })).toBeDisabled();
     expect(
-      screen.getByText('Wait for the host to confirm a clean stop before deleting this sandbox.'),
-    ).toBeInTheDocument();
+      await screen.findByRole('button', { name: 'Verify stopped and force delete' }),
+    ).toBeDisabled();
+    expect(screen.getByText('Wait for all active turns to finish.')).toBeInTheDocument();
     expect(deleteAdminSandbox).not.toHaveBeenCalled();
   });
 

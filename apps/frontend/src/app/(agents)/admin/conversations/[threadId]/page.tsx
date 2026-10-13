@@ -149,7 +149,7 @@ function ConversationDetails({ threadId, query }: { threadId: string; query: str
               <RunState state={conversation.state} />
               {(conversation.deleted_at || conversation.archived_at) && (
                 <span className="text-xs text-gray-500 dark:text-gray-400">
-                  {conversation.deleted_at ? 'Deleted' : 'Archived'}
+                  {conversation.deleted_at ? 'Deleted by user' : 'Archived'}
                 </span>
               )}
             </div>

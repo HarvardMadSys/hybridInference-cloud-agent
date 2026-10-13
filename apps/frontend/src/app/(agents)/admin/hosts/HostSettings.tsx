@@ -115,6 +115,7 @@ function SettingForm({
   clearLabel,
   busy,
   disabled = false,
+  targetId,
   onChange,
 }: {
   definition: HostSettingDefinition;
@@ -124,6 +125,7 @@ function SettingForm({
   clearLabel: string;
   busy: boolean;
   disabled?: boolean;
+  targetId?: string;
   onChange: OnChange;
 }) {
   // What this level uses now: its own value, else the one it inherits.
@@ -158,6 +160,7 @@ function SettingForm({
         }}
       >
         <input
+          id={targetId}
           name="value"
           type="number"
           inputMode={units.length > 0 ? 'decimal' : 'numeric'}
@@ -294,6 +297,7 @@ export function GlobalSettingsCard({
                     <div className="min-w-0">
                       <SettingForm
                         key={`${definition.key}:${saved ?? 'unset'}`}
+                        targetId={`host-setting-${definition.key}`}
                         definition={definition}
                         saved={saved}
                         placeholder={definition.default}

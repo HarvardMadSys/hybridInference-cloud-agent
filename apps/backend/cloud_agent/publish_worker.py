@@ -47,6 +47,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from cloud_agent.entitlement import RepoAccessUnavailable, RepoNotAllowed, require_entitled_repo
+from cloud_agent.environments import EnvironmentEncryptionError
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.pr_titles import generate_pr_title, is_generic_pr_summary
 from cloud_agent.publisher import (
@@ -69,6 +70,7 @@ if TYPE_CHECKING:
         SnapshotRepository,
         SourceControlRepository,
     )
+    from cloud_agent.ports.environments import EnvironmentRepository
     from cloud_agent.source_control_runtime import GitHubAppSource
     from cloud_agent.workers.background_wake import BackgroundWake
 
@@ -77,13 +79,14 @@ class PublishStorage(Protocol):
     """What publishing a group snapshot reaches the storage layer for.
 
     Two capabilities and no more: the snapshot rows it claims and records,
-    and the host pool, which it needs only to find the broker holding the
+    and the host pool, which it needs only to find the sandbox manager holding the
     workspace it is publishing from.
     """
 
     snapshot: SnapshotRepository
     host_pool: HostPoolRepository
     source_control: SourceControlRepository
+    environments: EnvironmentRepository
 
 
 logger = get_logger(__name__)
@@ -344,9 +347,33 @@ def _github_headers(credential: GitHubCredential) -> dict[str, str]:
     }
 
 
+_BACKTICK_RUN = re.compile(r"`+")
+
+
+def _code_span(value: str) -> str:
+    """Render agent-chosen text as one Markdown code span it cannot close early.
+
+    A file name is the agent's to choose, and the App posts the body under its
+    own name, so a name that closed its span could write mentions, closing
+    keywords or links into it. A span ends at the first backtick run as long
+    as the one that opened it, so the fence is one longer than any run inside,
+    and padded when the text starts or ends with a backtick or a space (the
+    renderer strips one space from each side). Control characters, which could
+    end the list item with the span still open, are shown as escapes; the
+    publisher's change-set gate refuses such names before this is reached.
+    """
+    text = "".join(
+        ascii(char)[1:-1] if unicodedata.category(char).startswith("C") else char for char in value
+    )
+    fence = "`" * (max(map(len, _BACKTICK_RUN.findall(text)), default=0) + 1)
+    if text[:1] in ("`", " ") or text[-1:] in ("`", " "):
+        text = f" {text} "
+    return f"{fence}{text}{fence}"
+
+
 def _pr_body(job: dict[str, Any], changed_files: list[str]) -> str:
     """Compose a PR body that tells the reviewer what they are reviewing."""
-    files = "\n".join(f"- `{path}`" for path in changed_files[:50])
+    files = "\n".join(f"- {_code_span(path)}" for path in changed_files[:50])
     if len(changed_files) > 50:
         files += f"\n- …and {len(changed_files) - 50} more"
     included = ", ".join(f"`{item}`" for item in job.get("included_job_ids") or [])
@@ -444,17 +471,17 @@ async def _import_snapshot_base(
             detail="the publisher produced no retained base bundle",
         )
         return False
-    from cloud_agent.broker_routing import broker_for_job
+    from cloud_agent.sandbox_manager_routing import sandbox_manager_for_job
 
-    broker = await broker_for_job(store.host_pool, snapshot["anchor_job_id"])
-    if broker is None:
+    sandbox_manager = await sandbox_manager_for_job(store.host_pool, snapshot["anchor_job_id"])
+    if sandbox_manager is None:
         await store.snapshot.record_snapshot_base_import_failure(
             snapshot_id=snapshot_id,
-            detail="the owning workspace broker is unavailable for base import",
+            detail="the owning sandbox manager is unavailable for base import",
         )
         return False
     try:
-        await broker.import_shared_base(snapshot, commit_sha=commit_sha, bundle=bundle)
+        await sandbox_manager.import_shared_base(snapshot, commit_sha=commit_sha, bundle=bundle)
     except Exception as exc:
         await store.snapshot.record_snapshot_base_import_failure(
             snapshot_id=snapshot_id,
@@ -594,7 +621,7 @@ def _is_retryable_publication_failure(exc: BaseException) -> bool:
     same HTTP statuses from the remote. Patch, content, and other HTTP
     rejections are permanent.
     """
-    if isinstance(exc, TransientPublishError):
+    if isinstance(exc, (TransientPublishError, EnvironmentEncryptionError)):
         return True
     status = _http_status(exc)
     if _retryable_github_status(status):
@@ -792,6 +819,7 @@ async def _publish_claimed_owned(
     # allowlist) has to be able to stop it. The read side already refuses at
     # claim; without this the same deployment would block the read-only token
     # and still hand out the push token.
+    environment = None
     try:
         await require_entitled_repo(
             job["repo"],
@@ -841,6 +869,11 @@ async def _publish_claimed_owned(
     try:
         # Blocking git work: keep it off the event loop so a slow clone cannot
         # stall the gateway's request handling.
+        environment = (
+            await store.environments.get_job_environment(job_id)
+            if getattr(store, "environments", None)
+            else None
+        )
         result = await asyncio.to_thread(
             publish_patch,
             job_id=job_id,
@@ -852,6 +885,7 @@ async def _publish_claimed_owned(
             allow_workflow_changes=allow_workflow_changes,
             include_base_bundle=True,
             auth_env=credential.git_auth_env(),
+            **({"known_secrets": environment.secrets()} if environment else {}),
         )
         title = await generate_pr_title(job, result.changed_files, grants=grants)
         pr_url = await ensure_draft_pull_request(
@@ -864,6 +898,10 @@ async def _publish_claimed_owned(
         )
     except Exception as exc:
         detail = str(exc) if isinstance(exc, PublishError) else f"publish failed: {exc}"
+        if environment is not None:
+            from cloud_agent_shared.secret_redaction import SecretRedactor
+
+            detail = SecretRedactor(environment.secrets()).text(detail)
         if _is_retryable_publication_failure(exc):
             await retry(detail)
             return None
@@ -873,7 +911,10 @@ async def _publish_claimed_owned(
                 extra={"event": "agent_job_publish_rejected", "job_id": job_id},
             )
         else:
-            logger.exception("agent job publish failed unexpectedly")
+            if environment is not None and environment.secrets():
+                logger.error("agent job publish failed unexpectedly (%s)", type(exc).__name__)
+            else:
+                logger.exception("agent job publish failed unexpectedly")
         await fail(detail)
         return None
 

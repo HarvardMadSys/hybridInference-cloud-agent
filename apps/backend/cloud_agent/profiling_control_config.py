@@ -12,7 +12,7 @@ production gives each its own name and the two stop being able to reach each
 other's control state.
 
 This lives in its own module rather than in the profiling package because it is
-a *control-plane* concern: the host agent and the broker never read it, and a
+a *control-plane* concern: the host agent and the sandbox manager never read it, and a
 name they cannot act on is a name they should not be able to hold.
 """
 

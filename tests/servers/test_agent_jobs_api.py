@@ -20,7 +20,7 @@ longer holds are supplied by the test app instead of by an import:
 
 Workspace operations always route through the attempt's enrolled host. The
 fake store returns one test host row and individual cases replace the client
-factory with their in-memory broker; there is no global broker fallback.
+factory with their in-memory sandbox manager; there is no global sandbox manager fallback.
 """
 
 from __future__ import annotations
@@ -31,8 +31,9 @@ import hashlib
 import json
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Any, ClassVar
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, call
 
 import pytest
 import pytest_asyncio
@@ -40,7 +41,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from tests.support.storage import AllCapabilities, EmptyAttachments, EmptySkillLibrary
 
-from cloud_agent import broker_routing
+from cloud_agent import sandbox_manager_routing
 from cloud_agent.api import routes as agent_jobs_router, worker, workspace as agent_workspace
 from cloud_agent.api._owner_auth import authenticate_agent_owner
 from cloud_agent.api.deps import get_storage
@@ -1731,10 +1732,10 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
     # Every executable job belongs to one enrolled host, including this
     # in-memory route fixture.
     async def host_for_attempt(self, *, attempt_id: int) -> dict[str, Any] | None:
-        return {"host": "runner-test", "broker_url": "http://broker.test:8092"}
+        return {"host": "runner-test", "sandbox_manager_url": "http://sandbox_manager.test:8092"}
 
     async def host_for_job(self, *, job_id: str) -> dict[str, Any] | None:
-        return {"host": "runner-test", "broker_url": "http://broker.test:8092"}
+        return {"host": "runner-test", "sandbox_manager_url": "http://sandbox_manager.test:8092"}
 
     async def claim_job(
         self,
@@ -1936,7 +1937,7 @@ def _api_key_secret(monkeypatch):
     environment.
     """
     monkeypatch.setenv("AGENT_CONTROL_TOKEN_SECRET", "api-test-secret")
-    monkeypatch.setenv("AGENT_WORKSPACE_BROKER_TOKEN", "api-test-broker-secret")
+    monkeypatch.setenv("AGENT_SANDBOX_MANAGER_TOKEN", "api-test-sandbox-manager-secret")
     monkeypatch.setenv("AGENT_SESSION_SECRET", "session-test-secret-32-bytes-minimum!")
     monkeypatch.setenv("AGENT_REPO_ALLOWLIST", "owner/name,o/n,private/repo")
     # The key stored MCP credentials are wrapped under. Without it a deployment
@@ -3272,11 +3273,11 @@ async def test_legacy_retained_chat_cannot_fall_back_to_a_docker_clone(
 ):
     """Historical one-chat containers stay readable but are never cloned."""
 
-    class Broker:
+    class SandboxManager:
         async def __getattr__(self, _name: str):
             raise AssertionError("legacy fork must be rejected before a host mutation")
 
-    monkeypatch.setattr(broker_routing, "_client_for", lambda _host: Broker())
+    monkeypatch.setattr(sandbox_manager_routing, "_client_for", lambda _host: SandboxManager())
     app = _build_app(store)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         job_id = await _create_job(client)
@@ -3303,7 +3304,7 @@ async def test_shared_chat_fork_creates_two_native_sessions_in_one_container(
 ):
     """Clicking Fork immediately materializes a sibling process, not a clone."""
 
-    class Broker:
+    class SandboxManager:
         def __init__(self) -> None:
             self.calls: list[tuple[str, dict[str, Any]]] = []
 
@@ -3335,11 +3336,11 @@ async def test_shared_chat_fork_creates_two_native_sessions_in_one_container(
                 "target_process_generation": 1,
             }
 
-    broker = Broker()
+    sandbox_manager = SandboxManager()
     plugins = (
         [{"plugin": "reviewer@team-tools", "marketplace": "owner/plugins"}] if with_plugins else []
     )
-    monkeypatch.setattr(broker_routing, "_client_for", lambda _host: broker)
+    monkeypatch.setattr(sandbox_manager_routing, "_client_for", lambda _host: sandbox_manager)
     app = _build_app(store)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         job_id = await _create_job(client)
@@ -3379,7 +3380,7 @@ async def test_shared_chat_fork_creates_two_native_sessions_in_one_container(
     assert forked["thread_sandbox"]["native_session_id"] == "native-session-child"
     assert response.json()["plugins"] == plugins
     assert next(iter(store.session_forks.values()))["coordinator_lease_seconds"] == lease_seconds
-    assert len(broker.calls) == 1
+    assert len(sandbox_manager.calls) == 1
 
 
 async def test_shared_chat_can_fork_from_a_specific_historical_turn(
@@ -3387,7 +3388,7 @@ async def test_shared_chat_can_fork_from_a_specific_historical_turn(
 ):
     """The host receives the selected prefix, not an implicit latest fork."""
 
-    class Broker:
+    class SandboxManager:
         def __init__(self) -> None:
             self.native_turns: list[int] = []
 
@@ -3411,8 +3412,8 @@ async def test_shared_chat_can_fork_from_a_specific_historical_turn(
                 "target_process_generation": 1,
             }
 
-    broker = Broker()
-    monkeypatch.setattr(broker_routing, "_client_for", lambda _host: broker)
+    sandbox_manager = SandboxManager()
+    monkeypatch.setattr(sandbox_manager_routing, "_client_for", lambda _host: sandbox_manager)
     app = _build_app(store)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         first_id = await _create_job(client)
@@ -3452,7 +3453,7 @@ async def test_shared_chat_can_fork_from_a_specific_historical_turn(
     forked = store.jobs[response.json()["id"]]
     assert forked["turn_no"] == 1
     assert forked["fork_source_job_id"] == first_id
-    assert broker.native_turns == [1]
+    assert sandbox_manager.native_turns == [1]
     assert second["thread_id"] == first["thread_id"]
 
 
@@ -3464,7 +3465,7 @@ async def test_same_native_fork_request_has_one_external_coordinator(
     started = asyncio.Event()
     finish = asyncio.Event()
 
-    class Broker:
+    class SandboxManager:
         calls = 0
 
         async def fork_shared_session(self, source_thread_id: str, **kwargs: Any):
@@ -3489,8 +3490,8 @@ async def test_same_native_fork_request_has_one_external_coordinator(
                 "target_process_generation": 1,
             }
 
-    broker = Broker()
-    monkeypatch.setattr(broker_routing, "_client_for", lambda _host: broker)
+    sandbox_manager = SandboxManager()
+    monkeypatch.setattr(sandbox_manager_routing, "_client_for", lambda _host: sandbox_manager)
     app = _build_app(store)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         job_id = await _create_job(client)
@@ -3521,13 +3522,13 @@ async def test_same_native_fork_request_has_one_external_coordinator(
     assert competing.json()["detail"]["error"]["type"] == "fork_in_progress"
     assert competing.headers["retry-after"] == "2"
     assert completed.status_code == 201
-    assert broker.calls == 1
+    assert sandbox_manager.calls == 1
 
 
 async def test_ready_native_fork_retry_does_not_need_the_host(store: FakeStorage, monkeypatch):
     """A lost success response remains idempotent after the host disappears."""
 
-    class Broker:
+    class SandboxManager:
         calls = 0
 
         async def fork_shared_session(self, source_thread_id: str, **kwargs: Any):
@@ -3550,8 +3551,8 @@ async def test_ready_native_fork_retry_does_not_need_the_host(store: FakeStorage
                 "target_process_generation": 1,
             }
 
-    broker = Broker()
-    monkeypatch.setattr(broker_routing, "_client_for", lambda _host: broker)
+    sandbox_manager = SandboxManager()
+    monkeypatch.setattr(sandbox_manager_routing, "_client_for", lambda _host: sandbox_manager)
     app = _build_app(store)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         job_id = await _create_job(client)
@@ -3573,13 +3574,13 @@ async def test_ready_native_fork_retry_does_not_need_the_host(store: FakeStorage
         path = f"/v1/agent/jobs/{job_id}/fork"
         headers = {"Idempotency-Key": "lost-success-response"}
         first = await client.post(path, headers=headers)
-        monkeypatch.setattr(broker_routing, "_client_for", lambda _host: None)
+        monkeypatch.setattr(sandbox_manager_routing, "_client_for", lambda _host: None)
         retried = await client.post(path, headers=headers)
 
     assert first.status_code == 201
     assert retried.status_code == 201
     assert retried.json()["id"] == first.json()["id"]
-    assert broker.calls == 1
+    assert sandbox_manager.calls == 1
 
 
 async def test_fork_is_owner_scoped(client: AsyncClient, store: FakeStorage):
@@ -3733,10 +3734,10 @@ async def test_other_users_jobs_are_404_not_403(client: AsyncClient, store: Fake
         assert missing_pin.status_code == 404
 
 
-async def test_live_workspace_routes_use_the_job_broker(store: FakeStorage, monkeypatch):
+async def test_live_workspace_routes_use_the_job_sandbox_manager(store: FakeStorage, monkeypatch):
     """Files, terminal and Git address the same retained chat workspace."""
 
-    class Broker:
+    class SandboxManager:
         def __init__(self) -> None:
             self.calls: list[tuple] = []
 
@@ -3778,8 +3779,8 @@ async def test_live_workspace_routes_use_the_job_broker(store: FakeStorage, monk
                 "commits": [],
             }
 
-    broker = Broker()
-    monkeypatch.setattr(broker_routing, "_client_for", lambda _host: broker)
+    sandbox_manager = SandboxManager()
+    monkeypatch.setattr(sandbox_manager_routing, "_client_for", lambda _host: sandbox_manager)
     app = _build_app(store)
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as local_client:
@@ -3803,7 +3804,7 @@ async def test_live_workspace_routes_use_the_job_broker(store: FakeStorage, monk
     assert saved.status_code == 200
     assert terminal.json()["output"] == "ok\n"
     assert git.json()["branch"] == "agent/thread"
-    assert broker.calls == [
+    assert sandbox_manager.calls == [
         ("files", workspace_id, ""),
         ("write", workspace_id, "README.md", "updated"),
         ("terminal", workspace_id, "pwd", "/workspace"),
@@ -3816,7 +3817,7 @@ async def test_binary_workspace_payload_preserves_owner_and_path_checks(
 ):
     """Binary bytes use the same owned, normalized route as text previews."""
 
-    class Broker:
+    class SandboxManager:
         def __init__(self) -> None:
             self.calls: list[tuple[str, str]] = []
 
@@ -3837,8 +3838,8 @@ async def test_binary_workspace_payload_preserves_owner_and_path_checks(
                 "source": "workspace",
             }
 
-    broker = Broker()
-    monkeypatch.setattr(broker_routing, "_client_for", lambda _host: broker)
+    sandbox_manager = SandboxManager()
+    monkeypatch.setattr(sandbox_manager_routing, "_client_for", lambda _host: sandbox_manager)
     app = _build_app(store)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         job_id = await _create_job(client)
@@ -3867,23 +3868,23 @@ async def test_binary_workspace_payload_preserves_owner_and_path_checks(
     assert fetched.json()["binary"] is True
     assert refused.status_code == 404
     assert traversal.status_code == 400
-    assert broker.calls == [(workspace_id, "artifact.png")]
+    assert sandbox_manager.calls == [(workspace_id, "artifact.png")]
 
 
 async def test_missing_shared_workspace_is_a_conflict_not_a_missing_file(
     store: FakeStorage, monkeypatch
 ):
-    """The broker's shared-only 404 describes the workspace, not a file path."""
-    from cloud_agent.workspace_broker_client import WorkspaceBrokerError
+    """The sandbox manager's shared-only 404 describes the workspace, not a file path."""
+    from cloud_agent.sandbox_manager_client import SandboxManagerError
 
-    class Broker:
+    class SandboxManager:
         async def register_shared_sandbox(self, _sandbox: dict[str, Any]):
             return None
 
         async def files(self, _workspace_id: str, _path: str, *, profiling=None):
-            raise WorkspaceBrokerError(404, "shared chat workspace is not materialized")
+            raise SandboxManagerError(404, "shared chat workspace is not materialized")
 
-    monkeypatch.setattr(broker_routing, "_client_for", lambda _host: Broker())
+    monkeypatch.setattr(sandbox_manager_routing, "_client_for", lambda _host: SandboxManager())
     app = _build_app(store)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         job_id = await _create_job(client)
@@ -3900,9 +3901,9 @@ async def test_missing_shared_workspace_is_a_conflict_not_a_missing_file(
 async def test_retained_mutations_honor_thread_fence_even_through_a_settled_turn_url(
     store: FakeStorage, monkeypatch
 ):
-    """Broker restart cannot bypass a protected latest-turn workspace phase."""
+    """Sandbox Manager restart cannot bypass a protected latest-turn workspace phase."""
 
-    class Broker:
+    class SandboxManager:
         def __init__(self) -> None:
             self.calls: list[tuple[Any, ...]] = []
 
@@ -3911,28 +3912,28 @@ async def test_retained_mutations_honor_thread_fence_even_through_a_settled_turn
 
         async def write_file(self, workspace_id: str, path: str, content: str):
             self.calls.append(("write", workspace_id, path, content))
-            raise AssertionError("durably fenced write reached the broker")
+            raise AssertionError("durably fenced write reached the sandbox manager")
 
         async def terminal(self, workspace_id: str, **kwargs):
             self.calls.append(("terminal", workspace_id, kwargs["command"]))
-            raise AssertionError("durably fenced command reached the broker")
+            raise AssertionError("durably fenced command reached the sandbox manager")
 
         async def terminal_input(self, workspace_id: str, terminal_id: str, *, data: str):
             self.calls.append(("input", workspace_id, terminal_id, data))
-            raise AssertionError("durably fenced input reached the broker")
+            raise AssertionError("durably fenced input reached the sandbox manager")
 
         async def resize_terminal(
             self, workspace_id: str, terminal_id: str, *, rows: int, cols: int
         ):
             self.calls.append(("resize", workspace_id, terminal_id, rows, cols))
-            raise AssertionError("durably fenced resize reached the broker")
+            raise AssertionError("durably fenced resize reached the sandbox manager")
 
         async def delete_terminal(self, workspace_id: str, terminal_id: str):
             self.calls.append(("delete", workspace_id, terminal_id))
             return _terminal_session_descriptor(state="closed")
 
-    broker = Broker()
-    monkeypatch.setattr(broker_routing, "_client_for", lambda _host: broker)
+    sandbox_manager = SandboxManager()
+    monkeypatch.setattr(sandbox_manager_routing, "_client_for", lambda _host: sandbox_manager)
     app = _build_app(store)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         job_id = await _create_job(client)
@@ -3963,7 +3964,7 @@ async def test_retained_mutations_honor_thread_fence_even_through_a_settled_turn
     for response in (saved, command, wrote, resized):
         assert response.json()["detail"]["error"]["type"] == "workspace_not_ready"
     assert killed.status_code == 200
-    assert broker.calls == [("delete", job["thread_id"], "term_1")]
+    assert sandbox_manager.calls == [("delete", job["thread_id"], "term_1")]
 
 
 def _terminal_session_descriptor(*, state: str = "running") -> dict[str, Any]:
@@ -3991,7 +3992,7 @@ class _FiniteTerminalStream:
         self.closed = True
 
 
-class _TerminalSessionBroker:
+class _TerminalSessionSandboxManager:
     def __init__(self) -> None:
         self.calls: list[tuple[Any, ...]] = []
         self.suspended: set[str] = set()
@@ -4052,9 +4053,9 @@ class _TerminalSessionBroker:
     async def terminal_input(self, workspace_id: str, terminal_id: str, *, data: str):
         self.calls.append(("input", workspace_id, terminal_id, data))
         if workspace_id in self.suspended:
-            from cloud_agent.workspace_broker_client import WorkspaceBrokerError
+            from cloud_agent.sandbox_manager_client import SandboxManagerError
 
-            raise WorkspaceBrokerError(409, "workspace terminals are suspended")
+            raise SandboxManagerError(409, "workspace terminals are suspended")
         return _terminal_session_descriptor()
 
     async def resize_terminal(self, workspace_id: str, terminal_id: str, *, rows: int, cols: int):
@@ -4069,9 +4070,9 @@ class _TerminalSessionBroker:
 async def test_interactive_terminal_routes_proxy_owner_session_lifecycle(
     store: FakeStorage, monkeypatch
 ):
-    """The gateway keeps broker credentials private while proxying PTY controls."""
-    broker = _TerminalSessionBroker()
-    monkeypatch.setattr(broker_routing, "_client_for", lambda _host: broker)
+    """The gateway keeps sandbox manager credentials private while proxying PTY controls."""
+    sandbox_manager = _TerminalSessionSandboxManager()
+    monkeypatch.setattr(sandbox_manager_routing, "_client_for", lambda _host: sandbox_manager)
     app = _build_app(store)
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as local_client:
@@ -4102,7 +4103,7 @@ async def test_interactive_terminal_routes_proxy_owner_session_lifecycle(
     assert resized.json()["cols"] == 120
     assert killed.status_code == 200
     assert killed.json()["state"] == "closed"
-    assert broker.calls == [
+    assert sandbox_manager.calls == [
         ("create", workspace_id, 24, 80),
         ("list", workspace_id),
         ("input", workspace_id, "term_1", "bHMK"),
@@ -4111,11 +4112,11 @@ async def test_interactive_terminal_routes_proxy_owner_session_lifecycle(
     ]
 
 
-async def test_terminal_list_passes_the_brokers_advertised_limits_through(
+async def test_terminal_list_passes_the_sandbox_managers_advertised_limits_through(
     store: FakeStorage, monkeypatch
 ):
     """The browser checks these limits before asking, so it has to receive them."""
-    broker = _TerminalSessionBroker()
+    sandbox_manager = _TerminalSessionSandboxManager()
     advertised = {
         "terminals": [_terminal_session_descriptor()],
         "max_sessions": 2,
@@ -4123,11 +4124,11 @@ async def test_terminal_list_passes_the_brokers_advertised_limits_through(
     }
 
     async def list_terminals(workspace_id: str, *, profiling=None):
-        broker.calls.append(("list", workspace_id))
+        sandbox_manager.calls.append(("list", workspace_id))
         return advertised
 
-    monkeypatch.setattr(broker, "list_terminals", list_terminals)
-    monkeypatch.setattr(broker_routing, "_client_for", lambda _host: broker)
+    monkeypatch.setattr(sandbox_manager, "list_terminals", list_terminals)
+    monkeypatch.setattr(sandbox_manager_routing, "_client_for", lambda _host: sandbox_manager)
     app = _build_app(store)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         job_id = await _create_job(client)
@@ -4143,8 +4144,8 @@ async def test_terminal_controls_use_the_attached_session_capability(
     store: FakeStorage, monkeypatch
 ):
     """Attached PTY controls skip entitlement and never replay the event log."""
-    broker = _TerminalSessionBroker()
-    monkeypatch.setattr(broker_routing, "_client_for", lambda _host: broker)
+    sandbox_manager = _TerminalSessionSandboxManager()
+    monkeypatch.setattr(sandbox_manager_routing, "_client_for", lambda _host: sandbox_manager)
 
     async def unexpected_entitlement_recheck(**_kwargs):
         raise AssertionError("attached terminal controls must not call external entitlement")
@@ -4190,7 +4191,7 @@ async def test_terminal_controls_use_the_attached_session_capability(
     assert wrote.status_code == 200
     assert resized.status_code == 200
     assert killed.status_code == 200
-    assert broker.calls == [
+    assert sandbox_manager.calls == [
         ("input", workspace_id, "term_1", "eA=="),
         ("resize", workspace_id, "term_1", 30, 100),
         ("delete", workspace_id, "term_1"),
@@ -4201,8 +4202,8 @@ async def test_interactive_terminal_stream_is_relayed_byte_for_byte(
     store: FakeStorage, monkeypatch
 ):
     """Output and exit SSE frames cross the gateway without re-encoding."""
-    broker = _TerminalSessionBroker()
-    monkeypatch.setattr(broker_routing, "_client_for", lambda _host: broker)
+    sandbox_manager = _TerminalSessionSandboxManager()
+    monkeypatch.setattr(sandbox_manager_routing, "_client_for", lambda _host: sandbox_manager)
 
     async def unexpected_event_query(**_kwargs):
         raise AssertionError("attached terminal streams must not query lifecycle events")
@@ -4224,8 +4225,8 @@ async def test_interactive_terminal_stream_is_relayed_byte_for_byte(
         b'event: output\ndata: {"seq":1,"data":"aGk="}\n\n'
         b'event: exit\ndata: {"seq":2,"exit_code":0}\n\n'
     )
-    assert broker.calls == [("stream", workspace_id, "term_1", 7)]
-    assert broker.stream.closed is True
+    assert sandbox_manager.calls == [("stream", workspace_id, "term_1", 7)]
+    assert sandbox_manager.stream.closed is True
 
 
 class _EndlessTerminalStream:
@@ -4254,11 +4255,11 @@ async def test_a_live_terminal_stream_ends_at_the_owner_stream_cap_between_frame
 
     The relay stops after the cap, and only where a frame ends: the browser
     resumes after the last sequence it applied, and that request is admitted
-    again. The broker's stream is released.
+    again. The sandbox manager's stream is released.
     """
-    broker = _TerminalSessionBroker()
-    broker.stream = _EndlessTerminalStream()  # type: ignore[assignment]
-    monkeypatch.setattr(broker_routing, "_client_for", lambda _host: broker)
+    sandbox_manager = _TerminalSessionSandboxManager()
+    sandbox_manager.stream = _EndlessTerminalStream()  # type: ignore[assignment]
+    monkeypatch.setattr(sandbox_manager_routing, "_client_for", lambda _host: sandbox_manager)
     monkeypatch.setattr(agent_workspace, "OWNER_STREAM_MAX_S", 0.1)
     app = _build_app(store)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -4274,15 +4275,15 @@ async def test_a_live_terminal_stream_ends_at_the_owner_stream_cap_between_frame
     sequences = [json.loads(frame.split(b"data: ", 1)[1])["seq"] for frame in frames]
     assert sequences == list(range(1, len(frames) + 1))
     assert sequences, "frames before the cap are relayed"
-    assert broker.stream.closed is True
+    assert sandbox_manager.stream.closed is True
 
 
 async def test_full_terminal_lifecycle_is_available_while_agent_runs(
     store: FakeStorage, monkeypatch
 ):
     """PTY creation waits for checkout, then stays available during the run."""
-    broker = _TerminalSessionBroker()
-    monkeypatch.setattr(broker_routing, "_client_for", lambda _host: broker)
+    sandbox_manager = _TerminalSessionSandboxManager()
+    monkeypatch.setattr(sandbox_manager_routing, "_client_for", lambda _host: sandbox_manager)
     app = _build_app(store)
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as local_client:
@@ -4382,7 +4383,7 @@ async def test_full_terminal_lifecycle_is_available_while_agent_runs(
     assert listed.json() == {"terminals": [_terminal_session_descriptor()]}
     assert killed_once.json()["state"] == "closed"
     assert killed_twice.json()["state"] == "closed"
-    assert broker.calls == [
+    assert sandbox_manager.calls == [
         ("create", workspace_id, 24, 80),
         ("input", workspace_id, "term_1", "bHMK"),
         ("input", workspace_id, "term_1", "cHdkCg=="),
@@ -4397,8 +4398,8 @@ async def test_worker_suspends_terminals_around_protected_workspace_phases(
     store: FakeStorage, monkeypatch
 ):
     """Preparation and capture pause PTYs; execution and settled jobs resume them."""
-    broker = _TerminalSessionBroker()
-    monkeypatch.setattr(broker_routing, "_client_for", lambda _host: broker)
+    sandbox_manager = _TerminalSessionSandboxManager()
+    monkeypatch.setattr(sandbox_manager_routing, "_client_for", lambda _host: sandbox_manager)
     app = _build_app(store)
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as local_client:
@@ -4449,7 +4450,7 @@ async def test_worker_suspends_terminals_around_protected_workspace_phases(
     assert input_during_capture.status_code == 409
     assert finished.status_code == 200
     assert input_after_finish.status_code == 200
-    assert broker.calls == [
+    assert sandbox_manager.calls == [
         ("suspend_all", workspace_id, 1, job_id),
         ("resume_all", workspace_id, 1, job_id),
         ("input", workspace_id, "term_1", "eA=="),
@@ -4465,8 +4466,8 @@ async def test_settled_terminal_access_replays_durable_resume_after_restart(
     monkeypatch,
 ):
     """The first owner access repairs a persisted resume missed before restart."""
-    broker = _TerminalSessionBroker()
-    monkeypatch.setattr(broker_routing, "_client_for", lambda _host: broker)
+    sandbox_manager = _TerminalSessionSandboxManager()
+    monkeypatch.setattr(sandbox_manager_routing, "_client_for", lambda _host: sandbox_manager)
     app = _build_app(store)
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as local_client:
@@ -4477,7 +4478,7 @@ async def test_settled_terminal_access_replays_durable_resume_after_restart(
         response = await local_client.get(f"/v1/agent/jobs/{job_id}/terminals")
 
     assert response.status_code == 200
-    assert broker.calls == [
+    assert sandbox_manager.calls == [
         ("resume_settled", workspace_id, job_id),
         ("list", workspace_id),
     ]
@@ -4488,9 +4489,9 @@ async def test_worker_re_suspends_terminals_if_ready_event_loses_lease(
     store: FakeStorage,
     monkeypatch,
 ):
-    """A lease expiring during broker resume cannot expose background processes."""
-    broker = _TerminalSessionBroker()
-    monkeypatch.setattr(broker_routing, "_client_for", lambda _host: broker)
+    """A lease expiring during sandbox manager resume cannot expose background processes."""
+    sandbox_manager = _TerminalSessionSandboxManager()
+    monkeypatch.setattr(sandbox_manager_routing, "_client_for", lambda _host: sandbox_manager)
     app = _build_app(store)
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as local_client:
@@ -4519,7 +4520,7 @@ async def test_worker_re_suspends_terminals_if_ready_event_loses_lease(
 
     assert response.status_code == 409
     assert response.json()["detail"]["error"]["type"] == "lease_lost"
-    assert broker.calls == [
+    assert sandbox_manager.calls == [
         ("suspend_all", workspace_id, 1, job_id),
         ("resume_all", workspace_id, 1, job_id),
         ("suspend_all", workspace_id, 1, job_id),
@@ -4530,9 +4531,9 @@ async def test_worker_re_suspends_terminals_if_finish_loses_lease(
     store: FakeStorage,
     monkeypatch,
 ):
-    """A failed terminal transition compensates after broker resume."""
-    broker = _TerminalSessionBroker()
-    monkeypatch.setattr(broker_routing, "_client_for", lambda _host: broker)
+    """A failed terminal transition compensates after sandbox manager resume."""
+    sandbox_manager = _TerminalSessionSandboxManager()
+    monkeypatch.setattr(sandbox_manager_routing, "_client_for", lambda _host: sandbox_manager)
     app = _build_app(store)
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as local_client:
@@ -4562,7 +4563,7 @@ async def test_worker_re_suspends_terminals_if_finish_loses_lease(
 
     assert response.status_code == 409
     assert response.json()["detail"]["error"]["type"] == "lease_lost"
-    assert broker.calls == [
+    assert sandbox_manager.calls == [
         ("suspend_all", workspace_id, 1, job_id),
         ("resume_all", workspace_id, 1, job_id),
         ("suspend_all", workspace_id, 1, job_id),
@@ -4571,8 +4572,8 @@ async def test_worker_re_suspends_terminals_if_finish_loses_lease(
 
 async def test_terminal_readiness_uses_the_shared_group_barrier(store: FakeStorage, monkeypatch):
     """Owner PTYs open only after the durable shared workspace barrier clears."""
-    broker = _TerminalSessionBroker()
-    monkeypatch.setattr(broker_routing, "_client_for", lambda _host: broker)
+    sandbox_manager = _TerminalSessionSandboxManager()
+    monkeypatch.setattr(sandbox_manager_routing, "_client_for", lambda _host: sandbox_manager)
     app = _build_app(store)
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as local_client:
@@ -4593,10 +4594,10 @@ async def test_terminal_readiness_uses_the_shared_group_barrier(store: FakeStora
     assert blocked.status_code == 409
     assert blocked.json()["detail"]["error"]["type"] == "workspace_not_ready"
     assert ready.status_code == 200
-    assert broker.calls == [("create", workspace_id, 24, 80)]
+    assert sandbox_manager.calls == [("create", workspace_id, 24, 80)]
 
 
-async def test_terminal_routes_recheck_entitlement_before_contacting_broker(
+async def test_terminal_routes_recheck_entitlement_before_contacting_sandbox_manager(
     store: FakeStorage, monkeypatch
 ):
     """Owning a chat does not bypass current repository entitlement."""
@@ -4609,8 +4610,8 @@ async def test_terminal_routes_recheck_entitlement_before_contacting_broker(
     )
     _attach_shared_workspace(store, job["id"])
     job["state"] = "succeeded"
-    broker = _TerminalSessionBroker()
-    monkeypatch.setattr(broker_routing, "_client_for", lambda _host: broker)
+    sandbox_manager = _TerminalSessionSandboxManager()
+    monkeypatch.setattr(sandbox_manager_routing, "_client_for", lambda _host: sandbox_manager)
     app = _build_app(store)
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as local_client:
@@ -4621,14 +4622,14 @@ async def test_terminal_routes_recheck_entitlement_before_contacting_broker(
 
     assert response.status_code == 403
     assert response.json()["detail"]["error"]["type"] == "repo_not_allowed"
-    assert broker.calls == []
+    assert sandbox_manager.calls == []
 
 
-async def test_terminal_routes_report_missing_broker_and_workspace_as_conflicts(
+async def test_terminal_routes_report_missing_sandbox_manager_and_workspace_as_conflicts(
     store: FakeStorage, monkeypatch
 ):
-    """A retained chat reports missing broker/workspace as actionable conflicts."""
-    from cloud_agent.workspace_broker_client import WorkspaceBrokerError
+    """A retained chat reports missing sandbox manager/workspace as actionable conflicts."""
+    from cloud_agent.sandbox_manager_client import SandboxManagerError
 
     app = _build_app(store)
     transport = ASGITransport(app=app)
@@ -4636,30 +4637,30 @@ async def test_terminal_routes_report_missing_broker_and_workspace_as_conflicts(
         job_id = await _create_job(local_client)
         _attach_shared_workspace(store, job_id)
         store.jobs[job_id]["state"] = "succeeded"
-        monkeypatch.setattr(broker_routing, "_client_for", lambda _host: None)
-        missing_broker = await local_client.post(
+        monkeypatch.setattr(sandbox_manager_routing, "_client_for", lambda _host: None)
+        missing_sandbox_manager = await local_client.post(
             f"/v1/agent/jobs/{job_id}/terminals",
             json={"rows": 24, "cols": 80},
         )
 
-        class MissingWorkspaceBroker(_TerminalSessionBroker):
+        class MissingSandboxManager(_TerminalSessionSandboxManager):
             async def create_terminal(
                 self, workspace_id: str, *, rows: int, cols: int, profiling=None
             ):
-                raise WorkspaceBrokerError(404, "shared chat workspace is not materialized")
+                raise SandboxManagerError(404, "shared chat workspace is not materialized")
 
         monkeypatch.setattr(
-            broker_routing,
+            sandbox_manager_routing,
             "_client_for",
-            lambda _host: MissingWorkspaceBroker(),
+            lambda _host: MissingSandboxManager(),
         )
         missing_workspace = await local_client.post(
             f"/v1/agent/jobs/{job_id}/terminals",
             json={"rows": 24, "cols": 80},
         )
 
-    assert missing_broker.status_code == 409
-    assert missing_broker.json()["detail"]["error"]["type"] == "workspace_unavailable"
+    assert missing_sandbox_manager.status_code == 409
+    assert missing_sandbox_manager.json()["detail"]["error"]["type"] == "workspace_unavailable"
     assert missing_workspace.status_code == 409
     assert missing_workspace.json()["detail"]["error"]["type"] == "workspace_unavailable"
 
@@ -4764,8 +4765,8 @@ async def test_cancel_requeued_job_authoritatively_resumes_terminals(
     monkeypatch,
 ):
     """Cancellation must not strand sessions paused by an expired attempt."""
-    broker = _TerminalSessionBroker()
-    monkeypatch.setattr(broker_routing, "_client_for", lambda _host: broker)
+    sandbox_manager = _TerminalSessionSandboxManager()
+    monkeypatch.setattr(sandbox_manager_routing, "_client_for", lambda _host: sandbox_manager)
     app = _build_app(store)
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as local_client:
@@ -4776,7 +4777,7 @@ async def test_cancel_requeued_job_authoritatively_resumes_terminals(
 
     assert response.status_code == 200
     assert response.json()["state"] == "cancelled"
-    assert broker.calls == [("resume_settled", thread_id, job_id)]
+    assert sandbox_manager.calls == [("resume_settled", thread_id, job_id)]
     assert store.jobs[job_id]["terminal_resume_pending"] is False
 
 
@@ -4786,18 +4787,18 @@ async def test_cancel_reports_its_commit_when_the_workspace_host_cannot_be_reach
 ):
     """Stop answers with the cancel it committed, not with the host it could not reach.
 
-    The retained group's broker cannot be hydrated, so the terminals are not
+    The retained group's sandbox manager cannot be hydrated, so the terminals are not
     resumed now; the durable marker stays set for the reaper's next pass.
     """
-    from cloud_agent.workspace_broker_client import WorkspaceBrokerError
+    from cloud_agent.sandbox_manager_client import SandboxManagerError
 
-    broker = _TerminalSessionBroker()
+    sandbox_manager = _TerminalSessionSandboxManager()
 
     async def unreachable(_sandbox: dict[str, Any]) -> None:
-        raise WorkspaceBrokerError(503, "The shared chat supervisor is temporarily unavailable.")
+        raise SandboxManagerError(503, "The shared chat supervisor is temporarily unavailable.")
 
-    monkeypatch.setattr(broker, "register_shared_sandbox", unreachable)
-    monkeypatch.setattr(broker_routing, "_client_for", lambda _host: broker)
+    monkeypatch.setattr(sandbox_manager, "register_shared_sandbox", unreachable)
+    monkeypatch.setattr(sandbox_manager_routing, "_client_for", lambda _host: sandbox_manager)
     app = _build_app(store)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         job_id = await _create_job(client)
@@ -4808,7 +4809,7 @@ async def test_cancel_reports_its_commit_when_the_workspace_host_cannot_be_reach
     assert response.status_code == 200, response.text
     assert response.json()["state"] == "cancelled"
     assert response.json()["cancel_requested"] is True
-    assert broker.calls == []
+    assert sandbox_manager.calls == []
     assert store.jobs[job_id]["terminal_resume_pending"] is True, "left for the reaper"
 
 
@@ -5873,6 +5874,12 @@ class _FakeGitHubApp:
     async def token_for(self, repo: str, **kwargs: Any) -> str:
         return "ghs_x"
 
+    async def require_commit_on_branch(
+        self, repo: str, sha: str, *, branch: str | None = None
+    ) -> str:
+        """Every base is on its branch unless a test says otherwise."""
+        return branch or "main"
+
 
 def _store_with_grants(store: FakeStorage) -> FakeStorage:
     """Give the fake store the grant surface the router uses."""
@@ -6863,6 +6870,25 @@ async def test_reserved_base_ref_metadata_cannot_invent_a_branch(client: AsyncCl
     assert created.json()["metadata"] is None
 
 
+async def test_reserved_oncall_mark_cannot_be_claimed_by_an_owner(
+    client: AsyncClient, store: FakeStorage
+):
+    """Only the on-call door stamps the mark; an owner's copy is dropped."""
+    created = await client.post(
+        "/v1/agent/jobs",
+        json={
+            "repo": "owner/name",
+            "task_prompt": "fix it",
+            "model": "m",
+            "metadata": {"oncall": True, "ticket": "ABC-1"},
+        },
+    )
+
+    assert created.status_code == 201
+    assert created.json()["metadata"] == {"ticket": "ABC-1"}
+    assert store.jobs[created.json()["id"]]["metadata"] == {"ticket": "ABC-1"}
+
+
 async def test_an_unresolvable_branch_is_refused_at_creation(store: FakeStorage, monkeypatch):
     """Better a clear 400 than a job queued against a ref that does not exist."""
     monkeypatch.setenv("AGENT_REPO_ALLOWLIST", "owner/name")
@@ -6890,58 +6916,6 @@ async def test_an_unresolvable_branch_is_refused_at_creation(store: FakeStorage,
 
     assert created.status_code == 400
     assert "nope" in created.text
-
-
-@pytest.mark.parametrize("on_branch", [True, False])
-async def test_a_pinned_commit_must_be_on_the_branch_the_pr_will_target(
-    store: FakeStorage, monkeypatch, on_branch
-):
-    """The server checks the base_ref it records, even when the caller pinned the commit.
-
-    It used to store the caller's base_ref verbatim beside a caller's base_sha:
-    a tag, or a branch the commit is not on, then reached PR creation only
-    after the push.
-    """
-    monkeypatch.setenv("AGENT_REPO_ALLOWLIST", "owner/name")
-    from cloud_agent.api.deps import get_agent_app_credentials
-
-    asked: list[tuple[str, str, str]] = []
-
-    class PinnedApp(_FakeGitHubApp):
-        async def resolve_ref(self, repo: str, ref: str) -> str:
-            raise AssertionError("a pinned commit is not resolved again")
-
-        async def branch_contains(self, repo: str, branch: str, sha: str) -> bool:
-            asked.append((repo, branch, sha))
-            return on_branch
-
-    app = _build_app(_store_with_grants(store))
-    app.dependency_overrides[get_agent_app_credentials] = lambda: PinnedApp(
-        installations=[], repos_by_installation={}
-    )
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        created = await client.post(
-            "/v1/agent/jobs",
-            json={
-                "repo": "owner/name",
-                "task_prompt": "fix it",
-                "model": "m",
-                "base_ref": "release/1.2",
-                "base_sha": "c" * 40,
-            },
-        )
-
-    assert asked == [("owner/name", "release/1.2", "c" * 40)]
-    if on_branch:
-        assert created.status_code == 201
-        assert (created.json()["base_ref"], created.json()["base_sha"]) == (
-            "release/1.2",
-            "c" * 40,
-        )
-    else:
-        assert created.status_code == 400
-        assert "is not a branch of owner/name" in created.text
 
 
 @pytest.mark.parametrize(
@@ -6980,6 +6954,94 @@ async def test_a_base_ref_git_would_refuse_never_reaches_github(
     assert created.status_code == 422
     assert "base_ref" in created.text
     assert resolved == []
+
+
+class _HistoryApp(_FakeGitHubApp):
+    """Resolves every ref to ``resolved``; only ``on_branch`` is in branch history."""
+
+    def __init__(self, *, resolved: str, on_branch: set[str]) -> None:
+        super().__init__(installations=[], repos_by_installation={})
+        self.resolved = resolved
+        self.on_branch = on_branch
+        self.checked: list[tuple[str, str, str | None]] = []
+
+    async def resolve_ref(self, repo: str, ref: str) -> str:
+        return self.resolved
+
+    async def require_commit_on_branch(
+        self, repo: str, sha: str, *, branch: str | None = None
+    ) -> str:
+        from cloud_agent.github_app import CommitNotOnBranch
+
+        self.checked.append((repo, sha, branch))
+        if sha not in self.on_branch:
+            raise CommitNotOnBranch(f"commit {sha[:12]} is not in the history of branch 'main'")
+        return branch or "main"
+
+
+async def _create_with_history_app(
+    store: FakeStorage, monkeypatch, app_creds: _HistoryApp, **fields: str
+) -> Any:
+    monkeypatch.setenv("AGENT_REPO_ALLOWLIST", "owner/name")
+    from cloud_agent.api.deps import get_agent_app_credentials
+
+    app = _build_app(_store_with_grants(store))
+    app.dependency_overrides[get_agent_app_credentials] = lambda: app_creds
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        return await client.post(
+            "/v1/agent/jobs",
+            json={"repo": "owner/name", "task_prompt": "fix it", "model": "m", **fields},
+        )
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        # A named commit, with and without the branch it claims to come from.
+        {"base_sha": "c" * 40},
+        {"base_sha": "c" * 40, "base_ref": "dev"},
+        # A ref that resolves to such a commit is the same request.
+        {"base_ref": "refs/pull/5/head"},
+    ],
+)
+async def test_a_base_outside_the_repository_history_is_refused_at_creation(
+    store: FakeStorage, monkeypatch, fields
+):
+    """GitHub serves a fork's pull request head by hash; that is not this repository's history.
+
+    The publisher fetches the base by hash and pushes a branch built on it, so
+    a base the repository's branches do not contain would have the platform
+    push someone else's commits under its own name.
+    """
+    app_creds = _HistoryApp(resolved="c" * 40, on_branch={"f" * 40})
+    jobs_before = dict(store.jobs)
+
+    created = await _create_with_history_app(store, monkeypatch, app_creds, **fields)
+
+    assert created.status_code == 400, created.text
+    error = created.json()["detail"]["error"]
+    assert error["type"] == "invalid_request"
+    assert "not in the history of branch" in error["message"]
+    assert "base_ref" in error["message"]
+    assert app_creds.checked == [("owner/name", "c" * 40, fields.get("base_ref"))]
+    assert store.jobs == jobs_before
+
+
+@pytest.mark.parametrize(
+    "fields", [{"base_sha": "f" * 40}, {"base_sha": "f" * 40, "base_ref": "dev"}, {}]
+)
+async def test_a_base_on_its_branch_is_accepted_at_creation(
+    store: FakeStorage, monkeypatch, fields
+):
+    """Only a base that exists is checked, and one on its branch is kept as named."""
+    app_creds = _HistoryApp(resolved="f" * 40, on_branch={"f" * 40})
+
+    created = await _create_with_history_app(store, monkeypatch, app_creds, **fields)
+
+    assert created.status_code == 201, created.text
+    assert created.json()["base_sha"] == fields.get("base_sha")
+    expected = [("owner/name", "f" * 40, fields.get("base_ref"))] if fields else []
+    assert app_creds.checked == expected
 
 
 async def test_branches_are_only_listed_for_an_entitled_repo(store: FakeStorage, monkeypatch):
@@ -8617,7 +8679,7 @@ async def test_session_listing_exposes_stable_titles_facets_and_archive_state(
                     "archived_at": job["archived_at"],
                     "job": job,
                     "can_delete": False,
-                    "delete_block_reason": "session_active",
+                    "delete_block_reason": "fork_in_progress",
                 }
             ],
             "total": 51,
@@ -8642,7 +8704,7 @@ async def test_session_listing_exposes_stable_titles_facets_and_archive_state(
     body = response.json()
     assert body["sessions"][0]["title"] == "Stable conversation title"
     assert body["sessions"][0]["archived_at"] == body["sessions"][0]["job"]["archived_at"]
-    assert body["sessions"][0]["delete_block_reason"] == "session_active"
+    assert body["sessions"][0]["delete_block_reason"] == "fork_in_progress"
     assert body["total"] == 51 and body["next_cursor"] == "opaque-next-page"
     assert body["projects"] == [{"repo": "owner/name", "count": 51}]
     listing.assert_awaited_once_with(
@@ -8718,8 +8780,6 @@ async def test_session_mutations_use_explicit_owner_snapshot(
     ("error", "status"),
     [
         ("not_found", 404),
-        ("not_archived", 409),
-        ("session_active", 409),
         ("fork_in_progress", 409),
         ("publication_pending", 409),
     ],
@@ -8732,6 +8792,129 @@ async def test_session_delete_conflicts_have_actionable_types(
     response = await client.post("/v1/agent/sessions/delete", json={"thread_ids": ["athr_1"]})
     assert response.status_code == status
     assert response.json()["detail"]["error"]["type"] == error
+
+
+@pytest.mark.parametrize("manager_fails", [False, True])
+async def test_session_delete_revokes_and_closes_released_residencies(
+    store: FakeStorage, monkeypatch, manager_fails: bool
+):
+    """A deleted chat's credential ends now; its host is told to close the process."""
+    released = [
+        {"thread_id": "athr_1", "generation": 4, "host": "runner-a", "grant_id": "agr_1"},
+        {"thread_id": "athr_2", "generation": 2, "host": "runner-a", "grant_id": ""},
+    ]
+    delete = AsyncMock(
+        return_value={"thread_ids": ["athr_1", "athr_2"], "released_residencies": released}
+    )
+    monkeypatch.setattr(store, "delete_sessions", delete, raising=False)
+    monkeypatch.setattr(
+        store, "get_host", AsyncMock(return_value={"host": "runner-a"}), raising=False
+    )
+    manager = SimpleNamespace(
+        shared_residency_lost=AsyncMock(
+            side_effect=RuntimeError("unreachable") if manager_fails else None
+        )
+    )
+    monkeypatch.setattr(sandbox_manager_routing, "sandbox_manager_for_host", lambda host: manager)
+
+    class RecordingGrants(_FakeGrants):
+        def __init__(self) -> None:
+            super().__init__()
+            self.revoked: list[str] = []
+
+        async def revoke(self, grant_id: str) -> bool:
+            self.revoked.append(grant_id)
+            return True
+
+    grants = RecordingGrants()
+    app = _build_app(store)
+    from cloud_agent.api.deps import get_grant_client
+
+    app.dependency_overrides[get_grant_client] = lambda: grants
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/v1/agent/sessions/delete", json={"thread_ids": ["athr_1", "athr_2"]}
+        )
+    # The delete has committed; a host that cannot be reached now closes the
+    # process on its next residency heartbeat instead.
+    assert response.status_code == 200
+    assert response.json() == {"thread_ids": ["athr_1", "athr_2"]}
+    assert grants.revoked == ["agr_1"]
+    # Rows are closed concurrently, so only the set of calls is fixed.
+    assert sorted(manager.shared_residency_lost.await_args_list, key=lambda made: made.args[0]) == [
+        call("athr_1", generation=4),
+        call("athr_2", generation=2),
+    ]
+
+
+async def test_session_delete_does_not_wait_on_a_host_that_never_answers(
+    store: FakeStorage, monkeypatch
+):
+    """A silent host cannot hold the owner's delete open; its heartbeat finishes the close."""
+    from cloud_agent.application import residency
+
+    monkeypatch.setattr(residency, "RELEASED_RESIDENCY_CLOSE_TIMEOUT_S", 0.2)
+    released = [
+        {
+            "thread_id": f"athr_{index}",
+            "generation": 1,
+            "host": "runner-a",
+            "grant_id": f"agr_{index}",
+        }
+        for index in range(20)
+    ]
+    thread_ids = [row["thread_id"] for row in released]
+    monkeypatch.setattr(
+        store,
+        "delete_sessions",
+        AsyncMock(return_value={"thread_ids": thread_ids, "released_residencies": released}),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        store, "get_host", AsyncMock(return_value={"host": "runner-a"}), raising=False
+    )
+    never = asyncio.Event()
+
+    async def silent(thread_id: str, *, generation: int) -> dict:
+        await never.wait()
+        return {}
+
+    manager = SimpleNamespace(shared_residency_lost=AsyncMock(side_effect=silent))
+    monkeypatch.setattr(sandbox_manager_routing, "sandbox_manager_for_host", lambda host: manager)
+
+    class RecordingGrants(_FakeGrants):
+        def __init__(self) -> None:
+            super().__init__()
+            self.revoked: list[str] = []
+
+        async def revoke(self, grant_id: str) -> bool:
+            self.revoked.append(grant_id)
+            return True
+
+    grants = RecordingGrants()
+    app = _build_app(store)
+    from cloud_agent.api.deps import get_grant_client
+
+    app.dependency_overrides[get_grant_client] = lambda: grants
+    transport = ASGITransport(app=app)
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await asyncio.wait_for(
+            client.post("/v1/agent/sessions/delete", json={"thread_ids": thread_ids}),
+            timeout=5,
+        )
+    assert response.status_code == 200
+    assert response.json() == {"thread_ids": thread_ids}
+    # One deadline for the whole batch, not one per silent host.
+    assert loop.time() - started < 2
+    # Every grant is revoked even though no host ever answered and every close
+    # slot stayed taken; at most the bounded number of hosts was being waited on.
+    assert sorted(grants.revoked) == sorted(row["grant_id"] for row in released)
+    assert (
+        manager.shared_residency_lost.await_count == residency.RELEASED_RESIDENCY_CLOSE_CONCURRENCY
+    )
 
 
 @pytest.mark.parametrize("thread_ids", [[], [""], ["a", "a"], ["bad\x00id"], ["x" * 129]])

@@ -171,7 +171,9 @@ function record(overrides: Partial<MeasurementRecord> = {}): MeasurementRecord {
         stage: 'read',
         start_offset_us: 500,
         duration_us: 2000,
-        children: [{ stage: 'broker.fetch', duration_us: 1800, outcome: 'ok', source: 'broker' }],
+        children: [
+          { stage: 'sandbox_manager.fetch', duration_us: 1800, outcome: 'ok', source: 'broker' },
+        ],
       },
     ],
     facts: { request_kind: 'files.list' },
@@ -245,7 +247,7 @@ function control(overrides: Partial<ProfilingControlSnapshot> = {}): ProfilingCo
     budget_scope: 'producer_instance',
     budget_note: 'Each producer enforces its own operation budget.',
     sync_note:
-      'the configuration reaches the control plane, runners and brokers through a background ' +
+      'the configuration reaches the control plane, runners and sandbox managers through a background ' +
       'sync; allow up to 30 seconds for a change to take effect everywhere',
     operations: {
       selectable: {
@@ -281,7 +283,7 @@ function host(overrides: Partial<AgentRunnerHost> = {}): AgentRunnerHost {
     slots_total: 2,
     slots_used: 0,
     runner_version: '1.0.0',
-    broker_url: null,
+    sandbox_manager_url: null,
     last_heartbeat_at: '2026-09-21T10:00:00Z',
     sandbox_runtime: 'io.containerd.kata.v2',
     sandbox_image_digest: null,
@@ -565,8 +567,8 @@ describe('admin measurements page', () => {
     expect(within(read).getByText('2 ms')).toBeInTheDocument();
     expect(within(read).getByText('80%')).toBeInTheDocument();
     // Another process's duration sits under its stage, with no share of this one.
-    const fetch = within(timeline).getByText('Broker fetch').closest('tr')!;
-    expect(within(fetch).getByText(/broker/)).toBeInTheDocument();
+    const fetch = within(timeline).getByText('Sandbox Manager fetch').closest('tr')!;
+    expect(within(fetch).getByText('· Sandbox Manager')).toBeInTheDocument();
     expect(within(fetch).getByText('1.8 ms')).toBeInTheDocument();
     expect(fetch.querySelectorAll('td')[2]).toHaveTextContent('');
     expect(within(timeline).getByRole('rowheader', { name: 'Total' })).toBeInTheDocument();
@@ -633,9 +635,9 @@ describe('admin measurements page', () => {
           collection_complete: false,
           outcome: 'failed',
           failure_stage: 'sandbox.start',
-          missing_fragments: ['broker:call-2:sandbox.start'],
+          missing_fragments: ['sandbox_manager:call-2:sandbox.start'],
           missing_producers: ['broker'],
-          truncated_fragments: ['broker:call-1'],
+          truncated_fragments: ['sandbox_manager:call-1'],
           stages: [
             {
               stage: 'sandbox.start',
@@ -643,7 +645,7 @@ describe('admin measurements page', () => {
               duration_us: 2500,
               children: [
                 {
-                  stage: 'broker.wake',
+                  stage: 'sandbox_manager.wake',
                   duration_us: 900,
                   source: 'broker',
                   call_id: 'call-1',
@@ -662,13 +664,13 @@ describe('admin measurements page', () => {
     const notice = await screen.findByRole('alert');
     expect(within(notice).getByText(/Collection did not close/)).toBeInTheDocument();
     expect(within(notice).getByText(/Failed at stage “sandbox.start”/)).toBeInTheDocument();
-    expect(within(notice).getByText(/broker:call-1/)).toBeInTheDocument();
+    expect(within(notice).getByText(/sandbox_manager:call-1/)).toBeInTheDocument();
     expect(
-      within(notice).getByText(/never answered: broker:call-2:sandbox.start/),
+      within(notice).getByText(/never answered: sandbox_manager:call-2:sandbox.start/),
     ).toBeInTheDocument();
-    expect(within(notice).getByText(/never reported: broker/)).toBeInTheDocument();
+    expect(within(notice).getByText(/never reported: Sandbox Manager/)).toBeInTheDocument();
     const timeline = screen.getByRole('table', { name: 'Where the time went' });
-    const wake = within(timeline).getByText('Broker wake').closest('tr')!;
+    const wake = within(timeline).getByText('Sandbox Manager wake').closest('tr')!;
     expect(within(wake).getByText('Failed')).toBeInTheDocument();
     expect(within(wake).getByText('≥ 900 µs')).toHaveAttribute(
       'title',

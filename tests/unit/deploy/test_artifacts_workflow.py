@@ -629,7 +629,7 @@ def test_the_compose_job_pins_who_holds_the_docker_socket(tmp_path: Path) -> Non
     shipped = yaml.safe_load(HOST_STACK.read_text())
     passed = _check_rendered_stack(tmp_path, shipped)
     assert passed.returncode == 0, passed.stdout + passed.stderr
-    assert "held by runner and broker only" in passed.stdout
+    assert "held by runner and sandbox manager only" in passed.stdout
     assert "read-only" not in passed.stdout
 
     third = copy.deepcopy(shipped)

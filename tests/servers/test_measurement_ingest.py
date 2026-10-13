@@ -66,7 +66,7 @@ class _MeasurementStore:
 def _deployment_secrets(monkeypatch):
     """The signing secrets and the one entitled repository, as the route tests use."""
     monkeypatch.setenv("AGENT_CONTROL_TOKEN_SECRET", "api-test-secret")
-    monkeypatch.setenv("AGENT_WORKSPACE_BROKER_TOKEN", "api-test-broker-secret")
+    monkeypatch.setenv("AGENT_SANDBOX_MANAGER_TOKEN", "api-test-sandbox-manager-secret")
     monkeypatch.setenv("AGENT_SESSION_SECRET", "session-test-secret-32-bytes-minimum!")
     monkeypatch.setenv("AGENT_REPO_ALLOWLIST", "owner/name,o/n,private/repo")
 

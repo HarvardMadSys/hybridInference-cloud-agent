@@ -60,6 +60,7 @@ from cloud_agent_host.runtimes import (
 )
 from cloud_agent_host.sandbox import STATE_MOUNT_TARGET
 from cloud_agent_host.tool_windows import TOOL_MARK_FILE, hook_settings
+from cloud_agent_shared.event_payloads import subagent_owned
 from cloud_agent_shared.shared_protocol import (
     INPUT_PROCESS_GONE,
     INPUT_REFUSED,
@@ -69,7 +70,7 @@ from cloud_agent_shared.shared_protocol import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Iterator, Mapping
 
     from cloud_agent_host.sandbox import SandboxProcess
 
@@ -278,6 +279,29 @@ def _record_text(record: dict[str, Any]) -> str:
         for block in content
         if isinstance(block, dict) and block.get("type") == "text"
     )
+
+
+def _codex_error_text(message: str) -> str:
+    """Codex's error message without the request diagnostics it appends.
+
+    0.145.0 appends ``, url: <address>`` and then cf-ray, request id and auth
+    details to an HTTP error's message. The address is the sandbox's gateway
+    relay, which means nothing to the owner; the full error stays in the event.
+    """
+    return message.split(", url: ", 1)[0][:2000]
+
+
+def _http_agent_error_text(error: Any) -> str:
+    """Read an OpenCode/Kilo session error the way their own CLI prints it.
+
+    The error is ``{name, data: {message, ...}}`` (OpenCode 1.18.9, and Kilo's
+    fork of it): the message when there is one, otherwise the error's name.
+    """
+    if isinstance(error, dict):
+        data = error.get("data")
+        message = data.get("message") if isinstance(data, dict) else None
+        return str(message or error.get("name") or "session failed")
+    return str(error or "session failed")
 
 
 def user_message_event(pending: PendingInput, *, raw_line: str | None = None) -> HarnessEvent:
@@ -529,10 +553,7 @@ class HarnessTurn(Generic[_RuntimeT]):
         event = self._runtime.parse_event(line)
         if event is None:
             return HarnessEvent(LINE, raw_line=line)
-        parent_tool_use_id = (event.payload or {}).get("parent_tool_use_id")
-        if event.event_type == MESSAGE and not (
-            isinstance(parent_tool_use_id, str) and parent_tool_use_id
-        ):
+        if event.event_type == MESSAGE and not subagent_owned(event.payload):
             text = str((event.payload or {}).get("text", ""))
             if text.strip():
                 self._final_messages.append(text)
@@ -776,7 +797,7 @@ class _ProtocolReply:
 
 
 class _InputReceipt:
-    """One turn-local message-ID receipt shared by concurrent broker retries."""
+    """One turn-local message-ID receipt shared by concurrent sandbox manager retries."""
 
     def __init__(self) -> None:
         self._settled = threading.Event()
@@ -831,11 +852,21 @@ def _escaped_chars(text: str) -> int:
     return len(json.dumps(text)) - 2
 
 
-def _codex_raw_row(value: dict[str, Any], line: str) -> HarnessEvent:
-    """A Codex app-server notification stored as it came, for the trajectory."""
+def _codex_raw_row(
+    value: dict[str, Any], line: str, owner: Mapping[str, str] | None = None
+) -> HarnessEvent:
+    """A Codex app-server notification stored as it came, for the trajectory.
+
+    ``owner`` marks a subagent thread's notification as the subagent's.
+    """
     return HarnessEvent(
         RAW,
-        {"text": line[:4000], "protocol": "codex-app-server", "notification": value},
+        {
+            "text": line[:4000],
+            "protocol": "codex-app-server",
+            "notification": value,
+            **(owner or {}),
+        },
         raw_line=line,
     )
 
@@ -946,7 +977,7 @@ class _JsonResidentTurn(HarnessTurn[_LiveRuntimeT], Generic[_LiveRuntimeT]):
         # the stream reports the message taken whenever its answer arrives.
         self._steers: dict[str, PendingInput] = {}
         self._replies_lock = threading.Lock()
-        # The control plane may lose the broker's accepted response and replay
+        # The control plane may lose the sandbox manager's accepted response and replay
         # the same durable handoff after its lease expires.  One message ID is
         # one native steer for this exact turn, including concurrent retries.
         self._input_receipts: dict[str, _InputReceipt] = {}
@@ -1007,10 +1038,7 @@ class _JsonResidentTurn(HarnessTurn[_LiveRuntimeT], Generic[_LiveRuntimeT]):
             return [*flushed, reply]
         events = self._session.events_for_protocol_line(line, self)
         for event in events:
-            parent_tool_use_id = event.payload.get("parent_tool_use_id")
-            if event.event_type == MESSAGE and not (
-                isinstance(parent_tool_use_id, str) and parent_tool_use_id
-            ):
+            if event.event_type == MESSAGE and not subagent_owned(event.payload):
                 text = str(event.payload.get("text", ""))
                 if text.strip():
                     self._final_messages.append(text)
@@ -1148,7 +1176,7 @@ class _JsonResidentSession(HarnessSession[_LiveRuntimeT], Generic[_LiveRuntimeT]
         self._live_turn: _JsonResidentTurn[_LiveRuntimeT] | None = None
         self._request_sequence = 0
         self._prefetched: list[str] = []
-        # A mid-turn message is written from the broker's request thread while
+        # A mid-turn message is written from the sandbox manager's request thread while
         # the turn's own thread may be interrupting: one line at a time.
         self._request_lock = threading.Lock()
         self._write_lock = threading.Lock()
@@ -1183,7 +1211,7 @@ class _JsonResidentSession(HarnessSession[_LiveRuntimeT], Generic[_LiveRuntimeT]
             # Keep enough local diagnostics to distinguish a protocol crash
             # from an ordinary EOF.  The sandbox process already retains only
             # a bounded stderr tail; cap it again here because this exception
-            # crosses the broker boundary.  Agent credentials are supplied in
+            # crosses the sandbox manager boundary.  Agent credentials are supplied in
             # environment variables, never in the CLI's argv; the host's
             # ``docker exec`` names them without their values, which reach
             # the Docker client through its environment, not its argv (see
@@ -1339,6 +1367,35 @@ class CodexAppServerSession(_JsonResidentSession[CodexRuntime]):
 
     _PROVIDER = "hybridinference"
 
+    def __init__(
+        self,
+        driver: HarnessDriver[CodexRuntime],
+        context: LaunchContext,
+        *,
+        resume_session_id: str | None = None,
+    ) -> None:
+        super().__init__(driver, context, resume_session_id=resume_session_id)
+        # Each subagent thread's spawning call, as the spawn items name it.
+        # Kept for the process, whose threads outlive any one turn.
+        self._agent_calls: dict[str, str] = {}
+
+    def _thread_owner(self, params: dict[str, Any]) -> dict[str, str]:
+        """Mark a notification from another thread as that subagent's.
+
+        The pinned app-server sends every thread's notifications to this
+        client, its subagents' included. Those belong to the subagent.
+        """
+        thread = params.get("thread")
+        thread_id = params.get("threadId") or (
+            thread.get("id") if isinstance(thread, dict) else None
+        )
+        owner: dict[str, str] = {}
+        if isinstance(thread_id, str) and thread_id and thread_id != self.runtime.session_id:
+            owner["agent_thread_id"] = thread_id
+            if thread_id in self._agent_calls:
+                owner["parent_tool_use_id"] = self._agent_calls[thread_id]
+        return owner
+
     def _initialize_protocol(self) -> None:
         initialize_id = self._request_id("initialize")
         self._write_json(
@@ -1473,7 +1530,17 @@ class CodexAppServerSession(_JsonResidentSession[CodexRuntime]):
             or not isinstance(params.get("delta"), str)
         ):
             return None
-        return StreamDelta(value, ("params", "delta"), params["delta"], line, _codex_raw_row)
+        # A subagent's reasoning and output are merged as its own, never the
+        # conversation's. The thread is part of what is merged, so one merged
+        # row never spans two threads.
+        owner = self._thread_owner(params)
+        return StreamDelta(
+            value,
+            ("params", "delta"),
+            params["delta"],
+            line,
+            lambda merged, merged_line: _codex_raw_row(merged, merged_line, owner),
+        )
 
     def event_for_protocol_line(
         self, line: str, turn: _JsonResidentTurn[CodexRuntime]
@@ -1483,7 +1550,13 @@ class CodexAppServerSession(_JsonResidentSession[CodexRuntime]):
         if value is None:
             return HarnessEvent(LINE, raw_line=line)
         if value.get("error") is not None:
-            return HarnessEvent(ERROR, {"text": str(value["error"])[:2000]}, raw_line=line)
+            # A JSON-RPC error answer: {code, message}. Its message, not the
+            # Python spelling of the whole object.
+            error = value["error"]
+            message = error.get("message") if isinstance(error, dict) else None
+            return HarnessEvent(
+                ERROR, {"text": str(message or error)[:2000], "error": error}, raw_line=line
+            )
         method = str(value.get("method") or "")
         params = value.get("params")
         params = params if isinstance(params, dict) else {}
@@ -1494,7 +1567,27 @@ class CodexAppServerSession(_JsonResidentSession[CodexRuntime]):
         # identity. Trajectory can join deltas to this item without inventing a
         # provider request or attributing turn-wide usage to one reply.
         identity = {"native_item_id": str(item["id"])} if item.get("id") else {}
-        raw_notification = _codex_raw_row(value, line)
+        if (
+            item_type == "collabAgentToolCall"
+            and item.get("tool") == "spawnAgent"
+            and item.get("id")
+        ):
+            for receiver in item.get("receiverThreadIds") or []:
+                if isinstance(receiver, str) and receiver:
+                    self._agent_calls.setdefault(receiver, str(item["id"]))
+        owner = self._thread_owner(params)
+        raw_notification = _codex_raw_row(value, line, owner)
+        if method == "error" and params.get("willRetry") is not True and not owner:
+            # The error that fails the turn (0.145.0 sends it before the failed
+            # turn/completed); a retried one says ``willRetry`` and stays raw.
+            error = params.get("error")
+            message = error.get("message") if isinstance(error, dict) else None
+            if message:
+                return HarnessEvent(
+                    ERROR,
+                    {"text": _codex_error_text(str(message)), "error": error},
+                    raw_line=line,
+                )
         if method == "item/tool/requestUserInput":
             native_id = value.get("id")
             questions = _question_choices(params.get("questions"), dialect="codex")
@@ -1538,6 +1631,9 @@ class CodexAppServerSession(_JsonResidentSession[CodexRuntime]):
                 turn._forget_question(json.dumps(native_id))
             return raw_notification
         if method == "item/agentMessage/delta" and params.get("itemId"):
+            if owner:
+                # A subagent's text is not the conversation's answer.
+                return HarnessEvent(LINE, raw_line=line)
             # Batched rather than one stored notification per token.
             piece = turn.preview.add(str(params["itemId"]), str(params.get("delta") or ""))
             return (
@@ -1546,16 +1642,17 @@ class CodexAppServerSession(_JsonResidentSession[CodexRuntime]):
                 else HarnessEvent(LINE, raw_line=line)
             )
         if method == "item/completed" and item_type == "agentMessage":
-            preview = {"preview_id": str(item["id"])} if item.get("id") else {}
-            turn.preview.finish(preview.get("preview_id", ""))
+            preview = {"preview_id": str(item["id"])} if item.get("id") and not owner else {}
+            if preview:
+                turn.preview.finish(preview["preview_id"])
             return HarnessEvent(
                 MESSAGE,
-                {"text": str(item.get("text") or ""), **identity, **preview},
+                {"text": str(item.get("text") or ""), **identity, **preview, **owner},
                 raw_line=line,
             )
         if method == "item/completed" and item_type == "reasoning":
             text = "\n".join(str(value) for value in item.get("summary") or [])
-            return HarnessEvent(THINKING, {"text": text[:4000], **identity}, raw_line=line)
+            return HarnessEvent(THINKING, {"text": text[:4000], **identity, **owner}, raw_line=line)
         if method in {"item/started", "item/updated"} and item_type in {
             "commandExecution",
             "mcpToolCall",
@@ -1573,6 +1670,7 @@ class CodexAppServerSession(_JsonResidentSession[CodexRuntime]):
                     "name": item.get("tool") or item_type,
                     "id": item_id or None,
                     "input": item.get("command") or item.get("arguments"),
+                    **owner,
                 },
                 raw_line=line,
             )
@@ -1591,12 +1689,17 @@ class CodexAppServerSession(_JsonResidentSession[CodexRuntime]):
                         or ""
                     )[:4000],
                     "exit_code": exit_code,
+                    **owner,
                 },
                 raw_line=line,
             )
         if method in {"turn/diff/updated", "turn/diffUpdated"}:
-            return HarnessEvent(DIFF, {"text": str(params.get("diff") or "")[:4000]}, raw_line=line)
+            return HarnessEvent(
+                DIFF, {"text": str(params.get("diff") or "")[:4000], **owner}, raw_line=line
+            )
         if method == "turn/completed":
+            # A subagent's turn ending is not this turn's result; its usage
+            # still counts, so it stays a marked lifecycle record.
             completed = params.get("turn")
             return HarnessEvent(
                 LIFECYCLE,
@@ -1604,6 +1707,7 @@ class CodexAppServerSession(_JsonResidentSession[CodexRuntime]):
                     "phase": "result",
                     "status": completed.get("status") if isinstance(completed, dict) else None,
                     "usage": completed.get("usage") if isinstance(completed, dict) else None,
+                    **owner,
                 },
                 raw_line=line,
             )
@@ -1821,6 +1925,17 @@ class PiRpcSession(_JsonResidentSession[PiRuntime]):
         self, line: str, turn: _JsonResidentTurn[PiRuntime]
     ) -> HarnessEvent:
         """Normalize one Pi RPC protocol event for the active turn."""
+        value = self._object(line)
+        if (
+            value is not None
+            and value.get("type") == "response"
+            and value.get("id") == turn.protocol_turn_id
+            and value.get("success") is False
+        ):
+            # The prompt failed before it ran (0.73.1 answers this way only
+            # before preflight succeeds); later failures end in agent_end.
+            text = str(value.get("error") or "pi did not accept the prompt")
+            return HarnessEvent(ERROR, {"text": text[:2000]}, raw_line=line)
         event = self.runtime.parse_event(line)
         if event is None:
             return HarnessEvent(LINE, raw_line=line)
@@ -2111,19 +2226,25 @@ class HttpAgentLiveSession(_JsonResidentSession[ResidentLiveRuntime]):
                         raw_line=line,
                     )
                 if status in {"completed", "error"}:
+                    content = str(state.get("output") or state.get("error") or "")
+                    # A task's result is its subagent's whole answer, so only the
+                    # marked event bound applies to it. Other tools keep a short
+                    # preview that says it is one.
+                    clipped = part.get("tool") != "task" and len(content) > 4000
                     return HarnessEvent(
                         TOOL_RESULT,
                         {
                             "tool_use_id": call_id,
                             "is_error": status == "error",
-                            "content": str(state.get("output") or state.get("error") or "")[:4000],
+                            "content": content[:4000] if clipped else content,
+                            **({"truncated": True} if clipped else {}),
                         },
                         raw_line=line,
                     )
             if event_type == "session.error":
                 return HarnessEvent(
                     ERROR,
-                    {"text": str(properties.get("error") or "session failed")[:2000]},
+                    {"text": _http_agent_error_text(properties.get("error"))[:2000]},
                     raw_line=line,
                 )
             return HarnessEvent(RAW, {"text": line[:4000]}, raw_line=line)
@@ -2284,14 +2405,25 @@ class ClaudeCodeDriver(HarnessDriver[ClaudeCodeRuntime]):
 
 
 class ClaudeCodeLiveTurn(HarnessTurn[ClaudeCodeRuntime]):
-    """One turn on a resident process: borrows the shared stdout, ends at result."""
+    """One turn on a resident process: borrows the shared stdout, ends as ``claude -p`` would."""
 
-    def __init__(self, session: ClaudeCodeLiveSession, process: SandboxProcess) -> None:
+    def __init__(
+        self, session: ClaudeCodeLiveSession, process: SandboxProcess, *, prompt: str = ""
+    ) -> None:
         super().__init__(session, process)
         self._session: ClaudeCodeLiveSession = session
+        self._prompt = prompt
         self._saw_result = False
         self._error_result = False
         self._saw_api_retry = False
+        # Ending the turn the way the one-shot CLI ends its run (the pinned
+        # 2.1.220): it holds its result while a background agent runs, and a
+        # finished background task is answered in a turn Claude opens itself,
+        # whose result says ``origin: task-notification``.
+        self._prompt_read = False
+        self._answered = False
+        self._running_agents: set[str] = set()
+        self._unanswered: set[str] = set()
         # Tool calls the model made that have no result yet. Claude folds a
         # message written while one is running into this turn's next model
         # request; written at any other moment it opens a turn of its own.
@@ -2300,7 +2432,7 @@ class ClaudeCodeLiveTurn(HarnessTurn[ClaudeCodeRuntime]):
         # calls a tool, then written, then taken once the CLI echoes them.
         self._held: list[PendingInput] = []
         self._written: list[PendingInput] = []
-        # An accepted broker response can be lost after the CLI takes the
+        # An accepted sandbox manager response can be lost after the CLI takes the
         # message and removes it from ``_written``. Keep its ID for this turn
         # so a later durable replay returns the same receipt without writing it
         # to the native process a second time.
@@ -2342,13 +2474,63 @@ class ClaudeCodeLiveTurn(HarnessTurn[ClaudeCodeRuntime]):
             self._error_result = True
         return event
 
+    def _settles(self, line: str) -> bool:
+        """Whether this line ends the turn, as the one-shot CLI's run would end.
+
+        Not while a background agent is still running, and not before Claude
+        has answered a finished background task: the notification turn it then
+        opens comes after this turn's result, and read by the next turn it
+        would end that one with this one's answer. A notification turn read
+        before this turn's prompt was answered, left by a task that finished
+        between turns, does not end it either.
+        """
+        record = _json_object(line)
+        if record is None:
+            return False
+        kind = record.get("type")
+        if kind == "user" and record.get("isReplay") and self._prompt:
+            self._prompt_read = self._prompt_read or self._prompt in _record_text(record)
+        if kind == "system" and not record.get("parent_tool_use_id"):
+            subtype = record.get("subtype")
+            if subtype == "background_tasks_changed":
+                tasks = [task for task in record.get("tasks") or [] if isinstance(task, dict)]
+                listed = {str(task["task_id"]): task for task in tasks if task.get("task_id")}
+                self._session._background_tasks |= set(listed)
+                self._running_agents = {
+                    task_id
+                    for task_id, task in listed.items()
+                    if task.get("task_type") == "local_agent"
+                }
+            elif subtype == "task_notification":
+                task_id = str(record.get("task_id") or "")
+                # A stopped task gets no turn of its own; a foreground agent's
+                # notification is answered by its tool result.
+                if task_id in self._session._background_tasks and record.get("status") != "stopped":
+                    self._unanswered.add(task_id)
+            elif subtype == "init":
+                self._unanswered.clear()
+        if kind == "control_response" and self._cancelled and self._answered:
+            # An interrupt stops the background agents and opens no turn.
+            if self._running_agents:
+                self._session.retire_after_turn = True
+            return True
+        if kind != "result":
+            return False
+        origin = record.get("origin")
+        notification = isinstance(origin, dict) and origin.get("kind") == "task-notification"
+        self._answered = self._answered or not notification or self._prompt_read
+        if not self._answered or self._running_agents:
+            return False
+        return self._cancelled or not self._unanswered
+
     def raw_lines(self) -> Iterator[str]:
-        """This turn's slice of the shared stream, up to its result line."""
+        """This turn's slice of the shared stream, up to the line that settles it."""
         for line in self._session.shared_lines():
-            if self._runtime.turn_settled(line):
+            settles = self._settles(line)
+            if settles:
                 self._clear_questions()
             yield line
-            if self._runtime.turn_settled(line):
+            if settles:
                 self._saw_result = True
                 with self._input_lock:
                     self._input_closed = True
@@ -2560,10 +2742,11 @@ class ClaudeCodeLiveTurn(HarnessTurn[ClaudeCodeRuntime]):
         if kind == "result":
             with self._input_lock:
                 self._open_tool_uses.clear()
-                self._input_closed = True
-                # Held messages were never written: the turn answered without
-                # another tool call, so they wait and go as the next turn.
-                self._held.clear()
+                if self._answered:
+                    self._input_closed = True
+                    # Held messages were never written: the turn answered
+                    # without another tool call, so they go as the next turn.
+                    self._held.clear()
             return
         message = record.get("message")
         content = message.get("content") if isinstance(message, dict) else None
@@ -2656,7 +2839,7 @@ class ClaudeCodeLiveSession(HarnessSession[ClaudeCodeRuntime]):
         if context.state_dir is None:
             raise DriverError("a resident session needs a state mount")
         # Hook installation is an observability upgrade and must never cost a
-        # user their turn. The retained broker writes into the container's
+        # user their turn. The retained sandbox manager writes into the container's
         # Docker-owned state; tests and non-observing embeddings omit the seam.
         if context.install_tool_hooks is not None:
             try:
@@ -2689,6 +2872,9 @@ class ClaudeCodeLiveSession(HarnessSession[ClaudeCodeRuntime]):
         #: only meaningful once ``_process`` exists.
         self._reasoning_effort: str | None = None
         self._live_turn: ClaudeCodeLiveTurn | None = None
+        # Every task Claude has listed as running in the background. A shell
+        # can outlive the turn that started it, and its end still opens a turn.
+        self._background_tasks: set[str] = set()
         # The turn's prompt, an interrupt and a mid-turn message can come from
         # different threads; stdin takes them one whole line at a time.
         self._write_lock = threading.Lock()
@@ -2809,7 +2995,7 @@ class ClaudeCodeLiveSession(HarnessSession[ClaudeCodeRuntime]):
             # typed refusal, so the caller's fallback ladder catches it the
             # same way it catches every other driver refusal.
             raise DriverError(f"resident process is gone: {exc}") from exc
-        self._live_turn = ClaudeCodeLiveTurn(self, self._process)
+        self._live_turn = ClaudeCodeLiveTurn(self, self._process, prompt=turn_input.prompt)
         return self._live_turn
 
     def ensure_started(self, *, model: str, reasoning_effort: str | None) -> None:
@@ -2861,7 +3047,7 @@ class ClaudeCodeLiveSession(HarnessSession[ClaudeCodeRuntime]):
             # successful answer, then parent the next user to that error.
             # Resume follows that branch and loses the successful answer.
             # EOF at the result boundary prevents the stale parent update.
-            # Request EOF after broker settlement has recorded the native id.
+            # Request EOF after sandbox manager settlement has recorded the native id.
             # The supervisor then restores that id on the next turn; ordinary
             # turns keep their resident process.
             self.retire_after_turn = True

@@ -33,10 +33,10 @@
 | 能力 | 已有内容 | 尚缺内容 |
 | --- | --- | --- |
 | attempt.startup | runner claim 请求前至 prompt 交给 supervisor；四路径、内部阶段、可选采集、自动入库与完整性协议 | CP 排队、浏览器等待、模型首输出等完整用户边界；真实四路径线上基线 |
-| files.list / files.open | 独立 helper/stack/docker/live benchmark；环境范围明确的 baseline 文档；**CP 选择 + broker 阶段 + 响应片段透传** | 浏览器起点与内容可见终点、纯缓存命中的覆盖、真实整段开销实测 |
+| files.list / files.open | 独立 helper/stack/docker/live benchmark；环境范围明确的 baseline 文档；**CP 选择 + sandbox manager 阶段 + 响应片段透传** | 浏览器起点与内容可见终点、纯缓存命中的覆盖、真实整段开销实测 |
 | terminal.open | 终端现有业务流程；本清单中的边界设计；**list/create/stream 的共同操作身份（`measurement_id`）、PTY 阶段、流式片段的响应头回传** | 前端 xterm 可交互终点、buffer replay 与新输出的区分、首输出观察窗口 |
 | 共享采集器 | 默认关闭、run/期限/单进程预算、call ID、缺失与截断、有界异步导出；schema v3 通用记录与三类根操作 | 前端适配器、分布式名额分配 |
-| 分析与展示 | 结构化日志、可选 JSONL、Postgres、Admin API/UI、启动采集器微基准 | 三类线上基线与浏览器端到端报告；broker 完整采集开销实测 |
+| 分析与展示 | 结构化日志、可选 JSONL、Postgres、Admin API/UI、启动采集器微基准 | 三类线上基线与浏览器端到端报告；sandbox manager 完整采集开销实测 |
 
 服务端接入的落地位置、关闭路径不变性与明确未交付范围见
 [启动设计 §9.3](2026-09-14-sandbox-startup-measurement-design.zh-CN.md)。
@@ -73,7 +73,7 @@
 `AGENT_OPERATION_PROFILING_SINK` 时经**有界队列与后台线程**追加 JSONL；同一冻结
 记录另经有界队列进入 Postgres 与 Admin，JSONL 不是入库前提。目标过滤要求每个配置
 字段都匹配，未知字段直接拒绝该 run。
-broker 侧需要同样打开开关并校验继承的选择才会贡献内部阶段。记录按每次调用的
+sandbox manager 侧需要同样打开开关并校验继承的选择才会贡献内部阶段。记录按每次调用的
 call ID 判断完整性，并区分缺失、已应答但截断、正常复用而无需执行子阶段；完整协议
 见启动设计 §9.1。日志和 JSONL 都经同一有界后台队列发布。
 截止时间由 run descriptor 的绝对 `expires_at` 在首次读取时转成单调期限，服务重启
@@ -119,7 +119,7 @@ run admission 统一分配根操作名额，不能让每个 replica 各采 200 �
 - 前端关闭时不加载 profiler 模块，不注册 profiling 专用 PerformanceObserver、
   输出/按键监听器、timer 或 beacon；业务原有的 terminal/file 监听器照常运行。
 - 前端可用普通页面/session 配置中携带的实验描述开始测量，不为 off 状态新增配置轮询。
-  浏览器传来的开关/header 不能直接让 CP 或 broker 启动采集，服务端独立校验 run 和范围。
+  浏览器传来的开关/header 不能直接让 CP 或 sandbox manager 启动采集，服务端独立校验 run 和范围。
 - 服务间透传已授权的 run/operation 选择结果；各自再次校验有效期/本地开关，拒绝过期
   或未知实验。任何 producer 未开启都记为局部覆盖，不能显示完整端到端 trace。
 - 关掉主开关仅能承诺**新增 profiling 路径的开销接近零**，具体由验证确认，不能宣称
@@ -163,16 +163,16 @@ P0 是首批用户等待闭环；P1 是下一批协作、交互与结果交付�
 | --- | --- | --- | --- |
 | P0 | 新建沙盒、唤醒已有沙盒 | 发起需要 workspace 的操作 → 本次所需能力可用 | 调度、reservation、group/锁等待、create/start、网络、workspace、setup；用 trigger 区分 task/files/terminal/fork |
 | P0 | 打开/新建终端 | 点击入口 → 终端流连接且输入可用；首输出另记 | list/create/reattach、workspace wake、PTY spawn、前端 xterm 加载、流连接、输出解码与渲染 |
-| P0 | 打开 Files 面板/展开目录 | 点击 → 对应目录条目或确认的空目录可见 | 缓存、授权、broker、workspace wake、network check、exec、目录遍历/stat、JSON、渲染 |
+| P0 | 打开 Files 面板/展开目录 | 点击 → 对应目录条目或确认的空目录可见 | 缓存、授权、sandbox manager、workspace wake、network check、exec、目录遍历/stat、JSON、渲染 |
 | P0 | 打开文件 | 点击文件 → 对应文件内容可见 | 上述共享开销、读取、传输、文本处理/高亮/虚拟化；记录大小区间与是否截断 |
 | P0 | 提交第一轮/后续轮 | 点击发送 → 请求被接受；首活动和首文本分别记 | submission、queue、sandbox、resident new/resume/reuse、admission、prompt dispatch、事件送达/渲染 |
 | P0 | 打开或切换已有会话 | 点击会话 → 最新消息可见且 composer 状态确定 | metadata、历史事件加载、分页/解析、渲染、live stream 接入；历史首屏和追到当前进度分开 |
 | P0 | 停止任务 | 点击停止 → 停止请求被接受；实际执行停止另记 | CP cancel、heartbeat/通知送达、CLI interrupt、退出/turn boundary、清理/settle、UI 状态更新 |
 | P1 | 保存文件 | 点击保存 → 该次写入被服务端确认，UI 显示一致结果 | 写 admission、workspace wake、exec/write、响应、后续 refresh；保存确认不命名为 fsync durability |
-| P1 | 打开 Changes / Git diff | 打开面板 → 当前 diff 可查看 | broker、git status/diff/log、序列化、传输、diff 解析和渲染；区分变更文件数量/总字节 |
+| P1 | 打开 Changes / Git diff | 打开面板 → 当前 diff 可查看 | sandbox manager、git status/diff/log、序列化、传输、diff 解析和渲染；区分变更文件数量/总字节 |
 | P1 | workspace 变化可见 | 已知变更完成/refresh 触发 → Files/Changes 展示相应版本 | refresh 调度、debounce、请求、缓存失效、渲染；没有变更时钟/版本就只报告 refresh latency |
 | P1 | 终端持续交互 | input 提交 → PTY write；服务端输出 → 浏览器处理 | input batching、HTTP、队列/背压、PTY、output stream、xterm 处理；受控实验单测按键到回显 |
-| P1 | 断线重连 | 确认断线 → 重连成功并追到指定 cursor | reconnect backoff、auth、broker、buffer replay、实时恢复；terminal 和 agent stream 分开 |
+| P1 | 断线重连 | 确认断线 → 重连成功并追到指定 cursor | reconnect backoff、auth、sandbox manager、buffer replay、实时恢复；terminal 和 agent stream 分开 |
 | P1 | Fork | 点击 Fork → child 会话可用 | 幂等 reservation、group/member wait、native session fork、child CLI init、CP finalize、UI 导航；child 首轮另测 |
 | P1 | 结果发布 | workspace 达到可发布边界 → PR URL 可见 | snapshot queue、writer freeze、capture、thaw、publish queue、凭据、Git push、GitHub/GitLab API、UI 刷新 |
 | P2 | 登录与首屏 | 开始登录/打开应用 → 登录状态和任务列表可用 | OAuth 自身处理与用户停留分开、session exchange、config/models/projects 请求、浏览器加载/渲染 |
@@ -206,8 +206,8 @@ input HTTP 确认只能证明写入链路完成，不能证明字符已回显或
 
 ### 文件
 
-[文件 API](../../cloud_agent/api/routes.py) 会做 ownership、repo entitlement 与 broker
-解析。[broker](../../apps/backend/cloud_agent_host/workspace_broker.py) 为文件读取打开 workspace
+[文件 API](../../cloud_agent/api/routes.py) 会做 ownership、repo entitlement 与 sandbox manager
+解析。[sandbox manager](../../apps/backend/cloud_agent_host/sandbox_manager.py) 为文件读取打开 workspace
 operation、验证网络，再通过 [retained_workspace](../../apps/backend/cloud_agent_host/retained_workspace.py)
 在 guest 内执行固定 Python helper。文件读取的 wall time 包含容器 exec 和解释器启动；
 不能把 API 总耗时直接命名为磁盘 read latency。
@@ -252,7 +252,7 @@ milestones, spans, outcome, missing_reason, retries, sampling_probability
 operation 记录不能赋予读写或执行权限；终端和平台文件操作的资源也不能自动计入某个
 agent member 的 turn。现有 eBPF/resource measurement 用 link 关联，保持原有 scope。
 
-每个操作的 span 采用同一组公共名称：frontend-load、auth、DB/pool-wait、broker-RPC、
+每个操作的 span 采用同一组公共名称：frontend-load、auth、DB/pool-wait、sandbox-manager-RPC、
 group/lock-wait、sandbox-wake、exec、operation-work、serialization、render。按实际
 执行选择子阶段，不要求每个操作都跑一遍。已有 wake、新建沙盒和本轮 CLI 启动保持
 不同动作语义。
@@ -278,7 +278,7 @@ group/lock-wait、sandbox-wake、exec、operation-work、serialization、render�
 终端可交互不等于 shell 已完成 rc 文件或命令能够立即执行，shell-ready 仍按 §2 单独取证。
 
 实现时先把 operation_profiling.py 的选择、时钟、片段关联与 exporter 变成可由不同
-producer 调用的公共能力，保持单一实现。producer 由发起者传入，允许 runner、CP、broker；
+producer 调用的公共能力，保持单一实现。producer 由发起者传入，允许 runner、CP、sandbox manager；
 浏览器用相同契约的轻量适配器。公共记录使用 operation、outcome、failure_stage，
 startup_path 等只属于启动 facts；不得把文件返回成功写成 startup_outcome=dispatched。
 schema 升版，保留 #258 的 v1 读取兼容，不在同一 schema_version 下改变旧字段含义。
@@ -286,31 +286,31 @@ schema 升版，保留 #258 的 v1 读取兼容，不在同一 schema_version �
 
 **已实现**：schema v3（`outcome`、`producer`、`producers`、`timing_sources`、
 边界、coverage 与完整性）；
-`startup_outcome` 仅作为 `attempt.startup` 的 v1 别名保留；CP 与 broker 作为 producer
-接入，broker 片段经 `operation_call.py` 校验与应答。**未实现**：浏览器 producer 与其
+`startup_outcome` 仅作为 `attempt.startup` 的 v1 别名保留；CP 与 sandbox manager 作为 producer
+接入，sandbox manager 片段经 `operation_call.py` 校验与应答。**未实现**：浏览器 producer 与其
 轻量适配器（前端仍不上报，因此 browser 片段按缺失计）。
 
 ### 3.2 文件与终端的选择、关联和导出
 
-文件/终端入口走 CP 与 workspace broker，可能完全没有当前 agent attempt。
+文件/终端入口走 CP 与 sandbox manager，可能完全没有当前 agent attempt。
 job_id 用于验证工作区归属，不表示把此次操作归入该 job 的 agent 启动或资源窗口。
 
 1. 开启实验后，受认证的页面/session 配置下发最小实验描述，前端才加载 profiler。
    点击时记录本地起点和 interaction ID；关闭时不增加配置请求、监听器或上传。
 2. CP 在已有业务请求中执行服务端选择。依次完成原有认证、ownership、entitlement
-   和 broker/host 解析，再确认目标匹配；不得为 profiling 增加权限豁免或探测命令。
+   和 sandbox_manager/host 解析，再确认目标匹配；不得为 profiling 增加权限豁免或探测命令。
    先做开关/操作等廉价预过滤；目标信息尚不齐全时可暂存候选起点，只有身份与范围
    确认后才消费名额、形成样本。后置绑定不匹配即丢弃候选，不输出范围外记录。
 3. CP 为选中操作返回 measurement ID 与有期限的选择引用。一个 terminal.open 可包含
    list、create、stream 多个请求；后续请求继承同一选择，每次 RPC 生成独立 call ID。
    浏览器 ID 只用于关联，不能自行开启测量或声明 host、用户和 sandbox 归属。
-4. broker 同时校验本地开关、run、操作和继承期限，deadline 取本地与继承期限较早者。
+4. sandbox manager 同时校验本地开关、run、操作和继承期限，deadline 取本地与继承期限较早者。
    files/terminals 路由都要支持可选上下文；无效元数据仅停用采集，业务权限校验保持原样。
 5. 响应复用 #258 的 call ID 回声、profiling_recorded、profiling_truncated、stages。
    重试逐次登记；正常跳过是已应答且未截断；过期前收集的阶段继续保留。
    GET 文件和 SSE 流需设计可选 metadata/header 或旁路片段，不能更改文件内容、终端字节
    或把 PTY 原始输出作为测量数据。公共响应模型与客户端必须显式透传/消费 metadata，
-   避免 CP 的 response_model 把 broker 片段过滤掉。
+   避免 CP 的 response_model 把 sandbox manager 片段过滤掉。
 6. 浏览器和 CP 分别输出本地时长，用 measurement/interaction ID 关联；不把浏览器
    performance.now 与服务器单调时钟相减。缺浏览器样本时，服务端耗时仍可用，用户
    端到端覆盖标为不完整；纯 API 客户端只要求它声明的 server 范围。
@@ -319,7 +319,7 @@ job_id 用于验证工作区归属，不表示把此次操作归入该 job 的 a
    不阻塞用户打开文件或输入终端；上报入口的身份、run 和数据上限必须独立验证。
 
 **名额与纯缓存命中必须显式设计。** #258 的名额只在 runner 进程内生效；文件/终端
-扩展后由 CP 的根操作入口负责服务端名额，broker 子调用不再消费。单进程选择缓存须
+扩展后由 CP 的根操作入口负责服务端名额，sandbox manager 子调用不再消费。单进程选择缓存须
 有 TTL/数量上限，重试不重新抽样；在未实现共享 admission 前，实验 manifest 记录每个
 admission 实例的预算，不能宣称 fleet-wide 上限。首轮可在专用单 CP 实例上验证。
 **已实现的部分**：CP 根操作选择、服务端名额、有界 TTL 选择缓存、同名方法跳过与
@@ -332,19 +332,19 @@ admission 实例的预算，不能宣称 fleet-wide 上限。首轮可在专用�
 这些名额由 admission 从该 run 的预算预留并绑定会话；若后来发生 HTTP 请求，CP 校验并
 复用同一名额，不能再扣一份。刷新页面不能获得无限新名额；
 签发和校验方案是前端接入的一部分，未实现前只能声明 server 范围，不能承诺覆盖 cache hit。
-本地命中只要求 browser producer，不应报告缺失 CP/broker；发出网络请求后再要求相应片段。
+本地命中只要求 browser producer，不应报告缺失 CP/sandbox_manager；发出网络请求后再要求相应片段。
 
 ### 3.3 文件浏览/打开的具体接入
 
-实际调用顺序为 browser → CP → broker → supervisor.operation_opened() →
-网络验证 → retained file helper → CP 响应 → browser UI。operation_opened 在 broker
+实际调用顺序为 browser → CP → sandbox manager → supervisor.operation_opened() →
+网络验证 → retained file helper → CP 响应 → browser UI。operation_opened 在 sandbox manager
 内部，可能唤醒容器，不经过 runner.run_once()。
 
 | 位置 | 要记录的边界 |
 | --- | --- |
 | useWorkspaceFiles / WorkspaceFiles | 点击、目录缓存命中、request generation、响应接收、当前请求对应内容的 UI commit |
-| api/routes.py:get_agent_job_workspace_file | 选中请求的认证/归属与 entitlement、broker 解析、broker RPC、响应构造；框架发送完成若未观测则不命名为网络传输完成 |
-| WorkspaceBrokerClient.files / workspace_broker.py:files | 上下文与片段透传、工作区 admission、operation_opened、group 等待与容器 wake、network check |
+| api/routes.py:get_agent_job_workspace_file | 选中请求的认证/归属与 entitlement、sandbox manager 解析、sandbox manager RPC、响应构造；框架发送完成若未观测则不命名为网络传输完成 |
+| SandboxManagerClient.files / sandbox_manager.py:files | 上下文与片段透传、工作区 admission、operation_opened、group 等待与容器 wake、network check |
 | retained_workspace.read_retained_file / ChatSandboxManager.exec_capture | exec 总耗时、helper 执行、读取或目录遍历、返回字节/条目数量桶 |
 
 第一轮可把 docker exec + Python 启动 + read 作为可证实的组合阶段；如要再拆，需让
@@ -360,13 +360,13 @@ admission 实例的预算，不能宣称 fleet-wide 上限。首轮可在专用�
 
 一次 terminal.open 从用户意图开始，包含终端列表和前置 workspace-ready 等待。
 TerminalWorkspace 负责列出、新建、选择终端；TerminalPane 负责 xterm 和现有 SSE 流。
-相关 HTTP 入口是 /jobs/{job_id}/terminals、/{terminal_id}/stream，以及对应 broker 路由。
+相关 HTTP 入口是 /jobs/{job_id}/terminals、/{terminal_id}/stream，以及对应 sandbox manager 路由。
 
 | 位置 | 要记录的边界 |
 | --- | --- |
 | TerminalWorkspace / terminalRuntime | 点击、前置 ready 等待、list/create/reattach、模块加载冷/热、选中 terminal ID |
-| CP terminal API / WorkspaceBrokerClient | ownership/entitlement、broker 解析、每次 list/create/stream 请求与重试 |
-| workspace_broker.create_terminal / supervisor.terminal_opened | 工作区 admission、锁等待、容器 wake、network check、PTY/shell spawn、descriptor 返回 |
+| CP terminal API / SandboxManagerClient | ownership/entitlement、sandbox manager 解析、每次 list/create/stream 请求与重试 |
+| sandbox_manager.create_terminal / supervisor.terminal_opened | 工作区 admission、锁等待、容器 wake、network check、PTY/shell spawn、descriptor 返回 |
 | TerminalPane / stream 客户端 | xterm mounted、stream connected、input enabled、首条输出接收、xterm 写入回调；buffer replay 与新输出分开 |
 
 当前 stream 客户端需补可验证的连接建立回调；它来自对应请求的成功握手/流建立，
@@ -391,12 +391,12 @@ create 与 reattach 分开聚合；reattach 正常不生成 PTY-spawn 阶段，�
 | 终端新建、热复用/reattach、安静 shell、模块冷/热 | 正常跳过仍完整；首字节不是可交互的前提；首输出与 replay 单列 |
 | 文件/终端触发 stopped 容器 wake，并发共同等待 | 原操作包含全部等待，wake 因果关联；不重复累计共享执行成本 |
 | 调用失败后重试、应答 call ID 不匹配 | 每次物理调用独立，后一次成功不掩盖前一次缺失 |
-| 等锁时过期、broker 期限更短、阶段跨截止点 | 已应答但部分，保留先前阶段；空列表不能抹掉 skipped/truncated |
+| 等锁时过期、sandbox manager 期限更短、阶段跨截止点 | 已应答但部分，保留先前阶段；空列表不能抹掉 skipped/truncated |
 | exporter 队列满、线程启动失败、文件/日志阻塞、前端上传失败 | 有界丢样可见，业务不失败、不等待导出 |
 | browser 未回报或只有纯 API 调用 | 分别判断 browser/server 所需覆盖，不能把 server latency 标为点击到可用 |
 
 每类都要有真实业务路径的 on/off 对照；文件 helper 微基准与启动 recorder 微基准
-不能代替 CP → broker → 前端整段采集开销。完整结果需覆盖选中、失败、超时、部分与
+不能代替 CP → sandbox manager → 前端整段采集开销。完整结果需覆盖选中、失败、超时、部分与
 缺失的分母；不只展示最快的成功请求。
 
 ## 4. 统一报告四类结果
@@ -407,7 +407,7 @@ create 与 reattach 分开聚合；reattach 正常不生成 PTY-spawn 阶段，�
    后端成功但页面已离开的情况同时保留两个视角；不只统计成功返回的 HTTP 请求。
 3. **Freshness / continuity**：状态多久没更新、断线多久、恢复到哪个 cursor、数据是否
    过期/截断。输出长时间静默可能是模型或命令正常运行，不能仅凭字节间隔判定故障。
-4. **Pressure / overhead**：DB pool wait、broker queue/锁等待、线程池排队、host slots、
+4. **Pressure / overhead**：DB pool wait、sandbox manager queue/锁等待、线程池排队、host slots、
    CPU/memory/I/O 压力、stream buffer/丢弃量、每次操作的 Docker exec/inspect 数量。
    复用已有 host 快照；它是环境上下文，不是本次请求独占的资源账单。
 
@@ -436,7 +436,7 @@ create 与 reattach 分开聚合；reattach 正常不生成 PTY-spawn 阶段，�
 以及能跑通真实操作的验证**。下列步骤组织实现依赖，不要求每一步单独拆 PR：
 
 1. **启动切片（#258，已实现）**：保持 §0 的关闭快路径和启动片段回归；真实四路径基线
-   与 broker 自身开销仍待补，不因微基准通过就宣称启动已变快。
+   与 sandbox manager 自身开销仍待补，不因微基准通过就宣称启动已变快。
 2. **公共记录与 CP 接入（已实现）**：schema v3、CP 根操作选择与名额、选择缓存、
    交互关联、有界持久化与 Admin 读面。
 3. **文件和终端服务端接入（已实现）**：§3.3–§3.4 的后端阶段已实现并标为
@@ -456,7 +456,7 @@ workspace，不清生产缓存、不更改用户 shell，不向生产任务注�
 每次优化对照相同场景的 baseline/candidate，验证用户总等待和目标子阶段同步变化，
 保留失败/超时/缺失率及原始样本。实验回归门槛在第一轮基线后确定；长期 SLO 暂不纳入。
 已有 isolated
-helper benchmark 负责解释该层成本，完整产品路径需要浏览器与真实 broker/Kata 测试。
+helper benchmark 负责解释该层成本，完整产品路径需要浏览器与真实 sandbox_manager/Kata 测试。
 
 实施 PR 仍按仓库要求完成 `make check`、`make test-db` 及 web 类型/单测/构建检查。
 当前实现不包含浏览器终点，也不宣称三类端到端基线、缓存命中覆盖或线上优化结果；

@@ -72,7 +72,7 @@ export function NotificationSettings() {
   return (
     <section
       aria-labelledby="settings-notifications"
-      className="ui-card mt-6 rounded-2xl bg-surface p-4 sm:p-6"
+      className="ui-card mt-4 bg-surface p-3 sm:p-4"
     >
       <h2 id="settings-notifications" className="text-base font-semibold text-foreground">
         {t('settings.notifications.title')}

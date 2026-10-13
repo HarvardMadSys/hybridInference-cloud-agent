@@ -44,7 +44,7 @@ const terminalLifetime: HostSettingDefinition = {
   default: 28800,
   minimum: 60,
   maximum: 86400,
-  scope: 'broker',
+  scope: 'sandbox_manager',
 };
 
 const host: AgentRunnerHost = {
@@ -62,7 +62,7 @@ const host: AgentRunnerHost = {
   slots_total: 3,
   slots_used: 0,
   runner_version: null,
-  broker_url: null,
+  sandbox_manager_url: null,
   last_heartbeat_at: null,
   sandbox_runtime: null,
   sandbox_image_digest: null,

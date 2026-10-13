@@ -42,9 +42,9 @@ class ControlPlaneEndpoint(ComputeValue):
         address = ipaddress.IPv4Address(value)
         ranges = ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
         if not any(address in ipaddress.IPv4Network(network) for network in ranges):
-            raise ValueError("The broker requires the control-plane Docker bridge gateway")
+            raise ValueError("The sandbox manager requires the control-plane Docker bridge gateway")
         if address.is_multicast or address.is_link_local:
-            raise ValueError("The broker requires a private unicast Docker bridge gateway")
+            raise ValueError("The sandbox manager requires a private unicast Docker bridge gateway")
         return str(address)
 
 
@@ -87,7 +87,7 @@ _BLOCKERS = {
     "ssh_admission_blocked": "Existing SSH account or public-key restrictions do not admit the generated tunnel accounts",
     "ssh_conditional_policy": "An existing conditional SSH policy may block or widen tunnel access from future compute hosts",
     "ssh_reload_failed": "SSH could not reload the validated tunnel configuration",
-    "reverse_port_unavailable": "The selected broker reverse port is already in use on the control plane",
+    "reverse_port_unavailable": "The selected sandbox manager reverse port is already in use on the control plane",
     "setup_key_conflict": "This setup already has different tunnel keys; retry its saved configuration",
     "unsafe_key_file": "The SSH account's authorized_keys must be a regular file in a safe .ssh directory",
     "setup_failed": "Automatic tunnel setup failed; verify SSH sudo access and service prerequisites",
@@ -173,20 +173,22 @@ class SshTunnelSetup:
         reverse_port: int,
         setup_id: str,
     ) -> None:
-        """Authorize separate MCP/main keys and this Host's single broker reverse listener."""
+        """Authorize separate MCP/main keys and this Host's single sandbox manager reverse listener."""
         _validate_identity(setup_id, mcp_public_key)
         _validate_identity(setup_id, control_public_key)
         _validate_port(reverse_port)
         if reverse_port < 1024:
             raise ProviderError(
-                "setup_configuration", "The broker requires an unprivileged reverse port"
+                "setup_configuration", "The sandbox manager requires an unprivileged reverse port"
             )
         if mcp_public_key == control_public_key or endpoint.main_port == endpoint.mcp_port:
             raise ProviderError(
                 "setup_configuration", "Main API and MCP require separate keys and ports"
             )
         if reverse_port in {endpoint.main_port, endpoint.mcp_port}:
-            raise ProviderError("setup_configuration", "The broker needs a separate reverse port")
+            raise ProviderError(
+                "setup_configuration", "The sandbox manager needs a separate reverse port"
+            )
         await self._run(
             connection,
             {

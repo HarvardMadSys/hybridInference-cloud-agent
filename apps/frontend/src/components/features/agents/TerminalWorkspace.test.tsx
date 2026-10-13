@@ -143,7 +143,7 @@ describe('TerminalWorkspace', () => {
     vi.unstubAllGlobals();
   });
 
-  it('uses the broker session limit when deciding whether another terminal can open', async () => {
+  it('uses the sandbox manager session limit when deciding whether another terminal can open', async () => {
     vi.mocked(listAgentTerminals).mockResolvedValue({
       terminals: [terminal('term-1')],
       max_sessions: 1,
@@ -721,7 +721,7 @@ describe('TerminalWorkspace', () => {
     expect(screen.getByRole('application', { name: 'Terminal 1 terminal' })).toBeInTheDocument();
   });
 
-  it('asks the broker for a size it measured rather than a fixed 24x80', async () => {
+  it('asks the sandbox manager for a size it measured rather than a fixed 24x80', async () => {
     vi.mocked(listAgentTerminals).mockResolvedValue([]);
     vi.mocked(createAgentTerminal).mockResolvedValue(terminal('term-1'));
     vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(1200);
@@ -741,7 +741,7 @@ describe('TerminalWorkspace', () => {
     // Two waits were removed together and only one of them should have been.
     // The listing is not a precondition; workspace readiness is — there is no
     // container to open a PTY in until the job reports `workspace_ready`, and
-    // a create issued before then fails at the broker. A new conversation
+    // a create issued before then fails at the sandbox manager. A new conversation
     // starts in exactly this state.
     vi.mocked(listAgentTerminals).mockResolvedValue([]);
     vi.mocked(createAgentTerminal).mockResolvedValue(terminal('term-1'));
@@ -817,7 +817,7 @@ describe('TerminalWorkspace', () => {
     expect(deleteAgentTerminal).not.toHaveBeenCalled();
 
     // At the limit of one, the ended shell no longer blocks a new terminal,
-    // and makes way for it the same way the broker does.
+    // and makes way for it the same way the sandbox manager does.
     const create = screen.getByRole('button', { name: 'New terminal' });
     expect(create).toBeEnabled();
     fireEvent.click(create);
@@ -933,8 +933,8 @@ describe('TerminalWorkspace', () => {
     expect(writeAgentTerminalInput).toHaveBeenCalledTimes(2);
   });
 
-  it('takes the history boundary from the listing when the broker does not name it', async () => {
-    // A broker that predates the `attached` frame, with two events retained.
+  it('takes the history boundary from the listing when the sandbox manager does not name it', async () => {
+    // A sandbox manager that predates the `attached` frame, with two events retained.
     const first = { ...terminal('term-1'), last_seq: 2 };
     vi.mocked(listAgentTerminals).mockResolvedValue([first]);
     let live: ((seq: number) => void) | undefined;
@@ -970,7 +970,7 @@ describe('TerminalWorkspace', () => {
     vi.mocked(streamAgentTerminal).mockImplementation(async (_job, _terminal, opts) => {
       opts.onAttached?.({ seq: 1 });
       opts.onOutput({ seq: 1, data: btoa('$ ') });
-      // After a dropped connection the broker announces its newest event
+      // After a dropped connection the sandbox manager announces its newest event
       // again; what was produced meanwhile is late, not history.
       reconnect = () => {
         opts.onAttached?.({ seq: 3 });

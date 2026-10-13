@@ -125,7 +125,10 @@ async def test_proxy_streams_form_body_query_and_csrf_without_agent_credentials(
         f"{ROOT}/query_tool/run?sid=7&query=a%2Bb",
         headers={
             **ADMIN,
-            "Cookie": "cloud_agent_session=agent-secret; pga4_session=pgadmin-session; other=secret",
+            "Cookie": (
+                "cloud_agent_session=agent-secret; __Host-cloud_agent_session=agent-secret; "
+                "pga4_session=pgadmin-session; other=secret"
+            ),
             "X-pgA-CSRFToken": "csrf-proof",
             "X-Forwarded-User": "spoofed-admin",
             "X-Script-Name": "/spoofed",
@@ -173,6 +176,8 @@ async def test_cookie_scope_and_redirect_keep_the_public_proxy_prefix(database_a
     assert audit.record_admin_action.call_args.kwargs["actor_id"] == "admin-token"
 
 
+#: The proxy's framing policy, which every proxied page carries as well.
+FRAMING_POLICY = "frame-ancestors 'self'; object-src 'none'; base-uri 'self'"
 PGADMIN_ONLY = (
     f"connect-src {PUBLIC}/ wss://agents.example.org/agents/api{ROOT}/ blob: data:; "
     f"form-action {PUBLIC}/; frame-src {PUBLIC}/ blob: data:; worker-src {PUBLIC}/ blob:"
@@ -192,8 +197,12 @@ async def test_pgadmin_pages_cannot_reach_the_rest_of_the_shared_origin(database
     ]
     response = await client.get(f"{ROOT}/browser/", headers=ADMIN)
     assert response.status_code == status
-    # Both policies are enforced; pgAdmin's own is not replaced.
-    assert response.headers.get_list("content-security-policy") == [own, PGADMIN_ONLY]
+    # Every policy is enforced; pgAdmin's own is not replaced.
+    assert response.headers.get_list("content-security-policy") == [
+        own,
+        FRAMING_POLICY,
+        PGADMIN_ONLY,
+    ]
     assert response.headers.get_list("cross-origin-opener-policy") == ["same-origin"]
 
 
@@ -202,13 +211,13 @@ async def test_the_isolation_policy_follows_the_public_proxy_url(database_api, m
     monkeypatch.setenv("AGENT_PGADMIN_PUBLIC_URL", "http://localhost:3003/a;b,c/api" + ROOT)
     response = await client.get(f"{ROOT}/", headers=ADMIN)
     page = f"http://localhost:3003/a%3Bb%2Cc/api{ROOT}/"
-    assert response.headers["content-security-policy"] == (
+    assert response.headers.get_list("content-security-policy")[-1] == (
         f"connect-src {page} ws://localhost:3003/a%3Bb%2Cc/api{ROOT}/ blob: data:; "
         f"form-action {page}; frame-src {page} blob: data:; worker-src {page} blob:"
     )
     monkeypatch.setenv("AGENT_PGADMIN_PUBLIC_URL", "http://[::1]:3003/api" + ROOT)
     response = await client.get(f"{ROOT}/", headers=ADMIN)
-    assert response.headers["content-security-policy"] == (
+    assert response.headers.get_list("content-security-policy")[-1] == (
         "connect-src 'self' blob: data:; form-action 'self'; "
         "frame-src 'self' blob: data:; worker-src 'self' blob:"
     )
@@ -606,3 +615,43 @@ async def test_a_saved_url_without_the_bootstrap_slash_is_the_same_service(
     assert status.json()["setup_required"] is True
     assert (await client.post(SETUP, headers=ADMIN, json=CREDENTIALS)).status_code == 202
     assert (setup_volume / "email").read_text() == CREDENTIALS["email"]
+
+
+async def test_proxied_pages_cannot_be_framed_elsewhere_or_sniffed(database_api):
+    """pgAdmin keeps its own script policy; the proxy adds what cannot break it."""
+    client, _, result, _, _, _ = database_api
+    pgadmin_policy = "default-src ws: http: data: blob: 'unsafe-inline' 'unsafe-eval';"
+    result["headers"] = [
+        ("content-type", "text/html"),
+        ("content-security-policy", pgadmin_policy),
+        ("x-frame-options", "ALLOWALL"),
+        ("x-content-type-options", "sniff-away"),
+    ]
+    response = await client.get(f"{ROOT}/browser/", headers=ADMIN)
+    policies = response.headers.get_list("content-security-policy")
+    assert pgadmin_policy in policies
+    assert "frame-ancestors 'self'; object-src 'none'; base-uri 'self'" in policies
+    assert response.headers.get_list("x-frame-options") == ["SAMEORIGIN"]
+    assert response.headers.get_list("x-content-type-options") == ["nosniff"]
+
+
+async def test_the_first_request_of_a_pgadmin_session_is_audited_wherever_it_lands(
+    database_api,
+):
+    """The launch link opens the root, but a browser can enter at any URL."""
+    client, _, _, audit, _, _ = database_api
+    session = {**ADMIN, "Cookie": "pga4_session=pgadmin-session"}
+
+    await client.get(f"{ROOT}/browser/", headers=ADMIN)
+    await client.post(f"{ROOT}/login", headers=ADMIN, content=b"email=a")
+    await client.get(f"{ROOT}/browser/", headers=session)
+    await client.get(f"{ROOT}/", headers=session)
+
+    calls = [call.kwargs for call in audit.record_admin_action.await_args_list]
+    assert [call["action"] for call in calls] == ["agent.database.pgadmin.open"] * 3
+    assert [call["details"] for call in calls] == [
+        {"pgadmin_session": "new"},
+        {"pgadmin_session": "new"},
+        {"pgadmin_session": "existing"},
+    ]
+    assert all(call["actor_id"] == "admin-token" for call in calls)

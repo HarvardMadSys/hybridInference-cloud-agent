@@ -1,7 +1,7 @@
 """Lifecycle orchestration for export-only retained-sandbox S3 archives.
 
-Only the trusted workspace broker constructs this service.  A runner can ask
-for the one pre-prompt baseline over the broker API, and the shared-session
+Only the trusted sandbox manager constructs this service.  A runner can ask
+for the one pre-prompt baseline over the sandbox manager API, and the shared-session
 supervisor can hand it a stopped container for a final capture.  Neither path
 puts S3 credentials or an S3 client in the agent container.
 """
@@ -54,6 +54,13 @@ DEFAULT_ARCHIVE_OPERATION_TIMEOUT_S: Final = 12 * 60.0
 INITIAL_ARCHIVE_MARKER_FORMAT_VERSION: Final = 2
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _GIT_OBJECT_ID = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
+_ERROR_TYPE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
+
+
+def safe_archive_error_type(error: BaseException) -> str:
+    """Return a bounded class name without copying provider-controlled text."""
+    name = type(error).__name__
+    return name if _ERROR_TYPE.fullmatch(name) else "Error"
 
 
 class _BoundedBundleWriter:
@@ -213,7 +220,7 @@ class SandboxArchiveService:
 
     Final capture deliberately has no in-memory work queue. The stop hook
     returns only after S3 accepted the final object, so a successful clean stop
-    cannot silently lose an archive to queue pressure or a later broker
+    cannot silently lose an archive to queue pressure or a later sandbox manager
     shutdown. A small deadline-bounded semaphore applies backpressure
     *before* Docker starts copying bytes.
     """
@@ -304,7 +311,7 @@ class SandboxArchiveService:
         }
 
     def start(self) -> None:
-        """Allow archive captures before the broker accepts requests."""
+        """Allow archive captures before the sandbox manager accepts requests."""
         with self._lock:
             if self._closed or self._closing:
                 raise RuntimeError("sandbox archive service is closed")
@@ -693,7 +700,7 @@ class SandboxArchiveService:
     ) -> _BuiltArchive:
         self._check_deadline(deadline)
         # Membership is an admission-time fence, not durable archive identity.
-        # A replacement broker can reconstruct a stopped container before the
+        # A replacement sandbox manager can reconstruct a stopped container before the
         # control plane sends its full fork manifest, and retries must not
         # replace an otherwise identical archive with origin-only metadata.
         # The selected /agent-state payload still contains every runtime's
@@ -822,11 +829,11 @@ class SandboxArchiveService:
                 # S3's conditional-write 409 race. Retrying that exhausted
                 # result here would silently multiply the documented cap.
                 if is_sandbox_archive_conditional_conflict(exc):
-                    logger.exception(
+                    logger.error(
                         "initial sandbox archive conditional conflict exhausted",
                         extra={
                             "event": "sandbox_initial_archive_upload_failed",
-                            "error_type": type(exc).__name__,
+                            "error_type": safe_archive_error_type(exc),
                         },
                     )
                     raise SandboxError("initial sandbox archive could not be stored") from exc
@@ -835,12 +842,12 @@ class SandboxArchiveService:
                 except SandboxError:
                     raise SandboxError("initial sandbox archive operation timed out") from exc
                 if attempt == self._max_upload_attempts:
-                    logger.exception(
+                    logger.error(
                         "initial sandbox archive upload failed",
                         extra={
                             "event": "sandbox_initial_archive_upload_failed",
                             "attempts": attempt,
-                            "error_type": type(exc).__name__,
+                            "error_type": safe_archive_error_type(exc),
                         },
                     )
                     raise SandboxError("initial sandbox archive could not be stored") from exc
@@ -888,12 +895,12 @@ class SandboxArchiveService:
                 except SandboxError:
                     raise SandboxError("final sandbox archive operation timed out") from exc
                 if attempt == self._max_upload_attempts:
-                    logger.exception(
+                    logger.error(
                         "sandbox final archive upload failed",
                         extra={
                             "event": "sandbox_final_archive_upload_failed",
                             "attempts": attempt,
-                            "error_type": type(exc).__name__,
+                            "error_type": safe_archive_error_type(exc),
                         },
                     )
                     raise SandboxError("final sandbox archive could not be stored") from exc

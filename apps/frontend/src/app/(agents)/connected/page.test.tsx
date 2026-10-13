@@ -223,27 +223,37 @@ describe('AgentsConnectedPage', () => {
     expect(mockedConnectGitHub).toHaveBeenCalledTimes(2);
   });
 
-  // Anyone can link to this page with any query string. The heading is this
-  // app's, so the words under it have to be too.
-  it('explains a refusal in its own words, never the link’s', async () => {
-    navigation.search =
-      'provider=github&error=access_denied' +
-      '&error_description=Your+GitHub+token+leaked%3B+re-verify+at+github-verify.example';
+  it('words a provider error itself instead of repeating the link', async () => {
+    // Anyone can write this URL, description included.
+    navigation.search = new URLSearchParams({
+      provider: 'github',
+      error: 'access_denied',
+      error_description: 'Your GitHub account is locked. Call +1 555 0100 to unlock it.',
+    }).toString();
 
     render(<AgentsConnectedPage />);
 
-    expect(await screen.findByText('Access to GitHub was not granted.')).toBeInTheDocument();
-    expect(screen.queryByText(/github-verify\.example/)).not.toBeInTheDocument();
+    expect(
+      await screen.findByText('Access was cancelled or denied (access_denied).'),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Call \+1 555 0100/)).not.toBeInTheDocument();
     expect(mockedConnectGitHub).not.toHaveBeenCalled();
   });
 
-  it('does not echo an error code it does not recognize', async () => {
-    navigation.search = 'provider=gitlab&error=Call+support+at+%2B1-555-0100';
+  it('quotes an unknown provider error as unverified detail', async () => {
+    navigation.search = new URLSearchParams({
+      provider: 'gitlab',
+      error_description: 'Your session expired; sign in at evil.example',
+    }).toString();
 
     render(<AgentsConnectedPage />);
 
-    expect(await screen.findByText(/GitLab did not authorize the connection/)).toBeInTheDocument();
-    expect(screen.queryByText(/555-0100/)).not.toBeInTheDocument();
+    expect(
+      await screen.findByText(
+        'GitLab did not complete the authorization. Unverified detail from the redirect: ' +
+          '“Your session expired; sign in at evil.example”',
+      ),
+    ).toBeInTheDocument();
     expect(mockedConnectGitLab).not.toHaveBeenCalled();
   });
 

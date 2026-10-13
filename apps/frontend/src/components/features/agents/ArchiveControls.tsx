@@ -7,6 +7,13 @@ import { AGENT_SESSION_SELECTION_LIMIT } from '@/lib/api/agents';
 export const ARCHIVE_FOCUS =
   'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson/40 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-gray-900';
 
+/** Why the server refused to archive or delete a selected session. */
+export const SESSION_ERROR_KEYS = {
+  fork_in_progress: 'archive.forkInProgress',
+  publication_pending: 'archive.publicationPending',
+  not_found: 'archive.sessionNotFound',
+} as const;
+
 export function ArchiveIcon({
   name,
   className = 'h-4 w-4',

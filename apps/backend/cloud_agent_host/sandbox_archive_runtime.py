@@ -1,7 +1,7 @@
-"""Live, revision-fenced sandbox archive policy inside the workspace broker.
+"""Live, revision-fenced sandbox archive policy inside the sandbox manager.
 
 The control plane owns the policy in Postgres.  A host runner receives the
-complete desired revision on every heartbeat and relays it over the broker's
+complete desired revision on every heartbeat and relays it over the sandbox manager's
 authenticated private channel.  This controller is the stable lifecycle hook:
 the shared-session supervisor binds it once, while the controller atomically
 swaps the immutable S3 service behind that hook.
@@ -9,6 +9,12 @@ swaps the immutable S3 service behind that hook.
 An archive already in flight keeps the service it began with.  A failed final
 archive pins that same service for the exact stopped container, so a policy
 change cannot turn its retry into an unarchived successful stop.
+
+A lifecycle whose native history cannot be proven flushed (a crash, a reboot,
+a stop that bypassed the broker, or a failed transport close) is never
+archived. Its marker records an explicit ``skipped`` final instead, and the
+sandbox continues: resuming it relies on the ordinary native-resume checks,
+exactly as with archives disabled. The next clean stop archives normally.
 """
 
 from __future__ import annotations
@@ -26,8 +32,11 @@ from cloud_agent_host.sandbox_archive_s3 import (
     SandboxArchiveS3Config,
     SandboxArchiveS3Uploader,
 )
-from cloud_agent_host.sandbox_archives import SandboxArchiveService, SandboxInitialArchiveMarker
-from cloud_agent_shared.errors import SandboxArchiveBlocked
+from cloud_agent_host.sandbox_archives import (
+    SandboxArchiveService,
+    SandboxInitialArchiveMarker,
+    safe_archive_error_type,
+)
 from cloud_agent_shared.sandbox_archive_settings import (
     SANDBOX_ARCHIVE_BUCKET,
     SANDBOX_ARCHIVE_PREFIX,
@@ -35,6 +44,12 @@ from cloud_agent_shared.sandbox_archive_settings import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Final states that never upload. ``blocked`` is the pre-skip spelling written
+# by older brokers; it is read exactly like ``skipped`` so groups those brokers
+# quarantined finish their lifecycle and continue after an upgrade.
+_UNARCHIVED_FINAL_STATES = frozenset({"skipped", "blocked"})
+_COMPLETED_FINAL_STATES = frozenset({"uploaded"}) | _UNARCHIVED_FINAL_STATES
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -145,7 +160,7 @@ class _FinalArchiveMarker:
             or self.generation < 1
         ):
             raise ValueError("final archive marker generation is invalid")
-        if self.state not in {"pending", "uploaded", "blocked"}:
+        if self.state not in {"pending"} | _COMPLETED_FINAL_STATES:
             raise ValueError("final archive marker state is invalid")
         receipt_values = (
             self.object_key,
@@ -153,7 +168,7 @@ class _FinalArchiveMarker:
             self.archive_sha256,
             self.version_id,
         )
-        if self.state in {"pending", "blocked"}:
+        if self.state != "uploaded":
             if any(value is not None for value in receipt_values):
                 raise ValueError("non-uploaded final archive marker contains a receipt")
         else:
@@ -299,7 +314,7 @@ class SandboxArchiveController:
         """Build an uploader config for one pinned policy.
 
         Markers inside the sandbox omit credentials. A recovered upload uses
-        the access key the broker currently holds; the marker still chooses
+        the access key the sandbox manager currently holds; the marker still chooses
         the region, KMS key, owner and size limits.
         """
         current = self._policy
@@ -338,7 +353,7 @@ class SandboxArchiveController:
 
     @property
     def applied_revision(self) -> int | None:
-        """The exact desired revision this broker accepted."""
+        """The exact desired revision this sandbox manager accepted."""
         with self._condition:
             return None if self._policy is None else self._policy.revision
 
@@ -559,29 +574,36 @@ class SandboxArchiveController:
         """
         self._prepare_final_marker(spec, inspection, stopped=False)
 
-    def prepare_markerless_final_if_disabled(
+    def prepare_markerless_final(
         self,
         spec: ChatSandboxSpec,
         inspection: ChatSandboxInspection,
     ) -> bool:
-        """Fence a recovered markerless lifecycle only under explicit disabled policy.
+        """Fence a recovered markerless lifecycle so it can finish without upload.
 
         A running group normally has no final marker: ``complete_start`` removes
-        its start fail-stop fence.  After a broker restart, that absence is safe
-        to clean up only when the delivered policy explicitly disables archives.
-        Hold the policy lock through the durable marker write so a concurrent
-        enable cannot turn unknown native history into an enabled archive.
+        its start fail-stop fence.  After a sandbox manager restart, a reboot or a stop
+        that bypassed the broker, its native history is unknown. Under a
+        disabled policy this writes the ordinary disabled marker; under an
+        enabled one it writes an explicit ``skipped`` final, never an archive of
+        unknown history. Hold the policy lock through the durable marker write
+        so a concurrent enable cannot turn unknown native history into an
+        enabled archive.
 
         ``True`` means a durable marker now authorizes ordinary finalization.
-        ``False`` means the policy is enabled (or has not been delivered), so
-        the supervisor must quarantine the markerless group instead.
+        ``False`` means no policy has been delivered yet, so the supervisor must
+        keep the markerless group fenced until one arrives.
         """
         with self._condition:
             if self._closed or not self._started:
                 raise SandboxError("sandbox archive controller is not running")
             policy = self._policy
-            if policy is None or policy.enabled:
+            if policy is None:
                 return False
+            if policy.enabled:
+                # A markerless lifecycle has no prepare pin to release.
+                self._write_skipped_final(spec, inspection, policy, release_pin=False)
+                return True
             # Condition uses an RLock.  Keeping this outer acquisition while
             # the shared helper re-enters it freezes the disabled revision
             # until its marker is fsynced.
@@ -609,14 +631,25 @@ class SandboxArchiveController:
         )
 
     def invalidate_final(self, spec: ChatSandboxSpec, inspection: ChatSandboxInspection) -> None:
-        """Durably forbid archival when native history could not be flushed."""
-        key = (spec.sandbox_id, spec.generation, inspection.container_id)
+        """Durably skip this lifecycle's archive when native history was not flushed."""
         with self._condition:
             if self._closed or not self._started:
                 raise SandboxError("sandbox archive controller is not running")
             policy = self._policy
             if policy is None:
                 raise SandboxError("sandbox archive policy has not been delivered")
+        self._write_skipped_final(spec, inspection, policy)
+
+    def _write_skipped_final(
+        self,
+        spec: ChatSandboxSpec,
+        inspection: ChatSandboxInspection,
+        policy: SandboxArchivePolicy,
+        *,
+        release_pin: bool = True,
+    ) -> None:
+        """Record that this exact lifecycle finishes without a final archive."""
+        key = (spec.sandbox_id, spec.generation, inspection.container_id)
         marker = replace(
             _FinalArchiveMarker.create(
                 namespace=self._namespace,
@@ -624,7 +657,7 @@ class SandboxArchiveController:
                 inspection=inspection,
                 policy=policy,
             ),
-            state="blocked",
+            state="skipped",
         )
         writer = (
             self._manager.write_final_archive_marker
@@ -636,7 +669,17 @@ class SandboxArchiveController:
             marker.encode(),
             expected_container_id=inspection.container_id,
         )
-        self._release_final_pin(key)
+        # A pin left by an earlier prepare must not upload this lifecycle.
+        if release_pin:
+            self._release_final_pin(key)
+        logger.warning(
+            "sandbox final archive skipped: native history was not proven flushed",
+            extra={
+                "event": "sandbox_final_archive_skipped",
+                "sandbox_id": spec.sandbox_id,
+                "generation": spec.generation,
+            },
+        )
 
     def _prepare_final_marker(
         self,
@@ -666,12 +709,9 @@ class SandboxArchiveController:
                 != hashlib.sha256(self._namespace.encode("utf-8")).hexdigest()
             ):
                 raise SandboxError("final archive marker does not match the sandbox")
-            if existing.state == "blocked":
-                raise SandboxArchiveBlocked(
-                    "final archive is blocked by a prior native flush failure"
-                )
+        # An uploaded or skipped final completed the prior stopped lifecycle.
         replace_uploaded_history = bool(
-            stopped and existing is not None and existing.state == "uploaded"
+            stopped and existing is not None and existing.state in _COMPLETED_FINAL_STATES
         )
         added_pin = False
         services_to_close: list[_ArchiveService] = []
@@ -692,9 +732,9 @@ class SandboxArchiveController:
                 if policy.enabled and (current_slot is None or current_slot.policy != policy):
                     raise SandboxError("sandbox archive service does not match current policy")
 
-                # The uploaded marker completed the prior stopped lifecycle.
+                # The completed marker closed the prior stopped lifecycle.
                 # Starting the same container again needs a fresh fence under
-                # today's policy so a start fail-stop cannot reuse that receipt.
+                # today's policy so a start fail-stop cannot reuse that outcome.
                 if slot is not None:
                     self._final_pins.pop(key, None)
                     slot.pins.discard(key)
@@ -709,12 +749,12 @@ class SandboxArchiveController:
                 services_to_close = self._closable_locked()
                 self._condition.notify_all()
             elif existing is not None:
-                # A marker that made it to the broker-private filesystem is
-                # the durable revision fence. A replacement broker may see a
+                # A marker that made it to the sandbox-manager-private filesystem is
+                # the durable revision fence. A replacement sandbox manager may see a
                 # newer (or disabled) DB policy before it finishes stopping a
                 # running orphan; never overwrite the already-fsynced policy.
                 marker_policy = existing.policy
-                if existing.state == "uploaded":
+                if existing.state in _COMPLETED_FINAL_STATES:
                     return
                 if slot is not None and slot.policy != marker_policy:
                     raise SandboxError(
@@ -860,7 +900,7 @@ class SandboxArchiveController:
                 slot.active += 1
                 return slot
 
-        # No in-memory pin means this is recovery after broker restart. The
+        # No in-memory pin means this is recovery after sandbox manager restart. The
         # retained bridge says completion is pending; only the root-owned marker
         # may choose a policy. Never substitute the current DB revision.
         marker = _FinalArchiveMarker.decode(
@@ -877,11 +917,9 @@ class SandboxArchiveController:
             or marker.container_id != inspection.container_id
         ):
             raise SandboxError("final archive marker does not match the stopped sandbox")
-        if marker.state == "blocked":
-            raise SandboxArchiveBlocked("final archive is blocked by native flush failure")
         if not marker.policy.enabled:
             return None
-        if marker.state == "uploaded":
+        if marker.state in _COMPLETED_FINAL_STATES:
             return None
 
         with self._condition:
@@ -1009,10 +1047,13 @@ class SandboxArchiveController:
         for service in services:
             try:
                 service.close()
-            except Exception:
-                logger.exception(
+            except Exception as exc:
+                logger.error(
                     "retired sandbox archive service cleanup failed",
-                    extra={"event": "sandbox_archive_service_close_failed"},
+                    extra={
+                        "event": "sandbox_archive_service_close_failed",
+                        "error_type": safe_archive_error_type(exc),
+                    },
                 )
 
     def _all_slots_locked(self) -> list[_ServiceSlot]:

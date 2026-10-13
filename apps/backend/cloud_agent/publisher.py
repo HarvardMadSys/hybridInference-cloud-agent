@@ -37,6 +37,7 @@ from cloud_agent_shared.git.patch_gate import (
     validate_patch,
 )
 from cloud_agent_shared.git.source_archive import build_base_bundle
+from cloud_agent_shared.secret_redaction import secret_patterns
 
 logger = get_logger(__name__)
 
@@ -329,7 +330,9 @@ def _read_blob(repo: Path, sha: str, size: int) -> bytes:
     return completed.stdout
 
 
-def _validate_staged_blobs(repo: Path, blobs: list[_StagedBlob]) -> None:
+def _validate_staged_blobs(
+    repo: Path, blobs: list[_StagedBlob], known_secrets: dict[str, str] | None = None
+) -> None:
     """Reject new credentials in staged text or binary files before committing."""
     sizes = [_blob_size(repo, blob.sha) for blob in blobs]
     if sum(sizes) > MAX_CHANGED_BLOB_BYTES:
@@ -338,6 +341,20 @@ def _validate_staged_blobs(repo: Path, blobs: list[_StagedBlob]) -> None:
         )
     for blob, size in zip(blobs, sizes, strict=True):
         content = _read_blob(repo, blob.sha, size)
+        for name, value in (known_secrets or {}).items():
+            for pattern in secret_patterns(value):
+                if not pattern:
+                    continue
+                token = pattern.encode("utf-8")
+                if token not in content:
+                    continue
+                old_content = (
+                    _read_blob(repo, blob.base_sha, _blob_size(repo, blob.base_sha))
+                    if blob.base_sha
+                    else b""
+                )
+                if content.count(token) > old_content.count(token):
+                    raise PublishError(f"patch rejected: Secret {name} in {blob.path!r}")
         # Most files need no baseline read. A match requires checking the same
         # path's original object; deletion has no new blob and is never scanned.
         if not scan_blob_secrets(content):
@@ -366,6 +383,7 @@ def publish_patch(
     allow_workflow_changes: bool = False,
     include_base_bundle: bool = False,
     auth_env: dict[str, str] | None = None,
+    known_secrets: dict[str, str] | None = None,
 ) -> PublishResult:
     """Validate and publish one run's patch on its stable thread branch.
 
@@ -379,7 +397,9 @@ def publish_patch(
     ``.github/``. It defaults to False, and the platform never sets it: there
     is no release path, and the publish worker's token cannot push workflows.
     Actual staged files, including binary assets, are size-checked and scanned
-    for newly introduced credentials before committing or pushing.
+    for newly introduced credentials before committing or pushing;
+    ``known_secrets`` adds the values of the job's environment secrets to that
+    scan.
 
     Raises :class:`PublishError` with a reviewer-readable message on any gate
     violation or git failure.
@@ -449,7 +469,9 @@ def publish_patch(
         post = validate_change_set(staged.paths, staged.symlinks, staged.gitlinks)
         if not _gate_permits(post, allow_workflow_changes=allow_workflow_changes):
             raise PublishError(f"patch rejected after apply: {post.reason}")
-        _validate_staged_blobs(repo, staged.blobs)
+        _validate_staged_blobs(
+            repo, staged.blobs, **({"known_secrets": known_secrets} if known_secrets else {})
+        )
         gate = post
         _run_git(["commit", "--quiet", "--no-verify", "-m", commit_message], cwd=repo)
         commit_sha = _run_git(["rev-parse", "HEAD"], cwd=repo).strip()

@@ -419,7 +419,7 @@ Shared-live 只在能力门禁通过时启用。旧 retained container 不因为
 - 两个 member 同时执行与同时修改 workspace；
 - sibling credential、`/proc`、signal 与 local-control isolation；
 - `setsid`、double-fork、忽略 TERM 的 descendant cleanup；
-- Supervisor/runner/broker crash 与 lost-response reconciliation；
+- Supervisor/runner/sandbox_manager crash 与 lost-response reconciliation；
 - container OOM、unexpected exit 与 disk-pressure admission；
 - Kata/gVisor 或目标生产隔离后端；
 - snapshot ordering、external publication ambiguity 与 rollback；
@@ -435,7 +435,7 @@ Shared-live 只在能力门禁通过时启用。旧 retained container 不因为
 | Durable group/member/fork/snapshot 状态 | `cloud_agent/storage/store.py`、`migrations/` |
 | Shared Session Supervisor | `cloud_agent_host/shared_session_supervisor.py` |
 | Resident transport 与 native Fork | `cloud_agent_host/resident_transport.py`、`cloud_agent_host/drivers.py` |
-| Workspace 与 terminal broker | `cloud_agent_host/workspace_broker.py` |
+| Workspace 与 terminal sandbox manager | `cloud_agent_host/sandbox_manager.py` |
 | Runner claim/attempt | `cloud_agent_host/runner.py` |
 | Runtime 与沙盒执行 | `cloud_agent_host/runtimes.py`、`cloud_agent_host/sandbox.py` |
 | 资源采样 | `cloud_agent_host/resources.py` |

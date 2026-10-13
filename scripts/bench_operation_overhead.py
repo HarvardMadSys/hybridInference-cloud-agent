@@ -15,7 +15,7 @@ Two families, both on the real production path:
 Server-request operations (the default; ``--skip-server-ops`` turns them off)
     The real control-plane HTTP routes, served by ``cloud_agent.app.create_app()``
     over a real socket, against a real PostgreSQL database, with an in-process
-    broker stand-in in place of the host network:
+    sandbox manager stand-in in place of the host network:
 
     * ``files.list`` (root), ``files.list`` (subdirectory) and ``files.open``
       through ``GET /v1/agent/jobs/{job_id}/files``,
@@ -39,7 +39,7 @@ Cohorts, and what each one really is
     control-plane routes always call the collector seam, so there is no such
     configuration to deploy; for a server-request operation this cohort is
     measured on an *unmeasured sibling route* that walks the same authentication, ownership,
-    entitlement and broker chain (``PUT .../files`` for the file family,
+    entitlement and sandbox manager chain (``PUT .../files`` for the file family,
     ``POST .../terminals/{id}/resize`` for the terminal family). It is a floor
     reference for the request path, not the measured operation, and it is never
     used as the baseline for a budget verdict. For ``--startup`` it is the same
@@ -156,10 +156,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from cloud_agent import broker_routing, measurement_writer
+from cloud_agent import measurement_writer, sandbox_manager_routing
 from cloud_agent.operation_measurement import reset as reset_selections
 from cloud_agent_host import operation_call
 from cloud_agent_shared import operation_profiling
+from cloud_agent_shared.sandbox_manager_compat import SANDBOX_MANAGER_PRODUCER
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -184,16 +185,16 @@ BENCH_HOST_CREDENTIAL = "bench-overhead-credential-hash"
 BENCH_SANDBOX_ID = "asbx_overhead_bench"
 BENCH_CONTAINER_NAME = "bench-overhead-container"
 BENCH_IMAGE_DIGEST = "sha256:overhead-bench-image"
-BENCH_BROKER_URL = "http://bench-overhead-broker:8092"
+BENCH_SANDBOX_MANAGER_URL = "http://bench-overhead-sandbox-manager:8092"
 BENCH_RUNTIME_ID = "claude-code"
 BENCH_RUNTIME_VERSION = "2.1.220"
 BENCH_ADMIN_TOKEN = "bench-overhead-admin-token"
 BENCH_SESSION_SECRET = "bench-overhead-session-secret-32-bytes-minimum"
 BENCH_CONTROL_TOKEN_SECRET = "bench-overhead-control-token-secret"
-BENCH_BROKER_TOKEN = "bench-overhead-broker-token"
+BENCH_SANDBOX_MANAGER_TOKEN = "bench-overhead-sandbox-manager-token"
 BENCH_GATEWAY_ISSUER = "https://bench-gateway.example"
 
-#: The terminal id the broker stand-in answers with. The route validates ids
+#: The terminal id the sandbox manager stand-in answers with. The route validates ids
 #: against ``^term_[A-Za-z0-9_-]{1,80}$``.
 BENCH_TERMINAL_ID = "term_bench_overhead"
 
@@ -221,12 +222,12 @@ OPERATION_FAMILIES: dict[str, str] = {
     "terminal.stream_attach": "terminals",
 }
 
-#: The two unmeasured sibling routes the bare analogue uses, with the broker
+#: The two unmeasured sibling routes the bare analogue uses, with the sandbox manager
 #: call each one makes. Both walk the same authentication, ownership,
-#: entitlement and broker-resolution chain as the measured routes.
+#: entitlement and sandbox-manager-resolution chain as the measured routes.
 BARE_ANALOGUES: dict[str, str] = {
-    "files": "PUT /files (write route -> broker.write_file)",
-    "terminals": "POST /terminals/{id}/resize (-> broker.resize_terminal)",
+    "files": "PUT /files (write route -> sandbox manager.write_file)",
+    "terminals": "POST /terminals/{id}/resize (-> sandbox manager.resize_terminal)",
 }
 
 #: Server-operation run set: the three root operations the control plane selects.
@@ -440,14 +441,14 @@ async def _postgres_measurement_footprint(pool: asyncpg.Pool, run_id: str) -> di
 
 
 # --------------------------------------------------------------------------
-# the broker stand-in
+# the sandbox manager stand-in
 # --------------------------------------------------------------------------
 
 
-class BenchBroker:
-    """A broker that answers the measurement protocol exactly as the real one does.
+class BenchSandboxManager:
+    """A sandbox manager that answers the measurement protocol exactly as the real one does.
 
-    It reuses the broker's own :func:`operation_call.open_call`, so the fragment
+    It reuses the sandbox manager's own :func:`operation_call.open_call`, so the fragment
     handshake under test is the production one and not a second implementation:
     the control plane offers a selection, this validates it against the same
     switch and run the route used, and the answer carries the call id it belongs
@@ -470,8 +471,8 @@ class BenchBroker:
         """Accept the manifest re-registration a shared workspace request makes."""
         return None
 
-    def _open(self, context: Any, *operations: str) -> operation_call.BrokerCall:
-        """Validate the inherited selection the way the broker route does."""
+    def _open(self, context: Any, *operations: str) -> operation_call.SandboxManagerCall:
+        """Validate the inherited selection the way the sandbox manager route does."""
         call = operation_call.open_call(context, operations=operations)
         with call.stage("admission"):
             pass
@@ -541,10 +542,10 @@ class BenchBroker:
         after: int,
         profiling: dict[str, Any] | None = None,
     ) -> Any:
-        """Answer a stream attach in headers, the way the broker's SSE route does."""
+        """Answer a stream attach in headers, the way the sandbox manager's SSE route does."""
         import httpx
 
-        from cloud_agent.workspace_broker_client import WorkspaceBrokerStream
+        from cloud_agent.sandbox_manager_client import SandboxManagerStream
 
         self.calls.append({"op": "stream_terminal", "workspace_id": workspace_id})
         call = self._open(profiling, "terminal.open")
@@ -552,7 +553,7 @@ class BenchBroker:
         with call.stage("stream_attach"):
             pass
         response = httpx.Response(200, headers=call.headers(), stream=httpx.ByteStream(b""))
-        return WorkspaceBrokerStream(
+        return SandboxManagerStream(
             _ClosedClient(),
             response,
             profiling_answer=operation_profiling.answer_from_headers(response.headers),
@@ -567,14 +568,14 @@ class _ClosedClient:
         return None
 
 
-def install_broker(broker: BenchBroker) -> None:
-    """Point every resolved broker at the stand-in, as the route tests do."""
-    broker_routing._client_for = lambda _host: broker  # type: ignore[assignment]
+def install_sandbox_manager(sandbox_manager: BenchSandboxManager) -> None:
+    """Point every resolved sandbox manager at the stand-in, as the route tests do."""
+    sandbox_manager_routing._client_for = lambda _host: sandbox_manager  # type: ignore[assignment]
 
 
-def uninstall_broker(original: Any) -> None:
-    """Restore the real broker factory."""
-    broker_routing._client_for = original  # type: ignore[assignment]
+def uninstall_sandbox_manager(original: Any) -> None:
+    """Restore the real sandbox manager factory."""
+    sandbox_manager_routing._client_for = original  # type: ignore[assignment]
 
 
 # --------------------------------------------------------------------------
@@ -663,7 +664,7 @@ class BenchSession:
     pool: Any
     url: str
     client: Any
-    broker: BenchBroker
+    sandbox_manager: BenchSandboxManager
     db_config: dict[str, Any]
     job_id: str
     thread_id: str
@@ -731,7 +732,7 @@ def _open_session_environment(config: dict[str, Any], args: argparse.Namespace) 
             "ADMIN_TOKEN": BENCH_ADMIN_TOKEN,
             "AGENT_SESSION_SECRET": BENCH_SESSION_SECRET,
             "GATEWAY_ISSUER": BENCH_GATEWAY_ISSUER,
-            "AGENT_WORKSPACE_BROKER_TOKEN": BENCH_BROKER_TOKEN,
+            "AGENT_SANDBOX_MANAGER_TOKEN": BENCH_SANDBOX_MANAGER_TOKEN,
             "AGENT_REPO_ALLOWLIST": BENCH_REPO,
             "AGENT_OPERATION_PROFILING_ENABLED": "",
         }
@@ -772,7 +773,7 @@ async def _seed_workspace_rows(storage: Any) -> dict[str, Any]:
         host=BENCH_HOST,
         capabilities=capabilities,
         sandbox_image_digest=BENCH_IMAGE_DIGEST,
-        broker_url=BENCH_BROKER_URL,
+        sandbox_manager_url=BENCH_SANDBOX_MANAGER_URL,
     )
     if online is None:  # pragma: no cover - fixture failure
         raise RuntimeError("the benchmark host did not come online")
@@ -873,7 +874,7 @@ async def _open_session(config: dict[str, Any], args: argparse.Namespace) -> Ben
         pool=pool,
         url=url,
         client=client,
-        broker=BenchBroker(),
+        sandbox_manager=BenchSandboxManager(),
         db_config=config,
         storage=storage,
         tempdir=tempfile.TemporaryDirectory(prefix="operation-overhead-bench-"),
@@ -1078,8 +1079,8 @@ async def _run_server_cohort(
     )
     writer = measurement_writer.MeasurementWriter()
     measurement_writer.reset_writer(writer)
-    original_broker = broker_routing._client_for
-    install_broker(session.broker)
+    original_sandbox_manager = sandbox_manager_routing._client_for
+    install_sandbox_manager(session.sandbox_manager)
     storage = session.storage
     view: Any = DestinationStorage(storage, destination) if destination is not None else storage
     _install_storage_override(session, view)
@@ -1141,7 +1142,7 @@ async def _run_server_cohort(
         operation_profiling.close_sink()
     finally:
         _install_storage_override(session, storage)
-        uninstall_broker(original_broker)
+        uninstall_sandbox_manager(original_sandbox_manager)
 
     # The bare and off cohorts have no collector call at all, so they owe no
     # records; the instrumented cohorts owe one per measured request.
@@ -1399,8 +1400,8 @@ async def _run_slow_database_arm(session: BenchSession, args: argparse.Namespace
     )
     writer = measurement_writer.MeasurementWriter()
     measurement_writer.reset_writer(writer)
-    original_broker = broker_routing._client_for
-    install_broker(session.broker)
+    original_sandbox_manager = sandbox_manager_routing._client_for
+    install_sandbox_manager(session.sandbox_manager)
     _install_storage_override(session, session.storage)
     samples: dict[str, list[int]] = {label: [] for label, _ in SERVER_OPERATIONS}
     lock = await _acquire_table_lock(session.db_config)
@@ -1441,7 +1442,7 @@ async def _run_slow_database_arm(session: BenchSession, args: argparse.Namespace
     await writer.shutdown(timeout_s=10.0)
     operation_profiling.close_sink()
     _install_storage_override(session, session.storage)
-    uninstall_broker(original_broker)
+    uninstall_sandbox_manager(original_sandbox_manager)
     sink_records, sink_bytes = _sink_record_count(sink_path)
     return {
         "synthetic": True,
@@ -1803,7 +1804,7 @@ def _activate_once(
 
     Everything the startup pays for is here, in the runner's own order: the
     marks, the fragment registrations, the two supervisor calls *carrying the
-    profiling context to the broker*, their answers recorded as fragments, the
+    profiling context to the sandbox manager*, their answers recorded as fragments, the
     facts, the freeze and the handoff enqueue. The caller owns the clock, so the
     collection and the background enqueue are inside the measured window rather
     than beside it.
@@ -1814,14 +1815,16 @@ def _activate_once(
     fact collected the container-side sub-stages the runner collects.
 
     The answers are converted with ``dataclasses.asdict`` because that is what
-    the runner receives: it talks to a broker over HTTP and gets a mapping back,
+    the runner receives: it talks to a sandbox manager over HTTP and gets a mapping back,
     and ``record_fragment`` will only accept a mapping. Passing the dataclass
     itself silently answered nothing, which left every record with
     ``missing_fragments`` and ``collection_complete: false`` -- a benchmark that
     had not collected what it claimed to be measuring.
     """
     operation_profiling.mark(measurement, "supervisor_acquire")
-    acquire_call = operation_profiling.expect_fragment(measurement, "broker", "supervisor_acquire")
+    acquire_call = operation_profiling.expect_fragment(
+        measurement, SANDBOX_MANAGER_PRODUCER, "supervisor_acquire"
+    )
     lease = supervisor.acquire(
         sandbox.spec,
         thread_id=BENCH_STARTUP_THREAD,
@@ -1834,13 +1837,15 @@ def _activate_once(
     )
     operation_profiling.record_fragment(
         measurement,
-        producer="broker",
+        producer=SANDBOX_MANAGER_PRODUCER,
         call_id=acquire_call,
         stage="supervisor_acquire",
         response=asdict(lease),
     )
     operation_profiling.mark(measurement, "resident_start")
-    resident_call = operation_profiling.expect_fragment(measurement, "broker", "resident_start")
+    resident_call = operation_profiling.expect_fragment(
+        measurement, SANDBOX_MANAGER_PRODUCER, "resident_start"
+    )
     resident = supervisor.ensure_resident(
         BENCH_STARTUP_THREAD,
         lease.token,
@@ -1849,7 +1854,7 @@ def _activate_once(
     )
     operation_profiling.record_fragment(
         measurement,
-        producer="broker",
+        producer=SANDBOX_MANAGER_PRODUCER,
         call_id=resident_call,
         stage="resident_start",
         response=asdict(resident),
@@ -2029,7 +2034,7 @@ def _activate_path(
             resume.close()
 
     if path == "resume_running":
-        # A replacement broker: the container is running and durable, the local
+        # A replacement sandbox manager: the container is running and durable, the local
         # process pipe is gone, and the native session has to be resumed.
         inspection = _ensure_running_container(sandbox)
         supervisor = SharedChatSessionSupervisor(
@@ -2419,7 +2424,7 @@ def build_payload(
         "caveats": [
             "client and server share one process and one event loop over loopback, so no "
             "network round trip is in these numbers and every cohort pays the same HTTP costs",
-            "the broker is an in-process stand-in speaking the real fragment protocol; no "
+            "the sandbox manager is an in-process stand-in speaking the real fragment protocol; no "
             "container work is behind a file or terminal request here",
             "the `bare` cohort for a server operation is an unmeasured sibling route on the "
             "same app, not the measured operation with its instrumentation removed; the "
@@ -2901,7 +2906,7 @@ def report(payload: dict[str, Any]) -> list[str]:
     print(
         "\nWhat this measures: real control-plane HTTP requests and real sandbox activations, "
         "per cohort.\nWhat it does not: end-to-end latency, the browser, the network, a real "
-        "broker container,\nor any agent CLI. `bare` for a server operation is an unmeasured "
+        "sandbox manager container,\nor any agent CLI. `bare` for a server operation is an unmeasured "
         "sibling route, not the\nsame operation with the collector removed.\n"
         "Percentiles are nearest-rank; the Admin page's SQL uses percentile_cont, which "
         "interpolates."
@@ -3134,8 +3139,8 @@ async def _global_warmup(session: BenchSession, args: argparse.Namespace) -> Non
         operations=SERVER_RUN_OPERATIONS,
         target={"job_id": session.job_id},
     )
-    original_broker = broker_routing._client_for
-    install_broker(session.broker)
+    original_sandbox_manager = sandbox_manager_routing._client_for
+    install_sandbox_manager(session.sandbox_manager)
     _install_storage_override(session, session.storage)
     try:
         for label, _description in SERVER_OPERATIONS:
@@ -3148,7 +3153,7 @@ async def _global_warmup(session: BenchSession, args: argparse.Namespace) -> Non
                     f"bare:{family}",
                 )
     finally:
-        uninstall_broker(original_broker)
+        uninstall_sandbox_manager(original_sandbox_manager)
     print(f"warmed up with {args.warmup} requests per operation")
 
 
@@ -3242,7 +3247,7 @@ async def _run_server_section(
                 "route": BARE_ANALOGUES[family],
                 "note": (
                     "an unmeasured sibling route on the same app: same authentication, "
-                    "ownership, entitlement and broker chain, no instrumentation call "
+                    "ownership, entitlement and sandbox manager chain, no instrumentation call "
                     "anywhere. It is a floor reference, not this operation measured bare."
                 ),
                 **(Sample(bare_values).as_dict() if bare_values else {}),

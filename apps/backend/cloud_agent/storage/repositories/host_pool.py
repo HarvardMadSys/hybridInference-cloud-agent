@@ -69,7 +69,7 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-_LEGACY_BROKER_KEYS = frozenset(
+_LEGACY_SANDBOX_MANAGER_KEYS = frozenset(
     {"terminal_idle_ttl_s", "terminal_hard_ttl_s", "terminal_max_sessions"}
 )
 
@@ -264,9 +264,10 @@ class PostgresHostPoolRepository:
         *,
         host: str,
         credential_hash: str,
+        enrollment_token_hash: str | None = None,
         capabilities: list[str] | None = None,
         slots_total: int | None = None,
-        broker_url: str | None = None,
+        sandbox_manager_url: str | None = None,
         runner_version: str | None = None,
         labels: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -297,6 +298,15 @@ class PostgresHostPoolRepository:
         """
         async with self._pool.acquire() as conn, conn.transaction():
             await lock_compute_entry(conn)
+            if enrollment_token_hash is not None and not await conn.fetchval(
+                "SELECT 1 FROM agent_host_enroll_tokens "
+                "WHERE token_hash=$1 AND host=$2 AND consumed_host=$2 AND consumed_at IS NOT NULL",
+                enrollment_token_hash,
+                host,
+            ):
+                # Removal may have invalidated this token after consumption but
+                # before registration acquired the topology fence.
+                raise ValueError("enrollment_token_removed")
             existing = await conn.fetchrow(
                 "SELECT drain_fence_active FROM agent_runner_hosts WHERE host = $1 FOR UPDATE",
                 host,
@@ -352,7 +362,7 @@ class PostgresHostPoolRepository:
                 host,
                 json.dumps(normalize_capabilities(capabilities)),
                 slots_total,
-                broker_url,
+                sandbox_manager_url,
                 runner_version,
                 json.dumps(labels or {}),
                 credential_hash,
@@ -391,7 +401,7 @@ class PostgresHostPoolRepository:
         slots_total: int | None = None,
         launch_error: str | None = None,
         runner_version: str | None = None,
-        broker_url: str | None = None,
+        sandbox_manager_url: str | None = None,
         capabilities: list[str] | None = None,
         sandbox_runtime: str | None = None,
         sandbox_image_digest: str | None = None,
@@ -449,7 +459,7 @@ class PostgresHostPoolRepository:
                 leaves whatever is stored in place, the same way an unreported
                 runtime does.
             runner_version: Runner build the host is running.
-            broker_url: Address the control plane reaches this host's broker.
+            sandbox_manager_url: Address the control plane reaches this host's sandbox manager.
             capabilities: What this host can run.
             sandbox_runtime: Attested container runtime.
             sandbox_image_digest: Digest of the sandbox image it launches.
@@ -511,7 +521,7 @@ class PostgresHostPoolRepository:
                 host,
                 slots_total,
                 runner_version,
-                broker_url,
+                sandbox_manager_url,
                 None if capabilities is None else json.dumps(normalize_capabilities(capabilities)),
                 # "" survives COALESCE deliberately: an empty runtime is the
                 # host attesting shared-kernel runc, not declining to answer.
@@ -557,7 +567,7 @@ class PostgresHostPoolRepository:
                     and key not in excluded
                 }
                 expected = RUNNER_SETTING_KEYS | (
-                    _LEGACY_BROKER_KEYS if row["broker_url"] else frozenset()
+                    _LEGACY_SANDBOX_MANAGER_KEYS if row["sandbox_manager_url"] else frozenset()
                 )
                 complete = expected <= observed.keys()
                 row = await conn.fetchrow(
@@ -907,8 +917,8 @@ class PostgresHostPoolRepository:
             return None
         host = self._host_row_to_dict(row)
         # A retained sandbox remains hard-pinned even if its host row was
-        # administratively forgotten. Returning a placeholder (with no broker
-        # URL) makes broker routing fail closed instead of falling back to a
+        # administratively forgotten. Returning a placeholder (with no sandbox manager
+        # URL) makes sandbox manager routing fail closed instead of falling back to a
         # different machine's single-host environment setting.
         host["host"] = row["owner_host"]
         return host
@@ -973,7 +983,7 @@ class PostgresHostPoolRepository:
 
         The admin pin governs only chats with no sandbox. A control-plane
         rollout must also know which other hosts still own shared-live Docker
-        layers so it can reverse-probe their brokers. Read the policy under a
+        layers so it can reverse-probe their sandbox managers. Read the policy under a
         shared lock and the owners in the same transaction: a concurrent host
         switch cannot make the snapshot describe two different placement
         policies, and any newly claimed group while this lock is held belongs
@@ -1066,6 +1076,11 @@ class PostgresHostPoolRepository:
                 ORDER BY j.created_at, j.id
                 """
             )
+            job_rows.extend(
+                await conn.fetch(
+                    "SELECT execution_profile, '[\"environment-v1\"]'::jsonb AS requires FROM agent_environment_runs WHERE state='queued'",
+                )
+            )
             rows = await conn.fetch(
                 f"""
                 SELECT {HOST_COLUMNS}, {HOST_CAPACITY_COLUMNS}, n.allocation_id,
@@ -1109,6 +1124,19 @@ class PostgresHostPoolRepository:
             matching_hosts: list[_HostCapacity] = []
             templates: list[tuple[str, _HostShape]] = []
             free_slots = 0
+            active_tests = {
+                row["host"]: int(row["count"])
+                for row in await conn.fetch(
+                    "SELECT host,COUNT(*) AS count FROM agent_environment_runs WHERE host IS NOT NULL AND NOT cleanup_complete AND lease_expires_at>NOW() AND started_at>NOW()-INTERVAL '30 minutes' GROUP BY host"
+                )
+            }
+            cleanup_blocked_hosts = {
+                row["host"]
+                for row in await conn.fetch(
+                    "SELECT DISTINCT host FROM agent_environment_runs WHERE host IS NOT NULL AND NOT cleanup_complete "
+                    "AND (lease_expires_at<=NOW() OR started_at<=NOW()-INTERVAL '30 minutes')"
+                )
+            }
             for raw in rows:
                 host = self._host_row_to_dict(raw)
                 host["allocation_id"] = raw["allocation_id"]
@@ -1136,9 +1164,12 @@ class PostgresHostPoolRepository:
                         )
                     )
                 )
-                fresh = bool(
-                    heartbeat is not None
-                    and (observed_at - heartbeat).total_seconds() <= FRESH_AFTER_SECONDS
+                fresh = (
+                    bool(
+                        heartbeat is not None
+                        and (observed_at - heartbeat).total_seconds() <= FRESH_AFTER_SECONDS
+                    )
+                    and host["host"] not in cleanup_blocked_hosts
                 )
                 if not (
                     host.get("status") == HOST_ONLINE
@@ -1168,7 +1199,12 @@ class PostgresHostPoolRepository:
                 ceilings = [value for value in (total, desired) if isinstance(value, int)]
                 if not ceilings:
                     continue
-                free = max(0, min(ceilings) - int(host.get("slots_used") or 0))
+                free = max(
+                    0,
+                    min(ceilings)
+                    - int(host.get("slots_used") or 0)
+                    - active_tests.get(host["host"], 0),
+                )
                 free_slots += free
                 if free:
                     matching_hosts.append((shape, free))
@@ -1503,14 +1539,20 @@ class PostgresHostPoolRepository:
             return True
 
     async def forget_runner_host(self, *, host: str) -> str:
-        """Drop a host from the pool. A runner still polling re-adds itself.
+        """Drop a host and its enrollment tokens from the pool.
+
+        The removed credential and old enrollment tokens cannot restore it;
+        registering it again requires a freshly issued admin enrollment token.
 
         Returns ``"deleted"`` or ``"unknown"``; refuses ``"active"``,
         ``"fenced"``,
         ``"retained_groups_present"``, ``"resource_bound"``,
         ``"active_attempts_present"`` and ``"pending_compute_operations"``.
-        A disabled attached machine without external release capability may
-        be deregistered after dependency checks; this never shuts it down.
+        A sandbox whose deletion has completed is an audit row: it keeps the
+        host name and does not block forgetting. A live group, or one whose
+        deletion failed or is still in progress, does. A disabled attached
+        machine without external release capability may be deregistered after
+        dependency checks; this never shuts it down.
 
         The active-host refusal lives here rather than in the caller because
         checking there is a read the switch can outrun: the endpoint sees the
@@ -1526,7 +1568,8 @@ class PostgresHostPoolRepository:
             if active == host:
                 return "active"
             retained = await conn.fetchval(
-                "SELECT 1 FROM agent_sandboxes WHERE host=$1 LIMIT 1", host
+                "SELECT 1 FROM agent_sandboxes WHERE host=$1 AND deletion_state<>'deleted' LIMIT 1",
+                host,
             )
             if retained:
                 return "retained_groups_present"
@@ -1569,6 +1612,10 @@ class PostgresHostPoolRepository:
             deleted = await conn.fetchval(
                 "DELETE FROM agent_runner_hosts WHERE host = $1 RETURNING host", host
             )
+            if deleted is not None:
+                await conn.execute(
+                    "DELETE FROM agent_host_enroll_tokens WHERE host=$1 OR consumed_host=$1", host
+                )
             if deleted is not None and local_cleanup_allocation is not None:
                 # This is inventory deregistration for an attached machine,
                 # never a provider release, shutdown, or filesystem action.

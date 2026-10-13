@@ -25,7 +25,7 @@ from cloud_agent.api._job_views import (
     _job_response,
 )
 from cloud_agent.api._owner_auth import _owned_job, require_agent_owner
-from cloud_agent.api._workspace_access import _workspace_broker_for_job, _workspace_id
+from cloud_agent.api._workspace_access import _sandbox_manager_for_job, _workspace_id
 from cloud_agent.api.deps import (
     get_agent_app_credentials,
     get_gateway_client,
@@ -78,6 +78,8 @@ if TYPE_CHECKING:
     from cloud_agent.source_control_runtime import GitHubAppSource
 
 
+from cloud_agent.api.environments import CredentialSafeRoute
+
 router = APIRouter(prefix="/v1/agent")
 
 #: The moved handlers keep logging under the aggregator's logger name: the
@@ -96,7 +98,7 @@ class _JobsStorage(Protocol):
     Four of these are reached through a helper rather than spelled here,
     and leaving them out is not a narrowing: `cancel_agent_job` hands the whole
     store (through `_resume_terminals_after_cancel`) to
-    `_workspace_access._workspace_broker_for_job`, and `create_agent_job`
+    `_workspace_access._sandbox_manager_for_job`, and `create_agent_job`
     hands it to `application.job_admission._create_job_as`, which is typed against
     `_JobCreationStorage` (`conversation_commands`, `mcp`, `skills`,
     `source_control`). mypy says so at the call site, which is the point of
@@ -145,7 +147,6 @@ async def _job_usage(log_store: Any, job_id: str) -> dict[str, Any]:
     return usage
 
 
-@router.post("/jobs", response_model=AgentJobResponse, status_code=201)
 async def create_agent_job(
     body: AgentJobCreate,
     idempotency_key: str | None = Header(None, alias="Idempotency-Key", max_length=256),
@@ -323,7 +324,7 @@ async def _resume_terminals_after_cancel(job_store: _JobsStorage, job: dict[str,
     """Resume the terminals of a turn the cancel ended; the reaper retries a failure.
 
     Best effort, like the settlement before it: the cancel has committed, and
-    Stop must report it. A host broker that cannot be reached or hydrated must
+    Stop must report it. A sandbox manager that cannot be reached or hydrated must
     not turn into a 503 for a job that is already cancelled. The durable
     resume marker stays set instead, so the reaper's next pass resumes it (as
     does the owner's next terminal request).
@@ -335,7 +336,7 @@ async def _resume_terminals_after_cancel(job_store: _JobsStorage, job: dict[str,
             resumed = await resume_settled_terminal(
                 _workspace_id(job),
                 job_id=job_id,
-                broker=await _workspace_broker_for_job(job_store, job),
+                sandbox_manager=await _sandbox_manager_for_job(job_store, job),
             )
         if resumed:
             await job_store.sandbox.mark_terminal_resume_complete(job_id=job_id)
@@ -692,3 +693,13 @@ async def unpin_agent_thread(
 ) -> AgentThreadPinResponse:
     """Unpin the entire task thread containing an owned job."""
     return await _set_agent_thread_pinned(job_id=job_id, pinned=False, user=user, store=store)
+
+
+router.add_api_route(
+    "/jobs",
+    create_agent_job,
+    methods=["POST"],
+    response_model=AgentJobResponse,
+    status_code=201,
+    route_class_override=CredentialSafeRoute,
+)

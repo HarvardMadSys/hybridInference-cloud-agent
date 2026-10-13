@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Deploy the runner host — runners, workspace broker, tunnels.
+# Deploy the runner host — runners, sandbox manager, tunnels.
 #
 # The other half of `deploy/control-plane/deploy.sh`. They are separate because
 # they are separate machines: the control plane holds the queue and the web app,
@@ -138,7 +138,7 @@ else
 fi
 
 # Every heartbeat carries this exact commit only after sandbox_host.sh has
-# proved all runner replicas and the broker. The control-plane deployment uses
+# proved all runner replicas and the sandbox manager. The control-plane deployment uses
 # it as a rolling-compatibility fence; it is not a topology switch.
 AGENT_DEPLOYMENT_SHA="${SHA}"
 export AGENT_DEPLOYMENT_SHA
@@ -173,9 +173,9 @@ export COMPOSE_PROJECT
 # the failure this catches, and it is not hypothetical: this host was brought up
 # by hand as project `agenthost` while the script used
 # `hybridinference-agent-remote`. Deploying produced *two* complete stacks — six
-# runners claiming instead of three, and two workspace brokers.
+# runners claiming instead of three, and two sandbox managers.
 #
-# The brokers are the dangerous half. The control plane stores one `broker_url`
+# The sandbox managers are the dangerous half. The control plane stores one `sandbox_manager_url`
 # per host, so whichever stack heartbeats last wins it, and a job claimed by a
 # runner in one stack has its files and terminal served from the other. That
 # reads as "the workspace is empty", not as "there are two of me".
@@ -193,7 +193,7 @@ KNOWN="${EXPECTED_PROJECT},${SIBLING_COMPOSE_PROJECTS}"
 STRAY="$(docker ps --format '{{.Label "com.docker.compose.project"}} {{.Names}}' 2>/dev/null \
   | awk -v known="${KNOWN}" '
       BEGIN { n = split(known, k, ","); for (i = 1; i <= n; i++) if (k[i] != "") ok[k[i]] = 1 }
-      !($1 in ok) && $2 ~ /-(runner|workspace-broker|gateway-tunnel|mcp-tunnel|control-plane-tunnel)-[0-9]+$/ {
+      !($1 in ok) && $2 ~ /-(runner|sandbox-manager|gateway-tunnel|mcp-tunnel|control-plane-tunnel)-[0-9]+$/ {
         print "  " $2 "  (project: " $1 ")"
       }')"
 if [ -n "${STRAY}" ]; then

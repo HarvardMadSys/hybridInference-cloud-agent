@@ -60,47 +60,34 @@ if (rawApiPrefix.startsWith('/') && rawApiPrefix !== derivedApiPrefix) {
   );
 }
 
-// Sent with every page and asset. Mounted under `/agents`, this app shares the
-// gateway's origin, so a page of ours that another site can frame, or a
-// response a browser sniffs into script, is a hole in that origin too. None of
-// these restricts anything the app does itself:
+// Security headers on every response this app serves, documents and build
+// assets alike. The Content-Security-Policy is not among them: it carries a
+// per-request script nonce, so `src/middleware.ts` sets it, and with it
+// `frame-ancestors 'none'`. `X-Frame-Options` says the same for browsers that
+// predate `frame-ancestors`. Strict-Transport-Security belongs to whatever
+// terminates TLS in front of this process, not to a server that speaks plain
+// HTTP behind it (see `deploy/control-plane/edge.nginx.conf`).
 //
-//   * framing is same-origin only: a page on the shared origin may still frame
-//     the app, every other site is refused (clickjacking). `frame-ancestors`
-//     is the CSP form; `X-Frame-Options` covers browsers that predate it;
-//   * the app renders no plugin and no `<base>`, so `object-src` and
-//     `base-uri` refuse both rather than let an injected one change what loads;
-//   * Next serves every asset with its real type, so nothing needs sniffing;
-//   * the referrer policy is the modern default, stated for older browsers so
-//     they do not send another site the full URL of a task.
-//
-// This is deliberately not a script policy. Refusing inline script needs a
-// per-request nonce on Next's own inline scripts and on the theme boot script
-// in `src/app/layout.tsx`, and `connect-src` would have to name the API origin
-// a cross-origin deployment configures. Neither can be checked without a
-// browser exercising every page, so such a policy belongs in middleware, sent
-// as `Content-Security-Policy-Report-Only` until its reports are clean.
-// `securityHeaders.test.ts` pins these values, and the runtime-config build
-// check asserts that the built server sends them.
+// `securityHeaders.test.ts` reads these from this file, and the runtime-config
+// build check asserts that the built server sends them.
 const SECURITY_HEADERS = [
-  {
-    key: 'Content-Security-Policy',
-    value: "frame-ancestors 'self'; object-src 'none'; base-uri 'none'",
-  },
-  { key: 'X-Frame-Options', value: 'SAMEORIGIN' },
   { key: 'X-Content-Type-Options', value: 'nosniff' },
+  // Cross-origin requests and links learn the origin only, never a
+  // conversation's path. Same-origin requests keep the full referrer.
   { key: 'Referrer-Policy', value: 'strict-origin-when-cross-origin' },
+  { key: 'X-Frame-Options', value: 'DENY' },
 ];
 
 const nextConfig = {
   reactStrictMode: true,
   output: 'standalone',
+  // No `X-Powered-By`: it tells nobody anything but which framework to probe.
   poweredByHeader: false,
   // Omitted entirely when empty: Next rejects `basePath: ''`, and empty means
   // a deployment that owns its hostname.
   ...(basePath ? { basePath } : {}),
-  // Next prefixes `source` with `basePath`, so this covers the variant's
-  // whole mount and nothing outside it.
+  // Relative to `basePath`, so this covers the whole mount and nothing of the
+  // gateway's beside it.
   async headers() {
     return [{ source: '/:path*', headers: SECURITY_HEADERS }];
   },

@@ -42,6 +42,7 @@ export interface AdminSandbox {
   stop_requested_at?: string | null;
   archived_at?: string | null;
   deletion_state?: AdminSandboxDeletionState;
+  deletion_discard?: boolean;
   deletion_requested_at?: string | null;
   deletion_request_id?: string | null;
   deletion_archive_key?: string | null;
@@ -212,8 +213,13 @@ export function deleteAdminSandbox(
   reviewed: AdminSandboxStopRequest,
   signal?: AbortSignal,
   force = false,
+  discard = false,
 ): Promise<AdminSandboxDetail> {
-  return postSandboxAction(sandboxId, 'delete', reviewed, signal, force ? '?force=true' : '');
+  const params = new URLSearchParams();
+  if (force) params.set('force', 'true');
+  if (discard) params.set('discard', 'true');
+  const query = params.size ? `?${params}` : '';
+  return postSandboxAction(sandboxId, 'delete', reviewed, signal, query);
 }
 
 export function archiveAdminSandbox(

@@ -1,10 +1,10 @@
 """Gateway-owned recovery for terminal sessions left behind by settled jobs.
 
-The broker is passed in rather than read from the environment here.
+The sandbox manager is passed in rather than read from the environment here.
 This runs for jobs that have already settled — including from the reaper's
 startup reconciliation, where there is no request and no attempt in hand — so
-"which broker" is a question only the caller can answer, by looking up the host
-that ran the attempt. See ``cloud_agent.broker_routing``.
+"which sandbox manager" is a question only the caller can answer, by looking up the host
+that ran the attempt. See ``cloud_agent.sandbox_manager_routing``.
 """
 
 from __future__ import annotations
@@ -12,10 +12,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from cloud_agent.logging_utils import get_logger
-from cloud_agent.workspace_broker_client import WorkspaceBrokerError
+from cloud_agent.sandbox_manager_client import SandboxManagerError
 
 if TYPE_CHECKING:
-    from cloud_agent.workspace_broker_client import WorkspaceBrokerClient
+    from cloud_agent.sandbox_manager_client import SandboxManagerClient
 
 logger = get_logger(__name__)
 
@@ -24,20 +24,20 @@ async def resume_settled_terminal(
     workspace_id: str,
     *,
     job_id: str,
-    broker: WorkspaceBrokerClient | None,
+    sandbox_manager: SandboxManagerClient | None,
 ) -> bool:
     """Authoritatively resume one settled workspace, reporting confirmation.
 
-    ``broker=None`` reports failure. Every runnable chat has a retained
-    broker-owned workspace; clearing the durable recovery marker without
+    ``sandbox_manager=None`` reports failure. Every runnable chat has a retained
+    sandbox-manager-owned workspace; clearing the durable recovery marker without
     reaching that owner would turn a routing/configuration fault into silent
     state loss.
     """
-    if broker is None:
+    if sandbox_manager is None:
         return False
     try:
-        await broker.resume_settled_terminals(workspace_id, job_id=job_id)
-    except WorkspaceBrokerError:
+        await sandbox_manager.resume_settled_terminals(workspace_id, job_id=job_id)
+    except SandboxManagerError:
         logger.warning(
             "agent_terminal_settled_resume_failed",
             exc_info=True,

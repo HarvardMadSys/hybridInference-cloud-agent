@@ -18,7 +18,7 @@ external services. It does not test live provider behavior or GitHub
 publication; this staging runbook checks those boundaries separately.
 
 **Recorded staging status:** On 2026-08-06, job `ajob_8b0be5f9e7ff9ad5`
-verified enrollment, job creation and remote claim, broker workspace access,
+verified enrollment, job creation and remote claim, sandbox manager workspace access,
 tool-calling execution, success, four grant renewals, and revocation after
 settlement. That record did not verify real PR publication, mid-run
 cancellation, or the full fail-closed sequence. See
@@ -45,7 +45,7 @@ contracts belong to the Gateway; verify its deployed routes before starting.
       enough memory for the selected CLI. The local all-five-CLI smoke recommends
       at least 8 GiB; public multi-tenant staging requires a Kata-capable host.
 - [ ] Record the exact release SHA and the Gateway environment. API, host,
-      broker and sandbox must satisfy the shared deployment/version checks.
+      sandbox manager and sandbox must satisfy the shared deployment/version checks.
 - [ ] Verify `GET /v1/identity/jwks` succeeds on the staging Gateway:
 
       ```bash
@@ -89,7 +89,7 @@ neither Gateway signing keys nor its account database credentials.
       web origin/base path and browser API path. For existing data, prepare the
       [identity binding](minimal-identity.md#upgrade-an-existing-deployment).
 - [ ] Set explicit Compose project names, sandbox image, enrolled host name,
-      broker credential/reverse route, all three tunnel destinations and keys,
+      sandbox manager credential/reverse route, all three tunnel destinations and keys,
       and the host's non-overlapping egress pool/resolver.
 - [ ] Render configuration privately using the active environment file. Export
       `AGENT_DEPLOYMENT_SHA` for direct control-plane Compose commands; the
@@ -131,10 +131,10 @@ configuration root throughout these phases.
       enrollment token; put it in the host's private configuration.
 - [ ] Deploy the host through `deploy/host/deploy.sh` for the same target release.
       The host process prepares/attests the sandbox image, starts tunnels and
-      broker, probes both relays and publishes the completed-generation marker.
+      sandbox manager, probes both relays and publishes the completed-generation marker.
       Directly starting runner Compose containers does not complete this gate.
 - [ ] `GET /admin/agent/runner-hosts` shows a fresh online heartbeat, expected
-      deployment capability and reachable broker URL. Check the reverse broker
+      deployment capability and reachable sandbox manager URL. Check the reverse sandbox manager
       route from the control plane.
 - [ ] Complete control-plane activation and confirm its readiness check succeeds
       for the intended host/API SHA.

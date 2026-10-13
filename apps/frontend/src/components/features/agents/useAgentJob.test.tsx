@@ -103,6 +103,295 @@ describe('useAgentJob history-to-stream handoff', () => {
     vi.mocked(streamAgentJob).mockImplementation(stayOpen);
   }
 
+  it('shows durable replies before activity finishes and keeps them through partial pages', async () => {
+    const previous = { ...running('previous-job'), state: 'succeeded', turn_no: 1 } as AgentJobApi;
+    const current = { ...running(), state: 'succeeded', turn_no: 2 } as AgentJobApi;
+    const first = event(10, 'message', { text: 'Current first reply' });
+    const second = event(11, 'message', { text: 'Current second reply' });
+    const olderFirst = {
+      ...event(1, 'message', { text: 'Previous first reply' }),
+      job_id: previous.id,
+    };
+    const olderSecond = {
+      ...event(2, 'message', { text: 'Previous second reply' }),
+      job_id: previous.id,
+    };
+    serve(current, []);
+    vi.mocked(getAgentJobThread).mockResolvedValue({
+      thread_id: current.thread_id,
+      jobs: [previous, current],
+      messages: [
+        { id: 1, role: 'user', job_id: previous.id, content: 'Previous prompt', created_at: null },
+        {
+          id: 2,
+          role: 'assistant',
+          job_id: previous.id,
+          content: 'Previous first reply',
+          created_at: null,
+        },
+        {
+          id: 3,
+          role: 'assistant',
+          job_id: previous.id,
+          content: 'Previous second reply',
+          created_at: null,
+        },
+        { id: 4, role: 'user', job_id: current.id, content: 'Current prompt', created_at: null },
+        {
+          id: 5,
+          role: 'assistant',
+          job_id: current.id,
+          content: 'Current first reply',
+          created_at: null,
+        },
+        {
+          id: 6,
+          role: 'assistant',
+          job_id: current.id,
+          content: 'Current second reply',
+          created_at: null,
+        },
+      ],
+    } as AgentThreadApi);
+    let pageOptions!: NonNullable<Parameters<typeof listAllAgentThreadEvents>[1]>;
+    let finish!: (rows: AgentThreadEventApi[]) => void;
+    vi.mocked(listAllAgentThreadEvents).mockImplementationOnce((_id, options) => {
+      pageOptions = options!;
+      return new Promise((resolve) => (finish = resolve));
+    });
+    const { result } = renderHook(() => useAgentJob(current.id));
+    await waitFor(() => expect(result.current.job?.id).toBe(current.id));
+    expect(result.current.loading).toBe(true);
+    expect(result.current.job?.threadMessages?.map((message) => message.content)).toContain(
+      'Current second reply',
+    );
+    expect(
+      result.current.job?.historyTurns?.[0].messages.map((message) => message.content),
+    ).toContain('Previous second reply');
+    expect(streamAgentJob).not.toHaveBeenCalled();
+
+    act(() => pageOptions.onPage?.([olderFirst, first]));
+    expect(result.current.events).toEqual([olderFirst, first]);
+    expect(result.current.job?.events.filter((row) => row.kind === 'message')).toHaveLength(0);
+    expect(result.current.job?.threadMessages?.map((message) => message.content)).toContain(
+      'Current second reply',
+    );
+    expect(
+      result.current.job?.historyTurns?.[0].events.filter((row) => row.kind === 'message'),
+    ).toHaveLength(0);
+    expect(
+      result.current.job?.historyTurns?.[0].messages.map((message) => message.content),
+    ).toContain('Previous second reply');
+
+    await act(async () => finish([olderFirst, olderSecond, first, second]));
+    expect(result.current.loading).toBe(false);
+    expect(result.current.job?.events.filter((row) => row.kind === 'message')).toHaveLength(2);
+    expect(
+      result.current.job?.historyTurns?.[0].events.filter((row) => row.kind === 'message'),
+    ).toHaveLength(2);
+    expect(streamAgentJob).not.toHaveBeenCalled();
+  });
+
+  it('keeps all durable replies when a partial activity download fails', async () => {
+    const current = { ...running(), state: 'succeeded' } as AgentJobApi;
+    serve(current, []);
+    vi.mocked(getAgentJobThread).mockResolvedValue({
+      thread_id: current.thread_id,
+      jobs: [current],
+      messages: [
+        { id: 1, role: 'assistant', job_id: current.id, content: 'First reply', created_at: null },
+        { id: 2, role: 'assistant', job_id: current.id, content: 'Second reply', created_at: null },
+      ],
+    } as AgentThreadApi);
+    let pageOptions!: NonNullable<Parameters<typeof listAllAgentThreadEvents>[1]>;
+    let fail!: (cause: Error) => void;
+    vi.mocked(listAllAgentThreadEvents).mockImplementationOnce((_id, options) => {
+      pageOptions = options!;
+      return new Promise((_, reject) => (fail = reject));
+    });
+    const { result } = renderHook(() => useAgentJob(current.id));
+    await waitFor(() => expect(pageOptions).toBeDefined());
+    act(() => pageOptions.onPage?.([event(1, 'message', { text: 'First reply' })]));
+    await act(async () => fail(new Error('History unavailable')));
+    expect(result.current.loading).toBe(false);
+    expect(result.current.error).toBe('History unavailable');
+    expect(result.current.job?.threadMessages?.map((message) => message.content)).toEqual([
+      'First reply',
+      'Second reply',
+    ]);
+    expect(result.current.job?.events.filter((row) => row.kind === 'message')).toHaveLength(0);
+  });
+
+  it('aborts an abandoned history download and ignores its late pages', async () => {
+    const first = running();
+    const next = running('next-job');
+    serve(first, []);
+    let pageOptions!: NonNullable<Parameters<typeof listAllAgentThreadEvents>[1]>;
+    let finish!: (rows: AgentThreadEventApi[]) => void;
+    vi.mocked(listAllAgentThreadEvents).mockImplementationOnce((_id, options) => {
+      pageOptions = options!;
+      return new Promise((resolve) => (finish = resolve));
+    });
+    const { result, rerender } = renderHook(({ id }) => useAgentJob(id), {
+      initialProps: { id: first.id },
+    });
+    await waitFor(() => expect(pageOptions).toBeDefined());
+    const nextEvent = { ...event(5, 'message', { text: 'Next chat' }), job_id: next.id };
+    serve(next, [nextEvent]);
+    rerender({ id: next.id });
+    expect(pageOptions.signal?.aborted).toBe(true);
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    const late = event(100, 'message', { text: 'Abandoned chat' });
+    await act(async () => {
+      pageOptions.onPage?.([late]);
+      finish([late]);
+    });
+    expect(result.current.job?.id).toBe(next.id);
+    expect(result.current.events).toEqual([nextEvent]);
+    expect(result.current.error).toBeNull();
+  });
+
+  it('retains complete older activity and new stream frames during paged refreshes', async () => {
+    const job = running();
+    const first = { ...event(1, 'message', { text: 'Older first' }), job_id: 'older-job' };
+    const second = { ...event(2, 'message', { text: 'Older second' }), job_id: 'older-job' };
+    const own = event(3, 'message', { text: 'Current' });
+    serve(job, [first, second, own]);
+    const { result } = renderHook(() => useAgentJob(job.id));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    const stream = vi.mocked(streamAgentJob).mock.calls[0][1];
+    let pageOptions!: NonNullable<Parameters<typeof listAllAgentThreadEvents>[1]>;
+    let finish!: (rows: AgentThreadEventApi[]) => void;
+    vi.mocked(listAllAgentThreadEvents).mockImplementationOnce((_id, options) => {
+      pageOptions = options!;
+      return new Promise((resolve) => (finish = resolve));
+    });
+    act(() => result.current.reload());
+    await waitFor(() => expect(pageOptions).toBeDefined());
+    const live = event(4, 'message', { text: 'Arrived during refresh' });
+    act(() => {
+      stream.onEvent(live);
+      pageOptions.onPage?.([first]);
+    });
+    expect(result.current.events).toEqual([first, second, own, live]);
+    await act(async () => finish([first, second, own]));
+    expect(result.current.events).toEqual([first, second, own, live]);
+    expect(streamAgentJob).toHaveBeenCalledOnce();
+  });
+
+  it('keeps older transcript activity on refresh when the selected turn has no events', async () => {
+    const previous = { ...running('previous-job'), state: 'succeeded', turn_no: 1 } as AgentJobApi;
+    const current = {
+      ...running(),
+      state: 'queued',
+      turn_no: 2,
+      current_attempt_id: null,
+    } as AgentJobApi;
+    const first = { ...event(1, 'message', { text: 'Older first' }), job_id: previous.id };
+    const second = { ...event(2, 'message', { text: 'Older second' }), job_id: previous.id };
+    serve(current, [first, second]);
+    vi.mocked(getAgentJobThread).mockResolvedValue({
+      thread_id: current.thread_id,
+      jobs: [previous, current],
+      messages: [
+        { id: 1, role: 'assistant', job_id: previous.id, content: 'Older first', created_at: null },
+        {
+          id: 2,
+          role: 'assistant',
+          job_id: previous.id,
+          content: 'Older second',
+          created_at: null,
+        },
+      ],
+    } as AgentThreadApi);
+    const { result } = renderHook(() => useAgentJob(current.id));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.job?.events).toHaveLength(0);
+    expect(result.current.events).toEqual([first, second]);
+
+    let pageOptions!: NonNullable<Parameters<typeof listAllAgentThreadEvents>[1]>;
+    let finish!: (rows: AgentThreadEventApi[]) => void;
+    vi.mocked(listAllAgentThreadEvents).mockImplementationOnce((_id, options) => {
+      pageOptions = options!;
+      return new Promise((resolve) => (finish = resolve));
+    });
+    act(() => result.current.reload());
+    await waitFor(() => expect(pageOptions).toBeDefined());
+    expect(result.current.loading).toBe(true);
+    expect(result.current.events).toEqual([first, second]);
+    expect(result.current.job?.historyTurns?.[0].events.map((row) => row.sourceEventId)).toEqual([
+      first.id,
+      second.id,
+    ]);
+
+    act(() => pageOptions.onPage?.([first]));
+    expect(result.current.events).toEqual([first, second]);
+    expect(result.current.job?.historyTurns?.[0].events.map((row) => row.sourceEventId)).toEqual([
+      first.id,
+      second.id,
+    ]);
+    await act(async () => finish([first, second]));
+    expect(result.current.loading).toBe(false);
+    expect(result.current.events).toEqual([first, second]);
+    expect(streamAgentJob).toHaveBeenCalledOnce();
+  });
+
+  it('keeps the previous live replies while the next turn metadata is pending', async () => {
+    const first = { ...running(), turn_no: 1 } as AgentJobApi;
+    const next = {
+      ...running('next-job'),
+      state: 'queued',
+      turn_no: 2,
+      current_attempt_id: null,
+    } as AgentJobApi;
+    const before = event(1, 'message', { text: 'Saved first reply' });
+    const live = event(2, 'message', { text: 'Streamed after the durable snapshot' });
+    const thread = {
+      thread_id: first.thread_id,
+      jobs: [first],
+      messages: [
+        { id: 1, role: 'user', job_id: first.id, content: 'First prompt', created_at: null },
+        {
+          id: 2,
+          role: 'assistant',
+          job_id: first.id,
+          content: 'Saved first reply',
+          created_at: null,
+        },
+      ],
+    } as AgentThreadApi;
+    serve(first, [before]);
+    vi.mocked(getAgentJobThread).mockResolvedValue(thread);
+    const { result, rerender } = renderHook(({ id }) => useAgentJob(id), {
+      initialProps: { id: first.id },
+    });
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    const stream = vi.mocked(streamAgentJob).mock.calls[0][1];
+    act(() => stream.onEvent(live));
+    expect(
+      result.current.job?.events.filter((row) => row.kind === 'message').map((row) => row.text),
+    ).toContain('Streamed after the durable snapshot');
+
+    let resolveNext!: (job: AgentJobApi) => void;
+    vi.mocked(getAgentJob).mockImplementationOnce(
+      () => new Promise((resolve) => (resolveNext = resolve)),
+    );
+    vi.mocked(getAgentJobThread).mockResolvedValueOnce({ ...thread, jobs: [first, next] });
+    rerender({ id: next.id });
+    await act(async () => {});
+    expect(result.current.loading).toBe(true);
+    expect(result.current.job?.id).toBe(first.id);
+    expect(stream.signal?.aborted).toBe(true);
+    expect(
+      result.current.job?.events.filter((row) => row.kind === 'message').map((row) => row.text),
+    ).toEqual(['Saved first reply', 'Streamed after the durable snapshot']);
+
+    await act(async () => resolveNext(next));
+    expect(result.current.loading).toBe(false);
+    expect(result.current.job?.id).toBe(next.id);
+    expect(result.current.error).toBeNull();
+  });
+
   it('resumes a 5,000-event backlog after the selected turn, despite newer other-turn ids', async () => {
     const own = Array.from({ length: 5_000 }, (_, index) => ({
       ...event(index + 1, 'message', { text: `Saved ${index + 1}` }),
@@ -248,7 +537,9 @@ describe('useAgentJob history-to-stream handoff', () => {
     rerender({ id: next.id });
     await waitFor(() => expect(result.current.loading).toBe(false));
     await act(async () => resolveOldJob(first));
-    expect(vi.mocked(listAllAgentThreadEvents).mock.calls).toEqual([[next.id]]);
+    expect(vi.mocked(listAllAgentThreadEvents).mock.calls).toEqual([
+      [next.id, { signal: expect.any(AbortSignal), onPage: expect.any(Function) }],
+    ]);
     expect(vi.mocked(streamAgentJob).mock.calls.map(([id]) => id)).toEqual([next.id]);
     expect(result.current.job?.id).toBe(next.id);
   });

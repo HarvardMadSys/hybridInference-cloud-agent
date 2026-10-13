@@ -45,6 +45,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal
 
 from cloud_agent_host.bounded_output import OutputPump, TextTail, protocol_lines, text_chunks
+from cloud_agent_host.environment_process import ACTION_UIDS, ENVIRONMENT_UIDS
 from cloud_agent_host.guest_observer import (
     GUEST_OBSERVER_BINARY,
     GUEST_OBSERVER_EVENTS,
@@ -67,6 +68,11 @@ from cloud_agent_host.sandbox import (
     TerminalProcess,
 )
 from cloud_agent_host.tool_windows import MAX_TOOL_MARK_BYTES, TOOL_MARK_FILE, ToolMarkReader
+from cloud_agent_shared.environment import (
+    DOCKER_CLIENT_ENV as _DOCKER_CLIENT_ENV,
+    DOCKER_CLIENT_PREFIXES as _DOCKER_CLIENT_ENV_PREFIXES,
+    PROXY_ENV,
+)
 from cloud_agent_shared.operation_profiling import StageObserver, substage
 
 if TYPE_CHECKING:
@@ -92,7 +98,7 @@ CHAT_STOP_TIMEOUT_LABEL = "org.freeinference.chat-stop-timeout-seconds"
 CHAT_SHARED_LABEL = "org.freeinference.chat-shared-live"
 CHAT_RESIDENT_CAPACITY_LABEL = "org.freeinference.chat-resident-slot-capacity"
 #: Marks a disposable preflight probe with its creation time (Unix seconds).
-#: Retained-container discovery skips it: the broker adopted probes as orphan
+#: Retained-container discovery skips it: the sandbox manager adopted probes as orphan
 #: chats and stopped them mid-probe, failing the host's runtime qualification.
 CHAT_PROBE_LABEL = "org.freeinference.chat-probe-created"
 #: A probe older than this was abandoned by a process killed mid-probe. Since
@@ -145,26 +151,34 @@ CHAT_STATE_DIR = "/agent-state"
 CLAUDE_SHARED_PROJECTS_DIR = f"{CHAT_STATE_DIR}/claude/projects"
 #: Where Codex, OpenCode and Kilo keep one mode-0700 provider home per member
 #: (``resident_transport.PRIVATE_MEMBER_STATE_ROOTS``). Only a home's own
-#: member UID can open it.
+#: member UID can open it, and no member can rename or replace one: each
+#: collection is owned by the sandbox user and sticky, inside a sticky
+#: /agent-state (see :meth:`ChatSandboxManager.ensure_private_member_collections`).
 PRIVATE_MEMBER_HOME_COLLECTIONS = tuple(
+    f"{CHAT_STATE_DIR}/{runtime}-homes" for runtime in ("codex", "opencode", "kilo")
+)
+#: The member-created, group-writable collections earlier releases used. A
+#: member moves its own home out of one once; nothing is ever started from it.
+LEGACY_MEMBER_HOME_COLLECTIONS = tuple(
     f"{CHAT_STATE_DIR}/{runtime}-members" for runtime in ("codex", "opencode", "kilo")
 )
 ACTIVATION_TMPFS = "/run/agent-activation"
 MEMBER_TMPFS_ROOT = "/run/agent-members"
-#: Broker-owned durable receipt for the immutable pre-prompt archive.  It is
+#: Sandbox Manager-owned durable receipt for the immutable pre-prompt archive. It is
 #: deliberately outside every agent-writable or archived root.  Guest root
 #: creates this directory as 0700 and the one marker as 0600; all operations
 #: validate those exact properties without following symlinks.
+# Keep the on-disk path so existing retained containers keep their archive fences.
 INITIAL_ARCHIVE_MARKER_ROOT = "/var/lib/freeinference-broker"
 INITIAL_ARCHIVE_MARKER_NAME = "initial-archive-v1.json"
 INITIAL_ARCHIVE_MARKER_MAX_BYTES = 4096
 #: Root-owned policy fence written before a final Docker stop. Unlike the
 #: initial receipt, a newer running lifecycle deliberately replaces this file:
 #: the retained bridge, not marker presence alone, distinguishes pending from
-#: completed final archival after a broker restart.
+#: completed final archival after a sandbox manager restart.
 FINAL_ARCHIVE_MARKER_NAME = "final-archive-v1.json"
 # The canonical uploaded receipt can exceed 4 KiB at the accepted policy and
-# S3 VersionId field bounds. Keep the broker-private record tightly bounded,
+# S3 VersionId field bounds. Keep the sandbox-manager-private record tightly bounded,
 # but leave enough room for every schema-valid marker.
 FINAL_ARCHIVE_MARKER_MAX_BYTES = 8192
 
@@ -357,31 +371,9 @@ _UNPRIVILEGED_EXEC = ("/usr/bin/setpriv", "--no-new-privs", "--")
 # plugin and credential-helper lookup, TLS roots, proxies, the Go runtime and
 # the dynamic loader -- still travel as ``KEY=VALUE``: a sandbox value under one
 # of them must not reconfigure the client, and none of them carries a secret.
-_DOCKER_CLIENT_ENV = frozenset(
-    {
-        "PATH",
-        "HOME",
-        "TMPDIR",
-        "SSL_CERT_FILE",
-        "SSL_CERT_DIR",
-        "GODEBUG",
-        "GOGC",
-        "GOMAXPROCS",
-        "GOMEMLIMIT",
-        "GOTRACEBACK",
-        "GLIBC_TUNABLES",
-    }
-)
-_DOCKER_CLIENT_ENV_PREFIXES = (
-    "DOCKER_",
-    "BUILDKIT_",
-    "BUILDX_",
-    "COMPOSE_",
-    "LD_",
-    "OTEL_",
-    "XDG_",
-)
-_PROXY_ENV = frozenset({"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY", "FTP_PROXY"})
+
+
+_PROXY_ENV = frozenset(name.upper() for name in PROXY_ENV)
 _FULL_OBJECT_ID = re.compile(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})")
 #: Where retained chat state lives: only ever the container's writable layer.
 _CHAT_STATE_ROOTS = (CHAT_WORKDIR, CHAT_STATE_DIR)
@@ -506,10 +498,11 @@ def _exec_env_by_name(key: str) -> bool:
 # resolver the guest should use and $2 the relays as JSON. Prints the problems
 # it found as a JSON list; an empty list is a pass. Every probe has a short
 # bound and nothing here leaves the host: the resolver answers one query for the
-# root's name servers, and the two boundary probes aim at the host itself and at
-# the metadata address, which the host rules must refuse at once with their own
-# ICMP "administratively prohibited". A host without the rules would answer
-# "port unreachable" for itself instead, and route the other onwards.
+# root's name servers, and the boundary probes aim at the host itself and at the
+# two platform addresses (cloud metadata, and Azure's WireServer on a public
+# address), which the host rules must refuse at once with their own ICMP
+# "administratively prohibited". A host without the rules would answer "port
+# unreachable" for itself instead, and route the others onwards.
 _GUEST_NETWORK_CHECK = """
 import errno, json, socket, struct, sys
 resolver, relays = sys.argv[1], json.loads(sys.argv[2])
@@ -560,10 +553,13 @@ def host_udp():
     probe.recv(1)
 if gateway is not None:
     refused_by_rules('the host at %s:9/udp' % gateway, host_udp)
-refused_by_rules(
-    'the metadata address 169.254.169.254:80',
-    lambda: socket.create_connection(('169.254.169.254', 80), timeout=2).close(),
-)
+for label, address in (
+    ('the metadata address 169.254.169.254:80', '169.254.169.254'),
+    ('the platform address 168.63.129.16:80', '168.63.129.16'),
+):
+    refused_by_rules(
+        label, lambda address=address: socket.create_connection((address, 80), timeout=2).close()
+    )
 print(json.dumps(problems))
 """
 
@@ -671,7 +667,12 @@ class ChatSandboxSpec:
     @property
     def container_name(self) -> str:
         """A stable Docker-safe name without exposing a user-controlled id."""
-        digest = hashlib.sha256(f"{self.thread_id}\0{self.sandbox_id}".encode()).hexdigest()[:32]
+        return self.container_name_for(self.thread_id, self.sandbox_id)
+
+    @staticmethod
+    def container_name_for(thread_id: str, sandbox_id: str) -> str:
+        """Derive the stable container name from its two durable identities."""
+        digest = hashlib.sha256(f"{thread_id}\0{sandbox_id}".encode()).hexdigest()[:32]
         return f"{CHAT_CONTAINER_PREFIX}-{digest}"
 
     def docker_labels(self) -> dict[str, str]:
@@ -715,6 +716,7 @@ class ChatSandboxInspection:
     #: ``--tmpfs`` destinations, which Docker lists in ``HostConfig`` rather
     #: than with the other mounts.
     tmpfs: tuple[str, ...] = ()
+    started_at: str = ""
 
 
 @dataclass
@@ -760,7 +762,7 @@ class ChatSandboxManager:
         self._member_reaper_lock = threading.Lock()
         # Multiple fork siblings may admit turns concurrently. Singleton
         # observer startup/rotation and its live cursors therefore need one
-        # broker-wide critical section per manager.
+        # sandbox-manager-wide critical section per manager.
         self._guest_observer_lock = threading.RLock()
         self._guest_observer_active: dict[str, dict[int, int]] = {}
         # Containers this manager ran ``docker start`` on that have not since
@@ -1247,7 +1249,7 @@ class ChatSandboxManager:
         Docker remains the cross-process allocator: two runner replicas may
         race on one subnet, but only one ``network create`` can claim it. The
         loser advances through this deterministic ring instead of relying on a
-        process-local lock that would not cover the broker and runner replicas.
+        process-local lock that would not cover the sandbox manager and runner replicas.
         """
         pool = self._network().pool
         subnet_count = 1 << (CHAT_NETWORK_PREFIX_LENGTH - pool.prefixlen)
@@ -1645,7 +1647,7 @@ class ChatSandboxManager:
                 # and reading it as a network nobody owns made every
                 # later stop of an already-released sandbox raise. Because the
                 # supervisor stops every retained sandbox while reconciling, one
-                # such container was enough to keep the broker from starting.
+                # such container was enough to keep the sandbox manager from starting.
                 continue
             if (
                 network_name == CHAT_BOOTSTRAP_NETWORK
@@ -1670,7 +1672,7 @@ class ChatSandboxManager:
             # stopped before that timer can outlive its network and keep a stale
             # endpoint record. Reading that record as an unknown network failed
             # this sandbox's stop -- and with it the whole reconcile, and with
-            # that the broker's startup -- over a bridge the platform had
+            # that the sandbox manager's startup -- over a bridge the platform had
             # already removed itself.
             if self._inspect_network(network_name) is None:
                 self._disconnect_endpoint(network_name, current.container_id)
@@ -1753,7 +1755,7 @@ class ChatSandboxManager:
                     # from both relays and the internet.
                     continue
                 if not self._network_is_stale_for_prune(network):
-                    # Runner and broker use separate Docker clients. During
+                    # Runner and sandbox manager use separate Docker clients. During
                     # create or wake the bridge exists briefly before the
                     # sandbox endpoint is attached.
                     continue
@@ -1765,7 +1767,7 @@ class ChatSandboxManager:
                 )
                 continue
 
-            # No retained container on this broker owns the labelled bridge.
+            # No retained container on this sandbox manager owns the labelled bridge.
             # A runner can create the bridge just before its new container
             # appears in the daemon-wide list, so absence alone is not enough
             # proof that the bridge is orphaned.
@@ -1990,16 +1992,18 @@ class ChatSandboxManager:
     def verify_host_rules(self) -> None:
         """Prove the host still enforces this deployment's rules, repairing them if not.
 
-        Cheap while the guard's last verification is fresh; otherwise it
-        reinstalls and reads the tables back. A raise means the host cannot
-        show the boundary every running group was started behind.
+        Reads the tables from the kernel on every call, so the sweep that
+        calls this sees a flushed ruleset on its next pass rather than when
+        the guard's last verification ages out; a difference reinstalls and
+        reads back. A raise means the host cannot show the boundary every
+        running group was started behind.
         """
-        self.backend.network_guard().ensure()
+        self.backend.network_guard().recheck()
 
     def require_docker_data_root(self, expected: str) -> str:
         """Verify retained state is owned by the intended Docker data root.
 
-        The broker intentionally cannot read or mount this host path. Docker
+        The sandbox manager intentionally cannot read or mount this host path. Docker
         reports its daemon-side root over the socket; comparing that value is
         the configuration fence that catches a host accidentally using its
         ephemeral system disk instead of the operator's durable Docker disk.
@@ -2098,6 +2102,11 @@ class ChatSandboxManager:
             # drivers/backing filesystems reject creation; never retry without
             # the requested quota or pretend it was applied.
             argv += ["--storage-opt", f"size={spec.disk_limit_mib}M"]
+        for uid in (*ENVIRONMENT_UIDS, *ACTION_UIDS):
+            argv += [
+                "--tmpfs",
+                f"/run/agent-environments/{uid}:rw,nosuid,nodev,noexec,mode=0700,uid={uid},gid={self.backend.gid}",
+            ]
         for slot_id in range(spec.resident_slot_capacity):
             uid = MEMBER_UID_BASE + slot_id
             argv += [
@@ -2202,12 +2211,21 @@ class ChatSandboxManager:
     def require_stopped_archive(
         self, spec: ChatSandboxSpec, *, container_id: str
     ) -> ChatSandboxInspection:
-        """Fence archival and removal to an exact, stopped, owned container."""
+        """Fence archival and removal to an exact owned container that is stopped or dead.
+
+        Docker's dead state is terminal and not running: the container cannot be
+        resumed, but its writable layer can still be exported. Removal stays
+        ``docker rm`` without ``--force``, so a start between these fences is
+        left in place.
+        """
         current = self.require_existing(spec, container_id=container_id)
         if not self._belongs_to_namespace(current):
             raise SandboxError("sandbox archive requires this deployment's ownership label")
-        if current.running or current.status is not ChatSandboxStatus.STOPPED:
-            raise SandboxError("sandbox archive requires a stopped container")
+        if current.running or current.status not in {
+            ChatSandboxStatus.STOPPED,
+            ChatSandboxStatus.DEAD,
+        }:
+            raise SandboxError("sandbox archive requires a stopped or dead container")
         return current
 
     def export_stopped_archive(
@@ -2319,6 +2337,19 @@ class ChatSandboxManager:
             },
         }
 
+    def remove_environment_test(self, spec: ChatSandboxSpec, *, container_id: str) -> None:
+        """Remove only the exact independently labelled ephemeral test container."""
+        inspection = self._require_exact(spec, container_id)
+        if inspection.labels.get("hybridinference.environment-test") != spec.labels.get(
+            "hybridinference.environment-test"
+        ) or not spec.labels.get("hybridinference.environment-test"):
+            raise SandboxError("Container is not an environment test")
+        if inspection.running:
+            self.stop(spec, expected_container_id=container_id)
+        result = self._run([self.backend.docker_binary, "rm", container_id], timeout=120)
+        if result.returncode:
+            raise SandboxError("Environment test cleanup failed")
+
     def remove_stopped_archived(self, spec: ChatSandboxSpec, *, container_id: str) -> None:
         """Remove only a verified archive's exact stopped container, without force."""
         current = self.require_stopped_archive(spec, container_id=container_id)
@@ -2396,6 +2427,7 @@ class ChatSandboxManager:
                 tmpfs=tuple(
                     sorted(str(path) for path in (raw.get("HostConfig") or {}).get("Tmpfs") or {})
                 ),
+                started_at=str(state.get("StartedAt") or ""),
             )
         except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise SandboxError("Docker returned an invalid chat sandbox inspection") from exc
@@ -2451,13 +2483,14 @@ class ChatSandboxManager:
             # belongs to the process running it and is never a chat to adopt.
             if namespace != self.backend.sandbox_namespace or probe:
                 continue
-            # A foreign namespace cannot make this broker fail startup by
+            # A foreign namespace cannot make this sandbox manager fail startup by
             # carrying policy-invalid mounts. Apply this stack's mount fence
             # only after ownership is established.
             item = self.inspect(container_id, verify_mounts=False)
             if item is not None and self._belongs_to_namespace(item):
                 self._verify_mounts(item)
-                found.append(item)
+                if not item.labels.get("hybridinference.environment-test"):
+                    found.append(item)
         return found
 
     def start(
@@ -2640,6 +2673,7 @@ class ChatSandboxManager:
         if stopped.running or stopped.status not in {
             ChatSandboxStatus.STOPPED,
             ChatSandboxStatus.CREATED,
+            ChatSandboxStatus.DEAD,
         }:
             raise SandboxError(
                 f"chat sandbox stopped into unexpected state {stopped.status.value!r}"
@@ -2677,7 +2711,7 @@ class ChatSandboxManager:
     ) -> None:
         """Prove this container is on exactly its guarded group bridge.
 
-        Called before every terminal and broker workspace operation, and by a
+        Called before every terminal and sandbox manager workspace operation, and by a
         turn's commands once its last proof is a minute old, so it is cheap: the
         guard's last verification is reused for a minute, and the relays and
         their host exceptions are reconciled against what Docker reports now.
@@ -2753,7 +2787,7 @@ class ChatSandboxManager:
     def exec_client_env(env: dict[str, str] | None = None) -> dict[str, str]:
         """Return the Docker CLI environment that supplies a named ``env``.
 
-        The broker's own environment still configures the client; only the
+        The sandbox manager's own environment still configures the client; only the
         values :meth:`build_exec_command` passed by name are added to it.
         """
         client = {**os.environ}
@@ -3115,6 +3149,48 @@ class ChatSandboxManager:
                 + result.stderr.decode("utf-8", "replace")[:300]
             )
 
+    def ensure_private_member_collections(self, spec: ChatSandboxSpec) -> None:
+        """Make every provider-home collection one no member can rename or swap.
+
+        A member's home is mode 0700, but that alone does not stop a sibling
+        from renaming it out of a group-writable directory and putting its own
+        tree at the known path before the member's CLI starts. Run as the
+        sandbox user, which owns /agent-state and is no member's UID, this sets
+        the sticky bit on /agent-state and creates each collection owned by the
+        sandbox user with mode 3770 (setgid, sticky). A member can then add its
+        own home but cannot rename or remove another's, nor the collection, and
+        no member UID can undo either bit. An entry at a collection's name that
+        the sandbox user does not own -- a sibling's squat, or a symlink -- is
+        moved aside, which the owner of a sticky directory may always do.
+        """
+        script = (
+            'set -eu; me=$(id -u); group=$(id -g); root="$1"; shift; '
+            'test -n "$(find "$root" -maxdepth 0 -type d -uid "$me")" '
+            '|| { echo "shared state root is not owned by the sandbox user" >&2; exit 1; }; '
+            'chmod +t -- "$root"; '
+            'for collection in "$@"; do '
+            "attempt=0; "
+            'until mkdir -m 3770 -- "$collection" 2>/dev/null '
+            '|| test -n "$(find "$collection" -maxdepth 0 -type d -uid "$me" -gid "$group")"; '
+            "do "
+            'attempt=$((attempt + 1)); test "$attempt" -le 3; '
+            'mv -T -- "$collection" "$collection.refused-$$-$attempt"; '
+            "done; "
+            'chmod 3770 -- "$collection"; '
+            "done"
+        )
+        result = self.exec_capture(
+            spec,
+            ["/bin/sh", "-c", script, "sh", CHAT_STATE_DIR, *PRIVATE_MEMBER_HOME_COLLECTIONS],
+            workdir="/",
+            timeout_s=60,
+        )
+        if result.returncode != 0:
+            raise SandboxError(
+                "private member home collections could not be secured: "
+                + result.stderr.decode("utf-8", "replace")[:300]
+            )
+
     def normalize_member_files(
         self,
         spec: ChatSandboxSpec,
@@ -3139,6 +3215,7 @@ class ChatSandboxManager:
         # /home/agent-member-N/.claude-members, outside this traversal. Only projects/
         # remains shared; never widen other legacy shared Claude files.
         # Normalize shared roots while pruning every private-home collection.
+        trusted_prunes = "".join(f"-o -path {path} " for path in PRIVATE_MEMBER_HOME_COLLECTIONS)
         script = (
             "set -eu; uid=$1; "
             'normalize_dirs() { find "$@" -xdev -uid "$uid" -type d '
@@ -3151,14 +3228,16 @@ class ChatSandboxManager:
             f"-o -path {CHAT_STATE_DIR}/claude "
             f"-o -path {CHAT_STATE_DIR}/codex-members "
             f"-o -path {CHAT_STATE_DIR}/opencode-members "
-            f"-o -path {CHAT_STATE_DIR}/kilo-members \\) -prune -o "
+            f"-o -path {CHAT_STATE_DIR}/kilo-members "
+            f"{trusted_prunes}\\) -prune -o "
             '-uid "$uid" -type d -exec chmod g+rwx,g+s -- {} +; '
             f"find {CHAT_STATE_DIR} -xdev "
             f"\\( -path {CHAT_STATE_DIR}/.platform "
             f"-o -path {CHAT_STATE_DIR}/claude "
             f"-o -path {CHAT_STATE_DIR}/codex-members "
             f"-o -path {CHAT_STATE_DIR}/opencode-members "
-            f"-o -path {CHAT_STATE_DIR}/kilo-members \\) -prune -o "
+            f"-o -path {CHAT_STATE_DIR}/kilo-members "
+            f"{trusted_prunes}\\) -prune -o "
             '-uid "$uid" -type f -exec chmod g+rw -- {} +; '
             f"if test -d {CLAUDE_SHARED_PROJECTS_DIR}; then "
             f"normalize_dirs {CLAUDE_SHARED_PROJECTS_DIR}; "
@@ -3208,6 +3287,28 @@ class ChatSandboxManager:
             'else printf "%s" running; fi; }; '
         )
 
+    def _operation_writer_uids(self, spec: ChatSandboxSpec) -> builtins.list[int]:
+        """Enumerate active operation identities without reading their environments."""
+        script = """import os
+# AGENT_OPERATION_UID_CENSUS
+uids=set()
+for name in os.listdir('/proc'):
+ if not name.isdigit(): continue
+ try: uids.add(os.stat('/proc/'+name).st_uid)
+ except FileNotFoundError: pass
+print(' '.join(str(uid) for uid in sorted(uids) if uid in (30000,30001,30002) or 31000<=uid<31064))
+"""
+        result = self.exec_capture(spec, ["python3", "-c", script], workdir="/", timeout_s=10)
+        if result.returncode:
+            raise SandboxError("Environment writer census could not be verified")
+        try:
+            uids = [int(value) for value in result.stdout.decode().split()]
+        except ValueError:
+            raise SandboxError("Invalid environment writer census") from None
+        if any(uid not in (*ENVIRONMENT_UIDS, *ACTION_UIDS) for uid in uids):
+            raise SandboxError("Unexpected environment writer identity")
+        return uids
+
     def freeze_shared_writers(
         self,
         spec: ChatSandboxSpec,
@@ -3232,7 +3333,11 @@ class ChatSandboxManager:
         if expected_container_id is not None:
             self._require_exact(spec, expected_container_id)
         manifest = f"{ACTIVATION_TMPFS}/snapshot-{token}.pids"
-        target_uids = [self.backend.uid, *(MEMBER_UID_BASE + slot for slot in unique_slots)]
+        target_uids = [
+            self.backend.uid,
+            *self._operation_writer_uids(spec),
+            *(MEMBER_UID_BASE + slot for slot in unique_slots),
+        ]
         # The container drops every capability.  Even UID 0 therefore cannot
         # signal a process owned by a member UID; CAP_KILL is intentionally not
         # added back.  Run one census as each identity instead.  Repeating the
@@ -3344,7 +3449,11 @@ class ChatSandboxManager:
             raise ValueError("snapshot member slot is outside sandbox capacity")
         if expected_container_id is not None:
             self._require_exact(spec, expected_container_id)
-        target_uids = [self.backend.uid, *(MEMBER_UID_BASE + slot for slot in unique_slots)]
+        target_uids = [
+            self.backend.uid,
+            *self._operation_writer_uids(spec),
+            *(MEMBER_UID_BASE + slot for slot in unique_slots),
+        ]
         read = self.exec_capture(
             spec,
             ["/bin/sh", "-c", 'cat -- "$1"', "sh", manifest],
@@ -3359,7 +3468,10 @@ class ChatSandboxManager:
                 "shared snapshot writer manifest is unavailable: "
                 + read.stderr.decode("utf-8", "replace")[:300]
             )
-        frozen = self._parse_frozen_processes(read.stdout, allowed_uids=set(target_uids))
+        frozen = self._parse_frozen_processes(
+            read.stdout, allowed_uids={*target_uids, *ENVIRONMENT_UIDS, *ACTION_UIDS}
+        )
+        target_uids = sorted({*target_uids, *(uid for _, uid, _ in frozen)})
         resume_error: BaseException | None = None
         try:
             self._resume_frozen_processes(
@@ -3570,15 +3682,32 @@ class ChatSandboxManager:
         workdir: str = CHAT_WORKDIR,
         rows: int,
         cols: int,
+        argv: builtins.list[str] | None = None,
+        user_uid: int | None = None,
     ) -> TerminalProcess:
         """Attach a PTY to one shell without creating or killing a container."""
         current = self._require(spec)
         if not current.running:
             raise SandboxError("chat sandbox must be started before terminal exec")
         token = secrets.token_hex(16)
-        pidfile = f"{ACTIVATION_TMPFS}/terminal-{token}.pid"
+        if user_uid is not None:
+            from cloud_agent_host.environment_process import (
+                prepare_home,
+                prepare_tool_home,
+                tool_environment,
+            )
+
+            directory = prepare_home(self, spec, user_uid)
+            pidfile = f"{directory}/terminal-{token}.pid"
+            env = {
+                **tool_environment(),
+                **(env or {}),
+                "HOME": prepare_tool_home(self, spec, user_uid),
+            }
+        else:
+            pidfile = f"{ACTIVATION_TMPFS}/terminal-{token}.pid"
         rcfile = _terminal_rcfile(pidfile)
-        # The session shell gets its own process group.  Broker suspend/kill
+        # The session shell gets its own process group.  Sandbox Manager suspend/kill
         # then signals this terminal tree only; pausing or killing the retained
         # container would also stop the Agent CLI and violate one-chat
         # lifecycle ownership.
@@ -3606,6 +3735,7 @@ class ChatSandboxManager:
             'printf "%s\\n" "$$" > "$pidfile" || exit 126; '
             "umask 0002; "
             "trap '' TSTP TTIN TTOU; "
+            'if [ "$#" -gt 3 ]; then shift 3; exec "$@"; fi; '
             "if command -v bash >/dev/null 2>&1; then "
             'if printf "%s" "$3" > "$rcfile"; then '
             "SHELL=$(command -v bash); export SHELL; "
@@ -3618,11 +3748,22 @@ class ChatSandboxManager:
         )
         command = self.build_exec_command(
             spec,
-            ["/bin/sh", "-c", script, "sh", pidfile, rcfile, _terminal_bashrc(pidfile, rcfile)],
+            [
+                "/bin/sh",
+                "-c",
+                script,
+                "sh",
+                pidfile,
+                rcfile,
+                _terminal_bashrc(pidfile, rcfile),
+                *(argv or []),
+            ],
             env=env,
             workdir=workdir,
             interactive=True,
             tty=True,
+            user_uid=user_uid,
+            user_gid=self.backend.gid if user_uid is not None else None,
         )
         master_fd, slave_fd = os.openpty()
         try:
@@ -3654,13 +3795,14 @@ class ChatSandboxManager:
             spec=spec,
             pidfile=pidfile,
             input_fd=master_fd,
+            operation_uid=user_uid,
         )
 
     def reap_stale_terminal_processes(self, spec: ChatSandboxSpec) -> None:
-        """Remove PTYs whose broker client disappeared before graceful close.
+        """Remove PTYs whose sandbox manager client disappeared before graceful close.
 
         Interactive terminal streams are intentionally ephemeral and cannot
-        be reattached after a broker process restart.  The retained container
+        be reattached after a sandbox manager process restart.  The retained container
         is durable, however, and Docker may leave an exec process alive after
         its attaching client dies.  Match both the unguessable pidfile and the
         exact argv before signalling, so a stale/reused numeric PID can never
@@ -4430,7 +4572,7 @@ class ChatSandboxManager:
         """Atomically merge Claude hooks into this member's private settings.
 
         Docker-owned retained state has no corresponding host path. Writing it
-        with :mod:`pathlib` on the broker would configure the broker itself,
+        with :mod:`pathlib` on the sandbox manager would configure the sandbox manager itself,
         not the Agent CLI. Settings are never imported from the old shared
         Claude root. The group-writable marks file supports trusted non-Kata
         development; Kata accepts only its guest-root observer journal.
@@ -4512,7 +4654,7 @@ class ChatSandboxManager:
         *,
         expected_container_id: str,
     ) -> bytes | None:
-        """Read the bounded broker-private marker from one exact container.
+        """Read the bounded sandbox-manager-private marker from one exact container.
 
         Absence is the only soft outcome.  A symlink, non-regular file,
         unexpected owner/mode/link count, oversized payload, or identity race
@@ -4686,7 +4828,7 @@ finally:
         expected_container_id: str,
         replace_existing: bool,
     ) -> None:
-        """Publish one fsynced broker-private marker through guest root."""
+        """Publish one fsynced sandbox-manager-private marker through guest root."""
         script = (
             _INITIAL_ARCHIVE_MARKER_PREAMBLE
             + r"""
@@ -5027,7 +5169,7 @@ finally:
         those owners before it deletes anything, has each member remove its
         own homes, and only then clears both roots.
         """
-        collections = " ".join(PRIVATE_MEMBER_HOME_COLLECTIONS)
+        collections = " ".join(PRIVATE_MEMBER_HOME_COLLECTIONS + LEGACY_MEMBER_HOME_COLLECTIONS)
         script = (
             "set -eu; "
             f"owners=$(for collection in {collections}; do "
@@ -5065,7 +5207,7 @@ finally:
             if not MEMBER_UID_BASE <= uid < MEMBER_UID_BASE + spec.resident_slot_capacity:
                 raise SandboxError(f"private member home is owned by unexpected uid {uid}")
             uids.add(uid)
-        collections = " ".join(PRIVATE_MEMBER_HOME_COLLECTIONS)
+        collections = " ".join(PRIVATE_MEMBER_HOME_COLLECTIONS + LEGACY_MEMBER_HOME_COLLECTIONS)
         script = (
             "set -eu; uid=$(id -u); "
             f"for collection in {collections}; do "
@@ -5117,10 +5259,15 @@ finally:
             'git bundle unbundle "$bundle" >/dev/null; '
             'git cat-file -e "$object"'
         )
+        # A partial clone fetches a missing prerequisite on demand, through a
+        # transport the workspace's own config names (``remote.*.uploadpack``,
+        # ``core.sshCommand``). These objects come only from the bundle, so an
+        # empty ``GIT_ALLOW_PROTOCOL`` allows no transport, whatever
+        # ``protocol.*.allow`` says.
         result = self.exec_capture(
             spec,
             ["/bin/sh", "-c", script, "sh", commit, f"{commit}^{{commit}}"],
-            env=env,
+            env={**(env or {}), "GIT_ALLOW_PROTOCOL": ""},
             workdir=CHAT_WORKDIR,
             timeout_s=300,
             input_bytes=bundle,
@@ -5534,7 +5681,7 @@ def _terminal_bashrc(pidfile: str, rcfile: str) -> str:
         "[ -r ~/.bashrc ] && . ~/.bashrc",
         # bash re-enables job control after reading its startup files, which
         # would put each command in a process group of its own. Switching it
-        # off before every prompt keeps commands in the group the broker
+        # off before every prompt keeps commands in the group the sandbox manager
         # suspends and signals.
         'PROMPT_COMMAND="set +m${PROMPT_COMMAND:+;$PROMPT_COMMAND}"',
         f"trap {shlex.quote('rm -f -- ' + shlex.quote(pidfile))} EXIT",
@@ -5557,11 +5704,13 @@ class _RetainedTerminalProcess(TerminalProcess):
         spec: ChatSandboxSpec,
         pidfile: str,
         input_fd: int,
+        operation_uid: int | None = None,
     ) -> None:
         self._process = process
         self._manager = manager
         self._spec = spec
         self._pidfile = pidfile
+        self._operation_uid = operation_uid
         self._input_fd: int | None = input_fd
         self._state_lock = threading.Lock()
         self._write_lock = threading.Lock()
@@ -5632,6 +5781,8 @@ class _RetainedTerminalProcess(TerminalProcess):
             self._spec,
             ["/bin/sh", "-c", script, "sh", self._pidfile],
             timeout_s=15,
+            user_uid=self._operation_uid,
+            user_gid=self._manager.backend.gid if self._operation_uid is not None else None,
         )
         # Natural exit can win the small poll-to-signal race. That is already
         # the requested end state; a live client without a confirmed signal
@@ -5665,6 +5816,16 @@ class _RetainedTerminalProcess(TerminalProcess):
     def kill(self) -> None:
         with self._state_lock:
             if self._killed:
+                return
+            if self._operation_uid is not None:
+                from cloud_agent_host.environment_process import kill_identity
+
+                kill_identity(RetainedChatBackend(self._manager, self._spec), self._operation_uid)
+                self._close_input()
+                if self._process.poll() is None:
+                    self._process.kill()
+                self._process.wait(timeout=5)
+                self._killed = True
                 return
             if self._process.poll() is None:
                 # A hangup, as when a terminal window closes. An interactive
@@ -5781,7 +5942,7 @@ class RetainedChatBackend(SandboxBackend):
     def require_network(self, *, observer: StageObserver | None = None) -> None:
         """Prove the container is on its guarded group bridge before running anything.
 
-        A turn's backend starts from the proof its activation made: the broker
+        A turn's backend starts from the proof its activation made: the sandbox manager
         checked exactly this when it acquired the turn, moments before. That
         proof, and each one this backend makes itself, stands for
         :data:`TURN_NETWORK_PROOF_S`; a command after that, such as one after a
@@ -5811,16 +5972,26 @@ class RetainedChatBackend(SandboxBackend):
             process_pidfile=pidfile,
         )
 
+    def spawn_environment_script(
+        self, *, phase: str, script: str, env: dict[str, str]
+    ) -> SandboxProcess:
+        """Give install, services and verification independent non-root identities."""
+        from cloud_agent_host.environment_process import EnvironmentProcess
+
+        return EnvironmentProcess(self, phase=phase, script=script, env=env)
+
     def spawn_terminal(self, spec: SandboxSpec, *, rows: int, cols: int) -> TerminalProcess:
         """Open an interactive PTY in this chat's retained workspace."""
-        if spec.workdir != CHAT_WORKDIR:
+        if not (spec.workdir == CHAT_WORKDIR or spec.workdir.startswith(CHAT_WORKDIR + "/")):
             raise SandboxError("retained terminal must run in the chat workspace")
         return self.manager.spawn_terminal(
             self.spec,
             env=spec.env,
-            workdir=CHAT_WORKDIR,
+            workdir=spec.workdir,
             rows=rows,
             cols=cols,
+            argv=spec.argv if len(spec.argv) > 1 else None,
+            user_uid=int(spec.env["AGENT_ACTION_UID"]) if "AGENT_ACTION_UID" in spec.env else None,
         )
 
     def preflight(self) -> None:

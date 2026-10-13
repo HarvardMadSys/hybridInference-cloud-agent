@@ -157,7 +157,7 @@ export function ThreadStatsBar({ job }: { job: AgentJob }) {
 
   return (
     <div
-      className="mt-2 flex flex-wrap items-center justify-center gap-x-2 gap-y-1 px-2 text-[11px] text-gray-400 dark:text-gray-500"
+      className="mt-1.5 flex flex-wrap items-center justify-center gap-x-2 gap-y-1 px-2 text-[11px] text-gray-400 dark:text-gray-500"
       aria-label="Conversation totals"
     >
       {segments.map((segment, index) => (

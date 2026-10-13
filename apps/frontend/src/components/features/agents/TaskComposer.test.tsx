@@ -23,6 +23,8 @@ import {
 import type { AgentConfigApi, AgentConversationApi, AgentJobApi } from '@/lib/api/agents';
 import { getUserMemory, type UserMemoryView } from '@/lib/api/userMemory';
 vi.mock('@/lib/api/userMemory', () => ({ getUserMemory: vi.fn() }));
+import { getUserProfile } from '@/lib/api/userProfile';
+vi.mock('@/lib/api/userProfile', () => ({ getUserProfile: vi.fn() }));
 
 import { rewritePrompt, type RewritePromptResult } from '@/lib/api/promptRewrite';
 
@@ -39,7 +41,16 @@ vi.mock('@/components/providers/AuthProvider', () => ({
 }));
 beforeEach(() => {
   account.id = undefined;
+  vi.mocked(getUserMemory).mockReset();
   vi.mocked(getUserMemory).mockRejectedValue(new Error('Avatar unavailable'));
+  vi.mocked(getUserProfile).mockReset();
+  vi.mocked(getUserProfile).mockResolvedValue({
+    email: 'owner@example.com',
+    first_name: '',
+    last_name: '',
+    image_data_url: null,
+    revision: 0,
+  });
   localStorage.clear();
 });
 
@@ -47,6 +58,9 @@ vi.mock('next/navigation', () => ({
   useRouter: () => navigation,
   usePathname: () => '/',
 }));
+
+import { listEnvironments } from '@/lib/api/environments';
+vi.mock('@/lib/api/environments', () => ({ listEnvironments: vi.fn() }));
 
 import { listSkills } from '@/lib/api/skills';
 vi.mock('@/lib/api/skills', () => ({ listSkills: vi.fn() }));
@@ -92,6 +106,32 @@ function conversation(archived = false): AgentConversationApi {
     title: 'Earlier task',
     archived,
     last_activity_at: null,
+  };
+}
+
+function userProfile(overrides: Partial<UserMemoryView> = {}): UserMemoryView {
+  return {
+    enabled: true,
+    revision: 1,
+    updated_at: null,
+    avatar: { data_url: 'data:image/svg+xml,<svg></svg>', style: 'illustrated' },
+    portrait: {
+      summary: '',
+      projects: [],
+      focus_areas: [],
+      preferred_runtime: null,
+      preferred_model: null,
+    },
+    memories: [],
+    suggestions: [
+      {
+        id: 'success-checks',
+        title: 'Include success checks',
+        reason: 'Recent requests could use a clearer definition of done.',
+        action: 'Describe the result you expect and how to verify it.',
+      },
+    ],
+    ...overrides,
   };
 }
 
@@ -204,6 +244,54 @@ async function chooseRepository(name = 'owner/repository') {
 }
 
 describe('TaskComposer source-control onboarding', () => {
+  it('keeps repository switching usable after environment loading fails and can retry', async () => {
+    vi.mocked(getAgentConfig).mockResolvedValue(config({ environment_limits: {} }));
+    vi.mocked(listEnvironments).mockRejectedValueOnce(new Error('Environment unavailable'));
+    render(<TaskComposer />);
+    await chooseRepository();
+    expect(
+      await screen.findByText(/Environment configuration could not be loaded/),
+    ).toBeInTheDocument();
+    expect(await repositoryButton()).toBeEnabled();
+    fireEvent.change(screen.getByRole('textbox', { name: 'What should the agent do?' }), {
+      target: { value: 'Fix tests' },
+    });
+    expect(screen.getByRole('button', { name: 'Run' })).toBeEnabled();
+    vi.mocked(listEnvironments).mockResolvedValueOnce({
+      environments: [],
+      globals: {
+        id: null,
+        name: 'Global',
+        repo: null,
+        revision: 0,
+        variables: [],
+        setup_script: '',
+        start_script: '',
+        verify_script: '',
+        actions: [],
+      },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Run' })).toBeEnabled());
+  });
+  it('submits without environment fields after an initial load failure so server defaults apply', async () => {
+    vi.mocked(getAgentConfig).mockResolvedValue(config({ environment_limits: {} }));
+    vi.mocked(listEnvironments).mockRejectedValue(new Error('Environment unavailable'));
+    vi.mocked(createAgentJob).mockResolvedValue({ id: 'new-job' } as AgentJobApi);
+    render(<TaskComposer />);
+    await chooseRepository();
+    await screen.findByText(/Environment configuration could not be loaded/);
+    fireEvent.change(screen.getByRole('textbox', { name: 'What should the agent do?' }), {
+      target: { value: 'Fix tests' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Run' }));
+    await waitFor(() => expect(createAgentJob).toHaveBeenCalled());
+    const request = vi.mocked(createAgentJob).mock.calls[0][0];
+    expect(request).not.toHaveProperty('environment_id');
+    expect(request).not.toHaveProperty('environment_revision');
+    expect(request).not.toHaveProperty('global_revision');
+    expect(request).not.toHaveProperty('environment_overrides');
+  });
   beforeEach(() => {
     sessionStorage.clear();
     vi.mocked(githubAccessUrl).mockReset();
@@ -225,25 +313,92 @@ describe('TaskComposer source-control onboarding', () => {
 
   afterEach(() => cleanup());
 
-  it('shows the account avatar above the homepage composer and keeps the composer usable on avatar failure', async () => {
+  it('shows the avatar above the composer and user suggestions below it from one profile request', async () => {
     account.id = 'alice';
     vi.mocked(getAgentConfig).mockResolvedValue(config());
-    vi.mocked(getUserMemory).mockResolvedValueOnce({
-      avatar: { data_url: 'data:image/svg+xml,<svg></svg>', style: 'illustrated' },
-    } as UserMemoryView);
+    const profile = userProfile();
+    vi.mocked(getUserMemory).mockResolvedValueOnce(profile);
     const rendered = render(<TaskComposer />);
     const image = await screen.findByRole('img', {
-      name: 'Your automatically generated illustrated avatar',
+      name: 'Your Pokémon companion avatar',
     });
     const heading = screen.getByRole('heading', { name: 'What should the agent do?' });
     expect(image.compareDocumentPosition(heading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     const box = screen.getByRole('textbox', { name: 'What should the agent do?' });
     expect(box).toBeEnabled();
+    const suggestions = screen.getByRole('region', { name: 'Suggestions for your next request' });
+    expect(
+      box.compareDocumentPosition(suggestions) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(within(suggestions).getByText(profile.suggestions[0].title)).toBeInTheDocument();
+    expect(within(suggestions).getByText(profile.suggestions[0].reason)).toBeInTheDocument();
+    expect(within(suggestions).getByText(profile.suggestions[0].action)).toBeInTheDocument();
+    expect(within(suggestions).getByText('How your avatar is generated')).toBeInTheDocument();
+    expect(getUserMemory).toHaveBeenCalledTimes(1);
     rendered.unmount();
 
     render(<TaskComposer />);
     expect(await screen.findByRole('textbox', { name: 'What should the agent do?' })).toBeEnabled();
     expect(screen.queryByRole('img')).not.toBeInTheDocument();
+    expect(
+      await screen.findByText('Could not load your suggestions. You can still start a task.'),
+    ).toBeInTheDocument();
+    vi.mocked(getUserMemory).mockResolvedValueOnce(profile);
+    fireEvent.click(
+      within(screen.getByRole('region', { name: 'Suggestions for your next request' })).getByRole(
+        'button',
+        { name: 'Retry suggestions' },
+      ),
+    );
+    await screen.findByText(profile.suggestions[0].title);
+    expect(screen.getByRole('textbox', { name: 'What should the agent do?' })).toBeEnabled();
+  });
+
+  it('removes the previous account suggestions and ignores its pending response on account changes', async () => {
+    account.id = 'alice';
+    vi.mocked(getAgentConfig).mockResolvedValue(config());
+    const alice = userProfile();
+    vi.mocked(getUserMemory).mockResolvedValueOnce(alice);
+    const rendered = render(<TaskComposer />);
+    await screen.findByText(alice.suggestions[0].title);
+
+    let resolveBob!: (next: UserMemoryView) => void;
+    vi.mocked(getUserMemory).mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveBob = resolve;
+      }),
+    );
+    account.id = 'bob';
+    rendered.rerender(<TaskComposer />);
+    expect(screen.queryByText(alice.suggestions[0].title)).not.toBeInTheDocument();
+    await waitFor(() => expect(getUserMemory).toHaveBeenCalledTimes(2));
+    const bobSignal = vi.mocked(getUserMemory).mock.calls[1][0]!;
+
+    const carol = userProfile({
+      suggestions: [
+        {
+          id: 'carol',
+          title: 'Carol’s request guidance',
+          reason: 'Her recent work',
+          action: 'Add verification steps',
+        },
+      ],
+    });
+    vi.mocked(getUserMemory).mockResolvedValueOnce(carol);
+    account.id = 'carol';
+    rendered.rerender(<TaskComposer />);
+    await screen.findByText(carol.suggestions[0].title);
+    expect(bobSignal.aborted).toBe(true);
+    await act(async () => resolveBob(alice));
+    expect(screen.queryByText(alice.suggestions[0].title)).not.toBeInTheDocument();
+    expect(screen.getByText(carol.suggestions[0].title)).toBeInTheDocument();
+
+    account.id = undefined;
+    rendered.rerender(<TaskComposer />);
+    expect(
+      screen.queryByRole('region', { name: 'Suggestions for your next request' }),
+    ).not.toBeInTheDocument();
+    expect(getUserMemory).toHaveBeenCalledTimes(3);
   });
 
   it('rewrites the draft for review before creating a task', async () => {
@@ -299,8 +454,9 @@ describe('TaskComposer source-control onboarding', () => {
       const available = screen.getByRole('button', { name: 'Create repository' });
       expect(available).toBeEnabled();
       fireEvent.click(available);
+      const name = await screen.findByRole('textbox', { name: 'Repository name' });
+      await waitFor(() => expect(name).toHaveFocus());
       expect(screen.getByRole('dialog', { name: 'Create repository' })).toBeInTheDocument();
-      expect(screen.getByRole('textbox', { name: 'Repository name' })).toHaveFocus();
       expect(createAgentJob).not.toHaveBeenCalled();
     },
   );
@@ -539,6 +695,7 @@ describe('TaskComposer source-control onboarding', () => {
       } else {
         fireEvent.click(screen.getByRole('button', { name: 'Create repository' }));
       }
+      await screen.findByRole('textbox', { name: 'Repository name' });
       const dialog = screen.getByRole('dialog', { name: 'Create repository' });
       fireEvent.change(within(dialog).getByRole('textbox', { name: 'Repository name' }), {
         target: { value: 'new-repo' },
@@ -1773,7 +1930,8 @@ describe('TaskComposer plugins', () => {
   async function openPlugins() {
     const menu = await openAttachMenu();
     fireEvent.click(within(menu).getByRole('menuitem', { name: /Plugins/ }));
-    return screen.findByRole('dialog', { name: 'Plugins' });
+    await screen.findByRole('button', { name: 'Done' });
+    return screen.getByRole('dialog', { name: 'Plugins' });
   }
 
   async function selectPlugin() {
@@ -1899,6 +2057,7 @@ describe('TaskComposer plugins', () => {
     fireEvent.keyDown(box, { key: 'Enter' });
     expect(createAgentJob).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: 'Manage plugins' }));
+    await screen.findByRole('button', { name: 'Done' });
     const dialog = within(screen.getByRole('dialog', { name: 'Plugins' }));
     expect(dialog.getByText(plugin.plugin)).toBeInTheDocument();
     fireEvent.click(dialog.getByRole('button', { name: `Remove ${plugin.plugin}` }));

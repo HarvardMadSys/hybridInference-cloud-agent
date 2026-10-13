@@ -1,4 +1,4 @@
-"""Gateway-side client for the private agent workspace broker."""
+"""Gateway-side client for the private agent sandbox manager."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from urllib.parse import quote
 
 import httpx
 
+from cloud_agent.mcp.http_body import IDENTITY_ENCODING_HEADERS, iter_response_bytes
 from cloud_agent_shared.operation_profiling import (
     MAX_CONTEXT_CHARS,
     PROFILING_CONTEXT_HEADER,
@@ -25,10 +26,51 @@ SHARED_SESSION_FORK_TIMEOUT_S = 180.0
 # A new member can install its selected plugins before opening the native CLI.
 SHARED_PLUGIN_SESSION_FORK_TIMEOUT_S = 960.0
 
+#: The most this process buffers from one sandbox manager reply that carries workspace
+#: content: a file or listing, a one-shot command, Git inspection or a shared
+#: snapshot. The sandbox manager's own bounds, which a misbehaving host does not have to
+#: keep, stop those at 2 MiB of command or Git output plus 2 MiB of stderr, a
+#: 512 KiB preview or 5,000 directory entries. JSON escapes a control byte as
+#: six bytes, the widest any character grows, so no honest reply passes 24 MiB.
+MAX_SANDBOX_MANAGER_CONTENT_BYTES = 32 * 1024 * 1024
+#: The same for every other reply: lifecycle answers, terminal bookkeeping,
+#: the retained-sandbox inventory and native questions, which are themselves
+#: cut from protocol records of at most 8 MiB.
+MAX_SANDBOX_MANAGER_CONTROL_BYTES = 16 * 1024 * 1024
+#: The route suffixes whose replies are workspace content.
+_CONTENT_ROUTES = frozenset({"files", "terminal", "git", "snapshot"})
+
+
+async def _read_capped(response: httpx.Response, limit: int) -> bytes | None:
+    """Return the body, or ``None`` as soon as it passes ``limit`` bytes.
+
+    A host chooses both when the control plane reads from its sandbox manager and how
+    much it sends, and these reads run in the process every tenant shares. So
+    the body is consumed as a stream and abandoned at the ceiling, rather than
+    buffered whole and measured afterwards; ``Content-Length`` is not a
+    control, because the far side writes it. Compressed bodies are refused
+    before a decoder can expand them: the sandbox manager never compresses.
+    """
+    body = bytearray()
+    async for chunk in iter_response_bytes(response):
+        if len(body) + len(chunk) > limit:
+            return None
+        body.extend(chunk)
+    return bytes(body)
+
+
+def _json_object(body: bytes) -> dict[str, Any] | None:
+    """Decode a JSON object, or return ``None`` for anything else."""
+    try:
+        value = json.loads(body)
+    except ValueError:
+        return None
+    return value if isinstance(value, dict) else None
+
 
 @dataclass
-class WorkspaceBrokerError(RuntimeError):
-    """A bounded, owner-safe failure returned by the internal broker."""
+class SandboxManagerError(RuntimeError):
+    """A bounded, owner-safe failure returned by the internal sandbox manager."""
 
     status_code: int
     message: str
@@ -38,19 +80,19 @@ class WorkspaceBrokerError(RuntimeError):
 
 
 @dataclass
-class WorkspaceBrokerStream:
-    """An already-authorized broker response that the gateway must close."""
+class SandboxManagerStream:
+    """An already-authorized sandbox manager response that the gateway must close."""
 
     _client: httpx.AsyncClient
     _response: httpx.Response
-    #: The broker's measurement answer for a streaming route, read from the
+    #: The sandbox manager's measurement answer for a streaming route, read from the
     #: response headers because the body is the terminal's own bytes. ``None``
-    #: when the broker was not collecting, which leaves the caller's fragment
+    #: when the sandbox manager was not collecting, which leaves the caller's fragment
     #: unanswered rather than inventing an answer it never received.
     profiling_answer: dict[str, Any] | None = None
 
     def __aiter__(self) -> AsyncIterator[bytes]:
-        """Stream the broker's raw body."""
+        """Stream the sandbox manager's raw body."""
         return self._response.aiter_raw()
 
     async def aclose(self) -> None:
@@ -61,17 +103,17 @@ class WorkspaceBrokerStream:
             await self._client.aclose()
 
 
-class WorkspaceBrokerClient:
-    """Talk to the broker without exposing its credential to the browser."""
+class SandboxManagerClient:
+    """Talk to the sandbox manager without exposing its credential to the browser."""
 
     def __init__(
         self, base_url: str, token: str, *, client: httpx.AsyncClient | None = None
     ) -> None:
-        """Address one broker.
+        """Address one sandbox manager.
 
         Args:
-            base_url: The broker's origin, as its host reported it.
-            token: The pool's shared broker credential.
+            base_url: The sandbox manager's origin, as its host reported it.
+            token: The pool's shared sandbox manager credential.
             client: A client to borrow for request-shaped calls. These objects
                 are built per request — one per file read, per terminal
                 keystroke — so the pool cannot live on the instance; the
@@ -79,7 +121,7 @@ class WorkspaceBrokerClient:
                 one, each call opens and closes its own connection as before.
         """
         self._base_url = base_url.rstrip("/")
-        self._headers = {"X-Agent-Workspace-Token": token}
+        self._headers = {"X-Agent-Workspace-Token": token, **IDENTITY_ENCODING_HEADERS}
         self._client = client
 
     @asynccontextmanager
@@ -103,17 +145,59 @@ class WorkspaceBrokerClient:
             yield client
 
     @staticmethod
-    def _response_error(response: httpx.Response) -> WorkspaceBrokerError:
-        """Read a bounded, owner-safe error from a completed broker response."""
+    def _response_error(status_code: int, body: bytes | None) -> SandboxManagerError:
+        """Read a bounded, owner-safe error from a sandbox manager's error reply.
+
+        ``body`` is ``None`` when the reply passed its ceiling; the generic
+        message stands in for whatever detail it held.
+        """
         message = "The live workspace request failed."
-        try:
-            body = response.json()
-            detail = body.get("detail") if isinstance(body, dict) else None
-            if isinstance(detail, str) and detail:
-                message = detail
-        except ValueError:
-            pass
-        return WorkspaceBrokerError(response.status_code, message)
+        decoded = _json_object(body) if body is not None else None
+        detail = decoded.get("detail") if decoded is not None else None
+        if isinstance(detail, str) and detail:
+            message = detail
+        return SandboxManagerError(status_code, message)
+
+    @staticmethod
+    async def _exchange(
+        client: httpx.AsyncClient,
+        method: str,
+        url: str,
+        *,
+        limit: int,
+        read_success: bool = True,
+        **request: Any,
+    ) -> tuple[int, bytes | None]:
+        """Send one request; return its status and its body read under ``limit``.
+
+        ``read_success=False`` leaves a success body unread, for a caller that
+        needs only the status. Error bodies are always read, for their detail.
+        """
+        async with client.stream(method, url, **request) as response:
+            if response.status_code < 400 and not read_success:
+                return response.status_code, b""
+            return response.status_code, await _read_capped(response, limit)
+
+    @classmethod
+    def _reply(
+        cls, status_code: int, body: bytes | None, *, subject: str, invalid: str
+    ) -> dict[str, Any]:
+        """Turn one bounded sandbox manager reply into its JSON object, or raise.
+
+        A body that is not a JSON object is ``invalid`` — the same 502 the
+        caller always gave a non-object, and now also what a non-JSON body
+        gets instead of escaping as a bare decoding error.
+        """
+        if status_code >= 400:
+            raise cls._response_error(status_code, body)
+        if body is None:
+            raise SandboxManagerError(
+                502, f"{subject} returned more data than the control plane accepts."
+            )
+        decoded = _json_object(body)
+        if decoded is None:
+            raise SandboxManagerError(502, invalid)
+        return decoded
 
     async def _request(
         self,
@@ -126,26 +210,33 @@ class WorkspaceBrokerClient:
         timeout: float = 30,
         headers: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
+        limit = (
+            MAX_SANDBOX_MANAGER_CONTENT_BYTES
+            if suffix in _CONTENT_ROUTES
+            else MAX_SANDBOX_MANAGER_CONTROL_BYTES
+        )
         try:
             async with self._http(timeout) as client:
-                response = await client.request(
+                status_code, body = await self._exchange(
+                    client,
                     method,
                     f"{self._base_url}/workspaces/{workspace_id}/{suffix}",
+                    limit=limit,
                     headers=headers or self._headers,
                     params=params,
                     json=json,
                     timeout=timeout,
                 )
         except httpx.HTTPError as exc:
-            raise WorkspaceBrokerError(
+            raise SandboxManagerError(
                 503, "The live workspace is temporarily unavailable."
             ) from exc
-        if response.is_error:
-            raise self._response_error(response)
-        body = response.json()
-        if not isinstance(body, dict):
-            raise WorkspaceBrokerError(502, "The live workspace returned an invalid response.")
-        return body
+        return self._reply(
+            status_code,
+            body,
+            subject="The live workspace",
+            invalid="The live workspace returned an invalid response.",
+        )
 
     async def _shared_sandbox_request(
         self,
@@ -162,29 +253,70 @@ class WorkspaceBrokerClient:
         path = f"/shared-sandboxes/{encoded}"
         if suffix:
             path += f"/{suffix}"
+        limit = (
+            MAX_SANDBOX_MANAGER_CONTENT_BYTES
+            if suffix in _CONTENT_ROUTES
+            else MAX_SANDBOX_MANAGER_CONTROL_BYTES
+        )
         try:
             async with self._http(timeout) as client:
-                response = await client.request(
+                status_code, body = await self._exchange(
+                    client,
                     method,
                     f"{self._base_url}{path}",
+                    limit=limit,
                     headers=self._headers,
                     params=params,
                     json=json,
                     timeout=timeout,
                 )
         except httpx.HTTPError as exc:
-            raise WorkspaceBrokerError(
+            raise SandboxManagerError(
                 503, "The shared chat supervisor is temporarily unavailable."
             ) from exc
-        if response.is_error:
-            raise self._response_error(response)
-        body = response.json()
-        if not isinstance(body, dict):
-            raise WorkspaceBrokerError(502, "The shared chat supervisor returned invalid data.")
-        return body
+        return self._reply(
+            status_code,
+            body,
+            subject="The shared chat supervisor",
+            invalid="The shared chat supervisor returned invalid data.",
+        )
+
+    async def require_environment_capability(self) -> None:
+        """Require the capability from the actual authenticated broker replica."""
+        try:
+            async with self._http(5) as client:
+                response = await client.get(
+                    f"{self._base_url}/health", headers=self._headers, timeout=5
+                )
+                response.raise_for_status()
+                if "environment-v1" not in response.json().get("capabilities", []):
+                    raise SandboxManagerError(
+                        503, "Sandbox manager must be upgraded for environment configuration"
+                    )
+        except (httpx.HTTPError, ValueError, AttributeError):
+            raise SandboxManagerError(
+                503, "Sandbox manager environment capability is unavailable"
+            ) from None
+
+    async def prepare_environment(self, workspace_id: str, environment: Any) -> dict[str, Any]:
+        """Require actual broker support before sending value-bearing configuration."""
+        await self.require_environment_capability()
+        return await self._request(
+            "POST",
+            workspace_id,
+            "environment/prepare",
+            json={"environment": environment.model_dump(mode="json")},
+            timeout=1050,
+        )
+
+    async def environment_status(self, workspace_id: str, binding_id: str) -> dict[str, Any]:
+        """Read only masked steps from an already materialized workspace."""
+        return await self._request(
+            "GET", workspace_id, "environment/status", params={"binding_id": binding_id}, timeout=5
+        )
 
     async def health(self, *, timeout: float = 3) -> None:
-        """Reach the broker and be recognised by it, or raise.
+        """Reach the sandbox manager and be recognised by it, or raise.
 
         Not part of a job's path — this is what lets the control plane find out
         at enrolment whether the address a host reported is one it can actually
@@ -195,17 +327,23 @@ class WorkspaceBrokerClient:
         ways this was misconfigured on the first remote host. An unauthenticated
         endpoint would have said everything was fine while the token was wrong.
 
-        Deliberately short: a hanging broker must not hold up a heartbeat.
+        Deliberately short: a hanging sandbox manager must not hold up a heartbeat.
         """
         try:
             async with self._http(timeout) as client:
-                response = await client.get(
-                    f"{self._base_url}/health", headers=self._headers, timeout=timeout
+                status_code, body = await self._exchange(
+                    client,
+                    "GET",
+                    f"{self._base_url}/health",
+                    limit=MAX_SANDBOX_MANAGER_CONTROL_BYTES,
+                    read_success=False,
+                    headers=self._headers,
+                    timeout=timeout,
                 )
         except httpx.HTTPError as exc:
-            raise WorkspaceBrokerError(503, f"unreachable: {exc}") from exc
-        if response.is_error:
-            raise self._response_error(response)
+            raise SandboxManagerError(503, f"unreachable: {exc}") from exc
+        if status_code >= 400:
+            raise self._response_error(status_code, body)
 
     async def list_sandboxes(
         self, *, timeout: float = 10, thread_id: str | None = None
@@ -216,34 +354,39 @@ class WorkspaceBrokerClient:
         )
         try:
             async with self._http(timeout) as client:
-                response = await client.get(
+                status_code, raw = await self._exchange(
+                    client,
+                    "GET",
                     f"{self._base_url}/sandboxes",
+                    limit=MAX_SANDBOX_MANAGER_CONTROL_BYTES,
                     headers=self._headers,
                     timeout=timeout,
                     **selection,
                 )
         except httpx.HTTPError:
-            raise WorkspaceBrokerError(
-                503, "The workspace broker inventory is unavailable."
+            raise SandboxManagerError(
+                503, "The sandbox manager inventory is unavailable."
             ) from None
-        if response.is_error:
-            raise WorkspaceBrokerError(503, "The workspace broker refused the inventory request.")
+        if status_code >= 400:
+            raise SandboxManagerError(503, "The sandbox manager refused the inventory request.")
+        if raw is None:
+            raise SandboxManagerError(502, "The sandbox manager inventory exceeds the size limit.")
         try:
-            body = response.json()
+            body = json.loads(raw)
         except ValueError:
-            raise WorkspaceBrokerError(502, "The workspace broker inventory is invalid.") from None
+            raise SandboxManagerError(502, "The sandbox manager inventory is invalid.") from None
         if not isinstance(body, dict) or not isinstance(body.get("sandboxes"), list):
-            raise WorkspaceBrokerError(502, "The workspace broker inventory is incomplete.")
+            raise SandboxManagerError(502, "The sandbox manager inventory is incomplete.")
         rows = body["sandboxes"]
         if not all(isinstance(row, dict) and row.get("sandbox_id") for row in rows):
-            raise WorkspaceBrokerError(502, "The workspace broker inventory is invalid.")
+            raise SandboxManagerError(502, "The sandbox manager inventory is invalid.")
         return rows
 
     def _profiling_headers(self, context: Mapping[str, Any] | None) -> dict[str, str]:
         """Return this request's headers, carrying the inherited selection.
 
         The selection is measurement metadata, never an authorization token: the
-        broker validates it against its own switch, run and deadline and treats
+        sandbox manager validates it against its own switch, run and deadline and treats
         it as absent when it cannot. It travels as one header rather than as a
         query parameter so it cannot end up in an access log or a cache key.
         """
@@ -276,26 +419,66 @@ class WorkspaceBrokerClient:
         )
 
     async def terminal(
-        self, workspace_id: str, *, command: str, cwd: str, timeout_seconds: float
+        self,
+        workspace_id: str,
+        *,
+        command: str,
+        cwd: str,
+        timeout_seconds: float,
+        environment: Any = None,
     ) -> dict[str, Any]:
         """Execute one bounded command in an isolated workspace sandbox."""
+        if environment is not None and environment.required:
+            await self.require_environment_capability()
+        else:
+            environment = None
         return await self._request(
             "POST",
             workspace_id,
             "terminal",
-            json={"command": command, "cwd": cwd, "timeout_seconds": timeout_seconds},
+            json={
+                "command": command,
+                "cwd": cwd,
+                "timeout_seconds": timeout_seconds,
+                **(
+                    {"environment": environment.model_dump(mode="json")}
+                    if environment is not None
+                    else {}
+                ),
+            },
             timeout=timeout_seconds + 10,
         )
 
     async def create_terminal(
-        self, workspace_id: str, *, rows: int, cols: int, profiling: Mapping[str, Any] | None = None
+        self,
+        workspace_id: str,
+        *,
+        rows: int,
+        cols: int,
+        profiling: Mapping[str, Any] | None = None,
+        environment: Any = None,
+        action_id: str | None = None,
+        run_id: str | None = None,
     ) -> dict[str, Any]:
         """Open one interactive terminal in a durable workspace."""
+        if environment is not None and environment.required:
+            await self.require_environment_capability()
+        else:
+            environment = None
         return await self._request(
             "POST",
             workspace_id,
             "terminals",
-            json={"rows": rows, "cols": cols},
+            json={
+                "rows": rows,
+                "cols": cols,
+                **(
+                    {"environment": environment.model_dump(mode="json")}
+                    if environment is not None
+                    else {}
+                ),
+                **({"action_id": action_id, "run_id": run_id} if action_id else {}),
+            },
             headers=self._profiling_headers(profiling),
         )
 
@@ -350,7 +533,7 @@ class WorkspaceBrokerClient:
         *,
         after: int,
         profiling: Mapping[str, Any] | None = None,
-    ) -> WorkspaceBrokerStream:
+    ) -> SandboxManagerStream:
         """Open and validate a terminal SSE stream before public headers are sent."""
         client = httpx.AsyncClient(
             timeout=httpx.Timeout(connect=10.0, read=None, write=10.0, pool=10.0)
@@ -367,16 +550,18 @@ class WorkspaceBrokerClient:
             )
             response = await client.send(request, stream=True)
             if response.is_error:
-                await response.aread()
-                raise self._response_error(response)
+                raise self._response_error(
+                    response.status_code,
+                    await _read_capped(response, MAX_SANDBOX_MANAGER_CONTROL_BYTES),
+                )
             ownership_transferred = True
-            return WorkspaceBrokerStream(
+            return SandboxManagerStream(
                 client, response, profiling_answer=answer_from_headers(response.headers)
             )
-        except WorkspaceBrokerError:
+        except SandboxManagerError:
             raise
         except httpx.HTTPError as exc:
-            raise WorkspaceBrokerError(
+            raise SandboxManagerError(
                 503, "The live workspace is temporarily unavailable."
             ) from exc
         finally:
@@ -404,6 +589,12 @@ class WorkspaceBrokerClient:
         """Resize an interactive terminal."""
         suffix = f"terminals/{quote(terminal_id, safe='')}/resize"
         return await self._request("POST", workspace_id, suffix, json={"rows": rows, "cols": cols})
+
+    async def terminal_output(self, workspace_id: str, terminal_id: str) -> dict[str, Any]:
+        """Read bounded private terminal output for a redacted operation summary."""
+        return await self._request(
+            "GET", workspace_id, f"terminals/{quote(terminal_id, safe='')}/output"
+        )
 
     async def delete_terminal(self, workspace_id: str, terminal_id: str) -> dict[str, Any]:
         """Kill an interactive terminal; the private operation is idempotent."""
@@ -453,8 +644,16 @@ class WorkspaceBrokerClient:
             "POST", thread_id, "admin-delete/abort", json=payload, timeout=120
         )
 
+    async def discard_sandbox_deletion(
+        self, thread_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Remove a stopped container without exporting or uploading an archive."""
+        return await self._shared_sandbox_request(
+            "POST", thread_id, "admin-delete/discard", json=payload, timeout=120
+        )
+
     async def register_shared_sandbox(self, sandbox: dict[str, Any]) -> dict[str, Any]:
-        """Rehydrate durable member aliases after a broker process restart.
+        """Rehydrate durable member aliases after a sandbox manager process restart.
 
         Docker labels identify the group and its origin chat, but forked chat
         aliases live in the control-plane ledger.  Workspace operations can
@@ -480,7 +679,7 @@ class WorkspaceBrokerClient:
                     {key: value for key, value in raw.items() if key in allowed_member_fields}
                 )
         if not origin_thread_id or not members:
-            raise WorkspaceBrokerError(502, "The shared sandbox manifest is incomplete.")
+            raise SandboxManagerError(502, "The shared sandbox manifest is incomplete.")
         return await self._shared_sandbox_request(
             "POST",
             origin_thread_id,
@@ -645,7 +844,10 @@ class WorkspaceBrokerClient:
             "snapshot_id": snapshot["snapshot_id"],
             "workspace_epoch": snapshot["workspace_epoch"],
             "base_sha": snapshot["base_sha"],
+            **({"environment": snapshot["environment"]} if snapshot.get("environment") else {}),
         }
+        if snapshot.get("environment"):
+            await self.require_environment_capability()
         return await self._shared_sandbox_request(
             "POST",
             str(snapshot["origin_thread_id"]),
@@ -678,7 +880,7 @@ class WorkspaceBrokerClient:
 
 
 __all__ = [
-    "WorkspaceBrokerClient",
-    "WorkspaceBrokerError",
-    "WorkspaceBrokerStream",
+    "SandboxManagerClient",
+    "SandboxManagerError",
+    "SandboxManagerStream",
 ]

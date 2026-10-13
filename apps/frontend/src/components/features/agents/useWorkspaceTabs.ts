@@ -5,7 +5,13 @@ import type { AgentJobApi } from '@/lib/api/agents';
 import { latestJob } from './conversationJob';
 import type { AgentJob } from './types';
 
-export type WorkspaceTab = 'git' | 'terminal' | 'files' | 'side-chat' | `side-chat-${string}`;
+export type WorkspaceTab =
+  | 'git'
+  | 'terminal'
+  | 'files'
+  | 'environment'
+  | 'side-chat'
+  | `side-chat-${string}`;
 export interface SideChatTab {
   id: 'side-chat' | `side-chat-${string}`;
   number: number;
@@ -53,7 +59,7 @@ function read(key: string): TabsState {
     )
       return initial;
     if (
-      !['git', 'terminal', 'files'].includes(value.selected) &&
+      !['git', 'terminal', 'files', 'environment'].includes(value.selected) &&
       !value.chats.some((chat) => chat.id === value.selected)
     )
       value.selected = 'git';

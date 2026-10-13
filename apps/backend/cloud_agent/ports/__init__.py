@@ -16,6 +16,7 @@ from cloud_agent.ports.compute_resources import ComputeResourceRepository
 from cloud_agent.ports.conversation_commands import ConversationCommands
 from cloud_agent.ports.conversation_queries import ConversationQueries
 from cloud_agent.ports.credential_queries import CredentialQueries
+from cloud_agent.ports.environments import EnvironmentRepository
 from cloud_agent.ports.execution_queries import ExecutionQueries
 from cloud_agent.ports.goal_wakeups import GoalWakeupRepository
 from cloud_agent.ports.goals import GoalRepository
@@ -40,6 +41,7 @@ from cloud_agent.ports.skills import SkillRepository
 from cloud_agent.ports.snapshot import SnapshotRepository
 from cloud_agent.ports.source_control import SourceControlRepository
 from cloud_agent.ports.user_memory import UserMemoryRepository
+from cloud_agent.ports.user_profile import UserProfileRepository
 from cloud_agent.ports.web_search import WebSearchAdmission, WebSearchRepository
 
 __all__ = [
@@ -51,6 +53,7 @@ __all__ = [
     "ConversationCommands",
     "ConversationQueries",
     "CredentialQueries",
+    "EnvironmentRepository",
     "ExecutionQueries",
     "GoalRepository",
     "GoalWakeupRepository",
@@ -73,6 +76,7 @@ __all__ = [
     "SnapshotRepository",
     "SourceControlRepository",
     "UserMemoryRepository",
+    "UserProfileRepository",
     "WebSearchAdmission",
     "WebSearchRepository",
 ]

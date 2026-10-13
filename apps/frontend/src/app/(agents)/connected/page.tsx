@@ -10,24 +10,7 @@ import {
 } from '@/components/features/agents/githubReturn';
 import { connectGitHub, connectGitLab } from '@/lib/api/agents';
 import type { AgentIntegrationProvider } from '@/lib/api/agents';
-
-/**
- * The provider's refusal, in this app's own words.
- *
- * Anyone can link to this page with any query string, so its
- * `error_description` would put a stranger's text under this app's heading.
- * Only the standard OAuth `error` code is read, and only to choose a sentence.
- */
-function refusalMessage(error: string, providerName: string): string {
-  if (error === 'access_denied') return `Access to ${providerName} was not granted.`;
-  if (error === 'temporarily_unavailable' || error === 'server_error') {
-    return `${providerName} could not complete the authorization. Try again shortly.`;
-  }
-  return (
-    `${providerName} did not authorize the connection. Try again, and if it keeps ` +
-    'failing, contact the service administrator.'
-  );
-}
+import { describeProviderAuthorizationFailure } from '@/lib/authorizationOutcome';
 
 function ConnectedInner() {
   const router = useRouter();
@@ -40,7 +23,13 @@ function ConnectedInner() {
   const providerName = provider === 'gitlab' ? 'GitLab' : 'GitHub';
   const code = params?.get('code');
   const state = params?.get('state');
+  // Read as an outcome, never displayed as sent: anyone can write this link.
   const oauthError = params?.get('error');
+  const oauthErrorDescription = params?.get('error_description');
+  const oauthErrorMessage =
+    oauthError || oauthErrorDescription
+      ? describeProviderAuthorizationFailure(providerName, oauthError, oauthErrorDescription)
+      : null;
 
   useEffect(() => {
     // React intentionally replays effects in development Strict Mode. OAuth
@@ -49,8 +38,8 @@ function ConnectedInner() {
     if (connectStarted.current) return;
     connectStarted.current = true;
 
-    if (oauthError) {
-      setError(refusalMessage(oauthError, providerName));
+    if (oauthErrorMessage) {
+      setError(oauthErrorMessage);
       return;
     }
     if (!code) {
@@ -100,7 +89,7 @@ function ConnectedInner() {
     void completeConnection(code, state).catch((cause: unknown) =>
       setError(cause instanceof Error ? cause.message : 'could not complete the connection'),
     );
-  }, [code, oauthError, provider, providerName, router, state]);
+  }, [code, oauthErrorMessage, provider, providerName, router, state]);
 
   if (error) {
     return (

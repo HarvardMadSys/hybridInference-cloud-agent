@@ -190,7 +190,7 @@ entitlement.py         github_app.py          patch_gate.py
 publish_worker.py      publisher.py           runner.py
 runtimes.py            sandbox.py             setup.py
 source_control.py      terminal_coordination.py
-tokens.py              workspace_broker.py    workspace_broker_client.py
+tokens.py              sandbox_manager.py    sandbox_manager_client.py
 workspace_browser.py   workspace_paths.py     workspace_snapshot.py
 ```
 
@@ -316,8 +316,8 @@ tests/unit/test_agent_runtimes.py
 tests/unit/test_agent_sandbox.py
 tests/unit/test_agent_setup.py
 tests/unit/test_agent_source_control.py
-tests/unit/test_agent_workspace_broker.py
-tests/unit/test_agent_workspace_broker_client.py
+tests/unit/test_agent_sandbox_manager.py
+tests/unit/test_agent_sandbox_manager_client.py
 tests/unit/test_agent_workspace_snapshot.py
 tests/unit/ops/test_setup_kata_runtime.py
 tests/fixtures/agent_runtime_streams/           # claude_code_stream_contract.jsonl

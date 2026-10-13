@@ -214,6 +214,18 @@ function checkedSavedSiteConfig(value: unknown, metadata: EnvSource): RuntimeSit
   return parseRuntimeSiteConfig(env);
 }
 
+/** Only validated public appearance can become the server's outage fallback. */
+export function parseSavedPublicAppearance(
+  value: unknown,
+): Pick<RuntimeSiteConfig, 'branding' | 'features'> | null {
+  try {
+    const { branding, features } = checkedSavedSiteConfig(value, {});
+    return { branding, features };
+  } catch {
+    return null;
+  }
+}
+
 /** Keep the application accessible if saved appearance settings cannot be rendered. */
 export function parseSavedSiteConfig(value: unknown, metadata: EnvSource = {}): RuntimeSiteConfig {
   try {

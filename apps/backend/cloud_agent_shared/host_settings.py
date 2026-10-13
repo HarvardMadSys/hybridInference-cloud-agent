@@ -36,9 +36,9 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
 
 #: Which host process applies a setting. The runner reads its values when it
-#: hands a claimed turn to the process that runs it; the workspace broker is a
+#: hands a claimed turn to the process that runs it; the sandbox manager is a
 #: separate container and is told its values by the runner.
-SettingScope = Literal["runner", "broker", "both"]
+SettingScope = Literal["runner", "sandbox_manager", "both"]
 SettingUnit = Literal["seconds", "MiB", "KiB", "count", "millicores"]
 
 
@@ -200,7 +200,7 @@ HOST_SETTINGS: tuple[HostSetting, ...] = (
         default=1800,
         minimum=60,
         maximum=86400,
-        scope="broker",
+        scope="sandbox_manager",
     ),
     HostSetting(
         key="terminal_hard_ttl_s",
@@ -218,7 +218,7 @@ HOST_SETTINGS: tuple[HostSetting, ...] = (
         # terminal's credentials stay exposed, so the page cannot stretch it
         # past what a working day needs.
         maximum=86400,
-        scope="broker",
+        scope="sandbox_manager",
     ),
     HostSetting(
         key="terminal_max_sessions",
@@ -233,7 +233,7 @@ HOST_SETTINGS: tuple[HostSetting, ...] = (
         default=64,
         minimum=1,
         maximum=4096,
-        scope="broker",
+        scope="sandbox_manager",
     ),
     HostSetting(
         key="terminal_max_sessions_per_workspace",
@@ -244,7 +244,7 @@ HOST_SETTINGS: tuple[HostSetting, ...] = (
         default=4,
         minimum=1,
         maximum=4,
-        scope="broker",
+        scope="sandbox_manager",
     ),
     HostSetting(
         key="workspace_command_timeout_s",
@@ -255,7 +255,7 @@ HOST_SETTINGS: tuple[HostSetting, ...] = (
         default=60,
         minimum=1,
         maximum=120,
-        scope="broker",
+        scope="sandbox_manager",
     ),
     HostSetting(
         key="workspace_file_write_max_mib",
@@ -266,7 +266,7 @@ HOST_SETTINGS: tuple[HostSetting, ...] = (
         default=2,
         minimum=1,
         maximum=2,
-        scope="broker",
+        scope="sandbox_manager",
     ),
     HostSetting(
         key="workspace_file_preview_max_kib",
@@ -277,7 +277,7 @@ HOST_SETTINGS: tuple[HostSetting, ...] = (
         default=512,
         minimum=1,
         maximum=512,
-        scope="broker",
+        scope="sandbox_manager",
     ),
     HostSetting(
         key="workspace_command_output_max_mib",
@@ -288,7 +288,7 @@ HOST_SETTINGS: tuple[HostSetting, ...] = (
         default=2,
         minimum=1,
         maximum=2,
-        scope="broker",
+        scope="sandbox_manager",
     ),
     HostSetting(
         key="workspace_directory_max_entries",
@@ -299,7 +299,7 @@ HOST_SETTINGS: tuple[HostSetting, ...] = (
         default=5000,
         minimum=1,
         maximum=5000,
-        scope="broker",
+        scope="sandbox_manager",
     ),
     HostSetting(
         key="terminal_buffer_max_mib",
@@ -310,7 +310,7 @@ HOST_SETTINGS: tuple[HostSetting, ...] = (
         default=2,
         minimum=1,
         maximum=2,
-        scope="broker",
+        scope="sandbox_manager",
     ),
     HostSetting(
         key="terminal_buffer_max_events",
@@ -321,7 +321,7 @@ HOST_SETTINGS: tuple[HostSetting, ...] = (
         default=4096,
         minimum=2,
         maximum=4096,
-        scope="broker",
+        scope="sandbox_manager",
     ),
     HostSetting(
         key="terminal_output_max_mib",
@@ -332,7 +332,7 @@ HOST_SETTINGS: tuple[HostSetting, ...] = (
         default=32,
         minimum=1,
         maximum=32,
-        scope="broker",
+        scope="sandbox_manager",
     ),
     HostSetting(
         key="terminal_input_max_kib",
@@ -343,7 +343,7 @@ HOST_SETTINGS: tuple[HostSetting, ...] = (
         default=64,
         minimum=1,
         maximum=64,
-        scope="broker",
+        scope="sandbox_manager",
     ),
     HostSetting(
         key="terminal_max_streams_per_session",
@@ -354,20 +354,20 @@ HOST_SETTINGS: tuple[HostSetting, ...] = (
         default=4,
         minimum=1,
         maximum=4,
-        scope="broker",
+        scope="sandbox_manager",
     ),
 )
 
 HOST_SETTINGS_BY_KEY: dict[str, HostSetting] = {setting.key: setting for setting in HOST_SETTINGS}
 
-#: The keys the runner applies itself, and those it hands to the broker.
+#: The keys the runner applies itself, and those it hands to the sandbox manager.
 #: ``chat_idle_timeout_s`` is in both: the runner reports it to the control
-#: plane when a turn settles, and the broker arms its own idle sweep with it.
+#: plane when a turn settles, and the sandbox manager arms its own idle sweep with it.
 RUNNER_SETTING_KEYS = frozenset(
     setting.key for setting in HOST_SETTINGS if setting.scope in ("runner", "both")
 )
-BROKER_SETTING_KEYS = frozenset(
-    setting.key for setting in HOST_SETTINGS if setting.scope in ("broker", "both")
+SANDBOX_MANAGER_SETTING_KEYS = frozenset(
+    setting.key for setting in HOST_SETTINGS if setting.scope in ("sandbox_manager", "both")
 )
 
 #: The most keys a stored or reported settings map may carry.
@@ -466,11 +466,11 @@ def reported_values(raw: Any) -> dict[str, int | float] | None:
 
 
 __all__ = [
-    "BROKER_SETTING_KEYS",
     "HOST_SETTINGS",
     "HOST_SETTINGS_BY_KEY",
     "MAX_SETTINGS_KEYS",
     "RUNNER_SETTING_KEYS",
+    "SANDBOX_MANAGER_SETTING_KEYS",
     "HostSetting",
     "admin_values",
     "default_values",

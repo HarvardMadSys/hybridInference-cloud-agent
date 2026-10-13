@@ -161,10 +161,10 @@ describe('sandbox member visibility and control', () => {
     { terminal_count: 0, terminal_count_observed_at: '2026-10-10T09:57:00Z' },
     { terminal_count: 2, terminal_count_observed_at: '2026-10-10T09:57:00Z' },
   ])(
-    'shows the broker recovery message until refreshed activity is current: %j',
+    'shows the sandbox manager recovery message until refreshed activity is current: %j',
     async (overrides) => {
       const message =
-        "The host's workspace broker is unavailable. Restore its connection and refresh details.";
+        "The host's sandbox manager is unavailable. Restore its connection and refresh details.";
       vi.mocked(getAdminSandbox)
         .mockResolvedValueOnce({ ...detail(overrides), terminal_activity_error: message })
         .mockResolvedValue(detail({ terminal_count: 0, terminal_count_observed_at: observedAt }));
@@ -188,16 +188,16 @@ describe('sandbox member visibility and control', () => {
     [{ active_operation_count: 1 }, 'Wait for active workspace operations to finish.'],
     [{ snapshot_state: 'pending' }, 'Wait for the workspace snapshot to finish.'],
   ] as const)(
-    'keeps the current activity blocker visible ahead of broker errors: %j',
+    'keeps the current activity blocker visible ahead of sandbox manager errors: %j',
     async (overrides, message) => {
-      const brokerError = "The host's workspace broker is unavailable.";
+      const sandboxManagerError = "The host's sandbox manager is unavailable.";
       vi.mocked(getAdminSandbox).mockResolvedValue({
         ...detail(overrides),
-        terminal_activity_error: brokerError,
+        terminal_activity_error: sandboxManagerError,
       });
       mount();
       expect(await screen.findByText(message)).toBeInTheDocument();
-      expect(screen.queryByText(brokerError)).not.toBeInTheDocument();
+      expect(screen.queryByText(sandboxManagerError)).not.toBeInTheDocument();
       expect(screen.getByRole('button', { name: 'Stop idle sandbox' })).toBeDisabled();
       expect(stopAdminSandbox).not.toHaveBeenCalled();
     },
@@ -382,7 +382,7 @@ describe('sandbox member visibility and control', () => {
       const staleDetail = detail(overrides);
       vi.mocked(getAdminSandbox).mockResolvedValue({
         ...staleDetail,
-        terminal_activity_error: 'The host workspace broker is unavailable.',
+        terminal_activity_error: 'The host sandbox manager is unavailable.',
       });
       vi.mocked(archiveAdminSandbox).mockResolvedValue(
         detail({ ...overrides, archived_at: observedAt }),
@@ -671,7 +671,7 @@ describe('archive before physical sandbox deletion', () => {
     expect(window.confirm).toHaveBeenCalledWith(
       expect.stringContaining('exact retained container'),
     );
-    expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining('stopped and idle'));
+    expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining('stopped or dead'));
     expect(window.confirm).toHaveBeenCalledWith(
       expect.stringContaining('does not stop a running container'),
     );
@@ -683,6 +683,7 @@ describe('archive before physical sandbox deletion', () => {
       { generation: 4, container_id: 'container-one', last_activity_at: observedAt },
       expect.any(AbortSignal),
       true,
+      false,
     );
     expect(await screen.findByText(/Archiving to S3/)).toBeInTheDocument();
     expect(onChanged).toHaveBeenCalledOnce();
@@ -705,6 +706,7 @@ describe('archive before physical sandbox deletion', () => {
       { generation: 4, container_id: 'container-one', last_activity_at: observedAt },
       expect.any(AbortSignal),
       true,
+      false,
     );
     await waitFor(() => expect(getAdminSandbox).toHaveBeenCalledTimes(2));
     expect(screen.getByRole('button', { name: 'Verify stopped and force delete' })).toBeEnabled();
@@ -724,6 +726,8 @@ describe('archive before physical sandbox deletion', () => {
       'sandbox-one',
       { generation: 4, container_id: 'container-one', last_activity_at: observedAt },
       expect.any(AbortSignal),
+      false,
+      false,
     );
     expect(await screen.findByText(/Archiving to S3/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Archive to S3 and delete' })).toBeDisabled();
@@ -937,6 +941,8 @@ describe('archive before physical sandbox deletion', () => {
       'sandbox-one',
       { generation: 4, container_id: 'container-one', last_activity_at: observedAt },
       expect.any(AbortSignal),
+      false,
+      false,
     );
     expect(await screen.findByText(/Archiving to S3/)).toBeInTheDocument();
     expect(screen.queryByText(/Deletion failed:/)).not.toBeInTheDocument();

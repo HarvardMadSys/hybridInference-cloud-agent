@@ -13,7 +13,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from cloud_agent.api._job_views import _iso, _job_response
 from cloud_agent.api._owner_auth import require_agent_owner
-from cloud_agent.api.deps import get_storage, require_store
+from cloud_agent.api.deps import get_grant_client, get_storage, require_store
+from cloud_agent.application.residency import close_released_residencies
 from cloud_agent.entitlement import REPO_PATTERN
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.schemas import (
@@ -32,7 +33,7 @@ from cloud_agent.schemas import (
 )
 
 if TYPE_CHECKING:
-    from cloud_agent.ports import ConversationCommands, ConversationQueries
+    from cloud_agent.ports import ConversationCommands, ConversationQueries, HostPoolRepository
 
 
 router = APIRouter(prefix="/v1/agent")
@@ -44,10 +45,14 @@ logger = get_logger("cloud_agent.api.routes")
 
 
 class _CatalogStorage(Protocol):
-    """The two capabilities the catalogue reaches for."""
+    """The capabilities the catalogue reaches for.
+
+    The host pool only locates the sandbox manager that closes a deleted chat's process.
+    """
 
     conversation_commands: ConversationCommands
     conversation_queries: ConversationQueries
+    host_pool: HostPoolRepository
 
 
 def _require_store(store: _CatalogStorage | None) -> _CatalogStorage:
@@ -107,8 +112,6 @@ def _raise_session_mutation_error(result: dict[str, Any]) -> None:
         return
     messages = {
         "not_found": "One or more selected sessions are no longer available.",
-        "not_archived": "Archive every selected session before deleting it.",
-        "session_active": "A selected session is still active. Wait for its work to finish.",
         "fork_in_progress": "A selected session is being forked. Wait for the fork to finish.",
         "publication_pending": "A selected session has unfinished publication. Wait for it to finish.",
     }
@@ -146,12 +149,22 @@ async def delete_agent_sessions(
     body: AgentSessionSelection,
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _CatalogStorage | None = Depends(get_storage),
+    grants: Any = Depends(get_grant_client),
 ) -> AgentSessionDeleteResponse:
-    """Permanently remove archived sessions from owner history, retaining audit data."""
-    result = await _require_store(store).conversation_commands.delete_sessions(
+    """Permanently hide sessions from their owner, retaining audit data.
+
+    Archived or not, idle or working: the delete cancels each chat's turns and
+    releases its residency, then revokes the released grants and closes the
+    member processes on their hosts.
+    """
+    job_store = _require_store(store)
+    result = await job_store.conversation_commands.delete_sessions(
         thread_ids=body.thread_ids, user_id=user["user_id"]
     )
     _raise_session_mutation_error(result)
+    await close_released_residencies(
+        job_store.host_pool, grants, result.get("released_residencies") or []
+    )
     return AgentSessionDeleteResponse(thread_ids=result["thread_ids"])
 
 

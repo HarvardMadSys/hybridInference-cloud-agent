@@ -31,7 +31,7 @@
 ### 2.2 保持的边界
 
 - **Gateway 与 Agent 独立选版本。** FI 现有 `upstream.lock` 继续锁 Gateway/Console；新 `agent.lock` 锁 Agent。
-- **Agent 内部继续遵守现有版本协议。** 控制面、Runner、Broker、Sandbox 相关组件按同一个 Agent release 发布和部署；保留 `shared-live-exact-sha-v2` 的检查。
+- **Agent 内部继续遵守现有版本协议。** 控制面、Runner、Sandbox Manager、Sandbox 相关组件按同一个 Agent release 发布和部署；保留 `shared-live-exact-sha-v2` 的检查。
 - FI 的角色到 `agent.use` / `agent.admin` 的映射继续在 FI；Agent 只判断自身能力和任务 ownership。
 - Agent 的数据库、session 密钥、加密密钥、任务、租约与工作区继续属于 Agent 服务。
 - “FI 管理部署配置”不表示把 Agent 源码或数据库搬进 FI，也不表示把 Agent 与主站拼成一次必须同时成功的部署。
@@ -169,7 +169,7 @@ flowchart LR
 |---|---|---|
 | `control-plane` | 现有控制面 Dockerfile；同时用于 migrate 与 MCP relay | `linux/arm64` |
 | `web-root`、`web-agents` | 现有 Web Dockerfile 的两种 basePath 构建 | `linux/arm64` |
-| `runner` | Runner、workspace broker、egress 配置生成 | `linux/amd64` |
+| `runner` | Runner、sandbox manager、egress 配置生成 | `linux/amd64` |
 | `sandbox` | guest、agent CLIs、观察组件 | `linux/amd64` |
 | `gateway-tunnel` | 现有三个用途隔离的 tunnel 服务共用镜像 | `linux/amd64` |
 | `egress-proxy` | Squid 镜像 | `linux/amd64` |
@@ -284,10 +284,10 @@ Agent 增加 artifact 模式，输入是已验证 release、部署角色、明�
 产物模式必须：
 
 - 使用 `image@digest`；配方中不能保留会隐式触发构建的 `build:`。通过 `pull` 和 `up --no-build` 部署。
-- 控制面、migrate、MCP 使用同一个锁定镜像；Runner/Broker/配置生成器使用对应统一镜像。
+- 控制面、migrate、MCP 使用同一个锁定镜像；Runner/Sandbox Manager/配置生成器使用对应统一镜像。
 - `AGENT_DEPLOYMENT_SHA` 从 Agent release 的 source SHA 注入，不能从 FI checkout 的 `git rev-parse` 或部署目录推断。
 - 更新 `sandbox_host.sh` 的内部构建路径，不只修改调用它的 `deploy.sh`。
-- 保留 Kata probe、egress 隔离、tunnel 分工、旧 Runner drain、retained 配置检查、generation marker、heartbeat 和反向 Broker probe。
+- 保留 Kata probe、egress 隔离、tunnel 分工、旧 Runner drain、retained 配置检查、generation marker、heartbeat 和反向 Sandbox Manager probe。
 - 不为复用代码把复杂安全检查复制到 FI；通用脚本仍从固定版本的 Agent 配方取得。
 - 保留对部署协议和最低安全部署器版本的检查。应用回滚不能顺带换回一个没有现行 fence 的老部署器。
 
@@ -305,7 +305,7 @@ flowchart TD
     H --> P
     P --> D[控制面 DB 准备与 namespace 检查]
     D --> R[执行主机更新并发布目标 generation]
-    R --> A[控制面执行 exact-SHA 与反向 Broker 检查]
+    R --> A[控制面执行 exact-SHA 与反向 Sandbox Manager 检查]
     A --> U[切换控制面 / MCP / Web]
     U --> V[端到端验收与部署记录]
 ```
@@ -319,13 +319,13 @@ flowchart TD
 4. 使用现有 namespace 校验，但不要把 `identity_namespace --check` 描述成纯只读：它会初始化空库。严格 dry-run 应用查询或单独的只读检查路径。
 5. 有历史 owner 数据但缺 namespace 时，部署直接拒绝；CD 不自动执行 `--adopt-existing`。已有 issuer 不匹配也拒绝，不能通过重写它解决。
 6. DB 准备和 namespace 检查完成后再允许更新执行主机。保留当前真实冷启动对缺失 API/MCP listener 的受控 bootstrap，避免首次部署因等待 host heartbeat 死锁。
-7. 执行主机完成目标版本检查并发布新 generation 后，控制面再做 exact-SHA 与反向 Broker 检查，最后替换对外服务。
+7. 执行主机完成目标版本检查并发布新 generation 后，控制面再做 exact-SHA 与反向 Sandbox Manager 检查，最后替换对外服务。
 8. 任一步失败记录实际已完成的阶段，不写“全部部署成功”。主机已更新而控制面切换失败仍可能发生，必须有第 10 节的恢复路径，不能声称跨主机原子更新。
 
 ### 8.3 数据路径和当前任务
 
-- 切换前记录真实的 Compose project、volume、bind mount、数据库、密钥文件、Broker 数据根、generation marker 路径和主机标识。
-- 更换配方所在目录时，尤其注意相对路径。不能让 `../../` 指向新目录，从而创建空 volume、丢失 ready marker 或启动第二套 Broker。
+- 切换前记录真实的 Compose project、volume、bind mount、数据库、密钥文件、Sandbox Manager 数据根、generation marker 路径和主机标识。
+- 更换配方所在目录时，尤其注意相对路径。不能让 `../../` 指向新目录，从而创建空 volume、丢失 ready marker 或启动第二套 Sandbox Manager。
 - 可以继续使用历史磁盘路径。仓库归属迁移不要求同时迁移 `/srv` 或工作区目录。
 - 产物解压在独立目录，运行状态和 secret 放在稳定路径。成功部署不依赖那个目录存在 `.git`。
 - 原 session/加密/control token secret 不轮换，issuer 和 DB 不换；不主动使旧任务失去访问能力。
@@ -373,11 +373,11 @@ staging 和 production 各自切换。**不能因为 staging 成功就先删掉 
 | 按产物部署 | 在无 Agent checkout 的目录运行，所有容器来自 digest；没有构建或隐式拉最新版本 |
 | 双边预检 | 控制面缺 `GATEWAY_ISSUER` 或 host 缺必需配置时，两边都不开始服务替换 |
 | 身份边界 | issuer 与已有库不符、历史库未绑定都拒绝；CD 不执行 adoption |
-| 版本 fence | host/CP SHA 不匹配、旧 readiness marker、反向 Broker 不通时，不宣告就绪 |
+| 版本 fence | host/CP SHA 不匹配、旧 readiness marker、反向 Sandbox Manager 不通时，不宣告就绪 |
 | 登录与权限 | 正常有权限账号可用；正常无权限账号显示拒绝；不可用账号不能取得有效 Agent 身份；故障/配置错误页面保持现有区分 |
 | 历史数据 | 切换前后的采样 owner/任务计数与关键记录不变；旧会话/历史对话、工件与工作区可访问 |
 | 新任务链 | 使用明确的测试任务执行至少一轮，验证排队、Runner、Sandbox、推理、结果与用量；适用时验证 MCP 和继续对话 |
-| 正在执行/留存状态 | 按现有 drain/lease 协议更新，无重复 claim、越权恢复或错误 Broker 接管；不能只测空主机 |
+| 正在执行/留存状态 | 按现有 drain/lease 协议更新，无重复 claim、越权恢复或错误 Sandbox Manager 接管；不能只测空主机 |
 | 回滚 | 回到兼容的上一 Agent release，执行主机与控制面协议一致，旧任务和新测试任务可用 |
 | Gateway 独立性 | 在隔离验收环境停用或不配置 Agent，Gateway 仍可启动、登录、推理、升级及回滚 |
 | 外部部署 | 无 FI 源码、环境文件或部署权限的干净环境，能够取得产物、配置通用示例并走到可诊断的部署状态 |

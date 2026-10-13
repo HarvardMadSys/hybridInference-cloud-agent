@@ -578,6 +578,8 @@ async def test_migrated_native_correction_does_not_relink_to_new_duplicate_job(
                 correction,
             )
         apply_migrations(config, "0053_project_memory")
+        # Subsequent writes use the current store, after the legacy migration has run.
+        apply_migrations(config)
         if second is None:
             second = await _create_job(store, user_id="alice", repo=repo, task_prompt=source)
         user = await store.user_memory.refresh("alice")

@@ -10,9 +10,14 @@ import {
   type UserMemoryView,
 } from '@/lib/api/userMemory';
 import { getMemoryProjects } from '@/lib/api/projectMemory';
+import { getUserProfile } from '@/lib/api/userProfile';
 import { LOCALE_STORAGE_KEY } from '@/lib/i18n/locales';
 import { IntegrationsView } from './IntegrationsView';
 import type { AgentIntegrationProviderApi, AgentIntegrationsApi } from '@/lib/api/agents';
+
+vi.mock('@/components/features/agents/environment/EnvironmentManager', () => ({
+  EnvironmentManager: () => <div data-testid="environment-manager" />,
+}));
 
 vi.mock('@/components/providers/AuthProvider', () => ({
   useAuth: () => ({ state: { user: { id: 'settings-owner' } } }),
@@ -20,6 +25,7 @@ vi.mock('@/components/providers/AuthProvider', () => ({
 
 import { listSkills } from '@/lib/api/skills';
 vi.mock('@/lib/api/skills', () => ({ listSkills: vi.fn() }));
+vi.mock('@/lib/api/userProfile', () => ({ getUserProfile: vi.fn(), saveUserProfile: vi.fn() }));
 
 vi.mock('@/lib/api/agents', () => ({
   getAgentConfig: vi.fn(),
@@ -154,6 +160,13 @@ function unloadedGithub(
 }
 
 beforeEach(() => {
+  vi.mocked(getUserProfile).mockResolvedValue({
+    email: 'owner@example.com',
+    first_name: '',
+    last_name: '',
+    image_data_url: null,
+    revision: 0,
+  });
   localStorage.clear();
   document.documentElement.lang = 'en';
   vi.mocked(getAgentConfig).mockResolvedValue({
@@ -182,7 +195,8 @@ describe('IntegrationsView', () => {
 
     render(<IntegrationsView connectedProvider="github" />);
 
-    expect(screen.getByRole('heading', { level: 1, name: 'Setting' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 1, name: 'My Settings' })).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Profile' })).toBeInTheDocument();
     expect(screen.queryByText('Integrations & MCP')).not.toBeInTheDocument();
     expect(screen.getByRole('heading', { level: 2, name: 'MCP servers' })).toBeInTheDocument();
     expect(
@@ -200,42 +214,113 @@ describe('IntegrationsView', () => {
     expect(screen.getByRole('region', { name: 'Notifications' })).toBeInTheDocument();
     expect(screen.getByRole('checkbox', { name: 'Agent questions' })).toBeInTheDocument();
     expect(screen.getByRole('checkbox', { name: 'Turn completions' })).toBeInTheDocument();
-    expect(screen.getByRole('region', { name: 'User memory' })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { level: 2, name: 'User memory' })).toBeInTheDocument();
-    expect(screen.getByRole('region', { name: 'Project memory' })).toBeInTheDocument();
-    expect(screen.getByRole('combobox', { name: 'Repository (owner/repo)' })).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Memory' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 2, name: 'Memory' })).toBeInTheDocument();
+    expect(screen.getByRole('tabpanel', { name: 'User memory' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('tab', { name: 'Project memory' }));
+    expect(screen.getByRole('combobox', { name: 'Repository' })).toBeInTheDocument();
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     expect(screen.queryByRole('combobox', { name: 'Theme' })).not.toBeInTheDocument();
     expect(screen.queryByRole('combobox', { name: 'Display language' })).not.toBeInTheDocument();
   });
 
-  it('keeps source-linked memory, suggestions, and privacy controls on the Setting page without an avatar', async () => {
+  it('shares the companion with Profile and updates it after a memory refresh', async () => {
+    mockedGetIntegrations.mockResolvedValue(integrations);
+    render(<IntegrationsView />);
+    const profileSection = screen.getByRole('region', { name: 'Profile' });
+    const image = await within(profileSection).findByRole('img', {
+      name: 'Your Pokémon companion avatar',
+    });
+    expect(image).toHaveAttribute('src', memory.avatar.data_url);
+    const refreshed = 'data:image/svg+xml,<svg id="refreshed"></svg>';
+    vi.mocked(getUserMemory).mockResolvedValueOnce({
+      ...memory,
+      avatar: { ...memory.avatar, data_url: refreshed },
+    });
+    fireEvent.click(
+      within(screen.getByRole('tabpanel', { name: 'User memory' })).getByRole('button', {
+        name: /^Refresh$/,
+      }),
+    );
+    await waitFor(() => expect(image).toHaveAttribute('src', refreshed));
+    expect(getUserMemory).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the companion across memory tab switches without fetching user memory again', async () => {
+    mockedGetIntegrations.mockResolvedValue(integrations);
+    render(<IntegrationsView />);
+    const image = await within(screen.getByRole('region', { name: 'Profile' })).findByRole('img', {
+      name: 'Your Pokémon companion avatar',
+    });
+    fireEvent.click(screen.getByRole('tab', { name: 'Project memory' }));
+    expect(screen.getByRole('tabpanel', { name: 'Project memory' })).toBeVisible();
+    expect(image).toHaveAttribute('src', memory.avatar.data_url);
+    fireEvent.click(screen.getByRole('tab', { name: 'User memory' }));
+    expect(screen.getByRole('tabpanel', { name: 'User memory' })).toBeVisible();
+    expect(image).toHaveAttribute('src', memory.avatar.data_url);
+    expect(getUserMemory).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the uploaded photo when the companion theme changes', async () => {
+    const photo = 'data:image/png;base64,cGhvdG8=';
+    vi.mocked(getUserProfile).mockResolvedValue({
+      email: 'owner@example.com',
+      first_name: '',
+      last_name: '',
+      image_data_url: photo,
+      revision: 1,
+    });
+    mockedGetIntegrations.mockResolvedValue(integrations);
+    render(<IntegrationsView />);
+    const profileSection = screen.getByRole('region', { name: 'Profile' });
+    const image = await within(profileSection).findByRole('img', { name: 'Your profile image' });
+    expect(image).toHaveAttribute('src', photo);
+    const refreshed = 'data:image/svg+xml,<svg id="refreshed"></svg>';
+    vi.mocked(getUserMemory).mockResolvedValueOnce({
+      ...memory,
+      avatar: { ...memory.avatar, data_url: refreshed },
+    });
+    fireEvent.click(
+      within(screen.getByRole('tabpanel', { name: 'User memory' })).getByRole('button', {
+        name: /^Refresh$/,
+      }),
+    );
+    await waitFor(() => expect(getUserMemory).toHaveBeenCalledTimes(2));
+    expect(image).toHaveAttribute('src', photo);
+    expect(
+      within(profileSection).queryByRole('img', { name: 'Your Pokémon companion avatar' }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('keeps source-linked memory and privacy controls on the Setting page while user suggestions live on the homepage', async () => {
     mockedGetIntegrations.mockResolvedValue(integrations);
     render(<IntegrationsView />);
 
-    const section = screen.getByRole('region', { name: 'User memory' });
+    const section = screen.getByRole('tabpanel', { name: 'User memory' });
     await within(section).findByRole('switch');
-    expect(within(section).getByRole('combobox', { name: 'Consolidation model' })).toHaveValue(
-      'model-a',
-    );
-    expect(within(section).getByRole('button', { name: 'Consolidate' })).toBeEnabled();
+    fireEvent.click(within(section).getByRole('button', { name: 'Consolidate' }));
+    expect(await within(section).findByRole('combobox', { name: 'Model' })).toHaveValue('model-a');
+    expect(within(section).getByRole('button', { name: 'Consolidate now' })).toBeEnabled();
     expect(within(section).queryByRole('img')).not.toBeInTheDocument();
     expect(within(section).getByText(memory.portrait.summary)).toBeInTheDocument();
-    expect(within(section).getByRole('link', { name: 'View source task' })).toHaveAttribute(
+    expect(within(section).getByRole('link', { name: 'Source task' })).toHaveAttribute(
       'href',
       '/job_memory_source',
     );
-    expect(within(section).getByText(memory.suggestions[0].action)).toBeInTheDocument();
-    const toggle = within(section).getByRole('switch', { name: 'Automatically build memory' });
+    expect(within(section).queryByRole('heading', { name: 'Suggestions' })).not.toBeInTheDocument();
+    expect(within(section).queryByText(memory.suggestions[0].title)).not.toBeInTheDocument();
+    expect(within(section).queryByText(memory.suggestions[0].reason)).not.toBeInTheDocument();
+    expect(within(section).queryByText(memory.suggestions[0].action)).not.toBeInTheDocument();
+    const toggle = within(section).getByRole('switch', { name: 'Remember automatically' });
     fireEvent.click(toggle);
     await waitFor(() => expect(toggle).not.toBeChecked());
     expect(updateUserMemory).toHaveBeenCalledWith(false, expect.any(AbortSignal));
     expect(within(section).getByText(memory.memories[0].content)).toBeInTheDocument();
 
-    fireEvent.click(within(section).getByRole('button', { name: 'Clear memory' }));
+    fireEvent.click(within(section).getByRole('button', { name: 'Clear' }));
     expect(clearUserMemory).not.toHaveBeenCalled();
-    fireEvent.click(within(section).getByRole('button', { name: 'Confirm clear memory' }));
-    await within(section).findByText('No saved memory yet.');
+    fireEvent.click(within(section).getByRole('button', { name: 'Yes, clear' }));
+    await within(section).findByText('No memories yet.');
     expect(clearUserMemory).toHaveBeenCalledWith(expect.any(AbortSignal));
     expect(within(section).queryByText(memory.portrait.summary)).not.toBeInTheDocument();
     expect(within(section).queryByText(memory.suggestions[0].title)).not.toBeInTheDocument();
@@ -251,13 +336,16 @@ describe('IntegrationsView', () => {
       </LocaleProvider>,
     );
 
-    expect(await screen.findByRole('heading', { level: 1, name: '设置' })).toBeInTheDocument();
-    const section = screen.getByRole('region', { name: '用户记忆' });
-    await within(section).findByRole('switch', { name: '自动建立记忆' });
+    expect(await screen.findByRole('heading', { level: 1, name: '我的设置' })).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: '个人资料' })).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: '记忆' })).toBeInTheDocument();
+    const section = screen.getByRole('tabpanel', { name: '用户记忆' });
+    await within(section).findByRole('switch', { name: '自动记忆' });
     expect(within(section).queryByRole('img')).not.toBeInTheDocument();
-    expect(within(section).getByRole('switch', { name: '自动建立记忆' })).toBeChecked();
-    expect(screen.getByRole('region', { name: '项目记忆' })).toBeInTheDocument();
-    expect(screen.getByText('管理你的连接、技能、记忆和通知。')).toBeInTheDocument();
+    expect(within(section).getByRole('switch', { name: '自动记忆' })).toBeChecked();
+    expect(within(section).queryByRole('heading', { name: '建议' })).not.toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: '项目记忆' })).toBeInTheDocument();
+    expect(screen.getByText('管理你的个人资料、连接、技能、记忆和通知。')).toBeInTheDocument();
   });
 
   it('marks providers that need operator configuration', async () => {

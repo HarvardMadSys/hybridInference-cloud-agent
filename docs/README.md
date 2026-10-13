@@ -58,6 +58,7 @@ deployment has passed the same checks.
 
 Useful design entry points include:
 
+- [Reusable cloud environments](specs/2026-10-12-repository-environment-design.zh-CN.md)
 - [Native sessions, Fork, and shared workspaces](specs/2026-08-31-native-session-fork-shared-workspace-design.md)
 - [Sandbox security model](specs/2026-09-01-agent-sandbox-security-model.zh.md)
 - [Public egress and accepted inference-grant replay risk](specs/2026-09-23-agent-public-egress-design.zh-CN.md)

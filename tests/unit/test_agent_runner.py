@@ -63,8 +63,8 @@ def _stamp() -> dict:
 def _configure_host(monkeypatch) -> None:
     monkeypatch.setenv("AGENT_HOST_SLOTS", "3")
     monkeypatch.setenv("AGENT_SHARED_RESIDENT_CAPACITY", "8")
-    monkeypatch.setenv("AGENT_WORKSPACE_BROKER_URL", "http://broker:8092")
-    monkeypatch.setenv("AGENT_WORKSPACE_BROKER_TOKEN", "broker-token")
+    monkeypatch.setenv("AGENT_SANDBOX_MANAGER_URL", "http://sandbox_manager:8092")
+    monkeypatch.setenv("AGENT_SANDBOX_MANAGER_TOKEN", "sandbox-manager-token")
 
 
 def test_shared_live_is_the_only_capability_without_feature_switches(monkeypatch):
@@ -214,7 +214,7 @@ def test_chat_idle_timeout_has_one_canonical_setting(monkeypatch):
 
 
 def test_reconstructed_running_group_reports_unknown_activity(monkeypatch):
-    """A broker restart must not renew a full idle window on every beat."""
+    """A sandbox manager restart must not renew a full idle window on every beat."""
 
     class Supervisor:
         def list(self):
@@ -292,23 +292,23 @@ def test_retained_heartbeat_passes_group_resources_and_terminal_count(
     supervisor.close.assert_called_once()
 
 
-def test_a_broker_that_never_answers_costs_the_host_beat_only_its_observation(monkeypatch):
+def test_a_sandbox_manager_that_never_answers_costs_the_host_beat_only_its_observation(
+    monkeypatch,
+):
     """The observation runs on the host-heartbeat thread, ahead of the beat itself.
 
-    It used the broker client's 180-second ceiling, so a broker that accepted
-    the request and never answered held the beat for three minutes -- twice
-    the silence after which the control plane counts the host offline and
-    refuses its claims.
+    It used the sandbox manager client's 180-second ceiling, so a sandbox
+    manager that accepted the request and never answered held the beat for
+    three minutes -- twice the silence after which the control plane counts
+    the host offline and refuses its claims.
     """
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
     # Connections complete in the backlog and are never read or answered.
     listener.listen(8)
-    monkeypatch.setenv(
-        "AGENT_WORKSPACE_BROKER_URL", f"http://127.0.0.1:{listener.getsockname()[1]}"
-    )
-    monkeypatch.setenv("AGENT_WORKSPACE_BROKER_TOKEN", "broker-token")
-    monkeypatch.setattr(runner_mod, "_HOST_BEAT_BROKER_TIMEOUT_S", 0.2)
+    monkeypatch.setenv("AGENT_SANDBOX_MANAGER_URL", f"http://127.0.0.1:{listener.getsockname()[1]}")
+    monkeypatch.setenv("AGENT_SANDBOX_MANAGER_TOKEN", "sandbox-manager-token")
+    monkeypatch.setattr(runner_mod, "_HOST_BEAT_SANDBOX_MANAGER_TIMEOUT_S", 0.2)
     observed: list[Any] = []
     beat = threading.Thread(
         target=lambda: observed.append(runner_mod._retained_sandbox_heartbeat_rows()),
@@ -317,27 +317,28 @@ def test_a_broker_that_never_answers_costs_the_host_beat_only_its_observation(mo
     try:
         beat.start()
         beat.join(timeout=10)
-        assert not beat.is_alive(), "the host beat waited on the broker"
+        assert not beat.is_alive(), "the host beat waited on the sandbox manager"
         # "Not observed this beat", never an authoritative empty list.
         assert observed == [None]
     finally:
         listener.close()
 
 
-def test_residency_cleanup_waits_on_a_silent_broker_no_longer_than_the_beat(monkeypatch):
+def test_residency_cleanup_waits_on_a_silent_sandbox_manager_no_longer_than_the_beat(
+    monkeypatch,
+):
     """The cleanup a beat's answer asks for runs on the same heartbeat thread.
 
-    It still used the 180-second broker client, so a broker that never
-    answered held the next beat for three minutes and the host went offline.
+    It still used the 180-second sandbox manager client, so a sandbox manager
+    that never answered held the next beat for three minutes and the host went
+    offline.
     """
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
     listener.listen(8)
-    monkeypatch.setenv(
-        "AGENT_WORKSPACE_BROKER_URL", f"http://127.0.0.1:{listener.getsockname()[1]}"
-    )
-    monkeypatch.setenv("AGENT_WORKSPACE_BROKER_TOKEN", "broker-token")
-    monkeypatch.setattr(runner_mod, "_HOST_BEAT_BROKER_TIMEOUT_S", 0.2)
+    monkeypatch.setenv("AGENT_SANDBOX_MANAGER_URL", f"http://127.0.0.1:{listener.getsockname()[1]}")
+    monkeypatch.setenv("AGENT_SANDBOX_MANAGER_TOKEN", "sandbox-manager-token")
+    monkeypatch.setattr(runner_mod, "_HOST_BEAT_SANDBOX_MANAGER_TIMEOUT_S", 0.2)
     beat = threading.Thread(
         target=runner_mod._handle_host_residencies_lost,
         args=([{"thread_id": "athr_1", "generation": 3}],),
@@ -346,7 +347,7 @@ def test_residency_cleanup_waits_on_a_silent_broker_no_longer_than_the_beat(monk
     try:
         beat.start()
         beat.join(timeout=10)
-        assert not beat.is_alive(), "the host beat waited on the broker"
+        assert not beat.is_alive(), "the host beat waited on the sandbox manager"
     finally:
         listener.close()
 
@@ -354,25 +355,26 @@ def test_residency_cleanup_waits_on_a_silent_broker_no_longer_than_the_beat(monk
 def test_residency_cleanup_leaves_the_rest_to_a_later_beat_once_its_time_is_spent(
     monkeypatch,
 ):
-    """A slow broker gets one call per beat, not one ceiling per lost member.
+    """A slow sandbox manager gets one call per beat, not one ceiling per lost member.
 
-    Each verdict is named again by every beat while the broker still reports
-    the member live, so nothing is lost by stopping; waiting out one ceiling
-    per member would hold the next beat past the host's offline threshold.
+    Each verdict is named again by every beat while the sandbox manager still
+    reports the member live, so nothing is lost by stopping; waiting out one
+    ceiling per member would hold the next beat past the host's offline
+    threshold.
     """
     clock = SimpleNamespace(now=0.0)
     monkeypatch.setattr(runner_mod.time, "monotonic", lambda: clock.now)
     members = [{"thread_id": f"athr_{index}"} for index in range(3)]
     fenced: list[tuple[str, int]] = []
 
-    class Broker:
+    class SandboxManager:
         def list(self):
             return [{"members": members}]
 
         def shared_residency_lost(self, thread_id, *, generation):
             fenced.append((thread_id, generation))
             # A call that used the whole ceiling before it was answered.
-            clock.now += runner_mod._HOST_BEAT_BROKER_TIMEOUT_S
+            clock.now += runner_mod._HOST_BEAT_SANDBOX_MANAGER_TIMEOUT_S
             raise SessionSupervisorError(503, "shared Session Supervisor is unavailable")
 
         def close(self):
@@ -380,30 +382,34 @@ def test_residency_cleanup_leaves_the_rest_to_a_later_beat_once_its_time_is_spen
 
     timeouts: list[float | None] = []
 
-    def broker(*, timeout=None):
+    def sandbox_manager(*, timeout=None):
         timeouts.append(timeout)
-        return Broker()
+        return SandboxManager()
 
-    monkeypatch.setattr(runner_mod, "_session_supervisor_from_env", broker)
+    monkeypatch.setattr(runner_mod, "_session_supervisor_from_env", sandbox_manager)
 
     runner_mod._handle_host_residencies_lost(
         [{"thread_id": f"athr_{index}", "generation": index + 1} for index in range(3)]
     )
 
-    assert timeouts == [runner_mod._HOST_BEAT_BROKER_TIMEOUT_S]
+    assert timeouts == [runner_mod._HOST_BEAT_SANDBOX_MANAGER_TIMEOUT_S]
     assert fenced == [("athr_0", 1)]
 
 
-def test_residency_cleanup_fences_every_named_member_a_prompt_broker_holds(monkeypatch):
+def test_residency_cleanup_fences_every_named_member_a_prompt_sandbox_manager_holds(
+    monkeypatch,
+):
     fenced: list[tuple[str, int]] = []
-    broker = SimpleNamespace(
+    sandbox_manager = SimpleNamespace(
         list=lambda: [{"members": [{"thread_id": "athr_1"}, {"thread_id": "athr_2"}]}],
         shared_residency_lost=lambda thread_id, *, generation: fenced.append(
             (thread_id, generation)
         ),
         close=Mock(),
     )
-    monkeypatch.setattr(runner_mod, "_session_supervisor_from_env", lambda **_kwargs: broker)
+    monkeypatch.setattr(
+        runner_mod, "_session_supervisor_from_env", lambda **_kwargs: sandbox_manager
+    )
 
     runner_mod._handle_host_residencies_lost(
         [
@@ -414,7 +420,7 @@ def test_residency_cleanup_fences_every_named_member_a_prompt_broker_holds(monke
     )
 
     assert fenced == [("athr_1", 4), ("athr_2", 7)]
-    broker.close.assert_called_once()
+    sandbox_manager.close.assert_called_once()
 
 
 def test_resume_requires_the_exact_native_session():
@@ -500,6 +506,7 @@ def test_run_once_dispatches_only_to_shared_live(monkeypatch):
         "mid-turn-input-v1:claude-code",
         "mid-turn-input-v1:codex",
         "sandbox-archive-settings-v1",
+        "environment-v1",
     ]
     assert dispatched[0]["job"] is _JOB
     assert dispatched[0]["gateway_base_url"] == "http://gateway"
@@ -641,8 +648,8 @@ def _run_shared_boundary_case(
     resident_action="unknown",
     lease_stages=None,
     resident_stages=None,
-    broker_records=True,
-    broker_truncated=False,
+    sandbox_manager_records=True,
+    sandbox_manager_truncated=False,
     thread_sandbox=None,
     heart=None,
 ):
@@ -677,14 +684,14 @@ def _run_shared_boundary_case(
             "activation_generation": 3,
             "context_status": "live",
             "resident_state": "live",
-            # What the broker reports it did to the container.
+            # What the sandbox manager reports it did to the container.
             "container_action": container_action,
             "stages": list(lease_stages or []),
-            # Echoed like the real broker: which call this answers, and whether
+            # Echoed like the real sandbox manager: which call this answers, and whether
             # this process collected for it at all.
             "profiling_call_id": context.get("call_id"),
-            "profiling_recorded": broker_records,
-            "profiling_truncated": broker_truncated,
+            "profiling_recorded": sandbox_manager_records,
+            "profiling_truncated": sandbox_manager_truncated,
         }
 
     def ensure_shared_resident(_thread_id, **kwargs):
@@ -695,8 +702,8 @@ def _run_shared_boundary_case(
             "resident_action": resident_action,
             "stages": list(resident_stages or []),
             "profiling_call_id": context.get("call_id"),
-            "profiling_recorded": broker_records,
-            "profiling_truncated": broker_truncated,
+            "profiling_recorded": sandbox_manager_records,
+            "profiling_truncated": sandbox_manager_truncated,
         }
 
     supervisor.acquire_shared.side_effect = acquire_shared
@@ -704,7 +711,9 @@ def _run_shared_boundary_case(
     supervisor.settle_shared.return_value = {"native_session_id": observed_session_id}
     monkeypatch.setattr(runner_mod, "_session_supervisor_from_env", lambda: supervisor)
     monkeypatch.setattr(
-        runner_mod, "_stream_shared_agent_turn", lambda **_kwargs: (code, "API error", [], frame)
+        runner_mod,
+        "_stream_shared_agent_turn",
+        lambda **_kwargs: (code, "API error", [], frame, None),
     )
     finish = Mock()
     if configure is not None:
@@ -766,10 +775,10 @@ def test_only_the_runner_creating_a_group_reports_its_fork_helper_version(monkey
 
 
 @pytest.mark.parametrize("verified", [True, False, None])
-def test_a_turn_relies_on_the_bridge_proof_its_broker_states(monkeypatch, verified):
-    """One bridge check per turn: the broker's, when its lease says the call made one.
+def test_a_turn_relies_on_the_bridge_proof_its_sandbox_manager_states(monkeypatch, verified):
+    """One bridge check per turn: the sandbox manager's, when its lease says the call made one.
 
-    ``None`` is a broker from before the field, whose turn checks as it always
+    ``None`` is a sandbox manager from before the field, whose turn checks as it always
     did. The check before the CLI starts goes through the turn's backend either
     way, which is what decides whether that proof still stands.
     """
@@ -1170,7 +1179,7 @@ def test_lost_lifecycle_ack_recovers_without_repeating_the_agent_turn(monkeypatc
     from cloud_agent_host import runner as runner_mod
 
     monkeypatch.setattr(runner_mod.time, "sleep", lambda _seconds: None)
-    stream = Mock(return_value=(0, "", [], {"kind": "result", "status": "completed"}))
+    stream = Mock(return_value=(0, "", [], {"kind": "result", "status": "completed"}, None))
 
     def configure(control, supervisor, finish):
         monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream)
@@ -1255,9 +1264,48 @@ def test_native_failure_preserves_only_a_verified_turn_boundary(
         assert control.abandon_chat_sandbox.call_args.kwargs["lost"] is True
 
 
+@pytest.mark.parametrize("settled", [True, False])
+@pytest.mark.parametrize("runtime_id", ["claude-code", "codex", "pi", "opencode", "kilo"])
+def test_a_failed_turn_is_explained_by_what_it_reported(monkeypatch, settled, runtime_id):
+    """The CLI's own reason beats the end of its output, settled or not."""
+    frame = {"kind": "result", "status": "failed", "native_turn_settled": settled}
+    reported = "agent reported an error: API Error: Stream idle timeout - no chunks received"
+
+    def configure(_control, _supervisor, _finish):
+        monkeypatch.setattr(
+            runner_mod,
+            "_stream_shared_agent_turn",
+            lambda **_kwargs: (1, '"uuid":"tail-of-a-json-result"}\n', [], frame, reported),
+        )
+
+    result, _control, _supervisor, finish = _run_shared_boundary_case(
+        monkeypatch, 1, frame, runtime_id, configure=configure
+    )
+
+    assert result == 1
+    assert finish.call_args.args[:2] == ("failed", reported)
+
+
+@pytest.mark.parametrize(
+    ("settled", "expected"),
+    [
+        (True, "agent failed at native turn boundary: API error"),
+        (False, "agent exited 1: API error"),
+    ],
+)
+def test_a_failed_turn_that_reported_nothing_keeps_its_output_tail(monkeypatch, settled, expected):
+    frame = {"kind": "result", "status": "failed", "native_turn_settled": settled}
+
+    _result, _control, _supervisor, finish = _run_shared_boundary_case(
+        monkeypatch, 1, frame, "claude-code"
+    )
+
+    assert finish.call_args.args[:2] == ("failed", expected)
+
+
 @pytest.mark.parametrize("runtime_id", ["claude-code", "codex", "pi", "opencode", "kilo"])
 @pytest.mark.parametrize("code", [0, 1])
-def test_shared_runner_never_persists_a_different_session_returned_by_the_broker(
+def test_shared_runner_never_persists_a_different_session_returned_by_the_sandbox_manager(
     monkeypatch, runtime_id, code
 ):
     frame = {
@@ -1315,7 +1363,7 @@ class _Control:
         (SimpleNamespace(cancel_requested=False, lease_lost=False), -1.0, 124),
     ],
 )
-def test_shared_interrupt_drains_the_brokers_terminal_resource_frame(
+def test_shared_interrupt_drains_the_sandbox_managers_terminal_resource_frame(
     heart,
     timeout_s,
     expected_code,
@@ -1337,7 +1385,7 @@ def test_shared_interrupt_drains_the_brokers_terminal_resource_frame(
     )
     control = _Control()
 
-    code, _tail, _errors, result = runner_mod._stream_shared_agent_turn(
+    code, _tail, _errors, result, _reported = runner_mod._stream_shared_agent_turn(
         supervisor=supervisor,
         job=_JOB,
         control=control,
@@ -1369,6 +1417,69 @@ def test_shared_turn_lease_loss_interrupts_and_fences():
     assert supervisor.stream.closed is True
 
 
+def _run_frames(frames):
+    return runner_mod._stream_shared_agent_turn(
+        supervisor=_Supervisor(frames),
+        job=_JOB,
+        control=_Control(),
+        heart=SimpleNamespace(cancel_requested=False, lease_lost=False),
+        lease_token="lease",
+        timeout_s=30,
+    )
+
+
+def test_a_turn_reports_its_clis_last_error_as_the_reason():
+    """A Codex turn refused with 403 printed a config warning last."""
+    *_, reported = _run_frames(
+        [
+            {
+                "kind": "event",
+                "event_type": "error",
+                "payload": {"text": "an earlier error"},
+                "raw_line": "raw\n",
+            },
+            {
+                "kind": "event",
+                "event_type": "error",
+                "payload": {
+                    "text": "unexpected status 403 Forbidden: This account has no active API key"
+                },
+                "raw_line": "raw\n",
+            },
+            {"kind": "result", "status": "failed", "exit_code": 1, "stderr": "WARN bubblewrap"},
+        ]
+    )
+
+    assert reported == (
+        "agent reported an error: unexpected status 403 Forbidden: "
+        "This account has no active API key"
+    )
+
+
+def test_a_turn_reports_the_sandboxs_failure_when_the_cli_reported_none():
+    code, tail, _errors, _result, reported = _run_frames(
+        [
+            {"kind": "event", "event_type": "message", "payload": {"text": "done"}},
+            {"kind": "error", "detail": "shared member activation boundary failed: chmod"},
+        ]
+    )
+
+    assert code == 1
+    assert "shared member activation boundary failed" in tail
+    assert reported == "sandbox failed: shared member activation boundary failed: chmod"
+
+
+def test_a_turn_that_reported_no_error_has_no_reason():
+    *_, reported = _run_frames(
+        [
+            {"kind": "event", "event_type": "error", "payload": {"text": "  "}},
+            {"kind": "result", "status": "completed", "exit_code": 0, "stderr": ""},
+        ]
+    )
+
+    assert reported is None
+
+
 @pytest.mark.parametrize("runtime_id", ["claude-code", "codex", "pi", "opencode", "kilo"])
 def test_shared_turn_streams_events_and_requires_a_result(runtime_id):
     supervisor = _Supervisor(
@@ -1389,7 +1500,7 @@ def test_shared_turn_streams_events_and_requires_a_result(runtime_id):
     )
     control = _Control()
 
-    code, tail, errors, result = runner_mod._stream_shared_agent_turn(
+    code, tail, errors, result, _reported = runner_mod._stream_shared_agent_turn(
         supervisor=supervisor,
         job=replace(_JOB, runtime=runtime_id),
         control=control,
@@ -1416,7 +1527,7 @@ def test_shared_turn_reports_dispatch_before_waiting_for_runtime_output():
     supervisor = _Supervisor()
     supervisor.stream.frames = frames
 
-    code, _tail, _errors, _result = runner_mod._stream_shared_agent_turn(
+    code, _tail, _errors, _result, _reported = runner_mod._stream_shared_agent_turn(
         supervisor=supervisor,
         job=_JOB,
         control=control,
@@ -1646,7 +1757,7 @@ def test_startup_measurement_records_every_runner_stage(monkeypatch, caplog, tmp
         # real helper owns: the prompt handoff is what closes the measurement.
         def stream(**kwargs):
             operation_profiling.finish(kwargs.get("measurement"), outcome="dispatched")
-            return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}
+            return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}, None
 
         monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream)
 
@@ -1728,7 +1839,7 @@ def test_startup_path_comes_from_the_actions_the_supervisor_reported(
     def configure(_control, _supervisor, _finish):
         def stream(**kwargs):
             operation_profiling.finish(kwargs.get("measurement"), outcome="dispatched")
-            return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}
+            return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}, None
 
         monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream)
 
@@ -1751,10 +1862,10 @@ def test_startup_path_comes_from_the_actions_the_supervisor_reported(
     assert record["facts"]["resident_action"] == resident_action
 
 
-def test_broker_sub_stages_hang_off_the_stage_they_happened_in(monkeypatch, tmp_path):
-    """Durations from the broker are attached, attributed and not placed.
+def test_sandbox_manager_sub_stages_hang_off_the_stage_they_happened_in(monkeypatch, tmp_path):
+    """Durations from the sandbox manager are attached, attributed and not placed.
 
-    The broker has its own monotonic clock, so its sub-stages carry a duration
+    The sandbox manager has its own monotonic clock, so its sub-stages carry a duration
     and a producer but no offset on the runner's timeline.
     """
     _configure_host(monkeypatch)
@@ -1767,7 +1878,7 @@ def test_broker_sub_stages_hang_off_the_stage_they_happened_in(monkeypatch, tmp_
     def configure(_control, _supervisor, _finish):
         def stream(**kwargs):
             operation_profiling.finish(kwargs.get("measurement"), outcome="dispatched")
-            return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}
+            return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}, None
 
         monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream)
 
@@ -1817,7 +1928,7 @@ def test_broker_sub_stages_hang_off_the_stage_they_happened_in(monkeypatch, tmp_
             "call_id": "c2",
         }
     ]
-    # The broker contributed, and the record says so.
+    # The sandbox manager contributed, and the record says so.
     assert record["producers"] == ["runner", "broker"]
     # Every child is attributable, and no child pretends to a timeline offset.
     for child in acquire["children"] + resident["children"]:
@@ -1825,7 +1936,7 @@ def test_broker_sub_stages_hang_off_the_stage_they_happened_in(monkeypatch, tmp_
         assert child["source"] == "broker"
 
 
-def test_a_broker_that_is_not_profiling_leaves_the_record_partial(monkeypatch, tmp_path):
+def test_a_sandbox_manager_that_is_not_profiling_leaves_the_record_partial(monkeypatch, tmp_path):
     """A missing producer is visible, not silently absent."""
     _configure_host(monkeypatch)
     sink = tmp_path / "startup.jsonl"
@@ -1837,7 +1948,7 @@ def test_a_broker_that_is_not_profiling_leaves_the_record_partial(monkeypatch, t
     def configure(_control, _supervisor, _finish):
         def stream(**kwargs):
             operation_profiling.finish(kwargs.get("measurement"), outcome="dispatched")
-            return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}
+            return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}, None
 
         monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream)
 
@@ -1852,13 +1963,13 @@ def test_a_broker_that_is_not_profiling_leaves_the_record_partial(monkeypatch, t
         resident_action="reuse",
         lease_stages=[],
         resident_stages=[],
-        broker_records=False,
+        sandbox_manager_records=False,
     )
 
     operation_profiling.flush_sink()
     record = json.loads(sink.read_text().splitlines()[0])
     assert record["producers"] == ["runner"]
-    # The broker was asked for its fragment and did not answer, so the record
+    # The sandbox manager was asked for its fragment and did not answer, so the record
     # is partial rather than a quiet but complete timeline.
     assert record["missing_producers"] == ["broker"]
     assert record["missing_fragments"] == [
@@ -1930,7 +2041,7 @@ def test_stream_helper_closes_the_measurement_at_the_prompt_handoff(monkeypatch,
         started.append(kwargs)
         return _Stream()
 
-    code, _tail, _errors, _frame = runner_mod._stream_shared_agent_turn(
+    code, _tail, _errors, _frame, _reported = runner_mod._stream_shared_agent_turn(
         supervisor=SimpleNamespace(start_shared_turn=start_shared_turn),
         job=_JOB,
         control=SimpleNamespace(append_event=lambda _event: None),
@@ -2099,8 +2210,8 @@ def test_profiling_off_adds_no_record_and_no_measurement(monkeypatch, caplog, tm
     assert "agent_operation_profile" not in caplog.text
 
 
-def test_the_runner_hands_its_selection_to_the_broker(monkeypatch, tmp_path):
-    """The broker serves one call at a time; only the runner knows the attempt."""
+def test_the_runner_hands_its_selection_to_the_sandbox_manager(monkeypatch, tmp_path):
+    """The sandbox manager serves one call at a time; only the runner knows the attempt."""
     _configure_host(monkeypatch)
     _enable_profiling(monkeypatch)
     measurement = _profiled_measurement()
@@ -2109,7 +2220,7 @@ def test_the_runner_hands_its_selection_to_the_broker(monkeypatch, tmp_path):
     def configure(_control, _supervisor, _finish):
         def stream(**kwargs):
             operation_profiling.finish(kwargs.get("measurement"), outcome="dispatched")
-            return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}
+            return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}, None
 
         monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream)
 
@@ -2132,14 +2243,14 @@ def test_the_runner_hands_its_selection_to_the_broker(monkeypatch, tmp_path):
     assert resident_context["run_id"] == "runner-stages-1"
 
 
-def test_the_runner_offers_the_broker_nothing_when_it_is_not_profiling(monkeypatch):
-    """No selection means the broker has nothing to inherit."""
+def test_the_runner_offers_the_sandbox_manager_nothing_when_it_is_not_profiling(monkeypatch):
+    """No selection means the sandbox manager has nothing to inherit."""
     _configure_host(monkeypatch)
     operation_profiling.reset_cache()
 
     def configure(_control, _supervisor, _finish):
         def stream(**_kwargs):
-            return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}
+            return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}, None
 
         monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream)
 
@@ -2156,7 +2267,7 @@ def test_the_runner_offers_the_broker_nothing_when_it_is_not_profiling(monkeypat
 
 
 def test_an_acquire_fragment_does_not_cover_a_missing_resident_fragment(monkeypatch, tmp_path):
-    """Every call this attempt made to the broker owes a fragment.
+    """Every call this attempt made to the sandbox manager owes a fragment.
 
     Regression: the acquire answered, the resident call's timing never
     arrived, and the record was still reported complete.
@@ -2171,7 +2282,7 @@ def test_an_acquire_fragment_does_not_cover_a_missing_resident_fragment(monkeypa
     def configure(_control, _supervisor, _finish):
         def stream(**kwargs):
             operation_profiling.finish(kwargs.get("measurement"), outcome="dispatched")
-            return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}
+            return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}, None
 
         monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream)
 
@@ -2186,7 +2297,7 @@ def test_an_acquire_fragment_does_not_cover_a_missing_resident_fragment(monkeypa
         resident_action="resume",
         lease_stages=[{"name": "container_start", "duration_us": 690_000}],
         resident_stages=[],
-        broker_records=False,
+        sandbox_manager_records=False,
     )
 
     assert result == 0
@@ -2199,8 +2310,8 @@ def test_an_acquire_fragment_does_not_cover_a_missing_resident_fragment(monkeypa
     assert record["measurement_complete"] is False
 
 
-def test_a_truncated_broker_fragment_makes_the_record_partial(monkeypatch, tmp_path):
-    """The broker's own truncation must survive the boundary."""
+def test_a_truncated_sandbox_manager_fragment_makes_the_record_partial(monkeypatch, tmp_path):
+    """The sandbox manager's own truncation must survive the boundary."""
     _configure_host(monkeypatch)
     sink = tmp_path / "startup.jsonl"
     _enable_profiling(monkeypatch)
@@ -2211,7 +2322,7 @@ def test_a_truncated_broker_fragment_makes_the_record_partial(monkeypatch, tmp_p
     def configure(_control, _supervisor, _finish):
         def stream(**kwargs):
             operation_profiling.finish(kwargs.get("measurement"), outcome="dispatched")
-            return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}
+            return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}, None
 
         monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream)
 
@@ -2241,7 +2352,7 @@ def test_a_reuse_that_does_no_timed_work_is_a_complete_fragment(monkeypatch, tmp
 
     Regression: the supervisor's reuse path legitimately runs no `cli_spawn`
     and answers with no stages, which the previous rule read as "never heard
-    from the broker" and marked every normal reuse incomplete.
+    from the sandbox manager" and marked every normal reuse incomplete.
     """
     _configure_host(monkeypatch)
     sink = tmp_path / "startup.jsonl"
@@ -2253,7 +2364,7 @@ def test_a_reuse_that_does_no_timed_work_is_a_complete_fragment(monkeypatch, tmp
     def configure(_control, _supervisor, _finish):
         def stream(**kwargs):
             operation_profiling.finish(kwargs.get("measurement"), outcome="dispatched")
-            return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}
+            return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}, None
 
         monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream)
 
@@ -2266,7 +2377,7 @@ def test_a_reuse_that_does_no_timed_work_is_a_complete_fragment(monkeypatch, tmp
         measurement=measurement,
         container_action="reuse",
         resident_action="reuse",
-        # The broker answered both calls; neither had timed work to report.
+        # The sandbox manager answered both calls; neither had timed work to report.
         lease_stages=[],
         resident_stages=[],
     )
@@ -2297,7 +2408,7 @@ def test_a_retried_call_is_a_second_fragment_that_must_also_answer(monkeypatch, 
     def configure(control, supervisor, _finish):
         def stream(**kwargs):
             operation_profiling.finish(kwargs.get("measurement"), outcome="dispatched")
-            return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}
+            return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}, None
 
         monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream)
         # The retry rotates the residency grant before reopening the process.
@@ -2312,7 +2423,7 @@ def test_a_retried_call_is_a_second_fragment_that_must_also_answer(monkeypatch, 
             attempts.append(context.get("call_id"))
             if len(attempts) == 1:
                 # The first attempt never answered.
-                raise SessionSupervisorError(503, "broker restarted mid-call")
+                raise SessionSupervisorError(503, "sandbox manager restarted mid-call")
             return {
                 "context_status": "live",
                 "process_generation": 2,
@@ -2347,11 +2458,13 @@ def test_a_retried_call_is_a_second_fragment_that_must_also_answer(monkeypatch, 
     assert [child["call_id"] for child in resident["children"]] == ["c3"]
 
 
-def test_a_broker_cut_short_by_its_own_deadline_keeps_the_record_incomplete(monkeypatch, tmp_path):
-    """A collection that stopped at the broker's deadline is not complete.
+def test_a_sandbox_manager_cut_short_by_its_own_deadline_keeps_the_record_incomplete(
+    monkeypatch, tmp_path
+):
+    """A collection that stopped at the sandbox manager's deadline is not complete.
 
     Regression, end to end: the runner's deadline had ten minutes left while
-    the broker's had one second, the member-lock wait spent it, and the CLI
+    the sandbox manager's had one second, the member-lock wait spent it, and the CLI
     start was never timed. The answer was `stages: []` with
     `profiling_recorded: true`, which the runner read as "collected, nothing to
     time" and reported `measurement_complete: true`.
@@ -2366,7 +2479,7 @@ def test_a_broker_cut_short_by_its_own_deadline_keeps_the_record_incomplete(monk
     def configure(_control, _supervisor, _finish):
         def stream(**kwargs):
             operation_profiling.finish(kwargs.get("measurement"), outcome="dispatched")
-            return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}
+            return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}, None
 
         monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream)
 
@@ -2382,7 +2495,7 @@ def test_a_broker_cut_short_by_its_own_deadline_keeps_the_record_incomplete(monk
         # The acquire got its stages out; the resident call ran out of time.
         lease_stages=[{"name": "phase_network", "duration_us": 120}],
         resident_stages=[],
-        broker_truncated=True,
+        sandbox_manager_truncated=True,
     )
 
     assert result == 0
@@ -2393,6 +2506,15 @@ def test_a_broker_cut_short_by_its_own_deadline_keeps_the_record_incomplete(monk
     assert record["truncated"] is True
     assert record["truncated_fragments"] == ["broker:c1", "broker:c2"]
     assert record["measurement_complete"] is False
-    # What the broker did manage to measure is still reported.
+    # What the sandbox manager did manage to measure is still reported.
     acquire = next(item for item in record["stages"] if item["stage"] == "supervisor_acquire")
     assert [child["stage"] for child in acquire["children"]] == ["phase_network"]
+
+
+def test_environment_capability_disappears_when_broker_or_container_support_is_lost(monkeypatch):
+    _configure_host(monkeypatch)
+    backend = ContainerBackend(image="img")
+    assert "environment-v1" in runner_mod._environment_host_capabilities(backend, _stamp())
+    monkeypatch.delenv("AGENT_SANDBOX_MANAGER_TOKEN")
+    assert runner_mod._environment_host_capabilities(backend, _stamp()) == []
+    assert runner_mod._environment_host_capabilities(SimpleNamespace(), _stamp()) == []

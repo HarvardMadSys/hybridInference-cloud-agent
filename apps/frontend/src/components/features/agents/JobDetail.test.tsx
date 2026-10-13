@@ -218,6 +218,7 @@ vi.mock('@/lib/api/agents', () => ({
 }));
 
 const AGENT_CONFIG = {
+  environment_limits: {},
   repos: ['owner/repository'],
   runtimes: ['claude-code'],
   models: ['qwen-test', 'glm-test'],
@@ -1621,14 +1622,15 @@ describe('JobDetail', () => {
   it('keeps Side Chat in the existing workspace without handling its Escape as a main stop', async () => {
     render(<JobDetail job={makeJob()} />);
     openWorkspace();
+    await screen.findByRole('tab', { name: 'Environment' });
     const workspace = screen.getByRole('region', { name: 'Job workspace' });
     const names = () =>
       within(within(workspace).getByRole('tablist', { name: 'Workspace views' }))
         .getAllByRole('tab')
         .map((tab) => tab.textContent?.replace(/\d+$/, '').trim());
-    expect(names()).toEqual(['Git', 'Terminal', 'Files']);
+    expect(names()).toEqual(['Git', 'Terminal', 'Files', 'Environment']);
     addSideChat();
-    expect(names()).toEqual(['Git', 'Terminal', 'Files', 'Side Chat']);
+    expect(names()).toEqual(['Git', 'Terminal', 'Files', 'Environment', 'Side Chat']);
     expect(screen.getByRole('textbox', { name: 'Message side chat' })).toBeVisible();
     fireEvent.keyDown(screen.getByRole('region', { name: 'Side chat messages' }), {
       key: 'Escape',
@@ -2234,8 +2236,9 @@ describe('JobDetail', () => {
     expect(screen.getByRole('button', { name: /^(Send|Queue)$/ })).toBeEnabled();
   });
 
-  it('replaces duplicate header metadata with a keyboard-accessible task menu', () => {
+  it('replaces duplicate header metadata with a keyboard-accessible task menu', async () => {
     render(<JobDetail job={makeJob({ turnNo: 3 })} />);
+    await screen.findByLabelText('Model for this turn');
     const header = screen.getByRole('heading', { level: 1 }).closest('header')!;
     expect(within(header).queryByText(/turn 3/)).not.toBeInTheDocument();
     expect(within(header).queryByText('Run details')).not.toBeInTheDocument();
@@ -2243,6 +2246,8 @@ describe('JobDetail', () => {
     fireEvent.click(trigger);
     expect(screen.queryByRole('menuitem', { name: 'Run details' })).not.toBeInTheDocument();
     expect(screen.getByRole('menuitem', { name: 'Rename' })).toHaveFocus();
+    fireEvent.keyDown(document.activeElement!, { key: 'ArrowDown' });
+    expect(screen.getByRole('menuitem', { name: 'Edit saved configuration' })).toHaveFocus();
     fireEvent.keyDown(document.activeElement!, { key: 'ArrowDown' });
     expect(screen.getByRole('menuitem', { name: 'Pin' })).toHaveFocus();
     expect(screen.getByRole('menuitem', { name: 'Fork' })).toBeDisabled();
@@ -2498,9 +2503,10 @@ describe('JobDetail', () => {
     const showCall = within(turn).getByRole('button', { name: 'Show tool call' });
     expect(showCall).toHaveAttribute('aria-expanded', 'false');
     expect(within(turn).getByText('Read: src/router.py')).toBeVisible();
-    expect(within(turn).getByText('src/router.py', { selector: 'pre' })).not.toBeVisible();
-    expect(within(turn).getByText('router source')).not.toBeVisible();
+    expect(within(turn).queryByText('src/router.py', { selector: 'pre' })).not.toBeInTheDocument();
+    expect(within(turn).queryByText('router source')).not.toBeInTheDocument();
     fireEvent.click(showCall);
+    expect(within(turn).getByText('src/router.py', { selector: 'pre' })).toBeVisible();
     expect(within(turn).getByText('router source')).toBeVisible();
     expect(within(turn).getByText('Earlier answer')).toBeInTheDocument();
     expect(screen.getAllByText('Earlier answer')).toHaveLength(1);
@@ -2626,15 +2632,16 @@ describe('JobDetail', () => {
     expect(screen.getByText('Bash: pytest -q')).toBeVisible();
     expect(screen.getByTitle('Bash: pytest -q · Result received')).toBeVisible();
     const call = document.getElementById(showCall.getAttribute('aria-controls')!);
-    expect(call).toHaveTextContent('"cwd": "/workspace"');
-    expect(call).toHaveTextContent('"timeout": 0');
+    expect(call).toBeEmptyDOMElement();
     expect(call).not.toBeVisible();
-    expect(screen.getByText('2 passed')).not.toBeVisible();
+    expect(screen.queryByText('2 passed')).not.toBeInTheDocument();
 
     fireEvent.click(showCall);
     const hideCall = screen.getByRole('button', { name: 'Hide tool call' });
     expect(hideCall).toHaveAttribute('aria-expanded', 'true');
     expect(call).toBeVisible();
+    expect(call).toHaveTextContent('"cwd": "/workspace"');
+    expect(call).toHaveTextContent('"timeout": 0');
     expect(screen.getByText('2 passed')).toBeVisible();
 
     fireEvent.click(hideCall);
@@ -2642,7 +2649,8 @@ describe('JobDetail', () => {
       'aria-expanded',
       'false',
     );
-    expect(screen.getByText('2 passed')).not.toBeVisible();
+    expect(screen.queryByText('2 passed')).not.toBeInTheDocument();
+    expect(call).toBeEmptyDOMElement();
   });
 
   it('uses the real cancel endpoint and refreshes the job', async () => {
@@ -3582,7 +3590,8 @@ describe('JobDetail', () => {
       let activity = screen.getByRole('region', { name: 'Tasks and subagents' });
       expect(activity).toHaveAttribute('id', 'job-activity-window');
       expect(activity.parentElement).toHaveClass('absolute', 'pointer-events-none');
-      expect(activity).toHaveClass('pointer-events-auto', 'max-w-sm', 'shadow-xl');
+      expect(activity).toHaveClass('pointer-events-auto', 'absolute', 'shadow-xl');
+      expect(activity.style.width).toBe('384px');
       expect(screen.getByRole('region', { name: 'Task progress' })).toBeVisible();
       expect(within(activity).getByRole('region', { name: 'Tasks overview' })).toBeVisible();
       expect(within(activity).getByRole('region', { name: 'Subagents overview' })).toBeVisible();
@@ -3674,6 +3683,23 @@ describe('JobDetail', () => {
       fireEvent.keyDown(reopenedClose, { key: 'Escape' });
       expect(screen.queryByRole('region', { name: 'Tasks and subagents' })).not.toBeInTheDocument();
       expect(toggle).toHaveFocus();
+      expect(cancelAgentJob).not.toHaveBeenCalled();
+    });
+
+    it('restores a maximized window on Escape before closing it', () => {
+      render(<JobDetail job={makeJob({ events: activityEvents() })} />);
+
+      const panel = screen.getByRole('region', { name: 'Tasks and subagents' });
+      fireEvent.click(within(panel).getByRole('button', { name: 'Maximize tasks and subagents' }));
+      const restore = within(panel).getByRole('button', { name: 'Restore tasks and subagents' });
+      restore.focus();
+      fireEvent.keyDown(restore, { key: 'Escape' });
+      expect(panel).toBeInTheDocument();
+      expect(panel).not.toHaveAttribute('data-maximized');
+
+      const maximize = within(panel).getByRole('button', { name: 'Maximize tasks and subagents' });
+      fireEvent.keyDown(maximize, { key: 'Escape' });
+      expect(screen.queryByRole('region', { name: 'Tasks and subagents' })).not.toBeInTheDocument();
       expect(cancelAgentJob).not.toHaveBeenCalled();
     });
 
@@ -5123,7 +5149,10 @@ describe('JobDetail', () => {
     await waitFor(() => expect(forkAgentJob).toHaveBeenCalledWith('ajob_0'));
   });
 
-  it('skips a failed turn and rewinds its prompt from the nearest successful boundary', async () => {
+  it.each([
+    ['failed', 'Turn 2', 'Retry this failed prompt'],
+    ['current', 'Turn 3', 'Current task\nwith all of its detail.'],
+  ])('rewinds the %s turn from the nearest successful boundary', async (_turn, label, prompt) => {
     vi.mocked(forkAgentJob).mockResolvedValue({ id: 'ajob_rewind_failed' } as never);
     vi.spyOn(globalThis, 'confirm').mockReturnValue(true);
     render(
@@ -5171,12 +5200,12 @@ describe('JobDetail', () => {
 
     const failedTurn = within(screen.getByLabelText('Turn 2'));
     expect(failedTurn.queryByRole('button', { name: 'Fork from here' })).not.toBeInTheDocument();
-    fireEvent.click(failedTurn.getByRole('button', { name: 'Edit & rewind' }));
+    fireEvent.click(
+      within(screen.getByLabelText(label)).getByRole('button', { name: 'Edit & rewind' }),
+    );
 
     await waitFor(() => expect(forkAgentJob).toHaveBeenCalledWith('ajob_success'));
-    expect(sessionStorage.getItem('agent-rewind-draft-ajob_rewind_failed')).toBe(
-      'Retry this failed prompt',
-    );
+    expect(sessionStorage.getItem('agent-rewind-draft-ajob_rewind_failed')).toBe(prompt);
   });
 
   it('forks before a user prompt and carries it to the child as a one-shot edit draft', async () => {
@@ -6080,9 +6109,15 @@ describe('conversation turn navigation', () => {
     const { rerender } = render(
       <JobDetail job={multiTurnJob({ historyTurns: [withoutOutput] })} />,
     );
+    const turn = within(screen.getByLabelText('Turn 1'));
+    fireEvent.click(turn.getByRole('button', { name: 'Show tool call' }));
     expect(screen.getByText('Waiting for the tool result…')).toBeInTheDocument();
 
     rerender(<JobDetail job={multiTurnJob({ historyTurns: [withOutput] })} />);
+    expect(turn.getByRole('button', { name: 'Hide tool call' })).toHaveAttribute(
+      'aria-expanded',
+      'true',
+    );
     expect(screen.getByText('711 tests passed in the stored turn')).toBeInTheDocument();
     expect(screen.queryByText('Waiting for the tool result…')).not.toBeInTheDocument();
   });

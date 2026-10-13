@@ -32,7 +32,7 @@ SSH_PORT="${TUNNEL_SSH_PORT:-22}"
 # service on the far host, over the same connection.
 #
 # It exists because the route is one-way. The control plane must reach this
-# host's workspace broker for every file listing, terminal keystroke and
+# host's sandbox manager for every file listing, terminal keystroke and
 # git status — but this host is the only one that can open a connection: the
 # control plane's machine cannot resolve or reach it at all. So the reverse
 # forward rides the connection that already goes the other way.
@@ -43,14 +43,14 @@ SSH_PORT="${TUNNEL_SSH_PORT:-22}"
 # (deploy/host/sshd-tunnels.conf.example). Never `yes`: that silently moves
 # every remote forward to the wildcard address. Bind the far host's *docker
 # bridge gateway* rather than 0.0.0.0: the audience is containers on that
-# bridge, and 0.0.0.0 would publish the broker to the whole LAN behind one
+# bridge, and 0.0.0.0 would publish the sandbox manager to the whole LAN behind one
 # shared token.
 #
 # The far-side pair is what turns it on, because that is the deployment-
-# specific half; the target defaults to this stack's own broker.
+# specific half; the target defaults to this stack's own sandbox manager.
 REVERSE_BIND="${TUNNEL_REVERSE_BIND:-}"
 REVERSE_PORT="${TUNNEL_REVERSE_PORT:-}"
-REVERSE_TARGET_HOST="${TUNNEL_REVERSE_TARGET_HOST:-agent-workspace-broker}"
+REVERSE_TARGET_HOST="${TUNNEL_REVERSE_TARGET_HOST:-agent-sandbox-manager}"
 REVERSE_TARGET_PORT="${TUNNEL_REVERSE_TARGET_PORT:-8092}"
 
 die() { printf '[agent-gateway-tunnel] ERROR: %s\n' "$*" >&2; exit 1; }

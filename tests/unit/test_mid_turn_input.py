@@ -1,8 +1,8 @@
 """Giving the owner's message to a running turn ("send now"), on the host side.
 
 The drivers are driven with their real dialect adapters over a fake live
-process whose stdout is fed line by line, exactly as the broker's stream thread
-feeds a turn; the message arrives from another thread, as it does in the broker.
+process whose stdout is fed line by line, exactly as the sandbox manager's stream thread
+feeds a turn; the message arrives from another thread, as it does in the sandbox manager.
 The rule under test: the model gets the message before its next tool call, and
 a turn that answers without another tool call never gets it.
 """
@@ -41,11 +41,11 @@ from cloud_agent_host.runtimes import (
     PiRuntime,
 )
 from cloud_agent_host.sandbox import ProcessBackend
+from cloud_agent_host.sandbox_manager import create_app
 from cloud_agent_host.shared_session_supervisor import (
     HELD_INPUT_TTL_S,
     SharedChatSessionSupervisor,
 )
-from cloud_agent_host.workspace_broker import create_app
 from cloud_agent_shared.shared_protocol import (
     INPUT_PROCESS_GONE,
     INPUT_REFUSED,
@@ -162,7 +162,7 @@ def _claude_turn(tmp_path, process: _LiveProcess | None = None):
 
 
 def _read(process: _LiveProcess, events, *records: dict) -> list:
-    """Let the turn's stream read ``records``, as the broker's thread would."""
+    """Let the turn's stream read ``records``, as the sandbox manager's thread would."""
     process.feed.extend(_lines(*records))
     return [next(events) for _ in records]
 
@@ -598,7 +598,7 @@ def test_only_the_drivers_that_wire_it_declare_mid_turn_steering():
 
 
 class _Supervisor:
-    """The broker's view of the supervisor: one method, recorded."""
+    """The sandbox manager's view of the supervisor: one method, recorded."""
 
     def __init__(self, outcome: InputOutcome) -> None:
         self.outcome = outcome
@@ -614,13 +614,13 @@ class _Supervisor:
         return []
 
 
-def _broker(supervisor) -> AsyncClient:
+def _sandbox_manager(supervisor) -> AsyncClient:
     app = create_app(
         backend=ProcessBackend(acknowledged_unsafe=True),
-        token="broker-secret",
+        token="sandbox-manager-secret",
         shared_session_supervisor=supervisor,
     )
-    return AsyncClient(transport=ASGITransport(app=app), base_url="http://broker")
+    return AsyncClient(transport=ASGITransport(app=app), base_url="http://sandbox_manager")
 
 
 @pytest.mark.asyncio
@@ -628,12 +628,12 @@ def _broker(supervisor) -> AsyncClient:
     "outcome",
     [InputOutcome(True), InputOutcome(False, INPUT_TURN_ENDED)],
 )
-async def test_the_broker_answers_whether_the_turn_has_it(outcome):
+async def test_the_sandbox_manager_answers_whether_the_turn_has_it(outcome):
     supervisor = _Supervisor(outcome)
-    async with _broker(supervisor) as client:
+    async with _sandbox_manager(supervisor) as client:
         response = await client.post(
             "/shared-sandboxes/athr_1/input",
-            headers={"X-Agent-Workspace-Token": "broker-secret"},
+            headers={"X-Agent-Workspace-Token": "sandbox-manager-secret"},
             json={"owner": "attempt:7", "message_id": "apmsg_1", "text": "also this"},
         )
 
@@ -643,9 +643,9 @@ async def test_the_broker_answers_whether_the_turn_has_it(outcome):
 
 
 @pytest.mark.asyncio
-async def test_the_broker_takes_input_only_from_the_control_plane():
+async def test_the_sandbox_manager_takes_input_only_from_the_control_plane():
     supervisor = _Supervisor(InputOutcome(True))
-    async with _broker(supervisor) as client:
+    async with _sandbox_manager(supervisor) as client:
         response = await client.post(
             "/shared-sandboxes/athr_1/input",
             headers={"X-Agent-Workspace-Token": "wrong"},
@@ -699,7 +699,7 @@ def test_a_turn_that_has_not_started_here_gets_its_message_when_it_starts():
     member = SimpleNamespace(lease_owner=None, current_turn=None)
     supervisor = _supervisor({"athr_1": member}, now)
 
-    # Before the member is leased, and for a thread this broker has not seen.
+    # Before the member is leased, and for a thread this sandbox manager has not seen.
     supervisor.inject_input("athr_1", owner="attempt:3", message_id="apmsg_1", text="a")
     supervisor.inject_input("athr_1", owner="attempt:3", message_id="apmsg_1", text="a")
     supervisor.inject_input("athr_9", owner="attempt:4", message_id="apmsg_2", text="b")

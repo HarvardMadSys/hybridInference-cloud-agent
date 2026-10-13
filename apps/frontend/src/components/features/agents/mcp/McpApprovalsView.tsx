@@ -34,16 +34,16 @@ export function McpApprovalsView() {
   const approvals = useMcpApprovals();
   const t = useT();
   return (
-    <div className="mx-auto max-w-3xl px-4 py-8 sm:px-6">
+    <div className="mx-auto max-w-3xl px-4 py-4 sm:px-5">
       <div className="flex items-center justify-between gap-3">
-        <h1 className="text-2xl font-semibold text-gray-900 dark:text-gray-100">
+        <h1 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
           {t('approvals.title')}
         </h1>
         <button
           type="button"
           onClick={approvals.refresh}
           disabled={approvals.loading}
-          className="rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-700 disabled:opacity-60 dark:border-white/10 dark:text-gray-300"
+          className="rounded-md border border-gray-200 px-2.5 py-1 text-sm text-gray-700 disabled:opacity-60 dark:border-white/10 dark:text-gray-300"
         >
           {t(approvals.loading ? 'approvals.refreshing' : 'approvals.refresh')}
         </button>
@@ -76,7 +76,7 @@ export function McpApprovalsView() {
         </p>
       ) : null}
       {approvals.loaded && !approvals.invocations.length && !approvals.hasMore ? (
-        <p className="mt-6 rounded-xl border border-dashed border-gray-200 p-6 text-sm text-gray-500 dark:border-white/10 dark:text-gray-400">
+        <p className="mt-4 rounded-lg border border-dashed border-gray-200 p-4 text-sm text-gray-500 dark:border-white/10 dark:text-gray-400">
           {t('approvals.empty')}
         </p>
       ) : null}

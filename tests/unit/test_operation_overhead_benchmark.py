@@ -101,7 +101,7 @@ def enabled(monkeypatch):
 
 
 class _Lease:
-    """A supervisor answer shaped as the broker sends it."""
+    """A supervisor answer shaped as the sandbox manager sends it."""
 
     def __init__(self, token: str) -> None:
         self._lease = SharedSessionLease(
@@ -296,7 +296,7 @@ def test_the_profiling_context_reaches_the_supervisor(monkeypatch, enabled, tmp_
         )
         assert measurement is not None
         assert supervisor.calls and all(supervisor.calls), (
-            "every supervisor call must carry a profiling call id, or the broker "
+            "every supervisor call must carry a profiling call id, or the sandbox manager "
             "cannot answer the fragment at all"
         )
         record = profiling.frozen_record(measurement, "dispatched")
@@ -306,11 +306,11 @@ def test_the_profiling_context_reaches_the_supervisor(monkeypatch, enabled, tmp_
 
     assert record is not None
     assert record["collection_complete"] is True
-    assert "broker" in record["producers"], "the broker's answer must be recorded"
+    assert "broker" in record["producers"], "the sandbox manager's answer must be recorded"
     assert not record.get("missing_fragments"), (
         "an answered fragment must not be reported missing: the earlier revision passed "
         "the supervisor's dataclass straight to record_fragment, which only accepts a "
-        "mapping, so every record claimed an uncollected broker"
+        "mapping, so every record claimed an uncollected sandbox manager"
     )
     written = [json.loads(line) for line in sink.read_text().splitlines() if line.strip()]
     assert written and written[0]["operation"] == "attempt.startup"
