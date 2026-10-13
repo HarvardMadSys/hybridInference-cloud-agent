@@ -20,11 +20,18 @@ name: Publish
 # - `workflow_dispatch` names a commit by hand: for a commit whose own push run
 #   was cancelled by the push that followed it.
 #
-# A pull request cannot reach this file: there is no `pull_request` trigger, a
-# `push` runs only for commits on dev, and a `workflow_run` executes the copy of
-# this file on the default branch, which is dev. Each runs code that was merged,
-# never a pull request's copy. That is what keeps a publishing credential out of
-# the path that runs unreviewed code.
+# A pull request cannot reach this file: there is no `pull_request` trigger, and
+# a `push` runs dev's own copy for a commit on dev. A `workflow_run` executes
+# the copy on the default branch, which is main: sync-main.yml advances it by
+# hand, so that copy can lag dev's. Both are merged code, never a pull
+# request's copy, which keeps the publishing credentials out of the path that
+# runs unreviewed code. A `workflow_dispatch` executes the copy on the ref it is
+# dispatched from, so dispatch from dev. The steps below vet the commit, not
+# the file running them, and no job binds these credentials to a protected
+# environment: an edited copy on another branch, dispatched by someone with
+# write access, runs with them. Keeping that out is repository configuration
+# (who may push and dispatch, and environment rules for the Docker Hub
+# secrets), which this file cannot enforce.
 #
 # Publishing is idempotent per commit. A release that already exists is left
 # exactly as it is: a manifest that could be overwritten is one whose sha256 a
