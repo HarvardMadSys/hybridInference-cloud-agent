@@ -241,6 +241,21 @@ def test_control_plane_host_imports_are_the_transition_allowlist() -> None:
     )
 
 
+def test_the_scanner_sees_a_whole_module_import(tmp_path: Path) -> None:
+    """The negative case for the check above.
+
+    ``import cloud_agent_host.sandbox as host_impl`` is an ``ast.Import``. The
+    file used to walk only ``ast.ImportFrom``, so a line exactly like this one
+    left the allowlist equal to itself and the boundary unbroken as far as the
+    test could tell.
+    """
+    offender = tmp_path / "offender.py"
+    offender.write_text("import cloud_agent_host.sandbox as host_impl\n", encoding="utf-8")
+
+    assert _host_import_pairs(offender) == set()
+    assert _host_module_imports(offender) == {"cloud_agent_host.sandbox"}
+
+
 def _io_imports(path: Path) -> set[str]:
     """The ``IO_MODULES`` entries one file imports, in any import form.
 
@@ -334,21 +349,6 @@ def test_the_io_scanner_sees_every_import_form(tmp_path: Path) -> None:
         "httpx",
         "threading",
     }
-
-
-def test_the_scanner_sees_a_whole_module_import(tmp_path: Path) -> None:
-    """The negative case for the check above.
-
-    ``import cloud_agent_host.sandbox as host_impl`` is an ``ast.Import``. The
-    file used to walk only ``ast.ImportFrom``, so a line exactly like this one
-    left the allowlist equal to itself and the boundary unbroken as far as the
-    test could tell.
-    """
-    offender = tmp_path / "offender.py"
-    offender.write_text("import cloud_agent_host.sandbox as host_impl\n", encoding="utf-8")
-
-    assert _host_import_pairs(offender) == set()
-    assert _host_module_imports(offender) == {"cloud_agent_host.sandbox"}
 
 
 @pytest.mark.parametrize("package", sorted(SHARED_ROOTS))
