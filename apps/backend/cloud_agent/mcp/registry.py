@@ -52,7 +52,7 @@ from cloud_agent.mcp.models import (
     ToolRule,
     Transport,
 )
-from cloud_agent.mcp.net_policy import EndpointRejected
+from cloud_agent.mcp.net_policy import EndpointRejected, resource_covers
 from cloud_agent.source_control import SourceControlCipher, SourceControlError
 
 if TYPE_CHECKING:
@@ -360,10 +360,11 @@ async def resolve_connection(
         # by network position or not at all is usable as soon as it is reachable.
         return ResolvedConnection(connection=connection, snapshot=snapshot)
 
-    credential_present = bool(row.get("access_token_ciphertext")) or bool(
-        row.get("client_secret_ciphertext")
-    )
-    if not credential_present:
+    # The access token (or static secret) only. A client secret is how this
+    # platform authenticates to the authorization server, under its own cipher
+    # domain; it is never what the MCP server is sent, and a row holding only
+    # one is a sign-in that has not completed yet.
+    if not row.get("access_token_ciphertext"):
         return ResolvedConnection(
             connection=connection,
             snapshot=snapshot,
@@ -375,6 +376,23 @@ async def resolve_connection(
             connection=connection,
             snapshot=snapshot,
             error="This connection has expired. Connect it again.",
+            error_kind=ConnectionErrorKind.NEEDS_AUTHORIZATION,
+        )
+    resource = _optional(row.get("resource"))
+    if (
+        connection.auth.kind is AuthKind.OAUTH
+        and connection.config.url
+        # Without its trailing slash, as discovery compares a resource to the
+        # address: a server may name ``.../mcp/`` for a connection at ``.../mcp``.
+        and not resource_covers(resource.rstrip("/") if resource else None, connection.config.url)
+    ):
+        # A token is minted for one resource (RFC 8707). A connection whose
+        # address was edited while it held one -- before edits cleared it --
+        # must not send it to the new address.
+        return ResolvedConnection(
+            connection=connection,
+            snapshot=snapshot,
+            error="This connection's sign-in was for another address. Sign in again.",
             error_kind=ConnectionErrorKind.NEEDS_AUTHORIZATION,
         )
 
@@ -397,9 +415,8 @@ async def resolve_connection(
                 error_kind=ConnectionErrorKind.NONE,
             )
 
-    ciphertext = row.get("access_token_ciphertext") or row.get("client_secret_ciphertext") or ""
     try:
-        secret = resolved_cipher.decrypt(str(ciphertext))
+        secret = resolved_cipher.decrypt(str(row["access_token_ciphertext"]))
     except SourceControlError:
         # Narrow deliberately: this is the whole contract of `decrypt`, and a
         # broader catch would swallow a genuine bug here as "the user's

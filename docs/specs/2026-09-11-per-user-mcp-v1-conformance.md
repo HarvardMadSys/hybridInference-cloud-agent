@@ -239,7 +239,11 @@ the refreshed version. OAuth callbacks commit their draft status with the new
 credential, so they cannot reset a subsequent successful test. Target edits
 invalidate the old catalogue and pending OAuth flows in the same transaction as
 the configuration change, before new-target discovery or authorization can
-publish. Renames preserve the tested state and catalogue.
+publish. A change of address, transport, location or authentication kind also
+clears the stored credential with its OAuth issuer, resource, endpoints and
+client, and an OAuth token is only sent to an address its `resource` covers.
+Saving an unchanged address keeps the credential. Renames preserve the tested
+state and catalogue.
 Optional capability negotiation advertises only roots. Elicitation is reported
 as unsupported until there is a user interaction handler.
 
