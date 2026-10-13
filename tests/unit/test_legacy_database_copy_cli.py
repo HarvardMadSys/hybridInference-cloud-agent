@@ -23,3 +23,15 @@ def test_existing_report_refuses_before_connecting(tmp_path, monkeypatch):
     monkeypatch.setattr(migration.psycopg, "connect", forbidden)
     assert migration.main() == 1
     assert report.read_text() == "existing evidence"
+
+
+def test_the_rendered_migrations_run_inside_one_transaction():
+    """The conversion runs every revision's offline SQL in its one transaction.
+
+    PostgreSQL refuses a ``CONCURRENTLY`` index build inside a transaction
+    block, so a revision that emits one offline fails every conversion. Only
+    the database tier ran the conversion, so the rendering is checked here too.
+    """
+    rendered = migration.migration_sql(migration.BASELINE + ":head")
+
+    assert "CONCURRENTLY" not in rendered.upper()
