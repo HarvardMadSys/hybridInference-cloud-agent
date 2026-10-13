@@ -9,9 +9,10 @@ import { FloatingActivityWindow } from './FloatingActivityWindow';
 function Harness({ visible = true, bottom = 100 }: { visible?: boolean; bottom?: number }) {
   return (
     <FloatingActivityWindow visible={visible} bottom={bottom}>
-      {(moveHandleProps) => (
+      {(moveHandleProps, maximize) => (
         <ActivityWindow
           moveHandleProps={moveHandleProps}
+          maximize={maximize}
           overview={{
             taskActivity: {
               kind: 'tasks',
@@ -164,6 +165,40 @@ describe('FloatingActivityWindow', () => {
     drag(within(panel()).getByRole('button', { name: 'Close tasks and subagents' }), -100, 100);
     drag(within(panel()).getByRole('region', { name: 'Tasks and subagents details' }), -100, 100);
     expect(box()).toEqual(previous);
+  });
+
+  it('maximizes over the available area and restores the floating geometry', () => {
+    const view = render(<Harness />);
+    drag(moveHandle(), -200, 100);
+    const floating = box();
+    fireEvent.click(screen.getByRole('button', { name: 'Maximize tasks and subagents' }));
+    expect(panel()).toHaveAttribute('data-maximized', 'true');
+    expect(panel().style).toMatchObject({
+      left: '16px',
+      top: '16px',
+      right: '16px',
+      bottom: '16px',
+    });
+    expect(panel().style.width).toBe('');
+    expect(screen.queryByRole('button', { name: 'Move tasks and subagents' })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Resize tasks and subagents/ })).toBeNull();
+
+    // Escape restores; hiding keeps the maximized state for the next open.
+    const restore = screen.getByRole('button', { name: 'Restore tasks and subagents' });
+    fireEvent.keyDown(restore, { key: 'Escape' });
+    expect(panel()).not.toHaveAttribute('data-maximized');
+    expect(box()).toEqual(floating);
+    fireEvent.click(screen.getByRole('button', { name: 'Maximize tasks and subagents' }));
+    view.rerender(<Harness visible={false} />);
+    view.rerender(<Harness />);
+    expect(panel()).toHaveAttribute('data-maximized', 'true');
+
+    fireEvent.doubleClick(screen.getByText('Tasks & subagents'));
+    expect(box()).toEqual(floating);
+    fireEvent.click(screen.getByRole('button', { name: 'Maximize tasks and subagents' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Restore tasks and subagents' }));
+    expect(box()).toEqual(floating);
+    expect(moveHandle()).toBeInTheDocument();
   });
 
   it.each(['pointercancel', 'blur', 'hide', 'unmount'])(

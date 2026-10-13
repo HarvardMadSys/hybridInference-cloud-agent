@@ -1628,6 +1628,8 @@ export function JobDetail({
         event.repeat ||
         event.defaultPrevented ||
         !target?.closest('#job-activity-window') ||
+        // A maximized panel restores on Escape; only the floating one closes.
+        target.closest('#job-activity-window[data-maximized]') ||
         target.closest('input, textarea, select, [contenteditable="true"], [role="dialog"]')
       )
         return;
@@ -2560,9 +2562,10 @@ export function JobDetail({
           </div>
 
           <FloatingActivityWindow visible={activityVisible} bottom={composerHeight + 64}>
-            {(moveHandleProps) => (
+            {(moveHandleProps, maximize) => (
               <ActivityWindow
                 moveHandleProps={moveHandleProps}
+                maximize={maximize}
                 overview={activityOverview}
                 turnNo={currentTurn.displayNo}
                 attemptNo={attemptNo}

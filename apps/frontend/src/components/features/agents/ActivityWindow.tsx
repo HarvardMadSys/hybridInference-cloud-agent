@@ -2,6 +2,7 @@
 
 import type { HTMLAttributes } from 'react';
 import { hasActivityOverview, type ActivityOverview } from './activityOverview';
+import type { MaximizeControl } from './FloatingActivityWindow';
 import type { AgentEvent } from './types';
 import { DelegationReplyDetails, ToolActivityDetails } from './ToolActivityDetails';
 
@@ -35,6 +36,7 @@ export function ActivityWindow({
   stepKeyForEvent,
   onSelectStep,
   moveHandleProps,
+  maximize,
 }: {
   overview: ActivityOverview;
   turnNo: number;
@@ -43,6 +45,7 @@ export function ActivityWindow({
   stepKeyForEvent: (event: ToolEvent) => string | undefined;
   onSelectStep: (stepKey: string) => void;
   moveHandleProps?: HTMLAttributes<HTMLDivElement>;
+  maximize?: MaximizeControl;
 }) {
   if (!hasActivityOverview(overview)) return null;
 
@@ -60,23 +63,55 @@ export function ActivityWindow({
             {attemptNo > 0 ? ` · Attempt ${attemptNo}` : ''}
           </p>
         </div>
-        <button
-          type="button"
-          onClick={onClose}
-          aria-label="Close tasks and subagents"
-          className="rounded-md p-1 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700 focus-visible:outline-crimson dark:text-gray-500 dark:hover:bg-white/5 dark:hover:text-gray-200"
-        >
-          <svg
-            aria-hidden="true"
-            className="h-4 w-4"
-            fill="none"
-            viewBox="0 0 24 24"
-            stroke="currentColor"
-            strokeWidth={1.8}
+        <div className="flex shrink-0 items-center gap-1">
+          {maximize ? (
+            <button
+              type="button"
+              onClick={maximize.toggle}
+              aria-label={
+                maximize.maximized ? 'Restore tasks and subagents' : 'Maximize tasks and subagents'
+              }
+              title={maximize.maximized ? 'Restore · Esc' : 'Maximize'}
+              className="rounded-md p-1 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700 focus-visible:outline-crimson dark:text-gray-500 dark:hover:bg-white/5 dark:hover:text-gray-200"
+            >
+              <svg
+                aria-hidden="true"
+                className="h-4 w-4"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                strokeWidth={1.8}
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d={
+                    maximize.maximized
+                      ? 'M9 4v5H4m11-5v5h5M9 20v-5H4m11 5v-5h5'
+                      : 'M4 9V4h5m6 0h5v5M4 15v5h5m6 0h5v-5'
+                  }
+                />
+              </svg>
+            </button>
+          ) : null}
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close tasks and subagents"
+            className="rounded-md p-1 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700 focus-visible:outline-crimson dark:text-gray-500 dark:hover:bg-white/5 dark:hover:text-gray-200"
           >
-            <path strokeLinecap="round" d="m6 6 12 12M18 6 6 18" />
-          </svg>
-        </button>
+            <svg
+              aria-hidden="true"
+              className="h-4 w-4"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+              strokeWidth={1.8}
+            >
+              <path strokeLinecap="round" d="m6 6 12 12M18 6 6 18" />
+            </svg>
+          </button>
+        </div>
       </header>
       <div
         role="region"

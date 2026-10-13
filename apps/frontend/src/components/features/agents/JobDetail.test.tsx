@@ -3554,6 +3554,23 @@ describe('JobDetail', () => {
       expect(cancelAgentJob).not.toHaveBeenCalled();
     });
 
+    it('restores a maximized window on Escape before closing it', () => {
+      render(<JobDetail job={makeJob({ events: activityEvents() })} />);
+
+      const panel = screen.getByRole('region', { name: 'Tasks and subagents' });
+      fireEvent.click(within(panel).getByRole('button', { name: 'Maximize tasks and subagents' }));
+      const restore = within(panel).getByRole('button', { name: 'Restore tasks and subagents' });
+      restore.focus();
+      fireEvent.keyDown(restore, { key: 'Escape' });
+      expect(panel).toBeInTheDocument();
+      expect(panel).not.toHaveAttribute('data-maximized');
+
+      const maximize = within(panel).getByRole('button', { name: 'Maximize tasks and subagents' });
+      fireEvent.keyDown(maximize, { key: 'Escape' });
+      expect(screen.queryByRole('region', { name: 'Tasks and subagents' })).not.toBeInTheDocument();
+      expect(cancelAgentJob).not.toHaveBeenCalled();
+    });
+
     it('follows the selected attempt instead of mixing activity', () => {
       render(
         <JobDetail

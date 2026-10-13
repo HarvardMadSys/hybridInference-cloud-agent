@@ -16,9 +16,17 @@ type Box = { left: number; top: number; width: number; height: number };
 type Bounds = { width: number; height: number; inset: number };
 type Handle = 'move' | 'n' | 'e' | 's' | 'w' | 'ne' | 'se' | 'sw' | 'nw';
 type Gesture = { handle: Handle; pointerId: number; x: number; y: number };
+export type MaximizeControl = { maximized: boolean; toggle: () => void };
 
 const MIN_WIDTH = 280;
 const MIN_HEIGHT = 160;
+const DEFAULT_STYLE = {
+  right: 16,
+  top: 16,
+  width: 'min(384px, calc(100% - 32px))',
+  height: 'min(480px, calc(100% - 32px))',
+};
+const MAXIMIZED_STYLE = { left: 16, top: 16, right: 16, bottom: 16 };
 const handles: { handle: Exclude<Handle, 'move'>; label: string; className: string }[] = [
   { handle: 'n', label: 'top', className: 'inset-x-3 -top-1 h-2 cursor-ns-resize' },
   { handle: 'e', label: 'right', className: 'inset-y-3 -right-1 w-2 cursor-ew-resize' },
@@ -73,7 +81,10 @@ function adjust(box: Box, handle: Handle, dx: number, dy: number, bounds: Bounds
   return { left, top, width: right - left, height: bottom - top };
 }
 
-/** Geometry survives hiding the panel; the conversation and composer bound its gestures. */
+/**
+ * Geometry survives hiding the panel; the conversation and composer bound its gestures.
+ * Maximizing fills that same area and keeps the floating box to restore to.
+ */
 export function FloatingActivityWindow({
   visible,
   bottom,
@@ -81,13 +92,18 @@ export function FloatingActivityWindow({
 }: {
   visible: boolean;
   bottom: number;
-  children: (moveHandleProps: HTMLAttributes<HTMLDivElement>) => ReactNode;
+  children: (
+    moveHandleProps: HTMLAttributes<HTMLDivElement>,
+    maximize: MaximizeControl,
+  ) => ReactNode;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const boxRef = useRef<Box | null>(null);
   const gestureRef = useRef<Gesture | null>(null);
   const [box, setBox] = useState<Box | null>(null);
   const [dragging, setDragging] = useState(false);
+  const [maximized, setMaximized] = useState(false);
+  const toggleMaximized = useCallback(() => setMaximized((value) => !value), []);
 
   const bounds = useCallback((): Bounds => {
     const width = containerRef.current?.clientWidth || window.innerWidth;
@@ -181,7 +197,7 @@ export function FloatingActivityWindow({
   }, [apply, dragging, visible]);
 
   const start = (event: PointerEvent<HTMLElement>, handle: Handle) => {
-    if (event.button !== 0 || gestureRef.current) return;
+    if (maximized || event.button !== 0 || gestureRef.current) return;
     event.preventDefault();
     event.currentTarget.focus();
     gestureRef.current = { handle, pointerId: event.pointerId, x: event.clientX, y: event.clientY };
@@ -192,12 +208,29 @@ export function FloatingActivityWindow({
     const step = event.shiftKey ? 64 : 16;
     const dx = event.key === 'ArrowLeft' ? -step : event.key === 'ArrowRight' ? step : 0;
     const dy = event.key === 'ArrowUp' ? -step : event.key === 'ArrowDown' ? step : 0;
-    if ((!dx && !dy) || !boxRef.current) return;
+    if (maximized || (!dx && !dy) || !boxRef.current) return;
     event.preventDefault();
     apply(adjust(boxRef.current, handle, dx, dy, bounds()));
   };
 
   if (!visible) return null;
+
+  const floatingHandleProps: HTMLAttributes<HTMLDivElement> = {
+    role: 'button',
+    tabIndex: 0,
+    'aria-label': 'Move tasks and subagents',
+    title: 'Drag to move · Arrow keys to move · Double-click to reset',
+    className:
+      'min-w-0 flex-1 cursor-grab touch-none select-none rounded outline-none focus-visible:bg-gray-100/60 active:cursor-grabbing dark:focus-visible:bg-white/5',
+    onPointerDown: (event) => start(event, 'move'),
+    onKeyDown: (event) => keyDown(event, 'move'),
+    onDoubleClick: reset,
+  };
+  const maximizedHandleProps: HTMLAttributes<HTMLDivElement> = {
+    title: 'Double-click to restore',
+    className: 'min-w-0 flex-1 select-none',
+    onDoubleClick: toggleMaximized,
+  };
 
   return (
     <div
@@ -209,47 +242,44 @@ export function FloatingActivityWindow({
         id="job-activity-window"
         role="region"
         aria-label="Tasks and subagents"
+        data-maximized={maximized || undefined}
         className="pointer-events-auto absolute flex flex-col rounded-xl bg-white/95 shadow-xl ring-1 ring-gray-200/90 backdrop-blur-sm dark:bg-gray-900/95 dark:ring-white/10"
-        style={
-          box ?? {
-            right: 16,
-            top: 16,
-            width: 'min(384px, calc(100% - 32px))',
-            height: 'min(480px, calc(100% - 32px))',
-          }
-        }
+        style={maximized ? MAXIMIZED_STYLE : (box ?? DEFAULT_STYLE)}
+        onKeyDown={(event) => {
+          // The page's Escape handler leaves a maximized panel to this restore.
+          if (!maximized || event.key !== 'Escape' || event.repeat) return;
+          event.preventDefault();
+          setMaximized(false);
+        }}
       >
-        {children({
-          role: 'button',
-          tabIndex: 0,
-          'aria-label': 'Move tasks and subagents',
-          title: 'Drag to move · Arrow keys to move · Double-click to reset',
-          className:
-            'min-w-0 flex-1 cursor-grab touch-none select-none rounded outline-none focus-visible:bg-gray-100/60 active:cursor-grabbing dark:focus-visible:bg-white/5',
-          onPointerDown: (event) => start(event, 'move'),
-          onKeyDown: (event) => keyDown(event, 'move'),
-          onDoubleClick: reset,
+        {children(maximized ? maximizedHandleProps : floatingHandleProps, {
+          maximized,
+          toggle: toggleMaximized,
         })}
-        {handles.map(({ handle, label, className }) => (
-          <button
-            key={handle}
-            type="button"
-            aria-label={`Resize tasks and subagents from ${label}`}
-            title="Drag to resize · Arrow keys to resize"
-            className={`absolute z-10 touch-none rounded outline-none focus-visible:bg-gray-200/50 dark:focus-visible:bg-white/10 ${className}`}
-            onPointerDown={(event) => start(event, handle)}
-            onKeyDown={(event) => keyDown(event, handle)}
-          />
-        ))}
-        <svg
-          aria-hidden="true"
-          className="pointer-events-none absolute bottom-1 right-1 h-3 w-3 text-gray-400 dark:text-gray-500"
-          viewBox="0 0 12 12"
-          fill="none"
-          stroke="currentColor"
-        >
-          <path d="M4 10 10 4M7 10l3-3" />
-        </svg>
+        {maximized ? null : (
+          <>
+            {handles.map(({ handle, label, className }) => (
+              <button
+                key={handle}
+                type="button"
+                aria-label={`Resize tasks and subagents from ${label}`}
+                title="Drag to resize · Arrow keys to resize"
+                className={`absolute z-10 touch-none rounded outline-none focus-visible:bg-gray-200/50 dark:focus-visible:bg-white/10 ${className}`}
+                onPointerDown={(event) => start(event, handle)}
+                onKeyDown={(event) => keyDown(event, handle)}
+              />
+            ))}
+            <svg
+              aria-hidden="true"
+              className="pointer-events-none absolute bottom-1 right-1 h-3 w-3 text-gray-400 dark:text-gray-500"
+              viewBox="0 0 12 12"
+              fill="none"
+              stroke="currentColor"
+            >
+              <path d="M4 10 10 4M7 10l3-3" />
+            </svg>
+          </>
+        )}
       </aside>
     </div>
   );
