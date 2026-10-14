@@ -177,6 +177,29 @@ function endsStreamingTurn(current: AgentJobApi | null, latest: AgentJobApi): bo
   );
 }
 
+/**
+ * Where to read a conversation again when its earlier log is held.
+ *
+ * Stored events are never changed or removed, so a later read only has to
+ * reach what was added. It starts at the latest held turn's first event
+ * rather than after the newest held one: event ids are taken before their
+ * writes commit, so a write still in flight during the earlier read could
+ * land below an id that read already returned. Such writes belong to the
+ * turn that was running, which is read again in full; the turns before it
+ * had ended.
+ */
+function resumeAfter(held: readonly AgentThreadEventApi[]): number {
+  let turn = -Infinity;
+  let first = 0;
+  for (const event of held) {
+    if (event.turn_no > turn || (event.turn_no === turn && event.id < first)) {
+      turn = event.turn_no;
+      first = event.id;
+    }
+  }
+  return Math.max(0, first - 1);
+}
+
 export function useAgentJob(
   jobId: string,
   {
@@ -216,6 +239,14 @@ export function useAgentJob(
     lifecycleEvents: Map<number, AgentThreadEventApi>;
   } | null>(null);
   const generation = useRef(0);
+  // The conversation's log as of its last complete read. A follow-up turn, a
+  // turn's end and a stream reconnect read the same conversation again; this
+  // lets them read what was added instead of the whole log.
+  const heldLog = useRef<{
+    threadId: string;
+    reads: typeof reads;
+    events: AgentThreadEventApi[];
+  } | null>(null);
   const loadedStreamCursor = useRef<{
     jobId: string;
     reads: typeof reads;
@@ -261,6 +292,7 @@ export function useAgentJob(
         setEvents([]);
         setThreadEvents([]);
         setThread(null);
+        heldLog.current = null;
       }
       seen.current = new Map();
       seenScope.current = { jobId, reads };
@@ -301,19 +333,23 @@ export function useAgentJob(
         setApi((current) =>
           current?.id === jobId ? current : preserveResolvedTaskTitle(current, overlayPushed(job)),
         );
+        const held =
+          foundThread &&
+          heldLog.current?.reads === reads &&
+          heldLog.current.threadId === foundThread.thread_id
+            ? heldLog.current.events
+            : [];
         if (progressive && seen.current.size === 0) {
-          setEvents([]);
-          setThreadEvents([]);
+          setEvents(held.filter((event) => event.job_id === jobId));
+          setThreadEvents(held);
         }
         setThread(foundThread);
-        return [
-          job,
-          foundThread,
-          await listAllAgentThreadEvents(jobId, {
-            signal: controller.signal,
-            onPage: publishEvents,
-          }),
-        ] as const;
+        const added = await listAllAgentThreadEvents(jobId, {
+          after: resumeAfter(held),
+          signal: controller.signal,
+          onPage: (page) => publishEvents([...held, ...page]),
+        });
+        return [job, foundThread, [...held, ...added]] as const;
       })
       .then((snapshot) => {
         if (!snapshot || cancelled || requestGeneration !== generation.current) return;
@@ -329,6 +365,9 @@ export function useAgentJob(
         }
         for (const [id, event] of read.events) merged.set(id, event);
         const completeEvents = [...merged.values()].sort((left, right) => left.id - right.id);
+        heldLog.current = foundThread
+          ? { threadId: foundThread.thread_id, reads, events: completeEvents }
+          : null;
         if (historyRead.current === read) historyRead.current = null;
         const ownEvents = completeEvents.filter((event) => event.job_id === jobId);
         let cursor = 0;

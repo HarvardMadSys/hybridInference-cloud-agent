@@ -36,20 +36,23 @@ export async function listAgentThreadEvents(
   return jsonOrThrow(resp);
 }
 
-/** Read a complete thread without imposing the server's page size on Chat. */
+/** Read a thread to its end without imposing the server's page size on Chat. */
 export async function listAllAgentThreadEvents(
   jobId: string,
   {
+    after = 0,
     signal,
     onPage,
   }: {
+    /** Start after this event id: the caller already holds the thread up to it. */
+    after?: number;
     signal?: AbortSignal;
     /** An immutable snapshot of every page read so far. */
     onPage?: (events: AgentThreadEventApi[]) => void;
   } = {},
 ): Promise<AgentThreadEventApi[]> {
   const events: AgentThreadEventApi[] = [];
-  let cursor = 0;
+  let cursor = after;
   for (;;) {
     signal?.throwIfAborted();
     const page = await listAgentThreadEvents(jobId, cursor, 1000, signal);

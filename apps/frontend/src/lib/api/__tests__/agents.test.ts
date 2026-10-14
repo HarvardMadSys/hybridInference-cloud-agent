@@ -228,6 +228,19 @@ describe('agents api', () => {
     );
   });
 
+  it('reads a conversation event log from a held position to its end', async () => {
+    fetchWithAuth.mockResolvedValueOnce(jsonResponse({ events: [{ id: 43 }], next_cursor: 43 }));
+
+    const events = await listAllAgentThreadEvents('job/one', { after: 42 });
+
+    expect(events).toEqual([{ id: 43 }]);
+    expect(fetchWithAuth).toHaveBeenCalledOnce();
+    expect(fetchWithAuth).toHaveBeenCalledWith(
+      expect.any(String),
+      '/v1/agent/jobs/job%2Fone/thread/events?after=42&limit=1000',
+    );
+  });
+
   it('publishes immutable activity snapshots and forwards cancellation to every page', async () => {
     const first = Array.from({ length: 1000 }, (_, index) => ({ id: index + 1 }));
     const last = { id: 1001 };
