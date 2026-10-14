@@ -28,6 +28,9 @@ export function WorkspaceEnvironment({
   const t = useT();
   const [bound, setBound] = useState<EnvironmentBinding | null>(null);
   const [error, setError] = useState('');
+  // A failed read of the workspace's environment lasts until the next read
+  // succeeds; an action's failure stays until the owner acts again.
+  const [loadError, setLoadError] = useState('');
   const [editing, setEditing] = useState(false);
   const [runs, setRuns] = useState<Record<string, ActionRun>>({});
   const [busy, setBusy] = useState(false);
@@ -39,10 +42,12 @@ export function WorkspaceEnvironment({
     const refresh = () => {
       void getWorkspaceEnvironment(jobId)
         .then((value) => {
-          if (active) setBound(value);
+          if (!active) return;
+          setBound(value);
+          setLoadError('');
         })
         .catch((e) => {
-          if (active) setError(e instanceof Error ? e.message : String(e));
+          if (active) setLoadError(e instanceof Error ? e.message : String(e));
         });
     };
     refresh();
@@ -267,9 +272,9 @@ export function WorkspaceEnvironment({
       {editing && !isTemporaryWorkspace(repo) && (
         <EnvironmentManager repo={repo} onChanged={() => setReload((v) => v + 1)} />
       )}
-      {error && (
+      {(error || loadError) && (
         <p role="alert" className="text-sm text-red-600 dark:text-red-400">
-          {error}
+          {error || loadError}
         </p>
       )}
     </section>

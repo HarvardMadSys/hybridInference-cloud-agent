@@ -45,3 +45,27 @@ it('updates runtime by version and explicitly arms only one startup recovery', a
   expect(await screen.findByText('environment.skipArmed')).toBeInTheDocument();
   expect(screen.getByRole('button', { name: 'environment.skipStart' })).toBeDisabled();
 });
+
+it('clears a failed read of the environment once a later read succeeds', async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  try {
+    vi.mocked(getWorkspaceEnvironment)
+      .mockRejectedValueOnce(new Error('Temporarily unavailable'))
+      .mockResolvedValue({
+        binding_id: 'b',
+        legacy: false,
+        runtime_revision: 1,
+        variables: [],
+        setup_script: '',
+        start_script: '',
+        actions: [],
+        steps: [],
+      });
+    render(<WorkspaceEnvironment jobId="job" repo="org/repo" onTerminal={() => {}} />);
+    expect(await screen.findByRole('alert')).toHaveTextContent('Temporarily unavailable');
+    await vi.advanceTimersByTimeAsync(5000);
+    await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
+  } finally {
+    vi.useRealTimers();
+  }
+});
