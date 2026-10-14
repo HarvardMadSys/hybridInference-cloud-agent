@@ -10,6 +10,8 @@ export interface UserProfile {
   last_name: string;
   image_data_url: string | null;
   revision: number;
+  /** The account's fixed Pokémon companion, shown when no photo is saved. */
+  companion_data_url: string;
 }
 
 export interface UserProfileUpdate {

@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { useAuth, useT } from '@/components/providers';
+import { useT } from '@/components/providers';
 import { useSiteConfig } from '@/components/providers/SiteConfigProvider';
 import { BookIcon } from '@/components/features/settings/icons';
 import { GettingStartedSettings } from '@/components/features/settings/GettingStartedSettings';
@@ -18,7 +18,6 @@ import { EnvironmentManager } from './environment/EnvironmentManager';
 import { SkillsSection } from './skills/SkillsSection';
 import { McpConnectionsSection, type McpAuthorizationResult } from './mcp/McpConnectionsSection';
 import { SOURCE_CONTROL_RECHECK_MS } from './sourceControlRecovery';
-import { useUserHomeProfile } from './useUserHomeProfile';
 
 const PROVIDERS: AgentIntegrationProvider[] = ['github', 'gitlab'];
 
@@ -238,9 +237,6 @@ export function IntegrationsView({
 }) {
   const t = useT();
   const { docsUrl } = useSiteConfig().branding;
-  const userId = useAuth().state.user?.id;
-  const insights = useUserHomeProfile(userId);
-  const companion = userId ? { userId, dataUrl: insights.view?.avatar.data_url } : null;
   const [providers, setProviders] = useState<AgentIntegrationProviderApi[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -385,7 +381,7 @@ export function IntegrationsView({
         </div>
       ) : null}
 
-      <ProfileSettings companion={companion} />
+      <ProfileSettings />
 
       <section
         aria-labelledby="source-control-heading"

@@ -32,9 +32,15 @@ class ProfileView(BaseModel):
 
 
 class ProfileResponse(ProfileView):
-    """Combine Agent-owned display fields with a read-only account email."""
+    """Combine Agent-owned display fields with a read-only account email.
+
+    ``companion_data_url`` is the account's fixed Pokémon companion, shown
+    wherever no picture was uploaded. It depends on the account alone, unlike
+    the home page's, whose habitat follows recent work.
+    """
 
     email: str
+    companion_data_url: str
 
 
 class UpdateProfile(BaseModel):

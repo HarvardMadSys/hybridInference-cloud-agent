@@ -47,6 +47,9 @@ const THEME_LABEL_KEYS = {
 
 const MENU_WIDTH = 248;
 const SUBMENU_WIDTH = 216;
+// A submenu grows with its longest label, such as a deployment's
+// "<organization> Docs", up to this width; past it the label is cut.
+const SUBMENU_MAX_WIDTH = 360;
 const EDGE = 8;
 
 const PANEL =
@@ -90,6 +93,7 @@ export function AccountMenu({ variant }: { variant: 'sidebar' | 'header' }) {
   const name = [profile?.first_name, profile?.last_name].filter(Boolean).join(' ').trim();
   const label = name || profile?.email || '';
   const imageDataUrl = profile?.image_data_url ?? undefined;
+  const companionDataUrl = profile?.companion_data_url || undefined;
   const docsLabel =
     branding.orgName || branding.appName
       ? t('nav.docsNamed', { name: branding.orgName || branding.appName })
@@ -105,16 +109,16 @@ export function AccountMenu({ variant }: { variant: 'sidebar' | 'header' }) {
   };
 
   // Placed after the panel has rendered, because its height depends on which
-  // links this deployment has. Above the trigger when it sits low on the
-  // screen (the sidebar row), below it otherwise (the header avatar).
+  // links this deployment has. Centered on the trigger, kept on screen; above
+  // it when it sits low on the screen (the sidebar row), below it otherwise
+  // (the header avatar).
   useLayoutEffect(() => {
     if (!open || !menu.current || !trigger.current) return;
     const anchor = trigger.current.getBoundingClientRect();
     const height = menu.current.offsetHeight;
     const width = Math.min(MENU_WIDTH, window.innerWidth - EDGE * 2);
-    let left = anchor.left;
-    if (left + width > window.innerWidth - EDGE) left = anchor.right - width;
-    left = Math.max(EDGE, Math.min(left, window.innerWidth - width - EDGE));
+    const centered = anchor.left + (anchor.width - width) / 2;
+    const left = Math.max(EDGE, Math.min(centered, window.innerWidth - width - EDGE));
     const above = anchor.top > window.innerHeight / 2;
     let top = above ? anchor.top - height - 6 : anchor.bottom + 6;
     top = Math.max(EDGE, Math.min(top, window.innerHeight - height - EDGE));
@@ -133,7 +137,7 @@ export function AccountMenu({ variant }: { variant: 'sidebar' | 'header' }) {
     const item = parent.getBoundingClientRect();
     const panel = menu.current.getBoundingClientRect();
     const height = submenuPanel.current.offsetHeight;
-    const width = Math.min(SUBMENU_WIDTH, window.innerWidth - EDGE * 2);
+    const width = submenuPanel.current.offsetWidth;
     let left = panel.right + 4;
     if (left + width > window.innerWidth - EDGE) left = panel.left - width - 4;
     if (left < EDGE) left = Math.max(EDGE, window.innerWidth - width - EDGE);
@@ -223,10 +227,10 @@ export function AccountMenu({ variant }: { variant: 'sidebar' | 'header' }) {
       aria-hidden="true"
       className={`${size} flex shrink-0 items-center justify-center overflow-hidden rounded-full border border-border bg-surface text-[11px] font-semibold text-muted`}
     >
-      {/* The uploaded photo, else an initial. Not the generated companion:
-          reading it refreshes the owner's memory, too much for every page. */}
-      {imageDataUrl ? (
-        <AvatarImage imageDataUrl={imageDataUrl} />
+      {/* The uploaded photo, else the account's fixed companion, both from
+          the profile read; an initial until it answers. */}
+      {imageDataUrl || companionDataUrl ? (
+        <AvatarImage imageDataUrl={imageDataUrl} companionDataUrl={companionDataUrl} />
       ) : (
         (label.charAt(0) || '·').toUpperCase()
       )}
@@ -384,7 +388,9 @@ export function AccountMenu({ variant }: { variant: 'sidebar' | 'header' }) {
                       : t('nav.help')
                 }
                 style={{
-                  width: Math.min(SUBMENU_WIDTH, window.innerWidth - EDGE * 2),
+                  width: 'max-content',
+                  minWidth: Math.min(SUBMENU_WIDTH, window.innerWidth - EDGE * 2),
+                  maxWidth: Math.min(SUBMENU_MAX_WIDTH, window.innerWidth - EDGE * 2),
                   ...(submenuPosition ?? { left: -9999, top: -9999 }),
                 }}
                 className={PANEL}

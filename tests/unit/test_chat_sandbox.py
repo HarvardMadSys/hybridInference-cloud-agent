@@ -328,6 +328,7 @@ def _plain_group_network(monkeypatch):
     is covered against a model of Docker in ``test_chat_group_network.py``.
     """
     monkeypatch.setattr(ChatSandboxManager, "network_for", lambda _self, _spec: "agent-net")
+    monkeypatch.setattr(ChatSandboxManager, "require_host_rules", lambda _self: None)
     monkeypatch.setattr(
         ChatSandboxManager, "_ensure_group_network", lambda _self, _spec: "agent-net"
     )
@@ -2877,9 +2878,9 @@ class TestSandboxActionFacts:
             mounts=(),
             networks=("agent-net",),
         )
-        # Everything except the container creation itself: the network, the
-        # inspect that follows it (absent before the create, present after),
-        # and the ownership checks that run on both.
+        # Everything except the container creation itself: the inspect that
+        # follows it (absent before the create, present after) and the
+        # ownership checks that run on both.
         made = False
 
         def _inspect(_name):
@@ -2890,9 +2891,7 @@ class TestSandboxActionFacts:
             made = True
             return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-        monkeypatch.setattr(manager, "_ensure_group_network", lambda *_args: None)
         monkeypatch.setattr(manager, "inspect", _inspect)
-        monkeypatch.setattr(manager, "_require_group_network", lambda *_args: created)
         monkeypatch.setattr(manager, "_verify_identity", lambda *_args: None)
         monkeypatch.setattr(manager, "_run", _run)
 

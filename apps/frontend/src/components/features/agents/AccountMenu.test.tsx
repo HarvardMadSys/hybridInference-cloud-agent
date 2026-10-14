@@ -42,6 +42,7 @@ const PROFILE: UserProfile = {
   last_name: 'Lovelace',
   image_data_url: null,
   revision: 1,
+  companion_data_url: 'data:image/svg+xml,<svg id="ada-companion"></svg>',
 };
 
 beforeEach(() => {
@@ -103,14 +104,21 @@ function submenu(name: string) {
 }
 
 describe('account menu', () => {
-  it('shows who is signed in, with an initial until a photo is uploaded', async () => {
+  it("shows who is signed in, with the account's fixed companion until a photo is uploaded", async () => {
     renderMenu();
     const trigger = await screen.findByRole('button', { name: 'Account menu: Ada Lovelace' });
     expect(trigger).toHaveTextContent('Ada Lovelace');
-    expect(trigger).toHaveTextContent('A');
-    expect(trigger.querySelector('img')).toBeNull();
+    expect(trigger.querySelector('img')).toHaveAttribute('src', PROFILE.companion_data_url);
     expect(trigger).toHaveAttribute('aria-haspopup', 'menu');
     expect(trigger).toHaveAttribute('aria-expanded', 'false');
+  });
+
+  it('shows a placeholder, not a stale picture, until the profile answers', () => {
+    vi.mocked(getUserProfile).mockReturnValue(new Promise(() => {}));
+    renderMenu();
+    const trigger = screen.getByRole('button', { name: /^Account menu/ });
+    expect(trigger.querySelector('img')).toBeNull();
+    expect(trigger).toHaveTextContent('·');
   });
 
   it('uses the email when no name is set, and the uploaded photo when there is one', async () => {
@@ -241,6 +249,37 @@ describe('account menu', () => {
     expect(
       within(submenu('Help')).getByRole('menuitem', { name: 'Acme Cloud Agent Docs' }),
     ).toBeInTheDocument();
+  });
+
+  it('opens centered on the row and fits a long docs name in the Help submenu', async () => {
+    vi.stubGlobal('innerWidth', 1200);
+    vi.stubGlobal('innerHeight', 800);
+    renderMenu({ appName: 'FreeInference Cloud Agent', docsUrl: 'https://docs.example/' });
+    const trigger = await screen.findByRole('button', { name: 'Account menu: Ada Lovelace' });
+    trigger.getBoundingClientRect = () =>
+      ({ left: 0, right: 300, width: 300, top: 740, bottom: 780, height: 40 }) as DOMRect;
+    fireEvent.click(trigger);
+    const menu = screen.getByRole('menu', { name: 'Account menu' });
+    // (300 - 248) / 2: centered over the row, not pinned to its left edge.
+    expect(menu).toHaveStyle({ left: '26px' });
+
+    const help = submenu('Help');
+    expect(help).toHaveStyle({ width: 'max-content', minWidth: '216px', maxWidth: '360px' });
+    expect(
+      within(help).getByRole('menuitem', { name: 'FreeInference Cloud Agent Docs' }),
+    ).toBeInTheDocument();
+  });
+
+  it('keeps a centered menu on screen next to a trigger at the edge', async () => {
+    vi.stubGlobal('innerWidth', 1200);
+    vi.stubGlobal('innerHeight', 800);
+    renderMenu({}, 'header');
+    const trigger = await screen.findByRole('button', { name: 'Account menu: Ada Lovelace' });
+    trigger.getBoundingClientRect = () =>
+      ({ left: 1160, right: 1192, width: 32, top: 8, bottom: 40, height: 32 }) as DOMRect;
+    fireEvent.click(trigger);
+    // 1200 - 248 - 8: the right edge stops at the margin.
+    expect(screen.getByRole('menu', { name: 'Account menu' })).toHaveStyle({ left: '944px' });
   });
 
   it('works from the keyboard: arrows, into a submenu and back, Escape', async () => {

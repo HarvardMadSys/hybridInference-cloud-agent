@@ -67,17 +67,23 @@ credentials, over 240 characters, or limited to the current task) and
 
 ## Avatars
 
-The homepage and your profile show an automatically generated Pokémon
-companion. Your account is assigned Pikachu, Bulbasaur, Charmander, Squirtle,
-Eevee, Gengar, or Jigglypuff, with a consistent expression and pose across
-devices; that never changes. An uploaded profile photo takes its place.
+Without an uploaded profile photo, you are shown as an automatically generated
+Pokémon companion. Your account is assigned Pikachu, Bulbasaur, Charmander,
+Squirtle, Eevee, Gengar, or Jigglypuff, with a consistent expression and pose
+across devices; that never changes. An uploaded profile photo takes its place
+everywhere.
 
-The companion's habitat (backdrop, halo, and platform colors) and its orbiting
-work badges follow the work areas in your latest 50 requests, such as APIs, UI,
-testing, or data storage, detected with English keywords. The largest badge at
-the top right shows your most common area, the left badge your second, and
-smaller badges along the bottom the rest. With no recognized work area, the
-companion uses a consistent account palette and no badges. All shapes are drawn
+The account menu and **Profile** show the companion in its fixed form: an
+account palette and no badges. `GET /v1/agent/profile` returns it as
+`companion_data_url`, worked out from the account alone, so showing it on every
+page reads no requests.
+
+On the homepage, the companion's habitat (backdrop, halo, and platform colors)
+and its orbiting work badges follow the work areas in your latest 50 requests,
+such as APIs, UI, testing, or data storage, detected with English keywords.
+The largest badge at the top right shows your most common area, the left badge
+your second, and smaller badges along the bottom the rest. With no recognized
+work area, it looks like the fixed form. All shapes are drawn
 locally as a standalone SVG; account identifiers and request text are never
 embedded, and no image service or model is used.
 

@@ -281,6 +281,8 @@ class FakeDocker:
             if len(payload) != len(argv[3:]):
                 return subprocess.CompletedProcess(argv, 1, json.dumps(payload), "No such object")
             return self._ok(json.dumps(payload))
+        if argv[1] == "create":
+            return self._create_container(argv)
         if argv[1] == "start":
             container = self.container(argv[2])
             assert container is not None
@@ -320,6 +322,26 @@ class FakeDocker:
             labels=labels,
         )
         return self._ok(name)
+
+    def _create_container(self, argv: list[str]) -> subprocess.CompletedProcess[str]:
+        name = argv[argv.index("--name") + 1]
+        if self.container(name) is not None:
+            return self._fail(f'Conflict. The container name "/{name}" is already in use')
+        bootstrap = self.network(argv[argv.index("--network") + 1])
+        if bootstrap is None:
+            return self._fail("network not found")
+        labels = dict(
+            argv[i + 1].split("=", 1) for i, value in enumerate(argv) if value == "--label"
+        )
+        container = self.add_container(
+            f"created-{next(self._ids)}",
+            name=name,
+            status="created",
+            labels=labels,
+            image=argv[argv.index("--entrypoint") + 2],
+        )
+        self.connect(bootstrap["Id"], container["Id"], [])
+        return self._ok(container["Id"])
 
     def _network_json(self, network: dict[str, Any]) -> dict[str, Any]:
         length = network["IPAM"]["Config"][0]["Subnet"].split("/")[1]
@@ -708,6 +730,84 @@ def test_wake_reconnects_a_same_name_bridge_when_docker_kept_the_old_id(monkeypa
 
     assert ["docker", "network", "connect", name, "sandbox-container"] in docker.calls
     assert refreshed.networks == (name,)
+
+
+def _record_relay_syncs(guard: FakeGuard, docker: FakeDocker) -> list[int]:
+    """How many Docker commands had run each time the relay exceptions were synced."""
+    synced_after: list[int] = []
+    sync = guard.sync_relays
+
+    def recording(bridge: str, endpoints: set[tuple[str, int]]) -> None:
+        synced_after.append(len(docker.calls))
+        sync(bridge, endpoints)
+
+    guard.sync_relays = recording  # type: ignore[method-assign]
+    return synced_after
+
+
+def test_a_new_sandbox_meets_its_bridge_only_when_it_first_starts(monkeypatch):
+    """Creating leaves the bridge to the start, which attaches and proves it once.
+
+    Creation used to reconcile the bridge three times and the start a fourth,
+    each pass reading the host's relay exceptions through a helper container.
+    The host's rules are still checked before anything is created.
+    """
+    manager, docker, guard = _world(monkeypatch)
+    docker.add_network(CHAT_BOOTSTRAP_NETWORK, subnet="172.17.0.0/16")
+    spec = _spec()
+    name = manager.network_for(spec)
+    synced_after = _record_relay_syncs(guard, docker)
+    checked: list[str] = []
+    monkeypatch.setattr(
+        manager, "_verify_guest_network", lambda s, **_kwargs: checked.append(s.sandbox_id)
+    )
+
+    created = manager.create(spec)
+
+    assert created.status is ChatSandboxStatus.CREATED
+    assert created.networks == (CHAT_BOOTSTRAP_NETWORK,)
+    assert [argv[1:2] if argv[1] == "create" else argv[1:3] for argv in docker.calls] == [
+        ["container", "inspect"],
+        ["create"],
+        ["container", "inspect"],
+    ]
+    assert docker.network(name) is None
+    assert guard.events == ["ensure"]
+
+    started = manager.start(spec)
+
+    assert started.running is True
+    assert started.networks == (name,)
+    assert docker.names_on(name) == {"relay-gateway", "relay-mcp", created.container_id}
+    joined = docker.calls.index(["docker", "network", "connect", name, created.container_id])
+    assert len(synced_after) == 1
+    assert synced_after[0] > joined, "the exceptions are written once the sandbox has joined"
+    endpoints = docker.network(name)["endpoints"]
+    assert guard.relays[manager._network().bridge_name(name)] == {
+        (endpoints["relay-gateway"]["ip"], 8080),
+        (endpoints["relay-mcp"]["ip"], 8000),
+    }
+    assert checked == [spec.sandbox_id]
+
+
+def test_a_wake_writes_the_relay_exceptions_once_the_sandbox_has_rejoined(monkeypatch):
+    manager, docker, guard = _world(monkeypatch)
+    spec = _spec()
+    docker.add_sandbox(spec)
+    name = manager.network_for(spec)
+    synced_after = _record_relay_syncs(guard, docker)
+    monkeypatch.setattr(manager, "_verify_guest_network", lambda *_args, **_kwargs: None)
+
+    manager.start(spec)
+
+    joined = docker.calls.index(["docker", "network", "connect", name, "sandbox-container"])
+    assert len(synced_after) == 1
+    assert synced_after[0] > joined
+    endpoints = docker.network(name)["endpoints"]
+    assert guard.relays[manager._network().bridge_name(name)] == {
+        (endpoints["relay-gateway"]["ip"], 8080),
+        (endpoints["relay-mcp"]["ip"], 8000),
+    }
 
 
 def test_start_proves_the_network_from_inside_and_stops_a_sandbox_that_fails(monkeypatch):

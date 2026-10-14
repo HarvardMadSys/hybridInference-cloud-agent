@@ -50,6 +50,7 @@ beforeEach(() => {
     last_name: '',
     image_data_url: null,
     revision: 0,
+    companion_data_url: 'data:image/svg+xml,<svg id="fixed"></svg>',
   });
   localStorage.clear();
 });
