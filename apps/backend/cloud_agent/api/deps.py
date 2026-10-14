@@ -46,7 +46,9 @@ worth re-reading a diff of this file for.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hmac
+import itertools
 import os
 import time
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar
@@ -72,7 +74,7 @@ from cloud_agent.source_control_runtime import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
 
     from cloud_agent.gateway import GatewayClient
     from cloud_agent.grants import GrantClient
@@ -373,7 +375,9 @@ class AgentAccessAdmission:
     - **A grant is kept for** :data:`AGENT_ACCESS_ALLOW_TTL_S`. Only a decision
       that grants ``agent.use`` is kept. A denial, an unknown account and an
       unavailable Gateway are never kept, and any fresh answer that is not a
-      grant drops the one kept before it.
+      grant drops the one kept before it. A grant from a lookup that began
+      before the account's last recorded denial is older than that denial,
+      and is not kept either.
 
     Only owner admission reads it. Sign-in, ``/v1/session/me``, the admin
     surface and the checks made when a turn starts all ask the Gateway every
@@ -390,6 +394,12 @@ class AgentAccessAdmission:
         self._clock = clock
         self._granted: dict[str, tuple[float, AgentAccessDecision]] = {}
         self._lookups: dict[str, asyncio.Task[AgentAccessDecision]] = {}
+        # Every Gateway ask takes the next ticket when it starts; a denial takes
+        # one when it is recorded. A grant asked for before the account's last
+        # recorded denial is older than that denial, and is not kept.
+        self._tickets = itertools.count(1)
+        self._asking: set[int] = set()
+        self._denied: dict[str, int] = {}
 
     async def decision(self, gateway: Any, user_id: str) -> AgentAccessDecision:
         """The kept grant if still fresh, else the Gateway's current decision."""
@@ -405,30 +415,55 @@ class AgentAccessAdmission:
         # lookup the other callers are waiting on.
         return await asyncio.shield(lookup)
 
-    def record(self, decision: AgentAccessDecision) -> None:
-        """Keep a fresh grant, or drop the kept one if this decision is not a grant."""
+    @contextlib.contextmanager
+    def asking(self) -> Iterator[int]:
+        """A ticket for one Gateway lookup, held while it is under way."""
+        ticket = next(self._tickets)
+        self._asking.add(ticket)
+        try:
+            yield ticket
+        finally:
+            self._asking.discard(ticket)
+
+    def record(self, decision: AgentAccessDecision, asked: int) -> None:
+        """Keep a fresh grant, or drop the kept one if this decision is not a grant.
+
+        Args:
+            decision: What the Gateway answered.
+            asked: The :meth:`asking` ticket of the lookup that answered.
+        """
+        user_id = decision.user_id
         if not decision.permits("agent.use"):
-            self._granted.pop(decision.user_id, None)
+            self._granted.pop(user_id, None)
             # A lookup already under way may have been answered before this
             # denial. Requests from now on start one of their own; those
             # already waiting on it still get its answer.
-            self._lookups.pop(decision.user_id, None)
+            self._lookups.pop(user_id, None)
+            if len(self._denied) >= 1024:
+                # A denial matters only to a lookup that began before it and
+                # is still under way.
+                oldest = min(self._asking, default=None)
+                self._denied = {
+                    user: ticket
+                    for user, ticket in self._denied.items()
+                    if oldest is not None and oldest < ticket
+                }
+            self._denied[user_id] = next(self._tickets)
+            return
+        if asked < self._denied.get(user_id, 0):
             return
         now = self._clock()
         if len(self._granted) >= 1024:
             self._granted = {user: kept for user, kept in self._granted.items() if now < kept[0]}
-        self._granted[decision.user_id] = (now + self._ttl_s, decision)
+        self._granted[user_id] = (now + self._ttl_s, decision)
 
     async def _look_up(self, gateway: Any, user_id: str) -> AgentAccessDecision:
         # A failure is no verdict on the owner, and drops nothing: a lookup
         # starts only when no grant is fresh, so a fresh one now was recorded
         # while it waited, and is newer than anything it could have said.
-        decision = await resolve_agent_access(gateway, user_id)
-        if self._lookups.get(user_id) is asyncio.current_task():
-            self.record(decision)
-        # Otherwise a denial recorded while it waited retired it: it answers
-        # the requests already waiting on it, and changes nothing for later
-        # ones, whose answers are newer than its own.
+        with self.asking() as asked:
+            decision = await resolve_agent_access(gateway, user_id)
+            self.record(decision, asked)
         return decision
 
     def _finished(self, user_id: str, lookup: asyncio.Task[AgentAccessDecision]) -> None:

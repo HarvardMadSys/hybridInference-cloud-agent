@@ -1026,6 +1026,49 @@ async def test_a_withdrawal_me_sees_stops_owner_requests_at_once(key):
     assert gateway.access_asked == [_USER, _USER, _USER, _USER]
 
 
+class _HeldGateway(_FakeGateway):
+    """Holds the answer to the next Agent-access lookup until released."""
+
+    hold: asyncio.Event | None = None
+
+    async def agent_access(self, user_id: str) -> dict[str, Any]:
+        answer = await super().agent_access(user_id)
+        if self.hold is not None:
+            hold, self.hold = self.hold, None
+            await hold.wait()
+        return answer
+
+
+async def test_an_earlier_me_grant_cannot_outlast_a_later_me_denial(key):
+    gateway = _HeldGateway(
+        {"exists": True, "active": True, "role": "internal"},
+        identity_token=_identity_token(key),
+    )
+    app = _app(gateway)
+
+    @app.get("/probe")
+    async def probe(user: dict[str, Any] = Depends(require_agent_owner)):
+        return user
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="https://test", follow_redirects=False
+    ) as client:
+        await _sign_in(client)
+        # The first /me is answered "allowed", but that answer is held.
+        gateway.hold = asyncio.Event()
+        held = gateway.hold
+        earlier = asyncio.create_task(client.get("/v1/session/me"))
+        while len(gateway.access_asked) < 2:
+            await asyncio.sleep(0)
+        # Access is withdrawn, and a second /me records the denial first.
+        gateway.permissions = []
+        assert (await client.get("/v1/session/me")).json()["agent_access"]["allowed"] is False
+        held.set()
+        assert (await earlier).json()["agent_access"]["allowed"] is True
+        # The held grant is older than the denial, so it admits nothing.
+        assert (await client.get("/probe")).status_code == 403
+
+
 async def test_me_fails_closed_after_an_earlier_allow_when_gateway_is_unavailable(
     client_and_gateway,
 ):

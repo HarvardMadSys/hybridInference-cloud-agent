@@ -455,6 +455,12 @@ def _configured_identity_issuer(monkeypatch):
     monkeypatch.setenv("GATEWAY_ISSUER", "https://gateway.example")
 
 
+def _record(admission: deps.AgentAccessAdmission, decision: AgentAccessDecision) -> None:
+    """Record ``decision`` as a lookup that started and answered just now."""
+    with admission.asking() as asked:
+        admission.record(decision, asked)
+
+
 async def _until(condition: Any) -> None:
     """Yield to the loop until ``condition()`` holds, failing rather than hanging."""
     for _ in range(1000):
@@ -505,7 +511,7 @@ async def test_a_recorded_denial_ends_the_kept_grant():
     gateway.release.set()
     admission = deps.AgentAccessAdmission()
     await admission.decision(gateway, "u1")
-    admission.record(AgentAccessDecision(user_id="u1", allowed=False, permissions=[]))
+    _record(admission, AgentAccessDecision(user_id="u1", allowed=False, permissions=[]))
     await admission.decision(gateway, "u1")
     assert gateway.asked == 2
 
@@ -516,7 +522,7 @@ async def test_a_lookup_that_overlaps_a_recorded_denial_does_not_keep_its_grant(
     stale = asyncio.create_task(admission.decision(gateway, "u1"))
     await _until(lambda: gateway.asked == 1)
     # /v1/session/me is told the access was withdrawn while that lookup waits.
-    admission.record(AgentAccessDecision(user_id="u1", allowed=False, permissions=[]))
+    _record(admission, AgentAccessDecision(user_id="u1", allowed=False, permissions=[]))
     gateway.release.set()
     assert (await stale).permits("agent.use")
     await admission.decision(gateway, "u1")
@@ -546,7 +552,7 @@ async def test_requests_after_a_recorded_denial_do_not_join_the_lookup_before_it
     admission = deps.AgentAccessAdmission()
     stale = asyncio.create_task(admission.decision(gateway, "u1"))
     await _until(lambda: gateway.asked == 1)
-    admission.record(AgentAccessDecision(user_id="u1", allowed=False, permissions=[]))
+    _record(admission, AgentAccessDecision(user_id="u1", allowed=False, permissions=[]))
     after = asyncio.create_task(admission.decision(gateway, "u1"))
     await _until(lambda: gateway.asked == 2)
     gateway.release.set()
@@ -562,9 +568,26 @@ async def test_a_failed_lookup_leaves_a_grant_recorded_while_it_waited():
     admission = deps.AgentAccessAdmission()
     stale = asyncio.create_task(admission.decision(gateway, "u1"))
     await _until(lambda: gateway.asked == 1)
-    admission.record(AgentAccessDecision(user_id="u1", allowed=True, permissions=["agent.use"]))
+    _record(admission, AgentAccessDecision(user_id="u1", allowed=True, permissions=["agent.use"]))
     gateway.release.set()
     with pytest.raises(HTTPException):
         await stale
     assert (await admission.decision(gateway, "u1")).permits("agent.use")
+    assert gateway.asked == 1
+
+
+async def test_a_grant_asked_for_before_a_recorded_denial_is_not_kept():
+    admission = deps.AgentAccessAdmission()
+    granted = AgentAccessDecision(user_id="u1", allowed=True, permissions=["agent.use"])
+    with admission.asking() as earlier:
+        # A later /v1/session/me is told of the withdrawal and records it first.
+        _record(admission, AgentAccessDecision(user_id="u1", allowed=False, permissions=[]))
+        admission.record(granted, earlier)
+    gateway = _SlowAccessGateway()
+    gateway.release.set()
+    await admission.decision(gateway, "u1")
+    assert gateway.asked == 1
+    # A grant asked for after the denial is kept.
+    _record(admission, granted)
+    await admission.decision(gateway, "u1")
     assert gateway.asked == 1
