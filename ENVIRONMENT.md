@@ -754,7 +754,7 @@ configuration.
 
 ### Runtime: the deployment's identity
 
-The main control plane imports the first six appearance variables below when
+The main control plane imports the first seven appearance variables below when
 it initializes the settings document. Set them in its deployment environment
 before the first start, then change them through Admin → Settings. The web
 server reads the saved public appearance fields on every request through
@@ -768,6 +768,7 @@ development. Deployment time remains web runtime metadata.
 | `AGENT_WEB_ORG_NAME` | **MOVED** | Optional organisation name beside the product name. Empty hides it. |
 | `AGENT_WEB_ORG_URL` | **MOVED** | Link target for `AGENT_WEB_ORG_NAME`. |
 | `AGENT_WEB_STATUS_URL` | **MOVED** | Status page, opened in a new tab from the header. Empty hides the link — an empty `href` resolves to the current page, so a Status link that is rendered anyway reopens the page the user is standing on. |
+| `AGENT_WEB_DOCS_URL` | **NEW** | User documentation for this deployment, opened in a new tab from the sidebar and the My Settings page. Empty hides the link. Point it at the distribution's own user guide; this repository's developer documentation is for operators and contributors. |
 | `AGENT_WEB_GATEWAY_URL` | **MOVED** | `${GATEWAY_BASE_URL}`. The gateway's origin, for the links this app does not host itself — nothing to do with sign-in. It replaced `NEXT_PUBLIC_GATEWAY_AUTHORIZE_URL`, which the browser needed only while it built the authorize URL and redeemed the code itself; both are the control plane's job now (`GATEWAY_AUTHORIZE_URL`). A path in this value is ignored; empty hides the links. |
 | `AGENT_WEB_FEATURE_RAG` | **MOVED** | `true` shows the gateway's Docs Assistant link. `false` or empty hides it; any other value is refused. The page belongs to the gateway, not to this service. |
 | `AGENT_WEB_DEPLOYED_AT` | **NEW** | ISO timestamp with a timezone for the deployment footer. The control-plane deploy script sets the activation time in UTC and records it in `.deployed-at` after successful health checks; deploying the same release again preserves it. When starting Compose manually, supply the actual deployment time. Empty shows `Not available`. |

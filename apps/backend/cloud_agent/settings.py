@@ -513,6 +513,18 @@ SETTINGS: tuple[Setting, ...] = (
         "site.status_url", "Status page URL", "Appearance", "", env="AGENT_WEB_STATUS_URL", url=True
     ),
     Setting(
+        "site.docs_url",
+        "Documentation URL",
+        "Appearance",
+        "",
+        env="AGENT_WEB_DOCS_URL",
+        url=True,
+        description=(
+            "User documentation for this deployment, linked from the sidebar and My Settings. "
+            "Empty hides the link."
+        ),
+    ),
+    Setting(
         "site.gateway_url",
         "Gateway website URL",
         "Appearance",

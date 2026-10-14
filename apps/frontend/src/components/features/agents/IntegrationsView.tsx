@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useT } from '@/components/providers';
+import { useSiteConfig } from '@/components/providers/SiteConfigProvider';
+import { BookIcon } from '@/components/features/settings/icons';
 import { GettingStartedSettings } from '@/components/features/settings/GettingStartedSettings';
 import { ProfileSettings } from '@/components/features/settings/ProfileSettings';
 import { NotificationSettings } from '@/components/features/settings/NotificationSettings';
@@ -235,6 +237,7 @@ export function IntegrationsView({
   mcpAuthorization?: McpAuthorizationResult;
 }) {
   const t = useT();
+  const { docsUrl } = useSiteConfig().branding;
   const [companion, setCompanion] = useState<{ userId: string; dataUrl?: string } | null>(null);
   const updateCompanion = useCallback((userId: string, dataUrl?: string) => {
     setCompanion({ userId, dataUrl });
@@ -358,6 +361,17 @@ export function IntegrationsView({
           {t('settings.title')}
         </h1>
         <p className="mt-1 max-w-xl text-sm leading-5 text-muted">{t('settings.description')}</p>
+        {docsUrl ? (
+          <a
+            href={docsUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="ui-focus-ring mt-2 inline-flex items-center gap-1.5 rounded text-sm font-medium text-accent hover:underline"
+          >
+            <BookIcon className="h-4 w-4" />
+            {t('nav.docs')}
+          </a>
+        ) : null}
       </header>
 
       {notice ? (

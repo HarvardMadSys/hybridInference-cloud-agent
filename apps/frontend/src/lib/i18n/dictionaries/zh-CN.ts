@@ -245,6 +245,7 @@ export const zhCN: Record<TranslationKey, string> = {
   'nav.skipToWorkspace': '跳转到工作区',
   'nav.status': '服务状态',
   'nav.docsAssistant': '文档助手',
+  'nav.docs': '使用文档',
   'nav.agents': 'Agents',
   'nav.admin': '管理后台',
   'nav.dashboard': '控制台',

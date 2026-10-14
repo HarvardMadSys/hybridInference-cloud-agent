@@ -40,6 +40,8 @@ vi.mock('@/lib/api/agents', () => ({
   unpinAgentJob: mocks.unpinAgentJob,
 }));
 
+import { SiteConfigProvider } from '@/components/providers/SiteConfigProvider';
+import { NEUTRAL_SITE_CONFIG } from '@/config/site';
 import { AgentsSidebar, SIDEBAR_WIDTH_STORAGE_KEY } from './AgentsSidebar';
 
 function apiJob(overrides: Partial<AgentJobApi> = {}): AgentJobApi {
@@ -135,6 +137,26 @@ describe('AgentsSidebar layout', () => {
     expect(document.getElementById('agents-sidebar')).not.toBeInTheDocument();
     expect(screen.queryByRole('separator', { name: 'Resize task list' })).not.toBeInTheDocument();
     expect(screen.queryByRole('link', { name: 'New task' })).not.toBeInTheDocument();
+  });
+
+  it("links the deployment's documentation in a new tab, and only when it has some", async () => {
+    const docsUrl = 'https://docs.example.com/agents/';
+    const { unmount } = render(
+      <SiteConfigProvider
+        config={{ ...NEUTRAL_SITE_CONFIG, branding: { ...NEUTRAL_SITE_CONFIG.branding, docsUrl } }}
+      >
+        <AgentsSidebar />
+      </SiteConfigProvider>,
+    );
+    const link = await screen.findByRole('link', { name: 'Documentation' });
+    expect(link).toHaveAttribute('href', docsUrl);
+    expect(link).toHaveAttribute('target', '_blank');
+    expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+    unmount();
+
+    render(<AgentsSidebar />);
+    await waitFor(() => expect(screen.getByText('No jobs yet.')).toBeInTheDocument());
+    expect(screen.queryByRole('link', { name: 'Documentation' })).not.toBeInTheDocument();
   });
 });
 

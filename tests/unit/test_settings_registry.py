@@ -572,6 +572,7 @@ async def test_public_site_settings_expose_only_display_allowlist():
         {
             **settings.initial_settings(),
             "site.app_name": "Configured app",
+            "site.docs_url": "https://docs.example.com/agents/",
             "site.feature_rag": True,
         },
     )
@@ -583,12 +584,34 @@ async def test_public_site_settings_expose_only_display_allowlist():
     assert response.headers["Cache-Control"] == "no-store"
     view = response.json()
     assert set(view) == {"branding", "features"}
+    assert set(view["branding"]) == {
+        "appName",
+        "orgName",
+        "orgUrl",
+        "statusUrl",
+        "docsUrl",
+        "gatewayUrl",
+    }
     assert view["branding"]["appName"] == "Configured app"
+    assert view["branding"]["docsUrl"] == "https://docs.example.com/agents/"
     assert view["features"] == {"rag": True}
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=create_mcp_app()), base_url="http://relay"
     ) as client:
         assert (await client.get("/v1/agent/site-config")).status_code == 404
+
+
+@pytest.mark.parametrize("value", ["javascript:alert(1)", "docs.example.com", "ftp://docs.example"])
+def test_documentation_link_must_be_an_http_url(value):
+    with pytest.raises(ValueError):
+        settings.encode_changes({"site.docs_url": value})
+
+
+def test_documentation_link_is_imported_from_the_environment(monkeypatch):
+    monkeypatch.setenv("AGENT_WEB_DOCS_URL", "https://docs.example.com/agents/")
+    assert settings.initial_settings()["site.docs_url"] == "https://docs.example.com/agents/"
+    monkeypatch.delenv("AGENT_WEB_DOCS_URL")
+    assert settings.initial_settings()["site.docs_url"] == ""
 
 
 @pytest.mark.parametrize(

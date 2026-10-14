@@ -17,6 +17,7 @@ const FULL_ENV = {
   AGENT_WEB_ORG_NAME: 'Acme Research',
   AGENT_WEB_ORG_URL: 'https://acme.example/about',
   AGENT_WEB_STATUS_URL: 'https://status.acme.example/',
+  AGENT_WEB_DOCS_URL: 'https://docs.acme.example/agents/',
   AGENT_WEB_GATEWAY_URL: 'https://gateway.acme.example/authorize',
   AGENT_WEB_FEATURE_RAG: 'true',
 };
@@ -26,13 +27,14 @@ describe('parseRuntimeSiteConfig', () => {
     expect(parseRuntimeSiteConfig({})).toEqual(NEUTRAL_SITE_CONFIG);
   });
 
-  it('reads the six documented variables and nothing else', () => {
+  it('reads the seven documented variables and nothing else', () => {
     expect(parseRuntimeSiteConfig(FULL_ENV)).toEqual({
       branding: {
         appName: 'Acme Agents',
         orgName: 'Acme Research',
         orgUrl: 'https://acme.example/about',
         statusUrl: 'https://status.acme.example/',
+        docsUrl: 'https://docs.acme.example/agents/',
         // Reduced to the origin: the links built from it are `/chat` and
         // `/dashboard`, so a path in the configured URL is not carried.
         gatewayUrl: 'https://gateway.acme.example',
@@ -51,12 +53,14 @@ describe('parseRuntimeSiteConfig', () => {
     const site = parseRuntimeSiteConfig({ AGENT_WEB_ORG_URL: '', AGENT_WEB_STATUS_URL: '  ' });
     expect(site.branding.orgUrl).toBe('');
     expect(site.branding.statusUrl).toBe('');
+    expect(site.branding.docsUrl).toBe('');
     expect(site.branding.gatewayUrl).toBe('');
   });
 
   it.each([
     ['AGENT_WEB_ORG_URL', 'not a url'],
     ['AGENT_WEB_STATUS_URL', 'status.example.test'],
+    ['AGENT_WEB_DOCS_URL', 'docs.example.test'],
     ['AGENT_WEB_GATEWAY_URL', '://missing-scheme'],
   ])('refuses an unparseable %s instead of hiding the link', (name, value) => {
     expect(() => parseRuntimeSiteConfig({ [name]: value })).toThrow(SiteConfigError);
@@ -66,6 +70,7 @@ describe('parseRuntimeSiteConfig', () => {
   it.each([
     ['AGENT_WEB_ORG_URL', 'javascript:alert(1)'],
     ['AGENT_WEB_STATUS_URL', 'ftp://status.example.test/'],
+    ['AGENT_WEB_DOCS_URL', 'javascript:alert(1)'],
     ['AGENT_WEB_GATEWAY_URL', 'data:text/html,hi'],
   ])('refuses a non-http(s) %s', (name, value) => {
     expect(() => parseRuntimeSiteConfig({ [name]: value })).toThrow(/must be an http\(s\) URL/);
@@ -100,6 +105,7 @@ describe('parseRuntimeSiteConfig', () => {
     expect(Object.keys(site).sort()).toEqual(['branding', 'features']);
     expect(Object.keys(site.branding).sort()).toEqual([
       'appName',
+      'docsUrl',
       'gatewayUrl',
       'orgName',
       'orgUrl',

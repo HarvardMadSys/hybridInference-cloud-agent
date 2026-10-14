@@ -12,6 +12,8 @@ import {
 import { getMemoryProjects } from '@/lib/api/projectMemory';
 import { getUserProfile } from '@/lib/api/userProfile';
 import { LOCALE_STORAGE_KEY } from '@/lib/i18n/locales';
+import { SiteConfigProvider } from '@/components/providers/SiteConfigProvider';
+import { NEUTRAL_SITE_CONFIG } from '@/config/site';
 import { IntegrationsView } from './IntegrationsView';
 import type { AgentIntegrationProviderApi, AgentIntegrationsApi } from '@/lib/api/agents';
 
@@ -222,6 +224,28 @@ describe('IntegrationsView', () => {
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     expect(screen.queryByRole('combobox', { name: 'Theme' })).not.toBeInTheDocument();
     expect(screen.queryByRole('combobox', { name: 'Display language' })).not.toBeInTheDocument();
+  });
+
+  it("links the deployment's documentation from the heading, and only when it has some", async () => {
+    mockedGetIntegrations.mockResolvedValue(integrations);
+    const docsUrl = 'https://docs.example.com/agents/';
+    const { unmount } = render(
+      <SiteConfigProvider
+        config={{ ...NEUTRAL_SITE_CONFIG, branding: { ...NEUTRAL_SITE_CONFIG.branding, docsUrl } }}
+      >
+        <IntegrationsView />
+      </SiteConfigProvider>,
+    );
+    const link = screen.getByRole('link', { name: 'Documentation' });
+    expect(link).toHaveAttribute('href', docsUrl);
+    expect(link).toHaveAttribute('target', '_blank');
+    expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+    await screen.findByText('Connected as HarvardMadSys · 2 repositories');
+    unmount();
+
+    render(<IntegrationsView />);
+    await screen.findByText('Connected as HarvardMadSys · 2 repositories');
+    expect(screen.queryByRole('link', { name: 'Documentation' })).not.toBeInTheDocument();
   });
 
   it('shares the companion with Profile and updates it after a memory refresh', async () => {

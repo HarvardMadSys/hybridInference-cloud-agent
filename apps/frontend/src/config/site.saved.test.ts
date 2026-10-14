@@ -8,12 +8,28 @@ const saved = {
     orgName: 'Organization',
     orgUrl: 'https://example.com/about',
     statusUrl: '',
+    docsUrl: 'https://docs.example.com/agents/',
     gatewayUrl: 'https://gateway.example.com/dashboard',
   },
   features: { rag: true },
 };
 
 describe('saved public site settings', () => {
+  it('reads a control plane that predates the documentation link as having none', () => {
+    const { docsUrl: _omitted, ...olderBranding } = saved.branding;
+    const site = parseSavedSiteConfig({ ...saved, branding: olderBranding });
+    expect(site.branding.appName).toBe('Admin configured app');
+    expect(site.branding.docsUrl).toBe('');
+  });
+
+  it('rejects a documentation link that is not an http(s) URL', () => {
+    for (const docsUrl of ['javascript:alert(1)', 'docs.example.com', 42]) {
+      expect(
+        parseSavedPublicAppearance({ ...saved, branding: { ...saved.branding, docsUrl } }),
+      ).toBeNull();
+    }
+  });
+
   it('allows only validated public display fields into the server fallback', () => {
     expect(
       parseSavedPublicAppearance({

@@ -15,7 +15,7 @@ vi.mock('react', async (importOriginal) => ({
 }));
 
 const saved = (appName = 'Saved app') => ({
-  branding: { appName, orgName: '', orgUrl: '', statusUrl: '', gatewayUrl: '' },
+  branding: { appName, orgName: '', orgUrl: '', statusUrl: '', docsUrl: '', gatewayUrl: '' },
   features: { rag: false },
 });
 
