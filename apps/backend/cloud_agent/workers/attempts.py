@@ -747,15 +747,6 @@ async def _run_attempt_reaper(
         except Exception:
             logger.warning("Goal scheduling sweep failed", exc_info=True)
         try:
-            environments = getattr(store, "environments", None)
-            if environments is not None:
-                await environments.maintain_environments()
-            snapshots = getattr(store, "environment_snapshots", None)
-            if snapshots is not None:
-                await snapshots.maintain()
-        except Exception:
-            logger.warning("Environment maintenance sweep failed", exc_info=True)
-        try:
             actions = await store.attempt_commands.reap_expired(
                 max_attempts=(
                     max_attempts

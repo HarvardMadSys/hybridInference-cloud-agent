@@ -29,6 +29,7 @@ _EXPECTED_SHUTDOWN_TASKS = (
     "mcp_maintenance_task",
     "mcp_catalog_task",
     "reaper_task",
+    "environment_maintenance_task",
     "snapshot_task",
     "sandbox_deletion_task",
     "sandbox_move_out_task",
@@ -329,6 +330,10 @@ def _prepare(
     for target, label in (
         ("cloud_agent.settings.synchronize_settings", "settings_task"),
         ("cloud_agent.bootstrap.lifespan.reap_expired_attempts", "reaper_task"),
+        (
+            "cloud_agent.bootstrap.lifespan.run_environment_maintenance",
+            "environment_maintenance_task",
+        ),
         ("cloud_agent.bootstrap.lifespan.coordinate_shared_snapshots", "snapshot_task"),
         ("cloud_agent.bootstrap.lifespan.coordinate_sandbox_deletions", "sandbox_deletion_task"),
         ("cloud_agent.bootstrap.lifespan.coordinate_move_out", "sandbox_move_out_task"),
