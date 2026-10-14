@@ -37,6 +37,11 @@ HOST_SETTINGS_CAPABILITY = "host-settings-v1"
 #: Per runtime because each CLI takes mid-turn input through its own channel,
 #: and a host is only asked to steer a turn whose runtime it names here.
 MID_TURN_INPUT_CAPABILITY_PREFIX = "mid-turn-input-v1:"
+#: A claim's MCP binding with this prefix names a tool the platform serves
+#: (web search, durable memory), not a connection the owner made. A host with
+#: no MCP relay runs the turn without these; only the owner's own connected
+#: tools make it refuse the turn.
+PLATFORM_MCP_SERVER_PREFIX = ":platform:"
 
 
 def mid_turn_input_capability(runtime_id: str) -> str:

@@ -167,6 +167,7 @@ from cloud_agent_shared.shared_protocol import (
     GOAL_REPORT_CAPABILITY,
     HOST_SETTINGS_CAPABILITY,
     NATIVE_FORK_AT_ANCHOR_CAPABILITY,
+    PLATFORM_MCP_SERVER_PREFIX,
     PROFILING_CONTROL_CAPABILITY,
     SHARED_SANDBOX_CAPABILITY,
     SHARED_SANDBOX_HELPER_PINS,
@@ -2103,10 +2104,14 @@ def _run_shared_live_attempt(
         return 2
     mcp_url = _sandbox_mcp_url()
     if job.mcp_bindings and not mcp_url:
-        # Before any container work: the runtime would refuse these tools only
-        # at the resident launch, after a checkout the turn could never use.
-        finish_attempt("failed", SITE_MISCONFIGURED_MCP)
-        return 2
+        if any(not alias.startswith(PLATFORM_MCP_SERVER_PREFIX) for alias in job.mcp_bindings):
+            # Before any container work: the runtime would refuse these tools only
+            # at the resident launch, after a checkout the turn could never use.
+            finish_attempt("failed", SITE_MISCONFIGURED_MCP)
+            return 2
+        # Only the platform's own tools, which every turn carries: without a
+        # relay the turn runs without them rather than every chat failing.
+        job = replace(job, mcp_bindings=[])
 
     manager = ChatSandboxManager(backend)
     stamp = backend.version_stamp()

@@ -647,6 +647,28 @@ def test_a_turn_without_tools_is_given_no_relay(monkeypatch):
     assert launch.mcp_credential == ""
 
 
+def test_a_host_without_a_relay_runs_a_turn_that_carries_only_platform_tools(monkeypatch):
+    """Every claim names the platform's memory tools; they alone must not fail a turn.
+
+    Only an owner's own connected tools make a relay-less host refuse; the
+    platform's tools are left out of that turn instead.
+    """
+    monkeypatch.delenv("AGENT_SANDBOX_MCP_URL", raising=False)
+    job = replace(
+        _JOB,
+        mcp_token="mcp-token",
+        mcp_bindings=[":platform:memory", ":platform:web-search"],
+    )
+
+    run = _run_new_chat(monkeypatch, None, job)
+
+    assert run.result == 0
+    (launch,) = run.launches
+    assert launch.mcp_server_ids == ()
+    assert launch.mcp_base_url == ""
+    assert launch.mcp_credential == ""
+
+
 def test_a_turn_with_tools_on_a_host_without_a_relay_says_the_site_is_misconfigured(
     monkeypatch,
 ):
@@ -667,7 +689,7 @@ def test_a_turn_with_tools_on_a_host_without_a_relay_says_the_site_is_misconfigu
 
     result = runner_mod._run_shared_live_attempt(
         runtime=get_runtime("claude-code"),
-        job=replace(_JOB, mcp_token="mcp-token", mcp_bindings=["deepwiki"]),
+        job=replace(_JOB, mcp_token="mcp-token", mcp_bindings=["deepwiki", ":platform:memory"]),
         control=control,
         heart=SimpleNamespace(cancel_requested=False, lease_lost=False),
         backend=backend,

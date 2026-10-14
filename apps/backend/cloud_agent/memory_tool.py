@@ -20,6 +20,7 @@ from cloud_agent.agent_memory import (
     MemoryTask,
 )
 from cloud_agent.logging_utils import get_logger
+from cloud_agent_shared.shared_protocol import PLATFORM_MCP_SERVER_PREFIX
 
 if TYPE_CHECKING:
     from cloud_agent.ports.agent_memory import AgentMemoryRepository
@@ -28,7 +29,7 @@ logger = get_logger(__name__)
 
 #: A non-secret marker that makes the runtime load the merged MCP endpoint
 #: even when a conversation selected no user-owned connections.
-RUNTIME_SERVER_ID = ":platform:memory"
+RUNTIME_SERVER_ID = PLATFORM_MCP_SERVER_PREFIX + "memory"
 SAVE = "memory_save"
 UPDATE = "memory_update"
 DELETE = "memory_delete"
