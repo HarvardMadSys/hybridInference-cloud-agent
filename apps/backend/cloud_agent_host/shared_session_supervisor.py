@@ -435,6 +435,7 @@ class _Group:
     # Only a later accepted STOPPED inspection may release this snapshot fence.
     initial_archive_preservation_pending: bool = False
     starting: bool = False
+    start_failed: bool = False
     stopping: bool = False
     archive_request_id: str | None = None
     stop_archive_pending: bool = False
@@ -1085,6 +1086,24 @@ class SharedChatSessionSupervisor:
         # releases the bridge and clears the fences.
         return self._persist_stopped_archive(group, current, members)
 
+    def _wait_for_start_locked(self, group: _Group, *, retry_failed: bool = False) -> None:
+        """Wait for an in-flight bridge check without holding the metadata lock.
+
+        Workspace reads and terminal opens revalidate even a running container.
+        Their temporary start fence must not reject an already leased member's
+        prompt. Callers recheck membership and activation after this wait.
+        """
+        deadline = time.monotonic() + 30.0
+        while group.starting:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise SessionBusy("shared workspace start is in progress")
+            self._condition.wait(timeout=min(remaining, 0.5))
+        if group.container_lost:
+            raise RetainedChatLost("shared sandbox container identity was lost")
+        if group.start_failed and not retry_failed:
+            raise SandboxError("shared workspace start verification failed")
+
     def _start_group(
         self,
         group: _Group,
@@ -1094,10 +1113,7 @@ class SharedChatSessionSupervisor:
     ) -> ChatSandboxInspection:
         """Start a group and archive a guest-network fail-stop exactly once."""
         with self._lock:
-            if group.container_lost:
-                raise RetainedChatLost("shared sandbox container identity was lost")
-            if group.starting:
-                raise SessionBusy("shared workspace start is in progress")
+            self._wait_for_start_locked(group, retry_failed=True)
             if group.stopping:
                 raise SessionBusy("shared workspace stop is in progress")
             if group.stop_archive_pending:
@@ -1112,6 +1128,7 @@ class SharedChatSessionSupervisor:
             members = self._archive_members_locked(group)
             expected_container_id = group.inspection.container_id
         start_fence_prepared = False
+        start_completed = False
 
         def prepare_stopped_start(current: ChatSandboxInspection) -> None:
             nonlocal start_fence_prepared
@@ -1143,6 +1160,7 @@ class SharedChatSessionSupervisor:
                     with self._lock:
                         self._accept_inspection_locked(group, current)
                         group.start_archive_completion_pending = False
+                    start_completed = True
                     return current
             if self._starting_archive_prepare_hook is None:
                 inspection = self._manager.start(
@@ -1161,6 +1179,10 @@ class SharedChatSessionSupervisor:
                     defer_network_release_on_fail_stop=(self._stopped_archive_hook is not None),
                     before_stopped_start=prepare_stopped_start,
                 )
+        except RetainedChatLost:
+            with self._lock:
+                self._mark_container_lost_locked(group)
+            raise
         except RetainedChatFailStopped as exc:
             with self._lock:
                 self._accept_inspection_locked(group, exc.inspection)
@@ -1200,9 +1222,11 @@ class SharedChatSessionSupervisor:
                 self._accept_inspection_locked(group, inspection)
                 if start_fence_prepared or completion_pending:
                     group.start_archive_completion_pending = False
+            start_completed = True
             return inspection
         finally:
             with self._lock:
+                group.start_failed = not start_completed
                 group.starting = False
                 self._condition.notify_all()
 
@@ -1927,6 +1951,8 @@ class SharedChatSessionSupervisor:
         call_id = context_call_id(profiling)
         with self._lock:
             group, member = self._leased_member(thread_id, token)
+            self._wait_for_start_locked(group)
+            group, member = self._leased_member(thread_id, token)
             self._require_mutation_admission(group)
         # CLI initialization may block. The member lock, not the group lock,
         # leaves siblings able to initialize and execute simultaneously. The
@@ -1958,6 +1984,8 @@ class SharedChatSessionSupervisor:
     ) -> ResidentTurn[DialectRuntime]:
         """Send a prompt to one member without taking a group-wide turn lock."""
         with self._lock:
+            group, member = self._leased_member(thread_id, token)
+            self._wait_for_start_locked(group)
             group, member = self._leased_member(thread_id, token)
             self._require_mutation_admission(group)
             if member.current_turn is not None:
@@ -2027,6 +2055,8 @@ class SharedChatSessionSupervisor:
                             cpu_capacity_cores=parse_cpu_capacity(group.spec.cpu_limit),
                         )
             with self._lock:
+                self._wait_for_start_locked(group)
+                self._require_mutation_admission(group)
                 current_group = self._members.get(thread_id)
                 current_member = (
                     current_group.members.get(thread_id) if current_group is not None else None
