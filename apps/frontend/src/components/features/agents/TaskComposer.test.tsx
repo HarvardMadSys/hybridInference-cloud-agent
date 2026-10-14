@@ -267,7 +267,7 @@ function repositoryOptions(dialog: HTMLElement) {
     .map((button) => button.getAttribute('aria-label'));
 }
 
-const TEMPORARY_OPTION = 'Temporary workspace (no repository)';
+const TEMPORARY_OPTION = 'Start from scratch';
 const ACKNOWLEDGED = 'agents.temporaryWorkspace.acknowledged.alice';
 
 // Nobody connected, and a deployment App to connect to.
@@ -562,7 +562,7 @@ describe('TaskComposer source-control onboarding', () => {
 
     render(<TaskComposer />);
 
-    expect(await repositoryButton()).toHaveAccessibleName('Repository: Temporary workspace');
+    expect(await repositoryButton()).toHaveAccessibleName('Repository: Start from scratch');
     // No branch to pin, and no repository to ask for one.
     expect(screen.queryByLabelText('Branch')).not.toBeInTheDocument();
     expect(listRepoBranches).not.toHaveBeenCalled();
@@ -580,7 +580,7 @@ describe('TaskComposer source-control onboarding', () => {
     // keeps; the draft stays where it is meanwhile.
     fireEvent.keyDown(box, { key: 'Enter' });
     const notice = await screen.findByRole('alertdialog', { name: 'Before you start' });
-    expect(notice).toHaveTextContent('not saved to GitHub');
+    expect(notice).toHaveTextContent('not automatically saved to GitHub');
     expect(within(notice).getByRole('button', { name: 'Got it' })).toHaveFocus();
     expect(createAgentJob).not.toHaveBeenCalled();
     expect(box).toHaveValue('Plot the survey results');
@@ -741,7 +741,7 @@ describe('TaskComposer source-control onboarding', () => {
 
     render(<TaskComposer />);
 
-    expect(await repositoryButton()).toHaveAccessibleName('Repository: Temporary workspace');
+    expect(await repositoryButton()).toHaveAccessibleName('Repository: Start from scratch');
     fireEvent.click(await repositoryButton());
     const dialog = await screen.findByRole('dialog', { name: 'Repository' });
     expect(repositoryOptions(dialog)).toEqual([TEMPORARY_OPTION]);
@@ -830,7 +830,7 @@ describe('TaskComposer source-control onboarding', () => {
     expect(
       screen.queryByRole('button', { name: 'Connect GitHub to use a repository' }),
     ).not.toBeInTheDocument();
-    expect(await repositoryButton()).toHaveAccessibleName('Repository: Temporary workspace');
+    expect(await repositoryButton()).toHaveAccessibleName('Repository: Start from scratch');
     const box = screen.getByRole('textbox');
     fireEvent.change(box, { target: { value: 'Tidy the README' } });
     await waitFor(() => expect(screen.getByRole('button', { name: /^Run/ })).toBeEnabled());
@@ -965,7 +965,7 @@ describe('TaskComposer source-control onboarding', () => {
 
     render(<TaskComposer />);
 
-    expect(await repositoryButton()).toHaveAccessibleName('Repository: Temporary workspace');
+    expect(await repositoryButton()).toHaveAccessibleName('Repository: Start from scratch');
     expect(
       screen.queryByRole('button', { name: 'Connect GitHub to use a repository' }),
     ).not.toBeInTheDocument();
@@ -1823,7 +1823,7 @@ describe('TaskComposer source-control onboarding', () => {
   // temporary workspace is found by its name alone, and after the matches.
   it('finds the temporary workspace by its name, after any repository that matches', async () => {
     vi.mocked(getAgentConfig).mockResolvedValue(
-      config({ repos: ['owner/repository', 'owner/workshop'] }),
+      config({ repos: ['owner/repository', 'owner/scratchpad'] }),
     );
 
     render(<TaskComposer />);
@@ -1833,15 +1833,15 @@ describe('TaskComposer source-control onboarding', () => {
 
     fireEvent.change(search, { target: { value: 'repo' } });
     expect(repositoryOptions(dialog)).toEqual(['owner/repository']);
-    fireEvent.change(search, { target: { value: 'work' } });
-    expect(repositoryOptions(dialog)).toEqual(['owner/workshop', TEMPORARY_OPTION]);
-    fireEvent.change(search, { target: { value: 'temp' } });
+    fireEvent.change(search, { target: { value: 'scratch' } });
+    expect(repositoryOptions(dialog)).toEqual(['owner/scratchpad', TEMPORARY_OPTION]);
+    fireEvent.change(search, { target: { value: 'start' } });
     expect(repositoryOptions(dialog)).toEqual([TEMPORARY_OPTION]);
     expect(dialog).not.toHaveTextContent('Nothing matches');
 
     fireEvent.keyDown(search, { key: 'Enter' });
     expect(
-      await screen.findByRole('button', { name: 'Repository: Temporary workspace' }),
+      await screen.findByRole('button', { name: 'Repository: Start from scratch' }),
     ).toHaveFocus();
     expect(screen.queryByLabelText('Branch')).not.toBeInTheDocument();
   });
@@ -1862,7 +1862,7 @@ describe('TaskComposer source-control onboarding', () => {
       }),
     );
 
-    expect(await repositoryButton()).toHaveAccessibleName('Repository: Temporary workspace');
+    expect(await repositoryButton()).toHaveAccessibleName('Repository: Start from scratch');
     // The repository's branch goes with the repository.
     expect(screen.queryByLabelText('Branch')).not.toBeInTheDocument();
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Try an idea' } });
@@ -1885,7 +1885,7 @@ describe('TaskComposer source-control onboarding', () => {
 
     render(<TaskComposer initialRepo=":temporary" />);
 
-    expect(await repositoryButton()).toHaveAccessibleName('Repository: Temporary workspace');
+    expect(await repositoryButton()).toHaveAccessibleName('Repository: Start from scratch');
     expect(screen.queryByText(/is not available to you/)).not.toBeInTheDocument();
   });
 

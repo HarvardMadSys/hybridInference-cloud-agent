@@ -42,9 +42,9 @@ limit. Supported raster images also have a preview. HTML and SVG remain escaped
 text; downloads do not execute them in the application. Oversized files show the
 preview limit instead of offering a partial download or copy.
 
-A temporary workspace, a conversation without a repository, publishes nothing,
-so its files leave through **Download workspace**. It is offered in the
-**Temporary workspace** label beside the conversation title and on each turn's
+A conversation started with **Start from scratch** has no linked repository and
+does not automatically publish its files. **Download workspace** is offered in the
+**Start from scratch** label beside the conversation title and on each turn's
 result, and saves the whole workspace as one `.tar.gz`. A workspace larger than
 the server's download limit is refused rather than saved in part.
 

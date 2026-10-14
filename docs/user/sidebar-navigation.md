@@ -14,9 +14,9 @@ control. Pinned conversations appear once, outside project folders and the flat
 list. Unpinning returns them to their ordinary location. Search shows a unified
 result list regardless of pins.
 
-Conversations started without a repository are grouped in a **Temporary
-workspace** folder beside the repository projects. Its new-task button starts
-another temporary workspace.
+Conversations started without a repository are grouped in a **Start from scratch**
+folder beside the repository projects. Its new-task button starts another
+conversation without a repository.
 
 Use the folder-plus button beside the search and view controls to add a
 workspace. Select a repository from the same authorized list as the task

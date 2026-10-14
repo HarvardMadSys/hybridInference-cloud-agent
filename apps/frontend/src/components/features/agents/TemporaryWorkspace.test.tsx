@@ -23,7 +23,7 @@ vi.mock('@/components/providers', async () => {
 vi.mock('@/lib/api/agents', () => ({ downloadAgentWorkspace: vi.fn() }));
 
 const NOTICE =
-  'Temporary workspace: files exist only in this conversation’s sandbox and are not saved to GitHub. Once the conversation is deleted or its sandbox is cleaned up, they cannot be recovered.';
+  'Files stay in this conversation’s cloud workspace and are not automatically saved to GitHub. Download important files before deleting the conversation or its workspace.';
 
 function job(overrides: Partial<AgentJob> = {}): AgentJob {
   return {
@@ -133,12 +133,12 @@ describe('TemporaryWorkspaceBadge', () => {
 
   it('says what a temporary workspace keeps, beside the download', () => {
     render(<TemporaryWorkspaceBadge jobId="ajob_1" />);
-    const badge = screen.getByRole('button', { name: 'Temporary workspace' });
+    const badge = screen.getByRole('button', { name: 'Start from scratch' });
     expect(badge).toHaveAttribute('aria-expanded', 'false');
 
     fireEvent.click(badge);
 
-    const details = screen.getByRole('dialog', { name: 'About this temporary workspace' });
+    const details = screen.getByRole('dialog', { name: 'About this workspace' });
     expect(badge).toHaveAttribute('aria-expanded', 'true');
     expect(details).toHaveTextContent(NOTICE);
     expect(within(details).getByRole('button', { name: 'Download workspace' })).toBeEnabled();
@@ -151,7 +151,7 @@ describe('TemporaryWorkspaceBadge', () => {
         <p>elsewhere</p>
       </>,
     );
-    const badge = screen.getByRole('button', { name: 'Temporary workspace' });
+    const badge = screen.getByRole('button', { name: 'Start from scratch' });
 
     fireEvent.click(badge);
     fireEvent.keyDown(document, { key: 'Escape' });
@@ -193,8 +193,8 @@ describe('a temporary workspace where a repository would be', () => {
   it('is named, not shown as a key, in the sidebar and its tooltips', () => {
     const t = (key: Parameters<typeof translate>[1]) => translate('en', key);
 
-    expect(projectLabel(TEMPORARY_WORKSPACE, t)).toBe('Temporary workspace');
-    expect(projectTitle(TEMPORARY_WORKSPACE, t)).toBe('Temporary workspace');
+    expect(projectLabel(TEMPORARY_WORKSPACE, t)).toBe('Start from scratch');
+    expect(projectTitle(TEMPORARY_WORKSPACE, t)).toBe('Start from scratch');
     expect(projectLabel('owner/repository', t)).toBe('repository');
     expect(projectTitle('owner/repository', t)).toBe('owner/repository');
   });

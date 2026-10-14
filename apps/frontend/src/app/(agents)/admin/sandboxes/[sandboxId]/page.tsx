@@ -423,7 +423,7 @@ function SandboxTrajectory({ sandboxId }: { sandboxId: string }) {
             <dl className={`${CARD} mt-5 grid grid-cols-2 gap-5 p-5 text-sm lg:grid-cols-4`}>
               {[
                 ['Owner', sandbox.user_id],
-                ['Repository', sandbox.repo ?? 'Temporary workspace'],
+                ['Repository', sandbox.repo ?? 'Start from scratch'],
                 ['Host', sandbox.host],
                 [
                   'Runtime',

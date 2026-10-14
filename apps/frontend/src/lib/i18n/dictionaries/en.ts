@@ -702,21 +702,20 @@ export const en = {
   'composer.starting': 'Starting…',
   'composer.runTitle': 'Run — ⏎ to send, ⇧⏎ for a new line',
   'composer.keyboardHint': 'Enter to run · Shift + Enter for a new line',
-  'composer.workflowRepository':
-    'Choose a repository and branch, or start in a temporary workspace.',
+  'composer.workflowRepository': 'Choose a repository and branch, or start from scratch.',
   'composer.workflowAgent': 'Select the coding agent and model you want to work with.',
   'composer.workflowReviewTitle': 'Review',
   'composer.workflowReview': 'Follow progress, review the changes, and continue the conversation.',
   'composer.loadConfigFailed': 'could not load config',
   'composer.startFailed': 'could not start the job',
 
-  // ── Temporary workspace ─────────────────────────────────────────────────
-  'temporaryWorkspace.name': 'Temporary workspace',
-  'temporaryWorkspace.option': 'Temporary workspace (no repository)',
+  // ── Start from scratch ─────────────────────────────────────────────────
+  'temporaryWorkspace.name': 'Start from scratch',
+  'temporaryWorkspace.option': 'Start from scratch',
   'temporaryWorkspace.optionHint':
-    'Starts empty. Files stay in this conversation’s sandbox and are never published.',
+    'Start without a repository. Files stay in this conversation’s cloud workspace and are not automatically published.',
   'temporaryWorkspace.notice':
-    'Temporary workspace: files exist only in this conversation’s sandbox and are not saved to GitHub. Once the conversation is deleted or its sandbox is cleaned up, they cannot be recovered.',
+    'Files stay in this conversation’s cloud workspace and are not automatically saved to GitHub. Download important files before deleting the conversation or its workspace.',
   'temporaryWorkspace.confirmTitle': 'Before you start',
   'temporaryWorkspace.acknowledge': 'Got it',
   'temporaryWorkspace.cancel': 'Cancel',
@@ -724,7 +723,7 @@ export const en = {
   'temporaryWorkspace.download': 'Download workspace',
   'temporaryWorkspace.downloading': 'Preparing download…',
   'temporaryWorkspace.downloadFailed': 'Could not download the workspace. {message}',
-  'temporaryWorkspace.details': 'About this temporary workspace',
+  'temporaryWorkspace.details': 'About this workspace',
 
   // ── Composer commands ───────────────────────────────────────────────────
   'commands.title': 'Commands',
