@@ -746,9 +746,18 @@ async def start_action(
         action_id=action_id,
         run_id=run["id"],
     )
-    return await store.environments.update_environment_action_run(
+    updated = await store.environments.update_environment_action_run(
         user["user_id"], run["id"], {"terminal_id": terminal["id"], **_action_result(terminal)}
     )
+    if updated["terminal_id"] != terminal["id"]:
+        # Stopped while the host was still preparing: the stop found no
+        # terminal to end, and nothing tracks this one, so end it here.
+        try:
+            await broker.delete_terminal(str(job["thread_id"]), terminal["id"])
+        except SandboxManagerError as exc:
+            if exc.status_code != 404:
+                raise
+    return updated
 
 
 def _action_result(terminal: dict[str, Any]) -> dict[str, Any]:
