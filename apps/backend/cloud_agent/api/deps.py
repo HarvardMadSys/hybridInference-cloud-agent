@@ -396,9 +396,11 @@ class AgentAccessAdmission:
         self._lookups: dict[str, asyncio.Task[AgentAccessDecision]] = {}
         # Every Gateway ask takes the next ticket when it starts; a denial takes
         # one when it is recorded. A grant asked for before the account's last
-        # recorded denial is older than that denial, and is not kept.
+        # recorded denial is older than that denial, and is not kept. Each ask
+        # under way maps to when it started: a grant is kept from then, not from
+        # when a slow answer arrived, so it is never older than the bound.
         self._tickets = itertools.count(1)
-        self._asking: set[int] = set()
+        self._asking: dict[int, float] = {}
         self._denied: dict[str, int] = {}
 
     async def decision(self, gateway: Any, user_id: str) -> AgentAccessDecision:
@@ -419,11 +421,11 @@ class AgentAccessAdmission:
     def asking(self) -> Iterator[int]:
         """A ticket for one Gateway lookup, held while it is under way."""
         ticket = next(self._tickets)
-        self._asking.add(ticket)
+        self._asking[ticket] = self._clock()
         try:
             yield ticket
         finally:
-            self._asking.discard(ticket)
+            self._asking.pop(ticket, None)
 
     def record(self, decision: AgentAccessDecision, asked: int) -> None:
         """Keep a fresh grant, or drop the kept one if this decision is not a grant.
@@ -453,9 +455,12 @@ class AgentAccessAdmission:
         if asked < self._denied.get(user_id, 0):
             return
         now = self._clock()
+        expires = self._asking.get(asked, now) + self._ttl_s
+        if now >= expires:
+            return
         if len(self._granted) >= 1024:
             self._granted = {user: kept for user, kept in self._granted.items() if now < kept[0]}
-        self._granted[user_id] = (now + self._ttl_s, decision)
+        self._granted[user_id] = (expires, decision)
 
     async def _look_up(self, gateway: Any, user_id: str) -> AgentAccessDecision:
         # A failure is no verdict on the owner, and drops nothing: a lookup

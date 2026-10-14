@@ -156,6 +156,27 @@ async def test_a_withdrawal_stops_admitting_requests_once_the_kept_grant_expires
     assert gateway.asked == [_OWNER, _OWNER, _OWNER]
 
 
+async def test_a_slow_answer_does_not_stretch_how_long_its_grant_is_kept():
+    """The bound counts from when the Gateway was asked, not from when it answered."""
+    clock = _Clock()
+
+    class _SlowGateway(_AccessGateway):
+        async def agent_access(self, user_id: str) -> dict[str, Any]:
+            clock.now += AGENT_ACCESS_ALLOW_TTL_S - 1  # the answer takes this long
+            return await super().agent_access(user_id)
+
+    gateway = _SlowGateway()
+    app = _app(gateway)
+    app.state.agent_access_admission = AgentAccessAdmission(clock=clock)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="https://test") as client:
+        assert (await client.get("/probe")).status_code == 200
+        gateway.permissions = []
+        # Kept for the rest of the bound only: here it is ten seconds old.
+        clock.now += 1
+        assert (await client.get("/probe")).status_code == 403
+    assert gateway.asked == [_OWNER, _OWNER]
+
+
 async def test_a_grant_is_used_at_once_after_a_denial():
     gateway = _AccessGateway(permissions=[])
     async with AsyncClient(
