@@ -322,6 +322,19 @@ async def test_oncall_mark_cannot_be_spoofed_away(client, store):
     assert metadata["alert_id"] == "a-1"
 
 
+async def test_an_invalid_request_does_not_echo_its_secret_overrides(client):
+    """Validation errors name the field, never the values submitted with it."""
+    secret = "oncall-override-secret-value"
+    body = _create_body(environment_overrides=[{"name": "API_KEY", "value": secret}])
+    del body["model"]
+
+    response = await client.post("/v1/agent/service/oncall/jobs", json=body, headers=_auth())
+
+    assert response.status_code == 422
+    assert secret not in response.text
+    assert response.headers["cache-control"] == "no-store"
+
+
 async def test_unresolvable_model_fails_fast(client):
     """A model the service account cannot reach refuses at create, not at run."""
     response = await client.post(

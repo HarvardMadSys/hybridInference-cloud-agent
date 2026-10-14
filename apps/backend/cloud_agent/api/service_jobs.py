@@ -54,6 +54,7 @@ from cloud_agent.api.deps import (
     require_store,
     verify_admin_access,
 )
+from cloud_agent.api.environments import CredentialSafeRoute
 from cloud_agent.application.job_admission import _create_job_as
 from cloud_agent.application.pending_messages import settle_queue_when_possible
 from cloud_agent.logging_utils import get_logger
@@ -167,7 +168,6 @@ def _oncall_owner() -> dict[str, Any]:
     return {"user_id": user_id, "authenticated": True}
 
 
-@router.post("/jobs", response_model=AgentJobResponse, status_code=201)
 async def create_oncall_job(
     body: AgentJobCreate,
     idempotency_key: str | None = Header(None, alias="Idempotency-Key", max_length=256),
@@ -210,6 +210,18 @@ async def create_oncall_job(
         extra={"event": "oncall_job_created", "job_id": job["id"], "runtime": body.runtime},
     )
     return _job_response(job)
+
+
+# The body is the owner route's, Secret overrides included, so its errors are
+# kept as free of submitted values as the owner route's are.
+router.add_api_route(
+    "/jobs",
+    create_oncall_job,
+    methods=["POST"],
+    response_model=AgentJobResponse,
+    status_code=201,
+    route_class_override=CredentialSafeRoute,
+)
 
 
 @router.get("/jobs/{job_id}", response_model=AgentJobResponse)
