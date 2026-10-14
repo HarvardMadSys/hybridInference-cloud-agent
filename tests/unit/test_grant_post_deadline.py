@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
+from contextlib import suppress
 
 import httpx
 import pytest
@@ -80,6 +82,12 @@ def _client(transport: httpx.AsyncBaseTransport) -> tuple[GrantClient, httpx.Asy
 def _assert_ambiguous_timeout(error: GatewayError) -> None:
     assert error.status_code is None
     assert error.definitive is False
+    assert error.error_type == "gateway_timeout"
+
+
+def _assert_ambiguous_transport_failure(error: GatewayError) -> None:
+    assert error.status_code is None
+    assert error.definitive is False
 
 
 async def test_mint_stops_a_slow_drip_at_the_total_deadline(short_request_deadline) -> None:
@@ -106,6 +114,21 @@ async def test_renew_stops_a_delayed_response_at_the_total_deadline(short_reques
 
     assert time.monotonic() - started < 0.5
     _assert_ambiguous_timeout(raised.value)
+
+
+async def test_stalled_response_body_stops_at_the_request_deadline(short_request_deadline) -> None:
+    stream = _StalledBody()
+    client, http = _client(_StalledBodyTransport(stream))
+    started = time.monotonic()
+    try:
+        with pytest.raises(GatewayError) as raised:
+            await asyncio.wait_for(client.renew("agr_1"), timeout=0.4)
+    finally:
+        await http.aclose()
+
+    assert time.monotonic() - started < 0.5
+    _assert_ambiguous_timeout(raised.value)
+    assert stream.closed.is_set()
 
 
 async def test_revoke_remains_best_effort_when_the_total_deadline_expires(
@@ -136,3 +159,76 @@ async def test_caller_cancellation_closes_a_stalled_post_body() -> None:
             task.cancel()
         await asyncio.gather(task, return_exceptions=True)
         await http.aclose()
+
+
+async def test_lost_mint_response_reuses_the_idempotent_attempt_grant(
+    short_request_deadline,
+) -> None:
+    """A committed grant remains recoverable after a slow, lost HTTP response."""
+    grants: dict[tuple[str, str], dict[str, object]] = {}
+    requests: list[dict[str, object]] = []
+    server_errors: list[str] = []
+    grant_response = {"grant_id": "agr_committed", "token": "grant-token"}
+
+    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            head = await reader.readuntil(b"\r\n\r\n")
+            headers = {
+                name.strip().lower(): value.strip()
+                for line in head.decode("latin-1").split("\r\n")[1:]
+                if ":" in line
+                for name, value in (line.split(":", 1),)
+            }
+            request_body = await reader.readexactly(int(headers["content-length"]))
+            payload = json.loads(request_body)
+            requests.append(payload)
+            key = (payload["external_job_id"], payload["external_attempt_id"])
+            grant = grants.setdefault(key, dict(grant_response))
+            response_body = json.dumps(grant).encode()
+
+            if len(requests) == 1:
+                # The remote commits the grant, then loses its HTTP response.
+                writer.close()
+                await writer.wait_closed()
+                return
+
+            writer.write(
+                f"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                f"Content-Length: {len(response_body)}\r\nConnection: close\r\n\r\n".encode()
+                + response_body
+            )
+            await writer.drain()
+        except (ConnectionError, asyncio.IncompleteReadError):
+            pass
+        except Exception as exc:
+            server_errors.append(f"{type(exc).__name__}: {exc}")
+        finally:
+            writer.close()
+            with suppress(ConnectionError):
+                await writer.wait_closed()
+
+    server = await asyncio.start_server(handle, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    http = httpx.AsyncClient()
+    client = GrantClient(f"http://127.0.0.1:{port}", TOKEN, client=http)
+    try:
+        with pytest.raises(GatewayError) as raised:
+            await client.mint(user_id="user_1", job_id="job_1", attempt_id="1")
+        _assert_ambiguous_transport_failure(raised.value)
+
+        try:
+            recovered = await client.mint(user_id="user_1", job_id="job_1", attempt_id="1")
+        except GatewayError as exc:
+            pytest.fail(
+                f"retry failed: {exc}; server_errors={server_errors!r}; requests={requests!r}"
+            )
+    finally:
+        server.close()
+        await server.wait_closed()
+        await http.aclose()
+
+    assert recovered["grant_id"] == "agr_committed"
+    assert len(grants) == 1
+    assert len(requests) == 2
+    assert requests[0] == requests[1]
+    assert server_errors == []
