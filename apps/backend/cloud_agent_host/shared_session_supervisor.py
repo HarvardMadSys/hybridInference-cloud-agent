@@ -3219,6 +3219,8 @@ class SharedChatSessionSupervisor:
             group, member = self._member(thread_id)
         self._recover_start_archive_completion(group)
         with self._lock:
+            # This request performs its own fresh verification below.
+            self._wait_for_start_locked(group, retry_failed=True)
             current_group, current_member = self._member(thread_id)
             if current_group is not group or current_member is not member:
                 raise SessionLeaseLost("shared membership changed before operation admission")
@@ -3226,6 +3228,7 @@ class SharedChatSessionSupervisor:
             lifecycle_generation = group.lifecycle_generation
         self._ensure_running(group)
         with self._lock:
+            self._wait_for_start_locked(group)
             current_group, current_member = self._member(thread_id)
             if (
                 current_group is not group
@@ -3683,6 +3686,8 @@ class SharedChatSessionSupervisor:
             group, member = self._member(thread_id)
         self._recover_start_archive_completion(group)
         with self._lock:
+            # This request performs its own fresh verification below.
+            self._wait_for_start_locked(group, retry_failed=True)
             current_group, current_member = self._member(thread_id)
             if current_group is not group or current_member is not member:
                 raise SessionLeaseLost("shared membership changed before terminal admission")
@@ -3690,6 +3695,7 @@ class SharedChatSessionSupervisor:
             lifecycle_generation = group.lifecycle_generation
         self._ensure_running(group)
         with self._lock:
+            self._wait_for_start_locked(group)
             current_group, current_member = self._member(thread_id)
             if (
                 current_group is not group

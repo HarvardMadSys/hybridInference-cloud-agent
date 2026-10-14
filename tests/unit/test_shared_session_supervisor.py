@@ -6842,3 +6842,80 @@ def test_prompt_wait_does_not_accept_a_failed_bridge_recheck(monkeypatch):
         "athr_source", lease.token, prompt="now verified", model="glm-5.1", reasoning_effort=None
     )
     assert len(factory.transports[0].turns) == 1
+
+
+@pytest.mark.parametrize("entrypoint", ["operation", "terminal"])
+@pytest.mark.parametrize("race", ["before", "after", "membership", "container", "failure"])
+def test_workspace_admission_waits_for_bridge_rechecks(monkeypatch, entrypoint, race):
+    """Files and PTYs wait at both admission boundaries, then recheck identity."""
+    manager, supervisor, _factory, _lease, _launch_spec = _rechecking_activation()
+    group = supervisor._members["athr_source"]
+    opened = getattr(supervisor, f"{entrypoint}_opened")
+    closed = getattr(supervisor, f"{entrypoint}_closed")
+    waited = threading.Event()
+    wait = supervisor._condition.wait
+    rechecks = []
+
+    def waiting(*args, **kwargs):
+        waited.set()
+        return wait(*args, **kwargs)
+
+    def begin_recheck():
+        manager.block_start = True
+        rechecks.append(_in_thread(lambda: supervisor._start_group(group)))
+        assert manager.start_entered.wait(timeout=2)
+
+    monkeypatch.setattr(supervisor._condition, "wait", waiting)
+    if race == "before":
+        begin_recheck()
+    else:
+        # Start the competing check after this request's own check, before it
+        # can register its operation/PTY token. No sleep-based race timing.
+        manager.block_start = False
+        ensure_running = supervisor._ensure_running
+        start = manager.start
+
+        def ensure_then_recheck(current_group):
+            ensure_running(current_group)
+            if race == "failure":
+
+                def fail_start(*args, **kwargs):
+                    start(*args, **kwargs)
+                    raise SandboxError("bridge recheck failed")
+
+                monkeypatch.setattr(manager, "start", fail_start)
+            begin_recheck()
+
+        monkeypatch.setattr(supervisor, "_ensure_running", ensure_then_recheck)
+
+    opening, outcome = _in_thread(lambda: opened("athr_source"))
+    try:
+        assert waited.wait(timeout=1), outcome
+        assert group.operation_tokens == {} and group.terminal_tokens == {}
+        if race == "membership":
+            with supervisor._lock:
+                group.members["athr_source"] = replace(group.members["athr_source"])
+        elif race == "container":
+            current = manager.items[_spec().container_name]
+            manager.items[_spec().container_name] = replace(current, container_id="replacement")
+    finally:
+        manager.start_release.set()
+        opening.join(timeout=2)
+        for checking, _ in rechecks:
+            checking.join(timeout=2)
+    assert not opening.is_alive()
+    assert all(not checking.is_alive() for checking, _ in rechecks)
+    if race in {"before", "after"}:
+        assert "error" not in outcome
+        assert all("error" not in result for _, result in rechecks)
+        token, descriptor = outcome["value"]
+        assert descriptor.running is True
+        closed("athr_source", token)
+    else:
+        expected_error = {
+            "membership": SessionLeaseLost,
+            "container": RetainedChatLost,
+            "failure": SandboxError,
+        }[race]
+        assert isinstance(outcome.get("error"), expected_error), outcome
+    assert group.operation_tokens == {} and group.terminal_tokens == {}
