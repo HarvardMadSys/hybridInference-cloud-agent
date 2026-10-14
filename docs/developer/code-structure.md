@@ -187,7 +187,11 @@ extracting components.
    ownership, commands, or behavior.
 
 Backend architecture checks enforce service-image independence, API import
-direction, domain/port independence, and repository isolation. The import
-scanners include relative imports, imports inside functions, and
+direction, domain/port independence, and repository isolation. Backend imports
+must use the installed package names (`cloud_agent`, `cloud_agent_host`, and
+`cloud_agent_shared`), rather than the checkout namespace `apps.backend`.
+The host image flattens these packages, so checkout-prefixed imports can work
+locally and fail after deployment; the guards reject them in all three packages.
+The import scanners include relative imports, imports inside functions, and
 `TYPE_CHECKING` blocks. Backend behavior tests remain under `tests/`; frontend
 tests remain alongside the feature or utility they exercise.

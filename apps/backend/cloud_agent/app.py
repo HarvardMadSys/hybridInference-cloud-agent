@@ -4,9 +4,10 @@ Bootstrap owns resources, background workers, and shutdown. This module mounts
 HTTP surfaces and installs shared exception and response policies. The MCP
 listener exposes sandbox tools separately from the owner and admin API.
 
-Source-control account credentials remain in the control plane; hosts may mint
-short-lived repository-scoped credentials for a sandbox member as described in
-AGENTS.md. Session recovery requires the retained container and native CLI state.
+Source-control account credentials remain in the control plane, which mints
+short-lived repository-scoped GitHub tokens. Hosts inject authorized tokens
+into the owning sandbox member as described in AGENTS.md. Session recovery
+requires the retained container and native CLI state.
 """
 
 from __future__ import annotations

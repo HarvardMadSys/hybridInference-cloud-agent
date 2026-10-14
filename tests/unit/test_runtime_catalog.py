@@ -4,9 +4,25 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from typing import get_type_hints
 
 from cloud_agent_host import runtimes
 from cloud_agent_shared import runtime_catalog
+
+
+def test_public_runtime_factory_annotations_remain_resolvable() -> None:
+    """Callers can inspect factory contracts through the existing public API."""
+    expected = {
+        runtimes.get_runtime: {"name": str, "return": runtimes.AgentRuntime},
+        runtimes.registered_runtimes: {"return": list[str]},
+        runtimes.runtimes_supporting_mcp: {"return": list[str]},
+        runtimes.runtime_reasoning_efforts: {"return": dict[str, list[str]]},
+        runtime_catalog.registered_runtimes: {"return": list[str]},
+        runtime_catalog.runtimes_supporting_mcp: {"return": list[str]},
+        runtime_catalog.runtime_reasoning_efforts: {"return": dict[str, list[str]]},
+    }
+    for factory, expected_hints in expected.items():
+        assert get_type_hints(factory) == expected_hints
 
 
 def test_shared_catalog_matches_the_host_registry() -> None:

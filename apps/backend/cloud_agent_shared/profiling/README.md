@@ -44,14 +44,22 @@ modules.
 - Both log and JSONL writes run on the background thread. A full queue drops
   records and counts the drops; it never blocks the measured operation.
 
-The existing collector, runtime-control and overhead tests exercise these
-contracts, including fake-clock timing and real child-process continuations:
+The collector, runtime-control, shutdown and overhead tests exercise these
+contracts, including fake-clock timing, real child-process continuations and
+delivery at interpreter exit without an explicit flush:
 
 ```bash
 uv run pytest -q tests/unit/test_agent_operation_profiling.py \
   tests/unit/test_operation_profiling_runtime_control.py \
+  tests/unit/test_operation_profiling_shutdown.py \
   tests/unit/test_operation_overhead_benchmark.py
 ```
+
+Tests that replace a helper should patch its binding in the module that uses it,
+such as `cloud_agent_shared.profiling.policy.parse_run` for environment policy loading.
+Rebinding the stable facade's imported helpers does not rebind other modules'
+imports. The public `operation_profiling.time` object remains the explicit clock
+replacement hook shared by every collector module.
 
 Field definitions and operation boundaries remain in
 `docs/agents/specs/2026-09-14-sandbox-startup-measurement-design.zh-CN.md` and

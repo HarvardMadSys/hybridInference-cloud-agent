@@ -2,17 +2,12 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
+from .base import AgentRuntime  # noqa: TC001 — Public factory annotation introspection.
 from .claude import ClaudeCodeRuntime
 from .codex import CodexRuntime
 from .kilo import KiloRuntime
 from .opencode import OpencodeRuntime
 from .pi import PiRuntime
-
-if TYPE_CHECKING:
-    from .base import AgentRuntime
-
 
 _REGISTRY: dict[str, type[AgentRuntime]] = {
     ClaudeCodeRuntime.name: ClaudeCodeRuntime,

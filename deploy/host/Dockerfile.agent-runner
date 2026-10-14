@@ -3,10 +3,11 @@
 # The self-hosted agent runner (issue #1041).
 #
 # This is the TRUSTED side. It holds the enrolled-host and short-lived clone
-# credentials, then coordinates turns with the retained shared sandbox. Only
-# the inference grant and MCP token cross into that sandbox. The agent itself
-# never runs here, which is why this image carries a Docker client and the
-# sandbox image deliberately does not.
+# credentials, then coordinates turns with the retained shared sandbox. The
+# sandbox receives the member's scoped inference/MCP tokens, an authorized
+# repository-scoped GH_TOKEN, and owner-selected environment values. Platform
+# account and service credentials stay outside. The agent runs in the sandbox;
+# this runner image carries the Docker client that manages it.
 #
 # Two tools this image must have, and the reason each is load-bearing:
 #
@@ -14,8 +15,8 @@
 #           Without it the runner's preflight fails on every host and no job
 #           can run at all — the backend image alone is not enough.
 #   git     The runner clones the job's repository before the agent starts.
-#           Cloning here rather than inside the sandbox is what keeps the
-#           repository credential out of the agent's reach.
+#           Cloning here keeps the source-prefetch credential in the trusted
+#           runner, separate from the member's repository write token.
 
 FROM python:3.12-slim AS builder
 
