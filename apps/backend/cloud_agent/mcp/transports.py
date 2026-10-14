@@ -1359,6 +1359,8 @@ class HttpMetadataFetcher(MetadataFetcher):
             check_addresses(endpoint.host, {str(info[4][0]) for info in infos}, policy)
         except EndpointRejected as exc:
             raise TransportError(str(exc), kind=exc.kind) from exc
+        except OSError as exc:
+            raise TransportError(f"{endpoint.host} could not be resolved: {exc}") from exc
         owned = self.client is None
         timeout = httpx.Timeout(
             self.timeout

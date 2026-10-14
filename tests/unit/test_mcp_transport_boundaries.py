@@ -506,6 +506,22 @@ async def test_metadata_negotiates_identity_and_rejects_a_compressed_reply():
 
 
 @pytest.mark.asyncio
+async def test_metadata_on_a_name_that_does_not_resolve_is_a_transport_error(monkeypatch):
+    """Discovery reports it as unreachable, as the MCP transport does, not as a 500."""
+    import socket
+
+    async def unresolvable(*_args: Any, **_kwargs: Any) -> Any:
+        raise socket.gaierror(socket.EAI_NONAME, "Name or service not known")
+
+    monkeypatch.setattr(asyncio.get_running_loop(), "getaddrinfo", unresolvable)
+    with pytest.raises(TransportError, match="could not be resolved"):
+        await transports.HttpMetadataFetcher().fetch_json(
+            "https://mcp.example.invalid/.well-known/oauth-protected-resource",
+            policy=EgressPolicy(),
+        )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("operation", ["registration", "token", "refresh"])
 async def test_oauth_posts_negotiate_identity_and_refuse_compression(monkeypatch, operation):
     body = _UnconsumedBody()
