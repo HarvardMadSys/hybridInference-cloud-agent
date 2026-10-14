@@ -15,6 +15,21 @@ For session architecture, see the
 The dated findings below are local acceptance evidence. They do not describe
 the current state of a remote deployment.
 
+## Context status
+
+Each turn reports whether the chat's native context survived:
+
+| Context status | Meaning |
+|---|---|
+| `NEW` | No native turn has previously settled for this member |
+| `LIVE` | The turn uses the compatible resident CLI process |
+| `RESTORED` | A replacement process resumes the retained native session |
+| `LOST` | Required native state or container integrity cannot be established; execution is refused |
+
+Stopping a container preserves its writable layer. Losing the container or the
+Docker data root also loses the required native state. Transcript replay and
+cross-host restoration are not recovery paths.
+
 ## Native session identity at the shared boundary
 
 After each turn settles, the runner verifies the native session ID before saving

@@ -1,87 +1,61 @@
-# Cloud Agent
+# HybridInference Cloud Agent
 
-Cloud Agent runs coding agents against a user's repository inside retained
-sandbox containers. Users work from a web interface, while enrolled hosts run
-Claude Code, Codex, pi, OpenCode, or Kilo. The control plane coordinates jobs,
-sessions, and publication to source control.
+[![CI](https://github.com/HarvardMadSys/hybridInference-cloud-agent/actions/workflows/ci.yml/badge.svg?branch=dev)](https://github.com/HarvardMadSys/hybridInference-cloud-agent/actions/workflows/ci.yml?query=branch%3Adev)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![Python 3.12 | 3.13](https://img.shields.io/badge/python-3.12%20%7C%203.13-blue.svg)
 
-Cloud Agent gets model access and account identity from a
-[HybridInference gateway](https://github.com/HarvardMadSys/hybridInference).
-FreeInference is a hosted deployment of that gateway. Cloud Agent remains a
-separate service, with its own database and credentials.
+Self-hosted coding agents that work on your repositories in isolated, retained
+sandboxes.
 
-When writing a new task or follow-up, select **Rewrite prompt** to expand your
-draft with the selected model. If you select **Ask clarification questions
-first**, the model asks a few questions before rewriting your prompt. The result
-stays in the editor, where you can review and edit it before sending. Canceling
-the rewrite, or an unsuccessful rewrite, leaves the original draft unchanged.
-Rewrites use the account's normal model permissions and inference quota.
+Users give tasks from a web interface. Enrolled hosts run Claude Code, Codex,
+pi, OpenCode, or Kilo against the repository, each in its own native session
+inside a sandbox that survives between turns. The control plane schedules the
+work, streams it to the browser, and publishes the result as a pull request.
+Model access, quotas, and account identity come from a
+[HybridInference gateway](https://github.com/HarvardMadSys/hybridInference),
+reached over HTTP only.
 
-Open **Setting → Avatar & memory** to see your generated avatar, saved
-preferences, recent work, and suggestions for clearer requests. The avatar's
-colors and details follow recent work. Memory updates from your latest 50
-requests; explicit preferences can guide later tasks in the same project.
-You can pause memory or clear it so older requests are no longer used. Avatars
-and memory require no additional model calls. See the
-[avatar and memory guide](docs/user/user-memory.md).
+<!-- TODO: add a screenshot of a chat with its workspace pane. -->
 
-To install plugins for a new chat, select **+ → Plugins** before sending the
-first task. Claude Code and Codex accept `name@marketplace` with a GitHub
-repository or public HTTPS marketplace source. pi, OpenCode, and Kilo accept
-npm package names, optionally pinned to an exact version such as
-`@example/plugin@1.2.3`. Add up to eight plugins. The sandbox installs them
-before the first prompt; an installation failure stops startup and appears
-as a task error. Selections persist with the chat and are inherited by Fork.
+## Features
 
-To receive desktop alerts when an agent asks a question or a turn finishes,
-open **Settings → Notifications**, select **Enable notifications**, and allow
-the browser permission prompt. You can toggle question and turn-completion
-alerts separately. While the app is open, alerts cover all your chats,
-including chats you are not currently viewing. Clicking an alert opens the
-relevant turn. Notification preferences are stored separately for each
-account. Alerts are not delivered while the browser is closed.
+- **Five agent CLIs, run natively.** Claude Code, Codex, pi, OpenCode, and Kilo
+  run as their own CLIs at pinned versions, with their own sessions, tools, and
+  plugins.
+- **Retained sandboxes.** A chat keeps its container, workspace, and native CLI
+  session between turns, so a follow-up continues the same session instead of
+  replaying a transcript.
+- **Fork.** Branch a chat into a second chat that shares the workspace and runs
+  in parallel with its own process and credentials.
+- **Pull requests.** Changes are published to one branch per workspace as a
+  draft pull request, after a secret scan and path checks. Agents can also push
+  and open pull requests themselves with a short-lived, repository-scoped token.
+  **Review** starts an independent reviewer; **Watch PR and merge** follows
+  checks and reviews until the pull request merges.
+- **Reusable environments.** Configure a repository's variables, secrets, setup
+  scripts, and actions once, test them, and reuse them in new workspaces.
+- **Per-user MCP tools.** Each user connects their own MCP servers; sandboxes
+  reach them through a scoped relay, with approvals for held tool calls.
+- **Workspace tools.** Browse and open files, run a terminal, rewrite a draft
+  prompt, receive desktop notifications, and keep personal and project memory.
+- **Administration.** Manage settings, integrations, sandboxes, hosts, and
+  optional server provisioning from an admin dashboard.
+- **Isolation.** Each sandbox group runs under Kata Containers with its own
+  guest kernel, non-root members, and a network limited to public HTTP(S), one
+  DNS resolver, and its relays.
 
-## Getting started
+## Status
 
-Choose the path that matches what you want to do:
+Cloud Agent is under active development. Releases are immutable artifacts built
+from a commit; there are no versioned releases yet, and configuration and APIs
+can change between commits. [ENVIRONMENT.md](ENVIRONMENT.md) marks new and
+removed settings. [FreeInference](https://freeinference.org) runs a hosted
+deployment at [agents.freeinference.org](https://agents.freeinference.org).
 
-| Goal | Start here |
-|---|---|
-| Run the browser, API, host, and sandboxes locally | [Local Docker stack](deploy/local/README.md) |
-| Change the backend or frontend | [Developer guide](docs/developer/development.md) |
-| Understand module ownership and dependencies | [Code structure](docs/developer/code-structure.md) |
-| Operate a self-hosted deployment | [Operations runbook](docs/developer/operations.md) |
-| Build or deploy a release | [Release guide](deploy/release/README.md) |
-| Find configuration or a feature guide | [Documentation index](docs/README.md) |
+## Quick start
 
-### Backend development
-
-Install Python 3.12 and [uv](https://github.com/astral-sh/uv), then run the
-following commands from the repository root:
-
-```bash
-make setup-dev
-make check
-```
-
-The package supports Python 3.12 and 3.13. Setup and CI use Python 3.12 by
-default. `make check` formats the backend, checks lint and types, and runs tests
-not marked `external` or `dbtest`. Frontend development uses Node.js 22 and
-npm; its checks are documented separately in the
-[developer guide](docs/developer/development.md#run-the-relevant-checks).
-
-| Command | Purpose |
-|---|---|
-| `make format` | Apply Ruff formatting and automatic lint fixes |
-| `make lint` | Check formatting, Ruff rules, and Python docstrings |
-| `make typecheck` | Run mypy across all three backend packages |
-| `make test` | Run pytest with four workers, excluding `external` and `dbtest` |
-| `make test-db` | Run database-backed tests against a dedicated test database |
-
-### Complete local Docker run
-
-To run the complete local stack, install Docker 28+, Docker Compose, `openssl`,
-`curl`, and Python 3. Then run:
+Run the complete stack on one machine with Docker 28+, Docker Compose,
+`openssl`, `curl`, and Python 3:
 
 ```bash
 ./deploy/local/dev.sh up
@@ -89,31 +63,31 @@ To run the complete local stack, install Docker 28+, Docker Compose, `openssl`,
 ```
 
 Open <http://127.0.0.1:13002>. The stack includes the web app, OAuth flow,
-control plane, database, an enrolled host, and all five pinned Agent CLIs. A
-local gateway fixture supplies deterministic inference responses, so you do not
-need a staging gateway or provider key. This setup verifies integration and
-session lifecycle. It does not measure model quality or qualify production
-isolation.
+control plane, database, an enrolled host, and all five pinned agent CLIs.
+`./deploy/local/dev.sh stop` stops it and keeps its database and sandboxes for
+the next start.
 
-Run `./deploy/local/dev.sh stop` to stop the stack while preserving its database
-and sandbox state for the next startup. See the
-[local guide](deploy/local/README.md) for prerequisites, configuration, logs,
-and instructions for running multiple stacks.
+The local stack uses a gateway fixture that returns deterministic responses, so
+it needs no gateway or provider key. It verifies integration and the session
+lifecycle, not model quality or production isolation. To run agents against
+real models, deploy Cloud Agent against a HybridInference gateway: follow
+[Running self-hosted](docs/developer/operations.md#running-self-hosted) and
+[Before a job can run for real](docs/developer/operations.md#before-a-job-can-run-for-real).
+The [local guide](deploy/local/README.md) covers configuration, logs, and
+parallel stacks.
 
-Administrators can manage application behavior, integrations and credentials,
-web appearance, and sandbox/workspace limits from **Admin → Settings**. Saved
-values survive restarts. Existing environment values are imported once, and
-Reset restores the built-in defaults. Database access, identity, encryption,
-security, and deployment infrastructure remain bootstrap configuration. The
-[Settings runbook](docs/developer/operations.md#admin-settings) explains migration and key
-setup.
+To work on the code, install Python 3.12 and [uv](https://github.com/astral-sh/uv):
 
-**Admin → Database** opens the optional pgAdmin website for PostgreSQL
-administration. The first administrator chooses the pgAdmin login from the
-dashboard. Follow the [pgAdmin runbook](docs/developer/operations.md#pgadmin) to enable
-the private service.
+```bash
+make setup-dev
+make check   # format, lint, type-check, and test the backend
+```
 
-## Architecture
+The frontend uses Node.js 22; the
+[developer guide](docs/developer/development.md#run-the-relevant-checks) lists
+the checks for each area.
+
+## How it works
 
 ```mermaid
 flowchart TD
@@ -128,115 +102,43 @@ flowchart TD
     Sandbox -->|TCP 80 and 443 under host rules| Public[Public IPv4 destinations]
 ```
 
-The web app, control plane, and host pool are deployed separately. Each host
-runs the runner, sandbox manager, group supervisor, and the tunnels needed to
-reach the control plane and relays. A host enrolls once, then reports its
-capacity and capabilities through heartbeats.
+The web app, control plane, and hosts are deployed separately. A host enrolls
+once, then claims work and reports its capacity through heartbeats. A **job**
+records a user task; an **attempt** is one execution of it on one host, under a
+lease that fences out stale writes.
 
-A **job** records a user task. An **attempt** records one execution of that task
-on one host. Every attempt carries a lease and fencing generation. If an attempt
-is superseded, the store rejects its writes, including stale publication
-results.
+A new chat creates a retained container with one member. Its writable layer
+holds the workspace and the CLI's native state, so follow-ups reach the live CLI
+process, or resume its native session in a replacement process. Fork adds a
+member to the same group. See
+[native conversation recall](docs/developer/context-recall.md) for the context
+states and their limits.
 
-### Threads use retained native sessions
+The gateway owns accounts, model permissions, and inference quotas; there is no
+per-task dollar budget. Cloud Agent shares no database, code, or signing secret
+with it and uses only the
+[documented contracts](gateway_contracts/README.md). Sandboxes never hold a
+long-lived credential: they receive short-lived inference grants, a scoped MCP
+token, and, when the GitHub App is configured, an hour-long token for the job's
+repository. A grant can still be replayed until it expires or is revoked, within
+the owner's model permissions and quota. Read [SECURITY.md](SECURITY.md) and the
+[sandbox network runbook](docs/developer/operations.md#the-sandbox-network)
+before deploying for untrusted users.
 
-Starting a new chat creates a retained container and a sandbox group with one
-member. The container's writable layer holds both the workspace and native CLI
-state. Compatible follow-ups go to that member's live CLI process. If the
-process must be replaced, the CLI resumes its native session inside the same
-container.
+## Documentation
 
-Fork adds another chat and native session to the same sandbox group. The parent
-and child share the workspace and can run at the same time, but each has its own
-member UID, credentials, and process control.
-
-After a chat with a draft PR finishes, select **Review** beside **Open draft
-PR** to start an independent code-review subagent in a workspace tab. The
-review covers every change since the conversation's original base, including
-current workspace changes. The reviewer is instructed to report findings
-without editing files. Selecting Review again reopens that chat's existing
-review. Review needs an available native Fork; it cannot start from an archived
-chat or a chat whose context has been lost.
-
-Select **Watch PR and merge** beside a published PR to start a follow-up in the
-same chat. The follow-up monitors tests and reviews, addresses failures and
-feedback, and merges once the current PR head satisfies its required checks and
-review requirements. Starting it preserves unsent composer text and
-attachments. Before watching can begin, every chat that shares the workspace
-must have no active work or waiting messages.
-
-The agent needs source-control tools that can read checks and reviews, mark
-drafts ready, and merge. The supplied GitHub MCP template supports write tools.
-Use a token with Contents and Pull requests read and write permissions for the
-repositories the agent should update. Existing connections using `/mcp/readonly`
-need to be reconnected with the GitHub preset to enable write tools. The agent
-reports missing access and other blockers. Watching is limited by the agent turn's
-timeout. If the agent makes fixes, the turn ends so the platform can publish them.
-After publication, select the button again to continue watching.
-
-| Context status | Meaning |
+| If you want to | Read |
 |---|---|
-| `NEW` | No native turn has previously settled for this member |
-| `LIVE` | The turn uses the compatible resident CLI process |
-| `RESTORED` | A replacement process resumes the retained native session |
-| `LOST` | Required native state or container integrity cannot be established; execution is refused |
+| Set up a checkout and run checks | [Developer guide](docs/developer/development.md) |
+| Find the module that owns a change | [Code structure](docs/developer/code-structure.md) |
+| Deploy and operate a self-hosted instance | [Operations runbook](docs/developer/operations.md) |
+| Look up a configuration value | [ENVIRONMENT.md](ENVIRONMENT.md) |
+| Build and deploy a release | [Release guide](deploy/release/README.md) |
+| Learn how a user feature works | [User notes](docs/user/) |
+| Browse everything, including designs and reviews | [Documentation index](docs/README.md) |
 
-Stopping a container preserves its writable layer. Losing the container or the
-Docker data root also loses the required native state. Transcript replay and
-cross-host restoration are not recovery paths. See
-[native conversation recall](docs/developer/context-recall.md) for verification details
-and limits.
-
-## Powered by a HybridInference gateway
-
-Cloud Agent and the gateway communicate only over HTTP. Cloud Agent does not
-share the gateway's database, Python modules, or signing secrets. The contracts
-it consumes are documented in
-[gateway_contracts/](gateway_contracts/README.md):
-
-| Contract | Responsibility |
-|---|---|
-| Identity | Exchange login codes and verify gateway-signed identity using public keys |
-| Inference grants | Mint, renew, revoke, and read usage for scoped inference grants |
-| Internal lookups | Read the user's model catalog and deployment-owned Agent access decision |
-
-The gateway owns account permissions and inference quotas. An inference grant
-limits which models an attempt can call; there is no per-task dollar budget. The
-control plane renews grants while their attempt or retained member remains
-eligible. Revocation can end access sooner, while expiry remains the backstop if
-revocation fails.
-
-Protected owner and admin requests check the gateway's current Agent access
-decision. An unavailable or invalid gateway response never grants access. Each
-Agent database is bound to a single gateway identity issuer. See the
-[admission policy](docs/developer/agent-access-policy.md) and
-[identity configuration](docs/developer/minimal-identity.md) for details.
-
-MCP connections belong to individual users and are resolved by the control
-plane. Sandboxes call tools through the MCP-only listener with a separate,
-scoped credential. Inference grants provide no MCP or platform-management
-authority.
-
-## Sandbox isolation
-
-The host deployment defaults to `kata`, which gives each sandbox group a
-separate guest kernel. Public multi-tenant use requires Kata isolation,
-non-root execution, dropped capabilities, seccomp, and resource limits. The
-`container` backend is only for trusted internal repositories, and `process`
-is a unit-test seam.
-
-Each group uses one network for both setup and agent execution. Host nftables
-rules allow public IPv4 on TCP 80/443, one configured DNS resolver, and that
-group's inference and MCP relays. The rules block host addresses, private and
-special-purpose ranges, other groups, other ports, and IPv6. If network
-verification fails, the group does not start.
-
-Long-lived account and service credentials stay outside the sandbox. However,
-short-lived inference grants can still be exfiltrated and replayed through the
-gateway's public inference API until they expire or are revoked. Those calls
-remain subject to the owner's model permissions and quota. Before deployment,
-read the [security guidance](SECURITY.md) and the
-[operations runbook](docs/developer/operations.md#the-sandbox-network).
+`make docs` builds the [developer documentation](docs/developer/index.md) as a
+website.
 
 ## Repository layout
 
@@ -254,17 +156,17 @@ docs/                             Developer guides, user notes, and agent record
 
 ## Contributing
 
-Start with the [developer guide](docs/developer/development.md),
-[contribution workflow](CONTRIBUTING.md), and [repository rules](AGENTS.md).
-Create branches from `dev` using `<user>/<scope>/<name>`, and target pull
-requests at `dev`. Before opening a PR, run `make check` along with any frontend
-or database checks relevant to your change.
+Read the [contribution workflow](CONTRIBUTING.md) and the
+[repository rules](AGENTS.md). Branch from `dev` as `<user>/<scope>/<name>` and
+target pull requests at `dev`. Run `make check`, plus the frontend or database
+checks your change needs, before opening one.
 
-The extraction from HybridInference was completed in August 2026.
-[MIGRATION.md](MIGRATION.md) records its decisions and deferred work. Current
-work is tracked in this repository's issues and pull requests.
+Report bugs and ask questions in
+[GitHub issues](https://github.com/HarvardMadSys/hybridInference-cloud-agent/issues).
+Report vulnerabilities privately, as described in [SECURITY.md](SECURITY.md).
 
 ## License
 
-[MIT](LICENSE). The code retains the HybridInference project's copyright and
-license. See [license and provenance](MIGRATION.md#licence-and-provenance).
+[MIT](LICENSE). Cloud Agent was extracted from HybridInference in August 2026
+and keeps that project's copyright and license; [MIGRATION.md](MIGRATION.md)
+records the split.
