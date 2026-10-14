@@ -280,6 +280,29 @@ jobs:
           mkdir -p "${RUNNER_TEMP}/docker-config"
           echo "DOCKER_CONFIG=${RUNNER_TEMP}/docker-config" >> "${GITHUB_ENV}"
 
+      # Layers earlier releases built, under a tag in this cell's own package.
+      # Before it, every release rebuilt every layer cold, and no build is
+      # byte-reproducible: three releases on 2026-10-14 whose sandbox inputs
+      # were identical each pushed 1.4GB of new sandbox layers, the cell spent
+      # 169s building and pushing them, and staging spent 30s pulling them
+      # again. A layer whose inputs did not change now keeps its digest, so the
+      # registry already holds it and a host that runs the previous release
+      # already has it.
+      #
+      # Only this job writes the cache: it alone has `packages: write`. CI and
+      # pull requests neither read nor write it, and a fork's token is
+      # read-only. Someone with write access could write it from an edited
+      # workflow, but they can already dispatch an edited copy of this file
+      # with these credentials (see the header), so that boundary is unchanged.
+      # Cache mounts are not exported, and the builder is still fresh.
+      #
+      # A new name every ISO week. A cached `apt-get install` keeps the
+      # packages it fetched, so the first release of each week builds cold and
+      # no reused layer is more than a week old.
+      - name: Name the release cache
+        run: |
+          echo "RELEASE_CACHE=${PUBLISH_REPOSITORY}:buildcache-${{ matrix.artifact.name }}-$(date -u +%G-w%V)" >> "${GITHUB_ENV}"
+
       # Authenticated base-image pulls: the anonymous allowance is per IP and
       # shared with the other repository's CI, and it ran out twice in one day.
       # Before the builder step, because creating a builder pulls
@@ -304,7 +327,8 @@ jobs:
       # when the job ends. Not CI's per-runner `ci-<runner>` builder: CI builds
       # on these same runners, and that builder's layer cache and cache mounts
       # outlive the jobs that wrote them. A release is built only from the
-      # vetted tree and the registries, so it starts cold, once per commit.
+      # vetted tree and the registries; the one layer state it reuses is the
+      # release cache named below, which it reads from the registry.
       #
       # The name carries the runner as well as the run, attempt and cell:
       # buildx names the buildkitd container after the builder alone, and
@@ -353,6 +377,8 @@ jobs:
         id: push
         # A build can fail for reasons of its own; one more attempt is cheaper
         # than a red cell. Nothing after the retry is allowed to fail quietly.
+        # A cache that fails to export costs the next release time, not this
+        # one, so the export ignores its own errors.
         continue-on-error: true
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
@@ -361,6 +387,8 @@ jobs:
           file: ${{ matrix.artifact.dockerfile }}
           platforms: linux/${{ matrix.artifact.arch }}
           outputs: type=image,name=${{ env.PUBLISH_REPOSITORY }},name-canonical=true,push-by-digest=true,push=true
+          cache-from: type=registry,ref=${{ env.RELEASE_CACHE }}
+          cache-to: type=registry,ref=${{ env.RELEASE_CACHE }},mode=max,ignore-error=true
           build-args: |
             SOURCE_COMMIT=${{ env.SHA }}
             ${{ matrix.artifact.build_args }}
@@ -375,6 +403,8 @@ jobs:
           file: ${{ matrix.artifact.dockerfile }}
           platforms: linux/${{ matrix.artifact.arch }}
           outputs: type=image,name=${{ env.PUBLISH_REPOSITORY }},name-canonical=true,push-by-digest=true,push=true
+          cache-from: type=registry,ref=${{ env.RELEASE_CACHE }}
+          cache-to: type=registry,ref=${{ env.RELEASE_CACHE }},mode=max,ignore-error=true
           build-args: |
             SOURCE_COMMIT=${{ env.SHA }}
             ${{ matrix.artifact.build_args }}
