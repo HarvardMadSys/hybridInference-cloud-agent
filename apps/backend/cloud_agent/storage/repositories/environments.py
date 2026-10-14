@@ -790,14 +790,29 @@ class PostgresEnvironmentRepository:
             )
             runtime = [v for v in merged if v.phase in ("runtime", "both")]
             # Original installation secrets remain in the base snapshot. Retain prior
-            # runtime values as scan material for files produced by earlier turns.
+            # runtime values as scan material for files produced by earlier turns:
+            # each value once, and none still current, which the new runtime
+            # variables carry. Otherwise every refresh re-adds the unchanged
+            # Secrets, and a few refreshes exhaust the history limit.
             prior = _json(binding["runtime_secret_history"])
-            old = (
-                _json(binding["runtime_variables"])
-                if binding["runtime_variables"] is not None
-                else []
-            )
-            prior += [v for v in old if v["secret"]]
+            old = [
+                v
+                for v in (
+                    _json(binding["runtime_variables"])
+                    if binding["runtime_variables"] is not None
+                    else []
+                )
+                if v["secret"]
+            ]
+            if old:
+                cipher = _cipher()
+                kept = {cipher.decrypt(v["value_ciphertext"]) for v in prior}
+                kept.update(v.value for v in runtime if v.secret)
+                for v in old:
+                    value = cipher.decrypt(v["value_ciphertext"])
+                    if value not in kept:
+                        prior.append(v)
+                        kept.add(value)
             if len(prior) > 512 or sum(v["value_bytes"] for v in prior) > 262144:
                 raise EnvironmentInputError(
                     "Runtime Secret history limit reached; create a new workspace"

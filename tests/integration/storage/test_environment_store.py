@@ -651,6 +651,29 @@ async def test_legacy_disabled_setting_cannot_block_bindings_or_runtime_refresh(
     )["runtime_revision"] == 1
 
 
+async def test_unchanged_runtime_secrets_do_not_fill_the_history(store, monkeypatch):
+    """Each replaced value is kept once; refreshing without a change adds nothing."""
+    monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "environment-test-key")
+    env = await _save(store, variables=[{"name": "TOKEN", "value": "original-secret"}])
+    job = await _job(store, env)
+    binding = job["environment_binding_id"]
+    for revision in range(10):
+        await store.environments.refresh_runtime_environment("alice", binding, revision)
+    bound = await store.environments.get_environment_binding("alice", binding)
+    assert bound.previous_secrets == {}
+    await _save(
+        store,
+        environment_id=env["id"],
+        revision=1,
+        variables=[{"name": "TOKEN", "value": "rotated-secret"}],
+    )
+    for revision in range(10, 15):
+        await store.environments.refresh_runtime_environment("alice", binding, revision)
+    bound = await store.environments.get_environment_binding("alice", binding)
+    assert list(bound.previous_secrets.values()) == ["original-secret"]
+    assert bound.values("runtime") == {"TOKEN": "rotated-secret"}
+
+
 async def test_start_skip_only_consumes_requesting_chat_next_turn(store, pool, monkeypatch):
     monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "environment-test-key")
     env = await _save(store)
