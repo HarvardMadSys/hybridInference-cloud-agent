@@ -6660,3 +6660,273 @@ def test_a_collection_cut_short_by_the_deadline_says_so(monkeypatch):
         # ...but every stage was skipped, so nothing was measured at all.
         assert answer.stages == []
         assert answer.profiling_truncated is True
+
+
+@pytest.mark.parametrize(
+    "operation", ["idle_stop", "begin_archive", "commit_archive", "reconcile_marker"]
+)
+def test_lifecycle_io_leaves_other_groups_available(monkeypatch, operation):
+    """A slow lifecycle check must fence its group without stalling siblings."""
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager)
+    spec = _spec()
+    supervisor.register_manifest(spec, _members())
+    other = replace(spec, thread_id="athr_other", sandbox_id="asbx_other")
+    supervisor.register_manifest(other, [replace(_members()[0], thread_id=other.thread_id)])
+    entered = threading.Event()
+    release = threading.Event()
+
+    def gate():
+        entered.set()
+        assert release.wait(timeout=5)
+
+    if operation == "idle_stop":
+        inspect = manager.inspect
+
+        def inspect_slow(name):
+            observed = inspect(name)
+            if name == spec.container_name and not entered.is_set():
+                gate()
+            return observed
+
+        monkeypatch.setattr(manager, "inspect", inspect_slow)
+
+        def call():
+            return supervisor.stop_if_idle(spec.thread_id, generation=spec.generation)
+    elif operation in {"begin_archive", "commit_archive"}:
+        manager.items[spec.container_name] = replace(
+            manager.items[spec.container_name], running=False, status=ChatSandboxStatus.STOPPED
+        )
+
+        def require_stopped(owned_spec, *, container_id):
+            current = manager.items[owned_spec.container_name]
+            assert current.container_id == container_id
+            assert not current.running
+            if operation == "begin_archive":
+                gate()
+            return current
+
+        monkeypatch.setattr(manager, "require_stopped_archive", require_stopped, raising=False)
+        kwargs = {
+            "request_id": "delete-1",
+            "generation": spec.generation,
+            "container_id": "container-shared",
+        }
+        if operation == "begin_archive":
+
+            def call():
+                return supervisor.begin_archive(spec.thread_id, **kwargs)
+        else:
+            supervisor.begin_archive(spec.thread_id, **kwargs)
+
+            def remove(owned_spec, *, container_id):
+                assert manager.items[owned_spec.container_name].container_id == container_id
+                gate()
+                manager.items.pop(owned_spec.container_name)
+
+            monkeypatch.setattr(manager, "remove_stopped_archived", remove, raising=False)
+
+            def call():
+                return supervisor.commit_archive(
+                    spec, request_id="delete-1", container_id="container-shared"
+                )
+    else:
+        orphan = replace(spec, thread_id="athr_orphan", sandbox_id="asbx_orphan")
+        manager.items[orphan.container_name] = manager._inspection(orphan)
+
+        def read_marker(owned_spec, **_kwargs):
+            if owned_spec == orphan:
+                gate()
+            return None
+
+        monkeypatch.setattr(manager, "read_running_final_archive_marker", read_marker)
+        call = supervisor.reconcile
+
+    worker, outcome = _in_thread(call)
+    other_worker = None
+    try:
+        assert entered.wait(timeout=2)
+        other_worker, other_outcome = _in_thread(lambda: supervisor.status(other.thread_id))
+        other_worker.join(timeout=0.5)
+        assert not other_worker.is_alive(), "lifecycle I/O held the supervisor-wide lock"
+        assert "error" not in other_outcome
+        if operation != "reconcile_marker":
+            with pytest.raises(SessionBusy):
+                supervisor.operation_opened(spec.thread_id)
+    finally:
+        release.set()
+        worker.join(timeout=5)
+        if other_worker is not None:
+            other_worker.join(timeout=5)
+    assert not worker.is_alive()
+    assert "error" not in outcome
+
+
+@pytest.mark.parametrize("operation", ["idle_stop", "begin_archive", "reconcile_marker"])
+@pytest.mark.parametrize("fence", ["index", "lifecycle", "spec", "container"])
+def test_lifecycle_check_rejects_superseded_observations(monkeypatch, operation, fence):
+    """An observation cannot commit to a group whose authority changed."""
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager)
+    spec = _spec()
+    supervisor.register_manifest(spec, _members())
+    group = supervisor._members[spec.thread_id]
+    observed = replace(group.inspection, running=False, status=ChatSandboxStatus.STOPPED)
+
+    def changed(*_args, **_kwargs):
+        with supervisor._lock:
+            if fence == "index":
+                supervisor._groups.pop(spec.sandbox_id)
+            elif fence == "lifecycle":
+                group.lifecycle_generation += 1
+            elif fence == "spec":
+                group.spec = replace(spec, generation=spec.generation + 1)
+            else:
+                group.inspection = replace(group.inspection, container_id="replacement")
+        return observed
+
+    if operation == "idle_stop":
+        monkeypatch.setattr(manager, "inspect", changed)
+
+        def call():
+            return supervisor.stop_if_idle(spec.thread_id, generation=spec.generation)
+    elif operation == "reconcile_marker":
+        group.orphan_marker_unreadable = True
+        monkeypatch.setattr(manager, "read_running_final_archive_marker", changed)
+        call = supervisor.reconcile
+    else:
+        monkeypatch.setattr(manager, "require_stopped_archive", changed, raising=False)
+
+        def call():
+            return supervisor.begin_archive(
+                spec.thread_id,
+                request_id="delete-1",
+                generation=spec.generation,
+                container_id=observed.container_id,
+            )
+
+    with pytest.raises(SessionLeaseLost, match="lifecycle changed"):
+        call()
+    assert manager.stop_count == 0
+    assert group.inspection.running is True
+    assert group.archive_request_id is None
+
+
+@pytest.mark.parametrize("operation", ["idle_stop", "begin_archive"])
+def test_failed_lifecycle_proof_releases_only_its_temporary_reservation(monkeypatch, operation):
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager)
+    spec = _spec()
+    supervisor.register_manifest(spec, _members())
+    group = supervisor._members[spec.thread_id]
+
+    def failed(*_args, **_kwargs):
+        raise SandboxError("Docker did not answer")
+
+    with monkeypatch.context() as patch:
+        if operation == "idle_stop":
+            patch.setattr(manager, "inspect", failed)
+            with pytest.raises(SandboxError, match="did not answer"):
+                supervisor.stop_if_idle(spec.thread_id, generation=spec.generation)
+        else:
+            patch.setattr(manager, "require_stopped_archive", failed, raising=False)
+            with pytest.raises(SandboxError, match="did not answer"):
+                supervisor.begin_archive(
+                    spec.thread_id,
+                    request_id="delete-1",
+                    generation=spec.generation,
+                    container_id=group.inspection.container_id,
+                )
+    assert group.lifecycle_check is None
+    assert group.archive_request_id is None
+    assert not group.stopping
+    token, descriptor = supervisor.operation_opened(spec.thread_id)
+    assert descriptor.running
+    supervisor.operation_closed(spec.thread_id, token)
+
+
+def test_absence_proof_rechecks_registration_after_slow_docker_reads(monkeypatch):
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager)
+    spec = _spec()
+    entered, release = _gated_inspect(manager, monkeypatch, spec.container_name)
+    worker, outcome = _in_thread(
+        lambda: supervisor.admin_deletion_target_absent(
+            spec.thread_id, sandbox_id=spec.sandbox_id, container_id="container-shared"
+        )
+    )
+    try:
+        assert entered.wait(timeout=2)
+        supervisor.register_manifest(spec, _members())
+    finally:
+        release.set()
+        worker.join(timeout=5)
+    assert not worker.is_alive()
+    assert outcome == {"value": False}
+
+
+@pytest.mark.parametrize("replacement", ["stable_name", "renamed_original"])
+def test_deletion_proves_both_container_identities_absent_before_forgetting_group(
+    monkeypatch, replacement
+):
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager)
+    spec = _spec()
+    supervisor.register_manifest(spec, _members())
+    group = supervisor._members[spec.thread_id]
+    manager.items[spec.container_name] = replace(
+        group.inspection, running=False, status=ChatSandboxStatus.STOPPED
+    )
+
+    def require_stopped(owned_spec, *, container_id):
+        current = manager.items[owned_spec.container_name]
+        assert current.container_id == container_id
+        return current
+
+    def remove(owned_spec, *, container_id):
+        original = manager.items.pop(owned_spec.container_name)
+        if replacement == "stable_name":
+            manager.items[owned_spec.container_name] = replace(original, container_id="replacement")
+        else:
+            manager.items[container_id] = replace(original, name="renamed")
+
+    monkeypatch.setattr(manager, "require_stopped_archive", require_stopped, raising=False)
+    monkeypatch.setattr(manager, "remove_stopped_archived", remove, raising=False)
+    supervisor.begin_archive(
+        spec.thread_id,
+        request_id="delete-1",
+        generation=spec.generation,
+        container_id=group.inspection.container_id,
+    )
+    with pytest.raises(RetainedChatLost, match="identity changed"):
+        supervisor.commit_archive(
+            spec, request_id="delete-1", container_id=group.inspection.container_id
+        )
+    assert supervisor._groups[spec.sandbox_id] is group
+    assert supervisor._members[spec.thread_id] is group
+    assert group.archive_request_id == "delete-1"
+    assert group.stopping
+    assert group.lifecycle_check is None
+
+
+def test_refused_busy_deletion_does_not_invalidate_active_lifecycle(monkeypatch):
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager)
+    spec = _spec()
+    supervisor.register_manifest(spec, _members())
+    token, _descriptor = supervisor.operation_opened(spec.thread_id)
+    group = supervisor._members[spec.thread_id]
+    generation = group.lifecycle_generation
+
+    def inspect(*_args):
+        pytest.fail("a refused busy deletion must not perform Docker I/O")
+
+    monkeypatch.setattr(manager, "inspect", inspect)
+    with pytest.raises(SessionBusy, match="idle group"):
+        supervisor.commit_archive(
+            spec, request_id="delete-1", container_id=group.inspection.container_id
+        )
+    assert group.lifecycle_generation == generation
+    assert group.lifecycle_check is None
+    assert group.archive_request_id is None
+    supervisor.operation_closed(spec.thread_id, token)

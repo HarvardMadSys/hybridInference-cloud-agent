@@ -105,7 +105,12 @@ public names and keeps client construction at its orchestration boundary.
 values, ownership labels, and identity bounds. `chat_sandbox.py` manages
 retained groups and their members; `sandbox.py` owns the container/process
 boundary. The Sandbox Manager and session supervisor coordinate native
-sessions and workspace operations. Public sandbox model imports through
+sessions and workspace operations. The supervisor's metadata lock protects
+in-memory ownership only. Stop, orphan recovery, and archive deletion reserve
+one group's lifecycle before Docker or marker I/O, then revalidate its group,
+member, container, and lifecycle identities before accepting the result. Other
+groups remain available; failed checks release their temporary reservation,
+while durable archive and native-flush barriers remain in force. Public sandbox model imports through
 `chat_sandbox` continue to work.
 
 The runtime adapters are a package under `cloud_agent_host/runtimes/`:
