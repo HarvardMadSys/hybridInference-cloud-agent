@@ -86,6 +86,7 @@ class FakeGuard:
         self.ensured = 0
         self.fail: Exception | None = None
         self.relays: dict[str, set[tuple[str, int]]] = {}
+        self.network_ids: dict[str, str | None] = {}
         self.events: list[str] = []
 
     def ensure(self, **_kwargs: Any) -> None:
@@ -94,9 +95,12 @@ class FakeGuard:
             raise self.fail
         self.ensured += 1
 
-    def sync_relays(self, bridge: str, endpoints: set[tuple[str, int]]) -> None:
+    def sync_relays(
+        self, bridge: str, endpoints: set[tuple[str, int]], *, network_id: str | None = None
+    ) -> None:
         self.events.append("sync_relays")
         self.relays[bridge] = set(endpoints)
+        self.network_ids[bridge] = network_id
 
 
 class FakeDocker:
@@ -737,9 +741,9 @@ def _record_relay_syncs(guard: FakeGuard, docker: FakeDocker) -> list[int]:
     synced_after: list[int] = []
     sync = guard.sync_relays
 
-    def recording(bridge: str, endpoints: set[tuple[str, int]]) -> None:
+    def recording(bridge: str, endpoints: set[tuple[str, int]], **kwargs: Any) -> None:
         synced_after.append(len(docker.calls))
-        sync(bridge, endpoints)
+        sync(bridge, endpoints, **kwargs)
 
     guard.sync_relays = recording  # type: ignore[method-assign]
     return synced_after
@@ -782,8 +786,10 @@ def test_a_new_sandbox_meets_its_bridge_only_when_it_first_starts(monkeypatch):
     joined = docker.calls.index(["docker", "network", "connect", name, created.container_id])
     assert len(synced_after) == 1
     assert synced_after[0] > joined, "the exceptions are written once the sandbox has joined"
+    bridge = manager._network().bridge_name(name)
+    assert guard.network_ids[bridge] == docker.network(name)["Id"]
     endpoints = docker.network(name)["endpoints"]
-    assert guard.relays[manager._network().bridge_name(name)] == {
+    assert guard.relays[bridge] == {
         (endpoints["relay-gateway"]["ip"], 8080),
         (endpoints["relay-mcp"]["ip"], 8000),
     }
@@ -1051,8 +1057,8 @@ def test_activation_refuses_topology_changes_after_the_rule_sync(monkeypatch, mu
     manager, docker, guard, spec, name, synced = _running_kata_group(monkeypatch)
     sync = guard.sync_relays
 
-    def mutate_after_sync(bridge, endpoints):
-        sync(bridge, endpoints)
+    def mutate_after_sync(bridge, endpoints, **kwargs):
+        sync(bridge, endpoints, **kwargs)
         network = docker.network(name)
         if mutation == "peer":
             docker.add_container("stranger", running=True)

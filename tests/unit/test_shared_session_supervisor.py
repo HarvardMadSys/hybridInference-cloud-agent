@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import os
 import shutil
 import stat
@@ -76,6 +77,9 @@ class _Manager:
         # The host-rule check: how many of the next checks fail, and how many ran.
         self.host_rule_failures = 0
         self.host_rule_checks = 0
+        # Renewals of the host-rule verification the sweep makes while idle.
+        self.host_rule_renewals = 0
+        self.host_rule_renewal_failures = 0
         self.pruned_specs: list[ChatSandboxSpec] = []
         self.process_baseline: tuple[tuple[int, int], ...] = ((41, 400),)
         self.initial_archive_marker: bytes | None = None
@@ -220,6 +224,12 @@ class _Manager:
 
     def prune_orphan_networks(self, specs: list[ChatSandboxSpec]) -> None:
         self.pruned_specs = specs
+
+    def renew_host_rules(self) -> None:
+        self.host_rule_renewals += 1
+        if self.host_rule_renewal_failures:
+            self.host_rule_renewal_failures -= 1
+            raise SandboxError("nft failed: Error: Could not process rule")
 
     def verify_host_rules(self) -> None:
         self.host_rule_checks += 1
@@ -1985,12 +1995,43 @@ def test_one_failed_check_is_retried_before_anything_is_stopped():
     assert manager.stop_count == 0
 
 
-def test_the_rules_are_not_checked_while_nothing_runs():
+def test_while_nothing_runs_the_rules_are_renewed_not_read_every_pass():
+    """An idle host keeps its verification fresh so the next start does not pay for it.
+
+    Nothing is read back every pass and nothing is stopped: the renewal is the
+    guard's own cached ensure, which installs and reads back only once the
+    last verification is old enough to need it.
+    """
     manager = _Manager()
     supervisor = SharedChatSessionSupervisor(manager)
 
     assert supervisor.guard_network() == []
     assert manager.host_rule_checks == 0
+    assert manager.host_rule_renewals == 1
+    assert manager.stop_count == 0
+
+
+def test_an_idle_renewal_that_fails_is_logged_once_and_stops_nothing(caplog):
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager)
+    manager.host_rule_renewal_failures = 2
+
+    with caplog.at_level(logging.WARNING):
+        assert supervisor.guard_network() == []
+        assert supervisor.guard_network() == []
+        assert supervisor.guard_network() == []
+        supervisor.guard_network()
+        manager.host_rule_renewal_failures = 1
+        supervisor.guard_network()
+
+    warnings = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "shared_chat_idle_host_rules_unavailable"
+    ]
+    assert len(warnings) == 2, "once per failing streak, not once per pass"
+    assert manager.host_rule_renewals == 5
+    assert manager.stop_count == 0
 
 
 def test_stale_activation_does_not_wake_a_stopped_shared_container():

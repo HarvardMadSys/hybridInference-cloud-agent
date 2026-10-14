@@ -30,6 +30,7 @@ from cloud_agent_host.chat_sandbox_models import (
     RetainedChatFailStopped,
     RetainedChatLost,
 )
+from cloud_agent_host.network_guard import GUARD_RENEW_S
 from cloud_agent_host.sandbox import KATA_RUNTIME, SandboxError
 
 if TYPE_CHECKING:
@@ -769,11 +770,19 @@ class ChatSandboxNetwork:
             )
         return set(owners)
 
-    def _sync_relay_exceptions(self, network: str, addresses: dict[str, str] | None = None) -> None:
+    def _sync_relay_exceptions(
+        self,
+        network: str,
+        addresses: dict[str, str] | None = None,
+        *,
+        network_id: str | None = None,
+    ) -> None:
         """Make the host's relay exceptions for one bridge match its relays.
 
         One exception per configured endpoint, not per relay name: a single
-        relay may serve both the gateway and the MCP port.
+        relay may serve both the gateway and the MCP port. ``network_id``, the
+        bridge's Docker id from this reconciliation, lets the guard skip an
+        update it already made for that same network.
         """
         config = self._network()
         if addresses is None:
@@ -785,6 +794,7 @@ class ChatSandboxNetwork:
                 for relay in config.relays
                 if relay.host in addresses
             },
+            network_id=network_id,
         )
 
     def _drop_relay_exceptions(self, network_name: str) -> None:
@@ -845,12 +855,23 @@ class ChatSandboxNetwork:
                     raise SandboxError("relay endpoint changed during group network reconciliation")
         addresses = self._relay_addresses_from(owners, reconciled)
         if sync_exceptions:
-            self._sync_relay_exceptions(network, addresses)
+            self._sync_relay_exceptions(
+                network, addresses, network_id=str(reconciled.get("Id") or "") or None
+            )
         return _GroupNetworkSnapshot(network=reconciled, owners=owners, addresses=addresses)
 
     def require_host_rules(self) -> None:
         """Install and verify this deployment's host rules, unless a recent check stands."""
         self.backend.network_guard().ensure()
+
+    def renew_host_rules(self) -> None:
+        """Renew the host-rule verification before it lapses, for the sweep.
+
+        A host with no sandbox network configured has nothing to keep warm.
+        """
+        if self.backend.sandbox_network is None:
+            return
+        self.backend.network_guard().ensure(max_age_s=GUARD_RENEW_S)
 
     def _ensure_group_network(
         self,

@@ -532,6 +532,7 @@ class SharedChatSessionSupervisor:
         self._manager = manager
         self._idle_timeout_s = idle_timeout_s
         self._sweep_interval_s = sweep_interval_s
+        self._idle_host_rules_failing = False
         self._clock = clock
         self._transport_factory = transport_factory or ResidentTransportFactory(manager)
         self._native_forker = native_forker or self._transport_factory.fork_native
@@ -4917,6 +4918,7 @@ class SharedChatSessionSupervisor:
                 if group.inspection.running and not group.stopping and group.members
             ]
         if not running:
+            self._renew_idle_host_rules()
             return []
         try:
             self._manager.verify_host_rules()
@@ -4983,6 +4985,31 @@ class SharedChatSessionSupervisor:
                     },
                 )
         return stopped
+
+    def _renew_idle_host_rules(self) -> None:
+        """Keep the host-rule verification fresh while no group runs.
+
+        Nothing runs behind the rules, so nothing is read every pass and
+        nothing is stopped. But the next start or wake must install and read
+        them back first if their verification has lapsed, and on a quiet host
+        it always has. Renewing it before it lapses keeps that off the start.
+        A failure is logged once until a renewal succeeds again; the next
+        activation repeats the same check and refuses on its own.
+        """
+        try:
+            self._manager.renew_host_rules()
+        except SandboxError as exc:
+            if not self._idle_host_rules_failing:
+                logger.warning(
+                    "shared_chat_idle_host_rules_unavailable",
+                    extra={
+                        "event": "shared_chat_idle_host_rules_unavailable",
+                        "detail": str(exc)[:300],
+                    },
+                )
+            self._idle_host_rules_failing = True
+        else:
+            self._idle_host_rules_failing = False
 
     def _sweep_loop(self) -> None:
         while not self._stop.wait(self._sweep_interval_s):

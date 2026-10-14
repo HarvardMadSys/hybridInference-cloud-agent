@@ -36,6 +36,8 @@ class FakeNft:
 
     def __init__(self) -> None:
         self.calls: list[tuple[list[str], str | None]] = []
+        #: Every ``nft -f -`` transaction applied, in order.
+        self.applied: list[str] = []
         self.tables: dict[tuple[str, str], dict[str, Any]] = {}
         self._next_handle = 1
         #: What ``ip -4 -j route show table all`` answers on this host.
@@ -56,27 +58,48 @@ class FakeNft:
         if entrypoint == "ip":
             assert args == ["-4", "-j", "route", "show", "table", "all"], args
             return subprocess.CompletedProcess(argv, 0, json.dumps(self.routes), "")
+        assert entrypoint == "python3" and args[0] == "-c", argv
+        return self.run_script(argv, args[1], stdin)
+
+    def nft(self, argv: list[str], *, input: str | None = None, **_kwargs: Any) -> Any:
+        """One ``nft`` invocation inside the helper, against this model."""
+        assert argv[0] == "nft", argv
         try:
-            if entrypoint == "python3":
-                return subprocess.CompletedProcess(
-                    argv,
-                    0,
-                    json.dumps([self.listing(command) for command in json.loads(stdin or "[]")]),
-                    "",
-                )
-            if args[:2] == ["-f", "-"]:
-                self.apply(stdin or "")
+            if argv[1:3] == ["-f", "-"]:
+                self.apply(input or "")
+                self.applied.append(input or "")
                 return subprocess.CompletedProcess(argv, 0, "", "")
-            assert args[0] == "-j"
-            return subprocess.CompletedProcess(argv, 0, json.dumps(self.listing(args[1:])), "")
+            assert argv[1] == "-j", argv
+            return subprocess.CompletedProcess(argv, 0, json.dumps(self.listing(argv[2:])), "")
         except KeyError as exc:
             return subprocess.CompletedProcess(argv, 1, "", f"No such file or directory: {exc}")
 
-    def transactions(self) -> list[tuple[list[str], str | None]]:
+    def run_script(
+        self, argv: list[str], script: str, stdin: str | None
+    ) -> subprocess.CompletedProcess[str]:
+        """Run the helper's own script, its ``nft`` calls answered by this model."""
+        output, error = io.StringIO(), io.StringIO()
+        saved = (subprocess.run, sys.stdin, sys.stdout, sys.stderr)
+        subprocess.run = self.nft  # type: ignore[assignment]
+        sys.stdin, sys.stdout, sys.stderr = io.StringIO(stdin or ""), output, error
+        try:
+            exec(script, {"__name__": "__main__"})
+            code = 0
+        except SystemExit as exit_:
+            code = int(exit_.code or 0)
+        finally:
+            subprocess.run, sys.stdin, sys.stdout, sys.stderr = saved  # type: ignore[assignment]
+        return subprocess.CompletedProcess(argv, code, output.getvalue(), error.getvalue())
+
+    def transactions(self) -> list[str]:
+        return list(self.applied)
+
+    def requests(self) -> list[dict[str, Any]]:
+        """What each privileged helper was asked to do, in order."""
         return [
-            (argv, stdin)
+            json.loads(stdin or "{}")
             for argv, stdin in self.calls
-            if "--entrypoint" in argv and argv[argv.index("--entrypoint") + 1] == "nft" and stdin
+            if "--entrypoint" in argv and argv[argv.index("--entrypoint") + 1] == "python3"
         ]
 
     def table(self, family: str, name: str) -> dict[str, Any]:
@@ -152,6 +175,8 @@ class FakeNft:
         assert args[:2] == ["list", "table"]
         body = self.table(args[2], args[3])
         items: list[dict[str, Any]] = [{"table": {"name": args[3]}}]
+        for set_name, elements in body["sets"].items():
+            items.append({"set": {"name": set_name, "elem": list(elements)}})
         for chain, meta in body["chains"].items():
             items.append({"chain": {"name": chain, **{k: v for k, v in meta.items() if v}}})
             items.extend({"rule": {"chain": chain}} for _ in range(body["rules"][chain]))
@@ -178,7 +203,7 @@ def test_the_helper_is_the_host_kernel_with_only_net_admin() -> None:
         ("--cap-add", "NET_ADMIN"),
         ("--security-opt", "no-new-privileges"),
         ("--pull", "never"),
-        ("--entrypoint", "nft"),
+        ("--entrypoint", "python3"),
     ):
         assert argv[argv.index(flag) + 1] == value, flag
     assert "--read-only" in argv
@@ -199,42 +224,86 @@ def test_ensure_installs_both_tables_and_trusts_the_result_for_a_while() -> None
     assert len(nft.transactions()) == installs + 1
 
 
-def test_ensure_batches_nft_readback_after_install_and_keeps_routes_unprivileged() -> None:
+def test_ensure_installs_and_reads_back_in_one_helper_and_keeps_routes_unprivileged() -> None:
+    """A helper container costs far more than its nft calls, so a check is one helper.
+
+    The install used to take a helper of its own before the read-back's.
+    """
+    from cloud_agent_shared.egress import render_ruleset
+
     nft = FakeNft()
     guard = _guard(nft)
     guard.ensure()
-    assert [argv[argv.index("--entrypoint") + 1] for argv, _ in nft.calls] == [
-        "nft",
-        "python3",
-        "ip",
-    ]
-    command, stdin = nft.calls[1]
-    assert json.loads(stdin or "[]") == [
-        ["list", "table", "inet", guard.network.table],
-        ["list", "table", "bridge", guard.network.table],
-        ["list", "set", "inet", guard.network.table, "protected4"],
-        ["list", "set", "inet", guard.network.table, "pool4"],
-        ["list", "tables", "inet"],
-    ]
+    assert [argv[argv.index("--entrypoint") + 1] for argv, _ in nft.calls] == ["python3", "ip"]
+    command, stdin = nft.calls[0]
+    assert json.loads(stdin or "{}") == {
+        "install": render_ruleset(guard.network),
+        "reads": [
+            ["list", "table", "inet", guard.network.table],
+            ["list", "table", "bridge", guard.network.table],
+            ["list", "set", "inet", guard.network.table, "protected4"],
+            ["list", "set", "inet", guard.network.table, "pool4"],
+            ["list", "tables", "inet"],
+        ],
+    }
+    assert nft.transactions() == [render_ruleset(guard.network)], "installed before the reads"
     assert command[command.index("--cap-add") + 1] == "NET_ADMIN"
-    assert "--cap-add" not in nft.calls[2][0]
+    assert "--cap-add" not in nft.calls[1][0]
 
 
-def test_relay_reads_share_one_helper_without_a_write_when_unchanged() -> None:
+def test_a_relay_update_reads_compares_and_writes_in_one_helper() -> None:
     nft = FakeNft()
     guard = _guard(nft)
     guard.ensure()
     bridge = guard.network.bridge_name("freeinference-chat-net-x")
+    calls, transactions = len(nft.calls), len(nft.transactions())
     guard.sync_relays(bridge, {("10.240.0.3", 8080)})
-    calls = len(nft.calls)
-    guard.sync_relays(bridge, {("10.240.0.3", 8080)})
-    assert len(nft.calls) == calls + 1
+    assert len(nft.calls) == calls + 1, "the write rides the read's helper"
+    assert len(nft.transactions()) == transactions + 1
     argv, stdin = nft.calls[-1]
     assert argv[argv.index("--entrypoint") + 1] == "python3"
-    assert json.loads(stdin or "[]") == [
-        ["list", "set", "inet", guard.network.table, "relays"],
-        ["list", "set", "bridge", guard.network.table, "relays"],
-    ]
+    assert argv[argv.index("--cap-add") + 1] == "NET_ADMIN"
+    assert json.loads(stdin or "{}") == {
+        "reads": [],
+        "relays": {
+            "table": guard.network.table,
+            "families": ["inet", "bridge"],
+            "bridge": bridge,
+            "wanted": [["10.240.0.3", 8080]],
+        },
+    }
+    # Without a network to remember it by, the kernel is read again, and an
+    # unchanged set costs no transaction.
+    guard.sync_relays(bridge, {("10.240.0.3", 8080)})
+    assert len(nft.calls) == calls + 2
+    assert len(nft.transactions()) == transactions + 1
+
+
+def test_the_helper_renders_a_relay_update_exactly_as_the_shared_renderer_does() -> None:
+    """The helper computes the update from what each table holds, then renders it."""
+    from cloud_agent_shared.egress import render_relay_update
+
+    nft = FakeNft()
+    guard = _guard(nft)
+    guard.ensure()
+    bridge = guard.network.bridge_name("freeinference-chat-net-x")
+    guard.sync_relays(bridge, {("10.240.0.3", 8080), ("10.240.0.4", 8000)})
+    # The bridge table has lost one exception the inet table still holds.
+    nft.table("bridge", guard.network.table)["sets"]["relays"].remove(
+        {"concat": [bridge, "10.240.0.4", 8000]}
+    )
+
+    guard.sync_relays(bridge, {("10.240.0.5", 8080), ("10.240.0.4", 8000)})
+
+    assert nft.transactions()[-1] == render_relay_update(
+        guard.network,
+        remove={
+            "inet": [(bridge, "10.240.0.3", 8080)],
+            "bridge": [(bridge, "10.240.0.3", 8080)],
+        },
+        add=[(bridge, "10.240.0.4", 8000), (bridge, "10.240.0.5", 8080)],
+    )
+    assert guard.relay_endpoints(bridge) == {("10.240.0.5", 8080), ("10.240.0.4", 8000)}
 
 
 def test_a_flushed_chain_is_detected_and_repaired() -> None:
@@ -450,33 +519,39 @@ def test_a_missing_relay_set_in_either_family_prevents_updates() -> None:
     assert nft.table("inet", guard.network.table)["sets"]["relays"] == []
 
 
-def test_batch_helper_runs_nft_without_a_shell_and_returns_each_listing(monkeypatch) -> None:
-    from cloud_agent_host.network_guard import _NFT_LIST_BATCH
+def test_batch_helper_installs_then_reads_without_a_shell(monkeypatch) -> None:
+    from cloud_agent_host.network_guard import _NFT_BATCH
 
     commands = [["list", "table", "inet", "example"], ["list", "tables", "inet"]]
-    calls: list[list[str]] = []
+    calls: list[tuple[list[str], str | None]] = []
     listings = [{"nftables": [{"table": {"name": "example"}}]}, {"nftables": []}]
 
-    def run(argv, *, capture_output, text):
+    def run(argv, *, input=None, capture_output, text):
         assert capture_output and text
-        calls.append(argv)
-        return subprocess.CompletedProcess(argv, 0, json.dumps(listings[len(calls) - 1]), "")
+        calls.append((argv, input))
+        if argv[1:3] == ["-f", "-"]:
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        return subprocess.CompletedProcess(argv, 0, json.dumps(listings[len(calls) - 2]), "")
 
     output = io.StringIO()
     monkeypatch.setattr(subprocess, "run", run)
-    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(commands)))
+    request = {"install": "add table inet example\n", "reads": commands}
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(request)))
     monkeypatch.setattr(sys, "stdout", output)
-    exec(_NFT_LIST_BATCH, {})
-    assert calls == [["nft", "-j", *command] for command in commands]
-    assert json.loads(output.getvalue()) == listings
+    exec(_NFT_BATCH, {})
+    assert calls == [
+        (["nft", "-f", "-"], "add table inet example\n"),
+        *((["nft", "-j", *command], None) for command in commands),
+    ]
+    assert json.loads(output.getvalue()) == {"listings": listings}
 
 
 def test_batch_helper_fails_without_partial_output_when_a_read_fails(monkeypatch) -> None:
-    from cloud_agent_host.network_guard import _NFT_LIST_BATCH
+    from cloud_agent_host.network_guard import _NFT_BATCH
 
     calls: list[list[str]] = []
 
-    def run(argv, *, capture_output, text):
+    def run(argv, *, input=None, capture_output, text):
         calls.append(argv)
         if len(calls) == 2:
             return subprocess.CompletedProcess(argv, 1, "", "table disappeared")
@@ -484,15 +559,38 @@ def test_batch_helper_fails_without_partial_output_when_a_read_fails(monkeypatch
 
     output, error = io.StringIO(), io.StringIO()
     monkeypatch.setattr(subprocess, "run", run)
-    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps([["list", "tables", "inet"]] * 3)))
+    request = {"reads": [["list", "tables", "inet"]] * 3}
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(request)))
     monkeypatch.setattr(sys, "stdout", output)
     monkeypatch.setattr(sys, "stderr", error)
     with pytest.raises(SystemExit) as failure:
-        exec(_NFT_LIST_BATCH, {})
+        exec(_NFT_BATCH, {})
     assert failure.value.code == 1
     assert len(calls) == 2
     assert output.getvalue() == ""
     assert error.getvalue() == "table disappeared"
+
+
+def test_a_failed_install_ends_the_helper_before_any_read(monkeypatch) -> None:
+    from cloud_agent_host.network_guard import _NFT_BATCH
+
+    calls: list[list[str]] = []
+
+    def run(argv, *, input=None, capture_output, text):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 1, "", "Error: Could not process rule")
+
+    output, error = io.StringIO(), io.StringIO()
+    monkeypatch.setattr(subprocess, "run", run)
+    request = {"install": "add table inet example\n", "reads": [["list", "tables", "inet"]]}
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(request)))
+    monkeypatch.setattr(sys, "stdout", output)
+    monkeypatch.setattr(sys, "stderr", error)
+    with pytest.raises(SystemExit):
+        exec(_NFT_BATCH, {})
+    assert calls == [["nft", "-f", "-"]]
+    assert output.getvalue() == ""
+    assert error.getvalue() == "Error: Could not process rule"
 
 
 @pytest.mark.parametrize("output", ["not json", "{}", "[]", '[{"nftables": []}]', "[{}, {}]"])
@@ -533,12 +631,14 @@ def test_an_intact_ruleset_costs_the_sweep_one_read_and_no_install() -> None:
     guard.recheck()
 
     assert [argv[argv.index("--entrypoint") + 1] for argv, _ in nft.calls[calls:]] == ["python3"]
-    assert json.loads(nft.calls[-1][1] or "[]") == [
-        ["list", "table", "inet", guard.network.table],
-        ["list", "table", "bridge", guard.network.table],
-        ["list", "set", "inet", guard.network.table, "protected4"],
-        ["list", "set", "inet", guard.network.table, "pool4"],
-    ]
+    assert json.loads(nft.calls[-1][1] or "{}") == {
+        "reads": [
+            ["list", "table", "inet", guard.network.table],
+            ["list", "table", "bridge", guard.network.table],
+            ["list", "set", "inet", guard.network.table, "protected4"],
+            ["list", "set", "inet", guard.network.table, "pool4"],
+        ]
+    }
 
 
 def test_a_sweep_that_cannot_reinstall_the_rules_raises_and_trusts_nothing() -> None:
@@ -548,7 +648,7 @@ def test_a_sweep_that_cannot_reinstall_the_rules_raises_and_trusts_nothing() -> 
     nft.table("inet", guard.network.table)["rules"]["from_group"] = 0
 
     def run(argv, stdin):
-        if argv[argv.index("--entrypoint") + 1] == "nft":
+        if "install" in json.loads(stdin or "{}"):
             return subprocess.CompletedProcess(argv, 1, "", "Error: Could not process rule")
         return nft(argv, stdin)
 
@@ -592,3 +692,186 @@ def test_the_managers_host_rule_check_reads_the_kernel_every_time() -> None:
     manager.verify_host_rules()
 
     assert ("inet", guard.network.table) in nft.tables
+
+
+# ── remembered relay exceptions ─────────────────────────────────────────
+
+_NET = "net-1111"
+
+
+def _synced_guard() -> tuple[FakeNft, HostNetworkGuard, str]:
+    nft = FakeNft()
+    guard = _guard(nft)
+    guard.ensure()
+    bridge = guard.network.bridge_name("freeinference-chat-net-x")
+    guard.sync_relays(bridge, {("10.240.0.3", 8080)}, network_id=_NET)
+    return nft, guard, bridge
+
+
+def test_an_unchanged_update_for_the_same_network_costs_no_helper() -> None:
+    """Every turn and workspace command re-syncs its bridge; unchanged, that is free."""
+    nft, guard, bridge = _synced_guard()
+    calls = len(nft.calls)
+
+    guard.sync_relays(bridge, {("10.240.0.3", 8080)}, network_id=_NET)
+
+    assert len(nft.calls) == calls
+
+
+@pytest.mark.parametrize("change", ["network", "endpoints", "no_network", "invalidated"])
+def test_anything_but_the_same_update_for_the_same_network_reads_the_kernel(change) -> None:
+    nft, guard, bridge = _synced_guard()
+    endpoints, network_id = {("10.240.0.3", 8080)}, _NET
+    if change == "network":
+        network_id = "net-2222"  # the bridge was removed and created again
+    elif change == "endpoints":
+        endpoints = {("10.240.0.9", 8080)}
+    elif change == "no_network":
+        network_id = None
+    else:
+        guard.invalidate()
+    calls = len(nft.calls)
+
+    guard.sync_relays(bridge, endpoints, network_id=network_id)
+
+    assert len(nft.calls) == calls + 1
+    assert guard.relay_endpoints(bridge) == endpoints
+
+
+def test_an_update_for_another_network_on_the_same_bridge_name_is_written() -> None:
+    """A removed bridge's exceptions dropped elsewhere are restored for its successor."""
+    nft, guard, bridge = _synced_guard()
+    nft.table("inet", guard.network.table)["sets"]["relays"].clear()
+    nft.table("bridge", guard.network.table)["sets"]["relays"].clear()
+
+    guard.sync_relays(bridge, {("10.240.0.3", 8080)}, network_id="net-2222")
+
+    assert guard.relay_endpoints(bridge) == {("10.240.0.3", 8080)}
+
+
+def test_the_sweep_forgets_an_exception_the_kernel_lost_and_the_next_update_restores_it():
+    nft, guard, bridge = _synced_guard()
+    nft.table("bridge", guard.network.table)["sets"]["relays"].clear()
+
+    guard.recheck()  # the sweep's read-back: chains intact, so no reinstall
+    calls = len(nft.calls)
+    guard.sync_relays(bridge, {("10.240.0.3", 8080)}, network_id=_NET)
+
+    assert len(nft.calls) == calls + 1
+    assert guard.relay_endpoints(bridge) == {("10.240.0.3", 8080)}
+
+
+def test_the_sweep_forgets_an_exception_someone_else_added_for_the_bridge() -> None:
+    nft, guard, bridge = _synced_guard()
+    for family in ("inet", "bridge"):
+        nft.table(family, guard.network.table)["sets"]["relays"].append(
+            {"concat": [bridge, "10.240.0.66", 22]}
+        )
+
+    guard.recheck()
+    guard.sync_relays(bridge, {("10.240.0.3", 8080)}, network_id=_NET)
+
+    assert guard.relay_endpoints(bridge) == {("10.240.0.3", 8080)}
+
+
+def test_a_reinstall_after_a_flushed_ruleset_forgets_what_it_no_longer_holds() -> None:
+    nft, guard, bridge = _synced_guard()
+    nft.tables.clear()  # `flush ruleset`, from a firewall reload
+
+    guard.recheck()  # the read-back fails, so the sweep reinstalls: empty relay sets
+    calls = len(nft.calls)
+    guard.sync_relays(bridge, {("10.240.0.3", 8080)}, network_id=_NET)
+
+    assert len(nft.calls) == calls + 1
+    assert guard.relay_endpoints(bridge) == {("10.240.0.3", 8080)}
+
+
+def test_a_reinstall_that_finds_the_exceptions_still_held_keeps_them_remembered() -> None:
+    nft, guard, bridge = _synced_guard()
+
+    guard.ensure(max_age_s=0)
+    calls = len(nft.calls)
+    guard.sync_relays(bridge, {("10.240.0.3", 8080)}, network_id=_NET)
+
+    assert len(nft.calls) == calls
+
+
+def test_a_failed_check_forgets_every_remembered_update() -> None:
+    nft, guard, bridge = _synced_guard()
+    nft.table("inet", guard.network.table)["rules"]["from_group"] = 0
+
+    def run(argv, stdin):
+        if "install" in json.loads(stdin or "{}"):
+            return subprocess.CompletedProcess(argv, 1, "", "Error: Could not process rule")
+        return nft(argv, stdin)
+
+    guard._run = run
+    with pytest.raises(NetworkGuardError):
+        guard.recheck()
+    guard._run = nft
+    calls = len(nft.calls)
+
+    guard.sync_relays(bridge, {("10.240.0.3", 8080)}, network_id=_NET)
+
+    assert len(nft.calls) == calls + 1
+
+
+def test_a_failed_update_is_never_remembered() -> None:
+    nft, guard, bridge = _synced_guard()
+    del nft.table("bridge", guard.network.table)["sets"]["relays"]
+    with pytest.raises(NetworkGuardError, match="No such file"):
+        guard.sync_relays(bridge, {("10.240.0.9", 8080)}, network_id=_NET)
+    nft.table("bridge", guard.network.table)["sets"]["relays"] = []
+    calls = len(nft.calls)
+
+    guard.sync_relays(bridge, {("10.240.0.3", 8080)}, network_id=_NET)
+
+    assert len(nft.calls) == calls + 1, "the earlier success was forgotten when the update began"
+
+
+def test_an_unreadable_relay_element_in_a_read_back_forgets_and_fails_nothing() -> None:
+    nft, guard, bridge = _synced_guard()
+    nft.table("inet", guard.network.table)["sets"]["relays"].append({"prefix": "garbage"})
+
+    guard.recheck()  # the rules themselves are intact: no error, no reinstall
+
+    with pytest.raises(NetworkGuardError, match="unreadable relay set element"):
+        guard.sync_relays(bridge, {("10.240.0.3", 8080)}, network_id=_NET)
+
+
+def test_a_remembered_update_is_trusted_no_longer_than_the_rules_are(monkeypatch) -> None:
+    from cloud_agent_host import network_guard
+
+    nft, guard, bridge = _synced_guard()
+    start = network_guard.time.monotonic()
+    monkeypatch.setattr(
+        network_guard.time, "monotonic", lambda: start + network_guard.GUARD_RECHECK_S
+    )
+    calls = len(nft.calls)
+
+    guard.sync_relays(bridge, {("10.240.0.3", 8080)}, network_id=_NET)
+
+    assert len(nft.calls) == calls + 1
+
+
+def test_the_sweeps_renewal_keeps_a_held_update_trusted(monkeypatch) -> None:
+    from cloud_agent_host import network_guard
+
+    nft, guard, bridge = _synced_guard()
+    start = network_guard.time.monotonic()
+    monkeypatch.setattr(
+        network_guard.time, "monotonic", lambda: start + network_guard.GUARD_RENEW_S
+    )
+    installs = len(nft.transactions())
+    guard.recheck()  # old enough to renew: reinstall, and the read-back confirms
+    assert len(nft.transactions()) == installs + 1
+    monkeypatch.setattr(
+        network_guard.time,
+        "monotonic",
+        lambda: start + network_guard.GUARD_RENEW_S + network_guard.GUARD_RECHECK_S - 1,
+    )
+    calls = len(nft.calls)
+
+    guard.sync_relays(bridge, {("10.240.0.3", 8080)}, network_id=_NET)
+
+    assert len(nft.calls) == calls

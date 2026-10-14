@@ -685,6 +685,10 @@ class ChatSandboxManager:
         """Delegate to the group-network lifecycle owner."""
         return self._network_lifecycle.require_host_rules()
 
+    def renew_host_rules(self) -> None:
+        """Delegate to the group-network lifecycle owner."""
+        return self._network_lifecycle.renew_host_rules()
+
     def _ensure_group_network(
         self,
         spec: ChatSandboxSpec,

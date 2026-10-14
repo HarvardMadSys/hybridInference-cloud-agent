@@ -3195,9 +3195,12 @@ table="cloud_agent_ca$digits"
 
 The runner and the sandbox manager hold no `NET_ADMIN` and are not in the host's network
 namespace. They change host rules through a short-lived helper: their own
-image, run with `nft` as its entrypoint in the host's network namespace, with
-`NET_ADMIN` and no other capability and a read-only root filesystem — the
-`host_nft` function below has the same shape. It runs under runc whatever the
+image, run in the host's network namespace with `NET_ADMIN` and no other
+capability and a read-only root filesystem — the `host_nft` function below has
+the same shape. Each guard step is one helper: a short Python step in it runs
+`nft` for the install and its read-back together, or reads, compares and
+writes one bridge's relay exceptions, because starting the helper costs far
+more than the `nft` calls it makes. It runs under runc whatever the
 daemon's default runtime is, because a Kata VM would change its own kernel's
 rules, not the host's.
 
@@ -3205,13 +3208,19 @@ rules, not the host's.
   startup preflight install the tables and read them back — every chain, its
   hook and its rule count, the protected set, the registered pool — and any
   difference stops the runner claiming and the sandbox manager starting. Group network
-  work repeats the check and trusts a pass for 60 seconds.
+  work repeats the check and trusts a pass for 60 seconds. The sandbox manager's
+  sweep renews that pass after 45 seconds, whether or not a group runs, so a
+  start or wake never waits for the install and read-back itself.
 - **Scoped to this deployment.** The tables recognise traffic by the bridge
   interface prefix. They never flush or edit another deployment's rules, so
   several deployments can share a host.
 - **Relays by exact endpoint.** When a group's relays are attached, their
   bridge, address and port are written to a `relays` set in both tables, and
-  removed with the bridge. The relay's own default route stays on its stack
+  removed with the bridge. Every activation and workspace command re-syncs its
+  bridge's exceptions; an update the guard already made for that same Docker
+  network within the last 60 seconds, and saw still held at its latest
+  read-back, is not made again. A reinstall, a failed check or a read-back that
+  shows anything else forgets it, and the next update reads the kernel. The relay's own default route stays on its stack
   network, because it joins every group bridge at gateway priority -1.
 - **Watched while groups run.** While any group of this deployment is
   running, the sandbox manager reads the tables back on every five-second sweep, logs
@@ -3328,7 +3337,7 @@ start:
   `AGENT_RELAY_NETWORK` names something else;
 - `` the relay network '…' is not `internal` `` — it must not route anywhere;
   let Compose recreate it as declared;
-- `nft -f - failed: …` or `network guard helper could not run: …` — the
+- `nft failed: …` or `network guard helper could not run: …` — the
   helper could not install the rules: the host kernel lacks nftables support,
   or Docker refused the helper container;
 - `the network guard runs its helper from this container's own image` — the
