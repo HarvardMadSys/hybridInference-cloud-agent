@@ -2566,6 +2566,42 @@ async def test_a_refresh_does_not_overwrite_a_newer_authorization(
     assert row["refresh_lease_expires_at"] is not None
 
 
+async def test_a_refresh_does_not_overwrite_a_callback_that_landed_first(
+    store: Storage,
+) -> None:
+    """A flow that had started before the claim shares the refresh's generation.
+
+    Its callback writes the new account's tokens while the refresh is still on
+    the network, and moves none of the fences the generation check reads -- only
+    the credential version the refresh claimed.
+    """
+    connection = await _connect(store, _OWNER, auth_kind="oauth", refresh_token="rt")
+    claim = await store.mcp.claim_mcp_refresh(
+        connection_id=connection["id"],
+        expected_credential_version=int(connection["credential_version"]),
+        lease_seconds=60,
+    )
+    assert claim is not None
+    assert await store.mcp.set_mcp_credential(
+        connection_id=connection["id"],
+        expected_authorization_epoch=int(claim["authorization_epoch"]),
+        access_token_ciphertext="callback-access",
+        expected_oauth_generation=int(claim["oauth_generation"]),
+        expected_config_revision=int(claim["config_revision"]),
+    )
+    assert not await store.mcp.set_mcp_credential(
+        connection_id=connection["id"],
+        expected_authorization_epoch=int(claim["authorization_epoch"]),
+        access_token_ciphertext="stale-access",
+        expected_oauth_generation=int(claim["oauth_generation"]),
+        expected_config_revision=int(claim["config_revision"]),
+        expected_refresh_generation=int(claim["refresh_generation"]),
+        expected_credential_version=int(claim["credential_version"]),
+    )
+    row = await store.mcp.get_mcp_connection(connection_id=connection["id"])
+    assert row["access_token_ciphertext"] == "callback-access"
+
+
 async def test_releasing_a_refresh_claim_is_fenced_on_its_generation(
     store: Storage,
 ) -> None:

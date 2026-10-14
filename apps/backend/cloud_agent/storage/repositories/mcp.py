@@ -712,6 +712,7 @@ class PostgresMcpConnectionRepository:
         expected_config_revision: int | None = None,
         expected_refresh_generation: int | None = None,
         reset_status: bool = False,
+        expected_credential_version: int | None = None,
     ) -> bool:
         """Write a credential, conditional on the state the flow started in.
 
@@ -753,6 +754,12 @@ class PostgresMcpConnectionRepository:
 
         ``reset_status`` publishes a new authorization's draft state with its
         credential, so a later discovery cannot be overwritten by the callback.
+
+        ``expected_credential_version`` is the version the refresh claimed. The
+        generation and lease fences cannot see an authorization callback that
+        completes while the refresh is on the network: the callback moves none
+        of them, so without this the refresh would write the old grant's
+        tokens over the new one.
         """
         async with self._pool.acquire() as conn, conn.transaction():
             if not await self._lock_connection(conn, connection_id):
@@ -792,6 +799,7 @@ class PostgresMcpConnectionRepository:
                   AND config_revision = COALESCE($20::bigint, config_revision)
                   AND ($21::bigint IS NULL
                        OR (refresh_generation = $21 AND refresh_lease_expires_at > clock_timestamp()))
+                  AND credential_version = COALESCE($23::bigint, credential_version)
                 RETURNING id
                 """,
                 connection_id,
@@ -816,6 +824,7 @@ class PostgresMcpConnectionRepository:
                 expected_config_revision,
                 expected_refresh_generation,
                 reset_status,
+                expected_credential_version,
             )
         return updated is not None
 

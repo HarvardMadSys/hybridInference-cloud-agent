@@ -280,6 +280,10 @@ async def refresh_credential(
         # started under is what tells them apart.
         expected_oauth_generation=int(claimed.get("oauth_generation") or 0),
         expected_config_revision=int(claimed.get("config_revision") or 1),
+        # A flow that had already started when this refresh claimed carries the
+        # same generation, and its callback can land while this refresh waits
+        # on the token endpoint. That write moves only the credential version.
+        expected_credential_version=int(claimed.get("credential_version") or 1),
     )
     if not written:
         # The owner disconnected, re-authorized, or the lease expired and
