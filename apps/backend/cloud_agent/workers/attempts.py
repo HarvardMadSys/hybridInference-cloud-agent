@@ -654,12 +654,6 @@ async def _run_attempt_reaper(
             without one, a message naming either waits for a settlement that
             can check it.
     """
-    # Consecutive renewal refusals, per grant. Held by the loop rather than by
-    # the module, so two reapers (a test's and a running app's) cannot count
-    # each other's failures toward a give-up — and so a restart forgets, which
-    # is the right way round: a fresh process should ask the gateway again
-    # before abandoning anyone's attempt.
-    renewal_failures: dict[str, int] = {}
     while True:
         await asyncio.sleep(interval_seconds)
         # Hosts first. A machine that stopped heartbeating should be out of the
