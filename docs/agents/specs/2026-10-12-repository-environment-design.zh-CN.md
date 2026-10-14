@@ -403,7 +403,7 @@ Secret 集合来自实际绑定及该工作区曾注入的版本引用，包含�
 
 ## 13. 单个 PR 的实现与合入要求
 
-功能开关 repository_environments_enabled 默认关闭，首次初始化可通过 AGENT_REPOSITORY_ENVIRONMENTS_ENABLED=true 导入。/config 仅开启时提供 environment_limits；三个 UI 入口据此显示。关闭后禁止新增非空绑定及独立测试，已有绑定的执行与恢复仍保持兼容。关闭时普通新任务沿用原创建路径，不写空绑定或取得环境 advisory 锁；显式携带非空环境选择的请求返回错误。所有控制面和 host/Sandbox Manager 升级且完成现场验收后再开启。
+环境配置是默认提供的产品功能，不设置管理员功能开关。/config 始终提供 environment_limits，Settings、任务环境选择和 Environment tab 始终显示，不依赖额外配置请求成功才出现。旧数据库或部署残留的 repository_environments_enabled=false / AGENT_REPOSITORY_ENVIRONMENTS_ENABLED=false 不再影响功能。用户没有配置变量或脚本时，任务使用基础环境，不执行环境准备；已有工作区继续使用固定绑定。权限、加密、runner 与 Sandbox Manager 的 environment-v1 能力检查继续生效。
 
 Environment tab 的 GET 不写库，Secret 脱敏材料按 owner、绑定、运行期版本和加密 key 缓存 60 秒，最多 256 条；状态的 Docker inspect 在线程执行器运行并缓存 15 秒。准备摘要由实时 attempt 租约锁保护的生命周期事件写入，不能由失去租约的 host 覆盖。操作状态轮询不重复查询 GitHub entitlement；新操作仍校验权限。过期检查持续执行，历史 GC 每小时一次，反向引用查询配套索引。
 

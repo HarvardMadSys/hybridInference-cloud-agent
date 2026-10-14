@@ -296,7 +296,6 @@ permissions, retention and verification requirements.
 | `AGENT_API_DOCS` | **NEW** | Defaults to off. Set to `true` on a development stack to serve `/docs`, `/redoc` and `/openapi.json` on the main API. Off, none of the three is served: the schema is unauthenticated, and the two pages load scripts from a CDN at a floating version. The MCP-only listener never serves them. |
 | `AGENT_MAX_STREAMS_PER_USER` | **NEW** | Default `24`. How many live-update streams (the change stream and job event streams) one account may hold open on one control-plane process; one more answers 429 with `Retry-After`, which the web app backs off on. A browser tab holds one change stream and one stream per conversation it is watching. A missing, non-numeric or non-positive value uses the default. |
 | `AGENT_TRUST_PROXY_HEADERS` | **NEW** | Defaults to off. Set to `true` only when a proxy this deployment controls sits directly in front of the control plane and writes `X-Forwarded-For`; both shipped nginx configurations overwrite it with the peer address. Only the rightmost entry, the one that proxy wrote, is recorded in the admin audit trail, so a proxy that appends instead works too; entries to its left are the caller's own and are ignored. Behind a further proxy, such as a tunnel or load balancer in front of the edge, the recorded address is that hop's unless the edge uses nginx's realip module as its configuration describes. |
-| `AGENT_REPOSITORY_ENVIRONMENTS_ENABLED` | **NEW**, optional initial import | Initial value of Admin → Settings → Repository environments (`repository_environments_enabled`), default `false`; saved settings take precedence. See [Repository environments rollout](#repository-environments-rollout) before turning it on. |
 | `AGENT_DEPLOYMENT_SHA` | **NEW** | Exact commit this API serves. Required by the production control-plane Compose stack and exported by `deploy/control-plane/deploy.sh`; do not hand-edit it during a rollout. New retained-group claims require the polling replica to advertise the matching completed host marker, so a pending or failed host deployment cannot claim through a cold-start API. The local stack generates its own stack-scoped marker. |
 
 ### Source control
@@ -754,7 +753,7 @@ configuration.
 
 ### Runtime: the deployment's identity
 
-The main control plane imports the first six appearance variables below when
+The main control plane imports the first seven appearance variables below when
 it initializes the settings document. Set them in its deployment environment
 before the first start, then change them through Admin → Settings. The web
 server reads the saved public appearance fields on every request through
@@ -768,6 +767,7 @@ development. Deployment time remains web runtime metadata.
 | `AGENT_WEB_ORG_NAME` | **MOVED** | Optional organisation name beside the product name. Empty hides it. |
 | `AGENT_WEB_ORG_URL` | **MOVED** | Link target for `AGENT_WEB_ORG_NAME`. |
 | `AGENT_WEB_STATUS_URL` | **MOVED** | Status page, opened in a new tab from the header. Empty hides the link — an empty `href` resolves to the current page, so a Status link that is rendered anyway reopens the page the user is standing on. |
+| `AGENT_WEB_DOCS_URL` | **NEW** | User documentation for this deployment, opened in a new tab from the sidebar and the My Settings page. Empty hides the link. Point it at the distribution's own user guide; this repository's developer documentation is for operators and contributors. |
 | `AGENT_WEB_GATEWAY_URL` | **MOVED** | `${GATEWAY_BASE_URL}`. The gateway's origin, for the links this app does not host itself — nothing to do with sign-in. It replaced `NEXT_PUBLIC_GATEWAY_AUTHORIZE_URL`, which the browser needed only while it built the authorize URL and redeemed the code itself; both are the control plane's job now (`GATEWAY_AUTHORIZE_URL`). A path in this value is ignored; empty hides the links. |
 | `AGENT_WEB_FEATURE_RAG` | **MOVED** | `true` shows the gateway's Docs Assistant link. `false` or empty hides it; any other value is refused. The page belongs to the gateway, not to this service. |
 | `AGENT_WEB_DEPLOYED_AT` | **NEW** | ISO timestamp with a timezone for the deployment footer. The control-plane deploy script sets the activation time in UTC and records it in `.deployed-at` after successful health checks; deploying the same release again preserves it. When starting Compose manually, supply the actual deployment time. Empty shows `Not available`. |
@@ -823,6 +823,8 @@ Recorded here as *what has to be decided*, not as anyone's actual answer.
 3. If it is a secret, say where it is stored — never the value itself.
 4. The PR checklist enforces this; a new variable without a row is a review stop.
 
-### Repository environments rollout
+### Repository environments
 
-Admin → Settings → Repository environments (`repository_environments_enabled`) defaults to false. `AGENT_REPOSITORY_ENVIRONMENTS_ENABLED=true` imports the initial value; saved settings take precedence. Enable only after every control-plane and host/broker replica is upgraded and deployment acceptance is complete. Disabling hides the UI and blocks new nonempty bindings and test runs; existing workspace bindings keep executing with their configuration.
+Reusable repository environments are available by default. There is no feature switch or initial environment-variable import. A legacy `repository_environments_enabled=false` setting or `AGENT_REPOSITORY_ENVIRONMENTS_ENABLED=false` value is ignored. Settings, task selection and the workspace Environment tab are always offered. `/config` always reports environment limits.
+
+A task with no configured variables or scripts uses the base environment without environment preparation. Configured workspaces still require an environment-capable runner and sandbox manager; owner authorization, encryption and execution isolation remain enforced.

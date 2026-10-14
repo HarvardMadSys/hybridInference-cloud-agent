@@ -23,6 +23,8 @@ export interface SiteBranding {
   orgName: string;
   orgUrl: string;
   statusUrl: string;
+  /** User documentation for this deployment. Empty hides the link. */
+  docsUrl: string;
   /**
    * The gateway's *origin*, for the links this app does not host itself.
    * Never the browser's API address — that is `basePath` plus `/api`, and it
@@ -57,6 +59,7 @@ export const NEUTRAL_SITE_CONFIG: RuntimeSiteConfig = {
     orgName: '',
     orgUrl: '',
     statusUrl: '',
+    docsUrl: '',
     gatewayUrl: '',
   },
   features: {
@@ -77,6 +80,7 @@ export const SITE_CONFIG_ENV = {
   orgName: 'AGENT_WEB_ORG_NAME',
   orgUrl: 'AGENT_WEB_ORG_URL',
   statusUrl: 'AGENT_WEB_STATUS_URL',
+  docsUrl: 'AGENT_WEB_DOCS_URL',
   gatewayUrl: 'AGENT_WEB_GATEWAY_URL',
   featureRag: 'AGENT_WEB_FEATURE_RAG',
   version: 'AGENT_DEPLOYMENT_SHA',
@@ -167,6 +171,7 @@ export function parseRuntimeSiteConfig(env: EnvSource): RuntimeSiteConfig {
       orgName: optionalName(env, SITE_CONFIG_ENV.orgName),
       orgUrl: optionalUrl(env, SITE_CONFIG_ENV.orgUrl),
       statusUrl: optionalUrl(env, SITE_CONFIG_ENV.statusUrl),
+      docsUrl: optionalUrl(env, SITE_CONFIG_ENV.docsUrl),
       gatewayUrl: optionalOrigin(env, SITE_CONFIG_ENV.gatewayUrl),
     },
     features: {
@@ -211,6 +216,13 @@ function checkedSavedSiteConfig(value: unknown, metadata: EnvSource): RuntimeSit
       throw new SiteConfigError('Invalid application settings.');
     env[SITE_CONFIG_ENV[key]] = branding[key];
   }
+  // Added after the other fields. The web server and the control plane deploy
+  // separately, so a control plane that predates it omits the field; that
+  // means "not configured", not an invalid response that discards the rest of
+  // the saved appearance.
+  if (branding.docsUrl !== undefined && typeof branding.docsUrl !== 'string')
+    throw new SiteConfigError('Invalid application settings.');
+  env[SITE_CONFIG_ENV.docsUrl] = branding.docsUrl ?? '';
   return parseRuntimeSiteConfig(env);
 }
 

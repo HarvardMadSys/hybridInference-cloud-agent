@@ -101,7 +101,6 @@ services:
       AGENT_SETTINGS_ENCRYPTION_KEY: ${AGENT_SETTINGS_ENCRYPTION_KEY:-}
       AGENT_CONTROL_TOKEN_SECRET: ${AGENT_CONTROL_TOKEN_SECRET:-}
       AGENT_SOURCE_CONTROL_ENCRYPTION_KEY: ${AGENT_SOURCE_CONTROL_ENCRYPTION_KEY:-}
-      AGENT_REPOSITORY_ENVIRONMENTS_ENABLED: ${AGENT_REPOSITORY_ENVIRONMENTS_ENABLED:-false}
       # The API enforces the same exact host-generation capability as the
       # deploy gate. Without this, a pending runner could claim queued work
       # while deploy.sh correctly refused to replace the old API.
@@ -117,6 +116,7 @@ services:
       AGENT_WEB_ORG_NAME: ${AGENT_WEB_ORG_NAME:-}
       AGENT_WEB_ORG_URL: ${AGENT_WEB_ORG_URL:-}
       AGENT_WEB_STATUS_URL: ${AGENT_WEB_STATUS_URL:-}
+      AGENT_WEB_DOCS_URL: ${AGENT_WEB_DOCS_URL:-}
       AGENT_WEB_GATEWAY_URL: ${AGENT_WEB_GATEWAY_URL:-}
       AGENT_WEB_FEATURE_RAG: ${AGENT_WEB_FEATURE_RAG:-}
       # Optional compute management runs only on this stable main listener.
@@ -309,7 +309,6 @@ services:
       # listener. Without this, health stays green but every connected server
       # is reported as unavailable at the first tool call.
       AGENT_SOURCE_CONTROL_ENCRYPTION_KEY: ${AGENT_SOURCE_CONTROL_ENCRYPTION_KEY:-}
-      AGENT_REPOSITORY_ENVIRONMENTS_ENABLED: ${AGENT_REPOSITORY_ENVIRONMENTS_ENABLED:-false}
       AGENT_LOG_LEVEL: ${AGENT_LOG_LEVEL:-INFO}
       AGENT_LOG_FORMAT: ${AGENT_LOG_FORMAT:-text}
     depends_on:
@@ -364,6 +363,7 @@ services:
       AGENT_WEB_ORG_NAME: ${AGENT_WEB_ORG_NAME:-}
       AGENT_WEB_ORG_URL: ${AGENT_WEB_ORG_URL:-}
       AGENT_WEB_STATUS_URL: ${AGENT_WEB_STATUS_URL:-}
+      AGENT_WEB_DOCS_URL: ${AGENT_WEB_DOCS_URL:-}
       # The gateway's origin, for links this app does not host. Sign-in does
       # not pass through the browser any more, so nothing here starts one.
       AGENT_WEB_GATEWAY_URL: ${AGENT_WEB_GATEWAY_URL:-}

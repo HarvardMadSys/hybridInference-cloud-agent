@@ -1494,7 +1494,6 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
     monkeypatch,
 ):
     """The durable saga creates a second session alias, never a Docker clone."""
-    monkeypatch.setenv("AGENT_REPOSITORY_ENVIRONMENTS_ENABLED", "true")
     monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "native-fork-environment-key")
     environment = await store.environments.save_environment(
         "user-1",

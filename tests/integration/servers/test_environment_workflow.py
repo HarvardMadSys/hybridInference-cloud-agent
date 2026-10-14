@@ -17,7 +17,6 @@ pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
 
 async def test_environment_create_test_bind_rotate_reuse_and_archive_via_http(api, monkeypatch):
-    monkeypatch.setenv("AGENT_REPOSITORY_ENVIRONMENTS_ENABLED", "true")
     monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "http-environment-key")
     api.app.include_router(environments.router)
     monkeypatch.setattr(

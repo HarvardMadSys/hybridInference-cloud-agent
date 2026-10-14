@@ -37,7 +37,6 @@ from cloud_agent.schemas import (
     PLATFORM_REASONING_EFFORTS,
     RESET_REASONING_EFFORT,
 )
-from cloud_agent.settings import setting_env
 from cloud_agent.skills.models import SkillError
 from cloud_agent.skills.selection import resolve_skills
 from cloud_agent.visible_models import (
@@ -602,13 +601,6 @@ async def _create_job_as(
     attachments = await _resolve_attachment_selection(
         job_store.attachments, user_id=user["user_id"], attachment_ids=body.attachment_ids
     )
-    if setting_env("AGENT_REPOSITORY_ENVIRONMENTS_ENABLED", "false") != "true" and (
-        body.environment_id
-        or body.environment_overrides
-        or body.environment_revision
-        or body.global_revision
-    ):
-        raise HTTPException(503, "Repository environments are disabled for new workspaces")
     try:
         job = await job_store.conversation_commands.create_job(
             user_id=user["user_id"],
@@ -628,9 +620,7 @@ async def _create_job_as(
                 "overrides": [v.model_dump() for v in body.environment_overrides],
                 "has_setup_override": "setup_script" in body.model_fields_set,
                 "setup_override": body.setup_script,
-            }
-            if setting_env("AGENT_REPOSITORY_ENVIRONMENTS_ENABLED", "false") == "true"
-            else None,
+            },
             plugins=plugins,
             metadata=metadata or None,
             mcp_bindings=mcp_bindings,

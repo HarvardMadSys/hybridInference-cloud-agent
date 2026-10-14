@@ -6,7 +6,7 @@ import type { SourceControlLoadStatus } from './integrations';
 const API_BASE = config.apiBase;
 
 export interface AgentConfigApi {
-  environment_limits?: Record<string, unknown> | null;
+  environment_limits?: Record<string, unknown>;
   skill_limits?: import('@/lib/skillLimits').SkillLimits;
   goal_limits?: GoalLimitsApi;
 

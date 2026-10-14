@@ -3525,16 +3525,9 @@
             "$ref": "#/components/schemas/AttachmentLimits"
           },
           "environment_limits": {
-            "anyOf": [
-              {
-                "additionalProperties": true,
-                "type": "object"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Environment Limits"
+            "additionalProperties": true,
+            "title": "Environment Limits",
+            "type": "object"
           },
           "github_connected": {
             "default": false,

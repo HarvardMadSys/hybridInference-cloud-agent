@@ -260,6 +260,7 @@ export const en = {
   'nav.skipToWorkspace': 'Skip to workspace',
   'nav.status': 'Status',
   'nav.docsAssistant': 'Docs Assistant',
+  'nav.docs': 'Documentation',
   'nav.agents': 'Agents',
   'nav.admin': 'Admin',
   'nav.dashboard': 'Dashboard',

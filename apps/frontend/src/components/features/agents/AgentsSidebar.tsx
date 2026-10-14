@@ -3,7 +3,8 @@ import Link from 'next/link';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useAuth, useT } from '@/components/providers';
-import { GearIcon } from '@/components/features/settings/icons';
+import { useSiteConfig } from '@/components/providers/SiteConfigProvider';
+import { BookIcon, GearIcon } from '@/components/features/settings/icons';
 import { archiveAgentJob, deleteAgentSessions, pinAgentJob, unpinAgentJob } from '@/lib/api/agents';
 import { APIError } from '@/lib/utils/errors';
 import { useAgentReads } from './AgentReadProvider';
@@ -47,6 +48,7 @@ export function AgentsSidebar({
   const params = useSearchParams();
   const router = useRouter();
   const t = useT();
+  const { docsUrl } = useSiteConfig().branding;
   const { state } = useAuth();
   const userId = state.user?.id;
   const reads = useAgentReads();
@@ -946,6 +948,21 @@ export function AgentsSidebar({
             <GearIcon className="h-4 w-4" />
             {t('settings.title')}
           </Link>
+
+          {/* The deployment's user documentation, when it has any. Hidden
+              rather than disabled when unset: an empty `href` would reopen the
+              current page in a new tab. */}
+          {docsUrl ? (
+            <a
+              href={docsUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="ui-focus-ring flex min-h-8 items-center gap-2 rounded-lg px-2.5 py-1.5 text-[13px] font-medium text-muted transition-colors hover:bg-surface-hover hover:text-foreground [@media(pointer:coarse)]:min-h-11"
+            >
+              <BookIcon className="h-4 w-4" />
+              {t('nav.docs')}
+            </a>
+          ) : null}
         </div>
       </aside>
       <PaneResizer pane={pane} label={t('sidebar.resize')} controls="agents-sidebar" />

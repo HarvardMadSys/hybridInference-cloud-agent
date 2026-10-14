@@ -31,7 +31,7 @@ const SETTING_GROUPS: SettingGroup[] = [
   },
   {
     title: 'Navigation links',
-    important: ['site.status_url', 'site.gateway_url'],
+    important: ['site.status_url', 'site.docs_url', 'site.gateway_url'],
     advanced: [],
   },
   {

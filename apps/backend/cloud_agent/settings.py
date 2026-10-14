@@ -265,15 +265,6 @@ MINIMUM_CREDENTIAL_BYTES = 32
 
 SETTINGS: tuple[Setting, ...] = (
     Setting(
-        "repository_environments_enabled",
-        "Repository environments",
-        "Operations",
-        False,
-        kind="boolean",
-        env="AGENT_REPOSITORY_ENVIRONMENTS_ENABLED",
-        description="Enable environment UI and new bindings. Existing workspaces retain their configuration.",
-    ),
-    Setting(
         "log_level",
         "Control-plane log level",
         "Operations",
@@ -511,6 +502,18 @@ SETTINGS: tuple[Setting, ...] = (
     ),
     Setting(
         "site.status_url", "Status page URL", "Appearance", "", env="AGENT_WEB_STATUS_URL", url=True
+    ),
+    Setting(
+        "site.docs_url",
+        "Documentation URL",
+        "Appearance",
+        "",
+        env="AGENT_WEB_DOCS_URL",
+        url=True,
+        description=(
+            "User documentation for this deployment, linked from the sidebar and My Settings. "
+            "Empty hides the link."
+        ),
     ),
     Setting(
         "site.gateway_url",
@@ -880,15 +883,6 @@ SETTINGS: tuple[Setting, ...] = (
     _numeric("task_titles.max_tokens", "Maximum title output tokens", "Task titles", 256, 16, 256),
 )
 MIGRATED_SETTINGS: tuple[Setting, ...] = (
-    Setting(
-        "repository_environments_enabled",
-        "Repository environments",
-        "Operations",
-        False,
-        kind="boolean",
-        env="AGENT_REPOSITORY_ENVIRONMENTS_ENABLED",
-        description="Enable environment UI and new bindings. Existing workspaces retain their configuration.",
-    ),
     Setting(
         "sandbox_archive.bucket",
         "Sandbox archive S3 bucket",

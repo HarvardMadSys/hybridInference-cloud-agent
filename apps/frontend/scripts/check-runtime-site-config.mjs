@@ -109,6 +109,7 @@ function deployment(spec) {
       AGENT_WEB_ORG_NAME: spec.orgName,
       AGENT_WEB_ORG_URL: spec.orgUrl,
       AGENT_WEB_STATUS_URL: spec.statusUrl,
+      AGENT_WEB_DOCS_URL: spec.docsUrl,
       AGENT_WEB_GATEWAY_URL: spec.gatewayUrl,
       AGENT_WEB_FEATURE_RAG: String(spec.rag),
       AGENT_DEPLOYMENT_SHA: spec.version,
@@ -129,6 +130,7 @@ const DEPLOYMENTS = [
     orgName: 'Alpha Research',
     orgUrl: 'https://alpha.example',
     statusUrl: 'https://status.alpha.example/',
+    docsUrl: 'https://docs.alpha.example/agents/',
     gatewayUrl: 'https://gateway-alpha.example/authorize',
     rag: true,
   }),
@@ -140,6 +142,7 @@ const DEPLOYMENTS = [
     orgName: 'Beta Research',
     orgUrl: 'https://beta.example',
     statusUrl: 'https://status.beta.example/',
+    docsUrl: 'https://docs.beta.example/',
     gatewayUrl: 'https://gateway-beta.example',
     rag: false,
   }),
@@ -157,6 +160,7 @@ const NEUTRAL = {
   orgName: '',
   orgUrl: '',
   statusUrl: '',
+  docsUrl: '',
   gatewayUrl: '',
   rag: false,
 };
@@ -196,6 +200,7 @@ function identityValues(target) {
     ['organisation', target.orgName],
     ['organisation URL', target.orgUrl],
     ['status URL', target.statusUrl],
+    ['documentation URL', target.docsUrl],
     ['gateway origin', target.gatewayOrigin],
   ];
 }
@@ -256,6 +261,7 @@ function expectedIdentity(target) {
     // report that normalization as a mismatch.
     orgUrl: new URL(target.orgUrl).toString(),
     statusUrl: new URL(target.statusUrl).toString(),
+    docsUrl: new URL(target.docsUrl).toString(),
     gatewayUrl: target.gatewayOrigin,
   };
 }
@@ -565,6 +571,7 @@ function assertBundleIsClean(variant) {
       ['organisation', target.orgName],
       ['organisation URL', target.orgUrl],
       ['status URL', target.statusUrl],
+      ['documentation URL', target.docsUrl],
       ['gateway host', target.gatewayHost],
     ]) {
       if (bundle.includes(value)) {
@@ -651,6 +658,7 @@ async function assertNeutralDeployment(variant) {
     orgName: NEUTRAL.orgName,
     orgUrl: NEUTRAL.orgUrl,
     statusUrl: NEUTRAL.statusUrl,
+    docsUrl: NEUTRAL.docsUrl,
     gatewayUrl: NEUTRAL.gatewayUrl,
   };
   if (JSON.stringify(identity) !== JSON.stringify(expected)) {
@@ -780,6 +788,7 @@ async function assertSavedConfigRequestScope(variant) {
       orgName: '',
       orgUrl: '',
       statusUrl: '',
+      docsUrl: '',
       gatewayUrl: '',
     };
     for (const stalled of ['slow headers', 'slow body']) {

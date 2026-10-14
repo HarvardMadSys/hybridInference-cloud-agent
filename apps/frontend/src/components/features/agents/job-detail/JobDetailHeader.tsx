@@ -15,7 +15,6 @@ import type { JobDetailPanels } from './useJobDetailPanels';
 export function JobDetailHeader({
   panels,
   job,
-  environmentEnabled,
   title,
   canForkCurrent,
   forking,
@@ -32,7 +31,6 @@ export function JobDetailHeader({
 }: {
   panels: JobDetailPanels;
   job: AgentJob;
-  environmentEnabled: boolean;
   title: string;
   canForkCurrent: boolean;
   forking: boolean;
@@ -85,7 +83,7 @@ export function JobDetailHeader({
             forking={forking}
             onFork={onFork}
             onRename={onRename}
-            onEnvironment={environmentEnabled ? () => openWorkspace('environment') : undefined}
+            onEnvironment={() => openWorkspace('environment')}
           />
         </div>
         <div className="agent-conversation-controls flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 pb-1.5">

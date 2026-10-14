@@ -345,7 +345,7 @@ async def test_empty_binding_terminal_does_not_prepare_or_interrupt_a_running_tu
 async def test_test_retry_returns_original_before_github_or_latest_config(monkeypatch):
     from cloud_agent.api.deps import get_agent_app_credentials
 
-    monkeypatch.setenv("AGENT_REPOSITORY_ENVIRONMENTS_ENABLED", "true")
+    monkeypatch.setenv("AGENT_REPOSITORY_ENVIRONMENTS_ENABLED", "false")
     original = {"id": "run", "base_sha": "a" * 40, "state": "queued"}
     repository = SimpleNamespace(
         find_environment_run=AsyncMock(return_value=original), get_environment=AsyncMock()
