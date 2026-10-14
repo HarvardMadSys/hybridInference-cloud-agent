@@ -1146,6 +1146,38 @@ def test_only_the_groups_own_pushes_are_built_on(origin, tmp_path):
     )
 
 
+def test_an_import_retry_reaches_the_base_under_any_number_of_own_pushes(origin, tmp_path):
+    """Publication builds on every recorded push, so the retry must reach that base too.
+
+    Forty failed pull request steps leave forty pushes between the published
+    commit and the base. The retried bundle still names the base and imports
+    into a workspace that holds only it. A base the commit was never built on
+    ends the search once the whole history is fetched.
+    """
+    clone_url, base_sha = origin
+    chain = tmp_path / "chain"
+    _git(["clone", "--quiet", clone_url, str(chain)], cwd=tmp_path)
+    for turn in range(41):
+        (chain / "turns.md").write_text(f"turn {turn}\n", encoding="utf-8")
+        _git(["add", "turns.md"], cwd=chain)
+        _git(["commit", "--quiet", "-m", f"agent: turn {turn}"], cwd=chain)
+    _git(["push", "--quiet", "origin", "HEAD:refs/heads/agent/athr_chain"], cwd=chain)
+    published = _git(["rev-parse", "HEAD"], cwd=chain).strip()
+
+    fetched = fetch_base_bundle(
+        clone_url=f"file://{clone_url}", commit_sha=published, base_sha=base_sha
+    )
+
+    assert _prerequisites(fetched) == [base_sha]
+    workspace = _workspace_at(base_sha, clone_url, tmp_path)
+    bundle = tmp_path / "base.bundle"
+    bundle.write_bytes(fetched)
+    _git(["bundle", "unbundle", str(bundle)], cwd=workspace)
+    _git(["cat-file", "-e", f"{published}^{{commit}}"], cwd=workspace)
+    with pytest.raises(PublishError, match="is not built on"):
+        fetch_base_bundle(clone_url=f"file://{clone_url}", commit_sha=published, base_sha="f" * 40)
+
+
 def test_republishing_the_same_patch_reuses_the_commit_already_pushed(origin):
     """A retry after the push, and before the PR is recorded, must not refuse.
 

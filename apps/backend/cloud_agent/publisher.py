@@ -588,11 +588,6 @@ def _head_parent(repo: Path) -> str:
     return _run_git(["rev-parse", "--verify", "HEAD^1"], cwd=repo).strip()
 
 
-#: How many unpublished pushes of its own a published commit may be built on
-#: before a base import stops looking for its base.
-_MAX_UNPUBLISHED_PUSHES = 32
-
-
 def fetch_base_bundle(
     *,
     clone_url: str,
@@ -608,8 +603,8 @@ def fetch_base_bundle(
 
     ``base_sha`` is the commit the workspace holds. A commit built on
     unpublished pushes of its own (see :func:`_reuse_pushed_commit`) is not its
-    parent; the history is then deepened one commit at a time down to it, and
-    the bundle carries those pushes too.
+    parent; the history is then deepened down to it, and the bundle carries
+    those pushes too.
     """
     if not _COMMIT_SHA.fullmatch(commit_sha or ""):
         raise PublishError(f"commit_sha must be a full commit hash, got {commit_sha!r}")
@@ -645,8 +640,16 @@ def fetch_base_bundle(
 def _deepen_to_base(
     repo: Path, commit_sha: str, base_sha: str, auth_env: dict[str, str] | None
 ) -> str:
-    """Fetch ``commit_sha``'s first-parent history down to ``base_sha``; return its full id."""
-    for depth in range(3, _MAX_UNPUBLISHED_PUSHES + 3):
+    """Fetch ``commit_sha``'s first-parent history down to ``base_sha``; return its full id.
+
+    Publication builds on any number of the group's own pushes, so the depth
+    doubles until the base appears. History is immutable and publication
+    checked that the commit descends from the base, so the search ends there;
+    it fails only once the whole history is fetched without it.
+    """
+    depth = 2
+    while True:
+        depth *= 2
         _run_git(
             [
                 "fetch",
@@ -664,7 +667,10 @@ def _deepen_to_base(
         for ancestor in _run_git(["rev-list", "--first-parent", "HEAD"], cwd=repo).split():
             if ancestor.lower().startswith(base_sha.lower()):
                 return ancestor
-    raise PublishError(f"published commit {commit_sha[:12]} is not built on {base_sha[:12]}")
+        if _run_git(["rev-parse", "--is-shallow-repository"], cwd=repo).strip() != "true":
+            raise PublishError(
+                f"published commit {commit_sha[:12]} is not built on {base_sha[:12]}"
+            )
 
 
 def _gate_permits(gate: PatchGateResult, *, allow_workflow_changes: bool) -> bool:
