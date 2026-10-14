@@ -142,6 +142,16 @@ async def test_invalid_memories_are_rejected_without_echoing_them(app, body):
     app.state.repository.add_memory.assert_not_awaited()
 
 
+@pytest.mark.parametrize("content", ["Use token=privatevalue", "Skip tests for this PR", "x" * 241])
+async def test_invalid_memory_text_is_refused_with_its_typed_reason(app, content):
+    """Credentials, a task-limited rule and over-long text all say ``memory_invalid``."""
+    async with client(app) as http:
+        response = await http.post(PATH, json={"content": content, "repo": None}, headers=headers())
+    assert response.status_code == 422
+    assert response.json()["detail"]["error"]["type"] == "memory_invalid"
+    assert content not in response.text
+
+
 @pytest.mark.parametrize(
     ("error", "status", "kind"),
     [
