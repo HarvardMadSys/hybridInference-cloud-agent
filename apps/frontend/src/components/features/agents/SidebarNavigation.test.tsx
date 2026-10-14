@@ -68,6 +68,7 @@ import { useAgentJob } from './useAgentJobs';
 import { ArchivedTasksView } from './ArchivedTasksView';
 import { announceConversationRestored } from './conversationEvents';
 import { DEFAULT_PREFERENCES, sidebarPreferencesKey } from './sidebarPreferences';
+import { SIDEBAR_ACTIVITY_REFRESH_MS } from './sidebarRecordChanges';
 import {
   PUSH_BATCH_MS,
   receiveHint,
@@ -444,6 +445,45 @@ describe('sidebar navigation interactions', () => {
       );
     },
   );
+
+  it('reads the lists once per window while only a conversation’s activity moves', async () => {
+    render(<AgentsSidebar />);
+    await screen.findByText('Task a');
+    vi.useFakeTimers();
+    const thread = { id: 'thread-a', title: 'Task a', title_source: 'manual' as const };
+    await act(async () => {
+      receiveThreadChange({ ...thread, revision: 1, updated_at: '2026-10-14T10:00:00Z' });
+      receiveJobChange({ id: 'a', thread_id: 'thread-a', revision: 1, state: 'running' });
+      await vi.advanceTimersByTimeAsync(PUSH_BATCH_MS);
+    });
+    api.list.mockClear();
+    api.projects.mockClear();
+
+    // Each stored reply bumps the conversation; none of them relabels a row.
+    for (let revision = 2; revision <= 6; revision += 1) {
+      await act(async () => {
+        receiveThreadChange({ ...thread, revision, updated_at: `2026-10-14T10:00:0${revision}Z` });
+        receiveJobChange({ id: 'a', thread_id: 'thread-a', revision, state: 'running' });
+        await vi.advanceTimersByTimeAsync(PUSH_BATCH_MS);
+      });
+    }
+    expect(api.list).not.toHaveBeenCalled();
+    expect(api.projects).not.toHaveBeenCalled();
+
+    await act(async () => vi.advanceTimersByTimeAsync(SIDEBAR_ACTIVITY_REFRESH_MS));
+    expect(api.projects).toHaveBeenCalledOnce();
+    expect(api.list).toHaveBeenCalledTimes(2);
+
+    // A rename is read at once.
+    api.list.mockClear();
+    api.projects.mockClear();
+    await act(async () => {
+      receiveThreadChange({ ...thread, revision: 7, title: 'Renamed' });
+      await vi.advanceTimersByTimeAsync(PUSH_BATCH_MS);
+    });
+    expect(api.projects).toHaveBeenCalledOnce();
+    expect(api.list).toHaveBeenCalledTimes(2);
+  });
 
   it('refreshes a delayed automatic title after the conversation is idle', async () => {
     localStorage.setItem(

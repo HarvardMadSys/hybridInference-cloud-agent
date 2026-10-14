@@ -12,6 +12,7 @@ import { CONVERSATION_RESTORED_EVENT, type ConversationRestoredDetail } from './
 import { latestJob } from './conversationJob';
 import { onAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
 import { onAgentRecordsChanged, PUSH_FALLBACK_POLL_MS, useAgentPushLive } from './agentPush';
+import { changesSidebarRows, SIDEBAR_ACTIVITY_REFRESH_MS } from './sidebarRecordChanges';
 import { GettingStarted } from './GettingStarted';
 import { PaneResizer } from './PaneResizer';
 import { useAgentProjects } from './useAgentJobs';
@@ -60,6 +61,10 @@ export function AgentsSidebar({
     () => ({ userId, updates: new Map<string, SidebarPinUpdate>() }),
     [userId],
   ).updates;
+  const pushedRecords = useMemo(
+    () => ({ userId, shown: new Map<string, string>() }),
+    [userId],
+  ).shown;
   const [refresh, setRefresh] = useState(0);
   const refreshRef = useRef(refresh);
   refreshRef.current = refresh;
@@ -246,16 +251,31 @@ export function AgentsSidebar({
   }, [pathname, reload, reloadProjects]);
   // The owner's change stream says when a conversation or turn changed; the
   // clock below is the backstop for when it is not flowing.
-  useEffect(
-    () =>
-      onAgentRecordsChanged((change) => {
-        // Tool approvals, usage, queues and publication hints belong to detail
-        // panes. Only changed records or a stream gap can affect these lists.
-        if (!change.resync && change.jobs.length === 0 && change.threads.length === 0) return;
+  const activityRefresh = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    const unsubscribe = onAgentRecordsChanged((change) => {
+      // Tool approvals, usage, queues and publication hints belong to detail
+      // panes. Only changed records or a stream gap can affect these lists.
+      if (!change.resync && change.jobs.length === 0 && change.threads.length === 0) return;
+      if (changesSidebarRows(change, pushedRecords)) {
+        if (activityRefresh.current) clearTimeout(activityRefresh.current);
+        activityRefresh.current = null;
         refreshInBackground();
-      }),
-    [refreshInBackground],
-  );
+        return;
+      }
+      // Only activity moved, which can only reorder rows: read it at most
+      // once per window, however many replies land in it.
+      activityRefresh.current ??= setTimeout(() => {
+        activityRefresh.current = null;
+        refreshInBackground();
+      }, SIDEBAR_ACTIVITY_REFRESH_MS);
+    });
+    return () => {
+      unsubscribe();
+      if (activityRefresh.current) clearTimeout(activityRefresh.current);
+      activityRefresh.current = null;
+    };
+  }, [pushedRecords, refreshInBackground]);
   const pushLive = useAgentPushLive();
   const hasActiveProjects = projects.some((project) => project.active_count > 0);
   useEffect(() => {
