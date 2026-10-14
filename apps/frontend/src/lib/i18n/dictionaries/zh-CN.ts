@@ -103,6 +103,7 @@ export const zhCN: Record<TranslationKey, string> = {
   'environment.stop': '停止',
   'environment.openOutput': '打开终端输出',
   'environment.editSaved': '编辑已保存配置',
+  'environment.configure': '配置环境',
 
   'approvals.title': '审批',
   'approvals.navCount': '审批（{count} 项待处理）',

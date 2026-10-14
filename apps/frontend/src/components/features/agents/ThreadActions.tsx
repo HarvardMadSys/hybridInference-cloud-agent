@@ -197,7 +197,7 @@ export function ThreadActions({
                 onEnvironment();
               }}
             >
-              {t('environment.editSaved')}
+              {t('environment.configure')}
             </button>
           )}
           <button

@@ -2247,7 +2247,7 @@ describe('JobDetail', () => {
     expect(screen.queryByRole('menuitem', { name: 'Run details' })).not.toBeInTheDocument();
     expect(screen.getByRole('menuitem', { name: 'Rename' })).toHaveFocus();
     fireEvent.keyDown(document.activeElement!, { key: 'ArrowDown' });
-    expect(screen.getByRole('menuitem', { name: 'Edit saved configuration' })).toHaveFocus();
+    expect(screen.getByRole('menuitem', { name: 'Configure Environment' })).toHaveFocus();
     fireEvent.keyDown(document.activeElement!, { key: 'ArrowDown' });
     expect(screen.getByRole('menuitem', { name: 'Pin' })).toHaveFocus();
     expect(screen.getByRole('menuitem', { name: 'Fork' })).toBeDisabled();

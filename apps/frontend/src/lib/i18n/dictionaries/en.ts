@@ -110,6 +110,7 @@ export const en = {
   'environment.stop': 'Stop',
   'environment.openOutput': 'Open terminal output',
   'environment.editSaved': 'Edit saved configuration',
+  'environment.configure': 'Configure Environment',
 
   'approvals.title': 'Approvals',
   'approvals.navCount': 'Approvals ({count} pending)',
