@@ -161,16 +161,24 @@ class _StagedChangeSet:
 def _remote_branch_tip(
     repo: Path, branch: str, auth_env: dict[str, str] | None = None
 ) -> str | None:
-    """Return the remote tip of ``branch``, or ``None`` when it does not exist."""
+    """Return the remote tip of ``branch``, or ``None`` when it does not exist.
+
+    ``ls-remote`` matches its pattern against the end of every ref, so a ref
+    named ``refs/heads/x/refs/heads/<branch>`` is listed too, and can sort
+    first. Only the exact ref is read.
+    """
+    want = f"refs/heads/{branch}"
     raw = _run_git(
-        ["ls-remote", "origin", "--end-of-options", f"refs/heads/{branch}"],
+        ["ls-remote", "origin", "--end-of-options", want],
         cwd=repo,
         env_extra=auth_env,
         remote=True,
-    ).strip()
-    if not raw:
-        return None
-    return raw.split()[0]
+    )
+    for line in raw.splitlines():
+        sha, _, ref = line.partition("\t")
+        if ref.strip() == want:
+            return sha.strip()
+    return None
 
 
 def _branch_moved(branch: str, tip: str, base_sha: str) -> PublishError:

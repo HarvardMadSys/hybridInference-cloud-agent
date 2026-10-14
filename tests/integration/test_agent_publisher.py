@@ -323,6 +323,21 @@ def test_staged_total_blob_limit_refuses_before_push(origin, tmp_path, monkeypat
     assert _branches(origin[0]) == ["main"]
 
 
+def test_the_branch_tip_is_read_from_the_exact_ref_only(origin, tmp_path):
+    """``ls-remote`` also lists any ref ending in the branch's name, and it can sort first."""
+    from cloud_agent.publisher import _remote_branch_tip
+
+    bare, base_sha = origin
+    clone = tmp_path / "clone"
+    _git(["clone", "--quiet", bare, str(clone)], cwd=tmp_path)
+    _git(["commit", "--quiet", "--allow-empty", "-m", "decoy"], cwd=clone)
+    _git(["push", "--quiet", "origin", "HEAD:refs/heads/a/refs/heads/agent/t1"], cwd=clone)
+
+    assert _remote_branch_tip(clone, "agent/t1") is None
+    _git(["push", "--quiet", "origin", f"{base_sha}:refs/heads/agent/t1"], cwd=clone)
+    assert _remote_branch_tip(clone, "agent/t1") == base_sha
+
+
 def test_publishes_branch_with_applied_patch(origin):
     """A clean patch lands on exactly one agent/<job-id> branch."""
     clone_url, base_sha = origin
