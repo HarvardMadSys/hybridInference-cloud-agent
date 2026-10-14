@@ -498,3 +498,17 @@ async def test_a_recorded_denial_ends_the_kept_grant():
     admission.record(AgentAccessDecision(user_id="u1", allowed=False, permissions=[]))
     await admission.decision(gateway, "u1")
     assert gateway.asked == 2
+
+
+async def test_a_lookup_that_overlaps_a_recorded_denial_does_not_keep_its_grant():
+    gateway = _SlowAccessGateway()
+    admission = deps.AgentAccessAdmission()
+    stale = asyncio.create_task(admission.decision(gateway, "u1"))
+    while gateway.asked == 0:
+        await asyncio.sleep(0)
+    # /v1/session/me is told the access was withdrawn while that lookup waits.
+    admission.record(AgentAccessDecision(user_id="u1", allowed=False, permissions=[]))
+    gateway.release.set()
+    assert (await stale).permits("agent.use")
+    await admission.decision(gateway, "u1")
+    assert gateway.asked == 2
