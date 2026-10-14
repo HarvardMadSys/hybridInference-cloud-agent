@@ -4414,14 +4414,6 @@
             ],
             "title": "Environment Id"
           },
-          "environment_overrides": {
-            "items": {
-              "$ref": "#/components/schemas/EnvironmentVariable"
-            },
-            "maxItems": 50,
-            "title": "Environment Overrides",
-            "type": "array"
-          },
           "environment_revision": {
             "anyOf": [
               {

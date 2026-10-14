@@ -8,7 +8,6 @@ from the same key reused for different content.
 from __future__ import annotations
 
 import hashlib
-import hmac
 import json
 from typing import Any
 
@@ -41,20 +40,14 @@ _HISTORICAL_FIELDS = frozenset(
 
 #: Later fields whose omitted value is ``False`` rather than null.
 _FALSE_WHEN_OMITTED = frozenset({"require_idle"})
-#: Later fields whose omitted value is an empty list rather than null.
-_EMPTY_WHEN_OMITTED = frozenset({"environment_overrides"})
 
 
 def _omitted(key: str, value: Any) -> bool:
     """Whether a field added after the frozen set carries its omitted value."""
-    return (
-        value is None
-        or (key in _FALSE_WHEN_OMITTED and value is False)
-        or (key in _EMPTY_WHEN_OMITTED and not value)
-    )
+    return value is None or (key in _FALSE_WHEN_OMITTED and value is False)
 
 
-def request_fingerprint(kind: str, payload: dict[str, Any], *, sensitive: bool = False) -> str:
+def request_fingerprint(kind: str, payload: dict[str, Any]) -> str:
     """Hash what a submission asked for, so a replayed key must ask the same thing.
 
     A client resending a create or follow-up after a lost response carries the
@@ -76,18 +69,6 @@ def request_fingerprint(kind: str, payload: dict[str, Any], *, sensitive: bool =
     canonical = json.dumps(
         {"kind": kind, **payload}, sort_keys=True, separators=(",", ":"), default=str
     )
-    if sensitive:
-        from cloud_agent.environments import EnvironmentEncryptionError
-        from cloud_agent.settings import setting_env
-        from cloud_agent.source_control import ENV_ENCRYPTION_KEY
-
-        material = setting_env(ENV_ENCRYPTION_KEY, "")
-        if not material:
-            raise EnvironmentEncryptionError("Environment encryption is unavailable")
-        key = hashlib.sha256(
-            b"hybridinference/environment-request/v1\0" + material.encode()
-        ).digest()
-        return hmac.new(key, canonical.encode(), hashlib.sha256).hexdigest()
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 

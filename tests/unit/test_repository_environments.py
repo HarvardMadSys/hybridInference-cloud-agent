@@ -239,19 +239,18 @@ def test_masked_output_is_idempotent_and_user_data_ids_are_still_masked():
     ) == {"native_session_id": "secret", "owner": "secret", "args": {"id": "[secret:TOKEN]"}}
 
 
-def test_secret_request_fingerprint_is_keyed_and_default_fields_are_compatible(monkeypatch):
+def test_task_only_variables_are_refused_and_an_empty_list_is_ignored():
     from cloud_agent.domain.requests import request_fingerprint
+    from cloud_agent.schemas.jobs import AgentJobCreate
 
-    body = {
-        "repo": "org/repo",
-        "environment_overrides": [{"name": "TOKEN", "value": "simple-password"}],
-    }
-    monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "first-test-key")
-    first = request_fingerprint("create", body, sensitive=True)
-    assert first == request_fingerprint("create", body, sensitive=True)
-    assert first != request_fingerprint("create", body)
-    monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "second-test-key")
-    assert request_fingerprint("create", body, sensitive=True) != first
+    base = {"repo": "org/repo", "task_prompt": "work", "model": "test-model"}
+    with pytest.raises(ValueError, match="no longer supported"):
+        AgentJobCreate.model_validate(
+            {**base, "environment_overrides": [{"name": "TOKEN", "value": "simple-password"}]}
+        )
+    # What a page loaded before the removal sends when it set none.
+    legacy = AgentJobCreate.model_validate({**base, "environment_overrides": []})
+    assert legacy == AgentJobCreate.model_validate(base)
     assert request_fingerprint("create", {"repo": "org/repo"}) == request_fingerprint(
         "create",
         {
@@ -259,7 +258,6 @@ def test_secret_request_fingerprint_is_keyed_and_default_fields_are_compatible(m
             "environment_id": None,
             "environment_revision": None,
             "global_revision": None,
-            "environment_overrides": [],
         },
     )
 

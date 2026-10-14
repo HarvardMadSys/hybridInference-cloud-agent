@@ -332,7 +332,6 @@ def environment_limits() -> dict[str, int | str | list[str]]:
         "total_bytes": MAX_ENVIRONMENT_BYTES,
         "script_chars": MAX_SCRIPT_CHARS,
         "import_bytes": MAX_IMPORT_BYTES,
-        "overrides": 50,
         "actions": 20,
         "setup_timeout_seconds": 900,
         "start_timeout_seconds": 120,
