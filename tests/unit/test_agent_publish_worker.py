@@ -28,7 +28,7 @@ from cloud_agent.publish_worker import (
     publish_loop,
     publish_one,
 )
-from cloud_agent.publisher import PublishError, PublishResult
+from cloud_agent.publisher import PublishError, PublishResult, TransientPublishError
 
 pytestmark = pytest.mark.asyncio
 
@@ -78,6 +78,7 @@ class FakeStore(AllCapabilities):
         self.renew_ok = True
         self.import_failed: tuple[int, str] | None = None
         self.import_completed: tuple[int, str] | None = None
+        self.pushes: list[tuple[int, int, str]] = []
         self._record_ok = record_ok
 
     async def claim_for_publish(self):
@@ -95,6 +96,12 @@ class FakeStore(AllCapabilities):
         assert snapshot_id == 9
         self.renewed_expected_attempts.append(expected_publish_attempt_count)
         return self.renew_ok
+
+    async def record_snapshot_push(
+        self, *, snapshot_id: int, expected_publish_attempt_count: int, commit_sha: str
+    ) -> bool:
+        self.pushes.append((snapshot_id, expected_publish_attempt_count, commit_sha))
+        return True
 
     async def record_snapshot_publish(
         self,
@@ -166,7 +173,7 @@ def _patch_pr(monkeypatch, url: str = "https://github.com/o/n/pull/7"):
         "patch rejected after apply: credential-shaped content in 'connection reset.md'",
     ],
 )
-def test_a_rejected_patch_is_never_retried_whatever_its_paths_say(detail):
+async def test_a_rejected_patch_is_never_retried_whatever_its_paths_say(detail):
     """A path quoted in the detail must not read as an HTTP status or a disconnect."""
     from cloud_agent.publisher import PatchRejected
 
@@ -180,6 +187,48 @@ async def test_empty_queue_is_a_no_op():
     store = FakeStore(None)
     assert await publish_one(store, credential=GitHubCredential("t")) is None
     assert store.snapshot_recorded is None and store.snapshot_failed is None
+
+
+@pytest.mark.parametrize(
+    ("headers", "body"),
+    [
+        ({"retry-after": "60"}, {"message": "Forbidden"}),
+        ({"x-ratelimit-remaining": "0"}, {"message": "Forbidden"}),
+        ({}, {"message": "You have exceeded a secondary rate limit."}),
+    ],
+)
+async def test_a_rate_limited_403_from_github_is_retried(headers, body):
+    """GitHub answers its rate limits with 403 as well as 429; waiting lifts them."""
+    limited = httpx.Response(403, headers=headers, json=body)
+    assert isinstance(
+        publish_worker._github_api_error("the draft PR", limited), TransientPublishError
+    )
+    forbidden = httpx.Response(403, json={"message": "Resource not accessible by integration"})
+    assert not isinstance(
+        publish_worker._github_api_error("the draft PR", forbidden), TransientPublishError
+    )
+
+
+async def test_a_push_stays_recorded_when_its_pull_request_step_fails(monkeypatch):
+    """The next publication from this base receives it as the group's own push."""
+    store = FakeStore(dict(_JOB, own_pushes=["c0ffee"]))
+    seen: dict[str, Any] = {}
+
+    def publish(**kwargs):
+        seen.update(kwargs)
+        return PublishResult(branch="agent/athr_1", commit_sha="pushed", changed_files=["x"])
+
+    async def refuse(**_kwargs):
+        raise PublishError("GitHub refused the draft PR (403)")
+
+    monkeypatch.setattr(publish_worker, "publish_patch", publish)
+    monkeypatch.setattr(publish_worker, "ensure_draft_pull_request", refuse)
+
+    assert await publish_one(store, credential=GitHubCredential("t")) is None
+
+    assert seen["own_pushes"] == ("c0ffee",)
+    assert store.pushes == [(9, 0, "pushed")]
+    assert store.snapshot_failed is not None and store.snapshot_recorded is None
 
 
 async def test_successful_publish_records_the_pr(monkeypatch):

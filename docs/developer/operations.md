@@ -2088,9 +2088,14 @@ captured when a later turn settles, supersedes it: every snapshot is the whole
 diff from the last published commit, so it carries the failed changes too, and
 is refused in turn if it still holds what was refused. Snapshots still publish
 in epoch order; only a failed one stops holding the later ones back. If the
-failed attempt had already pushed its commit to the `agent/<thread>` branch, a
-later snapshot with different changes is refused as a moved branch until that
-branch is deleted; the platform never force-pushes.
+failed attempt had already pushed its commit to the `agent/<thread>` branch
+(the draft-PR step failed after the push), that commit is recorded as the
+group's own before the PR step, and the later snapshot builds on it: the branch
+fast-forwards to the later snapshot's tree and the draft PR is opened then. Any
+other commit on the branch, and a push the publisher crashed before recording,
+is still refused as a moved branch until that branch is deleted; the platform
+never force-pushes. A GitHub 403 that reports a rate limit is retried like a
+429.
 
 Disk-pressure admission and alerting and a non-mutating pre-prompt context
 fingerprint remain deferred. Local functional checks do not establish production

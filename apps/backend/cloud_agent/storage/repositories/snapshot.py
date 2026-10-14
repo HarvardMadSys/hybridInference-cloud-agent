@@ -607,7 +607,17 @@ class PostgresSnapshotRepository:
                        ), '[]'::jsonb) AS members,
                        j.thread_id, j.parent_job_id, j.user_id, t.repo,
                        j.task_prompt, j.metadata, j.model,
-                       prior.published_pr_url AS parent_pr_url
+                       prior.published_pr_url AS parent_pr_url,
+                       COALESCE((
+                           SELECT jsonb_agg(
+                               pushed.published_commit_sha ORDER BY pushed.workspace_epoch
+                           )
+                           FROM agent_sandbox_snapshots pushed
+                           WHERE pushed.sandbox_id = s.sandbox_id
+                             AND pushed.base_sha = s.base_sha
+                             AND pushed.state <> 'published'
+                             AND pushed.published_commit_sha IS NOT NULL
+                       ), '[]'::jsonb) AS own_pushes
                 FROM agent_sandbox_snapshots s
                 JOIN agent_sandboxes g ON g.id = s.sandbox_id
                 JOIN agent_jobs j ON j.id = s.anchor_job_id
@@ -697,6 +707,7 @@ class PostgresSnapshotRepository:
                     "model": snapshot["model"],
                     "metadata": load_json(snapshot["metadata"]),
                     "patch": snapshot["patch"],
+                    "own_pushes": load_json(snapshot["own_pushes"]) or [],
                 }
             return None
 
@@ -830,6 +841,35 @@ class PostgresSnapshotRepository:
                     },
                 )
         return True
+
+    async def record_snapshot_push(
+        self, *, snapshot_id: int, expected_publish_attempt_count: int, commit_sha: str
+    ) -> bool:
+        """Remember the commit this claim pushed, before its pull request exists.
+
+        The push is a remote effect the pull request step cannot undo. If that
+        step then fails, the snapshot fails or waits with its commit on the
+        branch while the group's published base stays where it was, and the
+        next capture is cut from that base again. Recorded here, the commit is
+        handed to that next publication as the platform's own (``own_pushes``
+        on its claim), which may build on it instead of reading it as somebody
+        else's push. ``published_commit_sha`` holds it; only ``published``
+        makes it the group's base.
+        """
+        async with self._pool.acquire() as conn:
+            recorded = await conn.fetchval(
+                """
+                UPDATE agent_sandbox_snapshots
+                SET published_commit_sha = $3, updated_at = NOW()
+                WHERE id = $1 AND state = 'publishing'
+                  AND publish_attempt_count = $2
+                RETURNING id
+                """,
+                snapshot_id,
+                expected_publish_attempt_count,
+                commit_sha,
+            )
+        return recorded is not None
 
     async def record_snapshot_publish(
         self,
@@ -995,7 +1035,7 @@ class PostgresSnapshotRepository:
             row = await conn.fetchrow(
                 """
                 SELECT latest.id AS snapshot_id, latest.sandbox_id,
-                       latest.anchor_job_id, latest.published_commit_sha,
+                       latest.anchor_job_id, latest.published_commit_sha, latest.base_sha,
                        g.origin_thread_id, g.generation, g.container_id,
                        g.runtime_id, g.runtime_version, g.sandbox_image_digest,
                        g.memory_limit, g.cpu_limit, g.disk_limit_mib, g.stop_timeout_seconds,
@@ -1021,7 +1061,7 @@ class PostgresSnapshotRepository:
                 FROM agent_sandboxes g
                 JOIN LATERAL (
                     SELECT s.id, s.sandbox_id, s.anchor_job_id,
-                           s.published_commit_sha, s.retry_at
+                           s.published_commit_sha, s.base_sha, s.retry_at
                     FROM agent_sandbox_snapshots s
                     WHERE s.sandbox_id = g.id AND s.state = 'published'
                       AND s.published_commit_sha = g.published_base_sha
