@@ -699,7 +699,6 @@ export const en = {
   'temporaryWorkspace.download': 'Download workspace',
   'temporaryWorkspace.downloading': 'Preparing download…',
   'temporaryWorkspace.downloadFailed': 'Could not download the workspace. {message}',
-  'temporaryWorkspace.details': 'About this workspace',
 
   // ── Composer commands ───────────────────────────────────────────────────
   'commands.title': 'Commands',

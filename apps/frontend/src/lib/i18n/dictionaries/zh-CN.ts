@@ -612,7 +612,6 @@ export const zhCN: Record<TranslationKey, string> = {
   'temporaryWorkspace.download': '下载工作区',
   'temporaryWorkspace.downloading': '正在准备下载…',
   'temporaryWorkspace.downloadFailed': '无法下载工作区。{message}',
-  'temporaryWorkspace.details': '关于工作区',
   'composer.repository': '仓库',
   'composer.repositoryPlaceholder': '选择仓库',
   'composer.repositorySearch': '搜索仓库…',

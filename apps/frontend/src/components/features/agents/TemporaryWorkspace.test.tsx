@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
 
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { downloadAgentWorkspace } from '@/lib/api/agents';
@@ -10,7 +10,7 @@ import { TEMPORARY_WORKSPACE } from '@/lib/temporaryWorkspace';
 
 import { projectLabel, projectTitle } from './conversations';
 import { OutcomeCard } from './job-detail/RunOutcome';
-import { TemporaryWorkspaceBadge, WorkspaceDownloadButton } from './TemporaryWorkspace';
+import { WorkspaceDownloadButton } from './TemporaryWorkspace';
 import type { AgentJob } from './types';
 
 vi.mock('@/components/providers', async () => {
@@ -21,9 +21,6 @@ vi.mock('@/components/providers', async () => {
 });
 
 vi.mock('@/lib/api/agents', () => ({ downloadAgentWorkspace: vi.fn() }));
-
-const NOTICE =
-  'Files stay in this conversation’s cloud workspace and are not automatically saved to GitHub. Download important files before deleting the conversation or its workspace.';
 
 function job(overrides: Partial<AgentJob> = {}): AgentJob {
   return {
@@ -125,43 +122,6 @@ describe('WorkspaceDownloadButton', () => {
     );
     expect(screen.getByRole('button', { name: 'Download workspace' })).toBeEnabled();
     expect(click).not.toHaveBeenCalled();
-  });
-});
-
-describe('TemporaryWorkspaceBadge', () => {
-  afterEach(() => cleanup());
-
-  it('says what a temporary workspace keeps, beside the download', () => {
-    render(<TemporaryWorkspaceBadge jobId="ajob_1" />);
-    const badge = screen.getByRole('button', { name: 'Start from scratch' });
-    expect(badge).toHaveAttribute('aria-expanded', 'false');
-
-    fireEvent.click(badge);
-
-    const details = screen.getByRole('dialog', { name: 'About this workspace' });
-    expect(badge).toHaveAttribute('aria-expanded', 'true');
-    expect(details).toHaveTextContent(NOTICE);
-    expect(within(details).getByRole('button', { name: 'Download workspace' })).toBeEnabled();
-  });
-
-  it('closes on Escape and on a press outside it', () => {
-    render(
-      <>
-        <TemporaryWorkspaceBadge jobId="ajob_1" />
-        <p>elsewhere</p>
-      </>,
-    );
-    const badge = screen.getByRole('button', { name: 'Start from scratch' });
-
-    fireEvent.click(badge);
-    fireEvent.keyDown(document, { key: 'Escape' });
-    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
-
-    fireEvent.click(badge);
-    fireEvent.pointerDown(within(screen.getByRole('dialog')).getByRole('button'));
-    expect(screen.getByRole('dialog')).toBeInTheDocument();
-    fireEvent.pointerDown(screen.getByText('elsewhere'));
-    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
 });
 

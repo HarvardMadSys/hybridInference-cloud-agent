@@ -11,8 +11,8 @@ import { downloadAgentWorkspace } from '@/lib/api/agents';
 // A temporary workspace has no repository: nothing it does is published, and
 // once its sandbox is gone so are its files. The owner is told once, before the
 // first message of the first one they start, and is asked to say they read it;
-// after that the conversation's own badge carries the same words and the
-// download. The acknowledgement is remembered per account, in this browser,
+// after that each turn's result offers the workspace download.
+// The acknowledgement is remembered per account, in this browser,
 // like Skip in getting-started: a new browser asks once more, which costs a
 // click.
 
@@ -176,61 +176,6 @@ export function WorkspaceDownloadButton({
         <span role="alert" className="text-xs text-red-600 dark:text-red-400">
           {t('temporaryWorkspace.downloadFailed', { message: error })}
         </span>
-      ) : null}
-    </span>
-  );
-}
-
-/**
- * The conversation's mark where a repository would be named: what a temporary
- * workspace keeps, said again whenever it is opened, beside the download.
- */
-export function TemporaryWorkspaceBadge({ jobId }: { jobId: string }) {
-  const t = useT();
-  const [open, setOpen] = useState(false);
-  const panelId = useId();
-  const container = useRef<HTMLSpanElement>(null);
-
-  useEffect(() => {
-    if (!open) return undefined;
-    function onPointerDown(event: PointerEvent) {
-      if (!container.current?.contains(event.target as Node)) setOpen(false);
-    }
-    function onKeyDown(event: KeyboardEvent) {
-      if (event.key === 'Escape') setOpen(false);
-    }
-    document.addEventListener('pointerdown', onPointerDown);
-    document.addEventListener('keydown', onKeyDown);
-    return () => {
-      document.removeEventListener('pointerdown', onPointerDown);
-      document.removeEventListener('keydown', onKeyDown);
-    };
-  }, [open]);
-
-  return (
-    <span ref={container} className="relative inline-flex min-w-0">
-      <button
-        type="button"
-        aria-expanded={open}
-        aria-controls={open ? panelId : undefined}
-        title={t('temporaryWorkspace.details')}
-        onClick={() => setOpen((value) => !value)}
-        className="ui-focus-ring inline-flex min-w-0 items-center gap-1 rounded-md border border-amber-300/70 bg-amber-50 px-1.5 py-0.5 text-[11px] font-medium text-amber-800 transition-colors hover:bg-amber-100 dark:border-amber-400/30 dark:bg-amber-400/10 dark:text-amber-200 dark:hover:bg-amber-400/15"
-      >
-        <span className="truncate">{t('temporaryWorkspace.name')}</span>
-      </button>
-      {open ? (
-        <div
-          id={panelId}
-          role="dialog"
-          aria-label={t('temporaryWorkspace.details')}
-          className="absolute left-0 top-full z-30 mt-1.5 w-72 max-w-[calc(100vw-2rem)] rounded-xl border border-gray-200 bg-white p-3 text-left shadow-card dark:border-white/10 dark:bg-gray-900"
-        >
-          <p className="text-xs leading-5 text-gray-600 dark:text-gray-300">
-            {t('temporaryWorkspace.notice')}
-          </p>
-          <WorkspaceDownloadButton jobId={jobId} className="mt-2.5" />
-        </div>
       ) : null}
     </span>
   );

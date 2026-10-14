@@ -5,7 +5,6 @@ import Link from 'next/link';
 import type { RefObject } from 'react';
 import { ActivityIcon } from '../ActivityWindow';
 import { ThreadActions } from '../ThreadActions';
-import { TemporaryWorkspaceBadge } from '../TemporaryWorkspace';
 import { isTemporaryWorkspace } from '@/lib/temporaryWorkspace';
 import {
   TranscriptPresentationControl,
@@ -74,9 +73,7 @@ export function JobDetailHeader({
             >
               {title}
             </h1>
-            {isTemporaryWorkspace(job.repo) ? (
-              <TemporaryWorkspaceBadge jobId={job.id} />
-            ) : (
+            {!isTemporaryWorkspace(job.repo) && (
               <span className="min-w-0 truncate text-xs text-muted" title={job.repo}>
                 {job.repo}
               </span>

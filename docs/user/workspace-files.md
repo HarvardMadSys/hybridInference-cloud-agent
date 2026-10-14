@@ -43,9 +43,8 @@ text; downloads do not execute them in the application. Oversized files show the
 preview limit instead of offering a partial download or copy.
 
 A conversation started with **Start from scratch** has no linked repository and
-does not automatically publish its files. **Download workspace** is offered in the
-**Start from scratch** label beside the conversation title and on each turn's
-result, and saves the workspace files as one `.tar.gz`, excluding `.git`
+does not automatically publish its files. **Download workspace** is offered on
+each turn's result and saves the workspace files as one `.tar.gz`, excluding `.git`
 directories and metadata files. Git data stays in the cloud workspace. Other
 hidden files, including `.gitignore` and `.github`, are included; `.gitignore`
 does not filter the download. A workspace larger than the server's download
