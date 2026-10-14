@@ -2676,6 +2676,40 @@ async def test_recording_a_client_registration_moves_the_oauth_generation(
     assert updated["authorization_epoch"] == connection["authorization_epoch"]
 
 
+async def test_a_client_secret_stays_with_the_client_it_was_issued_to(
+    store: Storage,
+) -> None:
+    """Naming another client without a secret must not lend it the old one's."""
+    connection = await _connect(store, _OWNER, auth_kind="oauth", refresh_token="rt")
+    assert await store.mcp.set_mcp_client_registration(
+        connection_id=connection["id"],
+        user_id=_OWNER,
+        client_id="client-a",
+        client_secret_ciphertext="secret-a",
+    )
+    # The same client again, its secret not retyped: kept.
+    assert await store.mcp.set_mcp_client_registration(
+        connection_id=connection["id"],
+        user_id=_OWNER,
+        client_id="client-a",
+        client_secret_ciphertext=None,
+    )
+    kept = await store.mcp.get_mcp_connection(connection_id=connection["id"])
+    assert kept is not None
+    assert kept["client_secret_ciphertext"] == "secret-a"
+    # A public client: client A's secret goes with client A.
+    assert await store.mcp.set_mcp_client_registration(
+        connection_id=connection["id"],
+        user_id=_OWNER,
+        client_id="client-b",
+        client_secret_ciphertext=None,
+    )
+    switched = await store.mcp.get_mcp_connection(connection_id=connection["id"])
+    assert switched is not None
+    assert switched["auth_config"]["client_id"] == "client-b"
+    assert switched["client_secret_ciphertext"] is None
+
+
 async def test_a_client_identity_written_with_a_credential_reaches_the_refresh(
     store: Storage, monkeypatch: pytest.MonkeyPatch
 ) -> None:

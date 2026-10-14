@@ -843,13 +843,21 @@ class PostgresMcpConnectionRepository:
         is being reached*. The OAuth generation does move, because an
         authorization already in flight was started by the previous client and
         its callback must not complete the flow that replaces it.
+
+        A secret belongs to one client. Naming the same client again without
+        one keeps it; naming another client drops it, so a public client can
+        be adopted and the previous client's secret is never sent as the new
+        one's.
         """
         async with self._pool.acquire() as conn:
             updated = await conn.fetchval(
                 """
                 UPDATE agent_mcp_connections SET
                     auth_config = auth_config || jsonb_build_object('client_id', $3::text),
-                    client_secret_ciphertext = COALESCE($4, client_secret_ciphertext),
+                    client_secret_ciphertext = CASE
+                        WHEN $4::text IS NOT NULL THEN $4::text
+                        WHEN auth_config->>'client_id' IS DISTINCT FROM $3::text THEN NULL
+                        ELSE client_secret_ciphertext END,
                     oauth_generation = oauth_generation + 1,
                     updated_at = NOW()
                 WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL

@@ -325,9 +325,12 @@ class FakeStore(AllCapabilities):
         row = self.connections.get(connection_id)
         if row is None or row["user_id"] != user_id:
             return False
+        previous = (row["auth_config"] or {}).get("client_id")
         row["auth_config"] = {**(row["auth_config"] or {}), "client_id": client_id}
         if client_secret_ciphertext:
             row["client_secret_ciphertext"] = client_secret_ciphertext
+        elif previous != client_id:
+            row["client_secret_ciphertext"] = None
         row["oauth_generation"] += 1
         return True
 
