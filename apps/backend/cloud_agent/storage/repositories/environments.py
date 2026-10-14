@@ -600,12 +600,20 @@ class PostgresEnvironmentRepository:
             )
 
     async def _bind_environment(
-        self, conn: Any, user_id: str, repo: str, selection: dict[str, Any]
+        self, conn: Any, user_id: str, repo: str | None, selection: dict[str, Any]
     ) -> tuple[str, str | None]:
-        """Freeze a snapshot inside the transaction that creates its work item."""
+        """Freeze a snapshot inside the transaction that creates its work item.
+
+        A null ``repo`` is a temporary workspace. Environments belong to one
+        repository, so it binds only the owner's global variables and this
+        task's own overrides.
+        """
         await self._environment_lock(conn, user_id)
         environment_id = selection.get("environment_id")
-        if not selection.get("environment_id_provided", False):
+        if repo is None:
+            if environment_id:
+                raise EnvironmentNotFound("A temporary workspace has no repository environment")
+        elif not selection.get("environment_id_provided", False):
             environment_id = await conn.fetchval(
                 "SELECT environment_id FROM agent_repository_environment_defaults WHERE user_id=$1 AND repo=$2",
                 user_id,

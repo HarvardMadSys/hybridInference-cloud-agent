@@ -351,6 +351,8 @@ async def _reserve_shared_chat(
     fork_helper_version: str | None = None,
     disk_limit_mib: int = 0,
     environment_selection: dict | None = None,
+    repo: str | None = "example-org/example-repo",
+    base_sha: str = "a" * 40,
 ) -> tuple[dict, dict, dict]:
     """Create, claim, and reserve one capability-gated shared-live chat."""
     await store.host_pool.register_host(
@@ -367,7 +369,8 @@ async def _reserve_shared_chat(
     assert online is not None and online["status"] == "online"
     job = await _create_job(
         store,
-        base_sha="a" * 40,
+        repo=repo,
+        base_sha=base_sha,
         metadata=metadata,
         plugins=plugins,
         task_prompt=task_prompt,

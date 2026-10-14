@@ -74,7 +74,7 @@ across restarts. The inventory below records built-in defaults and the
 environment names used for an initial import. Once a setting is registered, the
 service no longer reads it continuously from `.env`.
 
-Run `alembic upgrade head` (through `0069_agent_memories`) before
+Run `alembic upgrade head` (through `0070_temporary_workspaces`) before
 starting this release. The updated worker claim query requires
 `agent_jobs.claim_retry_at`, and chat plugin selections require
 `agent_threads.plugins`; existing queued jobs remain immediately eligible and
@@ -404,6 +404,7 @@ additional environment names supply initial local values only:
 | `AGENT_WORKSPACE_FILE_PREVIEW_MAX_KIB` | **NEW** | 512 KiB for one file preview. |
 | `AGENT_WORKSPACE_COMMAND_OUTPUT_MAX_MIB` | **NEW** | 2 MiB of workspace command output. |
 | `AGENT_WORKSPACE_DIRECTORY_MAX_ENTRIES` | **NEW** | 5,000 entries per directory listing. |
+| `AGENT_WORKSPACE_DOWNLOAD_MAX_MIB` | **NEW** | 1,024 MiB for one whole-workspace download, measured before compression. |
 | `AGENT_TERMINAL_BUFFER_MAX_MIB` / `AGENT_TERMINAL_BUFFER_MAX_EVENTS` | **NEW** | 2 MiB / 4,096 events retained for terminal reconnects. |
 | `AGENT_TERMINAL_OUTPUT_MAX_MIB` | **NEW** | 32 MiB of output over one terminal's lifetime. |
 | `AGENT_TERMINAL_INPUT_MAX_KIB` | **NEW** | 64 KiB of input per terminal request. |

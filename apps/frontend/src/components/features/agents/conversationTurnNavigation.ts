@@ -240,6 +240,7 @@ const FOLLOW_UP_INTERNAL_PHASES = new Set([
   'init',
   'system',
   'checked_out',
+  'workspace_created',
   'workspace_reused',
   'context_restored',
   'setup',

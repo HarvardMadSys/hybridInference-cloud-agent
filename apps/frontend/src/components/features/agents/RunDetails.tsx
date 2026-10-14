@@ -7,6 +7,7 @@
 // a specific turn and reads that job only: its own status, its own attempts,
 // its own ledger snapshot.
 
+import { apiRepo, projectKey } from '@/lib/temporaryWorkspace';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useT } from '@/components/providers';
@@ -375,7 +376,8 @@ export function RunDetails({
   // fresh job/thread, so it is offered only for a failed run and only when the
   // turn exposed enough to recreate it. A cancelled run is deliberately not
   // offered: its follow-up continues from saved intermediate changes instead.
-  const repo = job?.repo ?? turnFallback?.repo;
+  // A project key, so a temporary workspace (no repository) restarts as one.
+  const repo = job ? projectKey(job.repo) : turnFallback?.repo;
   const prompt = (job?.task_prompt ?? turnFallback?.prompt ?? '').trim();
   const model = job?.model ?? turnFallback?.model;
   const restartable = state === 'failed' && Boolean(repo && prompt && model) && !restarting;
@@ -386,7 +388,7 @@ export function RunDetails({
     setRestartError(null);
     try {
       const restart = await createAgentJob({
-        repo,
+        repo: apiRepo(repo),
         task_prompt: prompt,
         model,
         ...((job?.reasoning_effort ?? turnFallback?.reasoningEffort)

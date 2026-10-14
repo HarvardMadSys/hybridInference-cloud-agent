@@ -1,6 +1,8 @@
 'use client';
 
+import { useT } from '@/components/providers';
 import { getAgentJobGit, type AgentGitWorkspaceApi } from '@/lib/api/agents';
+import { isTemporaryWorkspace } from '@/lib/temporaryWorkspace';
 import { useEffect, useId, useMemo, useState } from 'react';
 import { ownerFailureMessage, toDiffFileDetails } from '../adapt';
 import type { AgentJob } from '../types';
@@ -26,6 +28,7 @@ export function GitPanel({
   onReview?: () => void;
   onWatchPr?: () => void;
 }) {
+  const t = useT();
   const [view, setView] = useState<GitView>('diff');
   const gitId = useId();
   const [live, setLive] = useState<AgentGitWorkspaceApi | null>(null);
@@ -81,7 +84,7 @@ export function GitPanel({
       <header className="flex flex-wrap items-center gap-3 border-b border-gray-200 dark:border-white/10 pb-3">
         <div className="min-w-0">
           <p className="truncate text-sm font-medium text-gray-800 dark:text-gray-200">
-            {job.repo}
+            {isTemporaryWorkspace(job.repo) ? t('temporaryWorkspace.name') : job.repo}
           </p>
           <p className="truncate font-mono text-xs text-gray-400 dark:text-gray-500">
             {live?.available ? live.branch || 'detached HEAD' : job.branch}

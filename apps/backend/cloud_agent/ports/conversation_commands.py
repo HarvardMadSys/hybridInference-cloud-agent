@@ -22,7 +22,7 @@ class ConversationCommands(Protocol):
         self,
         *,
         user_id: str,
-        repo: str,
+        repo: str | None,
         task_prompt: str,
         runtime: str,
         model: str,

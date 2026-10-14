@@ -39,7 +39,8 @@ class ClaimedJob:
     thread_id: str
     attempt_id: int
     attempt_no: int
-    repo: str
+    #: Null for a temporary workspace, which starts empty instead of cloning.
+    repo: str | None
     base_sha: str | None
     task_prompt: str
     runtime: str

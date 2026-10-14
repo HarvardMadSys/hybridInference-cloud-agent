@@ -3,60 +3,35 @@
 import Link from 'next/link';
 import { useT } from '@/components/providers';
 
-// Inline onboarding shown above the composer. Keeping the task shape visible
-// gives the user context for why GitHub is needed without pretending a
-// repository can already be selected.
+// A notice above the composer for what GitHub still needs before a repository
+// can be chosen. A task does not wait on it: without a repository it runs in a
+// temporary workspace, so connecting is offered beside the composer instead.
 //
-// Two steps, told apart: connecting GitHub at all, and — once connected —
-// giving the App a repository. They used to be one message, so a user who had
-// connected but whose App reached no repository was asked to connect again.
+// By default it is the one step left once GitHub is connected: giving the App
+// a repository, which is not a connection to make again.
 //
 // `unavailable` is the deployment's GitHub App failing to load, which the
-// service retries on its own (issue #47). There is nothing for the user to
-// connect or ask an administrator for, so it says so and offers no action.
-//
-// `highlight` is the composer pointing here: the owner tried to run a task
-// written before connecting, and this card is the step still missing.
+// service retries on its own (issue #47). Nothing starts meanwhile, and there
+// is nothing for the user to connect or ask an administrator for, so it says
+// so and offers no action.
 export function ConnectSourceControl({
-  installUrl,
   unavailable = false,
-  step = 'connect',
   onAction,
   pending = false,
-  highlight = false,
 }: {
-  installUrl: string | null;
   unavailable?: boolean;
-  /** `repositories`: connected, but the App can reach no repository yet. */
-  step?: 'connect' | 'repositories';
-  /** Go to GitHub for this step directly; without it, the Integrations page. */
+  /** Go to GitHub for repository access directly; without it, the Integrations page. */
   onAction?: () => void;
   pending?: boolean;
-  highlight?: boolean;
 }) {
   const t = useT();
-  const repositories = step === 'repositories';
   const title = unavailable
     ? t('connect.titleTemporarilyUnavailable')
-    : repositories
-      ? t('connect.titleRepositories')
-      : installUrl
-        ? t('connect.title')
-        : t('connect.titleUnavailable');
+    : t('connect.titleRepositories');
   const body = unavailable
     ? t('connect.bodyTemporarilyUnavailable')
-    : repositories
-      ? t('connect.bodyRepositories')
-      : installUrl
-        ? t('connect.body')
-        : t('connect.bodyUnavailable');
-  const actionLabel = pending
-    ? t('connect.leaving')
-    : repositories
-      ? t('connect.actionRepositories')
-      : installUrl
-        ? t('connect.action')
-        : t('connect.actionUnavailable');
+    : t('connect.bodyRepositories');
+  const actionLabel = pending ? t('connect.leaving') : t('connect.actionRepositories');
   const actionClass =
     'inline-flex shrink-0 items-center justify-center gap-2 rounded-lg bg-gray-900 dark:bg-gray-100 px-3.5 py-2 text-[13px] font-medium text-white dark:text-gray-900 hover:bg-gray-800 dark:hover:bg-white disabled:cursor-wait disabled:opacity-70';
   const arrow = (
@@ -74,12 +49,7 @@ export function ConnectSourceControl({
   return (
     <div
       role="status"
-      data-highlighted={highlight || undefined}
-      className={`flex flex-col gap-3 rounded-xl border px-4 py-3.5 transition-shadow sm:flex-row sm:items-center ${
-        highlight
-          ? 'border-crimson/30 bg-white shadow-[0_0_0_4px_rgba(165,28,48,0.08)] dark:border-crimson-light/40 dark:bg-gray-900'
-          : 'border-gray-200 bg-gray-50 dark:border-white/10 dark:bg-gray-950'
-      }`}
+      className="flex flex-col gap-3 rounded-xl border border-gray-200 bg-gray-50 px-4 py-3.5 sm:flex-row sm:items-center dark:border-white/10 dark:bg-gray-950"
     >
       <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-white dark:bg-gray-900 text-gray-700 dark:text-gray-300 shadow-sm ring-1 ring-gray-200 dark:ring-white/10">
         <svg className="h-4 w-4" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
@@ -92,7 +62,7 @@ export function ConnectSourceControl({
           {body}
         </p>
       </div>
-      {unavailable ? null : onAction && (installUrl || repositories) ? (
+      {unavailable ? null : onAction ? (
         <button type="button" onClick={onAction} disabled={pending} className={actionClass}>
           {actionLabel}
           {arrow}

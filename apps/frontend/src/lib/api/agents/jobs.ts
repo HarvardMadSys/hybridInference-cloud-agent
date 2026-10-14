@@ -41,7 +41,8 @@ export interface AgentJobApi {
   /** Actual execution timestamps, matching duration_ms's selected attempt. */
   started_at?: string | null;
   finished_at?: string | null;
-  repo: string;
+  /** Null for a temporary workspace, which has no repository. */
+  repo: string | null;
   task_prompt: string;
   runtime: string;
   model: string;
@@ -156,7 +157,8 @@ export interface CreateAgentJobRequest {
   mcp_bindings?: McpBindingInputApi[];
   /** Omitted means no goal: nothing continues without the owner asking again. */
   goal?: GoalInputApi;
-  repo: string;
+  /** Null starts a temporary workspace: an empty sandbox whose work is never published. */
+  repo: string | null;
   task_prompt: string;
   model: string;
   runtime?: string;

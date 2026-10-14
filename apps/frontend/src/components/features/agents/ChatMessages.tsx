@@ -84,6 +84,7 @@ const FIRST_RUN_CAPTIONS: Partial<Record<string, TranslationKey>> = {
   started: 'firstRun.started',
   workspace_preparing: 'firstRun.preparing',
   checked_out: 'firstRun.checkedOut',
+  workspace_created: 'firstRun.workspaceCreated',
   publishing: 'firstRun.publishing',
   shared_snapshot_publishing: 'firstRun.publishing',
 };

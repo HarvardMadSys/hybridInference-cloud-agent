@@ -35,7 +35,8 @@ class AgentSessionResponse(BaseModel):
 class AgentSessionProjectCount(BaseModel):
     """A project facet after archive, title and state filters, before repo."""
 
-    repo: str
+    #: Null is the temporary workspaces: conversations with no repository.
+    repo: str | None
     count: int
 
 
@@ -95,7 +96,8 @@ class AgentConversationListResponse(BaseModel):
 class AgentProject(BaseModel):
     """One repo the caller has run tasks in, summarized for the task tree."""
 
-    repo: str
+    #: Null groups the caller's temporary workspaces, which have no repository.
+    repo: str | None
     # Conversations, not turns — the sidebar shows one row per conversation.
     task_count: int
     # Non-terminal jobs, so a collapsed project can still show live work.
@@ -156,7 +158,8 @@ class AgentThreadResponse(BaseModel):
     """Conversation context and runs for the thread containing a job."""
 
     thread_id: str
-    repo: str
+    #: Null for a temporary workspace.
+    repo: str | None
     title: str
     messages: list[AgentThreadMessageResponse]
     jobs: list[AgentJobResponse]

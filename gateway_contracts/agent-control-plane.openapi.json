@@ -642,8 +642,15 @@
             "type": "string"
           },
           "repo": {
-            "title": "Repo",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo"
           },
           "state": {
             "title": "State",
@@ -825,8 +832,15 @@
             "type": "string"
           },
           "repo": {
-            "title": "Repo",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo"
           },
           "state": {
             "title": "State",
@@ -936,8 +950,15 @@
             "title": "Reasoning Effort"
           },
           "repo": {
-            "title": "Repo",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo"
           },
           "resource_summary": {
             "anyOf": [
@@ -1504,8 +1525,15 @@
             "title": "Reasoning Effort"
           },
           "repo": {
-            "title": "Repo",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo"
           },
           "resource_summary": {
             "anyOf": [
@@ -1886,8 +1914,15 @@
             "type": "string"
           },
           "repo": {
-            "title": "Repo",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo"
           },
           "resident_slot_capacity": {
             "default": 8,
@@ -2860,8 +2895,15 @@
             "title": "Reason"
           },
           "repo": {
-            "title": "Repo",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo"
           },
           "runtime": {
             "title": "Runtime",
@@ -4480,11 +4522,18 @@
             "title": "Reasoning Effort"
           },
           "repo": {
-            "description": "Target repository, e.g. 'owner/name'.",
-            "maxLength": 140,
-            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,38}/[A-Za-z0-9][A-Za-z0-9._-]{0,99}$",
-            "title": "Repo",
-            "type": "string"
+            "anyOf": [
+              {
+                "maxLength": 140,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,38}/[A-Za-z0-9][A-Za-z0-9._-]{0,99}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Target repository, e.g. 'owner/name'. An explicit null starts a temporary workspace: the sandbox starts empty, and nothing it does is published.",
+            "title": "Repo"
           },
           "runtime": {
             "default": "claude-code",
@@ -5057,8 +5106,15 @@
             "title": "Reasoning Effort"
           },
           "repo": {
-            "title": "Repo",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo"
           },
           "resident_state": {
             "anyOf": [
@@ -5806,8 +5862,15 @@
             "type": "integer"
           },
           "repo": {
-            "title": "Repo",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo"
           },
           "task_count": {
             "title": "Task Count",
@@ -6489,8 +6552,15 @@
             "type": "integer"
           },
           "repo": {
-            "title": "Repo",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo"
           }
         },
         "required": [
@@ -7339,8 +7409,15 @@
             "title": "Queue Paused Reason"
           },
           "repo": {
-            "title": "Repo",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo"
           },
           "thread_id": {
             "title": "Thread Id",
@@ -17187,8 +17264,15 @@
             "title": "Reasoning Effort"
           },
           "repo": {
-            "title": "Repo",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo"
           },
           "runtime": {
             "title": "Runtime",
@@ -24930,6 +25014,18 @@
             }
           },
           {
+            "description": "Only temporary workspaces: the conversations without a repository.",
+            "in": "query",
+            "name": "temporary",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Only temporary workspaces: the conversations without a repository.",
+              "title": "Temporary",
+              "type": "boolean"
+            }
+          },
+          {
             "in": "query",
             "name": "include_archived",
             "required": false,
@@ -27084,7 +27180,7 @@
     },
     "/v1/agent/jobs": {
       "get": {
-        "description": "List jobs from the authenticated user's active or archived threads.\n\n``repo`` narrows the page to one project. It is a filter over what the\ncaller already owns, not an access grant, so an unentitled repo is not an\nerror here — it simply matches none of their rows.",
+        "description": "List jobs from the authenticated user's active or archived threads.\n\n``repo`` narrows the page to one project. It is a filter over what the\ncaller already owns, not an access grant, so an unentitled repo is not an\nerror here — it simply matches none of their rows. ``temporary`` narrows it\nto the temporary workspaces instead.",
         "operationId": "list_agent_jobs_v1_agent_jobs_get",
         "parameters": [
           {
@@ -27125,6 +27221,18 @@
                 }
               ],
               "title": "Repo"
+            }
+          },
+          {
+            "description": "Only temporary workspaces: the conversations without a repository.",
+            "in": "query",
+            "name": "temporary",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Only temporary workspaces: the conversations without a repository.",
+              "title": "Temporary",
+              "type": "boolean"
             }
           },
           {
@@ -29352,6 +29460,60 @@
         "tags": [
           "agent"
         ]
+      }
+    },
+    "/v1/agent/jobs/{job_id}/workspace/archive": {
+      "get": {
+        "description": "Download the chat's whole workspace as one gzipped tar.\n\nHow a temporary workspace's files leave its sandbox, since nothing else\ncopies them; a repository chat may use it too. The owning host builds the\narchive completely before answering, so a workspace over its download limit\nis refused with 413 instead of arriving truncated.",
+        "operationId": "download_agent_job_workspace_v1_agent_jobs__job_id__workspace_archive_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Download Agent Job Workspace"
       }
     },
     "/v1/agent/mcp/catalog": {
@@ -32597,6 +32759,18 @@
                 }
               ],
               "title": "Repo"
+            }
+          },
+          {
+            "description": "Only temporary workspaces: the conversations without a repository.",
+            "in": "query",
+            "name": "temporary",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Only temporary workspaces: the conversations without a repository.",
+              "title": "Temporary",
+              "type": "boolean"
             }
           },
           {

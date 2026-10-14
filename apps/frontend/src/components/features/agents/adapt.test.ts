@@ -294,6 +294,24 @@ describe('toDisplayEvent', () => {
     });
   });
 
+  it('says a temporary workspace starts empty rather than that a repository is ready', () => {
+    const checkout = (payload: Record<string, unknown>) =>
+      toDisplayEvent(event(1, 'lifecycle', { phase: 'checked_out', ...payload }));
+
+    expect(checkout({ temporary: true, reused: false })).toEqual({
+      kind: 'lifecycle',
+      text: 'workspace_created',
+      sourceEventId: 1,
+    });
+    expect(lifecyclePhaseLabel('workspace_created')).toEqual({
+      text: 'Empty workspace ready',
+      milestone: true,
+    });
+    // A later turn in the same sandbox reuses its tree, temporary or not.
+    expect(checkout({ temporary: true, reused: true })).toMatchObject({ text: 'workspace_reused' });
+    expect(checkout({ reused: false })).toMatchObject({ text: 'checked_out' });
+  });
+
   it('keeps rate-limit warnings while hiding normal allowance events', () => {
     expect(
       toDisplayEvent(event(1, 'lifecycle', { phase: 'rate_limit', info: { status: 'allowed' } })),

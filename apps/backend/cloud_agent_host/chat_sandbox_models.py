@@ -58,6 +58,10 @@ class RetainedChatLost(SandboxError):
     """The durable chat container is missing or is no longer the same object."""
 
 
+class ArchiveExportTooLarge(SandboxError):
+    """A container path holds more than the archive export was allowed to carry."""
+
+
 class RetainedChatFailStopped(SandboxError):
     """Activation failed after the exact retained container was cleanly stopped."""
 

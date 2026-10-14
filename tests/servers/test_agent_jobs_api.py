@@ -1551,6 +1551,7 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         limit: int = 50,
         archived: bool = False,
         repo: str | None = None,
+        temporary: bool = False,
     ) -> list[dict[str, Any]]:
         jobs = [
             {**job, "pinned_at": self.pinned_threads.get(job["thread_id"])}
@@ -1558,6 +1559,7 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
             if job["user_id"] == user_id
             and (job["thread_id"] in self.archived_threads) is archived
             and (repo is None or job["repo"] == repo)
+            and (not temporary or job["repo"] is None)
         ]
         minimum = datetime.min.replace(tzinfo=timezone.utc)
         jobs.sort(
@@ -2330,6 +2332,7 @@ async def test_conversation_search_forwards_owner_filters_and_shapes_latest_job(
         pinned=True,
         limit=17,
         cursor="previous-page",
+        temporary=False,
     )
     item = response.json()["conversations"][0]
     assert item["job"]["id"] == job_id
@@ -2387,7 +2390,14 @@ async def test_conversation_search_requires_owner_and_accepts_browser_session(
     assert response.status_code == 200
     assert response.json() == {"conversations": [], "next_cursor": None}
     search.assert_awaited_once_with(
-        user_id=_OWNER, q="", repo=None, include_archived=False, pinned=None, limit=50, cursor=None
+        user_id=_OWNER,
+        q="",
+        repo=None,
+        include_archived=False,
+        pinned=None,
+        limit=50,
+        cursor=None,
+        temporary=False,
     )
 
 
@@ -8749,6 +8759,7 @@ async def test_session_listing_exposes_stable_titles_facets_and_archive_state(
         limit=20,
         cursor="previous-page",
         include_summary=True,
+        temporary=False,
     )
 
 

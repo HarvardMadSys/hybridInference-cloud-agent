@@ -944,13 +944,15 @@ async def _hand_over_claim(
         # The same check create used. The allowlist-only variant here meant a
         # job entitled by its owner's own GitHub connection passed creation and
         # was then refused at claim — the two gates disagreeing about what the
-        # word entitled means.
-        await require_entitled_repo(
-            claim["repo"],
-            claim["user_id"],
-            store=job_store.source_control,
-            app_credentials=app_credentials,
-        )
+        # word entitled means. A temporary workspace has no repository to be
+        # entitled to; who may use Agent at all was checked just above.
+        if claim["repo"] is not None:
+            await require_entitled_repo(
+                claim["repo"],
+                claim["user_id"],
+                store=job_store.source_control,
+                app_credentials=app_credentials,
+            )
     except RepoAccessUnavailable as exc:
         await job_store.attempt_commands.release_claim(
             job_id=claim["id"],
@@ -1040,7 +1042,9 @@ async def _hand_over_claim(
     # public repository clones without any credential at all.
     clone_token: str | None = None
     github_token: str | None = None
-    if app_credentials is not None:
+    # A temporary workspace has no repository, so there is nothing to clone and
+    # nothing a repository-scoped token could be scoped to: it gets neither.
+    if app_credentials is not None and claim["repo"] is not None:
         try:
             clone_token = await app_credentials.token_for(
                 claim["repo"], permissions=_CLONE_SCOPE, repository_scoped=True
@@ -1116,10 +1120,16 @@ async def _hand_over_claim(
     thread_attachment_count = await job_store.attachments.count_thread_attachments(
         thread_id=str(claim["thread_id"])
     )
-    memory, project_memory = await asyncio.gather(
-        _refresh_claim_memory(job_store.user_memory, claim["user_id"]),
-        _refresh_claim_memory(job_store.user_memory, claim["user_id"], repo=claim["repo"]),
-    )
+    if claim["repo"] is None:
+        # Project memory belongs to one repository. A temporary workspace has
+        # none, so it is told only what its owner wants everywhere.
+        memory = await _refresh_claim_memory(job_store.user_memory, claim["user_id"])
+        project_memory = None
+    else:
+        memory, project_memory = await asyncio.gather(
+            _refresh_claim_memory(job_store.user_memory, claim["user_id"]),
+            _refresh_claim_memory(job_store.user_memory, claim["user_id"], repo=claim["repo"]),
+        )
     response = WorkerClaimResponse(
         thread_attachment_count=thread_attachment_count,
         turn_attachment_count=len(claim.get("attachments") or []),

@@ -84,7 +84,7 @@ class PostgresConversationCommands:
         self,
         *,
         user_id: str,
-        repo: str,
+        repo: str | None,
         task_prompt: str,
         runtime: str,
         model: str,
@@ -103,6 +103,9 @@ class PostgresConversationCommands:
         client_request_fingerprint: str | None = None,
     ) -> dict[str, Any]:
         """Create a queued job and return it.
+
+        A null ``repo`` creates a temporary workspace: a conversation whose
+        sandbox starts empty and whose turns are never published.
 
         ``goal`` sets the conversation's completion condition in the same
         transaction that creates it, so the first turn is already working

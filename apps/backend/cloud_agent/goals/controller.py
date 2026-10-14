@@ -578,6 +578,9 @@ async def _check_access(
             reason="access_denied",
             message=AGENT_ACCESS_WITHDRAWN + " Resume the goal once access is restored.",
         )
+    if turn["repo"] is None:
+        # A temporary workspace has no repository to lose access to.
+        return None
     try:
         # The caller's own credential minter, not ``None``: with no App
         # credentials the check can only see the deployment's allowlist, so a

@@ -235,7 +235,9 @@ class WorkerClaimResponse(BaseModel):
     turn_no: int = 1
     attempt_id: int
     attempt_no: int
-    repo: str
+    #: Null for a temporary workspace: the host builds an empty one, with no
+    #: clone and no repository credential.
+    repo: str | None
     base_sha: str | None = None
     task_prompt: str
     setup_script: str | None = None

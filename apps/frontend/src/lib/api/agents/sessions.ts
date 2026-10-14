@@ -1,5 +1,6 @@
 import { fetchWithAuth, jsonOrThrow } from '../client';
 import { config } from '@/config/env';
+import { isTemporaryWorkspace } from '@/lib/temporaryWorkspace';
 import { announceAgentSessionsChanged } from '../agentSessionEvents';
 import type { AgentJobApi } from './jobs';
 
@@ -30,7 +31,8 @@ export interface AgentSessionApi {
 }
 
 export interface AgentSessionProjectApi {
-  repo: string;
+  /** Null counts the temporary workspaces, which have no repository. */
+  repo: string | null;
   count: number;
 }
 
@@ -48,6 +50,7 @@ export interface AgentSessionListOptions {
   limit?: number;
   cursor?: string;
   search?: string;
+  /** One project's key: a repository, or `TEMPORARY_WORKSPACE` for those without one. */
   repo?: string;
   state?: AgentSessionState;
 }
@@ -62,7 +65,10 @@ export async function listAgentSessions(
   });
   if (options.cursor) query.set('cursor', options.cursor);
   if (options.search) query.set('search', options.search);
-  if (options.repo !== undefined) query.set('repo', options.repo);
+  if (options.repo !== undefined) {
+    if (isTemporaryWorkspace(options.repo)) query.set('temporary', 'true');
+    else query.set('repo', options.repo);
+  }
   if (options.state) query.set('state', options.state);
   if (options.includeSummary !== undefined)
     query.set('include_summary', String(options.includeSummary));

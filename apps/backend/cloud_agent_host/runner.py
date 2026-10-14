@@ -144,6 +144,13 @@ from cloud_agent_shared.git.source_archive import (
     build_source_archive,
     build_upload_archive,
 )
+from cloud_agent_shared.git.temporary_workspace import (
+    EMPTY_TREE_SHA,
+    TEMPORARY_WORKSPACE_BASE_SHA,
+    TEMPORARY_WORKSPACE_BRANCH,
+    TEMPORARY_WORKSPACE_COMMIT_MESSAGE,
+    temporary_workspace_commit_env,
+)
 from cloud_agent_shared.host_settings import (
     HOST_SETTINGS_BY_KEY,
     RUNNER_SETTING_KEYS,
@@ -830,6 +837,51 @@ def prepare_worktree(
     resolved = _run_git(["rev-parse", "HEAD"], cwd=workdir).stdout.strip()
     _assert_no_credential_on_disk(workdir, clone_token)
     return resolved or (base_sha or "")
+
+
+def prepare_temporary_worktree(*, workdir: str) -> str:
+    """Start a temporary workspace in ``workdir`` and return its first commit.
+
+    A temporary workspace has no repository, so nothing is fetched and no
+    credential is involved: the directory becomes a Git repository holding one
+    empty commit on ``main``. It is the same commit in every temporary
+    workspace (see :mod:`cloud_agent_shared.git.temporary_workspace`), which
+    the control plane already recorded as the job's base, so it is checked
+    rather than trusted. As in :func:`prepare_worktree`, running git here is
+    safe because the agent has not touched this directory yet.
+    """
+
+    def git(
+        args: list[str],
+        *,
+        env_extra: dict[str, str] | None = None,
+        input_text: str | None = None,
+    ) -> str:
+        result = _run_git(args, cwd=workdir, env_extra=env_extra, input_text=input_text)
+        if result.returncode != 0:
+            raise WorktreeError(
+                f"could not start the temporary workspace: git {args[0]} failed: "
+                f"{result.stderr.strip()[:200]}"
+            )
+        return result.stdout.strip()
+
+    git(["init", "--quiet", workdir])
+    # Written rather than assumed: commit-tree refuses a tree it cannot read.
+    if git(["mktree"], input_text="") != EMPTY_TREE_SHA:
+        raise WorktreeError("could not start the temporary workspace: unexpected empty tree")
+    commit = git(
+        ["commit-tree", "--no-gpg-sign", EMPTY_TREE_SHA, "-m", TEMPORARY_WORKSPACE_COMMIT_MESSAGE],
+        env_extra=temporary_workspace_commit_env(),
+    )
+    if commit != TEMPORARY_WORKSPACE_BASE_SHA:
+        raise WorktreeError(
+            f"temporary workspace commit {commit[:12]} is not the expected "
+            f"{TEMPORARY_WORKSPACE_BASE_SHA[:12]}"
+        )
+    branch = f"refs/heads/{TEMPORARY_WORKSPACE_BRANCH}"
+    git(["update-ref", branch, commit])
+    git(["symbolic-ref", "HEAD", branch])
+    return commit
 
 
 def repo_clone_base_url(
@@ -1520,16 +1572,20 @@ class _SourcePrefetch:
         archive: Any = None
         try:
             with tempfile.TemporaryDirectory(prefix="freeinference-source-") as source:
-                base_sha = prepare_worktree(
-                    workdir=source,
-                    repo=self._job.repo,
-                    base_sha=self._job.base_sha,
-                    clone_token=self._job.clone_token,
-                    remote_base=repo_clone_base_url(clone_token=self._job.clone_token),
-                    max_bytes=self._max_bytes,
-                    stop=self._stop,
-                )
-                checkout_output_branch(source, self._job.thread_id)
+                if self._job.repo is None:
+                    # Nothing to clone and nothing to publish, so no output branch.
+                    base_sha = prepare_temporary_worktree(workdir=source)
+                else:
+                    base_sha = prepare_worktree(
+                        workdir=source,
+                        repo=self._job.repo,
+                        base_sha=self._job.base_sha,
+                        clone_token=self._job.clone_token,
+                        remote_base=repo_clone_base_url(clone_token=self._job.clone_token),
+                        max_bytes=self._max_bytes,
+                        stop=self._stop,
+                    )
+                    checkout_output_branch(source, self._job.thread_id)
                 # Unnamed and outside the checkout: the archive is spooled to
                 # disk, not held in this process, and gone when it is closed,
                 # which import_into or discard does once the clone is done.
@@ -1656,18 +1712,24 @@ def _import_retained_base(
     lacks the parent too.
     """
     with tempfile.TemporaryDirectory(prefix="freeinference-base-") as source:
-        resolved = prepare_worktree(
-            workdir=source,
-            repo=job.repo,
-            base_sha=job.base_sha,
-            clone_token=job.clone_token,
-            remote_base=repo_clone_base_url(clone_token=job.clone_token),
-            depth=2,
-        )
-        parent = _run_git(["rev-parse", "--verify", "--quiet", "HEAD^1"], cwd=source)
-        held = (parent.stdout.strip() or None) if parent.returncode == 0 else None
-        if held and not _sandbox_has_commit(CHAT_WORKDIR, held, backend):
-            held = None
+        held: str | None = None
+        if job.repo is None:
+            # A temporary workspace's base is its fixed empty commit, which a
+            # fresh empty repository rebuilds exactly; it has no parent.
+            resolved = prepare_temporary_worktree(workdir=source)
+        else:
+            resolved = prepare_worktree(
+                workdir=source,
+                repo=job.repo,
+                base_sha=job.base_sha,
+                clone_token=job.clone_token,
+                remote_base=repo_clone_base_url(clone_token=job.clone_token),
+                depth=2,
+            )
+            parent = _run_git(["rev-parse", "--verify", "--quiet", "HEAD^1"], cwd=source)
+            held = (parent.stdout.strip() or None) if parent.returncode == 0 else None
+            if held and not _sandbox_has_commit(CHAT_WORKDIR, held, backend):
+                held = None
         bundle = build_base_bundle(source, commit=resolved, prerequisite=held)
         manager.import_base_bundle(
             spec,
@@ -2549,6 +2611,9 @@ def _run_shared_live_attempt(
                     "reused": reused_workspace,
                     "storage": "docker_writable_layer",
                     "workspace_shared": True,
+                    # Nothing was cloned: the tree is the one empty commit, and
+                    # the owner is told so instead of "repository ready".
+                    **({"temporary": True} if job.repo is None else {}),
                 },
             )
         )
@@ -2601,7 +2666,7 @@ def _run_shared_live_attempt(
             credential=None,
             github_token=job.github_token,
             environment=job.environment,
-            github_repo=job.repo,
+            github_repo=job.repo or "",
             plugins=tuple(job.plugins),
             mcp_server_ids=tuple(job.mcp_bindings),
             # The MCP relay token is attempt-fenced. It is process-fixed only
@@ -4797,6 +4862,7 @@ __all__ = [
     "WorktreeError",
     "checkout_output_branch",
     "main",
+    "prepare_temporary_worktree",
     "prepare_worktree",
     "run_forever",
     "run_once",

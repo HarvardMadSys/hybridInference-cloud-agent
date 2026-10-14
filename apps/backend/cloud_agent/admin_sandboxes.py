@@ -92,7 +92,8 @@ class AdminSandbox(BaseModel):
     generation: int = Field(1, ge=1)
     origin_thread_id: str
     title: str | None = None
-    repo: str
+    #: Null for a temporary workspace.
+    repo: str | None
     user_id: str
     host: str
     container_id: str | None = None

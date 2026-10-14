@@ -14,6 +14,10 @@ control. Pinned conversations appear once, outside project folders and the flat
 list. Unpinning returns them to their ordinary location. Search shows a unified
 result list regardless of pins.
 
+Conversations started without a repository are grouped in a **Temporary
+workspace** folder beside the repository projects. Its new-task button starts
+another temporary workspace.
+
 Use the folder-plus button beside the search and view controls to add a
 workspace. Select a repository from the same authorized list as the task
 composer. The project appears immediately, even with no conversations. The
@@ -117,6 +121,7 @@ row includes the latest `job`, canonical `title`, `archived` and
 | --- | --- |
 | `q` | Case-insensitive literal substring of title or full repository name; maximum 200 characters |
 | `repo` | Exact repository filter |
+| `temporary` | `true` lists only conversations without a repository; cannot be combined with `repo` |
 | `include_archived` | Include archived conversations; defaults to false |
 | `pinned` | True or false restricts the pin partition; omit to include both |
 | `limit` | Page size, 1–200; defaults to 50 |

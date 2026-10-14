@@ -16,7 +16,8 @@ class AdminConversation(BaseModel):
     thread_id: str
     title: str | None = None
     user_id: str
-    repo: str
+    #: Null for a temporary workspace.
+    repo: str | None
     created_at: datetime
     last_activity_at: datetime
     archived_at: datetime | None = None

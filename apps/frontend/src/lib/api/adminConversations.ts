@@ -7,7 +7,8 @@ export interface AdminConversation {
   thread_id: string;
   title: string | null;
   user_id: string;
-  repo: string;
+  /** Null for a temporary workspace. */
+  repo: string | null;
   created_at: string;
   last_activity_at: string;
   archived_at: string | null;

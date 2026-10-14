@@ -29,6 +29,14 @@ export interface AgentNotice {
 const receiptStorageKey = (userId: string) =>
   `agents.notifications.receipts.${encodeURIComponent(userId)}`;
 
+/**
+ * A title for a conversation the notice could not look up: its own, else its
+ * repository, else — a temporary workspace has none — its first line.
+ */
+function fallbackTitle(job: AgentJobApi): string {
+  return job.title || job.repo || job.task_prompt.split('\n')[0].slice(0, 80);
+}
+
 function readReceipts(userId: string): string[] {
   try {
     const value: unknown = JSON.parse(localStorage.getItem(receiptStorageKey(userId)) ?? '[]');
@@ -149,7 +157,7 @@ export function useAgentNotifications(
         kind: job.state as AgentNotice['kind'],
         jobId: job.id,
         attemptId: job.current_attempt_id,
-        title: (job.thread_id && titles.get(job.thread_id)) || job.title || job.repo,
+        title: (job.thread_id && titles.get(job.thread_id)) || fallbackTitle(job),
       });
     }
 
@@ -216,7 +224,7 @@ export function useAgentNotifications(
                 kind: 'question',
                 jobId: job.id,
                 attemptId: job.current_attempt_id,
-                title: titles.get(threadId) || job.title || job.repo,
+                title: titles.get(threadId) || fallbackTitle(job),
               });
             }
           } catch {

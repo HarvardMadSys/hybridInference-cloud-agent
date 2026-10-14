@@ -90,6 +90,8 @@ class SandboxManagerStream:
     #: when the sandbox manager was not collecting, which leaves the caller's fragment
     #: unanswered rather than inventing an answer it never received.
     profiling_answer: dict[str, Any] | None = None
+    #: The body's size when the sandbox manager stated it, for a download's progress.
+    content_length: int | None = None
 
     def __aiter__(self) -> AsyncIterator[bytes]:
         """Stream the sandbox manager's raw body."""
@@ -569,6 +571,51 @@ class SandboxManagerClient:
             # cleanup leaks this dedicated client while a cancelled public SSE
             # request is still connecting. Ownership moves to the returned
             # stream only after a successful, validated response.
+            if not ownership_transferred:
+                try:
+                    if response is not None:
+                        await response.aclose()
+                finally:
+                    await client.aclose()
+
+    async def workspace_archive(self, workspace_id: str) -> SandboxManagerStream:
+        """Open the whole workspace as a gzipped tar, validated before headers are sent.
+
+        The sandbox manager answers only once the archive is complete, so no
+        read deadline is set here: its own export deadline bounds the wait, and
+        a workspace over its download limit is refused before any byte moves.
+        """
+        client = httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=10.0, read=None, write=10.0, pool=10.0)
+        )
+        response: httpx.Response | None = None
+        ownership_transferred = False
+        try:
+            request = client.build_request(
+                "GET",
+                f"{self._base_url}/workspaces/{workspace_id}/archive",
+                headers=self._headers,
+            )
+            response = await client.send(request, stream=True)
+            if response.is_error:
+                raise self._response_error(
+                    response.status_code,
+                    await _read_capped(response, MAX_SANDBOX_MANAGER_CONTROL_BYTES),
+                )
+            ownership_transferred = True
+            stated = response.headers.get("content-length", "")
+            return SandboxManagerStream(
+                client, response, content_length=int(stated) if stated.isdigit() else None
+            )
+        except SandboxManagerError:
+            raise
+        except httpx.HTTPError as exc:
+            raise SandboxManagerError(
+                503, "The live workspace is temporarily unavailable."
+            ) from exc
+        finally:
+            # As for the terminal stream: a cancelled request must not leak
+            # this dedicated client before the stream takes ownership of it.
             if not ownership_transferred:
                 try:
                     if response is not None:

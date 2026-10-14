@@ -1,7 +1,7 @@
 import Link from 'next/link';
 import { useEffect, useState, type HTMLAttributes } from 'react';
 import { useT } from '@/components/providers';
-import { projectLabel } from './conversations';
+import { projectLabel, projectTitle } from './conversations';
 import { CONVERSATION_STATE_KEYS, getConversationState } from './conversationState';
 import { activityLabel } from './relativeTime';
 import { useConversationList, type SidebarConversation } from './useConversationList';
@@ -97,12 +97,12 @@ export function TaskRow({
         onClick={() => onRead(row)}
         aria-label={
           flat
-            ? `${job.title} · ${job.repo}${row.archived ? ` · ${t('sidebar.archived')}` : ''}`
+            ? `${job.title} · ${projectTitle(job.repo, t)}${row.archived ? ` · ${t('sidebar.archived')}` : ''}`
             : job.title
         }
         aria-current={isActive ? 'page' : undefined}
         data-search-result={search ? 'true' : undefined}
-        title={`${job.repo} · ${job.title}`}
+        title={`${projectTitle(job.repo, t)} · ${job.title}`}
         className={`ui-focus-ring flex min-h-8 w-full items-center gap-2 rounded-lg py-1 pl-2 pr-24 text-left text-[13px] transition-colors max-md:min-h-12 max-md:pr-36 [@media(pointer:coarse)]:min-h-12 [@media(pointer:coarse)]:pr-36 ${
           isActive
             ? 'bg-surface-hover font-medium text-foreground ring-1 ring-inset ring-border/70'
@@ -138,7 +138,7 @@ export function TaskRow({
           <SessionReviewBadge review={review} className="block truncate text-[11px]" />
           {flat && (
             <span className="mt-0.5 block truncate text-[11px] font-normal text-muted">
-              <Highlight text={job.repo} query={query} />
+              <Highlight text={projectTitle(job.repo, t)} query={query} />
               {row.archived ? ` · ${t('sidebar.archived')}` : ''}
             </span>
           )}
@@ -391,7 +391,7 @@ export function ProjectFolder({
           aria-expanded={expanded}
           aria-controls={listId}
           aria-current={active ? 'true' : undefined}
-          title={repo}
+          title={projectTitle(repo, t)}
           onClick={onToggle}
           className={`ui-focus-ring flex min-h-8 min-w-0 flex-1 items-center gap-2 rounded-lg py-1 pl-2 pr-1 text-left text-[13px] font-medium max-md:min-h-12 [@media(pointer:coarse)]:min-h-12 ${active ? 'text-foreground' : 'text-muted hover:text-foreground'}`}
         >
@@ -415,7 +415,7 @@ export function ProjectFolder({
           >
             <path d="M3 7.5A1.5 1.5 0 0 1 4.5 6h4l2 2.5h7A1.5 1.5 0 0 1 19 10v7a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 3 17V7.5Z" />
           </svg>
-          <span className="min-w-0 flex-1 truncate">{projectLabel(repo)}</span>
+          <span className="min-w-0 flex-1 truncate">{projectLabel(repo, t)}</span>
           {!expanded && activeCount > 0 && (
             <span
               aria-label={t('sidebar.runningOrQueued', { count: activeCount })}
@@ -427,8 +427,8 @@ export function ProjectFolder({
           href={`/?repo=${encodeURIComponent(repo)}`}
           draggable={reorderProps.draggable ? false : undefined}
           data-row-action
-          aria-label={t('sidebar.newTaskIn', { project: projectLabel(repo) })}
-          title={t('sidebar.newTaskIn', { project: projectLabel(repo) })}
+          aria-label={t('sidebar.newTaskIn', { project: projectLabel(repo, t) })}
+          title={t('sidebar.newTaskIn', { project: projectLabel(repo, t) })}
           className="ui-focus-ring mr-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-muted opacity-0 transition-colors hover:bg-surface-hover hover:text-foreground focus:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100 max-md:h-11 max-md:w-11 max-md:opacity-100 [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11 [@media(pointer:coarse)]:opacity-100"
         >
           <svg

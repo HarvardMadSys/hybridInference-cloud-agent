@@ -90,12 +90,19 @@ class ConversationQueries(Protocol):
         ...
 
     async def list_jobs(
-        self, *, user_id: str, limit: int = 50, archived: bool = False, repo: str | None = None
+        self,
+        *,
+        user_id: str,
+        limit: int = 50,
+        archived: bool = False,
+        repo: str | None = None,
+        temporary: bool = False,
     ) -> list[dict[str, Any]]:
         """List a user's jobs with pinned threads first, then newest first.
 
         ``repo`` narrows the page to one project, which is how the sidebar
         pages a single project past the global newest-first window.
+        ``temporary`` narrows it to the conversations without a repository.
         """
         ...
 
@@ -109,8 +116,11 @@ class ConversationQueries(Protocol):
         pinned: bool | None = None,
         limit: int = 50,
         cursor: str | None = None,
+        temporary: bool = False,
     ) -> dict[str, Any]:
         """Page complete owned conversations, searching their canonical title.
+
+        ``temporary`` keeps only the conversations without a repository.
 
         Activity is the thread's own update or the most recently updated of
         its turns, whichever is later. Any turn counts, not only the newest:
@@ -146,8 +156,12 @@ class ConversationQueries(Protocol):
         repo: str | None = None,
         state: str | None = None,
         include_summary: bool = True,
+        temporary: bool = False,
     ) -> dict[str, Any]:
         """Page complete conversations independently of their number of turns.
+
+        ``temporary`` selects the conversations without a repository, the way
+        ``repo`` selects one project; the facets always count every project.
 
         Project facets apply search/state/archive filters before the selected
         repo. The page and its counts share a database snapshot; the opaque

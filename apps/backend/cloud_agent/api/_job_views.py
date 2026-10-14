@@ -162,8 +162,13 @@ def _job_response(
         reasoning_effort=job.get("reasoning_effort"),
         base_ref=base_ref,
         base_sha=job["base_sha"],
-        output_branch=branch_name_for(
-            sandbox.get("origin_thread_id") or job.get("thread_id") or job["id"]
+        # A temporary workspace publishes nothing, so it has no branch.
+        output_branch=(
+            None
+            if job["repo"] is None
+            else branch_name_for(
+                sandbox.get("origin_thread_id") or job.get("thread_id") or job["id"]
+            )
         ),
         state=job["state"],
         conversation_state=job.get("conversation_state"),

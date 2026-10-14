@@ -7,17 +7,23 @@ import {
   listAgentSessions,
   type AgentSessionApi,
   type AgentSessionListOptions,
-  type AgentSessionProjectApi,
 } from '@/lib/api/agents';
 import { ArchiveAutoLoad } from './ArchiveAutoLoad';
 import { toDisplayState } from './adapt';
-import { projectLabel } from './conversations';
+import { projectLabel, projectTitle } from './conversations';
 import { CONVERSATION_STATE_KEYS, toConversationState } from './conversationState';
 import { ARCHIVE_FOCUS, ArchiveIcon, ArchiveProjectMenu } from './ArchiveControls';
 import { SessionReviewBadge } from './SessionReviewBadge';
 import { useSessionReview } from './useSessionReview';
 
 const ROWS_PER_PAGE = 5;
+
+/** One archived project facet, keyed the way the sidebar keys projects. */
+export interface ArchiveProject {
+  /** A repository, or `TEMPORARY_WORKSPACE` for the conversations without one. */
+  repo: string;
+  count: number;
+}
 const TEXT_BUTTON = `rounded px-1 py-1 text-xs font-medium text-crimson hover:underline disabled:opacity-50 dark:text-rose-300 ${ARCHIVE_FOCUS}`;
 
 function ArchiveSessionReviewBadge({ session }: { session: AgentSessionApi }) {
@@ -45,7 +51,7 @@ export function ArchiveProjectSection({
   onShownCount,
   onNeedsRefresh,
 }: {
-  project: AgentSessionProjectApi;
+  project: ArchiveProject;
   filters: AgentSessionListOptions;
   revision: number;
   removed: Set<string>;
@@ -171,14 +177,14 @@ export function ArchiveProjectSection({
   }, [cursor, loading, filters, project.repo]);
 
   return (
-    <section aria-label={project.repo}>
+    <section aria-label={projectTitle(project.repo, t)}>
       <div className="mb-2 flex min-w-0 items-center gap-2">
         <h2 className="min-w-0">
           <button
             type="button"
             aria-expanded={!collapsed}
             aria-controls={pageId}
-            title={project.repo}
+            title={projectTitle(project.repo, t)}
             onClick={() => setCollapsed(!collapsed)}
             className={`flex w-full min-w-0 items-center gap-2 rounded py-1 text-left text-xs font-medium text-gray-700 dark:text-gray-200 [@media(pointer:coarse)]:min-h-11 ${ARCHIVE_FOCUS}`}
           >
@@ -190,14 +196,14 @@ export function ArchiveProjectSection({
               name="folder"
               className="h-4 w-4 shrink-0 text-gray-500 dark:text-gray-400"
             />
-            <span className="truncate">{projectLabel(project.repo)}</span>
+            <span className="truncate">{projectLabel(project.repo, t)}</span>
           </button>
         </h2>
         <span className="ml-auto shrink-0 text-[11px] text-gray-500 dark:text-gray-400">
           {t(project.count === 1 ? 'archive.countOne' : 'archive.count', { count: project.count })}
         </span>
         <ArchiveProjectMenu
-          project={project.repo}
+          project={projectTitle(project.repo, t)}
           count={project.count}
           disabled={disabled || loading}
           onUnarchive={onUnarchiveGroup}

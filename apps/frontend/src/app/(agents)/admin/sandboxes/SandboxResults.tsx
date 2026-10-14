@@ -656,9 +656,9 @@ function SandboxRow({
           </button>
           <span
             className="mt-1 block truncate text-xs text-gray-500 dark:text-gray-400"
-            title={sandbox.repo}
+            title={sandbox.repo ?? 'Temporary workspace'}
           >
-            {sandbox.repo}
+            {sandbox.repo ?? 'Temporary workspace'}
           </span>
           <span
             className="mt-1 block truncate font-mono text-xs text-gray-500 dark:text-gray-400"

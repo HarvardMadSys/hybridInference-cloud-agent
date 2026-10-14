@@ -44,6 +44,7 @@ from cloud_agent.visible_models import (
     agent_model_reasoning_efforts,
     agent_visible_models,
 )
+from cloud_agent_shared.git.temporary_workspace import TEMPORARY_WORKSPACE_BASE_SHA
 from cloud_agent_shared.plugins import validate_sandbox_plugins
 from cloud_agent_shared.runtime_catalog import (
     registered_runtimes,
@@ -441,6 +442,63 @@ async def _require_base_on_branch(
         ) from exc
 
 
+async def _admit_repository(
+    body: AgentJobCreate,
+    repo: str,
+    user: dict[str, Any],
+    *,
+    source_control: SourceControlPort,
+    app_credentials: Any | None,
+) -> str | None:
+    """Check the owner may work on ``repo`` and return the commit the job starts from."""
+    # The requester chooses the repository and the platform later mints a real
+    # installation token for it. Without this the two combine into a confused
+    # deputy: name any repository the App reaches, and read it back through
+    # your own job's events and patch.
+    try:
+        await require_entitled_repo(
+            repo,
+            user["user_id"],
+            store=source_control,
+            app_credentials=app_credentials,
+        )
+    except RepoNotAllowed as exc:
+        raise HTTPException(
+            status_code=403,
+            detail={"error": {"type": "repo_not_allowed", "message": str(exc)}},
+        ) from exc
+    # A branch is resolved to the commit it points at *now*. The job stores the
+    # sha: a branch moves, so a job that recorded "dev" would silently mean a
+    # different tree by the time it ran, and the publisher applies its patch
+    # onto a pinned commit.
+    base_sha = body.base_sha
+    if base_sha is None and body.base_ref and app_credentials is not None:
+        try:
+            base_sha = await app_credentials.resolve_ref(repo, body.base_ref)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": {
+                        "type": "invalid_request",
+                        "message": f"could not resolve {body.base_ref!r} in {repo}: {exc}",
+                    }
+                },
+            ) from exc
+    # The publisher fetches the base by hash and pushes a branch built on it.
+    # GitHub serves any object of the repository's network by hash, a fork's
+    # pull request head included, and a ref resolves to whatever commit it
+    # names — so neither a named commit nor a resolved ref is, by itself, part
+    # of the repository's history. Checked once here: a job's base is fixed at
+    # creation (a host fills only an absent one, from its own checkout), and a
+    # follow-up builds on the branch the platform published.
+    if base_sha is not None and app_credentials is not None:
+        await _require_base_on_branch(
+            app_credentials, repo=repo, base_sha=base_sha, base_ref=body.base_ref
+        )
+    return base_sha
+
+
 async def _create_job_as(
     body: AgentJobCreate,
     user: dict[str, Any],
@@ -520,50 +578,19 @@ async def _create_job_as(
     reasoning_effort = await _require_offered_effort(
         body.reasoning_effort, runtime=body.runtime, model=model, gateway=gateway, user=user
     )
-    # The requester chooses the repository and the platform later mints a real
-    # installation token for it. Without this the two combine into a confused
-    # deputy: name any repository the App reaches, and read it back through
-    # your own job's events and patch.
-    try:
-        await require_entitled_repo(
+    if body.repo is None:
+        # A temporary workspace: there is no repository to be entitled to and no
+        # branch to pin. Its base is the one empty commit every temporary
+        # workspace starts from, recorded now so that later turns and forks
+        # carry it like any other base.
+        base_sha: str | None = TEMPORARY_WORKSPACE_BASE_SHA
+    else:
+        base_sha = await _admit_repository(
+            body,
             body.repo,
-            user["user_id"],
-            store=job_store.source_control,
+            user,
+            source_control=job_store.source_control,
             app_credentials=app_credentials,
-        )
-    except RepoNotAllowed as exc:
-        raise HTTPException(
-            status_code=403,
-            detail={"error": {"type": "repo_not_allowed", "message": str(exc)}},
-        ) from exc
-    # A branch is resolved to the commit it points at *now*. The job stores the
-    # sha: a branch moves, so a job that recorded "dev" would silently mean a
-    # different tree by the time it ran, and the publisher applies its patch
-    # onto a pinned commit.
-    base_sha = body.base_sha
-    if base_sha is None and body.base_ref and app_credentials is not None:
-        try:
-            base_sha = await app_credentials.resolve_ref(body.repo, body.base_ref)
-        except Exception as exc:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "error": {
-                        "type": "invalid_request",
-                        "message": f"could not resolve {body.base_ref!r} in {body.repo}: {exc}",
-                    }
-                },
-            ) from exc
-    # The publisher fetches the base by hash and pushes a branch built on it.
-    # GitHub serves any object of the repository's network by hash, a fork's
-    # pull request head included, and a ref resolves to whatever commit it
-    # names — so neither a named commit nor a resolved ref is, by itself, part
-    # of the repository's history. Checked once here: a job's base is fixed at
-    # creation (a host fills only an absent one, from its own checkout), and a
-    # follow-up builds on the branch the platform published.
-    if base_sha is not None and app_credentials is not None:
-        await _require_base_on_branch(
-            app_credentials, repo=body.repo, base_sha=base_sha, base_ref=body.base_ref
         )
 
     metadata = dict(body.metadata or {})

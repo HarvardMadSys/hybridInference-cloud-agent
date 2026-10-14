@@ -622,8 +622,20 @@ export const zhCN: Record<TranslationKey, string> = {
   'composer.subheading': '在隔离沙箱里运行。',
   'composer.subheadingFirstVisit':
     '描述一个任务。Agent 在隔离沙箱里改代码，改完在你的仓库开一个 draft PR。',
-  'composer.connectToRun': '连接 GitHub 后才能选仓库并运行',
-  'composer.connectToRunKept': '连好 GitHub 就能运行，写的内容会保留',
+  'composer.subheadingTemporary': '描述一个任务。Agent 在一个从空目录开始的隔离沙箱里工作。',
+  'temporaryWorkspace.name': '临时工作区',
+  'temporaryWorkspace.option': '临时工作区（不使用仓库）',
+  'temporaryWorkspace.optionHint': '从空目录开始。文件只留在这个对话的沙箱里，不会发布。',
+  'temporaryWorkspace.notice':
+    '临时工作区：文件只存在这个对话的沙箱里，不会保存到 GitHub。删除对话或沙箱被清理后，文件无法找回。',
+  'temporaryWorkspace.confirmTitle': '开始之前',
+  'temporaryWorkspace.acknowledge': '我知道了',
+  'temporaryWorkspace.cancel': '取消',
+  'temporaryWorkspace.connect': '连接 GitHub 以使用仓库',
+  'temporaryWorkspace.download': '下载工作区',
+  'temporaryWorkspace.downloading': '正在准备下载…',
+  'temporaryWorkspace.downloadFailed': '无法下载工作区。{message}',
+  'temporaryWorkspace.details': '关于临时工作区',
   'composer.repository': '仓库',
   'composer.repositoryPlaceholder': '选择仓库',
   'composer.repositorySearch': '搜索仓库…',
@@ -664,7 +676,7 @@ export const zhCN: Record<TranslationKey, string> = {
   'composer.starting': '启动中…',
   'composer.runTitle': '运行 —— ⏎ 发送,⇧⏎ 换行',
   'composer.keyboardHint': 'Enter 运行 · Shift + Enter 换行',
-  'composer.workflowRepository': '选择任务使用的仓库和分支。',
+  'composer.workflowRepository': '选择仓库和分支，或者在临时工作区里开始。',
   'composer.workflowAgent': '选择你想使用的编码 Agent 和模型。',
   'composer.workflowReviewTitle': '审查',
   'composer.workflowReview': '查看进度、审查改动，并继续对话。',
@@ -808,13 +820,6 @@ export const zhCN: Record<TranslationKey, string> = {
   'goal.reportNeedsInput': '需要补充信息',
   'goal.reportUnreadable': '报告无法读取',
 
-  'connect.title': '先连接 GitHub',
-  'connect.titleUnavailable': 'GitHub 尚未开放配置',
-  'connect.body':
-    '选择 Agent 可以工作的仓库。你的账号凭据不会进入沙箱；Agent 只会获得当前仓库的短期访问权限。',
-  'connect.bodyUnavailable': '请联系管理员为 cloud agent 开通仓库访问。',
-  'connect.action': '连接 GitHub',
-  'connect.actionUnavailable': '查看集成',
   'connect.titleTemporarilyUnavailable': 'GitHub 暂时不可用',
   'connect.titleRepositories': '给 GitHub App 授权仓库',
   'connect.bodyRepositories':
@@ -835,6 +840,7 @@ export const zhCN: Record<TranslationKey, string> = {
   'firstRun.started': 'Agent 在云端运行，关掉这个页面也会继续；跑完后左边的任务旁会出现蓝点。',
   'firstRun.preparing': '为这个会话创建隔离沙箱。第一轮会慢一点，之后的回复会复用它。',
   'firstRun.checkedOut': '仓库已经克隆进沙箱，Agent 只改这份副本。',
+  'firstRun.workspaceCreated': '沙箱从一个空目录开始，不克隆仓库，也不发布任何东西。',
   'firstRun.publishing': '把改动推到 agent/… 分支，开一个草稿 PR。',
   'firstRun.doneTitle': '第一个 draft PR 开好了',
   'firstRun.doneBody':

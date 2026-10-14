@@ -89,14 +89,19 @@ MAX_JOB_METADATA_BYTES = 16 * 1024
 class AgentJobCreate(BaseModel):
     """Request body for creating an agent job."""
 
-    repo: str = Field(
+    repo: str | None = Field(
         ...,
         # Shape-checked here as well as against the entitlement allowlist: the
         # value is interpolated into a clone URL and handed to git, which reads
         # a leading `-` as an option wherever it appears.
         pattern=REPO_PATTERN,
         max_length=140,
-        description="Target repository, e.g. 'owner/name'.",
+        # Still required: a client that leaves the field out is refused rather
+        # than handed a workspace whose work nothing will publish.
+        description=(
+            "Target repository, e.g. 'owner/name'. An explicit null starts a temporary "
+            "workspace: the sandbox starts empty, and nothing it does is published."
+        ),
     )
     # The same bounds and blank check a message to the conversation has: this
     # is that conversation's first message.
@@ -215,6 +220,25 @@ class AgentJobCreate(BaseModel):
             )
         return value
 
+    @model_validator(mode="after")
+    def temporary_workspace_names_no_repository(self) -> AgentJobCreate:
+        """Refuse a branch, commit or repository environment without a repository.
+
+        Each of these names something inside one repository. Ignoring them on a
+        temporary workspace would run a task in a place other than the one its
+        request described.
+        """
+        if self.repo is None:
+            named = [
+                name for name in ("base_ref", "base_sha", "environment_id") if getattr(self, name)
+            ]
+            if named:
+                raise ValueError(
+                    f"{', '.join(named)} must be omitted when repo is null: "
+                    "a temporary workspace has no repository"
+                )
+        return self
+
     @field_validator("task_prompt")
     @classmethod
     def validate_task_prompt(cls, value: str) -> str:
@@ -242,7 +266,8 @@ class AgentJobResponse(BaseModel):
     thread_id: str | None = None
     parent_job_id: str | None = None
     turn_no: int = 1
-    repo: str
+    #: Null for a temporary workspace, which has no repository.
+    repo: str | None
     task_prompt: str
     title: str | None = None
     title_source: str | None = None

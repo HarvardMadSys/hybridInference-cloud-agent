@@ -66,6 +66,7 @@ from cloud_agent_host.chat_sandbox_models import (
     CHAT_THREAD_LABEL as CHAT_THREAD_LABEL,
     MEMBER_UID_BASE as MEMBER_UID_BASE,
     MEMBER_UID_LIMIT as MEMBER_UID_LIMIT,
+    ArchiveExportTooLarge as ArchiveExportTooLarge,
     ChatSandboxInspection as ChatSandboxInspection,
     ChatSandboxSpec as ChatSandboxSpec,
     ChatSandboxStatus as ChatSandboxStatus,
@@ -121,6 +122,8 @@ if TYPE_CHECKING:
     import ipaddress
     from collections.abc import Callable, Iterator, Sequence
     from typing import BinaryIO
+
+    from _typeshed import SupportsWrite
 
     from cloud_agent_shared.egress import SandboxNetwork
 #: A probe older than this was abandoned by a process killed mid-probe. Since
@@ -4116,7 +4119,7 @@ finally:
         self,
         spec: ChatSandboxSpec,
         path: str,
-        destination: BinaryIO,
+        destination: SupportsWrite[bytes],
         *,
         max_bytes: int,
         expected_container_id: str | None = None,
@@ -4185,7 +4188,7 @@ finally:
                         break
                     total += len(chunk)
                     if total > max_bytes:
-                        raise SandboxError(
+                        raise ArchiveExportTooLarge(
                             f"chat sandbox archive for {path!r} exceeds its byte limit"
                         )
                     if destination.write(chunk) != len(chunk):

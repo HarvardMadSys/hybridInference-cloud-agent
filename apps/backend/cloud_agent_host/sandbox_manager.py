@@ -16,12 +16,14 @@ import binascii
 import codecs
 import contextlib
 import functools
+import gzip
 import hashlib
 import json
 import os
 import queue
 import re
 import secrets
+import tempfile
 import threading
 import time
 from collections import deque
@@ -40,6 +42,7 @@ from cloud_agent_host import sandbox_manager_profiling_policy
 from cloud_agent_host.bounded_output import OutputPump
 from cloud_agent_host.chat_sandbox import (
     CHAT_WORKDIR,
+    ArchiveExportTooLarge,
     ChatSandboxManager,
     ChatSandboxSpec,
     RetainedChatBackend,
@@ -3439,6 +3442,62 @@ def create_app(
                 max_preview_bytes=int(applied_settings["workspace_file_preview_max_kib"]) * 1024,
                 max_directory_entries=int(applied_settings["workspace_directory_max_entries"]),
             ),
+        )
+
+    @app.get("/workspaces/{workspace_id}/archive")
+    async def workspace_archive(
+        workspace_id: str,
+        _: None = Depends(authenticate),
+    ) -> StreamingResponse:
+        """Send the whole workspace as a gzipped tar, or refuse it whole.
+
+        Docker's archive boundary reads ``/workspace`` without running anything
+        inside the sandbox, and the archive is spooled to a temporary file
+        before the first byte is sent: a workspace over the download limit is
+        refused with 413 rather than arriving as a truncated file. The open
+        operation keeps the sandbox from being stopped or deleted underneath
+        the copy, and the command slots bound how many copies run at once.
+        """
+        limit_mib = int(applied_settings["workspace_download_max_mib"])
+        spool = tempfile.TemporaryFile(  # noqa: SIM115 — handed to the response body.
+            prefix="freeinference-workspace-download-"
+        )
+
+        def export(retained: RetainedChatBackend, _call: SandboxManagerCall) -> dict[str, Any]:
+            try:
+                with gzip.GzipFile(fileobj=spool, mode="wb", compresslevel=6, mtime=0) as packed:
+                    retained.manager.export_archive(
+                        retained.spec, CHAT_WORKDIR, packed, max_bytes=limit_mib * 1024 * 1024
+                    )
+            except ArchiveExportTooLarge as exc:
+                raise HTTPException(
+                    status_code=413,
+                    detail=(
+                        f"The workspace is larger than this server's {limit_mib} MiB "
+                        "download limit."
+                    ),
+                ) from exc
+            return {}
+
+        try:
+            await owner_command(workspace_id, export)
+        except BaseException:
+            spool.close()
+            raise
+        size = spool.tell()
+        spool.seek(0)
+
+        async def body() -> AsyncIterator[bytes]:
+            try:
+                while chunk := await asyncio.to_thread(spool.read, 1024 * 1024):
+                    yield chunk
+            finally:
+                spool.close()
+
+        return StreamingResponse(
+            body(),
+            media_type="application/gzip",
+            headers={"Content-Length": str(size), "Cache-Control": "no-store"},
         )
 
     @app.get("/workspaces/{workspace_id}/environment/status")

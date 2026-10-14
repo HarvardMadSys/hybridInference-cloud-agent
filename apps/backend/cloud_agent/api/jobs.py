@@ -25,6 +25,7 @@ from cloud_agent.api._job_views import (
     _job_response,
 )
 from cloud_agent.api._owner_auth import _owned_job, require_agent_owner
+from cloud_agent.api._project_filter import TemporaryFilter, require_single_project_filter
 from cloud_agent.api._workspace_access import _sandbox_manager_for_job, _workspace_id
 from cloud_agent.api.deps import (
     get_agent_app_credentials,
@@ -178,6 +179,7 @@ async def list_agent_jobs(
     limit: int = Query(50, ge=1, le=200),
     archived: bool = Query(False),
     repo: str | None = Query(None, pattern=REPO_PATTERN, max_length=140),
+    temporary: TemporaryFilter = False,
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _JobsStorage | None = Depends(get_storage),
 ) -> AgentJobListResponse:
@@ -185,11 +187,13 @@ async def list_agent_jobs(
 
     ``repo`` narrows the page to one project. It is a filter over what the
     caller already owns, not an access grant, so an unentitled repo is not an
-    error here — it simply matches none of their rows.
+    error here — it simply matches none of their rows. ``temporary`` narrows it
+    to the temporary workspaces instead.
     """
+    require_single_project_filter(repo, temporary)
     job_store = _require_store(store)
     jobs = await job_store.conversation_queries.list_jobs(
-        user_id=user["user_id"], limit=limit, archived=archived, repo=repo
+        user_id=user["user_id"], limit=limit, archived=archived, repo=repo, temporary=temporary
     )
     return AgentJobListResponse(jobs=[_job_response(job) for job in jobs])
 

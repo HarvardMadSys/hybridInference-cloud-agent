@@ -197,6 +197,16 @@ describe("a first run's milestones", () => {
     );
   });
 
+  it('say a temporary workspace starts empty instead of being cloned', () => {
+    render(
+      <EventRow event={{ kind: 'lifecycle', text: 'workspace_created' }} blockKey="k" firstRun />,
+    );
+
+    expect(screen.getByText('Empty workspace ready')).toBeInTheDocument();
+    expect(screen.getByText(/starts from an empty folder/)).toBeInTheDocument();
+    expect(screen.queryByText(/cloned into the sandbox/)).not.toBeInTheDocument();
+  });
+
   it('are left plain on every other turn', () => {
     render(<EventRow event={{ kind: 'lifecycle', text: 'workspace_preparing' }} />);
 

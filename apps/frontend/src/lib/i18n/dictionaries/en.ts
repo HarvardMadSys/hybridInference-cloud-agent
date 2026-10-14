@@ -657,8 +657,8 @@ export const en = {
   'composer.subheading': 'Runs in an isolated sandbox.',
   'composer.subheadingFirstVisit':
     'Describe a task. The agent works in an isolated sandbox and opens a draft pull request in your repository.',
-  'composer.connectToRun': 'Connect GitHub to select a repository and run',
-  'composer.connectToRunKept': 'Connect GitHub to run it. What you wrote is kept.',
+  'composer.subheadingTemporary':
+    'Describe a task. The agent works in an isolated sandbox that starts empty.',
   'composer.repository': 'Repository',
   'composer.repositoryPlaceholder': 'Select repository',
   'composer.repositorySearch': 'Search repositories…',
@@ -702,12 +702,29 @@ export const en = {
   'composer.starting': 'Starting…',
   'composer.runTitle': 'Run — ⏎ to send, ⇧⏎ for a new line',
   'composer.keyboardHint': 'Enter to run · Shift + Enter for a new line',
-  'composer.workflowRepository': 'Choose the repository and branch for your task.',
+  'composer.workflowRepository':
+    'Choose a repository and branch, or start in a temporary workspace.',
   'composer.workflowAgent': 'Select the coding agent and model you want to work with.',
   'composer.workflowReviewTitle': 'Review',
   'composer.workflowReview': 'Follow progress, review the changes, and continue the conversation.',
   'composer.loadConfigFailed': 'could not load config',
   'composer.startFailed': 'could not start the job',
+
+  // ── Temporary workspace ─────────────────────────────────────────────────
+  'temporaryWorkspace.name': 'Temporary workspace',
+  'temporaryWorkspace.option': 'Temporary workspace (no repository)',
+  'temporaryWorkspace.optionHint':
+    'Starts empty. Files stay in this conversation’s sandbox and are never published.',
+  'temporaryWorkspace.notice':
+    'Temporary workspace: files exist only in this conversation’s sandbox and are not saved to GitHub. Once the conversation is deleted or its sandbox is cleaned up, they cannot be recovered.',
+  'temporaryWorkspace.confirmTitle': 'Before you start',
+  'temporaryWorkspace.acknowledge': 'Got it',
+  'temporaryWorkspace.cancel': 'Cancel',
+  'temporaryWorkspace.connect': 'Connect GitHub to use a repository',
+  'temporaryWorkspace.download': 'Download workspace',
+  'temporaryWorkspace.downloading': 'Preparing download…',
+  'temporaryWorkspace.downloadFailed': 'Could not download the workspace. {message}',
+  'temporaryWorkspace.details': 'About this temporary workspace',
 
   // ── Composer commands ───────────────────────────────────────────────────
   'commands.title': 'Commands',
@@ -860,14 +877,6 @@ export const en = {
   'goal.reportNeedsInput': 'needs input',
   'goal.reportUnreadable': 'the report could not be read',
 
-  'connect.title': 'Connect GitHub to start',
-  'connect.titleUnavailable': 'GitHub setup is not available yet',
-  'connect.body':
-    'Choose the repositories the agent can work on. Your account credentials never enter the sandbox; the agent gets short-lived access to the current repository only.',
-  'connect.bodyUnavailable':
-    'Contact your administrator to enable repository access for cloud agents.',
-  'connect.action': 'Connect GitHub',
-  'connect.actionUnavailable': 'View integrations',
   'connect.titleTemporarilyUnavailable': 'GitHub is temporarily unavailable',
   'connect.titleRepositories': 'Give the GitHub App access to a repository',
   'connect.bodyRepositories':
@@ -892,6 +901,8 @@ export const en = {
     'Creating an isolated sandbox for this session. The first turn is slower; replies reuse it.',
   'firstRun.checkedOut':
     'Your repository is cloned into the sandbox. The agent only edits this copy.',
+  'firstRun.workspaceCreated':
+    'The sandbox starts from an empty folder. Nothing is cloned, and nothing is published.',
   'firstRun.publishing': 'Pushing the changes to an agent/… branch and opening a draft PR.',
   'firstRun.doneTitle': 'Your first draft PR is ready',
   'firstRun.doneBody':

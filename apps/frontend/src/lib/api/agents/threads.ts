@@ -1,5 +1,6 @@
 import { fetchWithAuth, jsonOrThrow } from '../client';
 import { config } from '@/config/env';
+import { isTemporaryWorkspace } from '@/lib/temporaryWorkspace';
 import type { PendingMessageApi, QueuePausedReason } from '../pendingMessages';
 import type { AgentJobApi } from './jobs';
 
@@ -22,7 +23,8 @@ export interface AgentThreadApi {
   archived_at?: string | null;
   thread_id: string;
   title?: string;
-  repo?: string;
+  /** Null for a temporary workspace. */
+  repo?: string | null;
   messages: AgentThreadMessageApi[];
   jobs: AgentJobApi[];
   created_at?: string | null;
@@ -65,6 +67,7 @@ export interface AgentConversationApi {
 export async function listAgentConversations(
   options: {
     q?: string;
+    /** One project's key: a repository, or `TEMPORARY_WORKSPACE` for those without one. */
     repo?: string;
     includeArchived?: boolean;
     pinned?: boolean;
@@ -75,7 +78,10 @@ export async function listAgentConversations(
 ): Promise<{ conversations: AgentConversationApi[]; next_cursor: string | null }> {
   const query = new URLSearchParams({ limit: String(options.limit ?? 50) });
   if (options.q) query.set('q', options.q);
-  if (options.repo) query.set('repo', options.repo);
+  if (options.repo) {
+    if (isTemporaryWorkspace(options.repo)) query.set('temporary', 'true');
+    else query.set('repo', options.repo);
+  }
   if (options.includeArchived) query.set('include_archived', 'true');
   if (options.pinned !== undefined) query.set('pinned', String(options.pinned));
   if (options.cursor) query.set('cursor', options.cursor);
@@ -83,7 +89,8 @@ export async function listAgentConversations(
 }
 
 export interface AgentProjectApi {
-  repo: string;
+  /** Null groups the temporary workspaces, which have no repository. */
+  repo: string | null;
   /** Conversations, not turns. */
   task_count: number;
   /** Non-terminal jobs, so a collapsed project can still show live work. */

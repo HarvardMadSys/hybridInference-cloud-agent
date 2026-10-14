@@ -35,7 +35,8 @@ export interface AdminRun {
   thread_id: string | null;
   turn_no: number;
   user_id: string;
-  repo: string;
+  /** Null for a temporary workspace. */
+  repo: string | null;
   runtime: string;
   model: string;
   reasoning_effort: string | null;
@@ -174,7 +175,8 @@ export interface AdminStepTurn {
   thread_id: string | null;
   turn_no: number;
   user_id: string;
-  repo: string;
+  /** Null for a temporary workspace. */
+  repo: string | null;
   runtime: string;
   state: AgentJobApiState;
   created_at: string;

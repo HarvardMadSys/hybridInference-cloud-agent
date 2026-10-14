@@ -72,7 +72,7 @@ that URL to another origin is refused while the token is kept. Reset the token,
 save the URL, then enter the token again.
 
 For the first deployment of this release, run `alembic upgrade head` through
-`0069_agent_memories`. Existing hosts begin without a deployment drain
+`0070_temporary_workspaces`. Existing hosts begin without a deployment drain
 owner or release receipt, and 0051 backfills each one with a non-null fence
 epoch. 0066 builds an index on `agent_jobs` concurrently: on a long job history
 it takes a while without blocking the running API, and an interrupted run can
@@ -81,8 +81,10 @@ runs, a shared workspace that a failed snapshot left `dirty` publishes again:
 a snapshot already pending behind the failure is captured, otherwise the
 group's next settled turn is (see
 [Resume, Fork, and publication](#resume-fork-and-publication)). 0069 adds the
-empty durable-memory table. Rebuild the sandbox image for explicit plugin
-loading.
+empty durable-memory table. 0070 only drops `NOT NULL` from
+`agent_threads.repo` and `agent_environment_bindings.repo`, so conversations
+can start without a repository; its downgrade refuses while any such
+conversation exists. Rebuild the sandbox image for explicit plugin loading.
 Then start the main control-plane listener with its existing complete
 environment. It imports registered environment settings once,
 while the MCP-only listener waits for initialization and then reads the same
@@ -419,6 +421,39 @@ grant rather than recovering a revoked predecessor. Worker replacement revokes
 the previous grant best-effort, matching Fork cleanup; a gateway revocation
 outage does not prevent issuing the replacement.
 
+### Temporary workspaces
+
+A job created with `"repo": null` starts a conversation without a repository.
+Any user with `agent.use` may create one; there is no repository entitlement to
+check, and the claim carries no clone or `GH_TOKEN` credential. The host builds
+`/workspace` as a new Git repository on `main` with one empty commit, identical
+on every host (`77bbec2039abcd5c7663078db4f90f3c860a751a`), and the control
+plane records that commit as the job's base. A request that also names
+`base_ref`, `base_sha` or `environment_id` is refused: each names something in
+a repository. The environment is the platform base, the owner's global
+variables, and the task's own overrides.
+
+Its turns settle without opening a workspace snapshot, so nothing is captured
+for the publisher and no branch or pull request is made. Everything else is an
+ordinary conversation: archive, delete, Fork, Side Chat, goals, MCP, retention,
+checkpoints and S3 archiving behave as they do for a repository chat, and
+project memory is not built from it. `temporary=true` on `GET /v1/agent/jobs`,
+`/conversations` and `/sessions` lists only these conversations and cannot be
+combined with `repo`; the project and facet lists report them as `repo: null`.
+
+`GET /v1/agent/jobs/{job_id}/workspace/archive` downloads a chat's whole
+`/workspace` as one gzipped tar, for any retained chat, repository chats
+included. The owning host compresses it to its own disk first and answers only
+once it is complete, so a workspace larger than the host's
+`workspace_download_max_mib` (default 1024 MiB, measured before compression)
+is refused with `413` instead of arriving truncated. Moving the files to GitHub
+is left to the agent: with the GitHub MCP server connected at its writable
+endpoint, it can create a repository and push to it.
+
+While a configured GitHub App cannot be loaded (see
+[the credentials section](#2-credentials)), creating a temporary workspace
+answers `503` like any other job.
+
 ### Automatic task titles
 
 New conversations initially use the first meaningful prompt line, shortened to
@@ -552,7 +587,8 @@ Cloud Agent may have the platform clone and publish to every listed repository
 with the deployment's GitHub credentials, so list only repositories all of them
 may work on. When the App's OAuth credentials and
 `AGENT_GITHUB_APP_INSTALL_URL` are configured, the composer still requires a
-connection before repository selection, including allowlisted repositories.
+connection before any repository can be selected, allowlisted ones included;
+until then a task runs in a [temporary workspace](#temporary-workspaces).
 The create endpoint independently honors the allowlist.
 
 **Disconnecting.** **Disconnect GitHub** in the Integrations Manage menu
@@ -1158,8 +1194,8 @@ cannot be loaded — missing, empty, unreadable by the service user, or not a
 valid key — does not stop the control plane (issue #47):
 
 - Integrations and the task composer say GitHub is temporarily unavailable.
-  Creating a job, a runner's claim, or a branch lookup answers `503
-  source_control_unavailable` with `Retry-After: 30`; queued jobs, pending
+  Creating a job (a temporary workspace's too), a runner's claim, or a branch
+  lookup answers `503 source_control_unavailable` with `Retry-After: 30`; queued jobs, pending
   publishes and goal wakeups wait without spending any retries.
 - The log carries one `ERROR` event, `source_control_load_failed`, with a
   `reason` (`key_file_unreadable`, `key_missing`, `key_invalid`, `unexpected`)

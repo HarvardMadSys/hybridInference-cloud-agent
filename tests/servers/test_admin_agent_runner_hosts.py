@@ -583,6 +583,7 @@ async def test_the_pool_lists_every_setting_an_admin_may_set_with_its_bounds(adm
         "workspace_file_preview_max_kib",
         "workspace_command_output_max_mib",
         "workspace_directory_max_entries",
+        "workspace_download_max_mib",
         "terminal_buffer_max_mib",
         "terminal_buffer_max_events",
         "terminal_output_max_mib",

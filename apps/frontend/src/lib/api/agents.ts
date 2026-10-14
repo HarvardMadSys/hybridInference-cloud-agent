@@ -137,7 +137,12 @@ export type {
   AgentGitWorkspaceApi,
 } from './agents/workspace';
 
-export { getAgentJobFiles, writeAgentJobFile, getAgentJobGit } from './agents/workspace';
+export {
+  getAgentJobFiles,
+  writeAgentJobFile,
+  getAgentJobGit,
+  downloadAgentWorkspace,
+} from './agents/workspace';
 
 export type {
   AgentTerminalApi,

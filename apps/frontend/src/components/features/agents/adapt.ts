@@ -40,6 +40,7 @@ import {
   replyPreviewPiece,
 } from './trajectoryProtocol';
 import { agentLiveStatus } from './agentLiveStatus';
+import { projectKey } from '@/lib/temporaryWorkspace';
 
 /**
  * Preserve a server result as a per-turn display state.
@@ -255,6 +256,10 @@ export function toDisplayEvent(event: AgentJobEventApi): AgentEvent | null {
     if (phase === 'checked_out' && payload.reused === true) {
       return { kind: 'lifecycle', text: 'workspace_reused', sourceEventId };
     }
+    // A temporary workspace cloned nothing: it starts from one empty commit.
+    if (phase === 'checked_out' && payload.temporary === true) {
+      return { kind: 'lifecycle', text: 'workspace_created', sourceEventId };
+    }
     if (phase === 'rate_limit') {
       const info = payload.info;
       const status =
@@ -410,6 +415,8 @@ const LIFECYCLE_LABELS: Record<string, string> = {
   // has been building. Saying "repository ready" either way told the owner
   // their thread had been rebuilt when it had not.
   workspace_reused: 'Reusing this conversation\u2019s workspace',
+  // No repository: nothing was cloned, and the tree starts empty.
+  workspace_created: 'Empty workspace ready',
   context_restored: 'Previous work restored',
   setup: 'Installing project dependencies',
   workspace_preparing: 'Preparing workspace',
@@ -1229,11 +1236,16 @@ function adaptJob(
     conversationState: job.conversation_state ?? undefined,
     stateNote: job.detail ? ownerFailureMessage(job.detail) : undefined,
     ...(failureCause ? { failureCause } : {}),
-    repo: job.repo,
+    // A temporary workspace has no repository; it is keyed and grouped under
+    // the reserved project key instead (see `temporaryWorkspace`).
+    repo: projectKey(job.repo),
     baseRef: job.base_ref ?? undefined,
     baseSha: (job.base_sha ?? '').slice(0, 7),
-    // Every turn in a conversation publishes to the same branch/PR.
-    branch: job.output_branch ?? `agent/${job.thread_id ?? options.thread?.thread_id ?? job.id}`,
+    // Every turn in a conversation publishes to the same branch/PR. A
+    // temporary workspace publishes nothing, so it has no branch at all.
+    branch:
+      job.output_branch ??
+      (job.repo === null ? '' : `agent/${job.thread_id ?? options.thread?.thread_id ?? job.id}`),
     runtime: job.runtime,
     model: job.model,
     reasoningEffort: job.reasoning_effort ?? undefined,

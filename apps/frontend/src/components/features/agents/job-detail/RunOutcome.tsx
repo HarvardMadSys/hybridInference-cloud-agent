@@ -1,5 +1,7 @@
 'use client';
 
+import { isTemporaryWorkspace } from '@/lib/temporaryWorkspace';
+import { WorkspaceDownloadButton } from '../TemporaryWorkspace';
 import { useT } from '@/components/providers';
 import Link from 'next/link';
 import { siteMisconfiguredReason } from '../adapt';
@@ -96,6 +98,8 @@ function RunActions({
           View changes
         </button>
       ) : null}
+      {/* A temporary workspace publishes nothing: its files leave as a download. */}
+      {isTemporaryWorkspace(job.repo) ? <WorkspaceDownloadButton jobId={job.id} /> : null}
       {job.prUrl ? (
         <>
           <a
@@ -229,7 +233,8 @@ export function OutcomeCard({
   if (job.state === 'running' || job.state === 'queued') return null;
   const successful = job.state === 'done' || job.state === 'needs_review';
   if (successful) {
-    const hasActions = job.diffFiles.length > 0 || Boolean(job.prUrl);
+    const hasActions =
+      job.diffFiles.length > 0 || Boolean(job.prUrl) || isTemporaryWorkspace(job.repo);
     if (!hasActions && !hasLostContext(job)) return null;
     if (firstRun && job.prUrl)
       return (

@@ -29,7 +29,8 @@ export interface AdminSandbox {
   id: string;
   origin_thread_id: string;
   title: string | null;
-  repo: string;
+  /** Null for a temporary workspace. */
+  repo: string | null;
   user_id: string;
   host: string;
   container_id: string | null;

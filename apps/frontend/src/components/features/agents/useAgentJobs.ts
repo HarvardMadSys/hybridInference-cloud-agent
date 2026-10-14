@@ -22,6 +22,7 @@ import type {
 import { createDisplayJobAdapter } from './adapt';
 import { useAgentReads } from './AgentReadProvider';
 import { announceAgentSessionsChanged, onAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
+import { projectKey } from '@/lib/temporaryWorkspace';
 import type { AgentJob } from './types';
 import { isActiveJobState, isActiveConversationState } from './conversationJob';
 import { hasActiveGoal } from './goal/liveWork';
@@ -119,14 +120,17 @@ export function applyAgentLifecycleEvent(
 // error — the server's SSE cap is finite by design, so a drop is the expected
 // shape and the client resumes from the last event id.
 
+/** A project as the sidebar keys it: a repository, or `TEMPORARY_WORKSPACE`. */
+export type SidebarProject = Omit<AgentProjectApi, 'repo'> & { repo: string };
+
 /** The caller's projects, for the sidebar's folder tree. */
 export function useAgentProjects(archived = false): {
-  projects: AgentProjectApi[];
+  projects: SidebarProject[];
   loading: boolean;
   error: string | null;
   reload: () => void;
 } {
-  const [projects, setProjects] = useState<AgentProjectApi[]>([]);
+  const [projects, setProjects] = useState<SidebarProject[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
@@ -145,7 +149,7 @@ export function useAgentProjects(archived = false): {
     listAgentProjects(archived)
       .then((api) => {
         if (cancelled || requestGeneration !== generation.current) return;
-        setProjects(api);
+        setProjects(api.map((project) => ({ ...project, repo: projectKey(project.repo) })));
         setError(null);
       })
       .catch((cause: unknown) => {

@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useT } from '@/components/providers';
-import { listEnvironments } from '@/lib/api/environments';
+import { getGlobalEnvironment, listEnvironments } from '@/lib/api/environments';
 import type { EnvironmentConfig, EnvironmentVariable, VariableEdit } from '@/lib/api/environments';
 import { EnvironmentManager } from './EnvironmentManager';
 import { VariableEditor } from './VariableEditor';
@@ -15,10 +15,17 @@ export interface EnvironmentSelection {
 }
 export function EnvironmentPicker({
   repo,
+  temporary = false,
   onChange,
   onStatusChange,
 }: {
   repo: string;
+  /**
+   * A temporary workspace: environments belong to one repository, so it runs
+   * on the platform's base with the owner's global variables and this task's
+   * own overrides.
+   */
+  temporary?: boolean;
   onChange: (selection: EnvironmentSelection | null) => void;
   onStatusChange?: (status: 'loading' | 'ready' | 'error') => void;
 }) {
@@ -32,16 +39,39 @@ export function EnvironmentPicker({
   const [reload, setReload] = useState(0);
   const previousRepo = useRef<string | null>(null);
   const initializedRepo = useRef<string | null>(null);
+  // One scope key, so switching between a repository and a temporary
+  // workspace clears overrides typed for the other.
+  const scope = temporary ? ':temporary' : repo;
   useEffect(() => {
     let active = true;
     onChange(null);
-    onStatusChange?.(repo ? 'loading' : 'ready');
+    onStatusChange?.(scope ? 'loading' : 'ready');
     setError('');
     setGlobals(null);
-    const changedRepo = previousRepo.current !== repo;
-    previousRepo.current = repo;
+    const changedRepo = previousRepo.current !== scope;
+    previousRepo.current = scope;
     if (changedRepo) setOverrides([]);
-    if (!repo) return;
+    if (!scope) return;
+    if (temporary) {
+      void getGlobalEnvironment()
+        .then((result) => {
+          if (!active) return;
+          initializedRepo.current = scope;
+          onStatusChange?.('ready');
+          setItems([]);
+          setSelected('');
+          setGlobals(result);
+        })
+        .catch((e) => {
+          if (active) {
+            onStatusChange?.('error');
+            setError(e instanceof Error ? e.message : String(e));
+          }
+        });
+      return () => {
+        active = false;
+      };
+    }
     void listEnvironments(repo)
       .then((result) => {
         if (!active) return;
@@ -67,7 +97,7 @@ export function EnvironmentPicker({
     return () => {
       active = false;
     };
-  }, [repo, reload, onChange, onStatusChange]);
+  }, [repo, scope, temporary, reload, onChange, onStatusChange]);
   useEffect(() => {
     if (!globals) return;
     const env = items.find((e) => e.id === selected);
@@ -96,33 +126,40 @@ export function EnvironmentPicker({
         source: 'override',
       }),
     );
-  return repo ? (
+  return scope ? (
     <div className="space-y-2 border-t border-border px-3 py-2 text-sm">
-      <div className="flex flex-wrap items-center gap-2">
-        <label className="flex min-w-0 flex-1 items-center gap-2">
+      {temporary ? (
+        <p className="flex min-w-0 flex-wrap items-center gap-2">
           {t('environment.title')}
-          <select
-            aria-label={t('environment.choose')}
-            className="ui-input min-w-0 flex-1"
-            value={selected}
-            onChange={(e) => setSelected(e.target.value)}
+          <span className="text-muted">{t('environment.platformBase')}</span>
+        </p>
+      ) : (
+        <div className="flex flex-wrap items-center gap-2">
+          <label className="flex min-w-0 flex-1 items-center gap-2">
+            {t('environment.title')}
+            <select
+              aria-label={t('environment.choose')}
+              className="ui-input min-w-0 flex-1"
+              value={selected}
+              onChange={(e) => setSelected(e.target.value)}
+            >
+              <option value="">{t('environment.platformBase')}</option>
+              {items.map((item) => (
+                <option key={item.id} value={item.id!}>
+                  {item.name} · v{item.revision}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button
+            type="button"
+            className="ui-button ui-button-ghost"
+            onClick={() => setManaging(!managing)}
           >
-            <option value="">{t('environment.platformBase')}</option>
-            {items.map((item) => (
-              <option key={item.id} value={item.id!}>
-                {item.name} · v{item.revision}
-              </option>
-            ))}
-          </select>
-        </label>
-        <button
-          type="button"
-          className="ui-button ui-button-ghost"
-          onClick={() => setManaging(!managing)}
-        >
-          {t('environment.manage')}
-        </button>
-      </div>
+            {t('environment.manage')}
+          </button>
+        </div>
+      )}
       <details>
         <summary>
           {t('environment.details')} · {effective.size} {t('environment.variables')}
@@ -150,7 +187,9 @@ export function EnvironmentPicker({
           <VariableEditor values={overrides} onChange={setOverrides} />
         </div>
       </details>
-      {managing && <EnvironmentManager repo={repo} onChanged={() => setReload((v) => v + 1)} />}
+      {managing && !temporary && (
+        <EnvironmentManager repo={repo} onChanged={() => setReload((v) => v + 1)} />
+      )}
       {error && (
         <p role="alert" className="text-red-600 dark:text-red-400">
           {t('environment.loadFailed')} {error}
