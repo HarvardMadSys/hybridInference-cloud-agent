@@ -205,6 +205,9 @@ services:
       # Sandbox Manager-only archival receipts and temporary exports survive service
       # replacement. No sandbox or runner mounts this directory.
       AGENT_SANDBOX_ARCHIVE_STATE_DIR: /var/lib/hybridinference/broker-archives
+      # containerd's content store, mounted read-only below, so a checkpoint
+      # copies only its new layer instead of saving the whole image.
+      AGENT_CONTAINERD_CONTENT_DIR: /var/lib/hybridinference/containerd-content
       # Product inactivity timeout: after the latest settled turn (and after
       # all terminals close), docker stop retains the chat writable layer.
       # This is distinct from the per-turn AGENT_TIMEOUT_S watchdog.
@@ -235,6 +238,9 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ${AGENT_HOST_STATE_ROOT:-/var/lib/hybridinference/agent-host}/sandbox-archives:/var/lib/hybridinference/broker-archives
+      # Read-only image blobs, named by digest. The Sandbox Manager already reaches the
+      # daemon through its socket; this only spares it a full image save.
+      - ${AGENT_HOST_CONTAINERD_CONTENT_DIR:-/var/lib/containerd/io.containerd.content.v1.content}:/var/lib/hybridinference/containerd-content:ro
     networks:
       internal:
         # Keep old runner images able to reach the renamed service during upgrades.

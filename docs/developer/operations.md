@@ -1882,9 +1882,8 @@ While archives are enabled, every clean archived stop also stores one more
 object: a checkpoint of the container's changes over its sandbox image. This
 is on by default; clear **Save restorable checkpoints** on the same settings
 card to opt out, and disabling archives disables checkpoints. The broker runs
-`docker container commit` on the stopped container, streams `docker image save`
-of the result, drops every blob the sandbox image already provides, and uploads
-the remainder as an OCI image archive to
+`docker container commit` on the stopped container and uploads an OCI image
+archive that holds only the commit's manifest, config and new layers to
 `cloud-agent/sandbox/v2/<sha256(sandbox id)>/g<generation>/<checkpoint id>.oci.tar`.
 The key names the sandbox, not the host, so a later release can restore it on
 any server that holds the same image. This release only captures; nothing
@@ -1896,8 +1895,20 @@ restores from a checkpoint yet.
 - A checkpoint never fails a stop. It runs after the final archive is durable;
   a failure is logged as `sandbox_checkpoint_failed` and the stop completes.
   It shares the final archive's capture slot and deadline, and adds a commit,
-  a full read of the image (once per image for the base scan, then once per
-  checkpoint) and an upload to each clean stop.
+  an export and an upload to each clean stop.
+- The Sandbox Manager reads the new layers straight from containerd's content
+  store, mounted read-only at `AGENT_CONTAINERD_CONTENT_DIR`. Host Compose binds
+  `AGENT_HOST_CONTAINERD_CONTENT_DIR` (default
+  `/var/lib/containerd/io.containerd.content.v1.content`, the system containerd
+  behind Docker's containerd image store) there. Blobs are named by digest and
+  every byte copied is checked against it; a damaged blob fails the checkpoint.
+  The mount grants nothing the Docker socket does not already grant. When the
+  mount is missing, empty, or belongs to another daemon, the broker logs
+  `sandbox_checkpoint_content_unavailable` and falls back to `docker image save`,
+  which streams the whole image (once per image for the base scan, then once
+  per checkpoint) and keeps the same blobs. On a CloudLab Kata host the save
+  path took about 90 seconds per export for a 12 MiB change; the content-store
+  path writes only the change.
 - The broker keeps the latest receipt per sandbox under
   `AGENT_SANDBOX_ARCHIVE_STATE_DIR/checkpoints` and repeats it on every
   heartbeat. The control plane records it in `agent_sandbox_checkpoints` only

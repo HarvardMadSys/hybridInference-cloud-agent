@@ -81,7 +81,11 @@ from cloud_agent_host.sandbox_archive import (
 from cloud_agent_host.sandbox_archive_runtime import SandboxArchiveController
 from cloud_agent_host.sandbox_archive_s3 import SandboxArchiveConfigError
 from cloud_agent_host.sandbox_archives import safe_archive_error_type
-from cloud_agent_host.sandbox_checkpoints import SandboxCheckpointCapture, SandboxCheckpointStore
+from cloud_agent_host.sandbox_checkpoints import (
+    DEFAULT_CONTAINERD_CONTENT_DIR,
+    SandboxCheckpointCapture,
+    SandboxCheckpointStore,
+)
 from cloud_agent_host.sandbox_resources import SandboxResourceCollector
 from cloud_agent_host.session_lifecycle import (
     DEFAULT_CHAT_IDLE_TIMEOUT_S,
@@ -2019,6 +2023,12 @@ def create_app(
                 docker_binary=retained_manager.backend.docker_binary,
                 spool_dir=state_dir / "checkpoint-spool",
                 store=checkpoint_store,
+                # A read-only mount of containerd's content store lets a
+                # checkpoint copy only its new layer; without it, the capture
+                # streams the whole image through `docker image save`.
+                content_dir=Path(
+                    os.environ.get("AGENT_CONTAINERD_CONTENT_DIR") or DEFAULT_CONTAINERD_CONTENT_DIR
+                ),
             ),
         )
     archive_boundary = archive_service or archive_controller

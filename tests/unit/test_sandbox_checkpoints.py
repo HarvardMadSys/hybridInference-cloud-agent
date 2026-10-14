@@ -19,11 +19,15 @@ import pytest
 from cloud_agent_host.sandbox_archive_s3 import SandboxArchiveReceipt
 from cloud_agent_host.sandbox_checkpoints import (
     CHECKPOINT_IMAGE_REPOSITORY,
+    CheckpointContentUnavailable,
+    ContainerdContentStore,
     SandboxCheckpointCapture,
     SandboxCheckpointError,
     SandboxCheckpointReceipt,
     SandboxCheckpointStore,
+    _image_names,
     export_checkpoint_archive,
+    export_from_content_store,
     read_base_layers,
 )
 
@@ -596,3 +600,232 @@ def test_a_stalled_export_is_killed_at_the_deadline_and_cleaned_up(tmp_path) -> 
     assert time.monotonic() - started < 3
     assert kills, "the stalled docker save was never killed"
     assert docker.commands[-1][:3] == ["docker", "image", "rm"]
+
+
+def _content_store(root: Any, *images: _Image) -> Any:
+    """Write images' blobs into a containerd-style content store directory."""
+    blobs = root / "blobs" / "sha256"
+    blobs.mkdir(parents=True, exist_ok=True)
+    for image in images:
+        for body in (image.manifest(), image.config(), *image.layers):
+            (blobs / _digest(body)).write_bytes(body)
+    return root
+
+
+def _descriptor_json(image: _Image) -> str:
+    return json.dumps(_descriptor(image.manifest(), _MANIFEST))
+
+
+def test_content_store_export_copies_only_the_new_layer_in_docker_save_layout(tmp_path) -> None:
+    base, committed = _Image(list(BASE)), _Image([*BASE, NEW])
+    store = ContainerdContentStore(_content_store(tmp_path, base, committed))
+    output = io.BytesIO()
+
+    archive = export_from_content_store(
+        store,
+        output,
+        image=_descriptor(committed.manifest(), _MANIFEST),
+        base=_descriptor(base.manifest(), _MANIFEST),
+        reference="freeinference-checkpoint/abc:def",
+        max_bytes=10**6,
+    )
+
+    assert archive.new_layers == (_digest(NEW),)
+    assert archive.new_layer_bytes == len(NEW)
+    with tarfile.open(fileobj=io.BytesIO(output.getvalue())) as tar:
+        names = set(tar.getnames())
+        index = json.loads(tar.extractfile("index.json").read())  # type: ignore[union-attr]
+        legacy = json.loads(tar.extractfile("manifest.json").read())  # type: ignore[union-attr]
+    assert {f"blobs/sha256/{_digest(layer)}" for layer in BASE}.isdisjoint(names)
+    assert {
+        f"blobs/sha256/{_digest(NEW)}",
+        f"blobs/sha256/{_digest(committed.manifest())}",
+        f"blobs/sha256/{_digest(committed.config())}",
+        "index.json",
+        "manifest.json",
+        "oci-layout",
+    } <= names
+    assert index["manifests"][0]["digest"] == f"sha256:{_digest(committed.manifest())}"
+    assert index["manifests"][0]["annotations"] == {
+        "io.containerd.image.name": "docker.io/freeinference-checkpoint/abc:def",
+        "org.opencontainers.image.ref.name": "def",
+    }
+    assert legacy[0]["RepoTags"] == ["freeinference-checkpoint/abc:def"]
+    assert len(legacy[0]["Layers"]) == 3
+    # The same structural checks the save path applies hold for this archive.
+    assert export_checkpoint_archive(
+        io.BytesIO(output.getvalue()),
+        io.BytesIO(),
+        base_layers=frozenset(_digest(layer) for layer in BASE),
+        max_bytes=10**6,
+    ).new_layers == (_digest(NEW),)
+
+
+def test_content_store_export_reports_missing_blobs_as_unavailable(tmp_path) -> None:
+    base, committed = _Image(list(BASE)), _Image([*BASE, NEW])
+    root = _content_store(tmp_path, base, committed)
+    store = ContainerdContentStore(root)
+    (root / "blobs" / "sha256" / _digest(NEW)).unlink()
+
+    with pytest.raises(CheckpointContentUnavailable):
+        export_from_content_store(
+            store,
+            io.BytesIO(),
+            image=_descriptor(committed.manifest(), _MANIFEST),
+            base=_descriptor(base.manifest(), _MANIFEST),
+            reference="freeinference-checkpoint/abc:def",
+            max_bytes=10**6,
+        )
+    with pytest.raises(CheckpointContentUnavailable):
+        export_from_content_store(
+            store,
+            io.BytesIO(),
+            image=_descriptor(committed.manifest(), _MANIFEST),
+            base=_descriptor(b"an image this daemon never pulled", _MANIFEST),
+            reference="freeinference-checkpoint/abc:def",
+            max_bytes=10**6,
+        )
+
+
+def test_content_store_export_refuses_a_damaged_layer_instead_of_falling_back(tmp_path) -> None:
+    base, committed = _Image(list(BASE)), _Image([*BASE, NEW])
+    root = _content_store(tmp_path, base, committed)
+    (root / "blobs" / "sha256" / _digest(NEW)).write_bytes(b"X" + NEW[1:])
+
+    with pytest.raises(SandboxCheckpointError, match="does not match its digest") as excinfo:
+        export_from_content_store(
+            ContainerdContentStore(root),
+            io.BytesIO(),
+            image=_descriptor(committed.manifest(), _MANIFEST),
+            base=_descriptor(base.manifest(), _MANIFEST),
+            reference="freeinference-checkpoint/abc:def",
+            max_bytes=10**6,
+        )
+    assert not isinstance(excinfo.value, CheckpointContentUnavailable)
+
+
+def test_content_store_export_is_sized_before_anything_is_written(tmp_path) -> None:
+    large = b"y" * (2 * 1024 * 1024)
+    base, committed = _Image(list(BASE)), _Image([*BASE, large])
+    output = _PeakBytes()
+
+    with pytest.raises(SandboxCheckpointError, match="size limit"):
+        export_from_content_store(
+            ContainerdContentStore(_content_store(tmp_path, base, committed)),
+            output,
+            image=_descriptor(committed.manifest(), _MANIFEST),
+            base=_descriptor(base.manifest(), _MANIFEST),
+            reference="freeinference-checkpoint/abc:def",
+            max_bytes=1024 * 1024,
+        )
+    assert output.peak == 0
+
+
+class _InspectingDocker(_FakeDocker):
+    """Also answer `docker image inspect --format {{json .Descriptor}}`."""
+
+    def run(self, argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if argv[1:3] == ["image", "inspect"]:
+            self.commands.append(argv)
+            image = self.base if argv[-1] == "sha256:base" else self.committed
+            return subprocess.CompletedProcess(argv, 0, _descriptor_json(image), "")
+        return super().run(argv, **kwargs)
+
+
+def _direct_capture(tmp_path, docker: _FakeDocker, content_dir: Any) -> SandboxCheckpointCapture:
+    return SandboxCheckpointCapture(
+        docker_binary="docker",
+        spool_dir=tmp_path / "spool",
+        store=SandboxCheckpointStore(tmp_path / "checkpoints"),
+        run=docker.run,
+        popen=docker.popen,
+        clock=lambda: 100.0,
+        now=lambda: datetime(2026, 10, 13, 12, tzinfo=UTC),
+        content_dir=content_dir,
+    )
+
+
+def _recording_upload(uploads: list[bytes]) -> Any:
+    def upload(**kwargs: Any) -> SandboxArchiveReceipt:
+        uploads.append(kwargs["body"].read())
+        return SandboxArchiveReceipt(
+            phase="checkpoint",
+            bucket="freeinference",
+            key="k",
+            size=kwargs["size"],
+            sha256=kwargs["sha256"],
+            etag="e",
+            version_id="v",
+            s3_checksum_sha256=None,
+            multipart=False,
+        )
+
+    return upload
+
+
+def test_capture_reads_the_new_layer_from_the_content_store_without_saving(tmp_path) -> None:
+    base, committed = _Image(list(BASE)), _Image([*BASE, NEW])
+    docker = _InspectingDocker(base, committed)
+    content = _content_store(tmp_path / "content", base, committed)
+    uploads: list[bytes] = []
+
+    receipt = _direct_capture(tmp_path, docker, content).capture(
+        _spec(),
+        SimpleNamespace(container_id="container-1234567890", running=False, image="i"),
+        [],
+        upload=_recording_upload(uploads),
+        max_bytes=10**6,
+        deadline=1e3,
+    )
+
+    assert not any(command[1:3] == ["image", "save"] for command in docker.commands)
+    assert "base_scan" not in receipt.durations_ms
+    assert receipt.new_layer_bytes == len(NEW)
+    assert f"blobs/sha256/{_digest(NEW)}" in _names(uploads[0])
+    assert docker.commands[-1][:3] == ["docker", "image", "rm"]
+
+
+@pytest.mark.parametrize("prepare", ["no-mount", "empty-mount", "other-daemon"])
+def test_capture_falls_back_to_image_save_without_a_usable_content_store(
+    tmp_path, prepare: str
+) -> None:
+    base, committed = _Image(list(BASE)), _Image([*BASE, NEW])
+    docker = _InspectingDocker(base, committed)
+    content = tmp_path / "content"
+    if prepare == "empty-mount":
+        content.mkdir()
+    elif prepare == "other-daemon":
+        _content_store(content, _Image([b"unrelated"]))
+    uploads: list[bytes] = []
+
+    receipt = _direct_capture(tmp_path, docker, content).capture(
+        _spec(),
+        SimpleNamespace(container_id="container-1234567890", running=False, image="i"),
+        [],
+        upload=_recording_upload(uploads),
+        max_bytes=10**6,
+        deadline=1e3,
+    )
+
+    assert any(command[1:3] == ["image", "save"] for command in docker.commands)
+    assert receipt.new_layer_bytes == len(NEW)
+    # A partial content-store attempt never leaks into the uploaded archive.
+    assert export_checkpoint_archive(
+        io.BytesIO(uploads[0]),
+        io.BytesIO(),
+        base_layers=frozenset(_digest(layer) for layer in BASE),
+        max_bytes=10**6,
+    ).new_layers == (_digest(NEW),)
+
+
+@pytest.mark.parametrize(
+    ("reference", "expected"),
+    [
+        ("freeinference-checkpoint/abc:def", "docker.io/freeinference-checkpoint/abc:def"),
+        ("ubuntu:24.04", "docker.io/library/ubuntu:24.04"),
+        ("ghcr.io/org/image:tag", "ghcr.io/org/image:tag"),
+        ("localhost/image:tag", "localhost/image:tag"),
+    ],
+)
+def test_image_names_match_dockers_normalisation(reference: str, expected: str) -> None:
+    assert _image_names(reference) == (expected, expected.rsplit(":", 1)[1])

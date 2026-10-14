@@ -11,10 +11,12 @@ only regular files under ``blobs/sha256/`` and the OCI index files are accepted,
 every kept blob is checked against its digest, and the manifest must be the
 base image's layers followed by new ones. Nothing is extracted on the host.
 
-Docker has no command that saves a single layer, so the whole committed image
-is streamed and the base image's blobs are dropped on the way. That costs one
-read of the image per capture; reading the new layer straight from containerd
-is a later optimisation.
+Docker has no command that saves a single layer. When containerd's content
+store is mounted read-only into the broker, the new layers are read straight
+from it: ``docker image inspect`` names the committed manifest, and the
+manifest names its blobs. Otherwise the whole committed image is streamed
+through ``docker image save`` and the base image's blobs are dropped on the
+way, which reads the entire image for every checkpoint.
 """
 
 from __future__ import annotations
@@ -50,6 +52,8 @@ logger = logging.getLogger(__name__)
 _T = TypeVar("_T")
 
 CHECKPOINT_FORMAT_VERSION: Final = 1
+#: Where host Compose mounts containerd's content store, read-only.
+DEFAULT_CONTAINERD_CONTENT_DIR: Final = "/var/lib/hybridinference/containerd-content"
 CHECKPOINT_IMAGE_REPOSITORY: Final = "freeinference-checkpoint"
 # Index, layout and manifest files are tiny; anything larger is not an image
 # description and is refused rather than buffered.
@@ -292,7 +296,23 @@ def _image_manifests(
     index_raw = metadata.get("index.json")
     if index_raw is None:
         raise SandboxCheckpointError("checkpoint archive has no index.json")
-    pending: list[Any] = list(_load_json(index_raw, "index").get("manifests") or [])
+    manifests = _walk_manifests(
+        list(_load_json(index_raw, "index").get("manifests") or []), small_blobs.get
+    )
+    if not manifests:
+        raise SandboxCheckpointError("checkpoint archive has no image manifest")
+    return manifests
+
+
+def _walk_manifests(
+    descriptors: list[Any],
+    read: Callable[[str], bytes | None],
+) -> list[tuple[str, dict[str, Any]]]:
+    """Follow index descriptors to every image manifest whose blob is present.
+
+    The result is empty when none is present; callers decide what that means.
+    """
+    pending: list[Any] = list(descriptors)
     manifests: list[tuple[str, dict[str, Any]]] = []
     seen: set[str] = set()
     while pending:
@@ -301,7 +321,7 @@ def _image_manifests(
         if digest in seen:
             continue
         seen.add(digest)
-        raw = small_blobs.get(digest)
+        raw = read(digest)
         if raw is None:
             # A multi-platform index lists manifests whose blobs were never
             # pulled; only the ones the archive carries describe this image.
@@ -314,8 +334,6 @@ def _image_manifests(
             manifests.append((digest, document))
         else:
             raise SandboxCheckpointError("checkpoint archive has an unknown manifest type")
-    if not manifests:
-        raise SandboxCheckpointError("checkpoint archive has no image manifest")
     return manifests
 
 
@@ -431,7 +449,24 @@ def export_checkpoint_archive(
     config_digest = _descriptor_digest(manifest.get("config"))
     if config_digest not in small_blobs:
         raise SandboxCheckpointError("checkpoint archive is missing its image config")
-    layers = _manifest_layers(manifest)
+    inherited, added = _split_new_layers(_manifest_layers(manifest), base_layers)
+    missing = [layer for layer in added if layer not in kept_blob_bytes]
+    if missing:
+        raise SandboxCheckpointError("checkpoint archive is missing a new layer")
+    return CheckpointArchive(
+        manifest_digest=manifest_digest,
+        config_digest=config_digest,
+        base_layers=inherited,
+        new_layers=added,
+        new_layer_bytes=sum(kept_blob_bytes[layer] for layer in added),
+    )
+
+
+def _split_new_layers(
+    layers: tuple[str, ...],
+    base_layers: frozenset[str],
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Split a manifest into the image's layers and the checkpoint's own."""
     split = next(
         (position for position, layer in enumerate(layers) if layer not in base_layers),
         len(layers),
@@ -443,15 +478,197 @@ def export_checkpoint_archive(
         raise SandboxCheckpointError("checkpoint adds no layer to the sandbox image")
     if any(layer in base_layers for layer in added):
         raise SandboxCheckpointError("checkpoint layers interleave with the sandbox image")
-    missing = [layer for layer in added if layer not in kept_blob_bytes]
-    if missing:
-        raise SandboxCheckpointError("checkpoint archive is missing a new layer")
+    return inherited, added
+
+
+class CheckpointContentUnavailable(SandboxCheckpointError):
+    """The content store cannot serve this image; the capture falls back to save."""
+
+
+class ContainerdContentStore:
+    """A read-only view of containerd's content store, whose blobs are digest-named.
+
+    Containerd writes a blob under its digest only after verifying it, and this
+    view verifies every read again, so a wrong mount or a damaged file is
+    refused instead of copied.
+    """
+
+    def __init__(self, root: Path) -> None:
+        self._blobs = root / "blobs" / "sha256"
+
+    def available(self) -> bool:
+        """Whether the mount looks like a content store at all."""
+        try:
+            return self._blobs.is_dir()
+        except OSError:
+            return False
+
+    def _path(self, digest: str) -> Path:
+        if _DIGEST_RE.fullmatch(digest) is None:
+            raise SandboxCheckpointError("content store digest is invalid")
+        return self._blobs / digest
+
+    def size(self, digest: str) -> int | None:
+        """Return a blob's size, or ``None`` when the store does not hold it."""
+        try:
+            return self._path(digest).stat().st_size
+        except FileNotFoundError:
+            return None
+
+    def read(self, digest: str) -> bytes | None:
+        """Return a small, verified blob such as a manifest, index or config."""
+        size = self.size(digest)
+        if size is None:
+            return None
+        if size > _MAX_METADATA_BYTES:
+            raise SandboxCheckpointError("content store metadata blob is too large")
+        body = self._path(digest).read_bytes()
+        if hashlib.sha256(body).hexdigest() != digest:
+            raise SandboxCheckpointError("content store blob does not match its digest")
+        return body
+
+    def open(self, digest: str) -> BinaryIO:
+        """Open a blob for streaming; the caller verifies what it copies."""
+        return self._path(digest).open("rb")
+
+
+def _image_names(reference: str) -> tuple[str, str]:
+    """Return the fully qualified name and tag Docker records for ``reference``."""
+    repository, _, tag = reference.rpartition(":")
+    first = repository.split("/", 1)[0]
+    if "/" not in repository:
+        repository = f"docker.io/library/{repository}"
+    elif "." not in first and ":" not in first and first != "localhost":
+        repository = f"docker.io/{repository}"
+    return f"{repository}:{tag}", tag
+
+
+def _descriptor_of(raw: Any, what: str) -> dict[str, Any]:
+    if not isinstance(raw, dict) or raw.get("mediaType") not in _INDEX_TYPES | _MANIFEST_TYPES:
+        raise CheckpointContentUnavailable(f"{what} has no image descriptor")
+    _descriptor_digest(raw)
+    return raw
+
+
+def export_from_content_store(
+    store: ContainerdContentStore,
+    output: BinaryIO,
+    *,
+    image: Mapping[str, Any],
+    base: Mapping[str, Any],
+    reference: str,
+    max_bytes: int,
+) -> CheckpointArchive:
+    """Write a committed image's new layers as a loadable OCI archive.
+
+    ``image`` and ``base`` are the descriptors ``docker image inspect`` reports
+    for the commit and for the sandbox image. Only the commit's manifest, its
+    config and its new layers are written, in the layout ``docker image save``
+    produces, so it loads on any host that holds the base image. Everything
+    is sized before the first byte is written and verified while copied.
+    """
+    if max_bytes <= 0:
+        raise ValueError("checkpoint size limit must be positive")
+    base_manifests = _walk_manifests([_descriptor_of(base, "sandbox image")], store.read)
+    if not base_manifests:
+        raise CheckpointContentUnavailable("sandbox image manifest is not in the content store")
+    base_layers = frozenset(
+        layer for _digest, manifest in base_manifests for layer in _manifest_layers(manifest)
+    )
+    image_descriptor = _descriptor_of(image, "checkpoint image")
+    manifests = _walk_manifests([image_descriptor], store.read)
+    if not manifests:
+        raise CheckpointContentUnavailable("checkpoint manifest is not in the content store")
+    if len(manifests) != 1:
+        raise SandboxCheckpointError("checkpoint image must have exactly one manifest")
+    manifest_digest, manifest = manifests[0]
+    config_digest = _descriptor_digest(manifest.get("config"))
+    layers = _manifest_layers(manifest)
+    inherited, added = _split_new_layers(layers, base_layers)
+    manifest_body = store.read(manifest_digest)
+    config_body = store.read(config_digest)
+    sizes = {layer: store.size(layer) for layer in added}
+    if manifest_body is None or config_body is None or None in sizes.values():
+        raise CheckpointContentUnavailable("checkpoint blobs are not in the content store")
+    layer_sizes = {layer: size for layer, size in sizes.items() if size is not None}
+    name, tag = _image_names(reference)
+    index_body = json.dumps(
+        {
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.index.v1+json",
+            "manifests": [
+                {
+                    "mediaType": manifest.get("mediaType") or image_descriptor["mediaType"],
+                    "digest": f"sha256:{manifest_digest}",
+                    "size": len(manifest_body),
+                    "annotations": {
+                        "io.containerd.image.name": name,
+                        "org.opencontainers.image.ref.name": tag,
+                    },
+                }
+            ],
+        },
+        separators=(",", ":"),
+    ).encode()
+    docker_manifest = json.dumps(
+        [
+            {
+                "Config": f"blobs/sha256/{config_digest}",
+                "RepoTags": [reference],
+                "Layers": [f"blobs/sha256/{layer}" for layer in layers],
+            }
+        ],
+        separators=(",", ":"),
+    ).encode()
+    layout_body = b'{"imageLayoutVersion":"1.0.0"}'
+    files: list[tuple[str, int]] = [
+        (f"blobs/sha256/{manifest_digest}", len(manifest_body)),
+        (f"blobs/sha256/{config_digest}", len(config_body)),
+        *((f"blobs/sha256/{layer}", layer_sizes[layer]) for layer in added),
+        ("index.json", len(index_body)),
+        ("manifest.json", len(docker_manifest)),
+        ("oci-layout", len(layout_body)),
+    ]
+    projected = _ARCHIVE_TRAILER_BYTES + 2 * _ENTRY_OVERHEAD_BYTES
+    for _name, size in files:
+        projected += _ENTRY_OVERHEAD_BYTES + -(-size // tarfile.BLOCKSIZE) * tarfile.BLOCKSIZE
+    if projected > max_bytes:
+        raise SandboxCheckpointError("sandbox checkpoint exceeds the archive size limit")
+    with tarfile.open(fileobj=output, mode="w|", format=tarfile.PAX_FORMAT) as target:
+        for directory in ("blobs", "blobs/sha256"):
+            entry = tarfile.TarInfo(directory)
+            entry.type = tarfile.DIRTYPE
+            entry.mode = 0o755
+            target.addfile(entry)
+
+        def add_bytes(name: str, body: bytes) -> None:
+            entry = tarfile.TarInfo(name)
+            entry.mode = 0o644
+            entry.size = len(body)
+            target.addfile(entry, _BytesReader(body))
+
+        add_bytes(f"blobs/sha256/{manifest_digest}", manifest_body)
+        add_bytes(f"blobs/sha256/{config_digest}", config_body)
+        for layer in added:
+            entry = tarfile.TarInfo(f"blobs/sha256/{layer}")
+            entry.mode = 0o644
+            entry.size = layer_sizes[layer]
+            with store.open(layer) as source:
+                reader = _DigestingReader(source, entry.size)
+                target.addfile(entry, reader)
+            if reader.digest.hexdigest() != layer:
+                raise SandboxCheckpointError("content store blob does not match its digest")
+        add_bytes("index.json", index_body)
+        add_bytes("manifest.json", docker_manifest)
+        add_bytes("oci-layout", layout_body)
+    if output.tell() > max_bytes:
+        raise SandboxCheckpointError("sandbox checkpoint exceeds the archive size limit")
     return CheckpointArchive(
         manifest_digest=manifest_digest,
         config_digest=config_digest,
         base_layers=inherited,
         new_layers=added,
-        new_layer_bytes=sum(kept_blob_bytes[layer] for layer in added),
+        new_layer_bytes=sum(layer_sizes.values()),
     )
 
 
@@ -507,10 +724,12 @@ class SandboxCheckpointCapture:
         popen: Callable[..., subprocess.Popen[bytes]] = subprocess.Popen,
         clock: Callable[[], float] = time.monotonic,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
+        content_dir: Path | None = None,
     ) -> None:
         self._docker = docker_binary
         self._spool_dir = spool_dir
         self.store = store
+        self._content = None if content_dir is None else ContainerdContentStore(content_dir)
         self._run = run
         self._popen = popen
         self._clock = clock
@@ -557,12 +776,16 @@ class SandboxCheckpointCapture:
             raise SandboxCheckpointError("sandbox checkpoint commit failed")
         durations["commit"] = self._elapsed_ms(started)
         try:
-            base_layers = self._base_image_layers(base_image, deadline, durations)
             self._spool_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
             with tempfile.TemporaryFile(dir=self._spool_dir, prefix="checkpoint-") as spool:
-                started = self._clock()
-                archive = self._export(reference, spool, base_layers, max_bytes, deadline)
-                durations["export"] = self._elapsed_ms(started)
+                archive = self._export_from_content(
+                    reference, base_image, spool, max_bytes, deadline, durations
+                )
+                if archive is None:
+                    base_layers = self._base_image_layers(base_image, deadline, durations)
+                    started = self._clock()
+                    archive = self._export(reference, spool, base_layers, max_bytes, deadline)
+                    durations["export"] = self._elapsed_ms(started)
                 size = spool.tell()
                 spool.seek(0)
                 digest = hashlib.sha256()
@@ -610,6 +833,56 @@ class SandboxCheckpointCapture:
         )
         self.store.save(receipt)
         return receipt
+
+    def _export_from_content(
+        self,
+        reference: str,
+        base_image: str,
+        spool: BinaryIO,
+        max_bytes: int,
+        deadline: float,
+        durations: dict[str, int],
+    ) -> CheckpointArchive | None:
+        """Export through the content store, or return ``None`` to use image save."""
+        if self._content is None or not self._content.available():
+            return None
+        started = self._clock()
+        try:
+            archive = export_from_content_store(
+                self._content,
+                spool,
+                image=self._image_descriptor(reference, deadline),
+                base=self._image_descriptor(base_image, deadline),
+                reference=reference,
+                max_bytes=max_bytes,
+            )
+        except CheckpointContentUnavailable as exc:
+            logger.warning(
+                "sandbox checkpoint falls back to image save",
+                extra={"event": "sandbox_checkpoint_content_unavailable", "detail": str(exc)},
+            )
+            spool.seek(0)
+            spool.truncate()
+            return None
+        durations["export"] = self._elapsed_ms(started)
+        return archive
+
+    def _image_descriptor(self, image: str, deadline: float) -> dict[str, Any]:
+        """Ask Docker which manifest or index an image is, as containerd stores it."""
+        inspected = self._run(
+            [self._docker, "image", "inspect", "--format", "{{json .Descriptor}}", image],
+            capture_output=True,
+            text=True,
+            timeout=min(_IMAGE_REMOVE_TIMEOUT_S, self._remaining(deadline)),
+            check=False,
+        )
+        if inspected.returncode != 0:
+            raise CheckpointContentUnavailable("image descriptor is unavailable")
+        try:
+            descriptor = json.loads(inspected.stdout)
+        except ValueError as exc:
+            raise CheckpointContentUnavailable("image descriptor is not JSON") from exc
+        return _descriptor_of(descriptor, "image")
 
     def _base_image_layers(
         self,
@@ -743,11 +1016,15 @@ class SandboxCheckpointCapture:
 __all__ = [
     "CHECKPOINT_FORMAT_VERSION",
     "CHECKPOINT_IMAGE_REPOSITORY",
+    "DEFAULT_CONTAINERD_CONTENT_DIR",
     "CheckpointArchive",
+    "CheckpointContentUnavailable",
+    "ContainerdContentStore",
     "SandboxCheckpointCapture",
     "SandboxCheckpointError",
     "SandboxCheckpointReceipt",
     "SandboxCheckpointStore",
     "export_checkpoint_archive",
+    "export_from_content_store",
     "read_base_layers",
 ]
