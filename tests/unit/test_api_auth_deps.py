@@ -23,7 +23,7 @@ from typing import Any
 import jwt
 import pytest
 import pytest_asyncio
-from fastapi import Depends, FastAPI, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from httpx import ASGITransport, AsyncClient
 
 from cloud_agent import identity
@@ -37,6 +37,7 @@ from cloud_agent.api.deps import (
     looks_like_agent_token,
     verify_admin_access,
 )
+from cloud_agent.gateway import GatewayError
 
 pytestmark = pytest.mark.asyncio
 
@@ -454,6 +455,15 @@ def _configured_identity_issuer(monkeypatch):
     monkeypatch.setenv("GATEWAY_ISSUER", "https://gateway.example")
 
 
+async def _until(condition: Any) -> None:
+    """Yield to the loop until ``condition()`` holds, failing rather than hanging."""
+    for _ in range(1000):
+        if condition():
+            return
+        await asyncio.sleep(0)
+    raise AssertionError("the awaited state was never reached")
+
+
 class _SlowAccessGateway:
     """Answers ``agent.use`` once released, counting how often it was asked."""
 
@@ -504,11 +514,57 @@ async def test_a_lookup_that_overlaps_a_recorded_denial_does_not_keep_its_grant(
     gateway = _SlowAccessGateway()
     admission = deps.AgentAccessAdmission()
     stale = asyncio.create_task(admission.decision(gateway, "u1"))
-    while gateway.asked == 0:
-        await asyncio.sleep(0)
+    await _until(lambda: gateway.asked == 1)
     # /v1/session/me is told the access was withdrawn while that lookup waits.
     admission.record(AgentAccessDecision(user_id="u1", allowed=False, permissions=[]))
     gateway.release.set()
     assert (await stale).permits("agent.use")
     await admission.decision(gateway, "u1")
     assert gateway.asked == 2
+
+
+class _ScriptedAccessGateway:
+    """Answers each lookup, once released, with the next scripted outcome."""
+
+    def __init__(self, *outcomes: bool | Exception) -> None:
+        self.outcomes = list(outcomes)
+        self.asked = 0
+        self.release = asyncio.Event()
+
+    async def agent_access(self, user_id: str) -> dict[str, Any]:
+        outcome = self.outcomes[self.asked]
+        self.asked += 1
+        await self.release.wait()
+        if isinstance(outcome, Exception):
+            raise outcome
+        permissions = ["agent.use"] if outcome else []
+        return {"user_id": user_id, "allowed": outcome, "permissions": permissions}
+
+
+async def test_requests_after_a_recorded_denial_do_not_join_the_lookup_before_it():
+    gateway = _ScriptedAccessGateway(True, False)
+    admission = deps.AgentAccessAdmission()
+    stale = asyncio.create_task(admission.decision(gateway, "u1"))
+    await _until(lambda: gateway.asked == 1)
+    admission.record(AgentAccessDecision(user_id="u1", allowed=False, permissions=[]))
+    after = asyncio.create_task(admission.decision(gateway, "u1"))
+    await _until(lambda: gateway.asked == 2)
+    gateway.release.set()
+    # The request that was already waiting is answered by its lookup; the one
+    # that arrived after the denial is answered by a lookup of its own.
+    assert (await stale).permits("agent.use")
+    assert not (await after).permits("agent.use")
+    assert gateway.asked == 2
+
+
+async def test_a_failed_lookup_leaves_a_grant_recorded_while_it_waited():
+    gateway = _ScriptedAccessGateway(GatewayError("unavailable", status_code=503))
+    admission = deps.AgentAccessAdmission()
+    stale = asyncio.create_task(admission.decision(gateway, "u1"))
+    await _until(lambda: gateway.asked == 1)
+    admission.record(AgentAccessDecision(user_id="u1", allowed=True, permissions=["agent.use"]))
+    gateway.release.set()
+    with pytest.raises(HTTPException):
+        await stale
+    assert (await admission.decision(gateway, "u1")).permits("agent.use")
+    assert gateway.asked == 1

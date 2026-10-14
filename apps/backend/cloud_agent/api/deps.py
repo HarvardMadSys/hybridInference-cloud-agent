@@ -390,9 +390,6 @@ class AgentAccessAdmission:
         self._clock = clock
         self._granted: dict[str, tuple[float, AgentAccessDecision]] = {}
         self._lookups: dict[str, asyncio.Task[AgentAccessDecision]] = {}
-        # Counts the denials recorded per account. A lookup that overlaps one
-        # may have been answered before the withdrawal, so its grant is not kept.
-        self._denials: dict[str, int] = {}
 
     async def decision(self, gateway: Any, user_id: str) -> AgentAccessDecision:
         """The kept grant if still fresh, else the Gateway's current decision."""
@@ -412,11 +409,10 @@ class AgentAccessAdmission:
         """Keep a fresh grant, or drop the kept one if this decision is not a grant."""
         if not decision.permits("agent.use"):
             self._granted.pop(decision.user_id, None)
-            if len(self._denials) >= 1024:
-                self._denials = {
-                    user: count for user, count in self._denials.items() if user in self._lookups
-                }
-            self._denials[decision.user_id] = self._denials.get(decision.user_id, 0) + 1
+            # A lookup already under way may have been answered before this
+            # denial. Requests from now on start one of their own; those
+            # already waiting on it still get its answer.
+            self._lookups.pop(decision.user_id, None)
             return
         now = self._clock()
         if len(self._granted) >= 1024:
@@ -424,17 +420,15 @@ class AgentAccessAdmission:
         self._granted[decision.user_id] = (now + self._ttl_s, decision)
 
     async def _look_up(self, gateway: Any, user_id: str) -> AgentAccessDecision:
-        denials = self._denials.get(user_id, 0)
-        try:
-            decision = await resolve_agent_access(gateway, user_id)
-        except BaseException:
-            self._granted.pop(user_id, None)
-            raise
-        if decision.permits("agent.use") and self._denials.get(user_id, 0) != denials:
-            # A denial was recorded while this lookup waited: answer the
-            # requests that were already waiting, but keep nothing for later.
-            return decision
-        self.record(decision)
+        # A failure is no verdict on the owner, and drops nothing: a lookup
+        # starts only when no grant is fresh, so a fresh one now was recorded
+        # while it waited, and is newer than anything it could have said.
+        decision = await resolve_agent_access(gateway, user_id)
+        if self._lookups.get(user_id) is asyncio.current_task():
+            self.record(decision)
+        # Otherwise a denial recorded while it waited retired it: it answers
+        # the requests already waiting on it, and changes nothing for later
+        # ones, whose answers are newer than its own.
         return decision
 
     def _finished(self, user_id: str, lookup: asyncio.Task[AgentAccessDecision]) -> None:
