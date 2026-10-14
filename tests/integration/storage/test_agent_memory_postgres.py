@@ -414,3 +414,43 @@ async def test_the_cutover_copies_switches_and_the_preferences_tasks_received(st
         ("owner/api", "Always use pnpm.", "agent"),
     ]
     assert all(list(row["source_job_ids"]) == ["job-1"] for row in copied)
+
+
+_OLD_TABLES = (
+    "agent_user_memory_edits",
+    "agent_project_memory_edits",
+    "agent_user_memories",
+    "agent_project_memories",
+)
+
+
+async def test_the_retired_memory_tables_are_dropped_and_come_back_empty(store, pool):
+    config = _db_config()
+
+    async def present(conn):
+        return [await conn.fetchval("SELECT to_regclass($1)::text", table) for table in _OLD_TABLES]
+
+    try:
+        async with pool.acquire() as conn:
+            assert await present(conn) == [None] * 4
+        downgrade_to(config, "0071_temporary_workspaces")
+        async with pool.acquire() as conn:
+            assert await present(conn) == list(_OLD_TABLES)
+            await conn.execute(
+                "INSERT INTO agent_user_memories (user_id, portrait) VALUES ('alice', '{}'::jsonb)"
+            )
+            await conn.execute(
+                "INSERT INTO agent_user_memory_edits (user_id, memory_id, source_job_id) "
+                "VALUES ('alice', 'm1', 'job-1')"
+            )
+        apply_migrations(config)
+        async with pool.acquire() as conn:
+            assert await present(conn) == [None] * 4
+            # The durable memory tables are untouched.
+            assert await conn.fetchval("SELECT to_regclass('agent_memory_settings')") is not None
+        downgrade_to(config, "0071_temporary_workspaces")
+        async with pool.acquire() as conn:
+            assert await conn.fetchval("SELECT count(*) FROM agent_user_memories") == 0
+            assert await conn.fetchval("SELECT count(*) FROM agent_user_memory_edits") == 0
+    finally:
+        apply_migrations(config)

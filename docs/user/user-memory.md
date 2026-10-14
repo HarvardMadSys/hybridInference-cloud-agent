@@ -110,8 +110,8 @@ Preferences the owner edited or consolidated become `manual` memories, the rest
 `agent` memories, at most 30 per scope; task references are not copied. The
 copy is idempotent.
 
-The earlier tables (`agent_user_memories`, `agent_project_memories`,
-`agent_user_memory_edits`, `agent_project_memory_edits`) are no longer read or
-written. They stay for one release so that a rollback still finds them; a later
-migration drops them. Every control-plane process purges expired archives
-hourly.
+`0072_drop_old_memory_tables` drops the earlier tables (`agent_user_memories`,
+`agent_project_memories`, `agent_user_memory_edits`,
+`agent_project_memory_edits`). Its downgrade recreates them empty, so a rollback
+to code from before 0070 starts without the earlier memory. Every control-plane
+process purges expired archives hourly.
