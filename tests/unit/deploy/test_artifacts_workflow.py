@@ -26,6 +26,7 @@ from typing import Any
 import pytest
 import yaml
 from deploy.release import build_host_bundle, release_manifest as rm, smoke
+from scripts.ci_image_matrix import image_matrix
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 CI = REPO_ROOT / ".github/workflows/ci.yml"
@@ -40,7 +41,10 @@ def workflow() -> dict[str, Any]:
 
 
 def cells() -> list[dict[str, Any]]:
-    return workflow()["jobs"]["artifacts"]["strategy"]["matrix"]["artifact"]
+    assert workflow()["jobs"]["artifacts"]["strategy"]["matrix"]["artifact"] == (
+        "${{ fromJSON(needs.changes.outputs.artifacts) }}"
+    )
+    return image_matrix("all")
 
 
 def step(name_fragment: str, job: str = "artifacts") -> dict[str, Any]:
@@ -230,7 +234,8 @@ def test_pull_requests_give_kilo_its_own_vms_and_trusted_events_run_every_case_t
     assert in_cell["if"] == "matrix.artifact.name == 'sandbox'"
     assert in_cell["env"]["MCP_TEST_SELECTION"] == SANDBOX_CELL_SELECTION
     assert jobs["mcp"]["if"] == (
-        "github.event_name == 'pull_request' && needs.changes.outputs.docker == 'true'"
+        "github.event_name == 'pull_request' && needs.changes.outputs.docker == 'true' "
+        "&& needs.changes.outputs.image_scope != 'web'"
     )
     assert jobs["mcp"]["needs"] == "changes"
     assert jobs["mcp"]["strategy"]["fail-fast"] is False
@@ -365,8 +370,8 @@ def test_the_commit_reaches_no_layer(dockerfile: str) -> None:
     )
 
 
-def _runs_the_image_jobs(path: str) -> bool:
-    """Execute the classifier with one changed path and a local-only Git double."""
+def _classify_paths(paths: list[str]) -> dict[str, str]:
+    """Execute the classifier with changed paths and a local-only Git double."""
     script = str(step("Classify changed paths", job="changes")["run"])
     with tempfile.TemporaryDirectory(prefix="ci-classifier-") as directory:
         temporary = Path(directory)
@@ -389,7 +394,7 @@ def _runs_the_image_jobs(path: str) -> bool:
             "GITHUB_SHA": "b" * 40,
             "BEFORE": "a" * 40,
             "GITHUB_OUTPUT": str(output),
-            "CHANGED_PATH": path,
+            "CHANGED_PATH": "\n".join(paths),
         }
         subprocess.run(
             ["bash", "--noprofile", "--norc", "-c", script],
@@ -400,7 +405,11 @@ def _runs_the_image_jobs(path: str) -> bool:
             text=True,
         )
         values = dict(line.split("=", 1) for line in output.read_text().splitlines())
-    return values["docker"] == "true"
+    return values
+
+
+def _runs_the_image_jobs(path: str) -> bool:
+    return _classify_paths([path])["docker"] == "true"
 
 
 def _copied_paths(dockerfile: Path) -> set[str]:
@@ -534,8 +543,20 @@ def history(tmp_path: Path) -> Path:
     return repository
 
 
-SELECTS_NOTHING = {"backend": "false", "web": "false", "docker": "false", "docs": "false"}
-SELECTS_EVERYTHING = {"backend": "true", "web": "true", "docker": "true", "docs": "true"}
+SELECTS_NOTHING = {
+    "backend": "false",
+    "web": "false",
+    "docker": "false",
+    "docs": "false",
+    "image_scope": "all",
+}
+SELECTS_EVERYTHING = {
+    "backend": "true",
+    "web": "true",
+    "docker": "true",
+    "docs": "true",
+    "image_scope": "all",
+}
 
 
 def test_a_push_is_checked_against_the_newest_release_not_the_previous_push(

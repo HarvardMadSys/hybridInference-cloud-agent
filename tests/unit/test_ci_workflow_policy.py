@@ -18,6 +18,7 @@ from typing import Any
 
 import pytest
 import yaml
+from scripts.ci_image_matrix import image_matrix
 
 WORKFLOW = Path(__file__).resolve().parents[2] / ".github/workflows/ci.yml"
 CACHE_WORKFLOW = WORKFLOW.with_name("pr-caches.yml")
@@ -96,7 +97,11 @@ def _runner_labels(job: dict, event: str, cell: dict, *, fork: bool = False) -> 
 
 
 def _cells(job: dict) -> list[dict]:
-    return job.get("strategy", {}).get("matrix", {}).get("artifact", [{}])
+    cells = job.get("strategy", {}).get("matrix", {}).get("artifact", [{}])
+    if isinstance(cells, str):
+        assert cells == "${{ fromJSON(needs.changes.outputs.artifacts) }}"
+        return image_matrix("all")
+    return cells
 
 
 def _self_hosted_labels(name: str, cell: dict) -> list[str]:

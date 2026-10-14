@@ -112,3 +112,54 @@ def test_a_shard_cannot_report_checks_it_skipped(
         check=False,
     )
     assert (completed.returncode == 0) is passes, completed.stdout
+
+
+@pytest.mark.parametrize(("job", "step"), [("test", "Pytest"), ("test-db", "Pytest (dbtest tier)")])
+@pytest.mark.parametrize("shard", ["1/1", "1/2", "2/2"])
+def test_one_shard_skips_duplicate_collection_but_split_runs_keep_it(
+    tmp_path: Path, job: str, step: str, shard: str
+) -> None:
+    """Run the actual shell; the tier and paths must survive both branches."""
+    log = tmp_path / "commands"
+    script = _step(job, step)["run"]
+    uv_double = r"""
+    uv() {
+      printf "%s\n" "$*" >> "$COMMAND_LOG"
+      if [ "$2" = python ]; then
+        printf '%s\n' tests/integration/example.py tests/unit/example.py
+      fi
+    }
+    """
+    subprocess.run(
+        ["bash", "-c", uv_double + script],
+        env={**os.environ, "SHARD": shard, "COMMAND_LOG": str(log), "RUNNER_TEMP": str(tmp_path)},
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    commands = log.read_text().splitlines()
+    assert len(commands) == (1 if shard == "1/1" else 2)
+    assert commands[-1].startswith("run pytest ")
+    if shard == "1/1":
+        assert commands[-1].endswith(" tests")
+    else:
+        assert f"ci_shard.py --shard {shard}" in commands[0]
+        assert commands[-1].endswith(" tests/integration/example.py tests/unit/example.py")
+
+
+@pytest.mark.parametrize(("job", "step"), [("test", "Pytest"), ("test-db", "Pytest (dbtest tier)")])
+def test_failed_shard_collection_never_falls_back_to_the_whole_suite(
+    tmp_path: Path, job: str, step: str
+) -> None:
+    log = tmp_path / "commands"
+    script = _step(job, step)["run"]
+    completed = subprocess.run(
+        ["bash", "-c", 'uv() { echo "$*" >> "$COMMAND_LOG"; return 1; }\n' + script],
+        env={**os.environ, "SHARD": "2/2", "COMMAND_LOG": str(log)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode != 0
+    commands = log.read_text().splitlines()
+    assert len(commands) == 1 and "ci_shard.py" in commands[0]

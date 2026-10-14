@@ -17,6 +17,7 @@ from typing import Any
 
 import yaml
 from deploy.release import publish_inputs as pi, release_manifest as rm
+from scripts.ci_image_matrix import image_matrix
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 PUBLISH = REPO_ROOT / ".github/workflows/publish.yml"
@@ -178,7 +179,10 @@ def test_nothing_is_published_until_ci_passed_this_exact_commit() -> None:
 def test_the_matrix_is_the_one_ci_verifies() -> None:
     """Same cells, same pools, same build arguments, or the release is not what CI checked."""
     mine = job("artifacts")["strategy"]["matrix"]["artifact"]
-    theirs = yaml.safe_load(CI.read_text())["jobs"]["artifacts"]["strategy"]["matrix"]["artifact"]
+    assert yaml.safe_load(CI.read_text())["jobs"]["artifacts"]["strategy"]["matrix"][
+        "artifact"
+    ] == ("${{ fromJSON(needs.changes.outputs.artifacts) }}")
+    theirs = image_matrix("all")
     assert sorted(mine, key=lambda cell: cell["name"]) == sorted(
         theirs, key=lambda cell: cell["name"]
     )

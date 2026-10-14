@@ -56,6 +56,8 @@ jobs:
       web: ${{ steps.classify.outputs.web }}
       docker: ${{ steps.classify.outputs.docker }}
       docs: ${{ steps.classify.outputs.docs }}
+      image_scope: ${{ steps.classify.outputs.image_scope }}
+      artifacts: ${{ steps.images.outputs.artifacts }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
@@ -109,6 +111,7 @@ jobs:
               echo "web=true"
               echo "docker=true"
               echo "docs=true"
+              echo "image_scope=all"
             } >> "${GITHUB_OUTPUT}"
             exit 0
           fi
@@ -159,16 +162,37 @@ jobs:
 
           # A change to CI itself runs all of it: the thing being changed is the
           # checking, and a filtered CI edit is checked by nothing.
-          if matches '^\.github/workflows/'; then
+          if matches '^(\.github/workflows/|scripts/ci_image_matrix\.py$)'; then
             backend=true; web=true; docker=true; docs=true
           fi
 
+          # Narrow only source-only image changes. Deployment assets, external
+          # tests, locks, workflow edits and the planner itself keep every image.
+          # Keep backend's sandbox: MCP parity runs backend/host code against it.
+          image_scope=all
+          image_files="$(printf '%s\n' "${files}" | grep -E \
+            '^(deploy/|apps/backend/|apps/frontend/|migrations/|tests/external/|\.github/workflows/|scripts/ci_image_matrix\.py$|pyproject\.toml$|uv\.lock$|README\.md$|LICENSE$|alembic\.ini$|\.dockerignore$)' || true)"
+          if [ "${docker}" = true ] && [ -n "${image_files}" ]; then
+            if ! printf '%s\n' "${image_files}" | grep -vE '^apps/frontend/' | grep . >/dev/null; then
+              image_scope=web
+            elif ! printf '%s\n' "${image_files}" | grep -vE '^(apps/backend/|migrations/|alembic\.ini$)' | grep . >/dev/null; then
+              image_scope=backend
+            fi
+          fi
+
           {
+            echo "image_scope=${image_scope}"
             echo "backend=${backend}"
             echo "web=${web}"
             echo "docker=${docker}"
             echo "docs=${docs}"
           } | tee -a "${GITHUB_OUTPUT}"
+
+      - name: Plan image checks
+        id: images
+        env:
+          IMAGE_SCOPE: ${{ steps.classify.outputs.image_scope }}
+        run: python3 scripts/ci_image_matrix.py "${IMAGE_SCOPE}" >> "${GITHUB_OUTPUT}"
 
   # ---------------------------------------------------------------- backend
   # One job, three checks — not a three-cell matrix. Each cell paid for its own
@@ -335,8 +359,12 @@ jobs:
       - name: Pytest
         run: |
           set -euo pipefail
-          files="$(uv run python scripts/ci_shard.py --shard "${SHARD}" -- -m "not external and not dbtest")"
-          mapfile -t paths <<< "${files}"
+          # One shard already covers testpaths; avoid collecting the suite twice.
+          paths=(tests)
+          if [ "${SHARD}" != "1/1" ]; then
+            files="$(uv run python scripts/ci_shard.py --shard "${SHARD}" -- -m "not external and not dbtest")"
+            mapfile -t paths <<< "${files}"
+          fi
           uv run pytest -n 4 --dist loadfile -q -m "not external and not dbtest" "${paths[@]}"
 
       # The external checks below run once per commit, in the first shard.
@@ -575,8 +603,12 @@ jobs:
       - name: Pytest (dbtest tier)
         run: |
           set -euo pipefail
-          files="$(uv run python scripts/ci_shard.py --shard "${SHARD}" -- -m "dbtest")"
-          mapfile -t paths <<< "${files}"
+          # One shard already covers testpaths; avoid collecting the suite twice.
+          paths=(tests)
+          if [ "${SHARD}" != "1/1" ]; then
+            files="$(uv run python scripts/ci_shard.py --shard "${SHARD}" -- -m "dbtest")"
+            mapfile -t paths <<< "${files}"
+          fi
           uv run pytest -q -n 4 --dist loadfile -m "dbtest" --junitxml="${RUNNER_TEMP}/dbtest.xml" "${paths[@]}"
 
       # Once per commit, not once per shard.
@@ -919,50 +951,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        artifact:
-          # The web image is built twice, and only here is either variant built
-          # in CI: a mount prefix is resolved while the bundle is compiled, so
-          # the two are different images and neither was verified before this.
-          - name: control
-            arch: arm64
-            smoke_args: --role control
-            dockerfile: deploy/control-plane/Dockerfile
-            runner: '["self-hosted","Linux","ARM64","image-verify-arm64"]'
-            build_args: ""
-          - name: web-root
-            arch: arm64
-            smoke_args: --role web --variant root
-            dockerfile: deploy/control-plane/Dockerfile.web
-            runner: '["self-hosted","Linux","ARM64","image-verify-arm64"]'
-            build_args: |
-              NEXT_PUBLIC_BASE_PATH=
-              NEXT_PUBLIC_AGENT_API_URL=/api
-          - name: web-agents
-            arch: arm64
-            smoke_args: --role web --variant agents
-            dockerfile: deploy/control-plane/Dockerfile.web
-            runner: '["self-hosted","Linux","ARM64","image-verify-arm64"]'
-            build_args: |
-              NEXT_PUBLIC_BASE_PATH=/agents
-              NEXT_PUBLIC_AGENT_API_URL=/agents/api
-          - name: runner
-            arch: amd64
-            smoke_args: --role runner
-            dockerfile: deploy/host/Dockerfile.agent-runner
-            runner: '["self-hosted","Linux","X64","image-verify-x64"]'
-            build_args: ""
-          - name: sandbox
-            arch: amd64
-            smoke_args: --role sandbox
-            dockerfile: deploy/sandbox/Dockerfile.agent-sandbox
-            runner: '["self-hosted","Linux","X64","image-verify-x64"]'
-            build_args: ""
-          - name: tunnel
-            arch: amd64
-            smoke_args: --role tunnel
-            dockerfile: deploy/host/Dockerfile.agent-gateway-tunnel
-            runner: '["self-hosted","Linux","X64","image-verify-x64"]'
-            build_args: ""
+        # The planner keeps both web mount variants and the release's native
+        # architectures. Shared inputs select the complete catalog; source-only
+        # edits select the affected images and backend's real-CLI sandbox checks.
+        artifact: ${{ fromJSON(needs.changes.outputs.artifacts) }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
@@ -1286,7 +1278,7 @@ jobs:
   mcp:
     name: MCP conformance (kilo, ${{ matrix.case }})
     needs: changes
-    if: github.event_name == 'pull_request' && needs.changes.outputs.docker == 'true'
+    if: github.event_name == 'pull_request' && needs.changes.outputs.docker == 'true' && needs.changes.outputs.image_scope != 'web'
     runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-24.04"]' || matrix.artifact.runner) }}
     strategy:
       fail-fast: false

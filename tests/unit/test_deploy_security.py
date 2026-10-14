@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from scripts.ci_image_matrix import image_matrix
 
 REPO = Path(__file__).resolve().parents[2]
 COMPOSE_PATH = REPO / "deploy/host/docker-compose.sandbox.yml"
@@ -90,7 +91,8 @@ def test_ci_images_build_on_their_deployment_architecture() -> None:
     workflow = yaml.safe_load((WORKFLOW_DIR / "ci.yml").read_text())
     matrix = workflow["jobs"]["artifacts"]["strategy"]["matrix"]
     assert set(matrix) == {"artifact"}
-    cells = matrix["artifact"]
+    assert matrix["artifact"] == "${{ fromJSON(needs.changes.outputs.artifacts) }}"
+    cells = image_matrix("all")
     x64 = ["self-hosted", "Linux", "X64", "image-verify-x64"]
     arm64 = ["self-hosted", "Linux", "ARM64", "image-verify-arm64"]
     expected = {
