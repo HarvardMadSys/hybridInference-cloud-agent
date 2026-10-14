@@ -45,6 +45,8 @@ export function useJobDetailPanels({
 }) {
   const workspaceScope = JSON.stringify([userId, job.threadId ?? job.id]);
   const [tab, setTab] = useState<'chat' | 'trajectory'>('chat');
+  // A subagent's own conversation replaces the Chat body; it is a Chat view.
+  const [subagentKey, setSubagentKey] = useState<string | null>(null);
   const [openWorkspaceScope, setOpenWorkspaceScope] = useState<string | null>(null);
   const workspaceOpen = openWorkspaceScope === workspaceScope;
   const setWorkspaceOpen = useCallback(
@@ -302,7 +304,10 @@ export function useJobDetailPanels({
 
   // Returning to Chat closes details selected from the trajectory.
   useEffect(() => {
-    if (tab !== 'chat') return;
+    if (tab !== 'chat') {
+      setSubagentKey(null);
+      return;
+    }
     setInspector(null);
     setFocusJobId(null);
   }, [tab]);
@@ -316,7 +321,7 @@ export function useJobDetailPanels({
       const target = event.target instanceof Element ? event.target : null;
       if (
         target?.closest(
-          'input, textarea, select, [contenteditable="true"], [role="dialog"], #job-workspace-pane',
+          'input, textarea, select, [contenteditable="true"], [role="dialog"], [role="menu"], #job-workspace-pane',
         )
       ) {
         return;
@@ -355,6 +360,8 @@ export function useJobDetailPanels({
     workspaceScope,
     tab,
     setTab,
+    subagentKey,
+    setSubagentKey,
     workspaceOpen,
     setWorkspaceOpen,
     workspaceTabs,

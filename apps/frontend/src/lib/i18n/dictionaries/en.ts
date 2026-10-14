@@ -145,7 +145,12 @@ export const en = {
   'workspaceFiles.binaryPreview':
     'Preview is unavailable for this file type. Download the file to open it.',
   'workspaceFiles.binaryMissing': 'This binary file has no downloadable content.',
-  'transcript.details': 'Work details',
+  'transcript.display': 'Activity: {mode}',
+  'transcript.displayTitle': 'Show in chat',
+  'transcript.displayHint': 'Only changes the display, not how the agent runs.',
+  'transcript.compactDescription': 'Group completed steps; expand when needed.',
+  'transcript.standardDescription': 'Show each step with inputs and outputs collapsed.',
+  'transcript.detailedDescription': 'Expand steps, inputs, and outputs.',
   'transcript.compact': 'Compact',
   'transcript.standard': 'Standard',
   'transcript.detailed': 'Detailed',

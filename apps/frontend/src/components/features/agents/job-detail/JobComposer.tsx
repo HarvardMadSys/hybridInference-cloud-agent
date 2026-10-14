@@ -60,6 +60,7 @@ export function JobComposer({
   steerNow,
   insertGoalCommand,
   onReload,
+  hidden = false,
 }: {
   job: AgentJob;
   settings: ReturnType<typeof useJobComposerSettings>;
@@ -88,6 +89,8 @@ export function JobComposer({
   steerNow: () => void;
   insertGoalCommand: () => void;
   onReload?: () => void;
+  /** Kept mounted, with its draft, while another view replaces the Chat. */
+  hidden?: boolean;
 }) {
   const t = useT();
   const threadId = job.threadId ?? job.id;
@@ -113,6 +116,7 @@ export function JobComposer({
       {/* Keep the sticky controls opaque while the transcript scrolls behind them. */}
       <div
         ref={composerRef}
+        hidden={hidden}
         className="sticky bottom-0 z-10 -mx-1 mt-3 bg-gray-50 px-1 pb-1 pt-2 dark:bg-gray-950"
       >
         <LiveAgentStatus job={job} />

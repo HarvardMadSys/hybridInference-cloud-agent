@@ -278,12 +278,6 @@
   }
 }
 
-@container conversation-header (max-width: 600px) {
-  .agent-conversation-controls > label > span {
-    display: none;
-  }
-}
-
 .agent-git-workspace {
   container: git-workspace / inline-size;
 }

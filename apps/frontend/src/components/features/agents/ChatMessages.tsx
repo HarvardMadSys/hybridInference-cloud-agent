@@ -965,7 +965,7 @@ function reportKey(turn: GoalTurn): TranslationKey | undefined {
   return undefined;
 }
 
-function UserMessage({
+export function UserMessage({
   text,
   blockKey,
   busy,
