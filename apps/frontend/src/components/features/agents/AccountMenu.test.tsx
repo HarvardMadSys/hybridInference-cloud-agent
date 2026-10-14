@@ -251,6 +251,37 @@ describe('account menu', () => {
     ).toBeInTheDocument();
   });
 
+  it('opens centered on the row and fits a long docs name in the Help submenu', async () => {
+    vi.stubGlobal('innerWidth', 1200);
+    vi.stubGlobal('innerHeight', 800);
+    renderMenu({ appName: 'FreeInference Cloud Agent', docsUrl: 'https://docs.example/' });
+    const trigger = await screen.findByRole('button', { name: 'Account menu: Ada Lovelace' });
+    trigger.getBoundingClientRect = () =>
+      ({ left: 0, right: 300, width: 300, top: 740, bottom: 780, height: 40 }) as DOMRect;
+    fireEvent.click(trigger);
+    const menu = screen.getByRole('menu', { name: 'Account menu' });
+    // (300 - 248) / 2: centered over the row, not pinned to its left edge.
+    expect(menu).toHaveStyle({ left: '26px' });
+
+    const help = submenu('Help');
+    expect(help).toHaveStyle({ width: 'max-content', minWidth: '216px', maxWidth: '360px' });
+    expect(
+      within(help).getByRole('menuitem', { name: 'FreeInference Cloud Agent Docs' }),
+    ).toBeInTheDocument();
+  });
+
+  it('keeps a centered menu on screen next to a trigger at the edge', async () => {
+    vi.stubGlobal('innerWidth', 1200);
+    vi.stubGlobal('innerHeight', 800);
+    renderMenu({}, 'header');
+    const trigger = await screen.findByRole('button', { name: 'Account menu: Ada Lovelace' });
+    trigger.getBoundingClientRect = () =>
+      ({ left: 1160, right: 1192, width: 32, top: 8, bottom: 40, height: 32 }) as DOMRect;
+    fireEvent.click(trigger);
+    // 1200 - 248 - 8: the right edge stops at the margin.
+    expect(screen.getByRole('menu', { name: 'Account menu' })).toHaveStyle({ left: '944px' });
+  });
+
   it('works from the keyboard: arrows, into a submenu and back, Escape', async () => {
     localStorage.setItem(THEME_STORAGE_KEY, 'dark');
     renderMenu();
