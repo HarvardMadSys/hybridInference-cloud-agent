@@ -227,6 +227,9 @@ class _Uploader:
             multipart=False,
         )
 
+    def upload_checkpoint(self, **kwargs: Any) -> SandboxArchiveReceipt:
+        raise AssertionError("checkpoint capture is faked in these tests")
+
     def initial_exists(self, **kwargs: Any) -> bool:
         self.exists_calls.append(kwargs)
         outcome = self.exists_outcomes.pop(0) if self.exists_outcomes else False
@@ -1104,3 +1107,85 @@ def test_final_retries_stop_before_backoff_would_cross_operation_deadline() -> N
     assert [call["deadline"] for call in uploader.calls] == [1.0, 1.0]
     assert delays == [0.6]
     assert service.status()["failed"] == 1
+
+
+class _Capture:
+    def __init__(self, *, error: BaseException | None = None) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self.error = error
+
+    def capture(self, spec, inspection, members, *, upload, max_bytes, deadline) -> Any:
+        self.calls.append(
+            {
+                "sandbox_id": spec.sandbox_id,
+                "container_id": inspection.container_id,
+                "members": members,
+                "upload": upload,
+                "max_bytes": max_bytes,
+                "deadline": deadline,
+            }
+        )
+        if self.error is not None:
+            raise self.error
+        return SimpleNamespace(size_bytes=1)
+
+
+def _checkpoint_service(manager: _Manager, capture: _Capture) -> SandboxArchiveService:
+    uploader = _Uploader(_config())
+    return SandboxArchiveService(
+        cast("ChatSandboxManager", manager),
+        namespace=_NAMESPACE,
+        uploader=cast("SandboxArchiveS3Uploader", uploader),
+        config=uploader.config,
+        operation_timeout_s=60,
+        clock=_zero_clock,
+        checkpoint_capture=cast("Any", capture),
+    )
+
+
+def test_checkpoint_capture_uses_the_exact_stopped_container_and_this_uploader() -> None:
+    spec = _spec()
+    manager = _Manager(spec, running=False)
+    capture = _Capture()
+    service = _checkpoint_service(manager, capture)
+    service.start()
+
+    service.capture_checkpoint(spec, manager.current, _members())
+
+    assert len(capture.calls) == 1
+    call = capture.calls[0]
+    assert call["container_id"] == _CONTAINER_ID
+    assert call["members"] == _members()
+    assert call["max_bytes"] == _config().max_archive_bytes
+    assert call["deadline"] == 60
+    assert call["upload"].__name__ == "upload_checkpoint"
+    assert service.status()["phases"]["checkpoint"] == {
+        "pending": 0,
+        "uploaded": 1,
+        "failed": 0,
+    }
+
+
+def test_checkpoint_capture_refuses_a_restarted_container_and_counts_failures() -> None:
+    spec = _spec()
+    manager = _Manager(spec, running=True)
+    capture = _Capture()
+    service = _checkpoint_service(manager, capture)
+    service.start()
+
+    with pytest.raises(SandboxError, match="exact stopped container"):
+        service.capture_checkpoint(spec, _inspection(spec, running=False), _members())
+
+    assert capture.calls == []
+    assert service.status()["phases"]["checkpoint"]["failed"] == 1
+
+
+def test_a_service_without_checkpoints_keeps_its_status_shape() -> None:
+    spec = _spec()
+    manager = _Manager(spec, running=False)
+    service = _service(manager, _Uploader(_config()))
+    service.start()
+
+    assert set(service.status()["phases"]) == {"initial", "final"}
+    with pytest.raises(SandboxError, match="not configured"):
+        service.capture_checkpoint(spec, manager.current, _members())

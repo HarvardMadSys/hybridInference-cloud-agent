@@ -1471,6 +1471,7 @@ describe('global limits', () => {
     await waitFor(() =>
       expect(updateArchiveSettings).toHaveBeenCalledWith({
         enabled: true,
+        checkpoints_enabled: true,
         region: archiveSettings.region,
         kms_key_arn: archiveSettings.kms_key_arn,
         expected_bucket_owner: archiveSettings.expected_bucket_owner,

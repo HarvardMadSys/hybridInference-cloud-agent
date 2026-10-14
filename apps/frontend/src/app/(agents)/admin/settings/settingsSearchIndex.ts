@@ -65,6 +65,13 @@ const ARCHIVE_FIELDS: StaticSearchField[] = [
       'With an access key, uploads use that key. Without one, sandbox managers use their workload identity and need the bucket owner and KMS key. Bucket versioning is required either way.',
   },
   {
+    key: 'checkpoints',
+    label: 'Save restorable checkpoints',
+    description:
+      "On by default with archives. At each clean stop, also store the container's changes over its image, so a later release can restore the chat on another server.",
+    keywords: ['checkpoint', 'restore', 'migration'],
+  },
+  {
     key: 's3_uri',
     label: 'S3 destination',
     description: 'Fixed by the deployment security policy and not included in update requests.',

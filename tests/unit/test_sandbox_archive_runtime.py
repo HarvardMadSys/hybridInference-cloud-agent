@@ -832,3 +832,104 @@ def test_untrusted_uploaded_final_receipt_cannot_authorize_release(
         replacement.queue_final(spec, inspection, ())
     assert all(service.final_calls == 0 for service in replacement_services)
     replacement.close()
+
+
+class _CheckpointingService(_Service):
+    def __init__(self, config: SandboxArchiveS3Config) -> None:
+        super().__init__(config)
+        self.checkpoint_calls: list[tuple[str, int]] = []
+        self.fail_checkpoint = False
+
+    def capture_checkpoint(self, spec, _inspection, _members) -> Any:
+        self.checkpoint_calls.append((spec.sandbox_id, spec.generation))
+        if self.fail_checkpoint:
+            raise RuntimeError("commit failed")
+        return SimpleNamespace(size_bytes=10, new_layer_bytes=5, durations_ms={})
+
+
+def _checkpointing_controller(
+    manager: _MarkerManager,
+) -> tuple[SandboxArchiveController, list[_CheckpointingService]]:
+    services: list[_CheckpointingService] = []
+
+    def factory(config: SandboxArchiveS3Config) -> _CheckpointingService:
+        service = _CheckpointingService(config)
+        services.append(service)
+        return service
+
+    controller = SandboxArchiveController(
+        manager,  # type: ignore[arg-type]
+        namespace="pool-east",
+        service_factory=factory,
+        checkpoint_capture=object(),  # type: ignore[arg-type]
+    )
+    return controller, services
+
+
+def test_clean_stop_checkpoints_after_its_final_archive_is_durable() -> None:
+    manager = _MarkerManager()
+    controller, services = _checkpointing_controller(manager)
+    controller.start()
+    # No switch in the policy: enabled archives checkpoint by default.
+    controller.apply(_policy(1))
+    spec = SimpleNamespace(sandbox_id="asbx", generation=3)
+    stopped = SimpleNamespace(container_id="container", running=False)
+    controller.prepare_final(spec, SimpleNamespace(container_id="container", running=True))
+
+    controller.queue_final(spec, stopped, ())
+
+    assert services[0].final_calls == 1
+    assert services[0].checkpoint_calls == [("asbx", 3)]
+    assert manager.marker is not None and b'"state":"uploaded"' in manager.marker
+    controller.close()
+
+
+def test_a_failed_checkpoint_never_fails_the_clean_stop(caplog) -> None:
+    manager = _MarkerManager()
+    controller, services = _checkpointing_controller(manager)
+    controller.start()
+    controller.apply({**_policy(1), "checkpoints_enabled": True})
+    services[0].fail_checkpoint = True
+    spec = SimpleNamespace(sandbox_id="asbx", generation=3)
+    controller.prepare_final(spec, SimpleNamespace(container_id="container", running=True))
+
+    controller.queue_final(spec, SimpleNamespace(container_id="container", running=False), ())
+
+    assert services[0].checkpoint_calls == [("asbx", 3)]
+    assert manager.marker is not None and b'"state":"uploaded"' in manager.marker
+    assert any(
+        getattr(record, "event", None) == "sandbox_checkpoint_failed" for record in caplog.records
+    )
+    controller.close()
+
+
+def test_no_checkpoint_when_an_admin_opts_out() -> None:
+    manager = _MarkerManager()
+    controller, services = _checkpointing_controller(manager)
+    controller.start()
+    controller.apply({**_policy(1), "checkpoints_enabled": False})
+    spec = SimpleNamespace(sandbox_id="asbx", generation=3)
+    controller.prepare_final(spec, SimpleNamespace(container_id="container", running=True))
+
+    controller.queue_final(spec, SimpleNamespace(container_id="container", running=False), ())
+
+    assert services[0].final_calls == 1
+    assert services[0].checkpoint_calls == []
+    controller.close()
+
+
+def test_a_skipped_final_is_never_checkpointed() -> None:
+    manager = _MarkerManager()
+    controller, services = _checkpointing_controller(manager)
+    controller.start()
+    controller.apply({**_policy(1), "checkpoints_enabled": True})
+    spec = SimpleNamespace(sandbox_id="asbx", generation=3)
+    stopped = SimpleNamespace(container_id="container", running=False)
+
+    # Unflushed native history: neither an archive nor a checkpoint of it.
+    controller.invalidate_final(spec, stopped)
+    controller.queue_final(spec, stopped, ())
+
+    assert services[0].final_calls == 0
+    assert services[0].checkpoint_calls == []
+    controller.close()

@@ -25,6 +25,7 @@ const SECRET_ACCESS_KEY = /^[A-Za-z0-9/+=]{40}$/;
 
 interface Draft {
   enabled: boolean;
+  checkpointsEnabled: boolean;
   region: string;
   kmsKeyArn: string;
   expectedBucketOwner: string;
@@ -46,6 +47,9 @@ type DraftErrors = Partial<Record<keyof Draft | 'form', string>>;
 function initialDraft(settings: SandboxArchiveSettings): Draft {
   return {
     enabled: settings.enabled,
+    // On by default: enabling archives also enables checkpoints unless an
+    // administrator saved an opt-out.
+    checkpointsEnabled: settings.enabled ? settings.checkpoints_enabled !== false : true,
     region: settings.region,
     kmsKeyArn: settings.kms_key_arn,
     expectedBucketOwner: settings.expected_bucket_owner,
@@ -174,6 +178,8 @@ export function validateSandboxArchiveSettings(
   return {
     update: {
       enabled: draft.enabled,
+      // Checkpoints ride on archives: the server refuses one without the other.
+      checkpoints_enabled: draft.enabled && draft.checkpointsEnabled,
       region,
       kms_key_arn: kmsKeyArn,
       expected_bucket_owner: expectedBucketOwner,
@@ -379,6 +385,30 @@ export default function SandboxArchiveSettingsCard({
                   With an access key, uploads use that key. Without one, sandbox managers use their
                   workload identity and need the bucket owner and KMS key. Bucket versioning is
                   required either way.
+                </span>
+              </span>
+            </label>
+            <label className="flex items-start gap-3 text-sm text-gray-800 dark:text-gray-200">
+              <input
+                id="archive-setting-checkpoints"
+                type="checkbox"
+                aria-label="Save restorable checkpoints"
+                aria-describedby="archive-checkpoints-description"
+                checked={draft.enabled && draft.checkpointsEnabled}
+                disabled={busy || !draft.enabled}
+                onChange={(event) => set('checkpointsEnabled', event.target.checked)}
+                className="mt-0.5 h-4 w-4 rounded border-gray-300 text-crimson focus:ring-crimson dark:border-white/20 dark:bg-gray-950"
+              />
+              <span>
+                <span className="block font-medium">Save restorable checkpoints</span>
+                <span
+                  id="archive-checkpoints-description"
+                  className="mt-0.5 block text-xs text-gray-500 dark:text-gray-400"
+                >
+                  On by default with archives. At each clean stop, also store the container&apos;s
+                  changes over its image, so a later release can restore the chat on another server.
+                  Adds a commit and export to each stop. Servers that predate checkpoints ignore
+                  this setting.
                 </span>
               </span>
             </label>

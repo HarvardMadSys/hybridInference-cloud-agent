@@ -117,6 +117,7 @@ describe('sandbox archive settings card', () => {
 
     expect(onSave).toHaveBeenCalledWith({
       enabled: true,
+      checkpoints_enabled: true,
       region: 'us-east-1',
       kms_key_arn: KMS_ARN,
       expected_bucket_owner: '123456789012',
@@ -152,6 +153,7 @@ describe('sandbox archive settings card', () => {
 
     expect(onSave).toHaveBeenCalledWith({
       enabled: true,
+      checkpoints_enabled: true,
       region: 'us-east-1',
       kms_key_arn: '',
       expected_bucket_owner: '',
@@ -184,6 +186,7 @@ describe('sandbox archive settings card', () => {
 
     expect(onSave).toHaveBeenCalledWith({
       enabled: true,
+      checkpoints_enabled: true,
       region: 'us-east-1',
       kms_key_arn: KMS_ARN,
       expected_bucket_owner: '123456789012',
@@ -313,6 +316,44 @@ describe('sandbox archive settings card', () => {
 
     await waitFor(() =>
       expect(screen.getByLabelText('Maximum archive bytes')).toHaveValue(536_870_912),
+    );
+  });
+
+  it('turns checkpoints on with archives by default and lets an administrator opt out', () => {
+    const onSave = vi.fn();
+    render(<SandboxArchiveSettingsCard settings={settings()} busy={false} onSave={onSave} />);
+
+    const checkpoints = screen.getByLabelText('Save restorable checkpoints');
+    expect(checkpoints).toBeDisabled();
+    expect(checkpoints).not.toBeChecked();
+
+    fireEvent.click(screen.getByLabelText('Enable sandbox archives'));
+    expect(checkpoints).toBeEnabled();
+    expect(checkpoints).toBeChecked();
+    fireEvent.click(checkpoints);
+    fireEvent.click(screen.getByRole('button', { name: 'Save archive settings' }));
+
+    expect(onSave).toHaveBeenCalledWith(
+      expect.objectContaining({ enabled: true, checkpoints_enabled: false }),
+    );
+  });
+
+  it('keeps a saved opt-out and never saves checkpoints without archives', () => {
+    const onSave = vi.fn();
+    render(
+      <SandboxArchiveSettingsCard
+        settings={settings({ enabled: true, checkpoints_enabled: false })}
+        busy={false}
+        onSave={onSave}
+      />,
+    );
+
+    expect(screen.getByLabelText('Save restorable checkpoints')).not.toBeChecked();
+    fireEvent.click(screen.getByLabelText('Enable sandbox archives'));
+    fireEvent.click(screen.getByRole('button', { name: 'Save archive settings' }));
+
+    expect(onSave).toHaveBeenCalledWith(
+      expect.objectContaining({ enabled: false, checkpoints_enabled: false }),
     );
   });
 });

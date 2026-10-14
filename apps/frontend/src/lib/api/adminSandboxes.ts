@@ -94,11 +94,25 @@ export interface AdminSandboxMember {
   updated_at: string;
 }
 
+/** The newest restorable checkpoint a host reported. Restore uses it later. */
+export interface AdminSandboxCheckpoint {
+  id: string;
+  generation: number;
+  host: string;
+  size_bytes: number;
+  new_layer_bytes: number;
+  state: 'reported' | 'verified' | 'superseded' | 'deleted';
+  captured_at: string;
+  recorded_at: string;
+  durations_ms?: Record<string, number>;
+}
+
 export interface AdminSandboxDetail {
   sandbox: AdminSandbox;
   members: AdminSandboxMember[];
   observed_at: string;
   terminal_activity_error?: string | null;
+  latest_checkpoint?: AdminSandboxCheckpoint | null;
 }
 
 export interface AdminSandboxStopRequest {
@@ -127,6 +141,7 @@ export interface AdminSandboxTrajectory {
   events: AdminSandboxTrajectoryEvent[];
   observed_at: string;
   next_cursor: string | null;
+  latest_checkpoint?: AdminSandboxCheckpoint | null;
 }
 
 export interface AdminSandboxInventoryRequest {

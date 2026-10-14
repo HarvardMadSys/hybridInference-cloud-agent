@@ -82,6 +82,7 @@ def test_shared_live_is_the_only_capability_without_feature_switches(monkeypatch
         "mid-turn-input-v1:claude-code",
         "mid-turn-input-v1:codex",
         "sandbox-archive-settings-v1",
+        "sandbox-checkpoints-v1",
     ]
 
 
@@ -99,6 +100,7 @@ def test_exact_deployment_capability_requires_the_completed_marker(monkeypatch, 
         "mid-turn-input-v1:claude-code",
         "mid-turn-input-v1:codex",
         "sandbox-archive-settings-v1",
+        "sandbox-checkpoints-v1",
     ]
 
     ready_file.write_text("different-sha\n")
@@ -109,6 +111,7 @@ def test_exact_deployment_capability_requires_the_completed_marker(monkeypatch, 
         "mid-turn-input-v1:claude-code",
         "mid-turn-input-v1:codex",
         "sandbox-archive-settings-v1",
+        "sandbox-checkpoints-v1",
     ]
 
     ready_file.write_text("target-sha\n")
@@ -119,6 +122,7 @@ def test_exact_deployment_capability_requires_the_completed_marker(monkeypatch, 
         "mid-turn-input-v1:claude-code",
         "mid-turn-input-v1:codex",
         "sandbox-archive-settings-v1",
+        "sandbox-checkpoints-v1",
         "shared-sandbox-deployment:target-sha",
     ]
 
@@ -506,6 +510,7 @@ def test_run_once_dispatches_only_to_shared_live(monkeypatch):
         "mid-turn-input-v1:claude-code",
         "mid-turn-input-v1:codex",
         "sandbox-archive-settings-v1",
+        "sandbox-checkpoints-v1",
         "environment-v1",
     ]
     assert dispatched[0]["job"] is _JOB
@@ -2522,3 +2527,29 @@ def test_environment_capability_disappears_when_broker_or_container_support_is_l
     monkeypatch.delenv("AGENT_SANDBOX_MANAGER_TOKEN")
     assert runner_mod._environment_host_capabilities(backend, _stamp()) == []
     assert runner_mod._environment_host_capabilities(SimpleNamespace(), _stamp()) == []
+
+
+@pytest.mark.parametrize("checkpoint", [{"checkpoint_id": "c" * 32}, "not-a-receipt", None])
+def test_retained_heartbeat_forwards_the_latest_checkpoint_receipt(monkeypatch, checkpoint):
+    supervisor = SimpleNamespace(
+        list=lambda: [
+            {
+                "thread_id": "athr_source",
+                "sandbox_id": "asbx_source",
+                "container_id": "container-source",
+                "generation": 1,
+                "activation_generation": 1,
+                "running": False,
+                "shared_live": True,
+                "members": [],
+                "checkpoint": checkpoint,
+            }
+        ],
+        close=Mock(),
+    )
+    monkeypatch.setattr(runner_mod, "_session_supervisor_from_env", lambda **_kwargs: supervisor)
+
+    rows = runner_mod._retained_sandbox_heartbeat_rows()
+
+    assert rows is not None
+    assert rows[0]["checkpoint"] == (checkpoint if isinstance(checkpoint, dict) else None)

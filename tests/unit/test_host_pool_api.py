@@ -86,6 +86,8 @@ class FakeHostPoolStore(AllCapabilities):
         self.release_answer: str | None = None
         self.release_calls: list[tuple[str, int, str, int | None]] = []
         self.sandbox_observations: list[dict[str, Any]] = []
+        self.checkpoints: list[dict[str, Any]] = []
+        self.fail_checkpoint_record = False
         self.sandbox_stop_due: dict[str, Any] | None = None
         #: History rows per host, as the capacity-history route would read
         #: them out of ``agent_host_capacity_history``.
@@ -484,6 +486,12 @@ class FakeHostPoolStore(AllCapabilities):
     async def reconcile_thread_sandbox_observation(self, **kwargs: Any) -> str | None:
         self.sandbox_observations.append(dict(kwargs))
         return "running" if kwargs["running"] else "stopped"
+
+    async def record_sandbox_checkpoint(self, **kwargs: Any) -> bool:
+        if self.fail_checkpoint_record:
+            raise RuntimeError("database unavailable")
+        self.checkpoints.append(dict(kwargs))
+        return True
 
     async def due_thread_sandbox_stop(self, **_kwargs: Any) -> dict[str, Any] | None:
         return self.sandbox_stop_due
@@ -3004,3 +3012,133 @@ async def test_capacity_history_returns_an_explicit_gap_per_missing_minute(clien
         point["cpu_percent"] is None for point in body["points"] if point["sampled_at"] is None
     )
     assert credential == ""
+
+
+def _enabled_archive(store: FakeHostPoolStore, **changes: Any) -> None:
+    store.archive_settings.update(
+        enabled=True,
+        region="us-east-1",
+        kms_key_arn=("arn:aws:kms:us-east-1:123456789012:key/00000000-0000-0000-0000-000000000000"),
+        expected_bucket_owner="123456789012",
+        revision=5,
+        **changes,
+    )
+
+
+@pytest.mark.parametrize("capable", [True, False])
+@pytest.mark.parametrize("opted_out", [True, False])
+async def test_only_a_capable_host_is_sent_a_checkpoint_opt_out(client, capable, opted_out):
+    async_client, store = client
+    credential = await _enroll(async_client, store)
+    _enabled_archive(store, checkpoints_enabled=not opted_out)
+    capabilities = ["sandbox-archive-settings-v1"]
+    if capable:
+        capabilities.append("sandbox-checkpoints-v1")
+
+    response = await async_client.post(
+        "/v1/agent/host/heartbeat",
+        json={"capabilities": capabilities},
+        headers={"Authorization": f"Bearer {credential}"},
+    )
+
+    assert response.status_code == 200
+    delivered = response.json()["sandbox_archive_settings"]
+    assert delivered["revision"] == 5
+    # The default (checkpoints on) is the absent key, which every manager
+    # parses. An older manager rejects the key, so it never sees the opt-out.
+    if capable and opted_out:
+        assert delivered["checkpoints_enabled"] is False
+    else:
+        assert "checkpoints_enabled" not in delivered
+
+
+def _retained_with_checkpoint(checkpoint: Any) -> dict[str, Any]:
+    return {
+        "thread_id": "athr_source",
+        "sandbox_id": "asbx_source",
+        "container_id": "container-source",
+        "generation": 2,
+        "activation_generation": 1,
+        "running": False,
+        "members": [],
+        "checkpoint": checkpoint,
+    }
+
+
+_CHECKPOINT = {
+    "checkpoint_id": "c" * 32,
+    "sandbox_id": "asbx_source",
+    "generation": 2,
+    "container_id": "container-source",
+    "base_image": "sha256:" + "b" * 64,
+    "runtime_id": "claude-code",
+    "runtime_version": "2.1.0",
+    "object_key": "cloud-agent/sandbox/v2/" + "d" * 64 + "/g2/" + "c" * 32 + ".oci.tar",
+    "version_id": "version-1",
+    "sha256": "e" * 64,
+    "size_bytes": 4096,
+    "new_layer_bytes": 2048,
+    "layer_count": 3,
+    "created_at": "2026-10-13T12:00:00+00:00",
+    "members": [{"thread_id": "athr_source", "last_settled_job_id": "ajob_1"}],
+    "durations_ms": {"commit": 10},
+    "format_version": 1,
+}
+
+
+async def test_a_heartbeat_records_the_latest_checkpoint_for_its_host(client):
+    async_client, store = client
+    credential = await _enroll(async_client, store)
+
+    response = await async_client.post(
+        "/v1/agent/host/heartbeat",
+        json={"retained_sandboxes": [_retained_with_checkpoint(_CHECKPOINT)]},
+        headers={"Authorization": f"Bearer {credential}"},
+    )
+
+    assert response.status_code == 200
+    assert len(store.checkpoints) == 1
+    recorded = store.checkpoints[0]
+    assert recorded["host"] == "runner-a"
+    assert recorded["thread_id"] == "athr_source"
+    assert recorded["checkpoint"]["checkpoint_id"] == "c" * 32
+    assert recorded["checkpoint"]["object_key"] == _CHECKPOINT["object_key"]
+
+
+@pytest.mark.parametrize(
+    "checkpoint",
+    [
+        {**_CHECKPOINT, "object_key": "../elsewhere"},
+        {**_CHECKPOINT, "sha256": "not-a-digest"},
+        {**_CHECKPOINT, "format_version": 2},
+        "not-a-receipt",
+    ],
+)
+async def test_an_unusable_checkpoint_never_costs_the_host_its_heartbeat(client, checkpoint):
+    async_client, store = client
+    credential = await _enroll(async_client, store)
+
+    response = await async_client.post(
+        "/v1/agent/host/heartbeat",
+        json={"retained_sandboxes": [_retained_with_checkpoint(checkpoint)]},
+        headers={"Authorization": f"Bearer {credential}"},
+    )
+
+    assert response.status_code == 200
+    assert store.checkpoints == []
+    assert len(store.sandbox_observations) == 1
+
+
+async def test_a_checkpoint_bookkeeping_failure_keeps_the_heartbeat(client):
+    async_client, store = client
+    credential = await _enroll(async_client, store)
+    store.fail_checkpoint_record = True
+
+    response = await async_client.post(
+        "/v1/agent/host/heartbeat",
+        json={"retained_sandboxes": [_retained_with_checkpoint(_CHECKPOINT)]},
+        headers={"Authorization": f"Bearer {credential}"},
+    )
+
+    assert response.status_code == 200
+    assert len(store.sandbox_observations) == 1

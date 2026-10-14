@@ -3064,3 +3064,52 @@ def test_build_turn_resources_adopts_late_announced_guest_marks_and_logs_them(ca
     assert "thread=athr_late" in line
     assert "applied=1" in line
     assert "1:Read:applied:lag=+50/+99:msg=70ms:exact=21ms" in line
+
+
+@pytest.mark.asyncio
+async def test_inventory_rows_carry_each_groups_latest_checkpoint(tmp_path):
+    from cloud_agent_host.sandbox_checkpoints import (
+        SandboxCheckpointReceipt,
+        SandboxCheckpointStore,
+    )
+
+    supervisor = _SharedSupervisor()
+    supervisor.list_for_thread = lambda _thread_id: [_descriptor("athr_source")]
+    app = _app(supervisor)
+    store = SandboxCheckpointStore(tmp_path)
+    receipt = SandboxCheckpointReceipt(
+        checkpoint_id="c" * 32,
+        sandbox_id=_descriptor("athr_source").sandbox_id,
+        generation=1,
+        container_id="container-shared",
+        base_image="sha256:" + "b" * 64,
+        runtime_id="claude-code",
+        runtime_version=None,
+        object_key="key",
+        version_id="v1",
+        sha256="e" * 64,
+        size_bytes=10,
+        new_layer_bytes=5,
+        layer_count=2,
+        created_at="2026-10-13T12:00:00+00:00",
+    )
+    store.save(receipt)
+    app.state.sandbox_checkpoint_store = store
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://sandbox_manager"
+    ) as client:
+        response = await client.get(
+            "/sandboxes",
+            headers={"X-Agent-Workspace-Token": "sandbox-manager-secret"},
+            params={"thread_id": "athr_source"},
+        )
+        app.state.sandbox_checkpoint_store = None
+        without_store = await client.get(
+            "/sandboxes",
+            headers={"X-Agent-Workspace-Token": "sandbox-manager-secret"},
+            params={"thread_id": "athr_source"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["sandboxes"][0]["checkpoint"] == receipt.as_dict()
+    assert without_store.json()["sandboxes"][0]["checkpoint"] is None

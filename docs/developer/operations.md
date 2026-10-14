@@ -72,7 +72,7 @@ that URL to another origin is refused while the token is kept. Reset the token,
 save the URL, then enter the token again.
 
 For the first deployment of this release, run `alembic upgrade head` through
-`0067_failed_snapshot_wake`. Existing hosts begin without a deployment drain
+`0068_sandbox_checkpoints`. Existing hosts begin without a deployment drain
 owner or release receipt, and 0051 backfills each one with a non-null fence
 epoch. 0066 builds an index on `agent_jobs` concurrently: on a long job history
 it takes a while without blocking the running API, and an interrupted run can
@@ -1875,6 +1875,43 @@ final for the skipped stop. Groups that an older broker marked `blocked` are
 treated the same way after the upgrade. Only a group whose skip cannot be
 written durably, or one found before any policy has been delivered, stays
 fenced with its bridge until reconciliation succeeds.
+
+#### Restorable checkpoints
+
+While archives are enabled, every clean archived stop also stores one more
+object: a checkpoint of the container's changes over its sandbox image. This
+is on by default; clear **Save restorable checkpoints** on the same settings
+card to opt out, and disabling archives disables checkpoints. The broker runs
+`docker container commit` on the stopped container, streams `docker image save`
+of the result, drops every blob the sandbox image already provides, and uploads
+the remainder as an OCI image archive to
+`cloud-agent/sandbox/v2/<sha256(sandbox id)>/g<generation>/<checkpoint id>.oci.tar`.
+The key names the sandbox, not the host, so a later release can restore it on
+any server that holds the same image. This release only captures; nothing
+restores from a checkpoint yet.
+
+- Checkpoints require archives and use the same bucket, credentials, size limit
+  and IAM permissions on `cloud-agent/sandbox/*`. Each object is written once
+  (`If-None-Match`); a retry after a lost response must find identical bytes.
+- A checkpoint never fails a stop. It runs after the final archive is durable;
+  a failure is logged as `sandbox_checkpoint_failed` and the stop completes.
+  It shares the final archive's capture slot and deadline, and adds a commit,
+  a full read of the image (once per image for the base scan, then once per
+  checkpoint) and an upload to each clean stop.
+- The broker keeps the latest receipt per sandbox under
+  `AGENT_SANDBOX_ARCHIVE_STATE_DIR/checkpoints` and repeats it on every
+  heartbeat. The control plane records it in `agent_sandbox_checkpoints` only
+  when it names the group's current host, generation and container. The admin
+  sandbox page shows the latest one. Receipts are recorded as `reported`; the
+  object is verified when restore uses it.
+- The policy omits the default and carries only an opt-out
+  (`checkpoints_enabled: false`), which is sent only to hosts that advertise
+  `sandbox-checkpoints-v1`. Older sandbox managers parse the policy unchanged
+  and keep archiving without checkpoints.
+- The archive holds the container's writable layer: workspace, native session
+  state, and anything installed outside `/workspace`. Credential tmpfs mounts
+  are not part of a commit. Bucket lifecycle and retention rules apply to the
+  `v2/` prefix like the rest of the archives.
 
 #### Launch failures and queue order
 

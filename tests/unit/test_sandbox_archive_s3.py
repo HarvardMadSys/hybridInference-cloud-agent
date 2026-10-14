@@ -19,6 +19,7 @@ from cloud_agent_host.sandbox_archive_s3 import (
     SandboxArchiveS3Config,
     SandboxArchiveS3Uploader,
     SandboxArchiveUploadError,
+    checkpoint_object_key,
 )
 from cloud_agent_shared.sandbox_archive_settings import (
     MAX_ARCHIVE_BYTES,
@@ -1022,3 +1023,96 @@ def test_access_key_is_passed_only_to_the_sdk_client(monkeypatch: pytest.MonkeyP
     assert calls[0]["aws_access_key_id"] == _ACCESS_KEY_ID
     assert calls[0]["aws_secret_access_key"] == _SECRET_ACCESS_KEY
     assert "aws_access_key_id" not in uploader.config.as_policy().as_dict()
+
+
+_CHECKPOINT_ID = "f" * 32
+
+
+def _checkpoint_key(*, generation: int = _GENERATION) -> str:
+    return f"cloud-agent/sandbox/v2/{_SANDBOX_HASH}/g{generation}/{_CHECKPOINT_ID}.oci.tar"
+
+
+def _upload_checkpoint(uploader: SandboxArchiveS3Uploader, payload: bytes) -> SandboxArchiveReceipt:
+    return uploader.upload_checkpoint(
+        sandbox_id=_SANDBOX_ID,
+        generation=_GENERATION,
+        checkpoint_id=_CHECKPOINT_ID,
+        body=io.BytesIO(payload),
+        size=len(payload),
+        sha256=hashlib.sha256(payload).hexdigest(),
+    )
+
+
+def test_checkpoint_upload_writes_once_under_the_sandbox_not_the_host() -> None:
+    payload = b"oci-archive"
+    client = RecordingS3Client()
+    uploader = SandboxArchiveS3Uploader(_config(), client=client)
+
+    receipt = _upload_checkpoint(uploader, payload)
+
+    put = client.one_call("put_object")
+    assert put["Key"] == _checkpoint_key()
+    assert _NAMESPACE_HASH not in put["Key"]
+    assert put["IfNoneMatch"] == "*"
+    assert put["ContentType"] == "application/x-tar"
+    assert put["Metadata"] == {
+        "archive-phase": "checkpoint",
+        "archive-format": "oci-layer-archive-v1",
+        "archive-size-bytes": str(len(payload)),
+        "archive-sha256": hashlib.sha256(payload).hexdigest(),
+    }
+    assert put["ServerSideEncryption"] == "aws:kms"
+    assert receipt.phase == "checkpoint"
+    assert receipt.key == _checkpoint_key()
+    assert receipt.version_id == "version-1"
+
+
+def test_checkpoint_retry_after_a_lost_response_returns_the_existing_receipt() -> None:
+    payload = b"oci-archive"
+    head = _matching_head(payload) | {
+        "ContentType": "application/x-tar",
+        "ETag": '"existing"',
+        "Metadata": {
+            "archive-phase": "checkpoint",
+            "archive-format": "oci-layer-archive-v1",
+            "archive-size-bytes": str(len(payload)),
+            "archive-sha256": hashlib.sha256(payload).hexdigest(),
+        },
+    }
+    client = RecordingS3Client(put_error=PreconditionFailure(), head_response=head)
+    uploader = SandboxArchiveS3Uploader(_config(), client=client)
+
+    receipt = _upload_checkpoint(uploader, payload)
+
+    assert receipt.key == _checkpoint_key()
+    assert receipt.version_id == "version-existing"
+    assert receipt.etag == '"existing"'
+
+
+def test_checkpoint_retry_refuses_different_existing_bytes() -> None:
+    payload = b"oci-archive"
+    head = _matching_head(b"something else") | {"ContentType": "application/x-tar"}
+    client = RecordingS3Client(put_error=PreconditionFailure(), head_response=head)
+    uploader = SandboxArchiveS3Uploader(_config(), client=client)
+
+    with pytest.raises(SandboxArchiveUploadError, match="does not match"):
+        _upload_checkpoint(uploader, payload)
+
+
+@pytest.mark.parametrize("checkpoint_id", ["", "F" * 32, "f" * 31, "../" + "f" * 29])
+def test_checkpoint_key_refuses_a_malformed_id(checkpoint_id: str) -> None:
+    with pytest.raises(SandboxArchiveUploadError, match="checkpoint id"):
+        checkpoint_object_key(sandbox_id=_SANDBOX_ID, generation=1, checkpoint_id=checkpoint_id)
+
+
+def test_upload_does_not_accept_the_checkpoint_phase() -> None:
+    uploader = SandboxArchiveS3Uploader(_config(), client=RecordingS3Client())
+
+    with pytest.raises(SandboxArchiveUploadError, match="phase"):
+        _upload(uploader, phase="checkpoint", body=io.BytesIO(b"x"), size=1)
+
+
+def test_config_carries_the_checkpoint_switch_back_into_its_policy() -> None:
+    policy = _policy(checkpoints_enabled=True)
+
+    assert SandboxArchiveS3Config.from_policy(policy).as_policy() == policy
