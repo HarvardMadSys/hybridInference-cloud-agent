@@ -3,8 +3,14 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useT } from '@/components/providers';
-import { pinAgentJob, renameAgentJob, unpinAgentJob } from '@/lib/api/agents';
+import {
+  listAllAgentThreadEvents,
+  pinAgentJob,
+  renameAgentJob,
+  unpinAgentJob,
+} from '@/lib/api/agents';
 import { onAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
+import { toSessionLog } from './trajectory';
 import type { AgentJob } from './types';
 
 /** Conversation actions, with Escape reserved for dismissing their own overlays. */
@@ -34,8 +40,14 @@ export function ThreadActions({
   const [title, setTitle] = useState(job.title);
   const [pinned, setPinned] = useState(Boolean(job.pinnedAt));
   const [busy, setBusy] = useState(false);
+  const [downloading, setDownloading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const mutation = useRef(false);
+  const download = useRef<AbortController | null>(null);
+
+  // Opening another conversation remounts this menu: an unfinished read for the
+  // one left behind must not save a file the reader has stopped waiting for.
+  useEffect(() => () => download.current?.abort(), []);
 
   useEffect(() => setPinned(Boolean(job.pinnedAt)), [job.pinnedAt]);
   useEffect(
@@ -116,6 +128,37 @@ export function ThreadActions({
     } finally {
       mutation.current = false;
       setBusy(false);
+    }
+  }
+
+  /**
+   * Save every turn's stored events as the Trajectory view's session log does.
+   * Read from the server, not this page, so the file holds the whole thread
+   * whatever the page has loaded.
+   */
+  async function downloadSessionLog() {
+    if (download.current) return;
+    const controller = new AbortController();
+    download.current = controller;
+    setDownloading(true);
+    setError(null);
+    try {
+      const events = await listAllAgentThreadEvents(job.id, { signal: controller.signal });
+      const url = URL.createObjectURL(
+        new Blob([toSessionLog(events)], { type: 'application/x-ndjson' }),
+      );
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `session-log-${job.threadId ?? job.id}.ndjson`;
+      link.click();
+      URL.revokeObjectURL(url);
+      close();
+    } catch (cause) {
+      if (controller.signal.aborted) return;
+      setError(cause instanceof Error ? cause.message : t('taskActions.downloadLogFailed'));
+    } finally {
+      download.current = null;
+      if (!controller.signal.aborted) setDownloading(false);
     }
   }
 
@@ -220,6 +263,16 @@ export function ThreadActions({
             }}
           >
             {t('taskActions.fork')}
+          </button>
+          <button
+            role="menuitem"
+            tabIndex={-1}
+            disabled={downloading}
+            aria-busy={downloading}
+            className={itemClass}
+            onClick={() => void downloadSessionLog()}
+          >
+            {t(downloading ? 'taskActions.downloadingLog' : 'taskActions.downloadLog')}
           </button>
           {error && (
             <p role="alert" className="px-3 py-2 text-xs text-status-error">

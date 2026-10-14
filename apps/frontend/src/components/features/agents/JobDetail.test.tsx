@@ -2323,6 +2323,78 @@ describe('JobDetail', () => {
     expect(screen.getByRole('menuitem', { name: 'Unpin' })).toBeInTheDocument();
   });
 
+  it('downloads the whole thread as its session log from the task menu', async () => {
+    const stored = [
+      {
+        id: 4,
+        job_id: 'ajob_0',
+        turn_no: 1,
+        attempt_id: 1,
+        seq: 1,
+        event_type: 'message',
+        payload: { text: 'first turn' },
+        created_at: null,
+      },
+      {
+        id: 9,
+        job_id: 'ajob_1',
+        turn_no: 2,
+        attempt_id: 2,
+        seq: 1,
+        event_type: 'tool_use',
+        payload: { name: 'Bash' },
+        created_at: null,
+      },
+    ];
+    let finish!: (events: typeof stored) => void;
+    vi.mocked(listAllAgentThreadEvents).mockReturnValueOnce(
+      new Promise((resolve) => (finish = resolve)),
+    );
+    const saved: { blob: Blob; name: string }[] = [];
+    const created = vi.fn((blob: Blob) => {
+      saved.push({ blob, name: '' });
+      return 'blob:session-log';
+    });
+    const revoked = vi.fn();
+    const original = { createObjectURL: URL.createObjectURL, revokeObjectURL: URL.revokeObjectURL };
+    Object.assign(URL, { createObjectURL: created, revokeObjectURL: revoked });
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (
+      this: HTMLAnchorElement,
+    ) {
+      saved[saved.length - 1].name = this.download;
+    });
+    try {
+      render(<JobDetail job={makeJob({ threadId: 'thread-1' })} />);
+      fireEvent.click(screen.getByRole('button', { name: 'Task actions' }));
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Download session log' }));
+      expect(screen.getByRole('menuitem', { name: 'Downloading…' })).toBeDisabled();
+      expect(listAllAgentThreadEvents).toHaveBeenCalledWith('ajob_1', {
+        signal: expect.any(AbortSignal),
+      });
+      await act(async () => finish(stored));
+      await waitFor(() => expect(screen.queryByRole('menu')).not.toBeInTheDocument());
+      expect(saved).toHaveLength(1);
+      expect(saved[0].name).toBe('session-log-thread-1.ndjson');
+      expect(saved[0].blob.type).toBe('application/x-ndjson');
+      expect((await saved[0].blob.text()).split('\n').map((line) => JSON.parse(line))).toEqual(
+        stored,
+      );
+      expect(revoked).toHaveBeenCalledWith('blob:session-log');
+    } finally {
+      click.mockRestore();
+      Object.assign(URL, original);
+    }
+  });
+
+  it('keeps the task menu open with the reason when the session log cannot be read', async () => {
+    vi.mocked(listAllAgentThreadEvents).mockRejectedValueOnce(new Error('job not found'));
+    render(<JobDetail job={makeJob()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Task actions' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Download session log' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('job not found');
+    expect(screen.getByRole('menuitem', { name: 'Download session log' })).toBeEnabled();
+  });
+
   it('uses the native fork action from the task menu', async () => {
     vi.spyOn(globalThis, 'confirm').mockReturnValue(true);
     vi.mocked(forkAgentJob).mockResolvedValue({ id: 'ajob_fork' } as never);
