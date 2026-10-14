@@ -3,16 +3,12 @@ import '@testing-library/jest-dom/vitest';
 
 import Link from 'next/link';
 import { useState } from 'react';
-import toast from 'react-hot-toast';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { listMcpInvocations, type McpInvocationsApi } from '@/lib/api/mcp';
 import type { AgentAccessApi } from '@/lib/api/session';
 import { SkillDialog } from '@/components/features/agents/skills/SkillDialog';
-import { LocaleProvider } from '@/components/providers/LocaleProvider';
-import { ThemeProvider } from '@/components/providers/ThemeProvider';
-import { DARK_CLASS, THEME_STORAGE_KEY } from '@/lib/theme';
 
 let access: AgentAccessApi | undefined;
 let role = 'internal';
@@ -27,7 +23,6 @@ beforeEach(() => {
   vi.mocked(listMcpInvocations).mockReset().mockResolvedValue({ invocations: [] });
   router.replace.mockReset();
   logout.mockReset();
-  vi.mocked(toast.error).mockReset();
 });
 
 let pathname = '/';
@@ -42,8 +37,6 @@ vi.mock('next/navigation', () => ({
   useRouter: () => router,
   usePathname: () => pathname,
 }));
-
-vi.mock('react-hot-toast', () => ({ default: { error: vi.fn() } }));
 
 vi.mock('@/components/features/auth/ProtectedRoute', () => ({
   ProtectedRoute: ({ children }: { children: React.ReactNode }) => <>{children}</>,
@@ -89,6 +82,15 @@ vi.mock('@/components/providers/SiteConfigProvider', () => ({
     branding: { appName: 'FreeInference', orgName: '', orgUrl: '', statusUrl },
     features: { rag: false },
   }),
+}));
+
+// The menu has its own tests; here it only matters where it is rendered.
+vi.mock('@/components/features/agents/AccountMenu', () => ({
+  AccountMenu: ({ variant }: { variant: string }) => (
+    <button type="button" data-testid={`account-menu-${variant}`}>
+      Account menu
+    </button>
+  ),
 }));
 
 vi.mock('@/components/features/agents/AgentsSidebar', () => ({
@@ -248,13 +250,14 @@ describe('AgentsLayout mobile task list', () => {
     });
   }
 
-  it('keeps website preferences in the header while the mobile task list is open', () => {
+  it('keeps the account menu in the header only while the mobile task list is closed', () => {
     renderLayout();
-    fireEvent.click(screen.getByRole('button', { name: 'Expand task list' }));
-
     const header = screen.getByRole('banner');
-    expect(header).toContainElement(screen.getByRole('combobox', { name: 'Theme' }));
-    expect(header).toContainElement(screen.getByRole('combobox', { name: 'Display language' }));
+    expect(header).toContainElement(screen.getByTestId('account-menu-header'));
+
+    // Open, the list carries its own account row at the bottom.
+    fireEvent.click(screen.getByRole('button', { name: 'Expand task list' }));
+    expect(screen.queryByTestId('account-menu-header')).not.toBeInTheDocument();
   });
 
   it('skips the task list and focuses the workspace when the mobile list is open', async () => {
@@ -502,26 +505,25 @@ describe('AgentsLayout product navigation', () => {
     );
   }
 
-  it('changes website preferences in the header when the task list is collapsed', () => {
-    localStorage.setItem(SIDEBAR_COLLAPSED_STORAGE_KEY, '1');
-    render(
-      <ThemeProvider>
-        <LocaleProvider>
-          <AgentsLayout>
-            <p>job</p>
-          </AgentsLayout>
-        </LocaleProvider>
-      </ThemeProvider>,
-    );
+  it('moves the account menu into the header when the task list is collapsed', () => {
+    renderLayout();
+    expect(screen.queryByTestId('account-menu-header')).not.toBeInTheDocument();
 
-    const theme = screen.getByRole('combobox', { name: 'Theme' });
+    fireEvent.click(toggle());
     expect(screen.queryByTestId('sidebar-stub')).not.toBeInTheDocument();
-    expect(screen.getByRole('banner')).toContainElement(theme);
-    expect(nav()).not.toContainElement(theme);
+    const account = screen.getByTestId('account-menu-header');
+    expect(screen.getByRole('banner')).toContainElement(account);
+    expect(nav()).not.toContainElement(account);
 
-    fireEvent.change(theme, { target: { value: 'dark' } });
-    expect(document.documentElement).toHaveClass(DARK_CLASS);
-    expect(localStorage.getItem(THEME_STORAGE_KEY)).toBe('dark');
+    fireEvent.click(toggle());
+    expect(screen.queryByTestId('account-menu-header')).not.toBeInTheDocument();
+  });
+
+  it('keeps Dashboard, Log out and the website preferences out of the header links', () => {
+    renderLayout();
+    expect(screen.queryByRole('link', { name: 'Dashboard' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Log out' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('combobox')).not.toBeInTheDocument();
   });
 
   it('links Status at the configured status page', () => {
@@ -689,32 +691,16 @@ describe('AgentsLayout owner approval navigation', () => {
 describe('AgentsLayout sign-out', () => {
   afterEach(cleanup);
 
-  function signOut() {
+  // Without admission there is no task list, and with it no account row; the
+  // header avatar is then the only way to sign out or switch accounts.
+  it('offers the account menu to an account without agent access', () => {
+    access = { allowed: false, permissions: [] };
     render(
       <AgentsLayout>
         <p>job</p>
       </AgentsLayout>,
     );
-    fireEvent.click(screen.getByRole('button', { name: 'Log out' }));
-  }
-
-  it('leaves for the start page once the session has ended', async () => {
-    logout.mockResolvedValueOnce(undefined);
-    signOut();
-    await waitFor(() => expect(router.replace).toHaveBeenCalledWith('/'));
-    expect(toast.error).not.toHaveBeenCalled();
-  });
-
-  // The server kept the session, so this browser is still signed in. Leaving
-  // the page as though it were not is what told the user they were done.
-  it('says the session is still open when signing out failed', async () => {
-    logout.mockRejectedValueOnce(new Error('HTTP 502: Bad Gateway'));
-    signOut();
-    await waitFor(() =>
-      expect(toast.error).toHaveBeenCalledWith(
-        'Could not log out. You are still signed in; try again.',
-      ),
-    );
-    expect(router.replace).not.toHaveBeenCalled();
+    expect(screen.queryByTestId('sidebar-stub')).not.toBeInTheDocument();
+    expect(screen.getByRole('banner')).toContainElement(screen.getByTestId('account-menu-header'));
   });
 });

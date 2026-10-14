@@ -25,6 +25,9 @@ const api = vi.hoisted(() => ({
   params: '',
   user: 'alice',
 }));
+// The account menu loads the profile and has its own tests.
+vi.mock('./AccountMenu', () => ({ AccountMenu: () => <div data-testid="account-menu" /> }));
+
 vi.mock('next/navigation', () => ({
   usePathname: () => api.pathname,
   useSearchParams: () => new URLSearchParams(api.params),
@@ -180,24 +183,17 @@ describe('sidebar navigation interactions', () => {
     expect(api.projects).toHaveBeenCalledTimes(1);
   });
 
-  it('shows one Setting link and highlights it on the integrations route', async () => {
+  it('leaves My Settings to the account menu and resolves no job on its route', async () => {
     const view = render(<AgentsSidebar />);
     await screen.findByText('Task a');
-    const setting = screen.getByRole('link', { name: 'My Settings' });
-    expect(screen.getAllByText('My Settings')).toHaveLength(1);
-    expect(setting).toHaveAttribute('href', '/integrations');
-    expect(setting).not.toHaveAttribute('aria-current');
+    expect(screen.getByTestId('account-menu')).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'My Settings' })).not.toBeInTheDocument();
     expect(screen.queryByRole('link', { name: /^Integrations?$/ })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /^Settings?$/ })).not.toBeInTheDocument();
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
 
     api.pathname = '/integrations';
     view.rerender(<AgentsSidebar />);
-    expect(screen.getByRole('link', { name: 'My Settings' })).toHaveAttribute(
-      'aria-current',
-      'page',
-    );
-    expect(screen.getAllByRole('link', { name: 'My Settings' })).toHaveLength(1);
+    expect(screen.getByTestId('account-menu')).toBeInTheDocument();
     expect(api.get).not.toHaveBeenCalled();
     expect(api.thread).not.toHaveBeenCalled();
   });

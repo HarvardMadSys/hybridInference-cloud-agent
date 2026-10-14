@@ -251,6 +251,10 @@ export const zhCN: Record<TranslationKey, string> = {
   'nav.dashboard': '控制台',
   'nav.logOut': '退出登录',
   'nav.logOutFailed': '退出登录失败，你仍处于登录状态，请重试。',
+  'nav.account': '账号菜单',
+  'nav.help': '帮助',
+  'nav.docsNamed': '{name} 文档',
+  'nav.contact': '联系我们',
   'nav.expandTaskList': '展开任务列表',
   'nav.collapseTaskList': '收起任务列表',
 

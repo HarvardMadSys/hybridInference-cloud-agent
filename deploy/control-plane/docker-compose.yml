@@ -117,6 +117,7 @@ services:
       AGENT_WEB_ORG_URL: ${AGENT_WEB_ORG_URL:-}
       AGENT_WEB_STATUS_URL: ${AGENT_WEB_STATUS_URL:-}
       AGENT_WEB_DOCS_URL: ${AGENT_WEB_DOCS_URL:-}
+      AGENT_WEB_CONTACT_URL: ${AGENT_WEB_CONTACT_URL:-}
       AGENT_WEB_GATEWAY_URL: ${AGENT_WEB_GATEWAY_URL:-}
       AGENT_WEB_FEATURE_RAG: ${AGENT_WEB_FEATURE_RAG:-}
       # Optional compute management runs only on this stable main listener.
@@ -364,6 +365,7 @@ services:
       AGENT_WEB_ORG_URL: ${AGENT_WEB_ORG_URL:-}
       AGENT_WEB_STATUS_URL: ${AGENT_WEB_STATUS_URL:-}
       AGENT_WEB_DOCS_URL: ${AGENT_WEB_DOCS_URL:-}
+      AGENT_WEB_CONTACT_URL: ${AGENT_WEB_CONTACT_URL:-}
       # The gateway's origin, for links this app does not host. Sign-in does
       # not pass through the browser any more, so nothing here starts one.
       AGENT_WEB_GATEWAY_URL: ${AGENT_WEB_GATEWAY_URL:-}

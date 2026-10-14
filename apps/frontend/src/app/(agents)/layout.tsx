@@ -1,9 +1,8 @@
 'use client';
 
 import Link from 'next/link';
-import { usePathname, useRouter } from 'next/navigation';
+import { usePathname } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
-import toast from 'react-hot-toast';
 import { ProtectedRoute } from '@/components/features/auth/ProtectedRoute';
 import { AgentsSidebar } from '@/components/features/agents/AgentsSidebar';
 import { useAgentChangeStream } from '@/components/features/agents/agentPush';
@@ -16,7 +15,7 @@ import { useSiteConfig } from '@/components/providers/SiteConfigProvider';
 import { DeploymentFooter } from '@/components/DeploymentFooter';
 import { McpApprovalsProvider } from '@/components/features/agents/mcp/McpApprovalsProvider';
 import { McpApprovalsLink } from '@/components/features/agents/mcp/McpApprovalsView';
-import { WebsitePreferences } from '@/components/features/settings/WebsitePreferences';
+import { AccountMenu } from '@/components/features/agents/AccountMenu';
 
 import { SIDEBAR_COLLAPSED_STORAGE_KEY } from './sidebarStorage';
 
@@ -28,10 +27,16 @@ const NAV_ITEM_CURRENT =
 // App-mode shell (same fixed-overlay pattern as the playground): slim header +
 // repo/task sidebar + main pane. Deep links keep working — /agents/* are real
 // routes; only the marketing chrome is replaced.
-function AgentsHeader({ sidebarToggle }: { sidebarToggle?: React.ReactNode }) {
-  const router = useRouter();
+function AgentsHeader({
+  sidebarToggle,
+  accountMenu,
+}: {
+  sidebarToggle?: React.ReactNode;
+  /** The account menu, while the sidebar that normally holds it is hidden. */
+  accountMenu: boolean;
+}) {
   const pathname = usePathname() ?? '/';
-  const { state, logout } = useAuth();
+  const { state } = useAuth();
   const { branding, features } = useSiteConfig();
   const t = useT();
 
@@ -44,17 +49,6 @@ function AgentsHeader({ sidebarToggle }: { sidebarToggle?: React.ReactNode }) {
   // lights neither item instead of wrongly lighting `Agents`.
   const onAdmin = pathname.startsWith('/admin/');
   const onTasks = !pathname.startsWith('/admin') && pathname !== '/approvals';
-
-  const handleLogout = async () => {
-    try {
-      await logout();
-    } catch {
-      // The session cookie is still set, so this browser is still signed in.
-      toast.error(t('nav.logOutFailed'));
-      return;
-    }
-    router.replace('/');
-  };
 
   return (
     <header className="grid shrink-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-2 gap-y-1 border-b border-border bg-surface px-3 py-1.5 sm:px-4 md:grid-cols-[minmax(0,auto)_minmax(0,1fr)_auto]">
@@ -91,8 +85,10 @@ function AgentsHeader({ sidebarToggle }: { sidebarToggle?: React.ReactNode }) {
           </a>
         )}
       </div>
-      <div className="md:col-start-3 md:row-start-1">
-        <WebsitePreferences compact />
+      {/* Signing out, the theme and the language stay within reach when the
+          task list is hidden: the sidebar's account row goes with it. */}
+      <div className="flex min-h-8 items-center md:col-start-3 md:row-start-1">
+        {accountMenu ? <AccountMenu variant="header" /> : null}
       </div>
       <nav
         aria-label={t('nav.aria')}
@@ -148,14 +144,6 @@ function AgentsHeader({ sidebarToggle }: { sidebarToggle?: React.ReactNode }) {
             {t('nav.admin')}
           </Link>
         )}
-        {branding.gatewayUrl && (
-          <a href={`${branding.gatewayUrl}/dashboard`} className={NAV_ITEM}>
-            {t('nav.dashboard')}
-          </a>
-        )}
-        <button type="button" onClick={handleLogout} className={NAV_ITEM}>
-          {t('nav.logOut')}
-        </button>
       </nav>
     </header>
   );
@@ -393,6 +381,10 @@ export default function AgentsLayout({ children }: { children: React.ReactNode }
             {t('nav.skipToWorkspace')}
           </a>
           <AgentsHeader
+            accountMenu={
+              !hasAgentPermission(state.user?.agent_access, 'agent.use') ||
+              (mobile ? !mobileSidebarOpen : sidebarCollapsed)
+            }
             sidebarToggle={
               mobile || sidebarCollapsed ? (
                 <SidebarToggleButton

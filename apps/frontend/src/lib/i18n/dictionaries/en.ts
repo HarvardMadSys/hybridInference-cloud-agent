@@ -266,6 +266,10 @@ export const en = {
   'nav.dashboard': 'Dashboard',
   'nav.logOut': 'Log out',
   'nav.logOutFailed': 'Could not log out. You are still signed in; try again.',
+  'nav.account': 'Account menu',
+  'nav.help': 'Help',
+  'nav.docsNamed': '{name} Docs',
+  'nav.contact': 'Contact us',
   'nav.expandTaskList': 'Expand task list',
   'nav.collapseTaskList': 'Collapse task list',
 
