@@ -234,6 +234,97 @@ async function chooseRepository(name = 'owner/repository') {
 }
 
 describe('TaskComposer source-control onboarding', () => {
+  it('applies the repository default without showing environment controls in the composer', async () => {
+    vi.mocked(getAgentConfig).mockResolvedValue(config());
+    const globals = {
+      id: 'global',
+      name: 'Global',
+      repo: null,
+      revision: 2,
+      variables: [],
+      setup_script: '',
+      start_script: '',
+      verify_script: '',
+      actions: [],
+    };
+    vi.mocked(listEnvironments).mockResolvedValue({
+      globals,
+      environments: [
+        {
+          ...globals,
+          id: 'env',
+          name: 'Development',
+          repo: 'owner/repository',
+          revision: 4,
+          is_default: true,
+        },
+      ],
+    });
+    vi.mocked(createAgentJob).mockResolvedValue({ id: 'new-job' } as AgentJobApi);
+    render(<TaskComposer />);
+    await chooseRepository();
+    await waitFor(() => expect(listEnvironments).toHaveBeenCalledWith('owner/repository'));
+    expect(screen.queryByRole('combobox', { name: 'Choose environment' })).not.toBeInTheDocument();
+    expect(screen.queryByText('Effective configuration')).not.toBeInTheDocument();
+    expect(screen.queryByText('Variables for this workspace only')).not.toBeInTheDocument();
+    fireEvent.change(screen.getByRole('textbox', { name: 'What should the agent do?' }), {
+      target: { value: 'Fix tests' },
+    });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Run' })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Run' }));
+    await waitFor(() =>
+      expect(createAgentJob).toHaveBeenCalledWith(
+        expect.objectContaining({
+          environment_id: 'env',
+          environment_revision: 4,
+          global_revision: 2,
+          environment_overrides: [],
+        }),
+      ),
+    );
+  });
+
+  it('keeps task-specific environment choices after closing and reopening the dialog', async () => {
+    vi.mocked(getAgentConfig).mockResolvedValue(config());
+    vi.mocked(createAgentJob).mockResolvedValue({ id: 'new-job' } as AgentJobApi);
+    render(<TaskComposer />);
+    await chooseRepository();
+    await openAttachMenu();
+    fireEvent.click(await screen.findByRole('menuitem', { name: /Environment/ }));
+    const dialog = screen.getByRole('dialog', { name: 'Environment' });
+    expect(within(dialog).getByRole('combobox', { name: 'Choose environment' })).toHaveFocus();
+    fireEvent.click(within(dialog).getByText('Variables for this workspace only'));
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Add variable' }));
+    fireEvent.change(within(dialog).getByLabelText('Variable name'), {
+      target: { value: 'APP_ENV' },
+    });
+    fireEvent.change(within(dialog).getByLabelText('Value APP_ENV'), {
+      target: { value: 'testing' },
+    });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Done' }));
+    expect(screen.queryByRole('dialog', { name: 'Environment' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Add to message' })).toHaveFocus();
+    await openAttachMenu();
+    const item = screen.getByRole('menuitem', { name: /Environment/ });
+    expect(item).toHaveTextContent('1 overrides');
+    fireEvent.click(item);
+    expect(screen.getByLabelText('Value APP_ENV')).toHaveValue('testing');
+    fireEvent.keyDown(window, { key: 'Escape' });
+    fireEvent.change(screen.getByRole('textbox', { name: 'What should the agent do?' }), {
+      target: { value: 'Fix tests' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Run' }));
+    await waitFor(() =>
+      expect(createAgentJob).toHaveBeenCalledWith(
+        expect.objectContaining({
+          environment_overrides: [
+            { name: 'APP_ENV', value: 'testing', secret: true, phase: 'both' },
+          ],
+        }),
+      ),
+    );
+  });
+
   it('keeps repository switching usable after environment loading fails and can retry', async () => {
     vi.mocked(getAgentConfig).mockResolvedValue(config());
     vi.mocked(listEnvironments).mockRejectedValueOnce(new Error('Environment unavailable'));

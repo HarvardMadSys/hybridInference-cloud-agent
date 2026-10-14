@@ -89,6 +89,13 @@ export const en = {
   'environment.platformDescription':
     'Linux sandbox; image tools and resource limits are platform-managed. Public IPv4 TCP 80/443 and the named DNS resolver are available. Private networks and other outbound ports stay blocked. Installation: 15 min; startup: 2 min; verification: 5 min. Stopped containers lose running processes. OPENAI_API_KEY, ANTHROPIC_API_KEY and platform names are reserved.',
   'environment.choose': 'Choose environment',
+  'environment.automaticHint':
+    'Your repository default is applied automatically. Change it here only when this task needs a different environment.',
+  'environment.loading': 'Loading environment…',
+  'environment.noVariables': 'No environment variables configured.',
+  'environment.done': 'Done',
+  'environment.selectionWithOverrides': '{name} · {count} overrides',
+  'attach.workspace': 'Workspace',
   'environment.platformBase': 'Platform base + global variables',
   'environment.manage': 'Manage',
   'environment.details': 'Effective configuration',

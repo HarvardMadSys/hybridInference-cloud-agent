@@ -146,6 +146,8 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
   const [environmentSelection, setEnvironmentSelection] = useState<EnvironmentSelection | null>(
     null,
   );
+  const [environmentOpen, setEnvironmentOpen] = useState(false);
+  const [environmentSummary, setEnvironmentSummary] = useState('');
   const [repoPickerOpen, setRepoPickerOpen] = useState(false);
   // Enter with no repository opens the picker; the choice then hands the caret
   // back to the task, so a second Enter sends it.
@@ -751,9 +753,13 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
         )}
 
         <EnvironmentPicker
+          key={repo}
           repo={repo}
+          open={environmentOpen}
+          onClose={() => setEnvironmentOpen(false)}
           onChange={setEnvironmentSelection}
           onStatusChange={setEnvironmentStatus}
+          onSummaryChange={setEnvironmentSummary}
         />
         <div className="flex min-w-0 flex-nowrap items-center gap-1 rounded-b-xl border-t border-border bg-surface-muted/50 p-2">
           {disconnected ? (
@@ -799,6 +805,8 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
                   pluginsSupported || plugins.length ? () => setPluginsOpen(true) : undefined
                 }
                 pluginSummary={String(plugins.length)}
+                onOpenEnvironment={repo ? () => setEnvironmentOpen(true) : undefined}
+                environmentSummary={environmentSummary}
               />
               <span aria-hidden="true" className="mx-0.5 h-4 w-px shrink-0 bg-border" />
               {/* Leave the scroller unpositioned so the repository menu anchors

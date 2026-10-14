@@ -84,6 +84,12 @@ export const zhCN: Record<TranslationKey, string> = {
   'environment.platformDescription':
     'Linux 沙箱，工具链和资源限制由平台管理。允许既定公网 IPv4 TCP 80/443 与指定 DNS；私网及其他出口端口不可用。安装超时 15 分钟，启动 2 分钟，验证 5 分钟。容器停止后运行中的进程不保留。OPENAI_API_KEY、ANTHROPIC_API_KEY 等平台变量名不可设置。',
   'environment.choose': '选择环境',
+  'environment.automaticHint': '自动使用仓库默认环境。仅在这次任务需要不同配置时调整。',
+  'environment.loading': '正在加载环境…',
+  'environment.noVariables': '未配置环境变量。',
+  'environment.done': '完成',
+  'environment.selectionWithOverrides': '{name} · {count} 个临时变量',
+  'attach.workspace': '工作区',
   'environment.platformBase': '平台基础环境 + 全局变量',
   'environment.manage': '管理环境',
   'environment.details': '有效配置',

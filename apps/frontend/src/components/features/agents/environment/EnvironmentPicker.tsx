@@ -1,7 +1,9 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useT } from '@/components/providers';
+import { useModalDialog } from '@/components/ui/useModalDialog';
 import { listEnvironments } from '@/lib/api/environments';
 import type { EnvironmentConfig, EnvironmentVariable, VariableEdit } from '@/lib/api/environments';
 import { EnvironmentManager } from './EnvironmentManager';
@@ -15,12 +17,18 @@ export interface EnvironmentSelection {
 }
 export function EnvironmentPicker({
   repo,
+  open,
+  onClose,
   onChange,
   onStatusChange,
+  onSummaryChange,
 }: {
   repo: string;
+  open: boolean;
+  onClose: () => void;
   onChange: (selection: EnvironmentSelection | null) => void;
   onStatusChange?: (status: 'loading' | 'ready' | 'error') => void;
+  onSummaryChange?: (summary: string) => void;
 }) {
   const t = useT();
   const [items, setItems] = useState<EnvironmentConfig[]>([]);
@@ -32,6 +40,8 @@ export function EnvironmentPicker({
   const [reload, setReload] = useState(0);
   const previousRepo = useRef<string | null>(null);
   const initializedRepo = useRef<string | null>(null);
+  const panel = useRef<HTMLDivElement>(null);
+  useModalDialog(panel, { open: open && !!repo, onClose, initialFocus: 'select' });
   useEffect(() => {
     let active = true;
     onChange(null);
@@ -81,6 +91,15 @@ export function EnvironmentPicker({
     });
   }, [globals, items, selected, overrides, onChange]);
   const env = items.find((e) => e.id === selected);
+  useEffect(() => {
+    if (!globals) {
+      onSummaryChange?.('');
+      return;
+    }
+    const name = env?.name ?? t('environment.platformBase');
+    const count = overrides.filter((v) => v.operation !== 'remove' && v.name.trim()).length;
+    onSummaryChange?.(count ? t('environment.selectionWithOverrides', { name, count }) : name);
+  }, [globals, env, overrides, onSummaryChange, t]);
   const effective = new Map(
     (globals?.variables ?? []).map((v) => [v.name, { ...v, source: 'global' }]),
   );
@@ -96,73 +115,142 @@ export function EnvironmentPicker({
         source: 'override',
       }),
     );
-  return repo ? (
-    <div className="space-y-2 border-t border-border px-3 py-2 text-sm">
-      <div className="flex flex-wrap items-center gap-2">
-        <label className="flex min-w-0 flex-1 items-center gap-2">
-          {t('environment.title')}
-          <select
-            aria-label={t('environment.choose')}
-            className="ui-input min-w-0 flex-1"
-            value={selected}
-            onChange={(e) => setSelected(e.target.value)}
-          >
-            <option value="">{t('environment.platformBase')}</option>
-            {items.map((item) => (
-              <option key={item.id} value={item.id!}>
-                {item.name} · v{item.revision}
-              </option>
-            ))}
-          </select>
-        </label>
-        <button
-          type="button"
-          className="ui-button ui-button-ghost"
-          onClick={() => setManaging(!managing)}
-        >
-          {t('environment.manage')}
-        </button>
-      </div>
-      <details>
-        <summary>
-          {t('environment.details')} · {effective.size} {t('environment.variables')}
-        </summary>
-        <ul className="mt-2 text-xs text-muted">
-          {Array.from(effective.values()).map((v) => (
-            <li key={v.name}>
-              <code>{v.name}</code> ·{' '}
-              {v.secret ? t('environment.secret') : t('environment.ordinary')} · {v.phase} ·{' '}
-              {env?.variables.some((e) => e.name === v.name)
-                ? env.name
-                : t('environment.globalVariables')}
-            </li>
-          ))}
-        </ul>
-        {env && (
-          <pre className="mt-2 max-h-32 overflow-auto whitespace-pre-wrap text-xs">
-            {env.setup_script}\n{env.start_script}
-          </pre>
-        )}
-      </details>
-      <details>
-        <summary>{t('environment.overrides')}</summary>
-        <div className="mt-2">
-          <VariableEditor values={overrides} onChange={setOverrides} />
-        </div>
-      </details>
-      {managing && <EnvironmentManager repo={repo} onChanged={() => setReload((v) => v + 1)} />}
-      {error && (
-        <p role="alert" className="text-red-600 dark:text-red-400">
-          {t('environment.loadFailed')} {error}
-          <button
-            type="button"
-            className="ui-button ui-button-ghost"
-            onClick={() => setReload((v) => v + 1)}
-          >
-            {t('environment.retry')}
-          </button>
-        </p>
-      )}
-    </div>
+  const errorNotice = error ? (
+    <p role="alert" className="text-sm text-status-error">
+      {t('environment.loadFailed')} {error}
+      <button
+        type="button"
+        className="ui-button ui-button-ghost"
+        onClick={() => setReload((v) => v + 1)}
+      >
+        {t('environment.retry')}
+      </button>
+    </p>
   ) : null;
+  if (!repo) return null;
+  if (!open) return errorNotice ? <div className="px-3 py-2">{errorNotice}</div> : null;
+  if (typeof document === 'undefined') return null;
+  return createPortal(
+    <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+      <button
+        type="button"
+        tabIndex={-1}
+        aria-label={t('environment.close')}
+        onClick={onClose}
+        className="absolute inset-0 cursor-default bg-gray-900/25 backdrop-blur-[2px] dark:bg-black/50"
+      />
+      <div
+        ref={panel}
+        role="dialog"
+        aria-modal="true"
+        aria-label={t('environment.title')}
+        className="relative flex max-h-full w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-border bg-surface shadow-card"
+      >
+        <div className="shrink-0 px-6 pb-4 pt-5">
+          <h2 className="text-lg font-semibold text-foreground">{t('environment.title')}</h2>
+          <p className="mt-1 truncate text-sm text-muted" title={repo}>
+            {repo}
+          </p>
+          <p className="mt-3 text-sm text-muted">{t('environment.automaticHint')}</p>
+        </div>
+        <div className="min-h-0 space-y-4 overflow-y-auto px-6 pb-5 text-sm">
+          {errorNotice}
+          <div className="flex flex-wrap items-end gap-2">
+            <label className="min-w-0 flex-1 space-y-2">
+              <span className="block font-medium">{t('environment.choose')}</span>
+              <select
+                className="ui-input w-full"
+                value={selected}
+                disabled={!globals}
+                onChange={(e) => setSelected(e.target.value)}
+              >
+                <option value="">{t('environment.platformBase')}</option>
+                {items.map((item) => (
+                  <option key={item.id} value={item.id!}>
+                    {item.name} · v{item.revision}
+                    {item.is_default ? ` · ${t('environment.default')}` : ''}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button
+              type="button"
+              className="ui-button ui-button-secondary"
+              aria-expanded={managing}
+              onClick={() => setManaging(!managing)}
+            >
+              {t('environment.manage')}
+            </button>
+          </div>
+          {!globals && !error ? (
+            <p role="status" className="text-muted">
+              {t('environment.loading')}
+            </p>
+          ) : null}
+          <details className="rounded-xl border border-border">
+            <summary className="cursor-pointer px-4 py-3 font-medium">
+              {t('environment.details')}{' '}
+              <span className="ml-1 text-xs font-normal text-muted">
+                {effective.size} {t('environment.variables')}
+              </span>
+            </summary>
+            <div className="space-y-3 border-t border-border px-4 py-3">
+              {effective.size ? (
+                <ul className="space-y-2 text-xs text-muted">
+                  {Array.from(effective.values()).map((v) => (
+                    <li key={v.name} className="break-words">
+                      <code className="text-foreground">{v.name}</code> ·{' '}
+                      {v.secret ? t('environment.secret') : t('environment.ordinary')} · {v.phase} ·{' '}
+                      {v.source === 'override'
+                        ? t('environment.overrides')
+                        : v.source === 'environment'
+                          ? env?.name
+                          : t('environment.globalVariables')}
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="text-xs text-muted">{t('environment.noVariables')}</p>
+              )}
+              {env?.setup_script ? (
+                <div>
+                  <p className="mb-1 text-xs text-muted">{t('environment.installScript')}</p>
+                  <pre className="max-h-32 overflow-auto whitespace-pre-wrap rounded-lg bg-surface-muted p-3 text-xs">
+                    {env.setup_script}
+                  </pre>
+                </div>
+              ) : null}
+              {env?.start_script ? (
+                <div>
+                  <p className="mb-1 text-xs text-muted">{t('environment.startScript')}</p>
+                  <pre className="max-h-32 overflow-auto whitespace-pre-wrap rounded-lg bg-surface-muted p-3 text-xs">
+                    {env.start_script}
+                  </pre>
+                </div>
+              ) : null}
+            </div>
+          </details>
+          <details className="rounded-xl border border-border">
+            <summary className="cursor-pointer px-4 py-3 font-medium">
+              {t('environment.overrides')}
+            </summary>
+            <div className="border-t border-border px-4 py-3">
+              <VariableEditor values={overrides} onChange={setOverrides} />
+            </div>
+          </details>
+          {managing && (
+            <div className="border-t border-border pt-4">
+              <EnvironmentManager repo={repo} onChanged={() => setReload((v) => v + 1)} />
+            </div>
+          )}
+        </div>
+        <div className="flex shrink-0 justify-end border-t border-border px-6 py-4">
+          <button type="button" onClick={onClose} className="ui-button ui-button-primary">
+            {t('environment.done')}
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
 }
