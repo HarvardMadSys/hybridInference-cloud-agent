@@ -29,6 +29,12 @@ const INSPECTOR_MIN_WIDTH = 320;
 const INSPECTOR_MAX_WIDTH = 640;
 const TRAJECTORY_MIN_WIDTH = 420;
 
+/** A delegated agent, named by the turn that started it and its overview key. */
+export interface SubagentTarget {
+  jobId: string;
+  key: string;
+}
+
 const EMPTY_TRAJECTORY_STEPS: ReturnType<typeof buildTrajectorySteps> = [];
 
 /** Owns the mutually exclusive workspace and inspector, their focus, and retained panels. */
@@ -46,7 +52,7 @@ export function useJobDetailPanels({
   const workspaceScope = JSON.stringify([userId, job.threadId ?? job.id]);
   const [tab, setTab] = useState<'chat' | 'trajectory'>('chat');
   // A subagent's own conversation replaces the Chat body; it is a Chat view.
-  const [subagentKey, setSubagentKey] = useState<string | null>(null);
+  const [subagent, setSubagent] = useState<SubagentTarget | null>(null);
   const [openWorkspaceScope, setOpenWorkspaceScope] = useState<string | null>(null);
   const workspaceOpen = openWorkspaceScope === workspaceScope;
   const setWorkspaceOpen = useCallback(
@@ -98,6 +104,8 @@ export function useJobDetailPanels({
   const [inspector, setInspector] = useState<InspectorSelection | null>(null);
   const focusInspectorRef = useRef(false);
   const [trajectoryQuery, setTrajectoryQuery] = useState('');
+  // The trajectory can be narrowed to one subagent's steps.
+  const [trajectorySubagent, setTrajectorySubagent] = useState<SubagentTarget | null>(null);
   const [focusJobId, setFocusJobId] = useState<string | null>(null);
   const inspectorTriggerRef = useRef<HTMLElement | null>(null);
   const trajectoryContext = useMemo(() => {
@@ -305,7 +313,7 @@ export function useJobDetailPanels({
   // Returning to Chat closes details selected from the trajectory.
   useEffect(() => {
     if (tab !== 'chat') {
-      setSubagentKey(null);
+      setSubagent(null);
       return;
     }
     setInspector(null);
@@ -360,8 +368,8 @@ export function useJobDetailPanels({
     workspaceScope,
     tab,
     setTab,
-    subagentKey,
-    setSubagentKey,
+    subagent,
+    setSubagent,
     workspaceOpen,
     setWorkspaceOpen,
     workspaceTabs,
@@ -379,6 +387,8 @@ export function useJobDetailPanels({
     setFocusJobId,
     trajectoryQuery,
     setTrajectoryQuery,
+    trajectorySubagent,
+    setTrajectorySubagent,
     trajectoryContext,
     getTrajectorySteps,
     trajectorySteps,

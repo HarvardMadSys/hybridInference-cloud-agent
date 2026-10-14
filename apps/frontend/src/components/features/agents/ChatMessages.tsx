@@ -32,6 +32,45 @@ import type { TranscriptPresentation } from './transcriptPresentation';
 
 export type InspectTranscriptEvent = (event: AgentEvent, jobId: string) => void;
 
+/** The subagent a delegating call started, when its own conversation can be shown. */
+export type SubagentOfCall = (
+  jobId: string,
+  event: Extract<AgentEvent, { kind: 'tool_use' }>,
+) => { title: string; open: () => void } | undefined;
+
+/**
+ * Supplied by the page around the main conversation, so a delegating call can
+ * switch to the subagent it started. Absent elsewhere, including inside a
+ * subagent's own conversation.
+ */
+export const SubagentLinks = createContext<SubagentOfCall | null>(null);
+
+function SubagentSwitch({
+  event,
+  jobId,
+  compact = false,
+}: {
+  event: Extract<AgentEvent, { kind: 'tool_use' }>;
+  jobId?: string;
+  compact?: boolean;
+}) {
+  const subagentOf = useContext(SubagentLinks);
+  const subagent = jobId && subagentOf ? subagentOf(jobId, event) : undefined;
+  if (!subagent) return null;
+  return (
+    <button
+      type="button"
+      onClick={subagent.open}
+      aria-label={`Switch subagent: ${subagent.title}`}
+      title="Switch to this subagent"
+      className="ui-focus-ring inline-flex shrink-0 items-center gap-0.5 rounded text-[11px] font-medium text-crimson hover:underline dark:text-crimson-light"
+    >
+      {compact ? null : 'Switch to subagent'}
+      <Chevron />
+    </button>
+  );
+}
+
 function Chevron({ className = '' }: { className?: string }) {
   return (
     <svg
@@ -255,6 +294,7 @@ function RichToolActivity({
           >
             {resultLabel}
           </span>
+          {activity.kind === 'delegation' ? <SubagentSwitch event={event} jobId={jobId} /> : null}
         </div>
         <div className="space-y-1.5 px-3 py-2">
           <ToolActivityDetails
@@ -369,6 +409,7 @@ function ToolActivityBody({
                 >
                   {toolResultLabel(event, t)}
                 </span>
+                <SubagentSwitch event={event} jobId={jobId} compact />
               </li>
             );
           })}

@@ -3938,6 +3938,107 @@ describe('JobDetail', () => {
       fireEvent.click(screen.getByRole('button', { name: 'chat' }));
       expect(screen.queryByRole('region', { name: /^Subagent: / })).not.toBeInTheDocument();
     });
+
+    it('opens an earlier turn’s subagent from its call and narrows the trajectory to it', async () => {
+      const record = (
+        id: number,
+        jobId: string,
+        turnNo: number,
+        event_type: string,
+        payload: Record<string, unknown>,
+      ) => ({
+        id,
+        job_id: jobId,
+        turn_no: turnNo,
+        attempt_id: turnNo * 10,
+        seq: id,
+        event_type,
+        payload,
+        created_at: '2026-10-10T12:00:00.000Z',
+      });
+      const launch = {
+        id: 'toolu_audit',
+        name: 'Agent',
+        input: { description: 'Audit old code', prompt: 'Look for dead code.' },
+      };
+      render(
+        <JobDetail
+          job={makeJob({
+            turnNo: 2,
+            historyTurns: [
+              {
+                jobId: 'ajob_0',
+                turnNo: 1,
+                forkable: false,
+                state: 'done',
+                messages: [],
+                events: [
+                  {
+                    kind: 'tool_use',
+                    tool: 'Agent',
+                    id: 'toolu_audit',
+                    detail: 'Audit old code',
+                    input: launch.input,
+                    resultState: 'received',
+                    output: ['Dead code is in src/dead.ts'],
+                    attemptNo: 1,
+                    sourceEventId: 501,
+                  },
+                  { kind: 'message', text: 'Main agent summary', attemptNo: 1 },
+                ],
+              },
+            ],
+          })}
+          threadJobs={
+            [
+              { id: 'ajob_0', state: 'succeeded', turn_no: 1, current_attempt_id: 10 },
+              { id: 'ajob_1', state: 'running', turn_no: 2, current_attempt_id: 20 },
+            ] as AgentJobApi[]
+          }
+          events={
+            [
+              record(501, 'ajob_0', 1, 'tool_use', launch),
+              record(502, 'ajob_0', 1, 'tool_use', {
+                id: 'toolu_dead_read',
+                name: 'Read',
+                input: { file_path: 'src/dead.ts' },
+                parent_tool_use_id: 'toolu_audit',
+              }),
+              record(503, 'ajob_0', 1, 'message', {
+                text: 'Unused helpers remain in src/dead.ts.',
+                parent_tool_use_id: 'toolu_audit',
+              }),
+              record(504, 'ajob_0', 1, 'message', { text: 'Main agent summary' }),
+              record(505, 'ajob_1', 2, 'tool_use', {
+                id: 'toolu_tests',
+                name: 'Bash',
+                input: { command: 'pytest -q' },
+              }),
+            ] as never
+          }
+        />,
+      );
+
+      // The earlier turn is not the panel's turn; its call is the way in.
+      fireEvent.click(screen.getByRole('button', { name: 'Switch subagent: Audit old code' }));
+      const view = screen.getByRole('region', { name: 'Subagent: Audit old code' });
+      expect(view).toHaveTextContent('Look for dead code.');
+      expect(view).toHaveTextContent('Unused helpers remain in src/dead.ts.');
+      expect(view).not.toHaveTextContent('Main agent summary');
+      expect(screen.queryByRole('textbox', { name: 'Add a follow-up' })).not.toBeInTheDocument();
+
+      fireEvent.click(within(view).getByRole('button', { name: 'View trajectory ›' }));
+      const filter = await screen.findByRole('combobox', { name: 'Show steps from' });
+      expect(filter).toHaveDisplayValue('Turn 1 · Audit old code');
+      const trajectory = screen.getByRole('region', { name: 'Trajectory' });
+      expect(trajectory).toHaveTextContent('src/dead.ts');
+      expect(trajectory).toHaveTextContent('Unused helpers remain');
+      expect(trajectory).not.toHaveTextContent('pytest -q');
+      expect(trajectory).not.toHaveTextContent('Main agent summary');
+
+      fireEvent.change(filter, { target: { value: '' } });
+      expect(screen.getByRole('region', { name: 'Trajectory' })).toHaveTextContent('pytest -q');
+    });
   });
 
   it('keeps the task as the default view behind an icon-only, accessible workspace toggle', () => {
@@ -4040,7 +4141,7 @@ describe('JobDetail', () => {
     });
     const events = [...historicalEvents, source];
     const { rerender } = render(<JobDetail job={job} events={events} threadJobs={threadJobs} />);
-    await screen.findByRole('button', { name: /^Switch subagent: / });
+    await screen.findAllByRole('button', { name: /^Switch subagent: / });
     expect(renderingWork.trajectory).not.toHaveBeenCalled();
     expect(renderingWork.history).toHaveBeenCalledTimes(1);
     expect(renderingWork.current).toHaveBeenCalledTimes(1);
@@ -4053,8 +4154,13 @@ describe('JobDetail', () => {
     expect(renderingWork.history).toHaveBeenCalledTimes(1);
     expect(renderingWork.current).toHaveBeenCalledTimes(1);
 
-    // A subagent's conversation reads its own records, not the diagnostic projection.
-    fireEvent.click(screen.getByRole('button', { name: /^Switch subagent: / }));
+    // A subagent's conversation reads its own records, not the diagnostic
+    // projection, whether it is opened from the panel or from the call.
+    fireEvent.click(
+      within(screen.getByRole('list', { name: 'Tool calls' })).getByRole('button', {
+        name: 'Switch subagent: Review scaling',
+      }),
+    );
     expect(screen.getByRole('region', { name: 'Subagent: Review scaling' })).toBeInTheDocument();
     expect(renderingWork.trajectory).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: '← Back to conversation' }));

@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef } from 'react';
+import { useLayoutEffect, useRef } from 'react';
 import type { OverviewSubagent } from './activityOverview';
 import { EventList, EventRow, UserMessage, type InspectTranscriptEvent } from './ChatMessages';
 import type { DelegationReply } from './toolActivity';
@@ -20,6 +20,13 @@ function subagentStatus(agent: OverviewSubagent): string | undefined {
   return undefined;
 }
 
+/** Slack for sub-pixel layout rounding when asking whether the end is reached. */
+const END_EPSILON_PX = 2;
+
+function atEnd(region: HTMLElement): boolean {
+  return region.scrollHeight - region.scrollTop - region.clientHeight <= END_EPSILON_PX;
+}
+
 /**
  * One subagent read as its own conversation: the main agent's instructions,
  * then what the subagent recorded. Subagents are started by the coding agent,
@@ -31,6 +38,7 @@ export function SubagentConversation({
   jobId,
   presentation,
   onBack,
+  onViewTrajectory,
   onInspectEvent,
 }: {
   agent: OverviewSubagent;
@@ -39,15 +47,34 @@ export function SubagentConversation({
   jobId: string;
   presentation?: TranscriptPresentation;
   onBack: () => void;
+  /** Show the trajectory narrowed to this subagent's steps. */
+  onViewTrajectory?: () => void;
   onInspectEvent?: InspectTranscriptEvent;
 }) {
   const { activity, reply } = agent;
   const backRef = useRef<HTMLButtonElement>(null);
+  // Whether the reader was at the end as of their last scroll. New records
+  // follow only then; a reader who scrolled up is left where they are.
+  const followingRef = useRef(true);
   // Opening a subagent starts at its instructions, wherever the Chat was read.
-  useEffect(() => {
-    backRef.current?.closest<HTMLElement>('[role="region"]')?.scrollTo?.({ top: 0 });
+  // A layout effect declared first, so the follow below judges that position.
+  useLayoutEffect(() => {
+    const region = backRef.current?.closest<HTMLElement>('[role="region"]');
+    region?.scrollTo?.({ top: 0 });
     backRef.current?.focus({ preventScroll: true });
-  }, [agent.key]);
+    if (!region) return undefined;
+    const onScroll = () => {
+      followingRef.current = atEnd(region);
+    };
+    onScroll();
+    region.addEventListener('scroll', onScroll, { passive: true });
+    return () => region.removeEventListener('scroll', onScroll);
+  }, [agent.key, jobId]);
+  // Before paint, so a followed record never flashes in below the fold.
+  useLayoutEffect(() => {
+    const region = backRef.current?.closest<HTMLElement>('[role="region"]');
+    if (region && followingRef.current && !atEnd(region)) region.scrollTop = region.scrollHeight;
+  }, [events, reply]);
 
   const title = activity.description ?? activity.title;
   const status = subagentStatus(agent);
@@ -67,14 +94,25 @@ export function SubagentConversation({
   return (
     <section aria-label={`Subagent: ${title}`} className="flex-1">
       <header className="sticky top-0 z-10 -mx-1 -mt-4 mb-3 border-b border-gray-200 bg-gray-50 px-1 pb-3 pt-4 dark:border-white/10 dark:bg-gray-950">
-        <button
-          ref={backRef}
-          type="button"
-          onClick={onBack}
-          className="ui-focus-ring rounded text-xs font-medium text-crimson hover:underline dark:text-crimson-light"
-        >
-          ← Back to conversation
-        </button>
+        <div className="flex items-center justify-between gap-3">
+          <button
+            ref={backRef}
+            type="button"
+            onClick={onBack}
+            className="ui-focus-ring rounded text-xs font-medium text-crimson hover:underline dark:text-crimson-light"
+          >
+            ← Back to conversation
+          </button>
+          {onViewTrajectory ? (
+            <button
+              type="button"
+              onClick={onViewTrajectory}
+              className="ui-focus-ring rounded text-xs text-gray-500 hover:text-gray-900 hover:underline dark:text-gray-400 dark:hover:text-gray-100"
+            >
+              View trajectory ›
+            </button>
+          ) : null}
+        </div>
         <div className="mt-1.5 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
           <span className="text-[11px] font-medium uppercase tracking-wide text-violet-700 dark:text-violet-300">
             Subagent

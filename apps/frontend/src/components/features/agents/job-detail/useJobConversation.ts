@@ -29,7 +29,7 @@ export function useJobConversation({
   setAttemptNo: (attemptNo: number) => void;
 }) {
   const t = useT();
-  const { tab, subagentKey, wideLayout, workspaceOpen, inspector } = panels;
+  const { tab, subagent, wideLayout, workspaceOpen, inspector } = panels;
   // The transcript and rail share descriptions. Composer edits cannot change
   // them; streaming updates rebuild only the description whose source changed.
   const currentAttemptNo = job.currentAttemptNo;
@@ -73,9 +73,7 @@ export function useJobConversation({
     turnKeys,
     conversationKey,
     active:
-      tab === 'chat' &&
-      subagentKey === null &&
-      (wideLayout || !(workspaceOpen || inspector !== null)),
+      tab === 'chat' && subagent === null && (wideLayout || !(workspaceOpen || inspector !== null)),
   });
   // Announced only for a jump the reader asked for, never for a streamed
   // event: a transcript that talks on every token is one nobody can listen to.

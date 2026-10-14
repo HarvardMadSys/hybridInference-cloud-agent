@@ -800,27 +800,42 @@ function displayEvents(events: AgentJobEventApi[], job?: AgentJobApi): AgentEven
   return rows;
 }
 
+/** A delegated agent's recorded identity: the call that started it and its Codex threads. */
+export interface SubagentOwner {
+  callId?: string;
+  threads: readonly string[];
+}
+
+/**
+ * Whether a record's owner fields assign it to this subagent: to the
+ * delegating call (`callId`) or, for Codex, to one of the threads that call
+ * started.
+ */
+export function ownedBySubagent(
+  payload: Record<string, unknown> | null | undefined,
+  owner: SubagentOwner,
+): boolean {
+  const parent = asText(payload ?? {}, 'parent_tool_use_id');
+  const thread = asText(payload ?? {}, 'agent_thread_id');
+  // One call may start several threads, and each thread's records name that
+  // call. Once the threads are known, a record belongs to its own thread.
+  if (thread && owner.threads.length) return owner.threads.includes(thread);
+  return Boolean(parent) && parent === owner.callId;
+}
+
 /**
  * One subagent's own transcript, read as if that subagent were the
- * conversation: the records its owner fields assign to the delegating call
- * (`callId`) or, for Codex, to one of the threads that call started. Its turn
+ * conversation: the records `ownedBySubagent` assigns to it. Its turn
  * milestones and usage stay runtime bookkeeping rather than rows.
  */
 export function subagentDisplayEvents(
   events: AgentJobEventApi[],
-  owner: { callId?: string; threads: readonly string[] },
+  owner: SubagentOwner,
   job?: AgentJobApi,
 ): AgentEvent[] {
-  const threads = new Set(owner.threads);
   const own = events.flatMap((event) => {
     const payload = event.payload ?? {};
-    const parent = asText(payload, 'parent_tool_use_id');
-    const thread = asText(payload, 'agent_thread_id');
-    // One call may start several threads, and each thread's records name that
-    // call. Once the threads are known, a record belongs to its own thread.
-    const mine =
-      thread && threads.size ? threads.has(thread) : Boolean(parent) && parent === owner.callId;
-    if (!mine) return [];
+    if (!ownedBySubagent(payload, owner)) return [];
     const { parent_tool_use_id: _parent, agent_thread_id: _thread, ...rest } = payload;
     return [{ ...event, payload: rest }];
   });
