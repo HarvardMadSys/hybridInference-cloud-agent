@@ -3932,14 +3932,16 @@ describe('JobDetail', () => {
       expect(screen.queryByRole('region', { name: /^Subagent: / })).not.toBeInTheDocument();
       expect(screen.getByRole('textbox', { name: 'Add a follow-up' })).toBeInTheDocument();
 
-      // The subagent view is part of Chat; another tab returns Chat to the conversation.
+      // The subagent stays selected across tabs: Chat comes back to its conversation.
       fireEvent.click(within(panel).getByRole('button', { name: /^Switch subagent: / }));
       fireEvent.click(screen.getByRole('button', { name: 'trajectory' }));
       fireEvent.click(screen.getByRole('button', { name: 'chat' }));
-      expect(screen.queryByRole('region', { name: /^Subagent: / })).not.toBeInTheDocument();
+      expect(
+        screen.getByRole('region', { name: 'Subagent: Review window interactions' }),
+      ).toBeInTheDocument();
     });
 
-    it('opens an earlier turn’s subagent from its call and narrows the trajectory to it', async () => {
+    it('opens an earlier turn’s subagent from its call and keeps it for the trajectory tab', async () => {
       const record = (
         id: number,
         jobId: string,
@@ -4027,7 +4029,8 @@ describe('JobDetail', () => {
       expect(view).not.toHaveTextContent('Main agent summary');
       expect(screen.queryByRole('textbox', { name: 'Add a follow-up' })).not.toBeInTheDocument();
 
-      fireEvent.click(within(view).getByRole('button', { name: 'View trajectory ›' }));
+      // While a subagent is open, the trajectory tab shows that subagent's steps.
+      fireEvent.click(screen.getByRole('button', { name: 'trajectory' }));
       const filter = await screen.findByRole('combobox', { name: 'Show steps from' });
       expect(filter).toHaveDisplayValue('Turn 1 · Audit old code');
       const trajectory = screen.getByRole('region', { name: 'Trajectory' });
@@ -4036,8 +4039,12 @@ describe('JobDetail', () => {
       expect(trajectory).not.toHaveTextContent('pytest -q');
       expect(trajectory).not.toHaveTextContent('Main agent summary');
 
+      // Choosing every agent there is choosing the main conversation in Chat too.
       fireEvent.change(filter, { target: { value: '' } });
       expect(screen.getByRole('region', { name: 'Trajectory' })).toHaveTextContent('pytest -q');
+      fireEvent.click(screen.getByRole('button', { name: 'chat' }));
+      expect(screen.queryByRole('region', { name: /^Subagent: / })).not.toBeInTheDocument();
+      expect(screen.getByRole('textbox', { name: 'Add a follow-up' })).toBeInTheDocument();
     });
   });
 

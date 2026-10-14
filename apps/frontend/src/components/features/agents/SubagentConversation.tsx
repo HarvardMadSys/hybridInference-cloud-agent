@@ -38,7 +38,6 @@ export function SubagentConversation({
   jobId,
   presentation,
   onBack,
-  onViewTrajectory,
   onInspectEvent,
 }: {
   agent: OverviewSubagent;
@@ -47,8 +46,6 @@ export function SubagentConversation({
   jobId: string;
   presentation?: TranscriptPresentation;
   onBack: () => void;
-  /** Show the trajectory narrowed to this subagent's steps. */
-  onViewTrajectory?: () => void;
   onInspectEvent?: InspectTranscriptEvent;
 }) {
   const { activity, reply } = agent;
@@ -94,25 +91,14 @@ export function SubagentConversation({
   return (
     <section aria-label={`Subagent: ${title}`} className="flex-1">
       <header className="sticky top-0 z-10 -mx-1 -mt-4 mb-3 border-b border-gray-200 bg-gray-50 px-1 pb-3 pt-4 dark:border-white/10 dark:bg-gray-950">
-        <div className="flex items-center justify-between gap-3">
-          <button
-            ref={backRef}
-            type="button"
-            onClick={onBack}
-            className="ui-focus-ring rounded text-xs font-medium text-crimson hover:underline dark:text-crimson-light"
-          >
-            ← Back to conversation
-          </button>
-          {onViewTrajectory ? (
-            <button
-              type="button"
-              onClick={onViewTrajectory}
-              className="ui-focus-ring rounded text-xs text-gray-500 hover:text-gray-900 hover:underline dark:text-gray-400 dark:hover:text-gray-100"
-            >
-              View trajectory ›
-            </button>
-          ) : null}
-        </div>
+        <button
+          ref={backRef}
+          type="button"
+          onClick={onBack}
+          className="ui-focus-ring rounded text-xs font-medium text-crimson hover:underline dark:text-crimson-light"
+        >
+          ← Back to conversation
+        </button>
         <div className="mt-1.5 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
           <span className="text-[11px] font-medium uppercase tracking-wide text-violet-700 dark:text-violet-300">
             Subagent

@@ -51,7 +51,8 @@ export function useJobDetailPanels({
 }) {
   const workspaceScope = JSON.stringify([userId, job.threadId ?? job.id]);
   const [tab, setTab] = useState<'chat' | 'trajectory'>('chat');
-  // A subagent's own conversation replaces the Chat body; it is a Chat view.
+  // The subagent being read, if any. Chat shows its own conversation and the
+  // trajectory its steps; without one, both show the whole conversation.
   const [subagent, setSubagent] = useState<SubagentTarget | null>(null);
   const [openWorkspaceScope, setOpenWorkspaceScope] = useState<string | null>(null);
   const workspaceOpen = openWorkspaceScope === workspaceScope;
@@ -104,8 +105,6 @@ export function useJobDetailPanels({
   const [inspector, setInspector] = useState<InspectorSelection | null>(null);
   const focusInspectorRef = useRef(false);
   const [trajectoryQuery, setTrajectoryQuery] = useState('');
-  // The trajectory can be narrowed to one subagent's steps.
-  const [trajectorySubagent, setTrajectorySubagent] = useState<SubagentTarget | null>(null);
   const [focusJobId, setFocusJobId] = useState<string | null>(null);
   const inspectorTriggerRef = useRef<HTMLElement | null>(null);
   const trajectoryContext = useMemo(() => {
@@ -312,10 +311,7 @@ export function useJobDetailPanels({
 
   // Returning to Chat closes details selected from the trajectory.
   useEffect(() => {
-    if (tab !== 'chat') {
-      setSubagent(null);
-      return;
-    }
+    if (tab !== 'chat') return;
     setInspector(null);
     setFocusJobId(null);
   }, [tab]);
@@ -387,8 +383,6 @@ export function useJobDetailPanels({
     setFocusJobId,
     trajectoryQuery,
     setTrajectoryQuery,
-    trajectorySubagent,
-    setTrajectorySubagent,
     trajectoryContext,
     getTrajectorySteps,
     trajectorySteps,

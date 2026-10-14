@@ -105,8 +105,6 @@ export function JobDetail({
     setFocusJobId,
     trajectoryQuery,
     setTrajectoryQuery,
-    trajectorySubagent,
-    setTrajectorySubagent,
     trajectorySteps,
     layoutContainerRef,
     openWorkspaceFile,
@@ -517,11 +515,10 @@ export function JobDetail({
       })),
     );
   }, [currentTurn, historyTurns, tab]);
-  const trajectoryAgent = subagentAt(trajectorySubagent);
-  const trajectoryAgentJobId = trajectoryAgent ? trajectorySubagent?.jobId : undefined;
+  // The subagent being read narrows the trajectory to its own steps.
   const shownTrajectorySteps = useMemo(() => {
-    if (!trajectoryAgent || !trajectoryAgentJobId) return trajectorySteps;
-    const { inScope, owner } = subagentScope(trajectoryAgentJobId, trajectoryAgent);
+    if (!openSubagent || !openSubagentJobId) return trajectorySteps;
+    const { inScope, owner } = subagentScope(openSubagentJobId, openSubagent);
     // The call that started the subagent, then what the subagent recorded.
     return trajectorySteps.filter(
       (step) =>
@@ -529,7 +526,7 @@ export function JobDetail({
         ((step.callId !== undefined && step.callId === owner.callId) ||
           step.sourceEvents.some((event) => ownedBySubagent(event.payload, owner))),
     );
-  }, [subagentScope, trajectoryAgent, trajectoryAgentJobId, trajectorySteps]);
+  }, [openSubagent, openSubagentJobId, subagentScope, trajectorySteps]);
   useEffect(() => {
     if (!activityVisible) return;
     const onKeyDown = (event: KeyboardEvent) => {
@@ -719,17 +716,15 @@ export function JobDetail({
                     onQueryChange={setTrajectoryQuery}
                     subagents={trajectorySubagents}
                     subagentFilter={
-                      trajectoryAgent && trajectorySubagent
-                        ? JSON.stringify([trajectorySubagent.jobId, trajectorySubagent.key])
-                        : ''
+                      openSubagent && subagent ? JSON.stringify([subagent.jobId, subagent.key]) : ''
                     }
                     onSubagentFilterChange={(value) => {
                       if (!value) {
-                        setTrajectorySubagent(null);
+                        setSubagent(null);
                         return;
                       }
                       const [jobId, key] = JSON.parse(value) as [string, string];
-                      setTrajectorySubagent({ jobId, key });
+                      setSubagent({ jobId, key });
                     }}
                     selectedKey={inspector?.kind === 'step' ? inspector.stepKey : null}
                     onSelectStep={selectStep}
@@ -744,10 +739,6 @@ export function JobDetail({
                   jobId={openSubagentJobId ?? job.id}
                   presentation={presentation}
                   onBack={() => setSubagent(null)}
-                  onViewTrajectory={() => {
-                    setTrajectorySubagent(subagent);
-                    setTab('trajectory');
-                  }}
                   onInspectEvent={events.length > 0 ? panels.inspectTranscriptEvent : undefined}
                 />
               ) : (
@@ -821,7 +812,7 @@ export function JobDetail({
                 attemptNo={attemptNo}
                 onClose={closeActivity}
                 openSubagentKey={
-                  showingSubagent && subagent?.jobId === currentTurn.jobId ? subagent.key : null
+                  openSubagent && subagent?.jobId === currentTurn.jobId ? subagent.key : null
                 }
                 onOpenSubagent={(key) => {
                   setTab('chat');
