@@ -26,7 +26,6 @@ from cloud_agent.workers.notifications import listen
 from cloud_agent.workers.owner_change_signal import OwnerChangeSignal
 from cloud_agent.workers.sandbox_deletion import coordinate_sandbox_deletions
 from cloud_agent.workers.snapshots import coordinate_shared_snapshots
-from cloud_agent.workers.user_memory import refresh_user_memories
 from cloud_agent.workers.work_signal import WorkSignal
 
 if TYPE_CHECKING:
@@ -91,7 +90,6 @@ _SHUTDOWN_TASK_ATTRS: tuple[str, ...] = (
     "sandbox_deletion_task",
     "ledger_task",
     "capacity_task",
-    "user_memory_task",
     "agent_memory_task",
     "queue_monitor_task",
     "publish_task",
@@ -466,28 +464,24 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
             capacity_history = asyncio.create_task(
                 prune_host_capacity_history(storage.host_capacity)
             )
-            user_memories = asyncio.create_task(refresh_user_memories(storage.user_memory))
             agent_memories = asyncio.create_task(maintain_agent_memories(storage.agent_memory))
             _BACKGROUND_TASKS.add(reaper)
             _BACKGROUND_TASKS.add(snapshot_coordinator)
             _BACKGROUND_TASKS.add(sandbox_deletions)
             _BACKGROUND_TASKS.add(ledger_collector)
             _BACKGROUND_TASKS.add(capacity_history)
-            _BACKGROUND_TASKS.add(user_memories)
             _BACKGROUND_TASKS.add(agent_memories)
             reaper.add_done_callback(_forget_background_task)
             snapshot_coordinator.add_done_callback(_forget_background_task)
             sandbox_deletions.add_done_callback(_forget_background_task)
             ledger_collector.add_done_callback(_forget_background_task)
             capacity_history.add_done_callback(_forget_background_task)
-            user_memories.add_done_callback(_forget_background_task)
             agent_memories.add_done_callback(_forget_background_task)
             app.state.reaper_task = reaper
             app.state.snapshot_task = snapshot_coordinator
             app.state.sandbox_deletion_task = sandbox_deletions
             app.state.ledger_task = ledger_collector
             app.state.capacity_task = capacity_history
-            app.state.user_memory_task = user_memories
             app.state.agent_memory_task = agent_memories
             # The profiling policy loop runs only here, in the one main process
             # that owns the reaper: file and terminal requests are rooted in this
@@ -547,7 +541,6 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
             app.state.sandbox_deletion_task = None
             app.state.ledger_task = None
             app.state.capacity_task = None
-            app.state.user_memory_task = None
             app.state.agent_memory_task = None
             app.state.queue_monitor_task = None
             app.state.publish_task = None

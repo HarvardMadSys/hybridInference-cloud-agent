@@ -12,6 +12,7 @@ import json
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent.agent_memory import (
+    MEMORY_CONTENT_LIMIT,
     AgentMemoryDisabled,
     AgentMemoryFull,
     AgentMemoryNotFound,
@@ -19,7 +20,6 @@ from cloud_agent.agent_memory import (
     MemoryTask,
 )
 from cloud_agent.logging_utils import get_logger
-from cloud_agent.user_memory import MEMORY_CONTENT_LIMIT
 
 if TYPE_CHECKING:
     from cloud_agent.ports.agent_memory import AgentMemoryRepository

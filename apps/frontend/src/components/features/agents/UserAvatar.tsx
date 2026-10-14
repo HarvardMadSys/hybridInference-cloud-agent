@@ -3,10 +3,10 @@
 import { useAuth } from '@/components/providers';
 import { AvatarImage, PokeBall } from '@/components/features/profile/AvatarImage';
 import { useUserProfile } from '@/components/features/profile/useUserProfile';
-import type { UserMemoryView } from '@/lib/api/userMemory';
+import type { WorkInsights } from '@/lib/api/insights';
 import { useUserHomeProfile } from './useUserHomeProfile';
 
-export function UserAvatar({ view }: { view?: UserMemoryView | null }) {
+export function UserAvatar({ view }: { view?: WorkInsights | null }) {
   const { state } = useAuth();
   const userId = state.user?.id;
   if (view !== undefined)
@@ -19,7 +19,7 @@ function AccountAvatar({ userId }: { userId?: string }) {
   return <ProfileAvatar userId={userId} view={view} />;
 }
 
-function ProfileAvatar({ userId, view }: { userId?: string; view: UserMemoryView | null }) {
+function ProfileAvatar({ userId, view }: { userId?: string; view: WorkInsights | null }) {
   const { profile, loading } = useUserProfile(userId);
   const imageDataUrl = profile?.image_data_url;
   const companionDataUrl = loading ? undefined : view?.avatar?.data_url;

@@ -21,8 +21,8 @@ import {
   listRepoBranches,
 } from '@/lib/api/agents';
 import type { AgentConfigApi, AgentConversationApi, AgentJobApi } from '@/lib/api/agents';
-import { getUserMemory, type UserMemoryView } from '@/lib/api/userMemory';
-vi.mock('@/lib/api/userMemory', () => ({ getUserMemory: vi.fn() }));
+import { getInsights, type WorkInsights } from '@/lib/api/insights';
+vi.mock('@/lib/api/insights', () => ({ getInsights: vi.fn() }));
 import { getUserProfile } from '@/lib/api/userProfile';
 vi.mock('@/lib/api/userProfile', () => ({ getUserProfile: vi.fn() }));
 
@@ -41,8 +41,8 @@ vi.mock('@/components/providers/AuthProvider', () => ({
 }));
 beforeEach(() => {
   account.id = undefined;
-  vi.mocked(getUserMemory).mockReset();
-  vi.mocked(getUserMemory).mockRejectedValue(new Error('Avatar unavailable'));
+  vi.mocked(getInsights).mockReset();
+  vi.mocked(getInsights).mockRejectedValue(new Error('Avatar unavailable'));
   vi.mocked(getUserProfile).mockReset();
   vi.mocked(getUserProfile).mockResolvedValue({
     email: 'owner@example.com',
@@ -109,20 +109,10 @@ function conversation(archived = false): AgentConversationApi {
   };
 }
 
-function userProfile(overrides: Partial<UserMemoryView> = {}): UserMemoryView {
+function userProfile(overrides: Partial<WorkInsights> = {}): WorkInsights {
   return {
-    enabled: true,
-    revision: 1,
-    updated_at: null,
     avatar: { data_url: 'data:image/svg+xml,<svg></svg>', style: 'illustrated' },
-    portrait: {
-      summary: '',
-      projects: [],
-      focus_areas: [],
-      preferred_runtime: null,
-      preferred_model: null,
-    },
-    memories: [],
+    focus_areas: [],
     suggestions: [
       {
         id: 'success-checks',
@@ -333,7 +323,7 @@ describe('TaskComposer source-control onboarding', () => {
     account.id = 'alice';
     vi.mocked(getAgentConfig).mockResolvedValue(config());
     const profile = userProfile();
-    vi.mocked(getUserMemory).mockResolvedValueOnce(profile);
+    vi.mocked(getInsights).mockResolvedValueOnce(profile);
     const rendered = render(<TaskComposer />);
     const image = await screen.findByRole('img', {
       name: 'Your Pokémon companion avatar',
@@ -350,7 +340,7 @@ describe('TaskComposer source-control onboarding', () => {
     expect(within(suggestions).getByText(profile.suggestions[0].reason)).toBeInTheDocument();
     expect(within(suggestions).getByText(profile.suggestions[0].action)).toBeInTheDocument();
     expect(within(suggestions).getByText('How your avatar is generated')).toBeInTheDocument();
-    expect(getUserMemory).toHaveBeenCalledTimes(1);
+    expect(getInsights).toHaveBeenCalledTimes(1);
     rendered.unmount();
 
     render(<TaskComposer />);
@@ -359,7 +349,7 @@ describe('TaskComposer source-control onboarding', () => {
     expect(
       await screen.findByText('Could not load your suggestions. You can still start a task.'),
     ).toBeInTheDocument();
-    vi.mocked(getUserMemory).mockResolvedValueOnce(profile);
+    vi.mocked(getInsights).mockResolvedValueOnce(profile);
     fireEvent.click(
       within(screen.getByRole('region', { name: 'Suggestions for your next request' })).getByRole(
         'button',
@@ -374,12 +364,12 @@ describe('TaskComposer source-control onboarding', () => {
     account.id = 'alice';
     vi.mocked(getAgentConfig).mockResolvedValue(config());
     const alice = userProfile();
-    vi.mocked(getUserMemory).mockResolvedValueOnce(alice);
+    vi.mocked(getInsights).mockResolvedValueOnce(alice);
     const rendered = render(<TaskComposer />);
     await screen.findByText(alice.suggestions[0].title);
 
-    let resolveBob!: (next: UserMemoryView) => void;
-    vi.mocked(getUserMemory).mockReturnValueOnce(
+    let resolveBob!: (next: WorkInsights) => void;
+    vi.mocked(getInsights).mockReturnValueOnce(
       new Promise((resolve) => {
         resolveBob = resolve;
       }),
@@ -387,8 +377,8 @@ describe('TaskComposer source-control onboarding', () => {
     account.id = 'bob';
     rendered.rerender(<TaskComposer />);
     expect(screen.queryByText(alice.suggestions[0].title)).not.toBeInTheDocument();
-    await waitFor(() => expect(getUserMemory).toHaveBeenCalledTimes(2));
-    const bobSignal = vi.mocked(getUserMemory).mock.calls[1][0]!;
+    await waitFor(() => expect(getInsights).toHaveBeenCalledTimes(2));
+    const bobSignal = vi.mocked(getInsights).mock.calls[1][0]!;
 
     const carol = userProfile({
       suggestions: [
@@ -400,7 +390,7 @@ describe('TaskComposer source-control onboarding', () => {
         },
       ],
     });
-    vi.mocked(getUserMemory).mockResolvedValueOnce(carol);
+    vi.mocked(getInsights).mockResolvedValueOnce(carol);
     account.id = 'carol';
     rendered.rerender(<TaskComposer />);
     await screen.findByText(carol.suggestions[0].title);
@@ -414,7 +404,7 @@ describe('TaskComposer source-control onboarding', () => {
     expect(
       screen.queryByRole('region', { name: 'Suggestions for your next request' }),
     ).not.toBeInTheDocument();
-    expect(getUserMemory).toHaveBeenCalledTimes(3);
+    expect(getInsights).toHaveBeenCalledTimes(3);
   });
 
   it('rewrites the draft for review before creating a task', async () => {

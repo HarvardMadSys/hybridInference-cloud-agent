@@ -3,7 +3,7 @@ import '@testing-library/jest-dom/vitest';
 import { act, cleanup, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LocaleProvider } from '@/components/providers/LocaleProvider';
-import { getUserMemory, type UserMemoryView } from '@/lib/api/userMemory';
+import { getInsights, type WorkInsights } from '@/lib/api/insights';
 import { getUserProfile, type UserProfile } from '@/lib/api/userProfile';
 import { LOCALE_STORAGE_KEY } from '@/lib/i18n/locales';
 import { UserAvatar } from './UserAvatar';
@@ -12,7 +12,7 @@ const auth = vi.hoisted(() => ({ userId: 'alice' as string | undefined }));
 vi.mock('@/components/providers/AuthProvider', () => ({
   useAuth: () => ({ state: { user: auth.userId ? { id: auth.userId } : null } }),
 }));
-vi.mock('@/lib/api/userMemory', () => ({ getUserMemory: vi.fn() }));
+vi.mock('@/lib/api/insights', () => ({ getInsights: vi.fn() }));
 vi.mock('@/lib/api/userProfile', () => ({ getUserProfile: vi.fn() }));
 
 const profile: UserProfile = {
@@ -24,19 +24,9 @@ const profile: UserProfile = {
 };
 const photo = 'data:image/png;base64,cGhvdG8=';
 
-const view: UserMemoryView = {
-  enabled: true,
-  revision: 1,
-  updated_at: null,
+const view: WorkInsights = {
   avatar: { data_url: 'data:image/svg+xml,<svg></svg>', style: 'illustrated' },
-  portrait: {
-    summary: '',
-    projects: [],
-    focus_areas: [],
-    preferred_runtime: null,
-    preferred_model: null,
-  },
-  memories: [],
+  focus_areas: [],
   suggestions: [],
 };
 
@@ -52,7 +42,7 @@ beforeEach(() => {
   vi.resetAllMocks();
   localStorage.clear();
   auth.userId = 'alice';
-  vi.mocked(getUserMemory).mockResolvedValue(view);
+  vi.mocked(getInsights).mockResolvedValue(view);
   vi.mocked(getUserProfile).mockResolvedValue(profile);
 });
 afterEach(cleanup);
@@ -60,7 +50,7 @@ afterEach(cleanup);
 describe('homepage avatar', () => {
   it('prefers the uploaded photo even when the work profile cannot load', async () => {
     vi.mocked(getUserProfile).mockResolvedValue({ ...profile, image_data_url: photo });
-    vi.mocked(getUserMemory).mockRejectedValue(new Error('Offline'));
+    vi.mocked(getInsights).mockRejectedValue(new Error('Offline'));
     render(avatar());
     const image = await screen.findByRole('img', { name: 'Your profile image' });
     expect(image).toHaveAttribute('src', photo);
@@ -73,7 +63,7 @@ describe('homepage avatar', () => {
   it('uses the supplied work profile without fetching it again', async () => {
     render(<UserAvatar view={view} />);
     expect(await screen.findByRole('img')).toHaveAttribute('src', view.avatar.data_url);
-    expect(getUserMemory).not.toHaveBeenCalled();
+    expect(getInsights).not.toHaveBeenCalled();
     expect(getUserProfile).toHaveBeenCalledTimes(1);
   });
 
@@ -127,12 +117,11 @@ describe('homepage avatar', () => {
     await act(async () => resolveBob({ ...profile, image_data_url: photo }));
     expect(screen.getByRole('img')).toHaveAttribute('src', view.avatar.data_url);
   });
-  it('loads the latest work theme each time the homepage opens, including paused and cleared themes', async () => {
-    for (const [index, enabled] of [true, false, false].entries()) {
+  it('loads the latest work theme each time the homepage opens', async () => {
+    for (const index of [0, 1, 2]) {
       const dataUrl = `data:image/svg+xml,<svg id="theme-${index}"></svg>`;
-      vi.mocked(getUserMemory).mockResolvedValueOnce({
+      vi.mocked(getInsights).mockResolvedValueOnce({
         ...view,
-        enabled,
         avatar: { ...view.avatar, data_url: dataUrl },
       });
       const rendered = render(avatar());
@@ -146,14 +135,14 @@ describe('homepage avatar', () => {
       );
       rendered.unmount();
     }
-    expect(getUserMemory).toHaveBeenCalledTimes(3);
+    expect(getInsights).toHaveBeenCalledTimes(3);
   });
 
   it('removes the previous avatar immediately on an account switch and ignores stale responses', async () => {
     const rendered = render(avatar());
     await screen.findByRole('img');
-    let resolveBob!: (next: UserMemoryView) => void;
-    vi.mocked(getUserMemory).mockReturnValueOnce(
+    let resolveBob!: (next: WorkInsights) => void;
+    vi.mocked(getInsights).mockReturnValueOnce(
       new Promise((resolve) => {
         resolveBob = resolve;
       }),
@@ -161,12 +150,12 @@ describe('homepage avatar', () => {
     auth.userId = 'bob';
     rendered.rerender(avatar());
     expect(screen.queryByRole('img')).not.toBeInTheDocument();
-    const bobSignal = vi.mocked(getUserMemory).mock.calls[1][0]!;
+    const bobSignal = vi.mocked(getInsights).mock.calls[1][0]!;
     const carol = {
       ...view,
       avatar: { ...view.avatar, data_url: 'data:image/svg+xml,<svg id="carol"></svg>' },
     };
-    vi.mocked(getUserMemory).mockResolvedValueOnce(carol);
+    vi.mocked(getInsights).mockResolvedValueOnce(carol);
     auth.userId = 'carol';
     rendered.rerender(avatar());
     expect(bobSignal.aborted).toBe(true);
@@ -176,21 +165,21 @@ describe('homepage avatar', () => {
   });
 
   it('keeps the fallback on load failure and does not fetch while signed out', async () => {
-    vi.mocked(getUserMemory).mockRejectedValueOnce(new Error('Offline'));
+    vi.mocked(getInsights).mockRejectedValueOnce(new Error('Offline'));
     const rendered = render(avatar());
     await act(async () => {});
     expect(screen.queryByRole('img')).not.toBeInTheDocument();
     expect(rendered.container.querySelector('svg')).toBeInTheDocument();
     auth.userId = undefined;
     rendered.rerender(avatar());
-    expect(getUserMemory).toHaveBeenCalledTimes(1);
+    expect(getInsights).toHaveBeenCalledTimes(1);
     expect(getUserProfile).toHaveBeenCalledTimes(1);
   });
 
   it('aborts an in-flight request when unmounted', () => {
-    vi.mocked(getUserMemory).mockReturnValueOnce(new Promise(() => {}));
+    vi.mocked(getInsights).mockReturnValueOnce(new Promise(() => {}));
     const rendered = render(avatar());
-    const signal = vi.mocked(getUserMemory).mock.calls[0][0]!;
+    const signal = vi.mocked(getInsights).mock.calls[0][0]!;
     const profileSignal = vi.mocked(getUserProfile).mock.calls[0][0]!;
     rendered.unmount();
     expect(signal.aborted).toBe(true);

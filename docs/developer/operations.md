@@ -72,7 +72,7 @@ that URL to another origin is refused while the token is kept. Reset the token,
 save the URL, then enter the token again.
 
 For the first deployment of this release, run `alembic upgrade head` through
-`0069_agent_memories`. Existing hosts begin without a deployment drain
+`0070_memory_cutover`. Existing hosts begin without a deployment drain
 owner or release receipt, and 0051 backfills each one with a non-null fence
 epoch. 0066 builds an index on `agent_jobs` concurrently: on a long job history
 it takes a while without blocking the running API, and an interrupted run can
@@ -81,7 +81,9 @@ runs, a shared workspace that a failed snapshot left `dirty` publishes again:
 a snapshot already pending behind the failure is captured, otherwise the
 group's next settled turn is (see
 [Resume, Fork, and publication](#resume-fork-and-publication)). 0069 adds the
-empty durable-memory table. Rebuild the sandbox image for explicit plugin
+durable-memory table; 0070 moves the memory switches and saved preferences
+onto it, leaving the retired memory tables unread until a later release drops
+them. Rebuild the sandbox image for explicit plugin
 loading.
 Then start the main control-plane listener with its existing complete
 environment. It imports registered environment settings once,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 from tests.integration.storage.test_agent_job_store import (
@@ -187,7 +188,7 @@ async def test_agents_save_to_the_tasks_repository_or_every_project(store, pool)
     assert repeated["id"] == saved["id"]
     assert repeated["source_job_ids"] == [job["id"], again["id"]]
 
-    await store.user_memory.set_project_enabled("alice", "owner/api", False)
+    await memories.set_memory_enabled("alice", "owner/api", False)
     with pytest.raises(AgentMemoryDisabled):
         await memories.save_agent_memory(task, "Use tabs.", all_projects=False)
     # Another owner cannot borrow this task's attempt.
@@ -281,7 +282,7 @@ async def test_a_task_reads_its_scopes_newest_first_and_marks_only_what_it_used(
     assert [row["id"] for row in marked] == [older["id"]]
 
     assert (await memories.task_memories("alice", None))["project"] == []
-    await store.user_memory.set_enabled("alice", False)
+    await memories.set_memory_enabled("alice", None, False)
     assert (await memories.task_memories("alice", "owner/api"))["user"] == []
 
 
@@ -319,3 +320,97 @@ async def test_a_task_stopped_after_its_token_was_accepted_cannot_write(store, p
     assert [
         m["content"] for m in (await memories.list_memories("alice", "owner/api"))["memories"]
     ] == ["Use pnpm."]
+
+
+async def test_switches_persist_per_scope_and_projects_are_listed(store, pool):
+    memories = store.agent_memory
+    await _create_job(store, user_id="alice", repo="owner/api")
+    await memories.add_memory("alice", "owner/kept", "Use tabs.")
+    paused = await memories.set_memory_enabled("alice", "owner/api", False)
+    assert paused["enabled"] is False and paused["repo"] == "owner/api"
+    assert (await memories.list_memories("alice", None))["enabled"] is True
+    assert (await memories.set_memory_enabled("alice", "owner/api", True))["enabled"] is True
+    await memories.set_memory_enabled("alice", "owner/switch-only", False)
+    assert await memories.memory_projects("alice") == [
+        "owner/api",
+        "owner/kept",
+        "owner/switch-only",
+    ]
+    assert await memories.memory_projects("bob") == []
+
+
+async def test_insights_read_only_the_owners_own_recent_requests(store, pool):
+    await _create_job(store, user_id="alice", task_prompt="First request")
+    await _create_job(store, user_id="alice", task_prompt="Second request")
+    await _create_job(store, user_id="bob", task_prompt="Not alice's")
+    assert await store.work_insights.recent_requests("alice") == [
+        "Second request",
+        "First request",
+    ]
+    assert await store.work_insights.recent_requests("alice", 1) == ["Second request"]
+
+
+async def test_the_cutover_copies_switches_and_the_preferences_tasks_received(store, pool):
+    config = _db_config()
+
+    def entry(content, *, kind="preference", scope=None, edited=False, repo=None):
+        value = {"id": content, "kind": kind, "content": content, "source_job_id": "job-1"}
+        if scope:
+            value["scope"] = scope
+        if repo:
+            value["source_repo"] = repo
+        if edited:
+            value["user_edited"] = True
+        return value
+
+    user_view = [
+        entry("Always reply in Chinese.", scope="user"),
+        entry("Never use emoji.", edited=True),
+        entry("always reply in chinese", scope="user"),
+        entry("Fix the login page", kind="task"),
+        entry("Always use pnpm.", scope="repo", repo="owner/api"),
+        entry("x" * 241, scope="user"),
+    ]
+    project_view = [
+        entry("Always use pnpm.", scope="repo", repo="owner/api"),
+        entry("Never force-push.", scope="user", repo="owner/api"),
+    ]
+    try:
+        downgrade_to(config, "0069_agent_memories")
+        async with pool.acquire() as conn:
+            await conn.execute("DELETE FROM agent_memories")
+            await conn.execute(
+                "INSERT INTO agent_user_memories (user_id, enabled, portrait, memories) "
+                "VALUES ('alice', FALSE, '{}'::jsonb, $1::jsonb)",
+                json.dumps(user_view),
+            )
+            await conn.execute(
+                "INSERT INTO agent_project_memories (user_id, repo, enabled, portrait, memories) "
+                "VALUES ('alice', 'owner/api', TRUE, '{}'::jsonb, $1::jsonb)",
+                json.dumps(project_view),
+            )
+        apply_migrations(config, "0070_memory_cutover")
+        # A second pass after a downgrade copies nothing twice.
+        downgrade_to(config, "0069_agent_memories")
+        apply_migrations(config, "0070_memory_cutover")
+        async with pool.acquire() as conn:
+            settings = await conn.fetch(
+                "SELECT repo, enabled FROM agent_memory_settings WHERE user_id = 'alice' "
+                "ORDER BY repo"
+            )
+            copied = await conn.fetch(
+                "SELECT repo, content, origin, source_job_ids, description FROM agent_memories "
+                "WHERE user_id = 'alice' ORDER BY repo NULLS FIRST, content"
+            )
+    finally:
+        async with pool.acquire() as conn:
+            await conn.execute("DELETE FROM agent_user_memories")
+            await conn.execute("DELETE FROM agent_project_memories")
+        apply_migrations(config)
+    assert [(row["repo"], row["enabled"]) for row in settings] == [("", False), ("owner/api", True)]
+    assert [(row["repo"], row["content"], row["origin"]) for row in copied] == [
+        (None, "Always reply in Chinese.", "agent"),
+        (None, "Never use emoji.", "manual"),
+        ("owner/api", "Always use pnpm.", "agent"),
+    ]
+    assert all(list(row["source_job_ids"]) == ["job-1"] for row in copied)

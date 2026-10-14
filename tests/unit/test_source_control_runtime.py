@@ -513,14 +513,15 @@ async def test_the_lifespan_hands_the_loops_the_provider_not_a_snapshot(
         "cloud_agent.bootstrap.lifespan.coordinate_sandbox_deletions", recording("sandbox_deletion")
     )
     monkeypatch.setattr("cloud_agent.workers.pr_archive.pr_archive_loop", recording("archiver"))
-    monkeypatch.setattr("cloud_agent.bootstrap.lifespan.refresh_user_memories", recording("memory"))
+    monkeypatch.setattr(
+        "cloud_agent.bootstrap.lifespan.maintain_agent_memories", recording("memory")
+    )
     for loop_path in (
         "cloud_agent.settings.synchronize_settings",
         # This wiring test uses a fake pool; its notification listener must
         # also stay idle instead of resolving the test-only database hostname.
         "cloud_agent.bootstrap.lifespan.listen",
         "cloud_agent.bootstrap.lifespan.coordinate_shared_snapshots",
-        "cloud_agent.bootstrap.lifespan.maintain_agent_memories",
         "cloud_agent.ledger.collect_usage_snapshots",
         "cloud_agent.capacity_history.prune_host_capacity_history",
         "cloud_agent.operational_health.monitor_queue",
@@ -559,7 +560,7 @@ async def test_the_lifespan_hands_the_loops_the_provider_not_a_snapshot(
         assert "sandbox_deletion" in started
         assert not app.state.sandbox_deletion_task.done()
         assert "memory" in started
-        assert not app.state.user_memory_task.done()
+        assert not app.state.agent_memory_task.done()
         assert not hasattr(app.state, "app_credentials")
         assert started["reaper"]["github_app"] is runtime.github
         assert started["publisher"]["github_app"] is runtime.github
@@ -575,7 +576,7 @@ async def test_the_lifespan_hands_the_loops_the_provider_not_a_snapshot(
     assert app.state.compute_resource_task.cancelled()
     assert app.state.sandbox_deletion_task.cancelled()
     assert app.state.pr_archive_task.cancelled()
-    assert app.state.user_memory_task.cancelled()
+    assert app.state.agent_memory_task.cancelled()
 
     # The MCP listener shares the database but must not start another scheduler.
     compute_builder.reset_mock()
@@ -594,7 +595,7 @@ async def test_the_lifespan_hands_the_loops_the_provider_not_a_snapshot(
         assert relay.state.compute_resource_task is None
         assert relay.state.sandbox_deletion_task is None
         assert relay.state.pr_archive_task is None
-        assert relay.state.user_memory_task is None
+        assert relay.state.agent_memory_task is None
         compute_builder.assert_not_called()
         relay_runtime_builder.assert_not_called()
 

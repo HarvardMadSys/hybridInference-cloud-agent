@@ -52,17 +52,12 @@ async def _lock(conn: Any, user_id: str) -> None:
 
 
 async def _enabled(conn: Any, user_id: str, repo: str | None) -> bool:
-    """Read the scope's existing switch; memory is on until its owner turns it off."""
-    if repo is None:
-        enabled = await conn.fetchval(
-            "SELECT enabled FROM agent_user_memories WHERE user_id = $1", user_id
-        )
-    else:
-        enabled = await conn.fetchval(
-            "SELECT enabled FROM agent_project_memories WHERE user_id = $1 AND repo = $2",
-            user_id,
-            repo,
-        )
+    """Read the scope's switch; memory is on until its owner turns it off."""
+    enabled = await conn.fetchval(
+        "SELECT enabled FROM agent_memory_settings WHERE user_id = $1 AND repo = $2",
+        user_id,
+        repo or "",
+    )
     return enabled is not False
 
 
@@ -315,6 +310,42 @@ class PostgresAgentMemoryRepository:
                 memory_id,
             )
         return _view(row)
+
+    async def set_memory_enabled(
+        self, user_id: str, repo: str | None, enabled: bool
+    ) -> dict[str, Any]:
+        """Turn one scope's memory on or off; its memories are kept either way."""
+        async with self._pool.acquire() as conn, conn.transaction():
+            await _lock(conn, user_id)
+            await conn.execute(
+                """
+                INSERT INTO agent_memory_settings (user_id, repo, enabled)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (user_id, repo)
+                DO UPDATE SET enabled = EXCLUDED.enabled, updated_at = clock_timestamp()
+                """,
+                user_id,
+                repo or "",
+                enabled,
+            )
+        return await self.list_memories(user_id, repo)
+
+    async def memory_projects(self, user_id: str) -> list[str]:
+        """Repositories the owner worked in or keeps memories or a switch for."""
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT repo FROM agent_threads
+                WHERE user_id = $1 AND repo IS NOT NULL AND repo <> '' AND deleted_at IS NULL
+                UNION
+                SELECT repo FROM agent_memories WHERE user_id = $1 AND repo IS NOT NULL
+                UNION
+                SELECT repo FROM agent_memory_settings WHERE user_id = $1 AND repo <> ''
+                ORDER BY repo
+                """,
+                user_id,
+            )
+        return [str(row["repo"]) for row in rows]
 
     async def clear_memories(self, user_id: str, repo: str | None) -> None:
         """Delete every memory in one scope, archived ones included."""

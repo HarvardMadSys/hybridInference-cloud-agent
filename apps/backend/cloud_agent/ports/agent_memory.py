@@ -41,6 +41,16 @@ class AgentMemoryRepository(Protocol):
         """Make an archived memory active again."""
         ...
 
+    async def set_memory_enabled(
+        self, user_id: str, repo: str | None, enabled: bool
+    ) -> dict[str, Any]:
+        """Turn one scope's memory on or off; its memories are kept either way."""
+        ...
+
+    async def memory_projects(self, user_id: str) -> list[str]:
+        """Repositories the owner worked in or keeps memories or a switch for."""
+        ...
+
     async def clear_memories(self, user_id: str, repo: str | None) -> None:
         """Delete every memory in one scope, archived ones included."""
         ...

@@ -128,7 +128,6 @@ from cloud_agent.tokens import (
     parse_host_token,
     parse_worker_token,
 )
-from cloud_agent.user_memory import prompt_with_user_memory
 from cloud_agent.workers.work_signal import WorkSignal  # noqa: TC001 — FastAPI resolves it.
 from cloud_agent.workspace_errors import _sandbox_manager_http_error
 from cloud_agent_shared.environment import ENVIRONMENT_CAPABILITY
@@ -155,7 +154,6 @@ if TYPE_CHECKING:
         SandboxRepository,
         SkillRepository,
         SourceControlRepository as SourceControlPort,
-        UserMemoryRepository,
     )
     from cloud_agent.ports.environments import EnvironmentRepository
     from cloud_agent.sandbox_manager_client import SandboxManagerClient
@@ -164,27 +162,8 @@ if TYPE_CHECKING:
 #: Check the raw report before FastAPI parses JSON or validates its model.
 MAX_TURN_RESOURCES_BODY_BYTES = 16 * 1024
 
-# Personalization must leave ample time inside the host's claim deadline.
-_USER_MEMORY_TIMEOUT_SECONDS = 2.0
-
-
-async def _refresh_claim_memory(
-    repository: UserMemoryRepository, user_id: str, *, repo: str | None = None
-) -> dict[str, Any] | None:
-    """Bound each scope independently so unavailable memory cannot block a claim."""
-    try:
-        async with asyncio.timeout(_USER_MEMORY_TIMEOUT_SECONDS):
-            if repo is None:
-                return await repository.refresh(user_id=user_id)
-            return await repository.refresh_project(user_id=user_id, repo=repo)
-    except Exception:
-        # Fixed log messages contain neither saved memory nor credentials.
-        logger.warning(
-            "agent_claim_user_memory_unavailable"
-            if repo is None
-            else "agent_claim_project_memory_unavailable"
-        )
-        return None
+# Memory must leave ample time inside the host's claim deadline.
+_MEMORY_TIMEOUT_SECONDS = 2.0
 
 
 async def _claim_agent_memories(
@@ -195,7 +174,7 @@ async def _claim_agent_memories(
     Unavailable memory leaves the lists empty and never blocks the claim.
     """
     try:
-        async with asyncio.timeout(_USER_MEMORY_TIMEOUT_SECONDS):
+        async with asyncio.timeout(_MEMORY_TIMEOUT_SECONDS):
             kept = fit_task_memories(await repository.task_memories(user_id, repo))
             await repository.mark_memories_used(
                 user_id, [memory["id"] for scope in ("project", "user") for memory in kept[scope]]
@@ -291,7 +270,6 @@ class _WorkerStorage(Protocol):
     sandbox: SandboxRepository
     skills: SkillRepository
     source_control: SourceControlPort
-    user_memory: UserMemoryRepository
     environments: EnvironmentRepository
 
 
@@ -1140,10 +1118,6 @@ async def _hand_over_claim(
     thread_attachment_count = await job_store.attachments.count_thread_attachments(
         thread_id=str(claim["thread_id"])
     )
-    memory, project_memory = await asyncio.gather(
-        _refresh_claim_memory(job_store.user_memory, claim["user_id"]),
-        _refresh_claim_memory(job_store.user_memory, claim["user_id"], repo=claim["repo"]),
-    )
     # Durable memories are only offered where the memory tools can be reached.
     durable_memories = (
         await _claim_agent_memories(job_store.agent_memory, claim["user_id"], claim["repo"] or None)
@@ -1169,12 +1143,7 @@ async def _hand_over_claim(
         task_prompt=prompt_with_goal(
             prompt_with_skills(
                 prompt_with_agent_memories(
-                    prompt_with_user_memory(
-                        prompt_with_attachments(claim["task_prompt"], claim.get("attachments")),
-                        memory,
-                        repo=claim["repo"],
-                        project_view=project_memory,
-                    ),
+                    prompt_with_attachments(claim["task_prompt"], claim.get("attachments")),
                     durable_memories,
                 ),
                 claim.get("skills"),

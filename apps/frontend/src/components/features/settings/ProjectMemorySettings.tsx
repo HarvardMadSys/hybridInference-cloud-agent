@@ -1,42 +1,10 @@
 'use client';
 
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { useAuth, useLocale } from '@/components/providers';
-import {
-  clearProjectMemory,
-  consolidateProjectMemory,
-  deleteProjectMemoryEntry,
-  editProjectMemoryEntry,
-  getMemoryProjects,
-  getProjectMemory,
-  saveProjectMemories,
-  updateProjectMemory,
-  type ProjectMemoryView,
-} from '@/lib/api/projectMemory';
-import { MemoryPanel, type MemoryApi } from './MemoryPanel';
+import { getMemoryProjects } from '@/lib/api/agentMemory';
+import { MemoryScopePanel } from './MemoryScopePanel';
 import { RefreshIcon } from './icons';
-
-function projectMemory(repo: string): MemoryApi {
-  // A response for another repository must never replace the selected one.
-  async function checked(response: Promise<ProjectMemoryView>) {
-    const view = await response;
-    if (view.repo !== repo)
-      throw new Error('Project memory response does not match the selected project');
-    return view;
-  }
-  return {
-    read: (signal) => checked(getProjectMemory(repo, signal)),
-    toggle: (enabled, signal) => checked(updateProjectMemory(repo, enabled, signal)),
-    clear: (signal) => checked(clearProjectMemory(repo, signal)),
-    edit: (id, content, revision, signal) =>
-      checked(editProjectMemoryEntry(repo, id, content, revision, signal)),
-    remove: (id, revision, signal) => checked(deleteProjectMemoryEntry(repo, id, revision, signal)),
-    save: (revision, memories, signal) =>
-      checked(saveProjectMemories(repo, revision, memories, signal)),
-    consolidate: (revision, model, signal) =>
-      checked(consolidateProjectMemory(repo, revision, model, signal)),
-  };
-}
 
 /** Per-repository memory, chosen from the repositories the user has worked in. */
 export function ProjectMemorySettings() {
@@ -139,12 +107,7 @@ function ProjectMemorySelector() {
       ) : projects.length === 0 ? (
         <p className="mt-3 text-sm text-muted">{t('settings.projectMemory.noProjects')}</p>
       ) : null}
-      {repo ? <ProjectMemory key={repo} repo={repo} /> : null}
+      {repo ? <MemoryScopePanel key={repo} repo={repo} /> : null}
     </>
   );
-}
-
-function ProjectMemory({ repo }: { repo: string }) {
-  const api = useMemo(() => projectMemory(repo), [repo]);
-  return <MemoryPanel api={api} repo={repo} />;
 }

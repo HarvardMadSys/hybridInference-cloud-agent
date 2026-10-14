@@ -19,7 +19,7 @@ pytestmark = pytest.mark.dbtest
 _BEFORE = "0057_admin_sandbox_trajectory"
 _THIS = "0058_mcp_connector_invariant"
 _NEXT = "0059_counter_constraints"
-_HEAD = "0069_agent_memories"
+_HEAD = "0070_memory_cutover"
 _OWNER = "user-owner"
 _OTHER = "user-other"
 _PRESERVED_AUTHORIZED_AT = datetime(2001, 2, 3, 4, 5, 6, tzinfo=timezone.utc)
@@ -54,7 +54,8 @@ def test_mcp_connector_invariant_revision_follows_trajectory_merge() -> None:
     assert (
         script.get_revision("0068_sandbox_checkpoints").down_revision == "0067_failed_snapshot_wake"
     )
-    assert script.get_revision(_HEAD).down_revision == "0068_sandbox_checkpoints"
+    assert script.get_revision("0069_agent_memories").down_revision == "0068_sandbox_checkpoints"
+    assert script.get_revision(_HEAD).down_revision == "0069_agent_memories"
 
 
 async def _local_connection(
