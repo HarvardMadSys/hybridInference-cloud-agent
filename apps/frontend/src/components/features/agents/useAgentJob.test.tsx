@@ -538,7 +538,7 @@ describe('useAgentJob history-to-stream handoff', () => {
     await waitFor(() => expect(result.current.loading).toBe(false));
     await act(async () => resolveOldJob(first));
     expect(vi.mocked(listAllAgentThreadEvents).mock.calls).toEqual([
-      [next.id, { signal: expect.any(AbortSignal), onPage: expect.any(Function) }],
+      [next.id, { after: 0, signal: expect.any(AbortSignal), onPage: expect.any(Function) }],
     ]);
     expect(vi.mocked(streamAgentJob).mock.calls.map(([id]) => id)).toEqual([next.id]);
     expect(result.current.job?.id).toBe(next.id);
@@ -732,6 +732,186 @@ describe('useAgentJob live turn rows', () => {
     expect(result.current.job?.state).toBe('running');
     expect(result.current.events.at(-1)).toMatchObject({ job_id: next.id, turn_no: 2 });
     expect(result.current.threadJobs[0]).toEqual(first);
+  });
+
+  describe('when the conversation is read again', () => {
+    function turn(id: string, turn_no: number, state = 'succeeded'): AgentJobApi {
+      return {
+        id,
+        thread_id: 'live-thread',
+        state,
+        current_attempt_id: turn_no,
+        turn_no,
+        task_prompt: `Question ${turn_no}`,
+        runtime: 'codex',
+        model: 'test',
+        title_source: 'generated',
+      } as AgentJobApi;
+    }
+
+    function stored(id: number, job: AgentJobApi): AgentThreadEventApi {
+      return {
+        ...event(id, 'message', { text: `Reply ${id}` }, job.turn_no!),
+        job_id: job.id,
+        turn_no: job.turn_no!,
+      };
+    }
+
+    /** The thread's event log, read the way the server pages it: after a cursor. */
+    function serveLog(jobs: AgentJobApi[], log: AgentThreadEventApi[]) {
+      vi.mocked(getAgentJob).mockImplementation(async (id) => jobs.find((job) => job.id === id)!);
+      vi.mocked(getAgentJobThread).mockImplementation(async (id) => {
+        const job = jobs.find((row) => row.id === id)!;
+        return {
+          thread_id: job.thread_id,
+          jobs: jobs.filter((row) => row.thread_id === job.thread_id),
+          messages: [],
+        } as AgentThreadApi;
+      });
+      vi.mocked(listAllAgentThreadEvents).mockImplementation(async (id, options) => {
+        const threadId = jobs.find((job) => job.id === id)!.thread_id;
+        const threadJobs = new Set(
+          jobs.filter((job) => job.thread_id === threadId).map((j) => j.id),
+        );
+        const rows = log.filter((row) => threadJobs.has(row.job_id));
+        return rows
+          .filter((row) => row.id > (options?.after ?? 0))
+          .sort((left, right) => left.id - right.id);
+      });
+      vi.mocked(streamAgentJob).mockImplementation(stayOpen);
+    }
+
+    function readCursors(): number[] {
+      return vi.mocked(listAllAgentThreadEvents).mock.calls.map(([, options]) => options!.after!);
+    }
+
+    it('reads only what a follow-up adds, keeping the earlier turns on screen', async () => {
+      const turns = [turn('turn-1', 1), turn('turn-2', 2), turn('turn-3', 3)];
+      const log = [
+        ...[1, 2, 3].map((id) => stored(id, turns[0])),
+        ...[4, 5, 6].map((id) => stored(id, turns[1])),
+        ...[7, 8, 9].map((id) => stored(id, turns[2])),
+      ];
+      serveLog(turns, log);
+      const { result, rerender } = renderHook(({ id }) => useAgentJob(id), {
+        initialProps: { id: 'turn-3' },
+      });
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      expect(result.current.events.map((row) => row.id)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+
+      const followUp = turn('turn-4', 4, 'running');
+      turns.push(followUp);
+      log.push(stored(10, followUp));
+      let resolveEvents!: (rows: AgentThreadEventApi[]) => void;
+      vi.mocked(listAllAgentThreadEvents).mockImplementationOnce(
+        () => new Promise((resolve) => (resolveEvents = resolve)),
+      );
+      rerender({ id: followUp.id });
+      await waitFor(() => expect(result.current.job?.id).toBe(followUp.id));
+      // The earlier turns stay on screen while the new activity is read.
+      expect(result.current.events.map((row) => row.id)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+      // The last two turns are read again in full; the ones before them are
+      // kept as they are.
+      expect(readCursors()).toEqual([0, 3]);
+
+      await act(async () => resolveEvents(log.filter((row) => row.id > 3)));
+      expect(result.current.loading).toBe(false);
+      expect(result.current.events.map((row) => row.id)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+      expect(result.current.job?.historyTurns?.map((row) => row.events.length)).toEqual([3, 3, 3]);
+      expect(vi.mocked(streamAgentJob).mock.calls.at(-1)![1].lastEventId).toBe(10);
+    });
+
+    it('reads a write to the ended turn that committed after the next turn began', async () => {
+      const turns = [turn('turn-1', 1), turn('turn-2', 2), turn('turn-3', 3)];
+      // Turn 2's snapshot event took id 5 and was still committing when turn
+      // 3 stored 6 and 7, so the first read could not see it.
+      const snapshot = stored(5, turns[1]);
+      const log = [
+        ...[1, 2].map((id) => stored(id, turns[0])),
+        ...[3, 4].map((id) => stored(id, turns[1])),
+        ...[6, 7].map((id) => stored(id, turns[2])),
+      ];
+      serveLog(turns, log);
+      const { result, rerender } = renderHook(({ id }) => useAgentJob(id), {
+        initialProps: { id: 'turn-3' },
+      });
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      expect(result.current.events.map((row) => row.id)).toEqual([1, 2, 3, 4, 6, 7]);
+
+      log.push(snapshot);
+      const followUp = turn('turn-4', 4, 'running');
+      turns.push(followUp);
+      log.push(stored(8, followUp));
+      rerender({ id: followUp.id });
+      await waitFor(() => expect(result.current.job?.id).toBe(followUp.id));
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      expect(readCursors()).toEqual([0, 2]);
+      expect(result.current.events.map((row) => row.id)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    });
+
+    it('reads its own turn and the one before it again when it ends', async () => {
+      const turns = [turn('turn-1', 1), turn('turn-2', 2), turn('turn-3', 3, 'running')];
+      const log = [
+        ...[1, 2].map((id) => stored(id, turns[0])),
+        ...[3, 4].map((id) => stored(id, turns[1])),
+        ...[5, 6].map((id) => stored(id, turns[2])),
+      ];
+      serveLog(turns, log);
+      const { result } = renderHook(() => useAgentJob('turn-3'));
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      const stream = vi.mocked(streamAgentJob).mock.calls[0][1];
+
+      log.push(stored(7, turns[2]));
+      turns[2] = { ...turns[2], state: 'succeeded' };
+      act(() => stream.onEvent(log[6]));
+      await act(async () => stream.onFinished?.({ state: 'succeeded', published_pr_url: null }));
+      await waitFor(() => expect(readCursors()).toEqual([0, 2]));
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      expect(result.current.events.map((row) => row.id)).toEqual([1, 2, 3, 4, 5, 6, 7]);
+    });
+
+    it('reads another conversation from its start', async () => {
+      const first = turn('turn-1', 1);
+      const other = { ...turn('other-1', 1), thread_id: 'other-thread' };
+      serveLog([first, other], [stored(1, first), stored(2, other)]);
+      const { result, rerender } = renderHook(({ id }) => useAgentJob(id), {
+        initialProps: { id: first.id },
+      });
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      rerender({ id: other.id });
+      await waitFor(() => expect(result.current.job?.id).toBe(other.id));
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      expect(readCursors()).toEqual([0, 0]);
+      expect(result.current.events.map((row) => row.id)).toEqual([2]);
+    });
+
+    it('reads a turn without a conversation from its start each time', async () => {
+      const lone = turn('lone', 1);
+      serveLog([lone], [stored(1, lone), stored(2, lone)]);
+      vi.mocked(getAgentJobThread).mockResolvedValue(null);
+      const { result } = renderHook(() => useAgentJob(lone.id));
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      act(() => result.current.reload());
+      await waitFor(() => expect(readCursors()).toEqual([0, 0]));
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      expect(result.current.events.map((row) => row.id)).toEqual([1, 2]);
+    });
+
+    it('reads the conversation from its start for another owner', async () => {
+      const first = turn('turn-1', 1);
+      serveLog([first], [stored(1, first), stored(2, first)]);
+      let userId = 'alice';
+      const wrapper = ({ children }: { children: ReactNode }) => (
+        <AgentReadProvider userId={userId}>{children}</AgentReadProvider>
+      );
+      const { result, rerender } = renderHook(() => useAgentJob(first.id), { wrapper });
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      userId = 'bob';
+      rerender();
+      await waitFor(() => expect(readCursors()).toEqual([0, 0]));
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      expect(result.current.events.map((row) => row.id)).toEqual([1, 2]);
+    });
   });
 
   it('refreshes shared activity while the selected follow-up waits and hands off to its stream', async () => {

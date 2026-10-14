@@ -40,7 +40,7 @@ afterEach(() => {
 });
 it('pins default and global versions and allows explicit platform-only selection', async () => {
   const change = vi.fn();
-  render(<EnvironmentPicker repo="org/repo" onChange={change} />);
+  render(<EnvironmentPicker repo="org/repo" open onClose={vi.fn()} onChange={change} />);
   await waitFor(() =>
     expect(change).toHaveBeenLastCalledWith({
       environment_id: 'env',
@@ -94,7 +94,7 @@ it('does not admit a task while the environment selection cannot be loaded', asy
       }),
   );
   const change = vi.fn();
-  render(<EnvironmentPicker repo="org/repo" onChange={change} />);
+  render(<EnvironmentPicker repo="org/repo" open={false} onClose={vi.fn()} onChange={change} />);
   await act(async () => rejectLoad(new Error('Load failed')));
   expect(await screen.findByRole('alert')).toHaveTextContent('Load failed');
   expect(change).toHaveBeenCalledWith(null);
@@ -105,7 +105,15 @@ it('leaves loading on failure and recovers through retry without silently droppi
   const status = vi.fn();
   const change = vi.fn();
   vi.mocked(listEnvironments).mockRejectedValueOnce(new Error('Temporary outage'));
-  render(<EnvironmentPicker repo="org/repo" onChange={change} onStatusChange={status} />);
+  render(
+    <EnvironmentPicker
+      repo="org/repo"
+      open={false}
+      onClose={vi.fn()}
+      onChange={change}
+      onStatusChange={status}
+    />,
+  );
   expect(await screen.findByRole('alert')).toHaveTextContent('Temporary outage');
   expect(status).toHaveBeenLastCalledWith('error');
   expect(change).toHaveBeenLastCalledWith(null);
@@ -121,7 +129,7 @@ it('leaves loading on failure and recovers through retry without silently droppi
 
 it('ignores a blank newly added override row in the submitted selection', async () => {
   const change = vi.fn();
-  render(<EnvironmentPicker repo="org/repo" onChange={change} />);
+  render(<EnvironmentPicker repo="org/repo" open onClose={vi.fn()} onChange={change} />);
   await screen.findByRole('combobox', { name: 'environment.choose' });
   fireEvent.click(screen.getByRole('button', { name: 'environment.addVariable' }));
   await waitFor(() => expect(change.mock.calls.at(-1)?.[0].environment_overrides).toEqual([]));

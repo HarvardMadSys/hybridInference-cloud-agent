@@ -60,6 +60,7 @@ describe('ComposerPlusMenu', () => {
     expect(menu.queryByRole('menuitem', { name: /Upload files/ })).not.toBeInTheDocument();
     expect(menu.queryByRole('menuitem', { name: /MCP servers/ })).not.toBeInTheDocument();
     expect(menu.queryByRole('menuitem', { name: /Plugins/ })).not.toBeInTheDocument();
+    expect(menu.queryByRole('menuitem', { name: /Environment/ })).not.toBeInTheDocument();
     expect(menu.getByRole('menuitem', { name: /Skills/ })).toBeInTheDocument();
     expect(menu.getByRole('menuitem', { name: /Goal/ })).toBeInTheDocument();
   });
@@ -78,6 +79,18 @@ describe('ComposerPlusMenu', () => {
     expect(item).toHaveTextContent('2');
     fireEvent.click(item);
     expect(onOpenPlugins).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Add to message' })).toHaveFocus();
+  });
+
+  it('opens environment settings from the workspace group and keeps the opener focused', () => {
+    const onOpenEnvironment = vi.fn();
+    renderMenu({ onOpenEnvironment, environmentSummary: 'Development' });
+    const item = within(open()).getByRole('menuitem', { name: /Environment/ });
+    expect(item).toHaveTextContent('Development');
+    expect(item).toHaveAttribute('aria-haspopup', 'dialog');
+    fireEvent.click(item);
+    expect(onOpenEnvironment).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole('menu')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Add to message' })).toHaveFocus();
   });
