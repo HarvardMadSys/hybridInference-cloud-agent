@@ -330,9 +330,8 @@ describe('TaskComposer source-control onboarding', () => {
     render(<TaskComposer />);
     await chooseRepository();
     await waitFor(() => expect(listEnvironments).toHaveBeenCalledWith('owner/repository'));
-    expect(screen.queryByRole('combobox', { name: 'Choose environment' })).not.toBeInTheDocument();
-    expect(screen.queryByText('Effective configuration')).not.toBeInTheDocument();
-    expect(screen.queryByText('Variables for this workspace only')).not.toBeInTheDocument();
+    expect(screen.queryByRole('radio')).not.toBeInTheDocument();
+    expect(screen.queryByText('What this task will use')).not.toBeInTheDocument();
     fireEvent.change(screen.getByRole('textbox', { name: 'What should the agent do?' }), {
       target: { value: 'Fix tests' },
     });
@@ -344,54 +343,57 @@ describe('TaskComposer source-control onboarding', () => {
           environment_id: 'env',
           environment_revision: 4,
           global_revision: 2,
-          environment_overrides: [],
         }),
       ),
     );
   });
 
-  it('keeps task-specific environment choices after closing and reopening the dialog', async () => {
+  it('keeps the chosen environment after closing and reopening the dialog', async () => {
     vi.mocked(getAgentConfig).mockResolvedValue(config());
+    vi.mocked(listEnvironments).mockResolvedValue({
+      globals: globalEnvironment({ revision: 2 }),
+      environments: [
+        {
+          ...globalEnvironment(),
+          id: 'env',
+          name: 'Development',
+          repo: 'owner/repository',
+          revision: 4,
+          is_default: true,
+        },
+      ],
+    });
     vi.mocked(createAgentJob).mockResolvedValue({ id: 'new-job' } as AgentJobApi);
     render(<TaskComposer />);
     await chooseRepository();
     await openAttachMenu();
     fireEvent.click(await screen.findByRole('menuitem', { name: /Environment/ }));
     const dialog = screen.getByRole('dialog', { name: 'Environment' });
-    expect(within(dialog).getByRole('combobox', { name: 'Choose environment' })).toHaveFocus();
-    fireEvent.click(within(dialog).getByText('Variables for this workspace only'));
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Add variable' }));
-    fireEvent.change(within(dialog).getByLabelText('Variable name'), {
-      target: { value: 'APP_ENV' },
-    });
-    fireEvent.change(within(dialog).getByLabelText('Value APP_ENV'), {
-      target: { value: 'testing' },
-    });
+    const development = await within(dialog).findByRole('radio', { name: /Development/ });
+    expect(development).toBeChecked();
+    expect(development).toHaveFocus();
+    expect(within(dialog).queryByText('Variables for this workspace only')).toBeNull();
+    fireEvent.click(within(dialog).getByRole('radio', { name: /No environment/ }));
     fireEvent.click(within(dialog).getByRole('button', { name: 'Done' }));
     expect(screen.queryByRole('dialog', { name: 'Environment' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Add to message' })).toHaveFocus();
     await openAttachMenu();
     const item = screen.getByRole('menuitem', { name: /Environment/ });
-    expect(item).toHaveTextContent('1 overrides');
+    expect(item).toHaveTextContent('No environment');
     fireEvent.click(item);
-    expect(screen.getByLabelText('Value APP_ENV')).toHaveValue('testing');
+    expect(screen.getByRole('radio', { name: /No environment/ })).toBeChecked();
     fireEvent.keyDown(window, { key: 'Escape' });
     fireEvent.change(screen.getByRole('textbox', { name: 'What should the agent do?' }), {
       target: { value: 'Fix tests' },
     });
     await runWhenReady();
-    await waitFor(() =>
-      expect(createAgentJob).toHaveBeenCalledWith(
-        expect.objectContaining({
-          environment_overrides: [
-            { name: 'APP_ENV', value: 'testing', secret: true, phase: 'both' },
-          ],
-        }),
-      ),
-    );
+    await waitFor(() => expect(createAgentJob).toHaveBeenCalled());
+    const request = vi.mocked(createAgentJob).mock.calls[0][0];
+    expect(request).toMatchObject({ environment_id: null, global_revision: 2 });
+    expect(request).not.toHaveProperty('environment_overrides');
   });
 
-  it('edits and submits scratch workspace variables from the plus menu without GitHub', async () => {
+  it('runs a scratch workspace with the global variables and no task variables', async () => {
     account.id = 'alice';
     localStorage.setItem(ACKNOWLEDGED, '1');
     vi.mocked(getAgentConfig).mockResolvedValue(disconnected());
@@ -402,69 +404,43 @@ describe('TaskComposer source-control onboarding', () => {
     fireEvent.click(await screen.findByRole('menuitem', { name: /Environment/ }));
     const dialog = screen.getByRole('dialog', { name: 'Environment' });
     expect(dialog).toHaveTextContent('Start from scratch');
-    expect(dialog).not.toHaveTextContent('Your repository default');
+    expect(dialog).toHaveTextContent('cannot use a repository environment');
+    expect(within(dialog).queryByRole('radio')).not.toBeInTheDocument();
+    expect(within(dialog).queryByRole('button', { name: 'Add variable' })).not.toBeInTheDocument();
     expect(
-      within(dialog).queryByRole('combobox', { name: 'Choose environment' }),
-    ).not.toBeInTheDocument();
-    expect(within(dialog).queryByRole('button', { name: 'Manage' })).not.toBeInTheDocument();
+      within(dialog).getByRole('button', { name: 'Edit personal global variables' }),
+    ).toBeInTheDocument();
     expect(within(dialog).getByRole('button', { name: 'Done' })).toHaveFocus();
-    fireEvent.click(within(dialog).getByText('Variables for this workspace only'));
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Add variable' }));
-    fireEvent.change(within(dialog).getByLabelText('Variable name'), {
-      target: { value: 'APP_ENV' },
-    });
-    fireEvent.change(within(dialog).getByLabelText('Value APP_ENV'), {
-      target: { value: 'scratch-env' },
-    });
     fireEvent.click(within(dialog).getByRole('button', { name: 'Done' }));
-    await openAttachMenu();
-    const item = screen.getByRole('menuitem', { name: /Environment/ });
-    expect(item).toHaveTextContent('1 overrides');
-    fireEvent.click(item);
-    expect(screen.getByLabelText('Value APP_ENV')).toHaveValue('scratch-env');
-    fireEvent.keyDown(window, { key: 'Escape' });
     fireEvent.change(screen.getByRole('textbox', { name: 'What should the agent do?' }), {
       target: { value: 'Write hello.py' },
     });
     await runWhenReady();
     await waitFor(() =>
       expect(createAgentJob).toHaveBeenCalledWith(
-        expect.objectContaining({
-          repo: null,
-          environment_id: null,
-          global_revision: 3,
-          environment_overrides: [
-            { name: 'APP_ENV', value: 'scratch-env', secret: true, phase: 'both' },
-          ],
-        }),
+        expect.objectContaining({ repo: null, environment_id: null, global_revision: 3 }),
       ),
+    );
+    expect(vi.mocked(createAgentJob).mock.calls[0][0]).not.toHaveProperty(
+      'environment_overrides',
     );
     expect(getGlobalEnvironment).toHaveBeenCalledOnce();
     expect(listEnvironments).not.toHaveBeenCalled();
   });
 
-  it('clears scratch task variables when switching to a repository', async () => {
+  it('offers repository environments after switching from a scratch workspace', async () => {
     vi.mocked(getAgentConfig).mockResolvedValue(config());
     vi.mocked(createAgentJob).mockResolvedValue({ id: 'new-job' } as AgentJobApi);
     render(<TaskComposer initialRepo=":temporary" />);
     expect(await repositoryButton()).toHaveAccessibleName('Repository: Start from scratch');
     await openAttachMenu();
     fireEvent.click(await screen.findByRole('menuitem', { name: /Environment/ }));
-    const dialog = screen.getByRole('dialog', { name: 'Environment' });
-    fireEvent.click(within(dialog).getByText('Variables for this workspace only'));
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Add variable' }));
-    fireEvent.change(within(dialog).getByLabelText('Variable name'), {
-      target: { value: 'SCRATCH_ONLY' },
-    });
-    fireEvent.change(within(dialog).getByLabelText('Value SCRATCH_ONLY'), {
-      target: { value: 'scratch-env' },
-    });
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Done' }));
+    expect(screen.queryByRole('radio')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }));
     await chooseRepository();
     await openAttachMenu();
     fireEvent.click(await screen.findByRole('menuitem', { name: /Environment/ }));
-    expect(screen.getByRole('combobox', { name: 'Choose environment' })).toBeInTheDocument();
-    expect(screen.queryByLabelText('Value SCRATCH_ONLY')).not.toBeInTheDocument();
+    expect(await screen.findByRole('radio', { name: /No environment/ })).toBeInTheDocument();
     fireEvent.keyDown(window, { key: 'Escape' });
     fireEvent.change(screen.getByRole('textbox', { name: 'What should the agent do?' }), {
       target: { value: 'Fix tests' },
@@ -476,7 +452,6 @@ describe('TaskComposer source-control onboarding', () => {
           repo: 'owner/repository',
           environment_id: null,
           global_revision: 0,
-          environment_overrides: [],
         }),
       ),
     );
@@ -488,7 +463,7 @@ describe('TaskComposer source-control onboarding', () => {
     render(<TaskComposer />);
     await chooseRepository();
     expect(
-      await screen.findByText(/Environment configuration could not be loaded/),
+      await screen.findByText(/Environments could not be loaded/),
     ).toBeInTheDocument();
     expect(await repositoryButton()).toBeEnabled();
     fireEvent.change(screen.getByRole('textbox', { name: 'What should the agent do?' }), {
@@ -518,7 +493,7 @@ describe('TaskComposer source-control onboarding', () => {
     vi.mocked(createAgentJob).mockResolvedValue({ id: 'new-job' } as AgentJobApi);
     render(<TaskComposer />);
     await chooseRepository();
-    await screen.findByText(/Environment configuration could not be loaded/);
+    await screen.findByText(/Environments could not be loaded/);
     fireEvent.change(screen.getByRole('textbox', { name: 'What should the agent do?' }), {
       target: { value: 'Fix tests' },
     });
@@ -1324,7 +1299,6 @@ describe('TaskComposer source-control onboarding', () => {
         environment_id: null,
         environment_revision: 0,
         global_revision: 0,
-        environment_overrides: [],
       }),
     );
     expect(navigation.push).toHaveBeenCalledWith('/ajob_1');
@@ -2232,7 +2206,6 @@ describe('TaskComposer source-control onboarding', () => {
         environment_id: null,
         environment_revision: 0,
         global_revision: 0,
-        environment_overrides: [],
       }),
     );
     expect(navigation.push).toHaveBeenCalledWith('/ajob_1');

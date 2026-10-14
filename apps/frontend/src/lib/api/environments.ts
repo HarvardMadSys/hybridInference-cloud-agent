@@ -46,8 +46,9 @@ export interface EnvironmentStep {
   phase: string;
   state: string;
   output: string;
-  exit_code?: number;
+  exit_code?: number | null;
   duration_seconds?: number;
+  detail?: string;
 }
 export interface EnvironmentRun {
   id: string;
@@ -72,6 +73,8 @@ export interface EnvironmentConfig {
   is_default?: boolean;
   default_revision?: number;
   latest_test?: { id: string; state: string; revision: number; global_revision: number } | null;
+  /** When this version was saved; present on version history entries. */
+  created_at?: string;
 }
 export interface EnvironmentBinding {
   binding_id: string | null;
@@ -80,6 +83,8 @@ export interface EnvironmentBinding {
   revision?: number;
   global_revision?: number;
   legacy: boolean;
+  required?: boolean;
+  environment_archived?: boolean;
   has_new_version?: boolean;
   runtime_revision?: number;
   runtime_variables?: EnvironmentVariable[] | null;

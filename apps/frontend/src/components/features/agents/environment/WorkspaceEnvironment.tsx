@@ -5,17 +5,86 @@ import { useEffect, useRef, useState } from 'react';
 import { useT } from '@/components/providers';
 import {
   getEnvironmentActionRun,
+  getGlobalEnvironment,
   getWorkspaceEnvironment,
+  listEnvironments,
   refreshWorkspaceRuntime,
   skipWorkspaceStart,
   retryWorkspaceEnvironment,
   startEnvironmentAction,
   stopEnvironmentAction,
 } from '@/lib/api/environments';
-import type { ActionRun, EnvironmentBinding } from '@/lib/api/environments';
-import { EnvironmentManager } from './EnvironmentManager';
-import { EnvironmentSteps } from './EnvironmentEditor';
+import type {
+  ActionRun,
+  EnvironmentBinding,
+  EnvironmentConfig,
+  EnvironmentVariable,
+} from '@/lib/api/environments';
+import type { TranslationKey } from '@/lib/i18n/translate';
+import { EnvironmentDialog } from './EnvironmentDialog';
+import { emptyEnvironment } from './EnvironmentManager';
+import {
+  ACTIVE_STATES,
+  Badge,
+  EnvironmentSteps,
+  StateBadge,
+  usePhaseLabel,
+} from './EnvironmentStatus';
 
+type Status = 'none' | 'pending' | 'preparing' | 'ready' | 'failed';
+const STATUS: Record<
+  Status,
+  { key: TranslationKey; tone: 'success' | 'error' | 'progress' | 'neutral' }
+> = {
+  none: { key: 'environment.status.none', tone: 'neutral' },
+  pending: { key: 'environment.status.pending', tone: 'neutral' },
+  preparing: { key: 'environment.status.preparing', tone: 'progress' },
+  ready: { key: 'environment.status.ready', tone: 'success' },
+  failed: { key: 'environment.status.failed', tone: 'error' },
+};
+
+function status(bound: EnvironmentBinding): Status {
+  if (bound.steps.some((s) => s.state === 'failed')) return 'failed';
+  if (bound.steps.some((s) => s.state === 'running')) return 'preparing';
+  if (bound.steps.length) return 'ready';
+  return bound.required ? 'pending' : 'none';
+}
+
+function VariableList({
+  variables,
+  sourceLabel,
+}: {
+  variables: EnvironmentVariable[];
+  sourceLabel: (source: EnvironmentVariable['source']) => string;
+}) {
+  const t = useT();
+  if (!variables.length)
+    return <p className="text-xs text-muted">{t('environment.noVariables')}</p>;
+  return (
+    <ul className="divide-y divide-border rounded-lg border border-border text-xs">
+      {variables.map((v) => (
+        <li key={v.name} className="flex flex-wrap items-center gap-x-3 gap-y-0.5 px-3 py-1.5">
+          <code className="min-w-0 truncate text-foreground">{v.name}</code>
+          <span className="min-w-0 flex-1 truncate font-mono text-muted">
+            {v.secret ? '••••••' : v.value}
+          </span>
+          {v.phase !== 'both' ? (
+            <span className="text-muted">
+              {t(v.phase === 'setup' ? 'environment.setupOnly' : 'environment.runtimeOnly')}
+            </span>
+          ) : null}
+          <span className="text-muted">{sourceLabel(v.source)}</span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/**
+ * A conversation's Environment panel. What the reader needs first is whether
+ * the workspace is ready and, when it is not, what to do about it; then the
+ * saved commands they can run. The fixed configuration behind it is detail.
+ */
 export function WorkspaceEnvironment({
   jobId,
   repo,
@@ -26,17 +95,22 @@ export function WorkspaceEnvironment({
   onTerminal: () => void;
 }) {
   const t = useT();
+  const phase = usePhaseLabel();
+  const temporary = isTemporaryWorkspace(repo);
   const [bound, setBound] = useState<EnvironmentBinding | null>(null);
   const [error, setError] = useState('');
   // A failed read of the workspace's environment lasts until the next read
   // succeeds; an action's failure stays until the owner acts again.
   const [loadError, setLoadError] = useState('');
-  const [editing, setEditing] = useState(false);
   const [runs, setRuns] = useState<Record<string, ActionRun>>({});
   const [busy, setBusy] = useState(false);
   const pendingKeys = useRef<Record<string, string>>({});
   const [reload, setReload] = useState(0);
   const [skipArmed, setSkipArmed] = useState(false);
+  const [editing, setEditing] = useState<{
+    config: EnvironmentConfig;
+    globals: EnvironmentConfig;
+  } | null>(null);
   useEffect(() => {
     let active = true;
     const refresh = () => {
@@ -59,9 +133,7 @@ export function WorkspaceEnvironment({
   }, [jobId, reload]);
   useEffect(() => {
     let active = true;
-    const current = Object.entries(runs).filter(([, run]) =>
-      ['starting', 'running', 'paused', 'suspended'].includes(run.state),
-    );
+    const current = Object.entries(runs).filter(([, run]) => ACTIVE_STATES.includes(run.state));
     if (!current.length) return;
     const timer = setInterval(() => {
       current.forEach(([id, run]) => {
@@ -90,130 +162,168 @@ export function WorkspaceEnvironment({
       setBusy(false);
     }
   }
+  // The saved environment as it is now, which may be newer than the version
+  // this workspace is fixed to; editing it changes what new tasks get.
+  const openEditor = () =>
+    perform(async () => {
+      if (temporary) {
+        const globals = await getGlobalEnvironment();
+        setEditing({ config: globals, globals });
+        return;
+      }
+      const result = await listEnvironments(repo);
+      const saved = result.environments.find((e) => e.id === bound?.environment_id);
+      setEditing({ config: saved ?? emptyEnvironment(repo), globals: result.globals });
+    });
+
+  if (!bound) {
+    return (
+      <section className="p-4" aria-label={t('environment.workspaceTitle')}>
+        {error || loadError ? (
+          <p role="alert" className="text-sm text-status-error">
+            {error || loadError}
+          </p>
+        ) : (
+          <p role="status" className="text-sm text-muted">
+            {t('environment.loading')}
+          </p>
+        )}
+      </section>
+    );
+  }
+  const state = status(bound);
+  const failed = bound.steps.find((s) => s.state === 'failed');
+  const name = bound.legacy
+    ? t('environment.legacy')
+    : (bound.environment_name ?? t('environment.none'));
+  const sourceLabel = (source: EnvironmentVariable['source']) =>
+    source === 'global'
+      ? t('environment.sourceGlobal')
+      : source === 'override'
+        ? t('environment.sourceTask')
+        : (bound.environment_name ?? '');
+  const editLabel: TranslationKey = temporary
+    ? 'environment.editGlobals'
+    : bound.environment_id && !bound.environment_archived
+      ? 'environment.editSaved'
+      : 'environment.createForRepository';
   return (
-    <section className="space-y-4 p-4" aria-label={t('environment.current')}>
-      <h2 className="text-sm font-semibold">{t('environment.current')}</h2>
-      {bound && (
-        <>
-          <p className="text-xs text-muted">
-            {bound.environment_name ?? t('environment.platformBase')} ·{' '}
-            {t('environment.boundVersion')} v{bound.revision ?? 0} ·{' '}
-            {t('environment.globalVariables')} v{bound.global_revision ?? 0}
-          </p>
-          {bound.has_new_version && (
-            <p className="rounded border border-border p-2 text-xs">
-              {t('environment.newVersionAvailable')}{' '}
-              <a href={`/?repo=${encodeURIComponent(repo)}`} className="text-accent underline">
-                {t('environment.newWorkspace')}
-              </a>
+    <section className="space-y-5 p-4" aria-label={t('environment.workspaceTitle')}>
+      <div className="space-y-3 rounded-lg border border-border p-3">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <h2 className="truncate text-sm font-semibold text-foreground">{name}</h2>
+            {bound.environment_id ? (
+              <p className="mt-0.5 text-xs text-muted">
+                {t('environment.versionLabel', { revision: bound.revision ?? 0 })}
+              </p>
+            ) : null}
+          </div>
+          <Badge tone={STATUS[state].tone}>{t(STATUS[state].key)}</Badge>
+        </div>
+        {state === 'pending' ? (
+          <p className="text-xs text-muted">{t('environment.pendingHint')}</p>
+        ) : null}
+        <EnvironmentSteps steps={bound.steps} />
+        {failed ? (
+          <div className="space-y-2 rounded-md bg-status-error/5 p-2">
+            <p className="text-sm font-medium text-status-error">
+              {t('environment.failedStep', { phase: phase(failed.phase) })}
             </p>
-          )}
-          {bound.binding_id && (
-            <button
-              type="button"
-              className="ui-button ui-button-secondary"
-              disabled={busy}
-              onClick={() =>
-                void perform(async () => {
-                  await refreshWorkspaceRuntime(jobId, bound.runtime_revision ?? 0);
-                  setReload((v) => v + 1);
-                })
-              }
-            >
-              {t('environment.refreshRuntime')}
-            </button>
-          )}
-          <p className="text-xs text-muted">
-            {t('environment.runtimeHint')} · v{bound.runtime_revision ?? 0}
-          </p>
-          {bound.runtime_variables && (
-            <h3 className="text-xs font-medium">{t('environment.baseVariables')}</h3>
-          )}
-          <ul className="space-y-1 text-xs">
-            {bound.variables.map((v) => (
-              <li key={v.name}>
-                <code>{v.name}</code> · {v.secret ? t('environment.secretSet') : v.value} ·{' '}
-                {v.phase}
-              </li>
-            ))}
-          </ul>
-          {bound.runtime_variables && (
-            <h3 className="text-xs font-medium">{t('environment.runtimeVariables')}</h3>
-          )}
-          {bound.runtime_variables && (
-            <ul className="space-y-1 text-xs" aria-label={t('environment.refreshRuntime')}>
-              {bound.runtime_variables.map((v) => (
-                <li key={v.name}>
-                  <code>{v.name}</code> · {v.secret ? t('environment.secretSet') : v.value} ·
-                  runtime
-                </li>
-              ))}
-            </ul>
-          )}
-          <details className="text-sm">
-            <summary>{t('environment.installScript')}</summary>
-            <pre className="overflow-auto whitespace-pre-wrap text-xs">{bound.setup_script}</pre>
-          </details>
-          <details className="text-sm">
-            <summary>{t('environment.startScript')}</summary>
-            <pre className="overflow-auto whitespace-pre-wrap text-xs">{bound.start_script}</pre>
-          </details>
-          <EnvironmentSteps run={{ steps: bound.steps }} />
-          {bound.steps.some((s) => s.state === 'failed') && (
-            <button
-              type="button"
-              className="ui-button ui-button-secondary"
-              disabled={busy}
-              onClick={() =>
-                void perform(async () => {
-                  await retryWorkspaceEnvironment(jobId);
-                  setReload((v) => v + 1);
-                })
-              }
-            >
-              {t('environment.retryPreparation')}
-            </button>
-          )}
-          {bound.steps.some((s) => s.phase === 'start' && s.state === 'failed') && (
-            <div>
+            <div className="flex flex-wrap gap-2">
               <button
                 type="button"
                 className="ui-button ui-button-secondary"
-                disabled={busy || skipArmed}
+                disabled={busy}
                 onClick={() =>
                   void perform(async () => {
-                    await skipWorkspaceStart(jobId);
-                    setSkipArmed(true);
+                    await retryWorkspaceEnvironment(jobId);
+                    setReload((v) => v + 1);
                   })
                 }
               >
-                {t('environment.skipStart')}
+                {t('environment.retryPreparation')}
               </button>
+              {failed.phase === 'start' ? (
+                <button
+                  type="button"
+                  className="ui-button ui-button-ghost"
+                  disabled={busy || skipArmed}
+                  onClick={() =>
+                    void perform(async () => {
+                      await skipWorkspaceStart(jobId);
+                      setSkipArmed(true);
+                    })
+                  }
+                >
+                  {t('environment.skipStart')}
+                </button>
+              ) : null}
+            </div>
+            {failed.phase === 'start' ? (
               <p className="text-xs text-muted">
                 {t(skipArmed ? 'environment.skipArmed' : 'environment.skipHint')}
               </p>
-            </div>
-          )}
-          <div className="space-y-2">
-            <h3 className="text-sm font-semibold">{t('environment.actions')}</h3>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
+
+      {bound.environment_archived ? (
+        <p className="rounded-lg border border-border bg-surface-muted p-3 text-xs text-muted">
+          {t('environment.archived')}
+        </p>
+      ) : bound.has_new_version ? (
+        <div className="space-y-2 rounded-lg border border-status-info/30 bg-status-info/5 p-3 text-xs">
+          <p className="text-foreground">
+            {t('environment.newVersionAvailable', { revision: bound.revision ?? 0 })}
+          </p>
+          <a
+            href={`/?repo=${encodeURIComponent(repo)}`}
+            className="inline-block font-medium text-accent hover:underline"
+          >
+            {t('environment.newWorkspace')}
+          </a>
+        </div>
+      ) : null}
+
+      {bound.actions.length ? (
+        <div className="space-y-2">
+          <h3 className="text-sm font-semibold text-foreground">{t('environment.actions')}</h3>
+          <ul className="divide-y divide-border rounded-lg border border-border">
             {bound.actions.map((action) => {
               const run = runs[action.id];
-              const running =
-                run && ['starting', 'running', 'paused', 'suspended'].includes(run.state);
+              const running = !!run && ACTIVE_STATES.includes(run.state);
               return (
-                <div key={action.id} className="space-y-2 rounded-lg border border-border p-3">
-                  <div className="flex flex-wrap justify-between gap-2">
-                    <span className="text-sm">
+                <li key={action.id} className="space-y-2 px-3 py-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="min-w-0 flex-1 truncate text-sm text-foreground">
                       {action.name}
-                      {run ? ` · ${run.state}` : ''}
                     </span>
-                    <div className="flex gap-1">
+                    {run ? <StateBadge state={run.state} /> : null}
+                    {running ? (
                       <button
                         type="button"
                         className="ui-button ui-button-secondary"
-                        disabled={busy || !!running}
+                        disabled={busy}
                         onClick={() =>
                           void perform(async () => {
+                            const result = await stopEnvironmentAction(run.id);
+                            setRuns((v) => ({ ...v, [action.id]: result }));
+                          })
+                        }
+                      >
+                        {t('environment.stop')}
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        className="ui-button ui-button-secondary"
+                        disabled={busy}
+                        onClick={() =>
+                          void perform(async () => {
+                            // The same key for a retry after a lost response, so
+                            // the command is not started twice.
                             const key = pendingKeys.current[action.id] ?? crypto.randomUUID();
                             pendingKeys.current[action.id] = key;
                             const result = await startEnvironmentAction(jobId, action.id, key);
@@ -224,59 +334,106 @@ export function WorkspaceEnvironment({
                       >
                         {t('environment.run')}
                       </button>
-                      {running && (
-                        <button
-                          type="button"
-                          className="ui-button ui-button-secondary"
-                          disabled={busy}
-                          onClick={() =>
-                            void perform(async () => {
-                              const result = await stopEnvironmentAction(run.id);
-                              setRuns((v) => ({ ...v, [action.id]: result }));
-                            })
-                          }
-                        >
-                          {t('environment.stop')}
-                        </button>
-                      )}
-                      <button
-                        type="button"
-                        className="ui-button ui-button-ghost"
-                        onClick={onTerminal}
-                      >
-                        {t('environment.openOutput')}
-                      </button>
-                    </div>
+                    )}
+                    <button
+                      type="button"
+                      className="ui-button ui-button-ghost"
+                      onClick={onTerminal}
+                    >
+                      {t('environment.openOutput')}
+                    </button>
                   </div>
-                  {run?.output && (
-                    <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all text-xs">
+                  <code className="block truncate font-mono text-xs text-muted">
+                    {action.command}
+                  </code>
+                  {run?.output ? (
+                    <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-md bg-surface-muted p-2 font-mono text-xs">
                       {run.output}
                     </pre>
-                  )}
-                </div>
+                  ) : null}
+                </li>
               );
             })}
+          </ul>
+        </div>
+      ) : null}
+
+      <details className="rounded-lg border border-border">
+        <summary className="cursor-pointer px-3 py-2 text-sm font-medium hover:bg-surface-hover">
+          {t('environment.configuration')}
+        </summary>
+        <div className="space-y-4 border-t border-border p-3">
+          <div className="space-y-2">
+            {bound.runtime_variables ? (
+              <h3 className="text-xs font-medium text-muted">{t('environment.baseVariables')}</h3>
+            ) : null}
+            <VariableList variables={bound.variables} sourceLabel={sourceLabel} />
           </div>
-        </>
-      )}
-      {/* Saved environments belong to one repository; a temporary workspace has none. */}
-      {isTemporaryWorkspace(repo) ? null : (
-        <button
-          type="button"
-          className="ui-button ui-button-secondary"
-          onClick={() => setEditing(!editing)}
-        >
-          {t('environment.editSaved')}
-        </button>
-      )}
-      {editing && !isTemporaryWorkspace(repo) && (
-        <EnvironmentManager repo={repo} onChanged={() => setReload((v) => v + 1)} />
-      )}
-      {(error || loadError) && (
-        <p role="alert" className="text-sm text-red-600 dark:text-red-400">
+          {bound.runtime_variables ? (
+            <div className="space-y-2">
+              <h3 className="text-xs font-medium text-muted">
+                {t('environment.runtimeVariables')}
+              </h3>
+              <VariableList variables={bound.runtime_variables} sourceLabel={sourceLabel} />
+            </div>
+          ) : null}
+          {(
+            [
+              ['setup_script', 'environment.installScript'],
+              ['start_script', 'environment.startScript'],
+            ] as const
+          ).map(([key, label]) =>
+            bound[key] ? (
+              <div key={key}>
+                <p className="mb-1 text-xs text-muted">{t(label)}</p>
+                <pre className="max-h-40 overflow-auto whitespace-pre-wrap rounded-md bg-surface-muted p-2 font-mono text-xs">
+                  {bound[key]}
+                </pre>
+              </div>
+            ) : null,
+          )}
+          {bound.binding_id ? (
+            <div className="space-y-1">
+              <button
+                type="button"
+                className="ui-button ui-button-secondary"
+                disabled={busy}
+                onClick={() =>
+                  void perform(async () => {
+                    await refreshWorkspaceRuntime(jobId, bound.runtime_revision ?? 0);
+                    setReload((v) => v + 1);
+                  })
+                }
+              >
+                {t('environment.refreshRuntime')}
+              </button>
+              <p className="text-xs text-muted">{t('environment.runtimeHint')}</p>
+            </div>
+          ) : null}
+        </div>
+      </details>
+
+      <button
+        type="button"
+        className="ui-button ui-button-secondary"
+        disabled={busy}
+        onClick={() => void openEditor()}
+      >
+        {t(editLabel)}
+      </button>
+      {error || loadError ? (
+        <p role="alert" className="text-sm text-status-error">
           {error || loadError}
         </p>
-      )}
+      ) : null}
+      {editing ? (
+        <EnvironmentDialog
+          initial={editing.config}
+          globals={editing.globals}
+          onSaved={() => setReload((v) => v + 1)}
+          onClose={() => setEditing(null)}
+        />
+      ) : null}
     </section>
   );
 }

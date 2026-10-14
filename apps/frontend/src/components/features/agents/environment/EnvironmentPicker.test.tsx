@@ -7,7 +7,11 @@ import { EnvironmentPicker } from './EnvironmentPicker';
 import { VariableEditor, variableEdits } from './VariableEditor';
 vi.mock('@/components/providers', () => ({ useT: () => (key: string) => key }));
 vi.mock('@/lib/api/environments', () => ({ listEnvironments: vi.fn() }));
-vi.mock('./EnvironmentManager', () => ({ EnvironmentManager: () => null }));
+vi.mock('./EnvironmentDialog', () => ({
+  EnvironmentDialog: ({ initial }: { initial: { name: string } }) => (
+    <div role="dialog" aria-label={`editing ${initial.name}`} />
+  ),
+}));
 const globals = {
   id: 'global',
   repo: null,
@@ -46,20 +50,23 @@ it('pins default and global versions and allows explicit platform-only selection
       environment_id: 'env',
       environment_revision: 4,
       global_revision: 2,
-      environment_overrides: [],
     }),
   );
-  fireEvent.change(screen.getByRole('combobox', { name: 'environment.choose' }), {
-    target: { value: '' },
-  });
+  expect(screen.getByRole('radio', { name: /Development/ })).toBeChecked();
+  fireEvent.click(screen.getByRole('radio', { name: /environment.none/ }));
   await waitFor(() =>
     expect(change).toHaveBeenLastCalledWith({
       environment_id: null,
       environment_revision: 0,
       global_revision: 2,
-      environment_overrides: [],
     }),
   );
+});
+it('edits the selected environment or a new one in the shared dialog', async () => {
+  render(<EnvironmentPicker repo="org/repo" open onClose={vi.fn()} onChange={vi.fn()} />);
+  await screen.findByRole('radio', { name: /Development/ });
+  fireEvent.click(screen.getByRole('button', { name: 'environment.editItem' }));
+  expect(screen.getByRole('dialog', { name: 'editing Development' })).toBeInTheDocument();
 });
 it('keeps a saved Secret blank and requires an explicit replacement when changing its type', () => {
   const change = vi.fn();
@@ -70,7 +77,9 @@ it('keeps a saved Secret blank and requires an explicit replacement when changin
     />,
   );
   expect(screen.getByLabelText('environment.value TOKEN')).toHaveValue('');
-  expect(screen.getByLabelText('environment.variableName')).toBeDisabled();
+  // A saved name is shown, not offered for editing.
+  expect(screen.queryByLabelText('environment.variableName')).toBeNull();
+  expect(screen.getByText('TOKEN')).toBeInTheDocument();
   fireEvent.change(screen.getByLabelText('environment.type TOKEN'), {
     target: { value: 'ordinary' },
   });
@@ -126,12 +135,4 @@ it('leaves loading on failure and recovers through retry without silently droppi
     ),
   );
   expect(screen.queryByRole('alert')).not.toBeInTheDocument();
-});
-
-it('ignores a blank newly added override row in the submitted selection', async () => {
-  const change = vi.fn();
-  render(<EnvironmentPicker repo="org/repo" open onClose={vi.fn()} onChange={change} />);
-  await screen.findByRole('combobox', { name: 'environment.choose' });
-  fireEvent.click(screen.getByRole('button', { name: 'environment.addVariable' }));
-  await waitFor(() => expect(change.mock.calls.at(-1)?.[0].environment_overrides).toEqual([]));
 });
