@@ -145,14 +145,16 @@ export function AccountMenu({ variant }: { variant: 'sidebar' | 'header' }) {
     setSubmenuPosition({ left, top });
     if (focusSubmenu.current) {
       focusSubmenu.current = false;
-      const items = submenuPanel.current.querySelectorAll<HTMLElement>(
-        '[role="menuitem"], [role="menuitemradio"]',
-      );
-      (
-        submenuPanel.current.querySelector<HTMLElement>('[aria-checked="true"]') ?? items[0]
-      )?.focus();
+      focusIntoSubmenu();
     }
   }, [submenu, menuPosition]);
+
+  function focusIntoSubmenu() {
+    const panel = submenuPanel.current;
+    if (!panel) return;
+    const items = panel.querySelectorAll<HTMLElement>('[role="menuitem"], [role="menuitemradio"]');
+    (panel.querySelector<HTMLElement>('[aria-checked="true"]') ?? items[0])?.focus();
+  }
 
   // Outside clicks close it; so do resizing and scrolling, which would leave
   // a fixed panel floating away from the row it belongs to.
@@ -184,6 +186,13 @@ export function AccountMenu({ variant }: { variant: 'sidebar' | 'header' }) {
   }, [open]);
 
   const openSubmenu = (key: Submenu, withFocus: boolean) => {
+    if (key === submenu) {
+      // Already open: the pointer opened it on its way to this click. Nothing
+      // re-renders, so focus it now rather than leave the request pending for
+      // whichever submenu the pointer next passes over.
+      if (withFocus) focusIntoSubmenu();
+      return;
+    }
     focusSubmenu.current = withFocus;
     setSubmenu(key);
   };
