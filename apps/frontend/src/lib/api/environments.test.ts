@@ -11,13 +11,22 @@ const variables = [
 describe('environment credentials and commands', () => {
   it('keeps saved Secrets write-only while preserving ordinary display values', () => {
     expect(variableEdits(variables)).toEqual([
-      { name: 'TOKEN', original_name: 'TOKEN', secret: true, phase: 'both', operation: 'keep' },
+      {
+        name: 'TOKEN',
+        original_name: 'TOKEN',
+        original_secret: true,
+        secret: true,
+        phase: 'both',
+        operation: 'keep',
+      },
       {
         name: 'REGION',
         original_name: 'REGION',
+        original_secret: false,
         secret: false,
         phase: 'runtime',
         value: 'east',
+        original_value: 'east',
         operation: 'keep',
       },
     ]);
@@ -52,6 +61,38 @@ describe('environment credentials and commands', () => {
     expect(JSON.parse(fetch.mock.lastCall?.[2]?.body as string).variables[0].value).toBe(
       'replacement',
     );
+  });
+  it('sends no edit for a row removed before it was ever saved', async () => {
+    const fetch = vi
+      .spyOn(client, 'fetchWithAuth')
+      .mockResolvedValue(new Response('{}', { headers: { 'Content-Type': 'application/json' } }));
+    await saveGlobalVariables(1, [
+      ...variableEdits(variables),
+      { name: '', secret: true, phase: 'both', operation: 'remove' },
+    ]);
+    expect(JSON.parse(fetch.mock.lastCall?.[2]?.body as string).variables).toEqual([
+      { name: 'TOKEN', secret: true, phase: 'both', operation: 'keep' },
+      { name: 'REGION', secret: false, phase: 'runtime', operation: 'keep' },
+    ]);
+  });
+  it('sends a saved name removed and added again as the new row alone', async () => {
+    const fetch = vi
+      .spyOn(client, 'fetchWithAuth')
+      .mockImplementation(
+        async () => new Response('{}', { headers: { 'Content-Type': 'application/json' } }),
+      );
+    const [token] = variableEdits(variables);
+    await saveGlobalVariables(1, [
+      { ...token, operation: 'remove', value: undefined },
+      { name: 'TOKEN', secret: true, phase: 'both', operation: 'replace', value: 'replacement' },
+    ]);
+    expect(JSON.parse(fetch.mock.lastCall?.[2]?.body as string).variables).toEqual([
+      { name: 'TOKEN', secret: true, phase: 'both', operation: 'replace', value: 'replacement' },
+    ]);
+    await saveGlobalVariables(1, [{ ...token, operation: 'remove', value: undefined }]);
+    expect(JSON.parse(fetch.mock.lastCall?.[2]?.body as string).variables).toEqual([
+      { name: 'TOKEN', secret: true, phase: 'both', operation: 'remove' },
+    ]);
   });
   it('requests saved actions by identity and binding without sending command text', async () => {
     const fetch = vi

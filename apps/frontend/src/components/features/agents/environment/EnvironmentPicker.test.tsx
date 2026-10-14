@@ -78,6 +78,7 @@ it('keeps a saved Secret blank and requires an explicit replacement when changin
     {
       name: 'TOKEN',
       original_name: 'TOKEN',
+      original_secret: true,
       secret: false,
       phase: 'both',
       operation: 'replace',

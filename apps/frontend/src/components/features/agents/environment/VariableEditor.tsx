@@ -9,9 +9,20 @@ export function variableEdits(values: EnvironmentVariable[]): VariableEdit[] {
     secret,
     phase,
     original_name: name,
+    original_secret: secret,
     operation: 'keep',
-    ...(!secret ? { value: value ?? '' } : {}),
+    ...(!secret ? { value: value ?? '', original_value: value ?? '' } : {}),
   }));
+}
+
+/** A saved row back at its saved type and value: keep it, rather than replace it. */
+function asSaved(value: VariableEdit): Partial<VariableEdit> | null {
+  if (!value.original_name || value.secret !== value.original_secret) return null;
+  if (value.original_secret) {
+    // A Secret's value is never shown: an empty field means "leave it as it is".
+    return value.value ? null : { operation: 'keep', value: undefined };
+  }
+  return value.value === value.original_value ? { operation: 'keep' } : null;
 }
 export function VariableEditor({
   values,
@@ -24,7 +35,13 @@ export function VariableEditor({
 }) {
   const t = useT();
   function update(index: number, patch: Partial<VariableEdit>) {
-    onChange(values.map((value, i) => (i === index ? { ...value, ...patch } : value)));
+    onChange(
+      values.map((value, i) => {
+        if (i !== index) return value;
+        const next = { ...value, ...patch };
+        return next.operation === 'remove' ? next : { ...next, ...asSaved(next) };
+      }),
+    );
   }
   return (
     <div className="space-y-3">
@@ -76,14 +93,16 @@ export function VariableEditor({
               aria-label={`${t('environment.type')} ${value.name}`}
               className="ui-input"
               value={value.secret ? 'secret' : 'ordinary'}
-              onChange={(e) =>
+              onChange={(e) => {
+                const secret = e.target.value === 'secret';
+                // A typed or saved Secret is never shown in a plain field. A saved
+                // ordinary value that was only marked Secret is kept as it was.
+                const hidden = value.operation === 'replace' || value.original_secret !== false;
                 update(index, {
-                  secret: e.target.value === 'secret',
-                  ...(value.secret && e.target.value === 'ordinary'
-                    ? { operation: 'replace', value: '' }
-                    : {}),
-                })
-              }
+                  secret,
+                  ...(value.secret && !secret && hidden ? { operation: 'replace', value: '' } : {}),
+                });
+              }}
             >
               <option value="secret">{t('environment.secret')}</option>
               <option value="ordinary">{t('environment.ordinary')}</option>
