@@ -481,6 +481,9 @@ MarkerlessFinalPrepareHook = Callable[[ChatSandboxSpec, ChatSandboxInspection], 
 #: it. Long past any sandbox preparation; a turn that never starts leaves its
 #: message to the control plane, which sends it as the next turn instead.
 HELD_INPUT_TTL_S = 15 * 60.0
+#: The pre-prompt archive's bound on waiting for a concurrent bridge check or
+#: workspace request (the chat page reads the workspace while a chat prepares).
+INITIAL_ARCHIVE_WAIT_S = 30.0
 
 
 @dataclass(frozen=True)
@@ -552,6 +555,9 @@ class SharedChatSessionSupervisor:
         self._condition = threading.Condition(self._lock)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        #: How long the pre-prompt archive waits for a concurrent bridge check
+        #: or workspace request to finish before it reports the group busy.
+        self.initial_archive_wait_s = INITIAL_ARCHIVE_WAIT_S
 
     @property
     def idle_timeout_s(self) -> float:
@@ -3570,6 +3576,50 @@ class SharedChatSessionSupervisor:
             raise SandboxError("shared snapshot capture returned no result")
         return result
 
+    def _require_initial_archive_admission(
+        self,
+        group: _Group,
+        member: _Member,
+        *,
+        expected_spec: ChatSandboxSpec | None,
+        expected_container_id: str | None,
+        own_barrier: bool = False,
+    ) -> None:
+        """Check, under the lock, everything the pre-prompt archive must exclude.
+
+        ``own_barrier`` rechecks after this capture raised its snapshot barrier,
+        which is then the one capture expected to be in progress.
+        """
+        if own_barrier:
+            # This capture's barrier is the one snapshot expected; every other
+            # writer and lifecycle fence is checked as usual.
+            group.snapshotting = False
+            try:
+                self._require_mutation_admission(group)
+            finally:
+                group.snapshotting = True
+        else:
+            self._require_mutation_admission(group)
+        if expected_spec is not None and group.spec != expected_spec:
+            raise SandboxError("shared sandbox immutable identity/configuration changed")
+        if expected_container_id is not None and group.inspection.container_id != (
+            expected_container_id
+        ):
+            raise RetainedChatLost("shared sandbox container identity changed")
+        if group.stopping:
+            raise SessionBusy("shared workspace stop is in progress")
+        if group.snapshotting and not own_barrier:
+            raise SessionBusy("shared workspace snapshot capture is already in progress")
+        if group.container_lost:
+            raise RetainedChatLost("shared sandbox container identity was lost")
+        if member.current_turn is not None or member.transport is not None:
+            raise SessionBusy("initial archive must precede resident process creation")
+        if any(
+            peer is not member and (peer.lease_token is not None or peer.current_turn is not None)
+            for peer in group.members.values()
+        ):
+            raise SessionBusy("a sibling member is active during initial archive capture")
+
     def capture_initial_archive(
         self,
         thread_id: str,
@@ -3596,31 +3646,53 @@ class SharedChatSessionSupervisor:
         """
         with self._lock:
             group, member = self._leased_member(thread_id, token)
-            self._require_mutation_admission(group)
-            if expected_spec is not None and group.spec != expected_spec:
-                raise SandboxError("shared sandbox immutable identity/configuration changed")
-            if (
-                expected_container_id is not None
-                and group.inspection.container_id != expected_container_id
-            ):
-                raise RetainedChatLost("shared sandbox container identity changed")
-            if group.stopping:
-                raise SessionBusy("shared workspace stop is in progress")
-            if group.snapshotting:
-                raise SessionBusy("shared workspace snapshot capture is already in progress")
-            if group.operation_tokens or group.terminal_tokens:
-                raise SessionBusy("shared workspace still has active mutations")
-            if member.current_turn is not None or member.transport is not None:
-                raise SessionBusy("initial archive must precede resident process creation")
-            if any(
-                peer is not member
-                and (peer.lease_token is not None or peer.current_turn is not None)
-                for peer in group.members.values()
-            ):
-                raise SessionBusy("a sibling member is active during initial archive capture")
-            # The barrier goes up first, so Docker can be asked without the lock.
+            deadline = time.monotonic() + self.initial_archive_wait_s
+            # A workspace read revalidates the bridge under a temporary start
+            # fence, and the chat page reads the workspace while a new chat
+            # prepares. Wait for that check as a prompt does, not fail on it.
+            while group.starting or group.lifecycle_check is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise SessionBusy(
+                        "shared workspace start is in progress"
+                        if group.starting
+                        else "shared sandbox lifecycle check is in progress"
+                    )
+                self._condition.wait(timeout=min(remaining, 0.5))
+            group, member = self._leased_member(thread_id, token)
+            self._require_initial_archive_admission(
+                group,
+                member,
+                expected_spec=expected_spec,
+                expected_container_id=expected_container_id,
+            )
+            # The barrier goes up first: no new workspace request is admitted,
+            # and the ones already running (reads, Git inspection, commands)
+            # are given the same bounded time to finish.
             group.snapshotting = True
             group.idle_deadline = None
+            try:
+                while group.operation_tokens or group.terminal_tokens:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise SessionBusy("shared workspace still has active mutations")
+                    self._condition.wait(timeout=min(remaining, 0.5))
+                # The wait released the lock; the lease and group may have moved.
+                leased_group, leased_member = self._leased_member(thread_id, token)
+                if leased_group is not group or leased_member is not member:
+                    raise SessionLeaseLost("shared membership changed before initial archive")
+                self._require_initial_archive_admission(
+                    group,
+                    member,
+                    expected_spec=expected_spec,
+                    expected_container_id=expected_container_id,
+                    own_barrier=True,
+                )
+            except BaseException:
+                group.snapshotting = False
+                self._arm_idle_if_quiescent(group)
+                self._condition.notify_all()
+                raise
             observed = group.inspection
             lifecycle_generation = group.lifecycle_generation
             authoritative_spec = group.spec

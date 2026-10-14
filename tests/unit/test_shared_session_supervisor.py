@@ -4412,22 +4412,24 @@ def test_failed_start_marker_completion_is_retried_in_place_before_snapshot() ->
     assert manager.stop_count == 1
 
 
-def test_initial_archive_is_fenced_while_a_group_start_is_in_progress() -> None:
-    class BlockingStartManager(_Manager):
-        def __init__(self) -> None:
-            super().__init__()
-            self.block_start = False
-            self.start_entered = threading.Event()
-            self.start_release = threading.Event()
+class _BlockingStartManager(_Manager):
+    def __init__(self) -> None:
+        super().__init__()
+        self.block_start = False
+        self.start_entered = threading.Event()
+        self.start_release = threading.Event()
 
-        def start(self, spec, **kwargs):
-            current = self.items[spec.container_name]
-            if self.block_start and not current.running:
-                self.start_entered.set()
-                assert self.start_release.wait(timeout=2)
-            return super().start(spec, **kwargs)
+    def start(self, spec, **kwargs):
+        current = self.items[spec.container_name]
+        if self.block_start and not current.running:
+            self.start_entered.set()
+            assert self.start_release.wait(timeout=2)
+        return super().start(spec, **kwargs)
 
-    manager = BlockingStartManager()
+
+def test_initial_archive_waits_out_a_concurrent_start_and_workspace_request() -> None:
+    """The chat page reads the workspace while a new chat prepares (staging 409)."""
+    manager = _BlockingStartManager()
     supervisor = SharedChatSessionSupervisor(manager)
     lease = supervisor.acquire(
         _spec(),
@@ -4440,40 +4442,71 @@ def test_initial_archive_is_fenced_while_a_group_start_is_in_progress() -> None:
     manager.stop(_spec(), release_networks=False)
     manager.block_start = True
     opened: list[tuple[str, SharedSessionDescriptor]] = []
-    errors: list[BaseException] = []
-
-    def open_operation() -> None:
-        try:
-            opened.append(supervisor.operation_opened("athr_peer"))
-        except BaseException as exc:  # pragma: no cover - asserted below
-            errors.append(exc)
-
-    opening = threading.Thread(target=open_operation)
+    opening = threading.Thread(
+        target=lambda: opened.append(supervisor.operation_opened("athr_peer"))
+    )
     opening.start()
     assert manager.start_entered.wait(timeout=1)
-    captured = False
+    captured = threading.Event()
 
     def capture(*_args):
-        nonlocal captured
-        captured = True
+        captured.set()
         return {"enabled": True, "stored": True}
 
+    capturing, outcome = _in_thread(
+        lambda: supervisor.capture_initial_archive("athr_source", lease.token, capture=capture)
+    )
     try:
-        with pytest.raises(SessionBusy, match="start is in progress"):
-            supervisor.capture_initial_archive(
-                "athr_source",
-                lease.token,
-                capture=capture,
-            )
-    finally:
+        # Neither the start nor the workspace request it admits fails the archive.
+        capturing.join(timeout=0.3)
+        assert capturing.is_alive()
         manager.start_release.set()
         opening.join(timeout=2)
+        assert not opening.is_alive() and opened
+        capturing.join(timeout=0.3)
+        assert capturing.is_alive(), "the archive captured while a request was still running"
+        assert not captured.is_set()
+        token, _ = opened[0]
+        supervisor.operation_closed("athr_peer", token)
+        capturing.join(timeout=2)
+    finally:
+        manager.start_release.set()
 
-    assert not opening.is_alive()
-    assert errors == []
-    assert captured is False
-    token, _ = opened[0]
+    assert not capturing.is_alive()
+    assert "error" not in outcome
+    assert captured.is_set()
+    assert supervisor._members["athr_source"].snapshotting is False
+
+
+def test_initial_archive_reports_busy_once_a_request_outlasts_its_wait() -> None:
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager)
+    supervisor.initial_archive_wait_s = 0.3
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=False,
+        manifest=_members(),
+    )
+    token, _ = supervisor.operation_opened("athr_peer")
+    captured: list[bool] = []
+
+    with pytest.raises(SessionBusy, match="active mutations"):
+        supervisor.capture_initial_archive(
+            "athr_source", lease.token, capture=lambda *_args: captured.append(True) or {}
+        )
+
+    group = supervisor._members["athr_source"]
+    assert captured == []
+    assert group.snapshotting is False
+    # The barrier is gone: the request finishes, and the next attempt captures.
     supervisor.operation_closed("athr_peer", token)
+    supervisor.capture_initial_archive(
+        "athr_source", lease.token, capture=lambda *_args: captured.append(True) or {}
+    )
+    assert captured == [True]
 
 
 def test_failed_marked_initial_archive_stops_and_completes_the_final_archive() -> None:
