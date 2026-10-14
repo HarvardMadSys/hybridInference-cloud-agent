@@ -20,9 +20,12 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, Mock
 
+import pytest
+from fastapi import HTTPException
 from tests.unit.test_goal_controller import FakeGateway
 from tests.unit.test_runner_host_settings import _JOB, _run_new_chat
 
+from cloud_agent.api.environments import RuntimeRefreshInput, refresh_runtime_environment
 from cloud_agent.api.worker import _claim_agent_memories
 from cloud_agent.goals.controller import _check_access
 from cloud_agent_host import runner as runner_mod
@@ -207,3 +210,49 @@ async def test_a_goal_in_a_temporary_workspace_still_needs_agent_access() -> Non
     assert action is not None
     assert action.kind == "pause"
     assert action.reason == "access_denied"
+
+
+def _environment_store(repo: str | None) -> SimpleNamespace:
+    job = {"id": "ajob_1", "user_id": "owner", "repo": repo, "environment_binding_id": "aenvb_1"}
+    return SimpleNamespace(
+        conversation_queries=SimpleNamespace(get_job=AsyncMock(return_value=job)),
+        source_control=object(),
+        environments=SimpleNamespace(
+            refresh_runtime_environment=AsyncMock(return_value={"runtime_revision": 2})
+        ),
+    )
+
+
+async def test_a_temporary_workspace_refreshes_its_runtime_variables(monkeypatch) -> None:
+    """A workspace with no repository has no repository access to recheck."""
+
+    async def refuse(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("a temporary workspace has no repository to check")
+
+    monkeypatch.setattr("cloud_agent.api.environments.require_entitled_repo", refuse)
+    store = _environment_store(None)
+
+    result = await refresh_runtime_environment(
+        "ajob_1", RuntimeRefreshInput(runtime_revision=1), {"user_id": "owner"}, store, object()
+    )
+
+    assert result == {"runtime_revision": 2}
+    store.environments.refresh_runtime_environment.assert_awaited_once_with("owner", "aenvb_1", 1)
+
+
+async def test_a_repository_workspace_still_rechecks_its_repository(monkeypatch) -> None:
+    from cloud_agent.entitlement import RepoNotAllowed
+
+    async def refuse(*_args: Any, **_kwargs: Any) -> None:
+        raise RepoNotAllowed("withdrawn")
+
+    monkeypatch.setattr("cloud_agent.api.environments.require_entitled_repo", refuse)
+    store = _environment_store("owner/repo")
+
+    with pytest.raises(HTTPException) as refused:
+        await refresh_runtime_environment(
+            "ajob_1", RuntimeRefreshInput(runtime_revision=1), {"user_id": "owner"}, store, object()
+        )
+
+    assert refused.value.status_code == 403
+    store.environments.refresh_runtime_environment.assert_not_awaited()
