@@ -498,13 +498,28 @@ async def test_repository_metadata_uses_configured_github_api(monkeypatch):
     assert urls == ["https://github.example.org/api/v3/repos/org/repo/commits/dev"]
 
 
-def test_environment_config_is_hidden_until_deployment_flag_is_enabled(monkeypatch):
+@pytest.mark.parametrize("legacy_value", [None, "false", "true"])
+def test_environment_config_is_always_available_despite_legacy_flag(monkeypatch, legacy_value):
+    from cloud_agent import settings
     from cloud_agent.schemas import AgentConfigResponse
 
-    monkeypatch.setenv("AGENT_REPOSITORY_ENVIRONMENTS_ENABLED", "false")
-    assert AgentConfigResponse(github_load_status="ready").environment_limits is None
-    monkeypatch.setenv("AGENT_REPOSITORY_ENVIRONMENTS_ENABLED", "true")
-    assert (
-        AgentConfigResponse(github_load_status="ready").environment_limits["capability"]
-        == "environment-v1"
-    )
+    if legacy_value is None:
+        monkeypatch.delenv("AGENT_REPOSITORY_ENVIRONMENTS_ENABLED", raising=False)
+    else:
+        monkeypatch.setenv("AGENT_REPOSITORY_ENVIRONMENTS_ENABLED", legacy_value)
+    settings.reset_settings()
+    try:
+        settings.apply_settings(1, {"repository_environments_enabled": False})
+        assert (
+            AgentConfigResponse(github_load_status="ready").environment_limits["capability"]
+            == "environment-v1"
+        )
+        assert "repository_environments_enabled" not in settings.SETTINGS_BY_KEY
+        assert all(
+            field["key"] != "repository_environments_enabled"
+            for field in settings.settings_response(1, {"repository_environments_enabled": False})[
+                "definitions"
+            ]
+        )
+    finally:
+        settings.reset_settings()

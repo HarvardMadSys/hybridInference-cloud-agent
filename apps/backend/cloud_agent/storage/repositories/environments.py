@@ -651,10 +651,6 @@ class PostgresEnvironmentRepository:
         )
         document = _json(version["document"]) if version else {}
         required = bool(merged or setup or document.get("start_script") or document.get("actions"))
-        from cloud_agent.settings import setting_env
-
-        if required and setting_env("AGENT_REPOSITORY_ENVIRONMENTS_ENABLED", "false") != "true":
-            raise EnvironmentInputError("Repository environments are disabled for new workspaces")
         binding_id = _id()
         await conn.execute(
             "INSERT INTO agent_environment_bindings(id,user_id,repo,environment_version_id,global_version_id,overrides,setup_override,has_setup_override,required) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9)",
@@ -785,14 +781,6 @@ class PostgresEnvironmentRepository:
                 self._environment_decode(_json(binding["overrides"])),
             )
             runtime = [v for v in merged if v.phase in ("runtime", "both")]
-            from cloud_agent.settings import setting_env
-
-            if (
-                runtime
-                and not binding["required"]
-                and setting_env("AGENT_REPOSITORY_ENVIRONMENTS_ENABLED", "false") != "true"
-            ):
-                raise EnvironmentInputError("Repository environments are disabled for new bindings")
             # Original installation secrets remain in the base snapshot. Retain prior
             # runtime values as scan material for files produced by earlier turns.
             prior = _json(binding["runtime_secret_history"])

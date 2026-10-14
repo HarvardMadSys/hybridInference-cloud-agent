@@ -594,7 +594,6 @@ export function JobDetail({
       <JobDetailHeader
         panels={panels}
         job={job}
-        environmentEnabled={Boolean(config?.environment_limits)}
         title={title}
         canForkCurrent={canForkCurrent}
         forking={forking}

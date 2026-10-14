@@ -12,7 +12,6 @@ export function WorkspaceTabBar({
   onAdd,
   onClose,
   onBack,
-  environmentEnabled = false,
 }: {
   selected: WorkspaceTab;
   chats: SideChatTab[];
@@ -21,7 +20,6 @@ export function WorkspaceTabBar({
   onAdd: () => WorkspaceTab;
   onClose: (id: SideChatTab['id']) => WorkspaceTab;
   onBack?: () => void;
-  environmentEnabled?: boolean;
 }) {
   const t = useT();
   const [focusTab, setFocusTab] = useState<WorkspaceTab | null>(null);
@@ -29,7 +27,7 @@ export function WorkspaceTabBar({
     { key: 'git', label: 'Git' },
     { key: 'terminal', label: 'Terminal' },
     { key: 'files', label: 'Files' },
-    ...(environmentEnabled ? [{ key: 'environment' as const, label: t('environment.title') }] : []),
+    { key: 'environment', label: t('environment.title') },
     ...chats.map((chat) => {
       const label = t(chat.reviewPrompt ? 'review.tab' : 'sideChat.tab');
       return {

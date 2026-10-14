@@ -94,7 +94,6 @@ export function JobDetailSidePanels({
           <>
             <WorkspaceTabBar
               key={`${userId}:${job.threadId ?? job.id}`}
-              environmentEnabled={Boolean(config?.environment_limits)}
               selected={workspaceTab}
               chats={workspaceTabs.chats}
               diffCount={job.diffFiles.length}
@@ -110,7 +109,7 @@ export function JobDetailSidePanels({
               hidden={workspaceTab !== 'environment'}
               className="min-h-0 flex-1 overflow-y-auto"
             >
-              {config?.environment_limits && workspaceTab === 'environment' && (
+              {workspaceTab === 'environment' && (
                 <WorkspaceEnvironment
                   key={job.threadId ?? job.id}
                   jobId={job.id}

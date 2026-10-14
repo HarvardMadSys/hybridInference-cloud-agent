@@ -3637,11 +3637,13 @@ Control plane values use `AGENT_SOURCE_CONTROL_ENCRYPTION_KEY` with a separate
 existing credential store; changing it without re-encryption makes old bindings
 unreadable. Secrets are not available through owner read/history APIs.
 
-The admin setting `repository_environments_enabled` defaults to false.
-`AGENT_REPOSITORY_ENVIRONMENTS_ENABLED=true` imports its initial value; saved
-settings are authoritative afterward. Enable only after all replicas are upgraded
-and deployment acceptance completes. Disable to hide UI and stop new nonempty
-bindings/tests; existing configured workspaces retain execution and recovery.
+Repository environments are a standard product feature, available without an
+admin switch. Settings, task selection and the Environment tab are always shown;
+`/config` always returns environment limits. Legacy saved or environment values
+for `repository_environments_enabled` / `AGENT_REPOSITORY_ENVIRONMENTS_ENABLED`
+are ignored and no longer appear in the settings editor. Unconfigured tasks keep
+base-environment behavior without preparation; configured workspaces still require
+actual runner and sandbox manager support for `environment-v1`.
 
 Upgrade every control-plane replica before creating any new environment-bound
 workspace; mixed old/new admission, Fork and terminal handlers may silently lose

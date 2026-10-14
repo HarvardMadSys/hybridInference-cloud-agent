@@ -11,7 +11,6 @@ from cloud_agent.goals.models import GoalLimits
 from cloud_agent.schemas.mcp import (
     McpConnectionSummary,  # noqa: TC001 — Pydantic resolves annotations at runtime.
 )
-from cloud_agent.settings import setting_env
 from cloud_agent.skills.models import SkillLimits
 from cloud_agent.source_control_runtime import (
     LoadStatus,  # noqa: TC001 — Pydantic resolves annotations at runtime.
@@ -27,13 +26,7 @@ class AgentConfigResponse(BaseModel):
     described a job nobody was running. These are the real answers.
     """
 
-    environment_limits: dict[str, Any] | None = Field(
-        default_factory=lambda: (
-            environment_limits()
-            if setting_env("AGENT_REPOSITORY_ENVIRONMENTS_ENABLED", "false") == "true"
-            else None
-        )
-    )
+    environment_limits: dict[str, Any] = Field(default_factory=environment_limits)
     skill_limits: SkillLimits = Field(default_factory=SkillLimits)
     attachment_limits: AttachmentLimits = Field(default_factory=AttachmentLimits)
     goal_limits: GoalLimits = Field(default_factory=GoalLimits)

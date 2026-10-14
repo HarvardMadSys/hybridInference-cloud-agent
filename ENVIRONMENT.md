@@ -296,7 +296,6 @@ permissions, retention and verification requirements.
 | `AGENT_API_DOCS` | **NEW** | Defaults to off. Set to `true` on a development stack to serve `/docs`, `/redoc` and `/openapi.json` on the main API. Off, none of the three is served: the schema is unauthenticated, and the two pages load scripts from a CDN at a floating version. The MCP-only listener never serves them. |
 | `AGENT_MAX_STREAMS_PER_USER` | **NEW** | Default `24`. How many live-update streams (the change stream and job event streams) one account may hold open on one control-plane process; one more answers 429 with `Retry-After`, which the web app backs off on. A browser tab holds one change stream and one stream per conversation it is watching. A missing, non-numeric or non-positive value uses the default. |
 | `AGENT_TRUST_PROXY_HEADERS` | **NEW** | Defaults to off. Set to `true` only when a proxy this deployment controls sits directly in front of the control plane and writes `X-Forwarded-For`; both shipped nginx configurations overwrite it with the peer address. Only the rightmost entry, the one that proxy wrote, is recorded in the admin audit trail, so a proxy that appends instead works too; entries to its left are the caller's own and are ignored. Behind a further proxy, such as a tunnel or load balancer in front of the edge, the recorded address is that hop's unless the edge uses nginx's realip module as its configuration describes. |
-| `AGENT_REPOSITORY_ENVIRONMENTS_ENABLED` | **NEW**, optional initial import | Initial value of Admin → Settings → Repository environments (`repository_environments_enabled`), default `false`; saved settings take precedence. See [Repository environments rollout](#repository-environments-rollout) before turning it on. |
 | `AGENT_DEPLOYMENT_SHA` | **NEW** | Exact commit this API serves. Required by the production control-plane Compose stack and exported by `deploy/control-plane/deploy.sh`; do not hand-edit it during a rollout. New retained-group claims require the polling replica to advertise the matching completed host marker, so a pending or failed host deployment cannot claim through a cold-start API. The local stack generates its own stack-scoped marker. |
 
 ### Source control
@@ -823,6 +822,8 @@ Recorded here as *what has to be decided*, not as anyone's actual answer.
 3. If it is a secret, say where it is stored — never the value itself.
 4. The PR checklist enforces this; a new variable without a row is a review stop.
 
-### Repository environments rollout
+### Repository environments
 
-Admin → Settings → Repository environments (`repository_environments_enabled`) defaults to false. `AGENT_REPOSITORY_ENVIRONMENTS_ENABLED=true` imports the initial value; saved settings take precedence. Enable only after every control-plane and host/broker replica is upgraded and deployment acceptance is complete. Disabling hides the UI and blocks new nonempty bindings and test runs; existing workspace bindings keep executing with their configuration.
+Reusable repository environments are available by default. There is no feature switch or initial environment-variable import. A legacy `repository_environments_enabled=false` setting or `AGENT_REPOSITORY_ENVIRONMENTS_ENABLED=false` value is ignored. Settings, task selection and the workspace Environment tab are always offered. `/config` always reports environment limits.
+
+A task with no configured variables or scripts uses the base environment without environment preparation. Configured workspaces still require an environment-capable runner and sandbox manager; owner authorization, encryption and execution isolation remain enforced.

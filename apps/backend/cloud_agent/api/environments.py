@@ -516,10 +516,6 @@ async def test_environment(
     credentials: Any = Depends(get_agent_app_credentials),
 ) -> dict[str, Any]:
     """Queue a disposable test without minting any inference credentials."""
-    from cloud_agent.settings import setting_env
-
-    if setting_env("AGENT_REPOSITORY_ENVIRONMENTS_ENABLED", "false") != "true":
-        raise HTTPException(503, "Repository environments are disabled for new tests")
     store = require_store(store)
     selection = {
         "environment_id": body.environment_id,

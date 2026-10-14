@@ -245,7 +245,7 @@ async function chooseRepository(name = 'owner/repository') {
 
 describe('TaskComposer source-control onboarding', () => {
   it('keeps repository switching usable after environment loading fails and can retry', async () => {
-    vi.mocked(getAgentConfig).mockResolvedValue(config({ environment_limits: {} }));
+    vi.mocked(getAgentConfig).mockResolvedValue(config());
     vi.mocked(listEnvironments).mockRejectedValueOnce(new Error('Environment unavailable'));
     render(<TaskComposer />);
     await chooseRepository();
@@ -275,7 +275,7 @@ describe('TaskComposer source-control onboarding', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: 'Run' })).toBeEnabled());
   });
   it('submits without environment fields after an initial load failure so server defaults apply', async () => {
-    vi.mocked(getAgentConfig).mockResolvedValue(config({ environment_limits: {} }));
+    vi.mocked(getAgentConfig).mockResolvedValue(config());
     vi.mocked(listEnvironments).mockRejectedValue(new Error('Environment unavailable'));
     vi.mocked(createAgentJob).mockResolvedValue({ id: 'new-job' } as AgentJobApi);
     render(<TaskComposer />);
@@ -296,6 +296,22 @@ describe('TaskComposer source-control onboarding', () => {
     sessionStorage.clear();
     vi.mocked(githubAccessUrl).mockReset();
     vi.mocked(leaveFor).mockReset();
+    vi.mocked(listEnvironments)
+      .mockReset()
+      .mockResolvedValue({
+        environments: [],
+        globals: {
+          id: null,
+          name: 'Global',
+          repo: null,
+          revision: 0,
+          variables: [],
+          setup_script: '',
+          start_script: '',
+          verify_script: '',
+          actions: [],
+        },
+      });
     vi.mocked(listSkills).mockResolvedValue([]);
     vi.mocked(listMcpConnections).mockResolvedValue({ connections: [], templates: [] });
     vi.mocked(getMcpConnectionCapabilities).mockResolvedValue([]);
@@ -921,6 +937,10 @@ describe('TaskComposer source-control onboarding', () => {
         runtime: 'claude-code',
         model: 'model-a',
         base_ref: 'dev',
+        environment_id: null,
+        environment_revision: 0,
+        global_revision: 0,
+        environment_overrides: [],
       }),
     );
     expect(navigation.push).toHaveBeenCalledWith('/ajob_1');
@@ -1719,6 +1739,10 @@ describe('TaskComposer source-control onboarding', () => {
         runtime: 'claude-code',
         model: 'model-a',
         base_ref: 'dev',
+        environment_id: null,
+        environment_revision: 0,
+        global_revision: 0,
+        environment_overrides: [],
       }),
     );
     expect(navigation.push).toHaveBeenCalledWith('/ajob_1');
@@ -1884,6 +1908,7 @@ describe('durable new-task drafts', () => {
     const second = render(<TaskComposer />);
     expect(await screen.findByRole('textbox')).toHaveValue('Next task');
     vi.mocked(createAgentJob).mockResolvedValue({ id: 'next-task' } as AgentJobApi);
+    await waitFor(() => expect(screen.getByRole('button', { name: /Run/ })).toBeEnabled());
     fireEvent.click(screen.getByRole('button', { name: /Run/ }));
     await waitFor(() => expect(navigation.push).toHaveBeenCalledWith('/next-task'));
     second.unmount();

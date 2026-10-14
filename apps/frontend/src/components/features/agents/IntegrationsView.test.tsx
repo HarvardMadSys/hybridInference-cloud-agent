@@ -190,6 +190,13 @@ afterEach(() => {
 });
 
 describe('IntegrationsView', () => {
+  it('shows environment management even while the capability request is unavailable', async () => {
+    vi.mocked(getAgentConfig).mockRejectedValue(new Error('Config unavailable'));
+    mockedGetIntegrations.mockResolvedValue(integrations);
+    render(<IntegrationsView />);
+    expect(screen.getByTestId('environment-manager')).toBeInTheDocument();
+    await screen.findByRole('heading', { level: 1, name: 'My Settings' });
+  });
   it('shows connected accounts and a same-window connect link', async () => {
     mockedGetIntegrations.mockResolvedValue(integrations);
 
