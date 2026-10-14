@@ -348,7 +348,7 @@ def test_the_database_revision_is_alembics_head() -> None:
     ("document", "sentence"),
     [
         ("ENVIRONMENT.md", r"Run `alembic upgrade head` \(through `([^`]+)`\)"),
-        ("docs/operations.md", r"run `alembic upgrade head` through\s+`([^`]+)`"),
+        ("docs/developer/operations.md", r"run `alembic upgrade head` through\s+`([^`]+)`"),
     ],
 )
 def test_the_upgrade_instructions_name_the_revision_this_release_migrates_to(

@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime  # noqa: TC003 — Pydantic resolves annotations at runtime.
 from typing import Annotated, Any, Literal
 
-from pydantic import AliasChoices, BaseModel, Field, StrictInt, model_validator
+from pydantic import AliasChoices, BaseModel, Field, StrictInt, ValidationError, model_validator
 
 from cloud_agent.capacity_protocol import HostCapacityReport, parse_capacity_block
 from cloud_agent.host_pool import ENROLL_TOKEN_TTL_S
@@ -167,6 +167,41 @@ class ResidencyBeat(BaseModel):
     generation: int = Field(..., ge=1)
 
 
+class SandboxCheckpointMember(BaseModel):
+    """One chat's native-session position inside a checkpoint."""
+
+    thread_id: str = Field(..., min_length=1, max_length=128)
+    native_session_id: str | None = Field(None, max_length=256)
+    last_settled_job_id: str | None = Field(None, max_length=256)
+    context_status: str | None = Field(None, max_length=32)
+
+
+class SandboxCheckpointBeat(BaseModel):
+    """The latest restorable checkpoint a host stored for one retained group."""
+
+    checkpoint_id: str = Field(..., pattern=r"^[0-9a-f]{32}$")
+    sandbox_id: str = Field(..., min_length=1, max_length=128)
+    generation: int = Field(..., ge=1)
+    container_id: str = Field(..., min_length=12, max_length=128)
+    base_image: str = Field(..., min_length=1, max_length=256)
+    runtime_id: str = Field(..., min_length=1, max_length=128)
+    runtime_version: str | None = Field(None, max_length=128)
+    object_key: str = Field(
+        ...,
+        pattern=r"^cloud-agent/sandbox/v2/[0-9a-f]{64}/g[0-9]+/[0-9a-f]{32}\.oci\.tar$",
+        max_length=256,
+    )
+    version_id: str | None = Field(None, max_length=1024)
+    sha256: str = Field(..., pattern=r"^[0-9a-f]{64}$")
+    size_bytes: int = Field(..., ge=1)
+    new_layer_bytes: int = Field(..., ge=0)
+    layer_count: int = Field(..., ge=1, le=1024)
+    created_at: datetime
+    members: list[SandboxCheckpointMember] = Field(default_factory=list, max_length=128)
+    durations_ms: dict[str, int] = Field(default_factory=dict, max_length=16)
+    format_version: Literal[1] = 1
+
+
 class RetainedSandboxBeat(BaseModel):
     """Docker-observed lifecycle of one retained chat sandbox on this host."""
 
@@ -197,6 +232,7 @@ class RetainedSandboxBeat(BaseModel):
     members: list[WorkerSandboxMember] = Field(default_factory=list, max_length=128)
     resource_usage: SandboxResourceSample | None = None
     terminal_count: StrictInt | None = Field(None, ge=0, le=4096)
+    checkpoint: SandboxCheckpointBeat | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -207,6 +243,11 @@ class RetainedSandboxBeat(BaseModel):
         result = dict(data)
         if result.get("resource_usage") is not None:
             result["resource_usage"] = parse_sandbox_resource_sample(result["resource_usage"])
+        if result.get("checkpoint") is not None:
+            try:
+                result["checkpoint"] = SandboxCheckpointBeat.model_validate(result["checkpoint"])
+            except ValidationError:
+                result["checkpoint"] = None
         count = result.get("terminal_count")
         if count is not None and (
             isinstance(count, bool) or not isinstance(count, int) or not 0 <= count <= 4096

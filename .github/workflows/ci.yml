@@ -33,7 +33,7 @@ on:
 # dispatches, which also publish and synchronise. PRs keep a read-only token,
 # checkout never persists it, and no PR job receives secrets. A fork can edit
 # this file, so these expressions are not the boundary: the runner-group
-# restrictions in docs/development.md (#464) are.
+# restrictions in docs/developer/development.md (#464) are.
 permissions:
   contents: read
 
@@ -55,6 +55,7 @@ jobs:
       backend: ${{ steps.classify.outputs.backend }}
       web: ${{ steps.classify.outputs.web }}
       docker: ${{ steps.classify.outputs.docker }}
+      docs: ${{ steps.classify.outputs.docs }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
@@ -107,6 +108,7 @@ jobs:
               echo "backend=true"
               echo "web=true"
               echo "docker=true"
+              echo "docs=true"
             } >> "${GITHUB_OUTPUT}"
             exit 0
           fi
@@ -145,16 +147,27 @@ jobs:
             docker=false
           fi
 
+          # Docs: the site's sources, any Markdown file a page includes or
+          # links to, and the locked Sphinx toolchain and the target that runs it.
+          if matches '\.md$' \
+             || matches '^docs/developer/' \
+             || matches '^(pyproject\.toml|uv\.lock|Makefile)$'; then
+            docs=true
+          else
+            docs=false
+          fi
+
           # A change to CI itself runs all of it: the thing being changed is the
           # checking, and a filtered CI edit is checked by nothing.
           if matches '^\.github/workflows/'; then
-            backend=true; web=true; docker=true
+            backend=true; web=true; docker=true; docs=true
           fi
 
           {
             echo "backend=${backend}"
             echo "web=${web}"
             echo "docker=${docker}"
+            echo "docs=${docs}"
           } | tee -a "${GITHUB_OUTPUT}"
 
   # ---------------------------------------------------------------- backend
@@ -1783,6 +1796,51 @@ jobs:
             -e AGENT_SANDBOX_BACKEND=kata -e "AGENT_SANDBOX_IMAGE=$sandbox" \
             "$runner" python -m cloud_agent_host.candidate_check
 
+  # ------------------------------------------------------------------- docs
+  # The developer documentation in docs/developer/ builds with warnings as
+  # errors, so a broken link, a missing anchor or a page left out of the table
+  # of contents fails here rather than on the published site.
+  docs-build:
+    name: Docs Build
+    needs: changes
+    if: needs.changes.outputs.docs == 'true'
+    # A dependency install and one sphinx-build that takes seconds; without a
+    # limit a hung step would hold a runner for the 360-minute default.
+    timeout-minutes: 10
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-24.04"]' || '["self-hosted","Linux","ci-general"]') }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          # Full fetch, for the same checkout reliability reason as Lint.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Isolate uv cache dir
+        # Off the shared ~/.cache/uv; see the note on this step in Lint.
+        run: |
+          echo "UV_CACHE_DIR=${RUNNER_TEMP}/uv-cache" >> "${GITHUB_ENV}"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          prune-cache: false
+
+      - name: Set up Python
+        run: uv python install ${{ env.PYTHON_VERSION }}
+
+      # --only-group: the build needs Sphinx, myst-parser and the theme from
+      # the `dev` group, never the application or its runtime dependencies.
+      - name: Sync dependencies
+        run: uv sync --locked --only-group dev
+
+      # Through the Makefile, so this job and a contributor's `make docs` run
+      # the same command. --no-sync keeps `uv run` from re-syncing the full
+      # project closure the step above deliberately left out.
+      - name: Build developer docs
+        run: make docs UV_RUN="uv run --no-sync"
+
   ci-gate:
     name: CI Gate
     # The single job that says whether this commit is good. `publish.yml` keys
@@ -1802,6 +1860,7 @@ jobs:
       - mcp
       - compose
       - kata
+      - docs-build
     steps:
       - name: Report the pull request qualification boundary
         if: github.event_name == 'pull_request'
@@ -1822,6 +1881,7 @@ jobs:
             mcp=${{ needs.mcp.result }}
             compose=${{ needs.compose.result }}
             kata=${{ needs.kata.result }}
+            docs-build=${{ needs.docs-build.result }}
           CHANGES_RESULT: ${{ needs.changes.result }}
         run: |
           set -euo pipefail

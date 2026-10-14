@@ -18,6 +18,7 @@ import {
 import { getErrorMessage } from '@/lib/utils/errors';
 
 import { AdminNavigation } from '../../AdminNavigation';
+import { formatBytes } from '../present';
 import {
   accessDenied,
   AdminRequired,
@@ -222,6 +223,7 @@ function SandboxTrajectory({ sandboxId }: { sandboxId: string }) {
   }
 
   const sandbox = trajectory?.sandbox;
+  const checkpoint = trajectory?.latest_checkpoint ?? null;
   const memberCount =
     trajectory?.member_history_count ?? trajectory?.members.length ?? sandbox?.member_count ?? 0;
   const idleBlocked = sandbox
@@ -433,6 +435,12 @@ function SandboxTrajectory({ sandboxId }: { sandboxId: string }) {
                 ['Members', String(memberCount)],
                 ['Created', dateTime(sandbox.created_at)],
                 ['Last activity', dateTime(sandbox.last_activity_at)],
+                [
+                  'Latest checkpoint',
+                  checkpoint
+                    ? `${formatBytes(checkpoint.size_bytes)}, ${dateTime(checkpoint.captured_at)}`
+                    : 'None',
+                ],
               ].map(([label, value]) => (
                 <div key={label} className="min-w-0">
                   <dt className="text-xs text-gray-500 dark:text-gray-400">{label}</dt>

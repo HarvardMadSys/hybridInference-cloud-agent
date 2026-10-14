@@ -107,3 +107,25 @@ def test_access_key_replaces_bucket_owner_and_kms_and_stays_out_of_markers() -> 
     assert restored.aws_secret_access_key == ""
     assert not restored.equivalent(policy)
     assert SandboxArchivePolicy.from_mapping(policy.as_sandbox_manager_dict()).equivalent(policy)
+
+
+def test_checkpoints_follow_archives_and_only_the_opt_out_is_written() -> None:
+    default = SandboxArchivePolicy.from_mapping(_enabled())
+    opted_out = SandboxArchivePolicy.from_mapping(_enabled(checkpoints_enabled=False))
+    disabled = SandboxArchivePolicy.from_mapping({"enabled": False, "checkpoints_enabled": True})
+
+    # Enabled archives checkpoint by default, and that default is written as
+    # nothing, so it matches policies and markers that predate checkpoints.
+    assert default.checkpoints_enabled is True
+    assert "checkpoints_enabled" not in default.as_dict()
+    assert "checkpoints_enabled" not in default.as_storage_dict()
+    assert opted_out.checkpoints_enabled is False
+    assert opted_out.as_dict()["checkpoints_enabled"] is False
+    assert opted_out.as_storage_dict()["checkpoints_enabled"] is False
+    assert SandboxArchivePolicy.from_mapping(opted_out.as_dict()) == opted_out
+    assert opted_out != default
+    # Checkpoints ride on archives: disabled archives never checkpoint.
+    assert disabled.checkpoints_enabled is False
+    assert "checkpoints_enabled" not in disabled.as_dict()
+    with pytest.raises(SandboxArchivePolicyError, match="boolean"):
+        SandboxArchivePolicy.from_mapping(_enabled(checkpoints_enabled="yes"))

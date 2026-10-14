@@ -60,6 +60,10 @@ if TYPE_CHECKING:
         ChatSandboxSpec,
         RetainedChatBackend,
     )
+    from cloud_agent_host.sandbox_checkpoints import (
+        SandboxCheckpointCapture,
+        SandboxCheckpointReceipt,
+    )
     from cloud_agent_host.shared_session_supervisor import SharedMemberManifest
 
 
@@ -97,6 +101,13 @@ class _ArchiveService(Protocol):
         inspection: ChatSandboxInspection,
         members: tuple[SharedMemberManifest, ...],
     ) -> SandboxArchiveReceipt: ...
+
+    def capture_checkpoint(
+        self,
+        spec: ChatSandboxSpec,
+        inspection: ChatSandboxInspection,
+        members: tuple[SharedMemberManifest, ...],
+    ) -> SandboxCheckpointReceipt: ...
 
 
 @dataclass(eq=False)
@@ -290,11 +301,13 @@ class SandboxArchiveController:
         *,
         namespace: str,
         service_factory: Callable[[SandboxArchiveS3Config], _ArchiveService] | None = None,
+        checkpoint_capture: SandboxCheckpointCapture | None = None,
     ) -> None:
         if not namespace:
             raise ValueError("sandbox archive namespace must not be empty")
         self._manager = manager
         self._namespace = namespace
+        self._checkpoint_capture = checkpoint_capture
         self._service_factory = service_factory or self._new_service
         # Every policy revision may temporarily retain its own service for an
         # in-flight capture or failed final retry. They nevertheless share one
@@ -337,6 +350,7 @@ class SandboxArchiveController:
             uploader=uploader,
             config=config,
             capture_slots=self._capture_slots,
+            checkpoint_capture=self._checkpoint_capture,
         )
 
     @property
@@ -870,6 +884,8 @@ class SandboxArchiveController:
                 uploaded_marker.encode(),
                 expected_container_id=inspection.container_id,
             )
+            if slot.policy.checkpoints_enabled and self._checkpoint_capture is not None:
+                self._capture_checkpoint(slot, spec, inspection, members)
             succeeded = True
         finally:
             services_to_close: list[_ArchiveService]
@@ -882,6 +898,43 @@ class SandboxArchiveController:
                 services_to_close = self._closable_locked()
                 self._condition.notify_all()
             self._close_services(services_to_close)
+
+    @staticmethod
+    def _capture_checkpoint(
+        slot: _ServiceSlot,
+        spec: ChatSandboxSpec,
+        inspection: ChatSandboxInspection,
+        members: tuple[SharedMemberManifest, ...],
+    ) -> None:
+        """Checkpoint a clean stop whose final archive is already durable.
+
+        A checkpoint is an optimisation for moving the chat later, never a
+        condition of stopping it: a failure is logged and the stop completes.
+        """
+        try:
+            receipt = slot.service.capture_checkpoint(spec, inspection, members)
+        except Exception as exc:
+            logger.warning(
+                "sandbox checkpoint failed; the clean stop still completes",
+                extra={
+                    "event": "sandbox_checkpoint_failed",
+                    "sandbox_id": spec.sandbox_id,
+                    "generation": spec.generation,
+                    "error_type": safe_archive_error_type(exc),
+                },
+            )
+            return
+        logger.info(
+            "sandbox checkpoint stored",
+            extra={
+                "event": "sandbox_checkpoint_stored",
+                "sandbox_id": spec.sandbox_id,
+                "generation": spec.generation,
+                "size_bytes": receipt.size_bytes,
+                "new_layer_bytes": receipt.new_layer_bytes,
+                "durations_ms": receipt.durations_ms,
+            },
+        )
 
     def _acquire_final_slot(
         self,

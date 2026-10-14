@@ -2,7 +2,7 @@
 
 Read and follow [AGENTS.md](AGENTS.md) before changing this repository. It is
 the canonical source for architecture, security boundaries, quality gates, and
-pull-request workflow. Use [docs/development.md](docs/development.md) for the
+pull-request workflow. Use [docs/developer/development.md](docs/developer/development.md) for the
 detailed local-development commands.
 
 ## Before creating a pull request
@@ -24,7 +24,7 @@ detailed local-development commands.
 3. Run every additional check required by the changed area. In particular,
    frontend changes need the checks in `apps/frontend`, and database changes
    need `make test-db` against the dedicated test database. See
-   `docs/development.md#run-the-relevant-checks` for the full selection guide.
+   `docs/developer/development.md#run-the-relevant-checks` for the full selection guide.
 4. Do not create, request, or claim readiness for a pull request while a
    required check is failing or was not run. Record the commands and results in
    the pull-request description.

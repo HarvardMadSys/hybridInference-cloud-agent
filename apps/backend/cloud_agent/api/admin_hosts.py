@@ -378,6 +378,7 @@ def _archive_audit_snapshot(values: dict[str, Any]) -> dict[str, bool | int | st
             "multipart_part_bytes",
         )
     }
+    snapshot["checkpoints_enabled"] = bool(values.get("checkpoints_enabled"))
     snapshot["aws_access_key_id"] = str(values.get("aws_access_key_id") or "")
     configured = values.get("aws_secret_access_key_configured")
     if configured is None:
@@ -413,7 +414,7 @@ async def set_sandbox_archive_settings(
     ):
         settings["aws_secret_access_key"] = previous["aws_secret_access_key"]
     try:
-        SandboxArchivePolicy(
+        checked = SandboxArchivePolicy(
             enabled=settings["enabled"],
             region=settings["region"],
             kms_key_arn=settings["kms_key_arn"],
@@ -424,9 +425,13 @@ async def set_sandbox_archive_settings(
             multipart_threshold_bytes=settings["multipart_threshold_bytes"],
             multipart_part_bytes=settings["multipart_part_bytes"],
             revision=payload.revision,
+            checkpoints_enabled=settings["checkpoints_enabled"],
         )
     except SandboxArchivePolicyError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    # Checkpoints ride on archives: store the resolved switch, never "on"
+    # beside disabled archives.
+    settings["checkpoints_enabled"] = checked.checkpoints_enabled
     try:
         updated = await job_store.host_pool.set_sandbox_archive_settings(
             expected_revision=payload.revision,

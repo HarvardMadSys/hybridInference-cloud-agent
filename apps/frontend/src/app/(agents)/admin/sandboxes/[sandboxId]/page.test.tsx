@@ -213,6 +213,35 @@ describe('admin sandbox trajectory', () => {
     expect(rows[0].querySelector('time')).toHaveTextContent('Oct 10, 2026, 9:00:00 AM UTC');
   });
 
+  it('shows the latest restorable checkpoint, or none', async () => {
+    vi.mocked(getAdminSandboxTrajectory).mockResolvedValue(
+      trajectory({
+        latest_checkpoint: {
+          id: 'c'.repeat(32),
+          generation: 1,
+          host: 'runner-one',
+          size_bytes: 12 * 1024 * 1024,
+          new_layer_bytes: 12 * 1024 * 1024,
+          state: 'reported',
+          captured_at: '2026-10-10T09:05:00Z',
+          recorded_at: '2026-10-10T09:05:10Z',
+        },
+      }),
+    );
+    render(<AdminSandboxTrajectoryPage />);
+
+    const label = await screen.findByText('Latest checkpoint');
+    expect(label.nextElementSibling).toHaveTextContent('12 MiB');
+    expect(label.nextElementSibling).toHaveTextContent('Oct 10, 2026');
+    cleanup();
+
+    vi.mocked(getAdminSandboxTrajectory).mockResolvedValue(trajectory());
+    render(<AdminSandboxTrajectoryPage />);
+    expect((await screen.findByText('Latest checkpoint')).nextElementSibling).toHaveTextContent(
+      'None',
+    );
+  });
+
   it('shows when the bounded member history omits older rows', async () => {
     vi.mocked(getAdminSandboxTrajectory).mockResolvedValue(
       trajectory({

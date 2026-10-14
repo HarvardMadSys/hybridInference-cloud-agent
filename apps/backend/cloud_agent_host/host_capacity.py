@@ -40,7 +40,7 @@ a container that reads its quota would report a 10 GiB ceiling as though it were
 the machine's capacity. So the number is withheld unless the deployment has
 attested the topology and written that verdict to a file the runner reads each
 round; an absent, stale or mismatched verdict reports ``unverified`` rather than
-a value. See ``docs/specs/2026-09-15-admin-server-storage-capacity-design.zh-CN.md``.
+a value. See ``docs/agents/specs/2026-09-15-admin-server-storage-capacity-design.zh-CN.md``.
 
 **Why a daemon thread.** The heartbeat is this host's liveness signal, and a
 Docker daemon under load can take seconds to answer. Sampling on its own thread

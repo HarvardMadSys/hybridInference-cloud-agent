@@ -6660,3 +6660,185 @@ def test_a_collection_cut_short_by_the_deadline_says_so(monkeypatch):
         # ...but every stage was skipped, so nothing was measured at all.
         assert answer.stages == []
         assert answer.profiling_truncated is True
+
+
+class _RecheckingStartManager(_Manager):
+    """Hold the bridge recheck a concurrent workspace request performs."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.block_start = False
+        self.start_entered = threading.Event()
+        self.start_release = threading.Event()
+
+    def start(self, spec, **kwargs):
+        if self.block_start:
+            self.start_entered.set()
+            assert self.start_release.wait(timeout=5)
+        expected = kwargs.get("expected_container_id")
+        if expected is not None and self.items[spec.container_name].container_id != expected:
+            raise RetainedChatLost("chat sandbox container identity changed before start")
+        return super().start(spec, **kwargs)
+
+
+def _rechecking_activation():
+    manager = _RecheckingStartManager()
+    factory = _TransportFactory()
+    supervisor = SharedChatSessionSupervisor(manager, transport_factory=factory)
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+    launch = _launch("athr_source", native_session_id="native-source", slot=0)
+    supervisor.ensure_resident("athr_source", lease.token, launch)
+    manager.block_start = True
+    return manager, supervisor, factory, lease, launch
+
+
+@pytest.mark.parametrize("call", ["resident", "turn", "late_turn"])
+def test_prompt_start_waits_for_a_workspace_bridge_recheck(monkeypatch, call):
+    """A files/terminal request must not destroy an admitted but unsent turn."""
+    manager, supervisor, factory, lease, launch = _rechecking_activation()
+    waited = threading.Event()
+    wait = supervisor._condition.wait
+
+    def waiting(*args, **kwargs):
+        waited.set()
+        return wait(*args, **kwargs)
+
+    monkeypatch.setattr(supervisor._condition, "wait", waiting)
+    reading, read_outcome = _in_thread(lambda: supervisor.operation_opened("athr_peer"))
+    if call == "late_turn":
+        # Let the first admission check pass, then race the process census.
+        manager.start_release.set()
+        reading.join(timeout=2)
+        supervisor.operation_closed("athr_peer", read_outcome["value"][0])
+        manager.start_entered.clear()
+        manager.start_release.clear()
+        census = manager.capture_member_processes
+
+        def capture(*args, **kwargs):
+            nonlocal reading, read_outcome
+            reading, read_outcome = _in_thread(lambda: supervisor.operation_opened("athr_peer"))
+            assert manager.start_entered.wait(timeout=2)
+            return census(*args, **kwargs)
+
+        monkeypatch.setattr(manager, "capture_member_processes", capture)
+    else:
+        assert manager.start_entered.wait(timeout=2)
+
+    def activate():
+        if call == "resident":
+            return supervisor.ensure_resident("athr_source", lease.token, launch)
+        return supervisor.start_turn(
+            "athr_source",
+            lease.token,
+            prompt="read PR state",
+            model="glm-5.1",
+            reasoning_effort=None,
+        )
+
+    activating, outcome = _in_thread(activate)
+    try:
+        assert waited.wait(timeout=1), outcome
+        assert factory.transports[0].turns == []
+    finally:
+        manager.start_release.set()
+        reading.join(timeout=2)
+        activating.join(timeout=2)
+    assert not reading.is_alive() and not activating.is_alive()
+    assert "error" not in read_outcome
+    assert "error" not in outcome
+    assert len(factory.transports[0].turns) == (0 if call == "resident" else 1)
+    supervisor.operation_closed("athr_peer", read_outcome["value"][0])
+
+
+@pytest.mark.parametrize("invalidate", ["lease", "container"])
+def test_prompt_wait_rechecks_the_lease_and_container_before_dispatch(monkeypatch, invalidate):
+    manager, supervisor, factory, lease, _launch_spec = _rechecking_activation()
+    waited = threading.Event()
+    wait = supervisor._condition.wait
+
+    def waiting(*args, **kwargs):
+        waited.set()
+        return wait(*args, **kwargs)
+
+    monkeypatch.setattr(supervisor._condition, "wait", waiting)
+    reading, _read_outcome = _in_thread(lambda: supervisor.operation_opened("athr_peer"))
+    assert manager.start_entered.wait(timeout=2)
+    activating, outcome = _in_thread(
+        lambda: supervisor.start_turn(
+            "athr_source",
+            lease.token,
+            prompt="must not send",
+            model="glm-5.1",
+            reasoning_effort=None,
+        )
+    )
+    try:
+        assert waited.wait(timeout=1), outcome
+        if invalidate == "lease":
+            supervisor.abandon("athr_source", lease.token, lost=False)
+        else:
+            current = manager.items[_spec().container_name]
+            manager.items[_spec().container_name] = replace(current, container_id="replacement")
+    finally:
+        manager.start_release.set()
+        reading.join(timeout=2)
+        activating.join(timeout=2)
+    assert not reading.is_alive() and not activating.is_alive()
+    assert isinstance(
+        outcome.get("error"), SessionLeaseLost if invalidate == "lease" else RetainedChatLost
+    )
+    assert factory.transports[0].turns == []
+
+
+def test_prompt_wait_does_not_accept_a_failed_bridge_recheck(monkeypatch):
+    manager, supervisor, factory, lease, _launch_spec = _rechecking_activation()
+    waited = threading.Event()
+    wait = supervisor._condition.wait
+    start = manager.start
+
+    def waiting(*args, **kwargs):
+        waited.set()
+        return wait(*args, **kwargs)
+
+    def fail_start(*args, **kwargs):
+        start(*args, **kwargs)
+        raise SandboxError("bridge recheck failed")
+
+    monkeypatch.setattr(supervisor._condition, "wait", waiting)
+    monkeypatch.setattr(manager, "start", fail_start)
+    reading, read_outcome = _in_thread(lambda: supervisor.operation_opened("athr_peer"))
+    assert manager.start_entered.wait(timeout=2)
+    activating, outcome = _in_thread(
+        lambda: supervisor.start_turn(
+            "athr_source",
+            lease.token,
+            prompt="must not send",
+            model="glm-5.1",
+            reasoning_effort=None,
+        )
+    )
+    try:
+        assert waited.wait(timeout=1), outcome
+    finally:
+        manager.start_release.set()
+        reading.join(timeout=2)
+        activating.join(timeout=2)
+    assert not reading.is_alive() and not activating.is_alive()
+    assert isinstance(read_outcome.get("error"), SandboxError)
+    assert isinstance(outcome.get("error"), SandboxError)
+    assert factory.transports[0].turns == []
+    # A fresh, successful check lifts the failed-proof fence.
+    monkeypatch.setattr(manager, "start", start)
+    token, _ = supervisor.operation_opened("athr_peer")
+    supervisor.operation_closed("athr_peer", token)
+    supervisor.start_turn(
+        "athr_source", lease.token, prompt="now verified", model="glm-5.1", reasoning_effort=None
+    )
+    assert len(factory.transports[0].turns) == 1

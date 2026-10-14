@@ -734,6 +734,7 @@ async def test_archive_policy_is_read_saved_and_audited_atomically(admin_client)
         "aws_access_key_id": "",
         "aws_secret_access_key_configured": False,
         "updated_at": None,
+        "checkpoints_enabled": True,
     }
     assert "aws_secret_access_key" not in response.json()
     assert store.audit[-1]["action"] == "agent.sandbox_archive_settings.set"
@@ -750,11 +751,16 @@ async def test_archive_policy_is_read_saved_and_audited_atomically(admin_client)
             "max_archive_bytes": 2 * 1024**3,
             "multipart_threshold_bytes": 8 * 1024**2,
             "multipart_part_bytes": 8 * 1024**2,
+            "checkpoints_enabled": False,
         },
         "new_settings": {
             key: value for key, value in _archive_policy().items() if key != "revision"
         }
-        | {"aws_access_key_id": "", "aws_secret_access_key_configured": False},
+        | {
+            "aws_access_key_id": "",
+            "aws_secret_access_key_configured": False,
+            "checkpoints_enabled": True,
+        },
     }
 
     no_op = await client.put(
@@ -1060,3 +1066,36 @@ async def test_global_placement_reports_known_compute_admission_refusal(admin_cl
     assert response.status_code == 409
     assert "compute resource" in response.json()["detail"]
     assert store.active_host is None
+
+
+@pytest.mark.asyncio
+async def test_checkpoints_follow_archives_unless_an_admin_opts_out(admin_client):
+    client, store = admin_client
+
+    default = await client.put(
+        "/admin/agent/sandbox-archive-settings", json=_archive_policy(), headers=ADMIN
+    )
+    opted_out = await client.put(
+        "/admin/agent/sandbox-archive-settings",
+        json=_archive_policy(revision=1) | {"checkpoints_enabled": False},
+        headers=ADMIN,
+    )
+
+    assert default.status_code == opted_out.status_code == 200
+    assert default.json()["checkpoints_enabled"] is True
+    assert opted_out.json()["checkpoints_enabled"] is False
+    assert store.audit[-1]["details"]["old_settings"]["checkpoints_enabled"] is True
+    assert store.audit[-1]["details"]["new_settings"]["checkpoints_enabled"] is False
+    read_back = await client.get("/admin/agent/sandbox-archive-settings", headers=ADMIN)
+    assert read_back.json()["checkpoints_enabled"] is False
+
+    disabled = await client.put(
+        "/admin/agent/sandbox-archive-settings",
+        json=_archive_policy(
+            revision=2, enabled=False, region="", kms_key_arn="", expected_bucket_owner=""
+        )
+        | {"checkpoints_enabled": True},
+        headers=ADMIN,
+    )
+    assert disabled.status_code == 200
+    assert disabled.json()["checkpoints_enabled"] is False

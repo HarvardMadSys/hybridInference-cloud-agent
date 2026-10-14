@@ -73,6 +73,7 @@ from cloud_agent_host.sandbox import (
     build_backend_from_env,
 )
 from cloud_agent_host.sandbox_archive import (
+    DEFAULT_ARCHIVE_STATE_DIR,
     MAX_ARCHIVE_BYTES,
     ArchiveIdentity,
     SandboxArchiveService as SandboxDeletionArchiveService,
@@ -80,6 +81,7 @@ from cloud_agent_host.sandbox_archive import (
 from cloud_agent_host.sandbox_archive_runtime import SandboxArchiveController
 from cloud_agent_host.sandbox_archive_s3 import SandboxArchiveConfigError
 from cloud_agent_host.sandbox_archives import safe_archive_error_type
+from cloud_agent_host.sandbox_checkpoints import SandboxCheckpointCapture, SandboxCheckpointStore
 from cloud_agent_host.sandbox_resources import SandboxResourceCollector
 from cloud_agent_host.session_lifecycle import (
     DEFAULT_CHAT_IDLE_TIMEOUT_S,
@@ -2002,10 +2004,22 @@ def create_app(
         raise ValueError("sandbox archive service and controller are mutually exclusive")
     archive_service = sandbox_archive_service
     archive_controller = sandbox_archive_controller
+    checkpoint_store: SandboxCheckpointStore | None = None
     if archive_service is None and archive_controller is None and retained_manager is not None:
+        # Checkpoint receipts and their temporary exports share the durable,
+        # Sandbox Manager-only archive state directory; no sandbox mounts it.
+        state_dir = Path(
+            os.environ.get("AGENT_SANDBOX_ARCHIVE_STATE_DIR") or DEFAULT_ARCHIVE_STATE_DIR
+        )
+        checkpoint_store = SandboxCheckpointStore(state_dir / "checkpoints")
         archive_controller = SandboxArchiveController(
             retained_manager,
             namespace=retained_manager.backend.sandbox_namespace,
+            checkpoint_capture=SandboxCheckpointCapture(
+                docker_binary=retained_manager.backend.docker_binary,
+                spool_dir=state_dir / "checkpoint-spool",
+                store=checkpoint_store,
+            ),
         )
     archive_boundary = archive_service or archive_controller
     if shared_supervisor is None:
@@ -2208,6 +2222,7 @@ def create_app(
     app.state.shared_session_supervisor = shared_supervisor
     app.state.sandbox_archive_service = archive_boundary
     app.state.sandbox_archive_controller = archive_controller
+    app.state.sandbox_checkpoint_store = checkpoint_store
     app.state.sandbox_deletion_archive_service = SandboxDeletionArchiveService(shared_supervisor)
     app.state.sandbox_resource_collector = None
 
@@ -3350,12 +3365,17 @@ def create_app(
             # Synchronization and cache reads perform no Docker stats I/O.
             # A partial listing must not evict unrelated collection targets.
             resource_collector.sync_targets(rows)
+        checkpoints: SandboxCheckpointStore | None = app.state.sandbox_checkpoint_store
         for row in rows:
             row["resource_usage"] = (
                 None
                 if resource_collector is None or not row["running"]
                 else resource_collector.latest(row["container_id"])
             )
+            # The latest checkpoint repeats on every beat; the control plane
+            # records it idempotently, so a lost beat needs no retry state.
+            receipt = None if checkpoints is None else checkpoints.latest(row["sandbox_id"])
+            row["checkpoint"] = None if receipt is None else receipt.as_dict()
         return {"sandboxes": rows}
 
     @app.get("/workspaces/{workspace_id}/files")

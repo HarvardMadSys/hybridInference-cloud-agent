@@ -90,6 +90,8 @@ from cloud_agent.schemas.hosts import (
     ResidencyBeat,
     RetainedSandboxBeat,
     RetainedSandboxStop,
+    SandboxCheckpointBeat,
+    SandboxCheckpointMember,
 )
 from cloud_agent.schemas.integrations import (
     CreateGitHubRepositoryRequest,
@@ -329,6 +331,8 @@ __all__ = [
     "RetainedSandboxStop",
     "RunResourceSummary",
     "SandboxArchiveSettingsResponse",
+    "SandboxCheckpointBeat",
+    "SandboxCheckpointMember",
     "SessionUserResponse",
     "SetActiveAgentRunnerHostRequest",
     "SetHostSettingsRequest",

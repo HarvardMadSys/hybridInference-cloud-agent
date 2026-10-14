@@ -57,6 +57,7 @@ describe('admin sandbox archive settings client', () => {
       multipart_threshold_bytes: settings.multipart_threshold_bytes,
       multipart_part_bytes: settings.multipart_part_bytes,
       revision: settings.revision,
+      checkpoints_enabled: false,
     };
 
     await updateSandboxArchiveSettings(update);

@@ -49,7 +49,7 @@ fourth contract. The client uses `/internal/users/{user_id}/agent-access` rather
 than the user-status lookup. Profile uses the existing user-status endpoint
 only to display the owner's current email; its role and status fields never
 authorize Agent access. Before connecting an older Gateway, read
-[agent access policy](../docs/agent-access-policy.md) for deployment policy,
+[agent access policy](../docs/developer/agent-access-policy.md) for deployment policy,
 rollout requirements, and fail-closed behavior.
 
 ## What these do not cover
@@ -83,7 +83,7 @@ committed with sorted keys so API changes can be reviewed.
 `tests/unit/test_api_surface_contract.py` compares the served schema with this
 snapshot and fails on disagreement. It does not regenerate the file. For an
 intentional API change, use the command in the
-[developer guide](../docs/development.md#changing-an-api), review the diff, and
+[developer guide](../docs/developer/development.md#changing-an-api), review the diff, and
 commit it with the implementation change.
 
 ## Checking them
@@ -116,4 +116,4 @@ These probes check JWKS keys and typed refusals using randomly named missing
 accounts. The grant lifecycle case skips unless `AGENT_CONTRACT_SUBJECT` names
 an account selected for the test. Setting that variable opts into minting,
 renewing, and revoking a real grant; the test revokes it during cleanup.
-See [smoke testing](../docs/smoke.md) for the wider deployment checks.
+See [smoke testing](../docs/developer/smoke.md) for the wider deployment checks.

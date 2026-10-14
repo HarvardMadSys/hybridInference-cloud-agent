@@ -101,7 +101,7 @@ def upgrade() -> None:
     # the target itself. Refusing here rather than guessing means a cutover that
     # began with a fork in flight is stopped while the old writer can still
     # settle it -- see "Applying migrations that are not backwards-compatible"
-    # in `docs/operations.md`.
+    # in `docs/developer/operations.md`.
     # No ``%`` anywhere in this block: a migration is executed through a
     # driver that treats ``%`` as a placeholder marker, and a bare one in a
     # message is not worth the escaping.

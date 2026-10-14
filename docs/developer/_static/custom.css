@@ -1,0 +1,29 @@
+/* Custom styles for the Cloud Agent developer documentation */
+
+/* Let wide tables and diagrams use the screen instead of the theme's fixed
+   content width. */
+.wy-nav-content {
+    max-width: none !important;
+}
+
+.rst-content {
+    max-width: 1400px !important;
+    margin: 0 auto;
+}
+
+table.docutils {
+    width: 100%;
+    table-layout: auto;
+}
+
+table.docutils td,
+table.docutils th {
+    padding: 10px 12px;
+    vertical-align: top;
+    /* The theme keeps cells on one line, which pushes long prose off screen. */
+    white-space: normal !important;
+}
+
+table.docutils thead {
+    background-color: #e7f2fa;
+}

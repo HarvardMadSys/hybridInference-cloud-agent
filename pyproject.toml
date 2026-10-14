@@ -186,4 +186,9 @@ dev = [
   # own PR, never as a side effect of a migration task. (0.16 default-enables
   # ISC004, which the migrated sandbox.py trips.)
   "ruff==0.15.12",
+  # Build the developer documentation in docs/developer/ (`make docs`). The
+  # site is plain MyST Markdown, so these are the only packages it needs.
+  "myst-parser>=4.0.1",
+  "sphinx>=8.1.3",
+  "sphinx-rtd-theme>=3.0.2",
 ]

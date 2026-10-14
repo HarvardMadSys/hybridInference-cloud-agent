@@ -53,6 +53,14 @@ class SandboxArchiveSettingsResponse(BaseModel):
     multipart_part_bytes: int = DEFAULT_MULTIPART_PART_BYTES
     revision: int = Field(0, ge=0)
     updated_at: datetime | None = None
+    checkpoints_enabled: bool = Field(
+        False,
+        description=(
+            "Whether clean stops also store a restorable checkpoint (the container's "
+            "changes over its image). On by default whenever archives are enabled; "
+            "always off while they are disabled."
+        ),
+    )
 
 
 class HostSandboxArchiveSettings(SandboxArchiveSettingsResponse):
@@ -73,6 +81,11 @@ class HostSandboxArchiveSettings(SandboxArchiveSettingsResponse):
         if not data.get("aws_secret_access_key"):
             data.pop("aws_secret_access_key", None)
         data.pop("aws_secret_access_key_configured", None)
+        # Only an explicit opt-out goes on the wire; omission is the default.
+        # Older sandbox managers reject the key, so the heartbeat never sends
+        # the opt-out to a host that lacks the checkpoint capability.
+        if not (data.get("enabled") and data.get("checkpoints_enabled") is False):
+            data.pop("checkpoints_enabled", None)
         return data
 
     @classmethod
@@ -118,6 +131,10 @@ class SetSandboxArchiveSettingsRequest(BaseModel):
         le=MAX_MULTIPART_PART_BYTES,
     )
     revision: StrictInt = Field(..., ge=0, description="Revision returned by the last GET.")
+    checkpoints_enabled: StrictBool = Field(
+        True,
+        description="Clear to skip checkpoints while archives stay enabled.",
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -152,6 +169,7 @@ class SetSandboxArchiveSettingsRequest(BaseModel):
                 multipart_threshold_bytes=self.multipart_threshold_bytes,
                 multipart_part_bytes=self.multipart_part_bytes,
                 revision=self.revision,
+                checkpoints_enabled=self.checkpoints_enabled,
             )
         except SandboxArchivePolicyError as exc:
             raise ValueError(str(exc)) from exc

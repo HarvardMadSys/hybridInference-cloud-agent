@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -22,8 +23,6 @@ from cloud_agent.storage._sql.sandbox import THREAD_SANDBOX_SOURCE
 from cloud_agent_shared.sandbox_resources import parse_sandbox_resource_sample
 
 if TYPE_CHECKING:
-    from datetime import datetime
-
     import asyncpg
 
 logger = get_logger(__name__)
@@ -1848,6 +1847,63 @@ class PostgresSandboxRepository:
             resource_usage=resource_usage,
             terminal_count=terminal_count,
         )
+
+    async def record_sandbox_checkpoint(
+        self,
+        *,
+        host: str,
+        thread_id: str,
+        checkpoint: dict[str, Any],
+    ) -> bool:
+        """Record one host-reported checkpoint receipt for its current group.
+
+        The receipt must name the group's current host, generation and exact
+        container; anything else is a stale or foreign report and is ignored.
+        Hosts repeat the latest receipt on every heartbeat, so an existing id
+        is a no-op. Returns whether a new receipt was stored. The object is
+        not verified here: restore will check it before trusting it.
+        """
+        captured_at = checkpoint["created_at"]
+        if isinstance(captured_at, str):
+            captured_at = datetime.fromisoformat(captured_at)
+        async with self._pool.acquire() as conn:
+            inserted = await conn.fetchval(
+                """
+                INSERT INTO agent_sandbox_checkpoints (
+                    id, sandbox_id, generation, host, container_id, base_image,
+                    runtime_id, runtime_version, object_key, object_version_id,
+                    sha256, size_bytes, new_layer_bytes, layer_count, members,
+                    durations_ms, format_version, captured_at
+                )
+                SELECT $1, g.id, $3, $4, $5, $6, $7, $8, $9, $10,
+                       $11, $12, $13, $14, $15::jsonb, $16::jsonb, $17, $18
+                FROM agent_sandboxes g
+                WHERE g.id = $2 AND g.origin_thread_id = $19 AND g.host = $4
+                  AND g.generation = $3 AND g.container_id = $5
+                ON CONFLICT (id) DO NOTHING
+                RETURNING TRUE
+                """,
+                checkpoint["checkpoint_id"],
+                checkpoint["sandbox_id"],
+                int(checkpoint["generation"]),
+                host,
+                checkpoint["container_id"],
+                checkpoint["base_image"],
+                checkpoint["runtime_id"],
+                checkpoint.get("runtime_version"),
+                checkpoint["object_key"],
+                checkpoint.get("version_id"),
+                checkpoint["sha256"],
+                int(checkpoint["size_bytes"]),
+                int(checkpoint["new_layer_bytes"]),
+                int(checkpoint["layer_count"]),
+                json.dumps(checkpoint.get("members") or []),
+                json.dumps(checkpoint.get("durations_ms") or {}),
+                int(checkpoint.get("format_version") or 1),
+                captured_at,
+                thread_id,
+            )
+        return bool(inserted)
 
     async def due_thread_sandbox_stop(
         self,
