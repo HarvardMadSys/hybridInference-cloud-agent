@@ -7112,3 +7112,30 @@ def test_prompt_wait_does_not_accept_a_failed_bridge_recheck(monkeypatch):
         "athr_source", lease.token, prompt="now verified", model="glm-5.1", reasoning_effort=None
     )
     assert len(factory.transports[0].turns) == 1
+
+
+def test_failed_idle_stop_keeps_its_automatic_retry_deadline(monkeypatch):
+    """A temporary inspection reservation must not suppress the stop retry."""
+    manager = _Manager()
+    now = {"value": 100.0}
+    supervisor = SharedChatSessionSupervisor(manager, clock=lambda: now["value"])
+    spec = _spec()
+    supervisor.register_manifest(spec, _members())
+    group = supervisor._members[spec.thread_id]
+    group.idle_deadline = now["value"]
+    stop = manager.stop
+
+    def fail_stop(*_args, **_kwargs):
+        raise SandboxError("Docker stop is temporarily unavailable")
+
+    monkeypatch.setattr(manager, "stop", fail_stop)
+    with pytest.raises(SandboxError, match="temporarily unavailable"):
+        supervisor.stop_if_idle(spec.thread_id, generation=spec.generation)
+    assert group.lifecycle_check is None
+    assert group.stopping is False
+    assert group.idle_deadline == now["value"] + supervisor.idle_timeout_s
+    monkeypatch.setattr(manager, "stop", stop)
+    now["value"] += supervisor.idle_timeout_s + 1
+    stopped = supervisor.sweep()
+    assert len(stopped) == 1
+    assert stopped[0].running is False

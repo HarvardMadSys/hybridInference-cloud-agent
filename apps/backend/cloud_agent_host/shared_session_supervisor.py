@@ -4327,7 +4327,7 @@ class SharedChatSessionSupervisor:
                             )
                 group.stopping = False
                 if inspection is None:
-                    self._arm_idle_if_quiescent(group)
+                    self._arm_idle_if_quiescent(group, allow_lifecycle_check=True)
                 self._condition.notify_all()
             raise
         assert inspection is not None
@@ -4625,9 +4625,9 @@ class SharedChatSessionSupervisor:
         if pending:
             self._start_group(group)
 
-    def _arm_idle_if_quiescent(self, group: _Group) -> None:
+    def _arm_idle_if_quiescent(self, group: _Group, *, allow_lifecycle_check: bool = False) -> None:
         if (
-            self._is_quiescent(group)
+            self._is_quiescent(group, allow_lifecycle_check=allow_lifecycle_check)
             and group.inspection.running
             and not group.stop_archive_pending
             and not group.stop_archive_blocked
