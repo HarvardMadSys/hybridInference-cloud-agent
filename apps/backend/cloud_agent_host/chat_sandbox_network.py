@@ -810,8 +810,14 @@ class ChatSandboxNetwork:
         spec: ChatSandboxSpec,
         *,
         sandbox: ChatSandboxInspection | None = None,
+        sync_exceptions: bool = True,
     ) -> _GroupNetworkSnapshot:
-        """Attach and verify the relays, then mirror them into the host's rules."""
+        """Attach and verify the relays, then mirror them into the host's rules.
+
+        ``sync_exceptions=False`` leaves the host's relay exceptions as they are,
+        for a caller that reconciles again before anything can send on the
+        bridge and syncs them then.
+        """
         aliases = self._relay_aliases()
         discovery = self._discover_relays() if aliases else ({}, {})
         owners = discovery[0]
@@ -838,8 +844,13 @@ class ChatSandboxNetwork:
                 ):
                     raise SandboxError("relay endpoint changed during group network reconciliation")
         addresses = self._relay_addresses_from(owners, reconciled)
-        self._sync_relay_exceptions(network, addresses)
+        if sync_exceptions:
+            self._sync_relay_exceptions(network, addresses)
         return _GroupNetworkSnapshot(network=reconciled, owners=owners, addresses=addresses)
+
+    def require_host_rules(self) -> None:
+        """Install and verify this deployment's host rules, unless a recent check stands."""
+        self.backend.network_guard().ensure()
 
     def _ensure_group_network(
         self,
@@ -847,6 +858,7 @@ class ChatSandboxNetwork:
         *,
         current: ChatSandboxInspection | None = None,
         snapshot: _GroupNetworkSnapshot | None = None,
+        sync_exceptions: bool = True,
     ) -> str:
         """Create/reconcile the group bridge, its relays and their exceptions."""
         # Rules first: no group bridge exists on a host that has not proved it
@@ -872,7 +884,9 @@ class ChatSandboxNetwork:
         if network is None:
             raise SandboxError("Docker created the group network but it cannot be inspected")
         self._verify_group_network(network, spec)
-        result = self._ensure_group_services(expected, spec, sandbox=current)
+        result = self._ensure_group_services(
+            expected, spec, sandbox=current, sync_exceptions=sync_exceptions
+        )
         if snapshot is not None:
             snapshot.network = result.network
             snapshot.owners = result.owners
@@ -1276,7 +1290,12 @@ class ChatSandboxNetwork:
                 "a running retained chat is not on exactly its group bridge; stop it "
                 "before it can be resumed"
             )
-        expected = self._ensure_group_network(spec, current=current)
+        # The relay exceptions wait for the reconciliation after the mutations
+        # below: the sandbox is stopped until then, so nothing can send on the
+        # bridge, and an exception that is missing meanwhile refuses traffic
+        # rather than allowing it. Syncing here too only cost a host-rule
+        # helper container on every first start and wake.
+        expected = self._ensure_group_network(spec, current=current, sync_exceptions=False)
         if not self._endpoint_is_current(current, expected):
             connected = self._containers._run(
                 [

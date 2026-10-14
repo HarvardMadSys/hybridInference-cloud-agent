@@ -678,6 +678,10 @@ class ChatSandboxManager:
         """Delegate to the group-network lifecycle owner."""
         return self._network_lifecycle._ensure_group_services(network, spec, sandbox=sandbox)
 
+    def require_host_rules(self) -> None:
+        """Delegate to the group-network lifecycle owner."""
+        return self._network_lifecycle.require_host_rules()
+
     def _ensure_group_network(
         self,
         spec: ChatSandboxSpec,
@@ -953,16 +957,25 @@ class ChatSandboxManager:
         facts: SandboxActionFacts | None = None,
         observer: StageObserver | None = None,
     ) -> ChatSandboxInspection:
-        """Create one chat container idempotently, never replacing an existing one."""
-        with substage(observer, "network_ensure"):
-            self._ensure_group_network(spec)
+        """Create one chat container idempotently, never replacing an existing one.
+
+        The container is created stopped on the dormant bootstrap bridge, and
+        its group bridge is left to :meth:`start`, which attaches it while it
+        is still stopped and proves the network before anything runs in it.
+        Reconciling the bridge here as well only repeated that work: each
+        reconciliation is a dozen Docker calls and a host-rule helper
+        container. The host's rules are still checked first, so a host that
+        cannot show them refuses before any container exists.
+        """
+        with substage(observer, "host_rules"):
+            self.require_host_rules()
         existing = self.inspect(spec.container_name)
         if existing is not None:
             # Idempotent adoption, not a creation. No action is noted here:
             # the start() that follows knows whether this attempt had to run
             # `docker start`, and that is what classifies the path.
             self._verify_identity(existing, spec)
-            return self._require_group_network(spec, existing)
+            return existing
         command = self.build_create_command(spec, image=image)
         with substage(observer, "container_create"):
             created = self._run(command, timeout=120)
@@ -977,7 +990,7 @@ class ChatSandboxManager:
             # The other replica paid for the creation, so this attempt did
             # not create the container. `start` reports what it did with it.
             self._verify_identity(raced, spec)
-            return self._require_group_network(spec, raced)
+            return raced
         if facts is not None:
             # The literal the startup-path classifier reads. Emitting anything
             # else -- "created", say -- hid every brand-new group: the guard in
@@ -990,7 +1003,7 @@ class ChatSandboxManager:
         if inspected is None:
             raise SandboxError("Docker created the chat sandbox but it cannot be inspected")
         self._verify_identity(inspected, spec)
-        return self._require_group_network(spec, inspected)
+        return inspected
 
     def require_existing(
         self,

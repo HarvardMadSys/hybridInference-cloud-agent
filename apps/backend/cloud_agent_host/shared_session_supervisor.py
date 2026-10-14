@@ -1785,8 +1785,7 @@ class SharedChatSessionSupervisor:
                     expected_container_id=expected_container_id,
                 )
             self._creating.add(spec.sandbox_id)
-        # Docker create with its group bridge, or the exact adoption check, can
-        # take minutes. Only registrations of this sandbox wait for it; the
+        # Docker create, or the exact adoption check, can take minutes. Only registrations of this sandbox wait for it; the
         # metadata lock stays free for every other group and member.
         try:
             created = (
