@@ -30,6 +30,9 @@ class _Store(AllCapabilities):
     async def reap_offline_hosts(self, **_kwargs: object) -> list[object]:
         return []
 
+    async def finish_host_removals(self) -> list[str]:
+        return []
+
     async def reap_expired_residencies(self) -> list[object]:
         return []
 

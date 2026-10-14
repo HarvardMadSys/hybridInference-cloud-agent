@@ -450,9 +450,15 @@ Pool and resource actions have different effects:
 
 | Action | Effect |
 | --- | --- |
-| `Remove from pool` | Revokes the Host credential; leaves the machine intact. |
+| `Remove from pool` | Revokes the Host credential; leaves the machine intact. A Host still running turns stops taking new work and shows `removing` until they finish, and the reaper then revokes it. |
+| `Cancel removal` | Puts a `removing` Host back to work. |
+| `Remove now` | Revokes a `removing` Host at once and ends its running turns: they are requeued once, or a chat whose turn may already have run is marked lost. |
 | `Forget` | Removes an eligible history record. |
 | `Retire/release` | Releases the complete allocation; for CloudLab, the whole experiment. Existing SSH has no cloud-destruction capability. |
+
+The page has no separate pause action. A Host held by a deployment drain shows
+`updating`; one drained through the `/drain` API shows `paused` and offers
+`Resume new work`.
 
 Release requires complete scope, no global placement reference, no running,
 in-flight or retained dependencies, and fresh sandbox manager and machine inventory.

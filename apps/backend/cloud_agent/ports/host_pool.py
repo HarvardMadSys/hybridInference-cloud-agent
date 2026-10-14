@@ -298,13 +298,15 @@ class HostPoolRepository(Protocol):
     async def remove_host(self, *, host: str, force: bool = False) -> str:
         """Revoke a host's credential and take it out of the pool.
 
-        Returns ``"ok"``, ``"unknown"`` or ``"busy"``. Busy means the host is
-        still holding slots: removing it then would leave running attempts
-        whose machine has officially stopped existing, and nothing would notice
-        until their leases lapsed. ``force`` accepts exactly that — the lease
-        expiry *is* the recovery path. A retained activation cannot be replayed
-        safely after its host disappears, so its expiry marks that chat LOST
-        and fails already-queued descendants instead.
+        Returns ``"ok"``, ``"unknown"``, ``"fenced"``, ``"draining"`` or
+        ``"busy"``. A host still holding slots is drained instead of revoked:
+        it claims nothing more, the request is recorded, and
+        :meth:`finish_host_removals` revokes it once its running attempts end.
+        ``"busy"`` is the busy host whose status cannot move to ``draining``.
+        ``force`` revokes now and ends that work — the lease expiry *is* the
+        recovery path. A retained activation cannot be replayed safely after
+        its host disappears, so its expiry marks that chat LOST and fails
+        already-queued descendants instead.
 
         Disabling rather than deleting. The row is what
         ``agent_attempts.host_id`` points at, and what an operator reads when
@@ -312,6 +314,13 @@ class HostPoolRepository(Protocol):
         machine that is genuinely gone. Removing or forgetting the host row is
         administrative bookkeeping; it is not by itself proof that a retained
         Docker writable layer was deleted.
+        """
+        ...
+
+    async def finish_host_removals(self) -> list[str]:
+        """Revoke every host whose requested removal has no running work left.
+
+        Returns the hosts it revoked.
         """
         ...
 

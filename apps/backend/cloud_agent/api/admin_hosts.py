@@ -179,6 +179,7 @@ def _to_item(row: dict[str, Any], *, now: datetime | None = None) -> AgentRunner
         # generation. The migration backfills it before this API may start;
         # silently defaulting it would make a partial CAS contract look usable.
         drain_fence_epoch=row["drain_fence_epoch"],
+        removal_pending=row.get("removal_requested_at") is not None,
         sandbox_runtime=row.get("sandbox_runtime"),
         sandbox_image_digest=row.get("sandbox_image_digest"),
         runtime_versions=row.get("runtime_versions"),
@@ -738,11 +739,12 @@ async def remove_agent_runner_host(
 ) -> ListAgentRunnerHostsResponse:
     """Revoke this host's credential and take it out of the pool.
 
-    Refused while the host still holds slots, unless forced. The refusal is not
-    bureaucracy: the running attempts belong to a machine the platform has just
-    declared gone, and nobody would learn that until their leases lapsed
-    minutes later. Being told "it is still busy" is the difference between
-    draining first and finding out afterwards.
+    A host still holding slots is not revoked on the spot: its running attempts
+    belong to a machine the platform would have just declared gone, and nobody
+    would learn that until their leases lapsed minutes later. It drains
+    instead — no new claims, ``removal_pending`` set — and the reaper revokes
+    it once its last running attempt ends. Putting it back to work
+    (``undrain``) cancels the request.
 
     Forced removal is the deliberate version of the same thing, and it ends
     that work rather than waiting for it: the revocation expires the host's
@@ -759,13 +761,13 @@ async def remove_agent_runner_host(
     evidence that the retained container or Docker data-root was deleted.
     """
     job_store = _require_store(store)
-    await _apply(HostCommands(job_store.host_pool).remove(host=host, force=force))
+    deferred = await _apply(HostCommands(job_store.host_pool).remove(host=host, force=force))
     await log_admin_action(
         job_store,
         get_client_ip(request),
         "agent.runner_host.remove",
         None,
-        {"host": host, "force": force},
+        {"host": host, "force": force, "deferred": deferred},
         actor_id=_admin_id,
     )
     return await _snapshot(job_store.host_pool)

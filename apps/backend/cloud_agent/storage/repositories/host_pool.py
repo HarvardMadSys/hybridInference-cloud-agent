@@ -334,6 +334,7 @@ class PostgresHostPoolRepository:
                     drain_fence_token = NULL,
                     drain_fence_status_before = NULL,
                     drain_fence_active = FALSE,
+                    removal_requested_at = NULL,
                     capabilities = EXCLUDED.capabilities,
                     slots_total = EXCLUDED.slots_total,
                     broker_url = EXCLUDED.broker_url,
@@ -603,6 +604,9 @@ class PostgresHostPoolRepository:
         caller means an admin draining a host and the reaper marking it offline
         can both read ``online`` and both write, and the loser's decision is the
         one that sticks.
+
+        Leaving ``draining`` cancels a pending removal: putting a host back to
+        work is the operator taking that request back.
         """
         async with self._pool.acquire() as conn, conn.transaction():
             row = await conn.fetchrow(
@@ -622,7 +626,9 @@ class PostgresHostPoolRepository:
                 return "invalid"
             await conn.execute(
                 "UPDATE agent_runner_hosts SET status = $2, drain_fence_token = NULL, "
-                "drain_fence_status_before = NULL, drain_fence_active = FALSE WHERE host = $1",
+                "drain_fence_status_before = NULL, drain_fence_active = FALSE, "
+                f"removal_requested_at = CASE WHEN $2 = '{HOST_DRAINING}' "
+                "THEN removal_requested_at END WHERE host = $1",
                 host,
                 status,
             )
@@ -700,8 +706,8 @@ class PostgresHostPoolRepository:
                 if row["status"] != HOST_DRAINING:
                     return "invalid", current_epoch
                 next_epoch = await conn.fetchval(
-                    "UPDATE agent_runner_hosts SET status = $2, drain_fence_active = FALSE "
-                    "WHERE host = $1 RETURNING drain_fence_epoch",
+                    "UPDATE agent_runner_hosts SET status = $2, drain_fence_active = FALSE, "
+                    "removal_requested_at = NULL WHERE host = $1 RETURNING drain_fence_epoch",
                     host,
                     HOST_ONLINE,
                 )
@@ -789,15 +795,21 @@ class PostgresHostPoolRepository:
     async def remove_host(self, *, host: str, force: bool = False) -> str:
         """Revoke a host's credential and take it out of the pool.
 
-        Returns ``"ok"``, ``"unknown"`` or ``"busy"``. Busy means the host is
-        still holding slots: removing it then ends running attempts whose
-        machine has officially stopped existing. ``force`` accepts exactly
-        that — lease expiry *is* the recovery path, and the revocation brings
-        it forward to now (see ``revoke_host_credentials``): the attempts'
-        worker tokens name no host, so a lease left to run would let the
-        removed machine keep renewing it. A retained activation cannot be
-        replayed safely after its host disappears, so its expiry marks that
-        chat LOST and fails already-queued descendants instead.
+        Returns ``"ok"``, ``"unknown"``, ``"fenced"``, ``"draining"`` or
+        ``"busy"``. A host still holding slots is not revoked on the spot:
+        that would end running attempts whose machine has officially stopped
+        existing. It moves to ``draining`` with the request recorded, so it
+        claims nothing more, and :meth:`finish_host_removals` revokes it once
+        its last slot comes back. ``"busy"`` is left for the busy host that
+        cannot drain at all.
+
+        ``force`` ends that work now instead of waiting for it — lease expiry
+        *is* the recovery path, and the revocation brings it forward to now
+        (see ``revoke_host_credentials``): the attempts' worker tokens name no
+        host, so a lease left to run would let the removed machine keep
+        renewing it. A retained activation cannot be replayed safely after its
+        host disappears, so its expiry marks that chat LOST and fails
+        already-queued descendants instead.
 
         Disabling rather than deleting. The row is what
         ``agent_attempts.host_id`` points at, and what an operator reads when
@@ -826,9 +838,54 @@ class PostgresHostPoolRepository:
             if row["drain_fence_active"] and not force:
                 return "fenced"
             if row["slots_used"] > 0 and not force:
-                return "busy"
+                if not transition_allowed(row["status"], HOST_DRAINING):
+                    return "busy"
+                await conn.execute(
+                    "UPDATE agent_runner_hosts SET status = $2, "
+                    "removal_requested_at = COALESCE(removal_requested_at, NOW()) "
+                    "WHERE host = $1",
+                    host,
+                    HOST_DRAINING,
+                )
+                return "draining"
             await revoke_host_credentials(conn, [host])
         return "ok"
+
+    async def finish_host_removals(self) -> list[str]:
+        """Revoke every host whose requested removal has no running work left.
+
+        The second half of a deferred :meth:`remove_host`. Each host is
+        decided in its own transaction, with the locks taken in the order
+        ``remove_host`` takes them, and its count read again under the row
+        lock: an attempt the reaper is ending at this moment must either be
+        finished first or keep the host for the next pass.
+
+        Returns the hosts it revoked.
+        """
+        removed: list[str] = []
+        async with self._pool.acquire() as conn:
+            candidates = await conn.fetch(
+                "SELECT host FROM agent_runner_hosts "
+                "WHERE removal_requested_at IS NOT NULL AND slots_used = 0 ORDER BY host"
+            )
+            for candidate in candidates:
+                host = candidate["host"]
+                async with conn.transaction():
+                    await conn.execute(
+                        "SELECT id FROM agent_attempts WHERE host_id = $1 AND status = 'running' "
+                        "ORDER BY id FOR UPDATE",
+                        host,
+                    )
+                    row = await conn.fetchrow(
+                        "SELECT slots_used, removal_requested_at "
+                        "FROM agent_runner_hosts WHERE host = $1 FOR UPDATE",
+                        host,
+                    )
+                    if row is None or row["removal_requested_at"] is None or row["slots_used"]:
+                        continue
+                    await revoke_host_credentials(conn, [host])
+                removed.append(host)
+        return removed
 
     async def reap_offline_hosts(
         self,

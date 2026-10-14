@@ -5,6 +5,7 @@ import { useState } from 'react';
 import type { ComputeAllocation, ComputeCatalog, ComputeServerSnapshot } from '@/lib/api/compute';
 
 import { absoluteTime, inputClass, remainingTime } from './compute-ui';
+import { hostStatusLabel } from './format';
 
 type InventoryHost = ComputeServerSnapshot['hosts'][number];
 
@@ -30,7 +31,7 @@ function serverStatus(allocation: ComputeAllocation, hosts: InventoryHost[]): st
     return 'Partly online';
   }
   if (hosts.some((host) => host.status === 'online')) return 'Not accepting new sandboxes';
-  return hosts[0].status.replaceAll('_', ' ');
+  return hostStatusLabel(hosts[0]).replaceAll('_', ' ');
 }
 
 function State({ label }: { label: string }) {
@@ -328,7 +329,7 @@ export default function ComputeServerList({
                 status={
                   host.status === 'online' && host.allows_new_groups === false
                     ? 'Not accepting new sandboxes'
-                    : host.status
+                    : hostStatusLabel(host)
                 }
                 selected={host.members.some((member) => member.host === activeHost)}
                 sandboxes={inventory ? host.retained_groups : null}

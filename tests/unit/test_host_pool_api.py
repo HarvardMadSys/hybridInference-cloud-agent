@@ -135,6 +135,7 @@ class FakeHostPoolStore(AllCapabilities):
             "drain_fence_status_before": None,
             "drain_fence_active": False,
             "drain_fence_epoch": uuid4(),
+            "removal_requested_at": None,
             "sandbox_runtime": None,
             "sandbox_image_digest": None,
             "runtime_versions": None,
@@ -306,6 +307,8 @@ class FakeHostPoolStore(AllCapabilities):
         row["drain_fence_token"] = None
         row["drain_fence_status_before"] = None
         row["drain_fence_active"] = False
+        if status != HOST_DRAINING:
+            row["removal_requested_at"] = None
         current = (
             row["status"],
             row["drain_fence_token"],
@@ -377,8 +380,14 @@ class FakeHostPoolStore(AllCapabilities):
         if row["drain_fence_active"] and not force:
             return "fenced"
         if row["slots_used"] > 0 and not force:
-            return "busy"
+            if not transition_allowed(row["status"], HOST_DRAINING):
+                return "busy"
+            row["status"] = HOST_DRAINING
+            row["removal_requested_at"] = row["removal_requested_at"] or datetime.now(UTC)
+            row["drain_fence_epoch"] = uuid4()
+            return "draining"
         row["status"] = HOST_DISABLED
+        row["removal_requested_at"] = None
         row["credential_hash"] = None
         row["enrolled"] = False
         row["drain_fence_token"] = None
@@ -2110,16 +2119,43 @@ async def test_draining_an_unknown_host_is_a_404(client):
     assert response.status_code == 404
 
 
-async def test_removing_a_busy_host_is_refused(client):
-    """Its running attempts belong to a machine that would just have vanished."""
+async def test_removing_a_busy_host_drains_it_until_its_work_ends(client):
+    """Its running attempts finish; the reaper revokes it once they have."""
     async_client, store = client
-    store.seed("runner-a", slots_used=1)
+    store.seed("runner-a", slots_used=1, credential_hash="abc", enrolled=True)
+
+    response = await async_client.post("/admin/agent/runner-hosts/runner-a/remove", headers=ADMIN)
+
+    assert response.status_code == 200
+    assert store.rows["runner-a"]["status"] == HOST_DRAINING
+    assert store.rows["runner-a"]["credential_hash"] == "abc"
+    row = response.json()["hosts"][0]
+    assert row["status"] == HOST_DRAINING
+    assert row["removal_pending"] is True
+
+
+async def test_a_busy_host_that_cannot_drain_is_still_refused(client):
+    """An enrolling row holding slots has no drain to wait on."""
+    async_client, store = client
+    store.seed("runner-a", status=HOST_ENROLLING, slots_used=1)
 
     response = await async_client.post("/admin/agent/runner-hosts/runner-a/remove", headers=ADMIN)
 
     assert response.status_code == 409
     assert "force=true" in response.json()["detail"]
+    assert store.rows["runner-a"]["status"] == HOST_ENROLLING
+
+
+async def test_putting_a_host_back_to_work_cancels_its_pending_removal(client):
+    async_client, store = client
+    store.seed("runner-a", slots_used=1, credential_hash="abc")
+    await async_client.post("/admin/agent/runner-hosts/runner-a/remove", headers=ADMIN)
+
+    response = await async_client.post("/admin/agent/runner-hosts/runner-a/undrain", headers=ADMIN)
+
+    assert response.status_code == 200
     assert store.rows["runner-a"]["status"] == HOST_ONLINE
+    assert response.json()["hosts"][0]["removal_pending"] is False
 
 
 async def test_removing_an_idle_host_revokes_it(client):

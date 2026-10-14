@@ -9,11 +9,25 @@ import { describe, expect, it } from 'vitest';
 
 import type { AgentRunnerHost } from '@/lib/api/admin';
 
-import { curveSource, curveSourceHosts } from './format';
+import { curveSource, curveSourceHosts, hostStatusLabel } from './format';
 
 function host(name: string, status = 'online'): AgentRunnerHost {
   return { host: name, status, labels: {} } as unknown as AgentRunnerHost;
 }
+
+describe('host status label', () => {
+  it('names a drain by what it leads to, never as draining', () => {
+    expect(hostStatusLabel({ status: 'draining', removal_pending: true })).toBe('removing');
+    expect(hostStatusLabel({ status: 'draining', drain_fence_active: true })).toBe('updating');
+    expect(hostStatusLabel({ status: 'draining' })).toBe('paused');
+  });
+
+  it('passes every other status through', () => {
+    for (const status of ['enrolling', 'online', 'offline', 'disabled']) {
+      expect(hostStatusLabel({ status })).toBe(status);
+    }
+  });
+});
 
 describe('curve sources', () => {
   it('never offers an enrollment that has been removed', () => {

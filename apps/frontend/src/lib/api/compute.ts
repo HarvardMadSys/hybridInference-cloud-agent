@@ -249,6 +249,8 @@ export interface ComputeServerSnapshot {
     allocation_id: string | null;
     retained_groups: number;
     status: string;
+    drain_fence_active?: boolean;
+    removal_pending?: boolean;
     allows_new_groups?: boolean;
     allows_claims?: boolean;
   }[];

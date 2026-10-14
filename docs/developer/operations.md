@@ -72,7 +72,7 @@ that URL to another origin is refused while the token is kept. Reset the token,
 save the URL, then enter the token again.
 
 For the first deployment of this release, run `alembic upgrade head` through
-`0072_drop_old_memory_tables`. Existing hosts begin without a deployment drain
+`0073_host_removal_pending`. Existing hosts begin without a deployment drain
 owner or release receipt, and 0051 backfills each one with a non-null fence
 epoch. 0066 builds an index on `agent_jobs` concurrently: on a long job history
 it takes a while without blocking the running API, and an interrupted run can
@@ -86,8 +86,10 @@ onto it. 0071 drops `NOT NULL` from `agent_threads.repo` and
 `agent_environment_bindings.repo`, so conversations can start without a
 repository; its downgrade refuses while any such conversation exists. 0072
 drops the retired memory tables; a rollback to before 0070 finds them empty,
-without the earlier memory's portraits and preferences. Rebuild the sandbox
-image for explicit plugin loading.
+without the earlier memory's portraits and preferences. 0073 adds
+`agent_runner_hosts.removal_requested_at`, empty for every existing host; a
+downgrade drops it and leaves a host that was waiting to be removed draining.
+Rebuild the sandbox image for explicit plugin loading.
 Then start the main control-plane listener with its existing complete
 environment. It imports registered environment settings once,
 while the MCP-only listener waits for initialization and then reads the same

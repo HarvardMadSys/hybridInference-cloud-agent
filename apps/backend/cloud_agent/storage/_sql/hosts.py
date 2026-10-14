@@ -35,6 +35,7 @@ HOST_COLUMN_NAMES = (
     "drain_fence_status_before",
     "drain_fence_active",
     "drain_fence_epoch",
+    "removal_requested_at",
     "sandbox_runtime",
     "sandbox_image_digest",
     "runtime_versions",
@@ -170,7 +171,7 @@ async def revoke_host_credentials(conn: Any, hosts: list[str]) -> None:
     await conn.execute(
         "UPDATE agent_runner_hosts "
         "SET status='disabled',credential_hash=NULL,drain_fence_token=NULL,"
-        "drain_fence_status_before=NULL,drain_fence_active=FALSE "
+        "drain_fence_status_before=NULL,drain_fence_active=FALSE,removal_requested_at=NULL "
         "WHERE host=ANY($1::text[])",
         hosts,
     )
