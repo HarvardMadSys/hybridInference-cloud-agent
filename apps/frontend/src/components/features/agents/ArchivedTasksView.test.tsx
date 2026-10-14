@@ -458,6 +458,20 @@ describe('archived session management', () => {
     expect(screen.getByRole('button', { name: 'Actions for owner/alpha' })).toHaveFocus();
   });
 
+  it('names the Start from scratch group as people see it when confirming its deletion', async () => {
+    sessions = [session('one', {}, { repo: ':temporary', published_pr_url: null })];
+    render(<ArchivedTasksView />);
+    const actions = await screen.findByRole('button', { name: 'Actions for Start from scratch' });
+    await waitFor(() => expect(actions).toBeEnabled());
+    fireEvent.click(actions);
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Permanently delete group (1)' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(
+      within(dialog).getByText('Scope: archived sessions in Start from scratch'),
+    ).toBeVisible();
+    expect(dialog).not.toHaveTextContent(':temporary');
+  });
+
   it.each(['delete', 'unarchive'])(
     'rejects an oversized %s scope after one bulk page',
     async (action) => {

@@ -55,6 +55,12 @@ describe('compact sidebar search controls', () => {
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'query' } });
     expect(screen.getByRole('textbox')).toHaveValue('query');
   });
+  it('names a temporary workspace as people see it, not by its internal key', () => {
+    render(<Controls activeRepo=":temporary" />);
+    const title = screen.getByRole('button', { name: 'Search scope' }).getAttribute('title');
+    expect(title).not.toContain(':temporary');
+    expect(title).toContain('Start from scratch');
+  });
   it('explains unavailable current-project scope while preserving archive search', () => {
     render(<Controls activeRepo={null} />);
     const scope = screen.getByRole('button', { name: 'Search scope' });
