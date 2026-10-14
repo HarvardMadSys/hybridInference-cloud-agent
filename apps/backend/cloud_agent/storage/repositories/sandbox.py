@@ -2002,6 +2002,14 @@ class PostgresSandboxRepository:
                 await conn.execute(
                     "SELECT id FROM agent_attempts WHERE id = $1 FOR NO KEY UPDATE", attempt_id
                 )
+                # Then the conversation: losing the context fails the turns
+                # queued behind this one, after the membership below, and
+                # deleting the conversation holds those turns while it waits
+                # for that membership. Deletion starts here, so the two
+                # serialize instead of each holding what the other needs.
+                await conn.execute(
+                    "SELECT id FROM agent_threads WHERE id = $1 FOR UPDATE", thread_id
+                )
             shared = await conn.fetchrow(
                 """
                 UPDATE agent_thread_sandbox_memberships m
