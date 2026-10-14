@@ -57,6 +57,23 @@ def test_phase_override_replaces_global_definition_before_filtering():
     }
 
 
+def test_a_binding_keeps_replaced_runtime_secrets_for_masking():
+    """A refresh that removed the last runtime Secret leaves only its history.
+
+    The claim, snapshot and terminal paths drop a binding that is not
+    required, and with it the only copy of the values earlier turns may have
+    written into the workspace.
+    """
+    bound = BoundEnvironment(
+        binding_id="bound",
+        runtime_variables=[],
+        previous_secrets={"API_KEY@history0": "replaced-runtime-secret"},
+    )
+    assert bound.required
+    assert "replaced-runtime-secret" in bound.secrets().values()
+    assert not BoundEnvironment(binding_id="bound", runtime_variables=[]).required
+
+
 def test_dotenv_is_atomic_and_never_interpolates_or_executes():
     values = parse_env(
         "export TOKEN='private value'\nURL=${TOKEN}\nCOMMAND=$(touch /tmp/should-not-exist)\nEMPTY=\n"

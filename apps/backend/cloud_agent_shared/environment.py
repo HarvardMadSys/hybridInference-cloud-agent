@@ -249,10 +249,17 @@ class BoundEnvironment(EnvironmentScripts):
 
     @property
     def required(self) -> bool:
-        """Whether dropping this configuration would change execution."""
+        """Whether dropping this configuration would change execution.
+
+        Runtime Secrets a refresh has since replaced count: earlier turns may
+        have written them into the workspace, and only this binding still
+        carries them for masking output and scanning snapshots. A binding has
+        them only after it was required, as its stored flag stays.
+        """
         return bool(
             self.variables
             or self.runtime_variables
+            or self.previous_secrets
             or self.setup_script
             or self.start_script
             or self.actions
