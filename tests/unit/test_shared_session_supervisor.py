@@ -4519,6 +4519,74 @@ def test_initial_archive_waits_out_a_concurrent_start_and_workspace_request() ->
     assert supervisor._members["athr_source"].snapshotting is False
 
 
+class _HeldStartManager(_Manager):
+    """Hold every start once armed, including a running group's bridge check."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.hold_start = False
+        self.start_entered = threading.Event()
+        self.start_release = threading.Event()
+
+    def start(self, spec, **kwargs):
+        if self.hold_start:
+            self.start_entered.set()
+            assert self.start_release.wait(timeout=2)
+        return super().start(spec, **kwargs)
+
+
+def test_initial_archive_waits_out_a_start_that_begins_under_its_barrier(monkeypatch) -> None:
+    """A request admitted before the barrier may begin its bridge check under it."""
+    manager = _HeldStartManager()
+    supervisor = SharedChatSessionSupervisor(manager)
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=False,
+        manifest=_members(),
+    )
+    running, _ = supervisor.operation_opened("athr_peer")
+    group = supervisor._members["athr_source"]
+    # A second read passes its first admission, then is held before its check.
+    entered, release = _gated_inspect(manager, monkeypatch, _spec().container_name)
+    manager.hold_start = True
+    opening, _ = _in_thread(lambda: supervisor.operation_opened("athr_peer"))
+    assert entered.wait(timeout=1)
+    captured = threading.Event()
+
+    def capture(*_args):
+        captured.set()
+        return {"enabled": True, "stored": True}
+
+    capturing, outcome = _in_thread(
+        lambda: supervisor.capture_initial_archive("athr_source", lease.token, capture=capture)
+    )
+    try:
+        deadline = time.monotonic() + 1
+        while not group.snapshotting and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert group.snapshotting
+        release.set()
+        assert manager.start_entered.wait(timeout=1)
+        assert group.starting
+        supervisor.operation_closed("athr_peer", running)
+        capturing.join(timeout=0.6)
+        assert capturing.is_alive(), f"the archive did not wait for the start: {outcome}"
+        assert not captured.is_set()
+    finally:
+        release.set()
+        manager.start_release.set()
+        opening.join(timeout=2)
+        capturing.join(timeout=2)
+
+    assert not capturing.is_alive()
+    assert "error" not in outcome
+    assert captured.is_set()
+    assert group.snapshotting is False
+
+
 def test_initial_archive_reports_busy_once_a_request_outlasts_its_wait() -> None:
     manager = _Manager()
     supervisor = SharedChatSessionSupervisor(manager)

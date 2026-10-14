@@ -3672,10 +3672,24 @@ class SharedChatSessionSupervisor:
             group.snapshotting = True
             group.idle_deadline = None
             try:
-                while group.operation_tokens or group.terminal_tokens:
+                # A request admitted before the barrier may still begin its
+                # bridge revalidation under it (``_start_group`` does not read
+                # the barrier), so its start fence is waited out here too.
+                while (
+                    group.operation_tokens
+                    or group.terminal_tokens
+                    or group.starting
+                    or group.lifecycle_check is not None
+                ):
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
-                        raise SessionBusy("shared workspace still has active mutations")
+                        raise SessionBusy(
+                            "shared workspace start is in progress"
+                            if group.starting
+                            else "shared sandbox lifecycle check is in progress"
+                            if group.lifecycle_check is not None
+                            else "shared workspace still has active mutations"
+                        )
                     self._condition.wait(timeout=min(remaining, 0.5))
                 # The wait released the lock; the lease and group may have moved.
                 leased_group, leased_member = self._leased_member(thread_id, token)
