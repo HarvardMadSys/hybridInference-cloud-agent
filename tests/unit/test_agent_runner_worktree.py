@@ -300,12 +300,24 @@ def _child_started(child_pid: Path) -> bool:
     return child_pid.exists() and bool(child_pid.read_text().strip())
 
 
+def _still_running(pid: int) -> bool:
+    """Whether ``pid`` exists and is not a zombie.
+
+    Read in one step: the process can exit between an existence check and the
+    read, and a status file that vanished means it ended.
+    """
+    try:
+        return "\tZ" not in pathlib.Path(f"/proc/{pid}/status").read_text()
+    except (FileNotFoundError, ProcessLookupError):
+        return False
+
+
 def _assert_ended(child_pid: Path) -> None:
-    status = pathlib.Path(f"/proc/{int(child_pid.read_text())}/status")
+    pid = int(child_pid.read_text())
     deadline = time.monotonic() + 5
-    while status.exists() and "\tZ" not in status.read_text() and time.monotonic() < deadline:
+    while _still_running(pid) and time.monotonic() < deadline:
         time.sleep(0.05)
-    assert not status.exists() or "\tZ" in status.read_text(), "git's child is still running"
+    assert not _still_running(pid), "git's child is still running"
 
 
 def test_a_clone_over_the_limit_is_stopped_with_everything_it_started(tmp_path: Path, monkeypatch):
