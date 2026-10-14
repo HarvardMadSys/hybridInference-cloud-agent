@@ -41,7 +41,10 @@ the hook.
 The hook checks the checkout the pull request is created from: the directory a
 preceding `cd` enters (`cd <worktree> && gh pr create ...`), or the worktree
 that has the `--head` branch checked out. Without either, it checks the session
-directory. Commands that do not create a pull request pass through unchecked.
+directory. Commands that do not create a pull request pass through unchecked,
+as do pull requests for another repository: a `cd` into its checkout, a
+`--repo` naming it, or an MCP call naming its owner and name. That repository's
+own checks apply.
 
 The hook enforces the repository-wide gate only. The area-specific checks in
 step 3 remain required and must be run before invoking pull-request creation.

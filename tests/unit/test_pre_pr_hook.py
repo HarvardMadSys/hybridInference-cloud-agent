@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -40,6 +41,23 @@ def repository(tmp_path: Path) -> Path:
     return main
 
 
+@pytest.fixture
+def project(repository: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Make ``repository`` the project the hook gates, as Claude Code does."""
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(repository))
+    _git(repository, "remote", "add", "origin", "git@github.com:Owner/project.git")
+    return repository
+
+
+@pytest.fixture
+def other(tmp_path: Path) -> Path:
+    """A checkout of an unrelated repository."""
+    path = tmp_path / "other"
+    path.mkdir()
+    _git(path, "init", "-q", "-b", "main")
+    return path
+
+
 @pytest.mark.parametrize(
     "command",
     [
@@ -55,17 +73,22 @@ def test_commands_that_create_no_pull_request_are_allowed(command: str) -> None:
 
 
 def test_the_session_directory_is_used_without_cd() -> None:
-    assert pr_target.parse_command("gh pr create --fill", "/session") == ("/session", None)
+    assert pr_target.parse_command("gh pr create --fill", "/session") == (
+        "/session",
+        None,
+        None,
+    )
 
 
 def test_a_cd_before_gh_pr_create_selects_that_checkout() -> None:
     command = 'cd /work/tree && gh pr create --base dev --title "x" --body "$(cat file)"'
-    assert pr_target.parse_command(command, "/session") == ("/work/tree", None)
+    assert pr_target.parse_command(command, "/session") == ("/work/tree", None, None)
 
 
 def test_a_relative_cd_resolves_against_the_session_directory() -> None:
     assert pr_target.parse_command("cd ../other; gh pr create", "/a/session") == (
         "/a/other",
+        None,
         None,
     )
 
@@ -75,7 +98,54 @@ def test_a_relative_cd_resolves_against_the_session_directory() -> None:
     [("--head topic", "topic"), ("-H topic", "topic"), ("--head=owner:topic", "owner:topic")],
 )
 def test_the_head_branch_is_read(args: str, head: str) -> None:
-    assert pr_target.parse_command(f"gh pr create {args} --base dev", "/s") == ("/s", head)
+    assert pr_target.parse_command(f"gh pr create {args} --base dev", "/s") == ("/s", head, None)
+
+
+@pytest.mark.parametrize("args", ["--repo Owner/other", "-R Owner/other", "--repo=Owner/other"])
+def test_the_repository_is_read(args: str) -> None:
+    assert pr_target.parse_command(f"gh pr create {args}", "/s") == ("/s", None, "Owner/other")
+
+
+def test_a_pull_request_from_another_repositorys_checkout_is_not_gated(
+    project: Path, other: Path
+) -> None:
+    """That repository has its own checks; this one's `make check` is not among them."""
+    event = {
+        "tool_name": "Bash",
+        "cwd": str(project),
+        "tool_input": {"command": f"cd {other} && gh pr create --base main"},
+    }
+    assert pr_target.target(event) is None
+
+
+@pytest.mark.parametrize(
+    "repo", ["Owner/other", "github.com/Owner/other", "https://github.com/owner/other.git"]
+)
+def test_a_pull_request_for_another_named_repository_is_not_gated(project: Path, repo: str) -> None:
+    event = {
+        "tool_name": "Bash",
+        "cwd": str(project),
+        "tool_input": {"command": f"gh pr create --repo {repo} --head topic"},
+    }
+    assert pr_target.target(event) is None
+
+
+def test_a_pull_request_naming_this_repository_is_still_gated(project: Path) -> None:
+    event = {
+        "tool_name": "Bash",
+        "cwd": str(project),
+        "tool_input": {"command": "gh pr create --repo owner/PROJECT --head feature"},
+    }
+    assert Path(pr_target.target(event)).resolve() == (project.parent / "feature").resolve()
+
+
+def test_an_mcp_pull_request_for_another_repository_is_not_gated(project: Path) -> None:
+    event = {
+        "tool_name": "mcp__github__create_pull_request",
+        "cwd": str(project),
+        "tool_input": {"owner": "Owner", "repo": "other", "head": "topic", "base": "main"},
+    }
+    assert pr_target.target(event) is None
 
 
 def test_a_head_branch_resolves_to_the_worktree_that_has_it(repository: Path) -> None:
@@ -91,22 +161,23 @@ def test_a_head_branch_checked_out_nowhere_is_refused(repository: Path) -> None:
         pr_target.resolve(str(repository), "elsewhere")
 
 
-def test_an_mcp_pull_request_names_its_head(repository: Path) -> None:
+def test_an_mcp_pull_request_names_its_head(project: Path) -> None:
     event = {
         "tool_name": "mcp__github__create_pull_request",
-        "cwd": str(repository),
-        "tool_input": {"head": "feature", "base": "main"},
+        "cwd": str(project),
+        "tool_input": {"owner": "Owner", "repo": "project", "head": "feature", "base": "main"},
     }
-    assert Path(pr_target.target(event)).resolve() == (repository.parent / "feature").resolve()
+    assert Path(pr_target.target(event)).resolve() == (project.parent / "feature").resolve()
 
 
-def _run_hook(event: dict) -> subprocess.CompletedProcess[str]:
+def _run_hook(event: dict, project: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["bash", str(HOOKS / "pre-pr-check.sh")],
         input=json.dumps(event),
         capture_output=True,
         text=True,
         cwd=event["cwd"],
+        env={**os.environ, "CLAUDE_PROJECT_DIR": str(project)},
         timeout=60,
     )
 
@@ -114,7 +185,8 @@ def _run_hook(event: dict) -> subprocess.CompletedProcess[str]:
 def test_the_hook_allows_a_command_that_is_not_a_pull_request(repository: Path) -> None:
     (repository / "untracked").write_text("dirty\n")
     result = _run_hook(
-        {"tool_name": "Bash", "cwd": str(repository), "tool_input": {"command": "ls"}}
+        {"tool_name": "Bash", "cwd": str(repository), "tool_input": {"command": "ls"}},
+        repository,
     )
     assert result.returncode == 0, result.stderr
     assert "gate" not in result.stderr
@@ -127,8 +199,26 @@ def test_the_hook_checks_the_worktree_the_pull_request_comes_from(repository: Pa
     (feature / "untracked-in-feature").write_text("dirty\n")
     command = f"cd {feature} && gh pr create --base main"
     result = _run_hook(
-        {"tool_name": "Bash", "cwd": str(repository), "tool_input": {"command": command}}
+        {"tool_name": "Bash", "cwd": str(repository), "tool_input": {"command": command}},
+        repository,
     )
     assert result.returncode == 2
     assert "untracked-in-feature" in result.stderr
     assert "untracked-in-session" not in result.stderr
+
+
+def test_the_hook_allows_a_pull_request_from_another_repository(
+    repository: Path, other: Path
+) -> None:
+    """The gate is this repository's; another repository's dirty checkout is its own concern."""
+    (other / "untracked").write_text("dirty\n")
+    result = _run_hook(
+        {
+            "tool_name": "Bash",
+            "cwd": str(repository),
+            "tool_input": {"command": f"cd {other} && gh pr create --base main"},
+        },
+        repository,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "gate" not in result.stderr

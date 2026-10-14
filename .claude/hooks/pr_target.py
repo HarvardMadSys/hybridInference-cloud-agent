@@ -9,9 +9,14 @@ the pull request may be created from another worktree (`cd <worktree> && gh pr
 create ...`). So the gate first has to know whether this is a pull-request
 creation at all, and if so which checkout holds the commit under review.
 
+The gate belongs to this repository. A pull request for another repository
+(a ``cd`` into its checkout, ``--repo``/``-R`` naming it, or an MCP call naming
+its owner and name) follows that repository's own checks, not this one's.
+
 Output on stdout, exit status 0:
 
-- ``skip``: the tool call does not create a pull request; allow it.
+- ``skip``: the tool call creates no pull request for this repository; allow
+  it.
 - an absolute directory: run the gate in that checkout.
 
 Exit status 2 with a reason on stderr when the checkout cannot be determined.
@@ -28,6 +33,9 @@ import sys
 
 _OPERATORS = {";", "&&", "||", "|", "&", "\n", "(", ")"}
 _GH_PR_CREATE = re.compile(r"\bgh\s+pr\s+create\b")
+# The OWNER/NAME of a GitHub remote URL or a `--repo` value, which may also be
+# HOST/OWNER/NAME or a full URL.
+_GITHUB_REPOSITORY = re.compile(r"(?:^|[:/])([^/:]+/[^/:]+?)(?:\.git)?/?$")
 
 
 class TargetError(Exception):
@@ -41,12 +49,12 @@ def _tokens(command: str) -> list[str]:
     return list(lexer)
 
 
-def parse_command(command: str, cwd: str) -> tuple[str, str | None] | None:
-    """Return ``(directory, head)`` for a `gh pr create` command, else ``None``.
+def parse_command(command: str, cwd: str) -> tuple[str, str | None, str | None] | None:
+    """Return ``(directory, head, repo)`` for a `gh pr create` command, else ``None``.
 
     ``directory`` is where the shell will be when `gh pr create` runs: the
-    session directory, changed by any earlier ``cd``. ``head`` is the value of
-    ``--head``/``-H`` when given.
+    session directory, changed by any earlier ``cd``. ``head`` and ``repo`` are
+    the values of ``--head``/``-H`` and ``--repo``/``-R`` when given.
     """
     if not _GH_PR_CREATE.search(command):
         return None
@@ -66,7 +74,7 @@ def parse_command(command: str, cwd: str) -> tuple[str, str | None] | None:
             index += 2
             continue
         if tokens[index : index + 3] == ["gh", "pr", "create"]:
-            head = None
+            head = repo = None
             args = []
             for arg in tokens[index + 3 :]:
                 if arg in _OPERATORS:
@@ -77,11 +85,61 @@ def parse_command(command: str, cwd: str) -> tuple[str, str | None] | None:
                     head = args[position + 1]
                 elif arg.startswith("--head="):
                     head = arg.split("=", 1)[1]
-            return directory, head
+                elif arg in ("--repo", "-R") and position + 1 < len(args):
+                    repo = args[position + 1]
+                elif arg.startswith("--repo="):
+                    repo = arg.split("=", 1)[1]
+            return directory, head, repo
         index += 1
     # The text matched but no `gh pr create` invocation was found in it, for
     # example inside a quoted argument. Nothing will create a pull request.
     return None
+
+
+def _git_output(directory: str, *args: str) -> str | None:
+    result = subprocess.run(
+        ["git", "-C", directory, *args], capture_output=True, text=True, check=False
+    )
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def _project_dir() -> str:
+    """This repository's checkout: Claude Code's project directory, else the hook's own."""
+    return os.environ.get("CLAUDE_PROJECT_DIR") or os.path.dirname(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    )
+
+
+def _common_dir(directory: str) -> str | None:
+    """The Git directory every worktree of ``directory``'s repository shares."""
+    if not os.path.isdir(directory):
+        return None
+    common = _git_output(directory, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    return os.path.realpath(common) if common else None
+
+
+def _github_repository(value: str) -> str | None:
+    match = _GITHUB_REPOSITORY.search(value.strip())
+    return match.group(1).lower() if match else None
+
+
+def is_other_repository(directory: str, repo: str | None) -> bool:
+    """Whether the pull request belongs to a repository other than this one.
+
+    ``repo`` (``--repo``, or an MCP call's owner and name) is compared with this
+    repository's ``origin``; otherwise ``directory`` is compared by the Git
+    directory its worktrees share. Anything that cannot be told apart counts
+    as this repository, so the gate still runs.
+    """
+    project = _project_dir()
+    if repo is not None:
+        origin = _git_output(project, "remote", "get-url", "origin")
+        own = _github_repository(origin) if origin else None
+        named = _github_repository(repo)
+        if own is not None and named is not None:
+            return named != own
+    common = _common_dir(directory)
+    return common is not None and common != _common_dir(project)
 
 
 def _worktree_branches(directory: str) -> dict[str, str]:
@@ -143,8 +201,15 @@ def target(event: dict) -> str | None:
         parsed = parse_command(tool_input.get("command", ""), cwd)
         if parsed is None:
             return None
-        return resolve(*parsed)
-    # An MCP create_pull_request tool names the head branch directly.
+        directory, head, repo = parsed
+        if is_other_repository(directory, repo):
+            return None
+        return resolve(directory, head)
+    # An MCP create_pull_request tool names the repository and head branch.
+    owner, name = tool_input.get("owner"), tool_input.get("repo")
+    repo = f"{owner}/{name}" if owner and name else None
+    if is_other_repository(cwd, repo):
+        return None
     return resolve(cwd, tool_input.get("head"))
 
 
