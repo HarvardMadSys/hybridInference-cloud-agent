@@ -510,6 +510,34 @@ def test_capture_refuses_a_running_container_and_a_failed_commit(tmp_path) -> No
     assert [command[1:3] for command in docker.commands] == [["container", "commit"]]
 
 
+def test_capture_removes_an_image_a_timed_out_commit_may_still_create(tmp_path) -> None:
+    """Killing the Docker client does not stop the daemon finishing the commit."""
+    docker = _FakeDocker(_Image(list(BASE)), _Image([*BASE, NEW]))
+    run = docker.run
+
+    def slow_commit(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if argv[1:3] == ["container", "commit"]:
+            docker.commands.append(argv)
+            raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+        return run(argv, **kwargs)
+
+    docker.run = slow_commit  # type: ignore[method-assign]
+    capture = _capture(tmp_path, docker)
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        capture.capture(
+            _spec(),
+            SimpleNamespace(container_id="c" * 12, running=False, image="i"),
+            [],
+            upload=lambda **_: None,  # type: ignore[arg-type,return-value]
+            max_bytes=10**6,
+            deadline=1e3,
+        )
+
+    reference = docker.commands[0][-1]
+    assert docker.commands[-1] == ["docker", "image", "rm", reference]
+
+
 class _PeakBytes(io.BytesIO):
     """Remember the largest size the spool ever reached."""
 

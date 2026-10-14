@@ -758,20 +758,27 @@ class SandboxCheckpointCapture:
         reference = f"{CHECKPOINT_IMAGE_REPOSITORY}/{sandbox_hash}:{checkpoint_id}"
         durations: dict[str, int] = {}
         started = self._clock()
-        committed = self._run(
-            [
-                self._docker,
-                "container",
-                "commit",
-                "--pause=false",
-                inspection.container_id,
-                reference,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=min(_COMMIT_TIMEOUT_S, self._remaining(deadline)),
-            check=False,
-        )
+        timeout = min(_COMMIT_TIMEOUT_S, self._remaining(deadline))
+        try:
+            committed = self._run(
+                [
+                    self._docker,
+                    "container",
+                    "commit",
+                    "--pause=false",
+                    inspection.container_id,
+                    reference,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+        except BaseException:
+            # A timeout kills only the client: the daemon may still finish the
+            # commit and tag the image, which nothing else would ever remove.
+            self._remove_image(reference)
+            raise
         if committed.returncode != 0:
             raise SandboxCheckpointError("sandbox checkpoint commit failed")
         durations["commit"] = self._elapsed_ms(started)
