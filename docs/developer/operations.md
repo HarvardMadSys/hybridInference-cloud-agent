@@ -3219,8 +3219,8 @@ rules, not the host's.
   bridge, address and port are written to a `relays` set in both tables, and
   removed with the bridge. Every activation and workspace command re-syncs its
   bridge's exceptions; an update the guard already made for that same Docker
-  network within the last 60 seconds, and saw still held at its latest
-  read-back, is not made again. A reinstall, a failed check or a read-back that
+  network, and saw still held at a read-back in the last 10 seconds (two sweep
+  passes), is not made again. A reinstall, a failed check or a read-back that
   shows anything else forgets it, and the next update reads the kernel. The relay's own default route stays on its stack
   network, because it joins every group bridge at gateway priority -1.
 - **Watched while groups run.** While any group of this deployment is

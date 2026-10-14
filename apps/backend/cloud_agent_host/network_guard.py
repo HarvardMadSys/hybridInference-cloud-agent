@@ -24,10 +24,11 @@ nft calls it makes, and every activation waits for it. So an install and its
 read-back run in one helper, and a bridge's relay update reads, compares and
 writes in one helper. A relay update that would change nothing is skipped when
 this guard wrote or read those exact exceptions for that exact Docker network
-within the last :data:`GUARD_RECHECK_S`, and no reinstall or failed check has
-happened since. Every read-back of the tables (the sweep's, every few seconds
-while groups run) confirms or forgets those remembered exceptions, so the
-memory is never trusted longer than the rules themselves are.
+within the last :data:`HELD_RELAYS_TRUST_S`, and no reinstall or failed check
+has happened since. Every read-back of the tables (the sweep's, every few
+seconds while groups run) confirms or forgets those remembered exceptions, so
+the memory is never trusted longer than the rules themselves are, and a stalled
+sweep sends the next update back to the kernel.
 
 **Neighbours.** Every deployment registers its address pool in its own table.
 The check runs after the install, so of two deployments starting together with
@@ -72,6 +73,13 @@ GUARD_RECHECK_S = 60.0
 #: activation always finds a verification it may still trust and never pays
 #: the install and read-back itself.
 GUARD_RENEW_S = 45.0
+#: How long after a kernel read showed them held a remembered relay update is
+#: trusted: two passes of the running-group sweep, which reads the tables back
+#: every five seconds. A relay update was an activation's one read of the
+#: kernel, so a flushed table refused it; the memory may skip that read only
+#: while the sweep keeps reading in its place, not while a long sweep step
+#: (a final-archive upload) holds the sweep back.
+HELD_RELAYS_TRUST_S = 10.0
 
 _HELPER_TIMEOUT_S = 60
 _RULE = re.compile(r"^add rule (\w+) (\S+) (\w+) ")
@@ -314,7 +322,7 @@ class HostNetworkGuard:
 
         ``network_id`` names the Docker network the bridge belongs to. With
         it, an update this guard already made, or saw held, for that network
-        within :data:`GUARD_RECHECK_S` is not made again; without it the
+        within :data:`HELD_RELAYS_TRUST_S` is not made again; without it the
         kernel is always read and corrected.
         """
         if not bridge.startswith(self.network.interface_prefix):
@@ -328,10 +336,11 @@ class HostNetworkGuard:
                 and held is not None
                 and held.network_id == network_id
                 and held.endpoints == wanted
-                # Never trusted longer than the rules themselves are.
+                # Never trusted longer than the rules themselves are, nor
+                # longer than the sweep's reads of the kernel keep up.
                 and self._verified_at is not None
                 and now - self._verified_at < GUARD_RECHECK_S
-                and now - held.confirmed_at < GUARD_RECHECK_S
+                and now - held.confirmed_at < HELD_RELAYS_TRUST_S
             ):
                 self._held[bridge] = held
                 return

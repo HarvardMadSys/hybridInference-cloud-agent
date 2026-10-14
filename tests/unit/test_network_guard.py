@@ -868,10 +868,30 @@ def test_the_sweeps_renewal_keeps_a_held_update_trusted(monkeypatch) -> None:
     monkeypatch.setattr(
         network_guard.time,
         "monotonic",
-        lambda: start + network_guard.GUARD_RENEW_S + network_guard.GUARD_RECHECK_S - 1,
+        lambda: start + network_guard.GUARD_RENEW_S + network_guard.HELD_RELAYS_TRUST_S - 1,
     )
     calls = len(nft.calls)
 
     guard.sync_relays(bridge, {("10.240.0.3", 8080)}, network_id=_NET)
 
     assert len(nft.calls) == calls
+
+
+def test_a_flushed_table_refuses_an_activation_once_the_sweep_falls_behind(monkeypatch) -> None:
+    """A relay update was an activation's one read of the kernel; memory may not hide a flush.
+
+    The verification is still trusted, but no read-back has confirmed the
+    remembered update for two sweep passes (a final-archive upload holds the
+    sweep back), so the update reads the kernel and finds the table gone.
+    """
+    from cloud_agent_host import network_guard
+
+    nft, guard, bridge = _synced_guard()
+    start = network_guard.time.monotonic()
+    nft.tables.clear()  # `flush ruleset`, from a firewall reload
+    monkeypatch.setattr(
+        network_guard.time, "monotonic", lambda: start + network_guard.HELD_RELAYS_TRUST_S
+    )
+
+    with pytest.raises(NetworkGuardError):
+        guard.sync_relays(bridge, {("10.240.0.3", 8080)}, network_id=_NET)
