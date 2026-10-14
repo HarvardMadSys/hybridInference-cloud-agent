@@ -463,7 +463,11 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
       );
     }
     rememberReturn(
-      initialRepo ? `/?repo=${encodeURIComponent(initialRepo)}` : '/',
+      // Not back to the temporary workspaces' folder: its link asks for a
+      // temporary workspace again, ahead of the draft that asks where to run.
+      initialRepo && initialRepo !== TEMPORARY_WORKSPACE
+        ? `/?repo=${encodeURIComponent(initialRepo)}`
+        : '/',
       {
         task,
         repo: temporary ? '' : repo,

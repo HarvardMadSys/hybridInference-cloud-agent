@@ -848,6 +848,31 @@ describe('TaskComposer source-control onboarding', () => {
     );
   });
 
+  it('comes back from GitHub to the picker, not the temporary workspaces it left', async () => {
+    account.id = 'alice';
+    localStorage.setItem(ACKNOWLEDGED, '1');
+    vi.mocked(getAgentConfig).mockResolvedValue(disconnected());
+    vi.mocked(githubAccessUrl).mockResolvedValue('https://github.test/login/oauth/authorize');
+    const view = render(<TaskComposer initialRepo=":temporary" />);
+    fireEvent.change(await screen.findByRole('textbox', { name: 'What should the agent do?' }), {
+      target: { value: 'Fix the flaky test' },
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Connect GitHub to use a repository' }));
+
+    await waitFor(() =>
+      expect(leaveFor).toHaveBeenCalledWith('https://github.test/login/oauth/authorize'),
+    );
+    expect(JSON.parse(sessionStorage.getItem('agents.github.return')!).value).toBe('/');
+
+    view.unmount();
+    vi.mocked(getAgentConfig).mockResolvedValue(config({ repos: ['owner/other'] }));
+    render(<TaskComposer />);
+
+    const dialog = await screen.findByRole('dialog', { name: 'Repository' });
+    expect(within(dialog).getByRole('searchbox')).toHaveFocus();
+  });
+
   it('asks where to run a task written before connecting, once back from GitHub', async () => {
     sessionStorage.setItem(
       'agents.composer.draft',
