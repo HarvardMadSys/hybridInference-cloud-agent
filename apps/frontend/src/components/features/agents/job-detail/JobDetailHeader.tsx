@@ -107,10 +107,10 @@ export function JobDetailHeader({
               </button>
             ))}
           </nav>
-          {tab === 'chat' ? (
-            <TranscriptPresentationControl value={presentation} onChange={onPresentationChange} />
-          ) : null}
           <div className="ml-auto flex max-w-full flex-wrap items-center gap-2">
+            {tab === 'chat' ? (
+              <TranscriptPresentationControl value={presentation} onChange={onPresentationChange} />
+            ) : null}
             {hasActivity ? (
               <button
                 ref={activityToggleRef}

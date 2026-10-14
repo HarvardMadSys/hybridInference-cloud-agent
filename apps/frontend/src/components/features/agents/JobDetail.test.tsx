@@ -3438,6 +3438,22 @@ describe('JobDetail', () => {
       expect(submitThreadMessage).not.toHaveBeenCalled();
     });
 
+    it('closes the activity display menu on Escape without closing the tool inspector', async () => {
+      viewport();
+      const { job, stored } = transcriptInspectorFixture();
+      render(<JobDetail job={job} events={stored} />);
+      fireEvent.click(screen.getByRole('button', { name: 'Inspect Bash: pytest -q' }));
+      await screen.findByRole('region', { name: 'Step details' });
+
+      const display = screen.getByRole('button', { name: 'Activity: Standard' });
+      fireEvent.click(display);
+      fireEvent.keyDown(screen.getByRole('menuitemradio', { name: 'Standard' }), { key: 'Escape' });
+      expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+      expect(screen.getByRole('region', { name: 'Step details' })).toBeInTheDocument();
+      expect(display).toHaveFocus();
+      expect(cancelAgentJob).not.toHaveBeenCalled();
+    });
+
     it('preserves the reading row while a narrow transcript tool inspector hides the chat', async () => {
       viewport();
       const observers: Array<{

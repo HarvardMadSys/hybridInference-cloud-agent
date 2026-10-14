@@ -1,12 +1,99 @@
 // @vitest-environment jsdom
-import { act, cleanup, renderHook } from '@testing-library/react';
+import '@testing-library/jest-dom/vitest';
+import { act, cleanup, fireEvent, render, renderHook, screen } from '@testing-library/react';
+import { useState } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { transcriptPresentationKey, useTranscriptPresentation } from './transcriptPresentation';
+import {
+  TranscriptPresentationControl,
+  transcriptPresentationKey,
+  useTranscriptPresentation,
+  type TranscriptPresentation,
+} from './transcriptPresentation';
 
 beforeEach(() => localStorage.clear());
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+});
+
+function DisplayControl() {
+  const [value, onChange] = useState<TranscriptPresentation>('standard');
+  return <TranscriptPresentationControl value={value} onChange={onChange} />;
+}
+
+describe('activity display menu', () => {
+  it('explains the modes and updates the current selection without leaving chat', () => {
+    render(<DisplayControl />);
+    const trigger = screen.getByRole('button', { name: 'Activity: Standard' });
+    fireEvent.click(trigger);
+    expect(screen.getByRole('menu', { name: 'Show in chat' })).toHaveAccessibleDescription(
+      'Only changes the display, not how the agent runs.',
+    );
+    expect(screen.getByRole('menuitemradio', { name: 'Compact' })).toHaveAccessibleDescription(
+      'Group completed steps; expand when needed.',
+    );
+    expect(screen.getByRole('menuitemradio', { name: 'Standard' })).toHaveFocus();
+    fireEvent.click(screen.getByRole('menuitemradio', { name: 'Detailed' }));
+    expect(trigger).toHaveAccessibleName('Activity: Detailed');
+    expect(trigger).toHaveFocus();
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+    fireEvent.click(trigger);
+    expect(screen.getByRole('menuitemradio', { name: 'Detailed' })).toHaveAttribute(
+      'aria-checked',
+      'true',
+    );
+    expect(screen.getByRole('menuitemradio', { name: 'Detailed' })).toHaveFocus();
+  });
+
+  it('supports keyboard navigation and consumes Escape before run cancellation', () => {
+    render(<DisplayControl />);
+    const trigger = screen.getByRole('button', { name: 'Activity: Standard' });
+    fireEvent.keyDown(trigger, { key: 'ArrowDown' });
+    const menu = screen.getByRole('menu');
+    fireEvent.keyDown(menu, { key: 'ArrowDown' });
+    expect(screen.getByRole('menuitemradio', { name: 'Detailed' })).toHaveFocus();
+    fireEvent.keyDown(menu, { key: 'ArrowDown' });
+    expect(screen.getByRole('menuitemradio', { name: 'Compact' })).toHaveFocus();
+    fireEvent.keyDown(menu, { key: 'End' });
+    expect(screen.getByRole('menuitemradio', { name: 'Detailed' })).toHaveFocus();
+    fireEvent.keyDown(menu, { key: 'Home' });
+    expect(screen.getByRole('menuitemradio', { name: 'Compact' })).toHaveFocus();
+    fireEvent.keyDown(menu, { key: 'ArrowUp' });
+    expect(screen.getByRole('menuitemradio', { name: 'Detailed' })).toHaveFocus();
+
+    const cancelRun = vi.fn();
+    window.addEventListener('keydown', cancelRun);
+    try {
+      fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
+      expect(cancelRun).not.toHaveBeenCalled();
+      expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+      expect(trigger).toHaveFocus();
+      fireEvent.keyDown(trigger, { key: 'Escape' });
+      expect(cancelRun).toHaveBeenCalledOnce();
+    } finally {
+      window.removeEventListener('keydown', cancelRun);
+    }
+  });
+
+  it('dismisses on outside interaction and returns Tab navigation to the trigger', () => {
+    render(
+      <>
+        <DisplayControl />
+        <button type="button">Next control</button>
+      </>,
+    );
+    const trigger = screen.getByRole('button', { name: 'Activity: Standard' });
+    fireEvent.click(trigger);
+    fireEvent.pointerDown(screen.getByRole('button', { name: 'Next control' }));
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+    fireEvent.click(trigger);
+    fireEvent.keyDown(screen.getByRole('menu'), { key: 'Tab' });
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+    fireEvent.click(trigger);
+    act(() => screen.getByRole('button', { name: 'Next control' }).focus());
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+  });
 });
 
 describe('conversation work-detail preferences', () => {
