@@ -3142,3 +3142,43 @@ async def test_a_checkpoint_bookkeeping_failure_keeps_the_heartbeat(client):
 
     assert response.status_code == 200
     assert len(store.sandbox_observations) == 1
+
+
+async def test_a_due_stop_is_fenced_to_the_activation_the_beat_reported(residency_client):
+    """The database answers a placeholder; the stop must name the live activation.
+
+    The sandbox manager refuses a stop whose activation differs from its
+    member's, so a placeholder made every control-plane stop of a used chat
+    stale (staging: activation 0 sent, 3 current).
+    """
+    client, store, _grants = residency_client
+    credential = await _enroll(client, store)
+    store.sandbox_stop_due = {
+        "thread_id": "athr_1",
+        "generation": 3,
+        "activation_generation": 0,
+        "reason": "idle",
+        "member_activation_generations": {"athr_1": 3},
+    }
+
+    response = await client.post(
+        "/v1/agent/host/heartbeat",
+        json={
+            "retained_sandboxes": [
+                {
+                    "thread_id": "athr_1",
+                    "sandbox_id": "asbx_1",
+                    "container_id": "0123456789abcdef",
+                    "generation": 3,
+                    "activation_generation": 3,
+                    "running": True,
+                }
+            ]
+        },
+        headers={"Authorization": f"Bearer {credential}"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["retained_sandboxes_stop"] == [
+        {**store.sandbox_stop_due, "activation_generation": 3, "shared_live": True}
+    ]

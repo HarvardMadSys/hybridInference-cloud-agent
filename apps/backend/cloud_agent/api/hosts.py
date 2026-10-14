@@ -443,7 +443,15 @@ async def heartbeat_host(
                 sandbox_generation=retained.generation,
             )
             if due is not None:
-                retained_stops.append(RetainedSandboxStop.model_validate(due))
+                # Fence the stop to the activation this beat reported idle. The
+                # sandbox manager refuses any other activation, so a database
+                # placeholder made every control-plane stop of a used chat
+                # stale; a newer activation still refuses this one.
+                retained_stops.append(
+                    RetainedSandboxStop.model_validate(
+                        {**due, "activation_generation": retained.activation_generation}
+                    )
+                )
     if renewals and grants is not None:
         background_tasks.add_task(_renew_residency_grants, grants, list(renewals))
     return HostHeartbeatResponse(
