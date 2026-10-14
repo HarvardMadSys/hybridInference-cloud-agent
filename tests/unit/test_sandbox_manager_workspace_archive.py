@@ -1,7 +1,7 @@
 """The sandbox manager's whole-workspace download.
 
 ``GET /workspaces/{id}/archive`` copies ``/workspace`` out through Docker's
-archive boundary, compresses it, and answers only once the archive is complete,
+archive boundary, excludes Git metadata, and answers only once the archive is complete,
 so a workspace over the host's download limit is refused instead of arriving
 truncated. The open workspace operation brackets the copy either way.
 """
@@ -29,10 +29,34 @@ def _workspace_tar() -> bytes:
         directory = tarfile.TarInfo("workspace")
         directory.type = tarfile.DIRTYPE
         archive.addfile(directory)
-        content = b"print('hello')\n"
-        entry = tarfile.TarInfo("workspace/hello.py")
-        entry.size = len(content)
-        archive.addfile(entry, io.BytesIO(content))
+        git_directory = tarfile.TarInfo("workspace/.git")
+        git_directory.type = tarfile.DIRTYPE
+        archive.addfile(git_directory)
+        files = {
+            "workspace/.git/config": b"[core]\n",
+            "workspace/.git/objects/example": b"git object",
+            "workspace/vendor/submodule/.git": b"gitdir: ../../.git/modules/vendor\n",
+            "workspace/hello.py": b"print('hello')\n",
+            "workspace/.gitignore": b"node_modules/\n",
+            "workspace/.github/workflows/ci.yml": b"name: CI\n",
+            "workspace/.gitkeep": b"",
+            "workspace/node_modules/dependency.js": b"export default 1;\n",
+            "workspace/结果/图表.bin": b"\x00\xff\x80",
+        }
+        for name, content in files.items():
+            entry = tarfile.TarInfo(name)
+            entry.size = len(content)
+            entry.mode = 0o755 if name.endswith("hello.py") else 0o644
+            archive.addfile(entry, io.BytesIO(content))
+        for name, kind, target in [
+            ("workspace/hello-link.py", tarfile.SYMTYPE, "hello.py"),
+            ("workspace/hello-copy.py", tarfile.LNKTYPE, "workspace/hello.py"),
+            ("workspace/git-config-copy", tarfile.LNKTYPE, "workspace/.git/config"),
+        ]:
+            entry = tarfile.TarInfo(name)
+            entry.type = kind
+            entry.linkname = target
+            archive.addfile(entry)
     return buffer.getvalue()
 
 
@@ -60,6 +84,27 @@ async def test_the_workspace_is_sent_as_one_gzipped_tar():
         hello = archive.extractfile("workspace/hello.py")
         assert hello is not None
         assert hello.read() == b"print('hello')\n"
+        assert archive.getnames() == [
+            "workspace",
+            "workspace/hello.py",
+            "workspace/.gitignore",
+            "workspace/.github/workflows/ci.yml",
+            "workspace/.gitkeep",
+            "workspace/node_modules/dependency.js",
+            "workspace/结果/图表.bin",
+            "workspace/hello-link.py",
+            "workspace/hello-copy.py",
+        ]
+        assert archive.getmember("workspace/hello.py").mode == 0o755
+        binary = archive.extractfile("workspace/结果/图表.bin")
+        assert binary is not None
+        assert binary.read() == b"\x00\xff\x80"
+        link = archive.getmember("workspace/hello-link.py")
+        assert link.issym()
+        assert link.linkname == "hello.py"
+        copy = archive.getmember("workspace/hello-copy.py")
+        assert copy.islnk()
+        assert copy.linkname == "workspace/hello.py"
     assert exported == [
         {
             "spec": supervisor.workspace_backend.spec,

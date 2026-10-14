@@ -16,7 +16,6 @@ import binascii
 import codecs
 import contextlib
 import functools
-import gzip
 import hashlib
 import json
 import os
@@ -104,6 +103,7 @@ from cloud_agent_host.shared_session_supervisor import (
     archive_failure_http_detail,
 )
 from cloud_agent_host.tool_windows import ToolWindowTracker, attribute, tool_time_ms
+from cloud_agent_host.workspace_download import write_workspace_download
 from cloud_agent_shared.git.source_archive import DEFAULT_MAX_BASE_BUNDLE_BYTES
 from cloud_agent_shared.host_settings import (
     HOST_SETTINGS_BY_KEY,
@@ -3449,11 +3449,11 @@ def create_app(
         workspace_id: str,
         _: None = Depends(authenticate),
     ) -> StreamingResponse:
-        """Send the whole workspace as a gzipped tar, or refuse it whole.
+        """Send workspace files without Git metadata, or refuse the download whole.
 
         Docker's archive boundary reads ``/workspace`` without running anything
-        inside the sandbox, and the archive is spooled to a temporary file
-        before the first byte is sent: a workspace over the download limit is
+        inside the sandbox. Git metadata is filtered from the download only,
+        and the archive is spooled before the first byte is sent: a workspace over the download limit is
         refused with 413 rather than arriving as a truncated file. The open
         operation keeps the sandbox from being stopped or deleted underneath
         the copy, and the command slots bound how many copies run at once.
@@ -3465,10 +3465,12 @@ def create_app(
 
         def export(retained: RetainedChatBackend, _call: SandboxManagerCall) -> dict[str, Any]:
             try:
-                with gzip.GzipFile(fileobj=spool, mode="wb", compresslevel=6, mtime=0) as packed:
+                with tempfile.TemporaryFile(prefix="freeinference-workspace-export-") as source:
                     retained.manager.export_archive(
-                        retained.spec, CHAT_WORKDIR, packed, max_bytes=limit_mib * 1024 * 1024
+                        retained.spec, CHAT_WORKDIR, source, max_bytes=limit_mib * 1024 * 1024
                     )
+                    source.seek(0)
+                    write_workspace_download(source, spool)
             except ArchiveExportTooLarge as exc:
                 raise HTTPException(
                     status_code=413,
