@@ -15,8 +15,12 @@ export const SIDEBAR_ACTIVITY_REFRESH_MS = 15_000;
  *
  * A record seen for the first time counts as a change, as does a stream gap.
  * `seen` holds what each record last showed, and is updated for every record.
+ * A gap also forgets it: pushes were missed, and the lists re-read for it may
+ * show newer values than `seen`, so a later push that returns a record to its
+ * older value is a change the lists have not seen.
  */
 export function changesSidebarRows(change: AgentRecordsChange, seen: Map<string, string>): boolean {
+  if (change.resync) seen.clear();
   let changed = change.resync;
   for (const job of change.jobs) {
     const shown = [

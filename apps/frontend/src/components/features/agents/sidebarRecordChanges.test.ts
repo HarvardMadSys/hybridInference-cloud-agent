@@ -36,6 +36,15 @@ const job = {
 };
 
 describe('changesSidebarRows', () => {
+  it('treats a value seen before a stream gap as new once the gap is re-read', () => {
+    const seen = new Map<string, string>();
+    changesSidebarRows(change({ threads: [thread] }), seen);
+    // Pinned on another device while the stream was down; the lists are re-read.
+    expect(changesSidebarRows(change({ resync: true }), seen)).toBe(true);
+    // Unpinned again: the lists show it pinned, so this must re-read them.
+    expect(changesSidebarRows(change({ threads: [{ ...thread, revision: 3 }] }), seen)).toBe(true);
+  });
+
   it('counts a record seen for the first time, then ignores activity alone', () => {
     const seen = new Map<string, string>();
     expect(changesSidebarRows(change({ threads: [thread], jobs: [job] }), seen)).toBe(true);
