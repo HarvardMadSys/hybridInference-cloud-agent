@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from cloud_agent_shared.sandbox_restore import PULLABLE_IMAGE_PATTERN
+
 if TYPE_CHECKING:
     from typing import Any
 
@@ -189,3 +191,56 @@ async def revoke_host_credentials(conn: Any, hosts: list[str]) -> None:
         """,
         hosts,
     )
+    await release_covered_sandboxes(conn, hosts)
+
+
+async def release_covered_sandboxes(conn: Any, hosts: list[str]) -> list[str]:
+    """Hand every stopped group a checkpoint covers to whichever host claims it.
+
+    The machine is leaving the pool, and with it the only Docker copy of its
+    groups. A stopped group whose restore point still covers it -- the
+    checkpoint of exactly this container, generation and start, taken from an
+    image another host can pull, and recording every member's last settled
+    turn -- becomes ``cold``: the next turn of any of its chats is claimed by
+    a restore-capable host and recreated there. Everything else stays bound to
+    this host, as before, and continues only if the same host returns.
+    """
+    rows = await conn.fetch(
+        f"""
+        UPDATE agent_sandboxes g
+        SET state = 'cold', restore_attempts = 0, restore_attempt_id = NULL,
+            idle_deadline = NULL, updated_at = NOW()
+        FROM agent_sandbox_checkpoints c
+        WHERE g.host = ANY($1::text[])
+          AND g.state = 'stopped'
+          AND g.deletion_state = 'none'
+          AND g.stop_requested_at IS NULL
+          AND c.id = g.restore_checkpoint_id
+          AND c.sandbox_id = g.id AND c.host = g.host
+          AND c.generation = g.generation AND c.container_id = g.container_id
+          AND c.start_seq = g.start_seq
+          AND c.base_image = g.sandbox_image_digest
+          AND c.base_image ~ '{PULLABLE_IMAGE_PATTERN}'
+          AND NOT EXISTS (
+              SELECT 1 FROM agent_thread_sandbox_memberships m
+              WHERE m.sandbox_id = g.id
+                AND (
+                    m.fork_operation_id IS NOT NULL
+                    OR m.active_attempt_id IS NOT NULL
+                    OR (
+                        m.native_session_id IS NOT NULL
+                        AND m.resident_slot_id IS NOT NULL
+                        AND NOT c.members @> jsonb_build_array(
+                            jsonb_build_object(
+                                'thread_id', m.thread_id,
+                                'last_settled_job_id', m.last_settled_job_id
+                            )
+                        )
+                    )
+                )
+          )
+        RETURNING g.id
+        """,
+        hosts,
+    )
+    return [str(row["id"]) for row in rows]

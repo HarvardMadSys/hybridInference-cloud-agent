@@ -46,6 +46,7 @@ from cloud_agent_host.chat_sandbox import (
     ChatSandboxSpec,
     RetainedChatBackend,
     RetainedChatLost,
+    SandboxRestoreFailed,
 )
 from cloud_agent_host.drivers import DriverError
 from cloud_agent_host.guest_observer import (
@@ -85,7 +86,9 @@ from cloud_agent_host.sandbox_archive_s3 import SandboxArchiveConfigError
 from cloud_agent_host.sandbox_archives import safe_archive_error_type
 from cloud_agent_host.sandbox_checkpoints import (
     DEFAULT_CONTAINERD_CONTENT_DIR,
+    CheckpointRestore,
     SandboxCheckpointCapture,
+    SandboxCheckpointError,
     SandboxCheckpointStore,
 )
 from cloud_agent_host.sandbox_resources import SandboxResourceCollector
@@ -489,6 +492,24 @@ class SharedSandboxMemberRequest(BaseModel):
     last_settled_job_id: str | None = Field(None, max_length=256)
 
 
+class SharedSandboxRestoreRequest(BaseModel):
+    """The control plane's record of a moved group's checkpoint."""
+
+    checkpoint_id: str = Field(..., pattern=r"^[0-9a-f]{32}$")
+    object_key: str = Field(..., min_length=1, max_length=1024)
+    version_id: str | None = Field(None, max_length=1024)
+    sha256: str = Field(..., pattern=r"^[0-9a-f]{64}$")
+    size_bytes: int = Field(..., gt=0)
+    base_image: str = Field(..., min_length=1, max_length=512)
+    format_version: int = Field(1, ge=1)
+
+    def restore(self) -> CheckpointRestore:
+        try:
+            return CheckpointRestore(**self.model_dump())
+        except SandboxCheckpointError as exc:
+            raise ValueError(str(exc)) from exc
+
+
 class SharedSandboxIdentityRequest(BaseModel):
     """Immutable group identity plus its current member manifest."""
 
@@ -505,6 +526,10 @@ class SharedSandboxIdentityRequest(BaseModel):
     disk_limit_mib: int = Field(0, ge=0, le=16777216, strict=True)
     stop_timeout_s: int = Field(10, ge=1, le=300)
     members: list[SharedSandboxMemberRequest] = Field(..., min_length=1, max_length=128)
+    #: The control plane's start fence for the request; see ``_Group.start_seq``.
+    start_seq: int | None = Field(None, ge=0)
+    #: The checkpoint a moved group is recreated from, only while it is restoring.
+    restore: SharedSandboxRestoreRequest | None = None
 
 
 class SharedSandboxAcquireRequest(SharedSandboxIdentityRequest):
@@ -2012,6 +2037,7 @@ def create_app(
     archive_service = sandbox_archive_service
     archive_controller = sandbox_archive_controller
     checkpoint_store: SandboxCheckpointStore | None = None
+    checkpoint_capture: SandboxCheckpointCapture | None = None
     if archive_service is None and archive_controller is None and retained_manager is not None:
         # Checkpoint receipts and their temporary exports share the durable,
         # Sandbox Manager-only archive state directory; no sandbox mounts it.
@@ -2019,20 +2045,21 @@ def create_app(
             os.environ.get("AGENT_SANDBOX_ARCHIVE_STATE_DIR") or DEFAULT_ARCHIVE_STATE_DIR
         )
         checkpoint_store = SandboxCheckpointStore(state_dir / "checkpoints")
+        checkpoint_capture = SandboxCheckpointCapture(
+            docker_binary=retained_manager.backend.docker_binary,
+            spool_dir=state_dir / "checkpoint-spool",
+            store=checkpoint_store,
+            # A read-only mount of containerd's content store lets a
+            # checkpoint copy only its new layer; without it, the capture
+            # streams the whole image through `docker image save`.
+            content_dir=Path(
+                os.environ.get("AGENT_CONTAINERD_CONTENT_DIR") or DEFAULT_CONTAINERD_CONTENT_DIR
+            ),
+        )
         archive_controller = SandboxArchiveController(
             retained_manager,
             namespace=retained_manager.backend.sandbox_namespace,
-            checkpoint_capture=SandboxCheckpointCapture(
-                docker_binary=retained_manager.backend.docker_binary,
-                spool_dir=state_dir / "checkpoint-spool",
-                store=checkpoint_store,
-                # A read-only mount of containerd's content store lets a
-                # checkpoint copy only its new layer; without it, the capture
-                # streams the whole image through `docker image save`.
-                content_dir=Path(
-                    os.environ.get("AGENT_CONTAINERD_CONTENT_DIR") or DEFAULT_CONTAINERD_CONTENT_DIR
-                ),
-            ),
+            checkpoint_capture=checkpoint_capture,
         )
     archive_boundary = archive_service or archive_controller
     if shared_supervisor is None:
@@ -2099,7 +2126,15 @@ def create_app(
                 complete_start=archive_controller.complete_start,
                 prepare_markerless_final=archive_controller.prepare_markerless_final,
             )
+            if hasattr(shared_supervisor, "checkpoint_restore_hook"):
+                # A moved group is recreated from its checkpoint with the
+                # same archive policy and credentials that captured it.
+                shared_supervisor.checkpoint_restore_hook = archive_controller.restore_checkpoint
         configure_archive_hook(final_archive_hook)
+    start_seq_for = getattr(shared_supervisor, "start_seq_for", None)
+    if checkpoint_capture is not None and callable(start_seq_for):
+        # A receipt names the start fence of the run its stop ended.
+        checkpoint_capture.start_seq_for = start_seq_for
     terminals = _TerminalManager(
         idle_ttl_s=idle_ttl_s,
         hard_ttl_s=hard_ttl_s,
@@ -2454,6 +2489,12 @@ def create_app(
         return shared_supervisor
 
     def supervisor_error(exc: Exception, *, safe_detail: str | None = None) -> HTTPException:
+        if isinstance(exc, SandboxRestoreFailed):
+            # The chat is intact in its checkpoint; the caller hands the turn back.
+            return HTTPException(
+                status_code=424,
+                detail=safe_detail if safe_detail is not None else str(exc)[:300],
+            )
         if isinstance(exc, RetainedChatLost):
             return HTTPException(
                 status_code=410,
@@ -2634,6 +2675,8 @@ def create_app(
                 manifest=shared_manifest(body.members),
                 expected_container_id=body.expected_container_id,
                 profiling=body.profiling,
+                start_seq=body.start_seq,
+                restore=None if body.restore is None else body.restore.restore(),
             )
         except (SandboxError, ValueError) as exc:
             raise supervisor_error(exc) from exc
@@ -2655,6 +2698,7 @@ def create_app(
                 shared_spec(body),
                 shared_manifest(body.members),
                 expected_container_id=body.expected_container_id,
+                start_seq=body.start_seq,
             )
         except (SandboxError, ValueError) as exc:
             raise supervisor_error(exc) from exc
@@ -3187,6 +3231,7 @@ def create_app(
                 shared_spec(body),
                 shared_manifest(source_members),
                 expected_container_id=body.expected_container_id,
+                start_seq=body.start_seq,
             )
             result = await endpoint_calls.run(
                 owner.fork_native,
@@ -3249,6 +3294,7 @@ def create_app(
                 shared_spec(body),
                 shared_manifest(body.members),
                 expected_container_id=body.expected_container_id,
+                start_seq=body.start_seq,
             )
             result = await endpoint_calls.run(
                 owner.capture_snapshot,
@@ -3291,6 +3337,7 @@ def create_app(
                 shared_spec(body),
                 shared_manifest(body.members),
                 expected_container_id=body.expected_container_id,
+                start_seq=body.start_seq,
             )
             token, _descriptor = await endpoint_calls.run(owner.operation_opened, thread_id)
             try:

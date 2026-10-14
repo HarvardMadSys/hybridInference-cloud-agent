@@ -74,7 +74,7 @@ across restarts. The inventory below records built-in defaults and the
 environment names used for an initial import. Once a setting is registered, the
 service no longer reads it continuously from `.env`.
 
-Run `alembic upgrade head` (through `0072_drop_old_memory_tables`) before
+Run `alembic upgrade head` (through `0073_sandbox_restore`) before
 starting this release. The updated worker claim query requires
 `agent_jobs.claim_retry_at`, and chat plugin selections require
 `agent_threads.plugins`; existing queued jobs remain immediately eligible and
@@ -586,6 +586,7 @@ Existing host credentials and retained sandboxes stay in place.
 | `AGENT_SANDBOX_BACKEND` | existing | Defaults to `kata`. `container` is the explicit trusted-repository downgrade. `process` is a non-claimable test seam and cannot serve retained chats. |
 | `AGENT_SANDBOX_RUNTIME` | existing | Unset selects `io.containerd.kata.v2` with backend `kata`, or Docker's default runtime with backend `container`. Set `runc` only for the trusted execution profile. The untrusted profile requires exactly `io.containerd.kata.v2`; gVisor needs a separate execution profile. |
 | `AGENT_SANDBOX_IMAGE` | existing | Required sandbox image, with no application default. Use distinct tags for sibling environments, such as `cloud-agent-job:staging` / `:prod`, so one rebuild cannot replace the other's image. This is the job image, distinct from the runner image. |
+| `AGENT_SANDBOX_IMAGE_PULL` | **NEW** | `true` makes a source deployment (`sandbox_host.sh`) pull `AGENT_SANDBOX_IMAGE` instead of building it; default `false`. Use it with the image published for the deployed commit, for example `ghcr.io/harvardmadsys/cloud-agent-sandbox:sandbox-<sha>` (an autoscaling deployment template can write `{deployment_sha}`). A pulled image is recorded by its registry digest, which is what lets another host restore this host's chats from their checkpoints; a locally built image is recorded by a local name no other host can fetch, so its groups stay on this host. The extra runtime version menus need a local build and are refused with this set. Artifact deployments always pull. |
 | `AGENT_SANDBOX_NAMESPACE` | **NEW**, required | Stable deployment namespace stamped onto retained containers and group bridges so sibling Compose stacks on one Docker daemon cannot discover, stop, or prune each other's chats. It also names this deployment's host nftables table and bridge-interface prefix, so a runner or sandbox manager without one refuses to start rather than sharing a default. The host stack uses its unique Compose project; the complete local stack derives it from `LOCAL_PROJECT_NAME`. |
 | `AGENT_SANDBOX_DOCKER` | existing | Docker executable used by the host backend, default `docker`. |
 | `AGENT_SANDBOX_HOME` | existing | Sandbox user home, default `/home/agent`. |

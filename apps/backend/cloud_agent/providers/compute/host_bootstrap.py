@@ -887,6 +887,9 @@ class SshHostBootstrap:
             "node_id": intent.node_id,
             "allocation_id": intent.allocation_id,
             "deploy_root": profile.deploy_root,
+            # Lets a template name the image published for exactly this
+            # commit, e.g. `...cloud-agent-sandbox:sandbox-{deployment_sha}`.
+            "deployment_sha": profile.deployment_sha,
         }.items():
             template = template.replace("{" + key + "}", value)
         values = manager_environment(dotenv_values(stream=io.StringIO(template), interpolate=False))

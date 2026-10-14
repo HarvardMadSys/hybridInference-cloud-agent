@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     )
     from cloud_agent_host.sandbox_archive_bundle import ArchivePhase
     from cloud_agent_host.sandbox_checkpoints import (
+        CheckpointRestore,
         SandboxCheckpointCapture,
         SandboxCheckpointReceipt,
     )
@@ -675,6 +676,28 @@ class SandboxArchiveService:
             if acquired:
                 self._capture_slots.release()
             self._finish_capture("checkpoint", uploaded=uploaded)
+
+    def restore_checkpoint(self, sandbox_id: str, restore: CheckpointRestore) -> str:
+        """Load the image a moved group is recreated from, under the capture budget.
+
+        A restore spools the object twice (as downloaded, then as checked), so
+        it takes the same host-wide capture slot as an archive or checkpoint.
+        """
+        capture = self._checkpoint_capture
+        if capture is None:
+            raise SandboxError("sandbox checkpoints are not configured on this sandbox manager")
+        deadline = self._new_deadline()
+        self._acquire_capture_slot(deadline)
+        try:
+            return capture.restore(
+                sandbox_id,
+                restore,
+                download=self._uploader.download_checkpoint,
+                max_bytes=self._config.max_archive_bytes,
+                deadline=deadline,
+            )
+        finally:
+            self._capture_slots.release()
 
     def _require_accepting(self) -> None:
         with self._lock:

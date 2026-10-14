@@ -25,6 +25,8 @@ def sandbox_row_to_dict(row: Any) -> dict[str, Any]:
     """Decode the JSON members embedded in the shared sandbox read shape."""
     result = dict(row)
     result["group_members"] = load_json(result.get("group_members")) or []
+    if "restore" in result:
+        result["restore"] = load_json(result["restore"])
     return result
 
 

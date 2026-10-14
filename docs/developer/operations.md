@@ -72,7 +72,7 @@ that URL to another origin is refused while the token is kept. Reset the token,
 save the URL, then enter the token again.
 
 For the first deployment of this release, run `alembic upgrade head` through
-`0072_drop_old_memory_tables`. Existing hosts begin without a deployment drain
+`0073_sandbox_restore`. Existing hosts begin without a deployment drain
 owner or release receipt, and 0051 backfills each one with a non-null fence
 epoch. 0066 builds an index on `agent_jobs` concurrently: on a long job history
 it takes a while without blocking the running API, and an interrupted run can
@@ -86,8 +86,13 @@ onto it. 0071 drops `NOT NULL` from `agent_threads.repo` and
 `agent_environment_bindings.repo`, so conversations can start without a
 repository; its downgrade refuses while any such conversation exists. 0072
 drops the retired memory tables; a rollback to before 0070 finds them empty,
-without the earlier memory's portraits and preferences. Rebuild the sandbox
-image for explicit plugin loading.
+without the earlier memory's portraits and preferences. 0073 adds the `cold`
+and `restoring` sandbox states and the start fence that binds a checkpoint to
+the run it ends (see
+[Restoring a removed host's sandboxes](#restoring-a-removed-hosts-sandboxes));
+existing checkpoints carry no fence and never move a group, and its downgrade
+refuses while any group is cold or restoring.
+Rebuild the sandbox image for explicit plugin loading.
 Then start the main control-plane listener with its existing complete
 environment. It imports registered environment settings once,
 while the MCP-only listener waits for initialization and then reads the same
@@ -1934,9 +1939,8 @@ card to opt out, and disabling archives disables checkpoints. The broker runs
 `docker container commit` on the stopped container and uploads an OCI image
 archive that holds only the commit's manifest, config and new layers to
 `cloud-agent/sandbox/v2/<sha256(sandbox id)>/g<generation>/<checkpoint id>.oci.tar`.
-The key names the sandbox, not the host, so a later release can restore it on
-any server that holds the same image. This release only captures; nothing
-restores from a checkpoint yet.
+The key names the sandbox, not the host, so another server can restore it;
+see [Restoring a removed host's sandboxes](#restoring-a-removed-hosts-sandboxes).
 
 - Checkpoints require archives and use the same bucket, credentials, size limit
   and IAM permissions on `cloud-agent/sandbox/*`. Each object is written once
@@ -1962,8 +1966,14 @@ restores from a checkpoint yet.
   `AGENT_SANDBOX_ARCHIVE_STATE_DIR/checkpoints` and repeats it on every
   heartbeat. The control plane records it in `agent_sandbox_checkpoints` only
   when it names the group's current host, generation and container. The admin
-  sandbox page shows the latest one. Receipts are recorded as `reported`; the
-  object is verified when restore uses it.
+  sandbox page shows the latest one. Receipts are recorded as `reported` and
+  become `verified` once a restore has loaded and started them.
+- Each receipt names the control plane's start fence (`start_seq`) for the run
+  its stop ended. Every path that may start the container (a turn, a workspace
+  file, terminal, Git or environment request, a Fork, a snapshot) advances the
+  fence first, and a running container clears it too. A receipt covers its
+  group only while its fence is still current; receipts from sandbox managers
+  that predate restore carry none and never cover a group.
 - The policy omits the default and carries only an opt-out
   (`checkpoints_enabled: false`), which is sent only to hosts that advertise
   `sandbox-checkpoints-v1`. Older sandbox managers parse the policy unchanged
@@ -1972,6 +1982,49 @@ restores from a checkpoint yet.
   state, and anything installed outside `/workspace`. Credential tmpfs mounts
   are not part of a commit. Bucket lifecycle and retention rules apply to the
   `v2/` prefix like the rest of the archives.
+
+#### Restoring a removed host's sandboxes
+
+When a host leaves the pool, through **Remove** on the Servers page or the
+autoscaler releasing its node, its credential is revoked in one transaction
+that also looks at its stopped groups. A group becomes `cold` when its latest
+checkpoint still covers it: the same container, generation and start fence,
+every member's last settled turn recorded, and a base image another host can
+pull by digest. Every other group stays bound to the removed host, as before,
+and continues only if that host is enrolled again; the admin sandbox page shows
+which is which.
+
+The next turn of any chat in a `cold` group is claimed by any host that
+advertises `sandbox-restore-v1` with archives enabled. The claim rehomes the
+group to that host and advances its generation (`restoring`), so anything the
+old host still holds is fenced out. The new host's Sandbox Manager:
+
+1. pulls the group's base image by digest if it lacks it;
+2. downloads the checkpoint version the receipt names and checks its size and
+   SHA-256;
+3. checks the archive: one image, every blob verified, every layer either the
+   base image's or carried in the archive, nothing else. It then rewrites
+   `index.json` and `manifest.json` itself, so loading can create no name but
+   the checkpoint's own;
+4. loads it, creates the container from it with the group's own limits and
+   network, labelled with the checkpoint id, and resumes each native session as
+   after any restart.
+
+A restore that fails before the turn is admitted returns the group to `cold`
+and the turn to the queue without spending an attempt; the third failed claim
+marks the group lost and fails its queued turns. The checkpoint is never
+changed. Workspace requests to a `cold` or `restoring` group return
+`workspace_restoring` (409) until a turn has restored it. Restore reads with
+the archive credentials hosts already receive: `s3:GetObject` and
+`kms:Decrypt` on the archive prefix.
+
+A turn that was running when its host disappeared is not covered and still
+ends as LOST. A group created from a locally built sandbox image cannot move,
+because no other host can fetch that image; autoscaled hosts should pull the
+published image with `AGENT_SANDBOX_IMAGE_PULL=true` (see `ENVIRONMENT.md`).
+A host that is enrolled again after its groups moved cannot start or report
+them: their generation has moved on. Remove those old containers with the
+admin **Discard** action.
 
 #### Launch failures and queue order
 

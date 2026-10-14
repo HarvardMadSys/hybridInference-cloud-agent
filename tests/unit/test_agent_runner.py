@@ -83,6 +83,7 @@ def test_shared_live_is_the_only_capability_without_feature_switches(monkeypatch
         "mid-turn-input-v1:codex",
         "sandbox-archive-settings-v1",
         "sandbox-checkpoints-v1",
+        "sandbox-restore-v1",
     ]
 
 
@@ -101,6 +102,7 @@ def test_exact_deployment_capability_requires_the_completed_marker(monkeypatch, 
         "mid-turn-input-v1:codex",
         "sandbox-archive-settings-v1",
         "sandbox-checkpoints-v1",
+        "sandbox-restore-v1",
     ]
 
     ready_file.write_text("different-sha\n")
@@ -112,6 +114,7 @@ def test_exact_deployment_capability_requires_the_completed_marker(monkeypatch, 
         "mid-turn-input-v1:codex",
         "sandbox-archive-settings-v1",
         "sandbox-checkpoints-v1",
+        "sandbox-restore-v1",
     ]
 
     ready_file.write_text("target-sha\n")
@@ -123,6 +126,7 @@ def test_exact_deployment_capability_requires_the_completed_marker(monkeypatch, 
         "mid-turn-input-v1:codex",
         "sandbox-archive-settings-v1",
         "sandbox-checkpoints-v1",
+        "sandbox-restore-v1",
         "shared-sandbox-deployment:target-sha",
     ]
 
@@ -511,6 +515,7 @@ def test_run_once_dispatches_only_to_shared_live(monkeypatch):
         "mid-turn-input-v1:codex",
         "sandbox-archive-settings-v1",
         "sandbox-checkpoints-v1",
+        "sandbox-restore-v1",
         "environment-v1",
     ]
     assert dispatched[0]["job"] is _JOB

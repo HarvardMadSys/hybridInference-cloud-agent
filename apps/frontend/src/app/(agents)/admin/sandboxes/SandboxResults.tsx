@@ -41,6 +41,8 @@ const STATE_OPTIONS: { value: AdminSandboxState | 'all'; label: string }[] = [
   { value: 'stopped', label: 'Stopped' },
   { value: 'stopped_dirty', label: 'Stopped dirty' },
   { value: 'lost', label: 'Lost' },
+  { value: 'cold', label: 'Cold (checkpoint only)' },
+  { value: 'restoring', label: 'Restoring' },
 ];
 
 interface Snapshot {

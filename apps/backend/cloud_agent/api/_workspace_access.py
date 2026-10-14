@@ -24,7 +24,7 @@ from cloud_agent.workspace_errors import (
 if TYPE_CHECKING:
     from typing import Any
 
-    from cloud_agent.ports import HostPoolRepository
+    from cloud_agent.ports import HostPoolRepository, SandboxRepository
     from cloud_agent.sandbox_manager_client import SandboxManagerClient
 
 
@@ -38,6 +38,43 @@ class _WorkspaceAccessStorage(Protocol):
     """
 
     host_pool: HostPoolRepository
+    sandbox: SandboxRepository
+
+
+#: Groups held only by a checkpoint until a turn recreates them. Their host
+#: is gone or is still recreating them, and a workspace request would at best
+#: fail there and at worst register the group as new.
+_RESTORE_STATES = frozenset({"cold", "restoring"})
+
+
+def _workspace_restoring() -> HTTPException:
+    return HTTPException(
+        status_code=409,
+        detail={
+            "error": {
+                "type": "workspace_restoring",
+                "message": (
+                    "This workspace is moving to another server. "
+                    "Send a message to continue the chat; the files return with it."
+                ),
+            }
+        },
+    )
+
+
+async def fence_workspace_start(store: _WorkspaceAccessStorage, job: dict[str, Any]) -> None:
+    """Fence a request that may start the chat's stopped container.
+
+    Every workspace operation and terminal opens the container. Counting the
+    start before the request leaves stops the last checkpoint from covering a
+    group whose files are about to change. A group only a checkpoint holds is
+    refused instead: its next turn recreates it.
+    """
+    thread_id = job.get("thread_id")
+    if not thread_id:
+        return
+    if await store.sandbox.fence_workspace_start(thread_id=str(thread_id)) in _RESTORE_STATES:
+        raise _workspace_restoring()
 
 
 _TERMINAL_ID_PATTERN = r"^term_[A-Za-z0-9_-]{1,80}$"
@@ -64,6 +101,7 @@ async def _sandbox_manager_for_job(
     job: dict[str, Any],
 ) -> SandboxManagerClient | None:
     """Resolve the owning sandbox manager and restore shared aliases before use."""
+    await fence_workspace_start(store, job)
     sandbox_manager = await sandbox_manager_for_job(store.host_pool, job["id"])
     try:
         return await hydrate_shared_sandbox_manager(job, sandbox_manager)

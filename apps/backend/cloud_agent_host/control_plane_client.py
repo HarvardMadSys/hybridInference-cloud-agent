@@ -376,6 +376,19 @@ class ControlPlane:
             },
         )
 
+    def release_turn(self, reason: str) -> bool:
+        """Hand this never-admitted turn back to the queue without spending an attempt.
+
+        The control plane refuses once the turn was admitted, so ``False`` is
+        never a reason to retry: the lease decides, as it always would.
+        """
+        try:
+            self._post(f"/v1/agent/worker/jobs/{self.job_id}/release", {"reason": reason})
+        except Exception as exc:
+            _log_control_failure("release", self.job_id, exc)
+            return False
+        return True
+
     def suspend_terminals(self, phase: str) -> None:
         """Freeze owner PTYs before workspace preparation or group snapshot capture."""
         self._post(

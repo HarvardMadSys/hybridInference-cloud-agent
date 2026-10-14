@@ -161,6 +161,9 @@ from cloud_agent_shared.sandbox_archive_settings import (
     SANDBOX_CHECKPOINT_CAPABILITY,
 )
 from cloud_agent_shared.sandbox_resources import parse_sandbox_resource_sample
+from cloud_agent_shared.sandbox_restore import (
+    SANDBOX_RESTORE_CAPABILITY,
+)
 from cloud_agent_shared.secret_redaction import SecretRedactor
 from cloud_agent_shared.shared_protocol import (
     FORK_HELPER,
@@ -1158,6 +1161,9 @@ def _shared_live_host_capabilities(
         # The same-deployment sandbox manager understands the policy's
         # checkpoint switch and reports checkpoint receipts.
         SANDBOX_CHECKPOINT_CAPABILITY,
+        # ... and recreates a group another host left behind from its
+        # checkpoint, so a claim may hand this replica a cold group.
+        SANDBOX_RESTORE_CAPABILITY,
     ]
     deployment_sha = (os.environ.get("AGENT_DEPLOYMENT_SHA") or "").strip()
     ready_file = _shared_live_ready_file()
@@ -2065,6 +2071,10 @@ def _stage(measurement: operation_profiling.Measurement | None, name: str) -> st
     return name
 
 
+class _RestoreHandBack(Exception):
+    """The sandbox manager could not recreate a moved group; the turn goes back."""
+
+
 def _run_shared_live_attempt(
     *,
     runtime: AgentRuntime,
@@ -2251,6 +2261,12 @@ def _run_shared_live_attempt(
         stop_timeout_s=int(reservation.get("stop_timeout_seconds") or seed_spec.stop_timeout_s),
     )
     activation_generation = int(reservation["activation_generation"])
+    # A group the control plane moved here is recreated from its checkpoint,
+    # never created empty: the sandbox manager refuses a moved group without it.
+    restore = reservation.get("restore") if reservation.get("state") == "restoring" else None
+    if reservation.get("state") == "restoring" and not isinstance(restore, dict):
+        finish_attempt("failed", "the control plane moved this chat without its checkpoint")
+        return 2
     has_context = bool(reservation.get("last_settled_job_id"))
     native_session_id = str(reservation.get("native_session_id") or "").strip() or None
     manifest = _shared_group_manifest(reservation, thread_id=job.thread_id)
@@ -2372,8 +2388,12 @@ def _run_shared_live_attempt(
                 members=manifest,
                 expected_container_id=reservation.get("container_id"),
                 profiling=operation_profiling.measurement_context(measurement, acquire_call),
+                start_seq=reservation.get("start_seq"),
+                restore=restore,
             )
         except SessionSupervisorError as exc:
+            if restore is not None and exc.status_code == 424:
+                raise _RestoreHandBack(str(exc)) from exc
             context_invalid = has_context and exc.status_code == 410
             raise
         lease_token = str(lease["token"])
@@ -2944,6 +2964,29 @@ def _run_shared_live_attempt(
         failure_detail = "attempt lease lost during shared live execution"
         operation_profiling.finish(measurement, outcome="lease_lost", failure_stage=stage)
         return 3
+    except _RestoreHandBack as exc:
+        # Nothing ran and the checkpoint is unchanged: give the group back to
+        # it and the turn back to the queue, for this host or another to try
+        # again. Once the control plane has run out of attempts it marks the
+        # group lost instead, and this turn fails with it.
+        failure_detail = f"sandbox restore failed: {exc}"
+        _log_control_failure(stage, job.job_id, exc)
+        abandoned = True
+        try:
+            group = control.abandon_chat_sandbox(
+                sandbox_generation=spec.generation,
+                activation_generation=activation_generation,
+                lost=False,
+                detail=failure_detail[:1000],
+                idle_timeout_seconds=idle_timeout_s,
+            )
+        except Exception as abandon_exc:
+            _log_control_failure("sandbox_abandon", job.job_id, abandon_exc)
+            return 2
+        if isinstance(group, dict) and group.get("state") == "lost":
+            report_failure()
+            return 2
+        return 0 if control.release_turn("sandbox_restore_failed") else 2
     except (DriverError, SandboxError, SessionSupervisorError, WorktreeError) as exc:
         failure_detail = str(exc)
         _log_control_failure(stage, job.job_id, exc)

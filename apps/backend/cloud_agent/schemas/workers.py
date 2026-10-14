@@ -152,6 +152,18 @@ class WorkerSandboxMember(BaseModel):
     fork_anchor_job_id: str | None = None
 
 
+class WorkerSandboxRestore(BaseModel):
+    """The checkpoint a claimed cold group is recreated from."""
+
+    checkpoint_id: str = Field(pattern=r"^[0-9a-f]{32}$")
+    object_key: str = Field(min_length=1, max_length=1024)
+    version_id: str | None = Field(None, max_length=1024)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    size_bytes: int = Field(gt=0)
+    base_image: str = Field(min_length=1, max_length=512)
+    format_version: int = Field(ge=1)
+
+
 class WorkerThreadSandbox(BaseModel):
     """The durable same-host container mapping carried with a claimed turn."""
 
@@ -177,6 +189,8 @@ class WorkerThreadSandbox(BaseModel):
         "stopped",
         "stopped_dirty",
         "lost",
+        "cold",
+        "restoring",
     ]
     context_status: Literal["new", "live", "restored", "lost"]
     activation_generation: int
@@ -197,6 +211,12 @@ class WorkerThreadSandbox(BaseModel):
     resident_slot_capacity: int = Field(8, ge=2, le=128)
     group_last_activity_at: datetime | None = None
     group_members: list[WorkerSandboxMember] = Field(default_factory=list)
+    # Starts the control plane has fenced for this group; a checkpoint receipt
+    # carries the value of the run it captured.
+    start_seq: int = Field(0, ge=0)
+    # Present only while a restore-capable host has claimed the group: the
+    # checkpoint to recreate it from instead of creating an empty container.
+    restore: WorkerSandboxRestore | None = None
 
 
 class WorkerAttachmentListResponse(BaseModel):

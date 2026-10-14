@@ -200,6 +200,9 @@ class SandboxCheckpointBeat(BaseModel):
     members: list[SandboxCheckpointMember] = Field(default_factory=list, max_length=128)
     durations_ms: dict[str, int] = Field(default_factory=dict, max_length=16)
     format_version: Literal[1] = 1
+    # The group's start fence when the checkpointed run began. Absent from
+    # managers that predate restore; such a receipt never covers its group.
+    start_seq: int | None = Field(None, ge=0)
 
 
 class RetainedSandboxBeat(BaseModel):
