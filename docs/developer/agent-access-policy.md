@@ -30,7 +30,13 @@ operated; this repository consumes its decision.
 An active account denied Agent permission can still sign in to see the
 access-required page. Missing or inactive accounts cannot create a session.
 Existing sessions recheck permissions on each protected owner/admin request and
-on `/v1/session/me`. The session response exposes
+on `/v1/session/me`. Owner requests may be admitted on a grant the Gateway gave
+up to 10 seconds earlier (`AGENT_ACCESS_ALLOW_TTL_S`): a page load sends a
+burst of owner requests, and concurrent lookups for one account share a single
+Gateway call. Only a grant is kept. A denial, an unknown account and an
+unavailable Gateway are asked again on every request. Sign-in, `/v1/session/me`,
+the admin surface and the checks made when a turn starts never use a kept
+grant, and a denial `/v1/session/me` receives ends the kept grant at once. The session response exposes
 `agent_access: {allowed, permissions}`. The web app denies access if that field
 is missing, including responses from an older backend.
 
@@ -39,7 +45,8 @@ an open stream or cancel a running job. An owner stream (a job's events, the
 account's change feed, a terminal's output) is admitted when it opens and ends
 after about 15 minutes. The client reconnects from where it left off, and that
 request is admitted again, so a withdrawn permission or an expired session
-stops a stream within that bound. Agent caches no session permissions;
+stops a stream within that bound. Agent keeps no permissions in a session,
+and an owner request's kept grant lasts at most 10 seconds;
 the Gateway's account cache can still delay direct database edits until its
 expiry. Ordinary Gateway account-management operations invalidate that cache.
 

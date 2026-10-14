@@ -17,7 +17,12 @@ from cloud_agent.api._owner_auth import (
     authenticate_agent_owner,
     require_agent_owner,
 )
-from cloud_agent.api.deps import get_gateway_client, verify_admin_access
+from cloud_agent.api.deps import (
+    AGENT_ACCESS_ALLOW_TTL_S,
+    AgentAccessAdmission,
+    get_gateway_client,
+    verify_admin_access,
+)
 from cloud_agent.api.hosts import authenticate_host
 from cloud_agent.api.service_jobs import verify_oncall_dispatch
 from cloud_agent.api.worker import _worker_claims, verify_claiming_host
@@ -124,15 +129,64 @@ async def test_unavailable_policy_never_falls_back_to_session_role(
     assert response.status_code == expected
 
 
-async def test_permission_is_rechecked_after_every_successful_read():
+class _Clock:
+    def __init__(self) -> None:
+        self.now = 1_000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+async def test_a_withdrawal_stops_admitting_requests_once_the_kept_grant_expires():
     gateway = _AccessGateway()
+    clock = _Clock()
+    app = _app(gateway)
+    app.state.agent_access_admission = AgentAccessAdmission(clock=clock)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="https://test") as client:
+        assert (await client.get("/probe")).status_code == 200
+        gateway.permissions = []
+        # Inside the bound, the grant the Gateway gave a moment ago admits.
+        clock.now += AGENT_ACCESS_ALLOW_TTL_S - 0.5
+        assert (await client.get("/probe")).status_code == 200
+        assert gateway.asked == [_OWNER]
+        # Past it, the Gateway is asked again, and its denial is never kept.
+        clock.now += 1
+        assert (await client.get("/probe")).status_code == 403
+        assert (await client.post("/probe")).status_code == 403
+    assert gateway.asked == [_OWNER, _OWNER, _OWNER]
+
+
+async def test_a_grant_is_used_at_once_after_a_denial():
+    gateway = _AccessGateway(permissions=[])
     async with AsyncClient(
         transport=ASGITransport(app=_app(gateway)), base_url="https://test"
     ) as client:
-        assert (await client.get("/probe")).status_code == 200
-        gateway.permissions = []
         assert (await client.get("/probe")).status_code == 403
-        assert (await client.post("/probe")).status_code == 403
+        gateway.permissions = ["agent.use"]
+        assert (await client.get("/probe")).status_code == 200
+    assert gateway.asked == [_OWNER, _OWNER]
+
+
+async def test_an_unavailable_gateway_is_asked_again_and_admits_nothing():
+    gateway = _AccessGateway(error=503)
+    async with AsyncClient(
+        transport=ASGITransport(app=_app(gateway)), base_url="https://test"
+    ) as client:
+        assert (await client.get("/probe")).status_code == 503
+        assert (await client.get("/probe")).status_code == 503
+    assert gateway.asked == [_OWNER, _OWNER]
+
+
+async def test_the_admin_surface_asks_the_gateway_on_every_request(admin_env):
+    gateway = _AccessGateway(permissions=["agent.use", "agent.admin"])
+    async with AsyncClient(
+        transport=ASGITransport(app=_app(gateway)), base_url="https://test"
+    ) as client:
+        client.cookies.set(identity.SESSION_COOKIE, identity.mint_session(user_id=_OWNER))
+        assert (await client.get("/probe")).status_code == 200
+        assert (await client.get("/admin/probe")).status_code == 200
+        gateway.permissions = ["agent.use"]
+        assert (await client.get("/admin/probe")).status_code == 403
     assert gateway.asked == [_OWNER, _OWNER, _OWNER]
 
 

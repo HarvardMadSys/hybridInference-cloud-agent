@@ -43,11 +43,12 @@ import jwt
 import pytest
 import pytest_asyncio
 from cryptography.hazmat.primitives.asymmetric import rsa
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from cloud_agent import identity
 from cloud_agent.api import session as session_router
+from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api.deps import get_gateway_client
 from cloud_agent.gateway import GatewayError
 
@@ -998,6 +999,31 @@ async def test_me_reports_revocation_without_erasing_authenticated_identity(clie
     assert response.json()["id"] == _USER
     assert response.json()["agent_access"] == {"allowed": False, "permissions": []}
     assert gateway.access_asked == [_USER, _USER, _USER]
+
+
+async def test_a_withdrawal_me_sees_stops_owner_requests_at_once(key):
+    gateway = _FakeGateway(
+        {"exists": True, "active": True, "role": "internal"},
+        identity_token=_identity_token(key),
+    )
+    app = _app(gateway)
+
+    @app.get("/probe")
+    async def probe(user: dict[str, Any] = Depends(require_agent_owner)):
+        return user
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="https://test", follow_redirects=False
+    ) as client:
+        await _sign_in(client)
+        assert (await client.get("/v1/session/me")).json()["agent_access"]["allowed"] is True
+        # Admitted on the grant /me was just given, without asking again.
+        assert (await client.get("/probe")).status_code == 200
+        assert gateway.access_asked == [_USER, _USER]
+        gateway.permissions = []
+        assert (await client.get("/v1/session/me")).json()["agent_access"]["allowed"] is False
+        assert (await client.get("/probe")).status_code == 403
+    assert gateway.access_asked == [_USER, _USER, _USER, _USER]
 
 
 async def test_me_fails_closed_after_an_earlier_allow_when_gateway_is_unavailable(

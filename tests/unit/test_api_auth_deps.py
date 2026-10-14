@@ -16,6 +16,7 @@ The credential boundaries that would be quietest if they broke:
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any
 
@@ -26,6 +27,7 @@ from fastapi import Depends, FastAPI, Request
 from httpx import ASGITransport, AsyncClient
 
 from cloud_agent import identity
+from cloud_agent.agent_access import AgentAccessDecision
 from cloud_agent.api import deps
 from cloud_agent.api.deps import (
     AGENT_TOKEN_PREFIX,
@@ -450,3 +452,49 @@ async def test_a_failed_audit_write_never_undoes_the_action() -> None:
 @pytest.fixture(autouse=True)
 def _configured_identity_issuer(monkeypatch):
     monkeypatch.setenv("GATEWAY_ISSUER", "https://gateway.example")
+
+
+class _SlowAccessGateway:
+    """Answers ``agent.use`` once released, counting how often it was asked."""
+
+    def __init__(self) -> None:
+        self.asked = 0
+        self.release = asyncio.Event()
+
+    async def agent_access(self, user_id: str) -> dict[str, Any]:
+        self.asked += 1
+        await self.release.wait()
+        return {"user_id": user_id, "allowed": True, "permissions": ["agent.use"]}
+
+
+async def test_concurrent_owner_admissions_share_one_gateway_lookup():
+    gateway = _SlowAccessGateway()
+    admission = deps.AgentAccessAdmission()
+    waiting = [asyncio.create_task(admission.decision(gateway, "u1")) for _ in range(5)]
+    await asyncio.sleep(0)
+    gateway.release.set()
+    decisions = await asyncio.gather(*waiting)
+    assert gateway.asked == 1
+    assert all(decision.permits("agent.use") for decision in decisions)
+
+
+async def test_a_caller_that_gives_up_does_not_cancel_the_shared_lookup():
+    gateway = _SlowAccessGateway()
+    admission = deps.AgentAccessAdmission()
+    first = asyncio.create_task(admission.decision(gateway, "u1"))
+    second = asyncio.create_task(admission.decision(gateway, "u1"))
+    await asyncio.sleep(0)
+    first.cancel()
+    gateway.release.set()
+    assert (await second).permits("agent.use")
+    assert gateway.asked == 1
+
+
+async def test_a_recorded_denial_ends_the_kept_grant():
+    gateway = _SlowAccessGateway()
+    gateway.release.set()
+    admission = deps.AgentAccessAdmission()
+    await admission.decision(gateway, "u1")
+    admission.record(AgentAccessDecision(user_id="u1", allowed=False, permissions=[]))
+    await admission.decision(gateway, "u1")
+    assert gateway.asked == 2

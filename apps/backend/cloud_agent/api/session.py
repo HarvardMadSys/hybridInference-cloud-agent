@@ -58,6 +58,7 @@ from fastapi.responses import RedirectResponse
 
 from cloud_agent import identity
 from cloud_agent.api.deps import (
+    agent_access_admission,
     get_current_user,
     get_gateway_client,
     resolve_agent_access,
@@ -553,6 +554,10 @@ async def session_me(
         request=request, authorization=request.headers.get("authorization")
     )
     decision = await resolve_agent_access(gateway, user["user_id"])
+    # Always asked for here, and it replaces what owner admission keeps: a page
+    # load's owner requests are admitted on it, and a withdrawal seen here
+    # stops admitting them at once.
+    agent_access_admission(request).record(decision)
     return SessionUserResponse(
         id=user["user_id"],
         agent_access=decision.public(),

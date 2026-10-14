@@ -2962,8 +2962,15 @@ async def test_config_offers_the_models_the_create_endpoint_accepts(client: Asyn
     assert config.json()["github_connected"] is True
 
 
-async def test_config_reads_one_current_catalog_and_rechecks_admission(store: FakeStorage):
-    """One catalog response supplies both fields, for each admitted owner read."""
+async def test_config_reads_one_current_catalog_for_each_admitted_owner_read(
+    store: FakeStorage,
+):
+    """One catalog response supplies both fields, for each admitted owner read.
+
+    The catalog is read on every request. Admission asks the Gateway once per
+    account here: the second read for the same owner is admitted on the grant
+    kept from the first (``AGENT_ACCESS_ALLOW_TTL_S``).
+    """
     from httpx import MockTransport, Response
 
     from cloud_agent.api.deps import get_gateway_client
@@ -2993,6 +3000,7 @@ async def test_config_reads_one_current_catalog_and_rechecks_admission(store: Fa
         gateway = GatewayClient("https://gateway.example", "config-dispatch-token", client=upstream)
         app.dependency_overrides[get_gateway_client] = lambda: gateway
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            admitted_after = ([_OWNER], [_OWNER], [_OWNER, _OTHER])
             for index, owner in enumerate((_OWNER, _OWNER, _OTHER), start=1):
                 identity["user_id"] = owner
                 response = await client.get("/v1/agent/config")
@@ -3001,8 +3009,8 @@ async def test_config_reads_one_current_catalog_and_rechecks_admission(store: Fa
                 assert response.json()["models"] == [model]
                 assert response.json()["model_reasoning_efforts"] == {model: ["high"]}
                 assert len(catalog_owners) == index
-                assert len(admitted_owners) == index
-    assert catalog_owners == admitted_owners == [_OWNER, _OWNER, _OTHER]
+                assert admitted_owners == admitted_after[index - 1]
+    assert catalog_owners == [_OWNER, _OWNER, _OTHER]
 
 
 @pytest.mark.parametrize(

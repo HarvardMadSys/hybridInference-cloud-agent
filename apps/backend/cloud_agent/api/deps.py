@@ -45,8 +45,10 @@ worth re-reading a diff of this file for.
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import os
+import time
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 
 import jwt
@@ -70,6 +72,8 @@ from cloud_agent.source_control_runtime import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from cloud_agent.gateway import GatewayClient
     from cloud_agent.grants import GrantClient
     from cloud_agent.ports import AuditRepository
@@ -333,7 +337,11 @@ async def require_agent_access(
     gateway: Any, user_id: str, permission: str = "agent.use"
 ) -> AgentAccessDecision:
     """Require an explicit current Gateway permission before accessing Agent data."""
-    decision = await resolve_agent_access(gateway, user_id)
+    return _permitted(await resolve_agent_access(gateway, user_id), permission)
+
+
+def _permitted(decision: AgentAccessDecision, permission: str) -> AgentAccessDecision:
+    """Return ``decision`` if it grants ``permission``; refuse the request otherwise."""
     if not decision.permits(permission):
         raise HTTPException(
             status_code=403,
@@ -344,6 +352,100 @@ async def require_agent_access(
             ),
         )
     return decision
+
+
+#: How long an owner request may be admitted on an earlier ``agent.use`` grant.
+#: A page load sends a burst of owner requests, and a running turn makes every
+#: open tab send more; each used to wait on its own Gateway round trip. A
+#: withdrawal therefore reaches owner requests within this bound — well inside
+#: the one an open stream already has (see agent-access-policy.md).
+AGENT_ACCESS_ALLOW_TTL_S = 10.0
+
+
+class AgentAccessAdmission:
+    """Owner-request admission that shares Gateway lookups and briefly keeps a grant.
+
+    Two things, both per process and per account:
+
+    - **Concurrent lookups are shared.** Requests that arrive while a lookup
+      for their account is in flight wait for that lookup instead of starting
+      their own.
+    - **A grant is kept for** :data:`AGENT_ACCESS_ALLOW_TTL_S`. Only a decision
+      that grants ``agent.use`` is kept. A denial, an unknown account and an
+      unavailable Gateway are never kept, and any fresh answer that is not a
+      grant drops the one kept before it.
+
+    Only owner admission reads it. Sign-in, ``/v1/session/me``, the admin
+    surface and the checks made when a turn starts all ask the Gateway every
+    time; ``/v1/session/me`` also records what it was told, so a withdrawal it
+    sees ends the kept grant at once.
+    """
+
+    def __init__(
+        self,
+        ttl_s: float = AGENT_ACCESS_ALLOW_TTL_S,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._ttl_s = ttl_s
+        self._clock = clock
+        self._granted: dict[str, tuple[float, AgentAccessDecision]] = {}
+        self._lookups: dict[str, asyncio.Task[AgentAccessDecision]] = {}
+
+    async def decision(self, gateway: Any, user_id: str) -> AgentAccessDecision:
+        """The kept grant if still fresh, else the Gateway's current decision."""
+        kept = self._granted.get(user_id)
+        if kept is not None and self._clock() < kept[0]:
+            return kept[1]
+        lookup = self._lookups.get(user_id)
+        if lookup is None:
+            lookup = asyncio.get_running_loop().create_task(self._look_up(gateway, user_id))
+            self._lookups[user_id] = lookup
+            lookup.add_done_callback(lambda done: self._finished(user_id, done))
+        # A caller that gives up (a closed connection) must not cancel the
+        # lookup the other callers are waiting on.
+        return await asyncio.shield(lookup)
+
+    def record(self, decision: AgentAccessDecision) -> None:
+        """Keep a fresh grant, or drop the kept one if this decision is not a grant."""
+        if not decision.permits("agent.use"):
+            self._granted.pop(decision.user_id, None)
+            return
+        now = self._clock()
+        if len(self._granted) >= 1024:
+            self._granted = {user: kept for user, kept in self._granted.items() if now < kept[0]}
+        self._granted[decision.user_id] = (now + self._ttl_s, decision)
+
+    async def _look_up(self, gateway: Any, user_id: str) -> AgentAccessDecision:
+        try:
+            decision = await resolve_agent_access(gateway, user_id)
+        except BaseException:
+            self._granted.pop(user_id, None)
+            raise
+        self.record(decision)
+        return decision
+
+    def _finished(self, user_id: str, lookup: asyncio.Task[AgentAccessDecision]) -> None:
+        if self._lookups.get(user_id) is lookup:
+            del self._lookups[user_id]
+        # Retrieve a failure even when every waiter has gone, so it is not
+        # reported as never retrieved.
+        if not lookup.cancelled():
+            lookup.exception()
+
+
+def agent_access_admission(request: Request) -> AgentAccessAdmission:
+    """The application's :class:`AgentAccessAdmission`, created on first use."""
+    admission = getattr(request.app.state, "agent_access_admission", None)
+    if admission is None:
+        admission = AgentAccessAdmission()
+        request.app.state.agent_access_admission = admission
+    return admission
+
+
+async def admit_agent_owner(request: Request, gateway: Any, user_id: str) -> AgentAccessDecision:
+    """Admit an owner request on a current or briefly kept ``agent.use`` grant."""
+    decision = await agent_access_admission(request).decision(gateway, user_id)
+    return _permitted(decision, "agent.use")
 
 
 #: The namespace :func:`cloud_agent.tokens.mint_worker_token` mints into. Kept
