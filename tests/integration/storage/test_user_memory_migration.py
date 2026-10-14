@@ -98,7 +98,8 @@ async def test_memory_overrides_migration_preserves_reset_fence_and_source_histo
             before = dict(
                 await conn.fetchrow("SELECT * FROM agent_user_memories WHERE user_id = 'alice'")
             )
-        apply_migrations(config)
+        # 0071 drops the table; stop where the overrides migration left it.
+        apply_migrations(config, "0052_memory_overrides")
         async with pool.acquire() as conn:
             row = await conn.fetchrow("SELECT * FROM agent_user_memories WHERE user_id = 'alice'")
             assert json.loads(row["overrides"]) == []

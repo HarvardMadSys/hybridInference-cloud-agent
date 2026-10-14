@@ -494,16 +494,24 @@ def test_publishing_leaves_the_attempt_thread(monkeypatch, caplog, tmp_path):
 
 
 def test_a_blocking_log_handler_does_not_stall_the_attempt(monkeypatch, caplog):
-    """The attempt thread never waits on a log handler, however slow."""
+    """The attempt thread never waits on a log handler, however slow.
+
+    Proved by the handler rather than by a tight clock: ``finish()`` returns
+    while the handler it would have waited on is still blocked. The ceiling is
+    a backstop for a bounded wait, set where scheduling noise on a loaded CI
+    runner cannot reach it and the five-second block still fails.
+    """
     _enable(monkeypatch)
     caplog.set_level(logging.INFO, logger=profiling.__name__)
     release = threading.Event()
     entered = threading.Event()
+    returned = threading.Event()
 
     class BlockingHandler(logging.Handler):
         def emit(self, record):
             entered.set()
             release.wait(5)
+            returned.set()
 
     blocker = BlockingHandler()
     profiling_logger = logging.getLogger(profiling.__name__)
@@ -514,12 +522,16 @@ def test_a_blocking_log_handler_does_not_stall_the_attempt(monkeypatch, caplog):
         started = time.monotonic()
         profiling.finish(measurement, outcome="dispatched")
         elapsed = time.monotonic() - started
+        handler_returned_first = returned.is_set()
+        handler_reached = entered.wait(5)
     finally:
         release.set()
         profiling_logger.removeHandler(blocker)
         profiling.flush_sink()
 
-    assert elapsed < 0.05, f"finish() waited {elapsed:.3f}s on a blocked handler"
+    assert handler_reached, "the record never reached the blocking handler"
+    assert not handler_returned_first, "finish() waited for the blocked handler to return"
+    assert elapsed < 1.0, f"finish() waited {elapsed:.3f}s on a blocked handler"
 
 
 def test_profiling_off_never_starts_the_exporter(monkeypatch, caplog):

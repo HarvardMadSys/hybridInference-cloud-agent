@@ -1,9 +1,11 @@
 """Serve the operator's pgAdmin behind the current Agent admin permission.
 
-The upstream is a private service, never a caller-selected URL. pgAdmin keeps
-its own login and CSRF protection; neither an Agent credential nor an asserted
-user header crosses the proxy. Each request uses a separate upstream cookie
-jar so administrators cannot inherit one another's pgAdmin sessions.
+The upstream is the deployment's own pgAdmin service, never a caller-selected
+URL: Admin Settings choose among the services the deployment names and can
+disable access, but cannot aim the proxy anywhere else. pgAdmin keeps its own
+login and CSRF protection; neither an Agent credential nor an asserted user
+header crosses the proxy. Each request uses a separate upstream cookie jar so
+administrators cannot inherit one another's pgAdmin sessions.
 """
 
 from __future__ import annotations
@@ -13,14 +15,14 @@ from dataclasses import dataclass
 from http.cookies import SimpleCookie
 from pathlib import Path
 from typing import TYPE_CHECKING
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import quote, urlsplit, urlunsplit
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, EmailStr, Field, SecretStr, field_validator
 from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
-from starlette.responses import RedirectResponse, StreamingResponse
+from starlette.responses import JSONResponse, RedirectResponse, StreamingResponse
 
 from cloud_agent import settings
 from cloud_agent.api.deps import (
@@ -41,6 +43,12 @@ router = APIRouter(
 )
 
 PGADMIN_PATH = "/admin/agent/pgadmin"
+#: The service the ``pgadmin`` Compose profile runs; it needs no declaration.
+BUNDLED_PGADMIN_URL = "http://pgadmin:5050"
+#: Deployment variables that name another pgAdmin service. Saved settings never
+#: reach the process environment, so only the operator can add one.
+_DEPLOYMENT_PGADMIN_ENV = ("AGENT_PGADMIN_URL", "AGENT_PGADMIN_BOOTSTRAP_URL")
+_DEFAULT_PORTS = {"http": 80, "https": 443}
 _SESSION_COOKIE = "pga4_session"
 _COOKIES = {_SESSION_COOKIE, "remember_token"}
 
@@ -49,13 +57,19 @@ _COOKIES = {_SESSION_COOKIE, "remember_token"}
 #: inline scripts, so a script policy here would break it; these directives
 #: are enforced alongside that one and break nothing pgAdmin does. No other
 #: site may frame pgAdmin's SQL editor, and nothing it serves is sniffed into
-#: a script or rendered as a plugin.
+#: a script or rendered as a plugin. :func:`_isolation` adds the second policy
+#: that keeps pgAdmin's requests under its own path.
 _SECURITY_HEADERS = (
     (b"content-security-policy", b"frame-ancestors 'self'; object-src 'none'; base-uri 'self'"),
     (b"x-frame-options", b"SAMEORIGIN"),
     (b"x-content-type-options", b"nosniff"),
 )
-_REPLACED_HEADERS = {"cache-control", "x-frame-options", "x-content-type-options"}
+_REPLACED_HEADERS = {
+    "cache-control",
+    "cross-origin-opener-policy",
+    "x-frame-options",
+    "x-content-type-options",
+}
 _REQUEST_HEADERS = {
     "accept",
     "accept-language",
@@ -132,8 +146,42 @@ def setup_root() -> Path | None:
     return root
 
 
+def _service(url: httpx.URL) -> tuple[str, str, int | None]:
+    """Name the service a URL reaches by scheme, host and effective port.
+
+    A trailing slash, letter case or a spelled-out default port does not make
+    an address another service.
+    """
+    return url.scheme, url.host, url.port or _DEFAULT_PORTS.get(url.scheme)
+
+
+def deployment_pgadmin_services() -> set[tuple[str, str, int | None]]:
+    """Return the pgAdmin services the deployment itself names.
+
+    The Private pgAdmin URL is an admin-editable setting, and the proxy sends
+    any method, path and body to it and returns the answer. Unbounded, that is
+    a forward proxy from the control plane's network to a cloud metadata
+    endpoint or any other private service it can reach. The environment is
+    read directly, never through saved settings, because only the operator
+    sets it.
+    """
+    services = set()
+    for value in (BUNDLED_PGADMIN_URL, *map(os.environ.get, _DEPLOYMENT_PGADMIN_ENV)):
+        try:
+            if value and value.strip():
+                services.add(_service(httpx.URL(value.strip())))
+        except httpx.InvalidURL:
+            continue
+    return services
+
+
 def pgadmin_config(*, bootstrap: bool = False) -> PgAdminConfig | None:
-    """Refuse malformed configuration without returning its contents."""
+    """Refuse malformed configuration without returning its contents.
+
+    Raises:
+        HTTPException: 503 when an address is malformed, or when the saved
+            upstream is not a pgAdmin service the deployment names.
+    """
     upstream = (
         (
             os.environ.get("AGENT_PGADMIN_BOOTSTRAP_URL")
@@ -171,7 +219,7 @@ def pgadmin_config(*, bootstrap: bool = False) -> PgAdminConfig | None:
         ):
             raise ValueError("invalid pgAdmin addresses")
         _ = origin.port, target.port
-        return PgAdminConfig(
+        config = PgAdminConfig(
             upstream=httpx.URL(upstream),
             public_url=public,
             public_path=target.path,
@@ -183,6 +231,16 @@ def pgadmin_config(*, bootstrap: bool = False) -> PgAdminConfig | None:
             status_code=503,
             detail="Check AGENT_PGADMIN_URL and the public pgAdmin URL configuration.",
         ) from None
+    # Compared as httpx parsed it, since that parse is the one the proxy dials.
+    if _service(config.upstream) not in deployment_pgadmin_services():
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"Set Private pgAdmin URL to {BUNDLED_PGADMIN_URL}, or to a pgAdmin address "
+                "set in AGENT_PGADMIN_URL or AGENT_PGADMIN_BOOTSTRAP_URL for this deployment."
+            ),
+        )
+    return config
 
 
 def pgadmin_client() -> httpx.AsyncClient:
@@ -252,6 +310,51 @@ def _location(location: str, config: PgAdminConfig) -> str:
     return urlunsplit(("", "", path, parsed.query, parsed.fragment))
 
 
+def _isolation(config: PgAdminConfig) -> list[tuple[bytes, bytes]]:
+    """Confine pgAdmin's pages to the pgAdmin path of the origin they share.
+
+    pgAdmin is served on the Agent's own origin, where the administrator's
+    session cookie authorizes every admin route, so a script running in a
+    pgAdmin page could call them. This policy is enforced alongside pgAdmin's
+    own: its fetches, form posts, frames and workers stay under the pgAdmin
+    path, and COOP denies it a handle on a page it opens that does not send
+    the same COOP, as the Agent's other pages do not. It narrows that reach;
+    only a separate origin removes it.
+    """
+    host = config.host
+    if host.isascii() and not host.startswith("["):
+        # A CSP path ends at ";" or ",", so those are escaped.
+        path = quote(config.public_path, safe="/%:@!$&'()*+=-._~")
+        page = f"{config.scheme}://{host}{path}/"
+        sockets = f"{'wss' if config.scheme == 'https' else 'ws'}://{host}{path}/"
+        connect = f"{page} {sockets}"
+    else:
+        # A CSP host cannot spell an IP literal or an IDN; keep the origin bound.
+        page = connect = "'self'"
+    policy = (
+        f"connect-src {connect} blob: data:; form-action {page}; "
+        f"frame-src {page} blob: data:; worker-src {page} blob:"
+    )
+    return [
+        (b"content-security-policy", policy.encode("latin-1")),
+        (b"cross-origin-opener-policy", b"same-origin"),
+    ]
+
+
+def _refusal(status_code: int, detail: str) -> JSONResponse:
+    """Answer for pgAdmin without becoming a page that could borrow the session.
+
+    The proxy's own answers are served under the pgAdmin path, where a pgAdmin
+    page may frame them. Sandboxed, such a document has an opaque origin and
+    offers that page no same-origin window to make requests from.
+    """
+    return JSONResponse(
+        {"detail": detail},
+        status_code=status_code,
+        headers={"Cache-Control": "no-store", "Content-Security-Policy": "sandbox"},
+    )
+
+
 @router.get("/database-tools", response_model=DatabaseTools)
 async def database_tools(
     response: Response,
@@ -276,7 +379,9 @@ async def database_tools(
         available=available,
         url=f"{config.public_url}/" if available else None,
         setup_required=bool(
-            not available and bootstrap is not None and bootstrap.upstream == config.upstream
+            not available
+            and bootstrap is not None
+            and _service(bootstrap.upstream) == _service(config.upstream)
         ),
     )
 
@@ -295,7 +400,9 @@ async def setup_pgadmin(
     if bootstrap is None or root is None:
         raise HTTPException(status_code=503, detail="pgAdmin setup is not configured.")
     config = pgadmin_config()
-    if config is not None and config.upstream != bootstrap.upstream:
+    # Compared as services: the setting saved below drops a trailing slash
+    # the bootstrap address may carry, and is still the same pgAdmin.
+    if config is not None and _service(config.upstream) != _service(bootstrap.upstream):
         raise HTTPException(
             status_code=409, detail="A different pgAdmin service is configured in Admin Settings."
         )
@@ -306,6 +413,9 @@ async def setup_pgadmin(
         raise HTTPException(status_code=403, detail="Open pgAdmin setup from the admin dashboard.")
     if await pgadmin_available(bootstrap):
         raise HTTPException(status_code=409, detail="pgAdmin has already been set up.")
+    # Saved before the volume is written, so a database failure leaves nothing
+    # half done. If the write then fails, the saved connection names the same
+    # service as the bootstrap address and the retry proceeds.
     if config is None:
         storage = require_store(store)
         changes = settings.encode_changes(
@@ -331,6 +441,13 @@ async def setup_pgadmin(
     except FileExistsError:
         raise HTTPException(status_code=409, detail="pgAdmin has already been set up.") from None
     except OSError:
+        await log_admin_action(
+            store,
+            get_client_ip(request),
+            "agent.database.pgadmin.setup",
+            actor_id=admin,
+            success=False,
+        )
         raise HTTPException(
             status_code=503, detail="pgAdmin setup storage is unavailable."
         ) from None
@@ -361,13 +478,20 @@ async def pgadmin_proxy(
     request: Request,
     admin: str = Depends(verify_admin_access),
     store: Storage | None = Depends(get_storage),
-) -> StreamingResponse:
+) -> Response:
     """Authorize every pgAdmin page, asset, upload, and SQL request."""
-    config = pgadmin_config()
+    try:
+        config = pgadmin_config()
+    except HTTPException as refused:
+        return _refusal(refused.status_code, refused.detail)
     if config is None:
-        raise HTTPException(status_code=503, detail="pgAdmin is not configured.")
-    # copy_with retains the configured host even for a path beginning with //.
-    url = config.upstream.copy_with(path=f"/{path}", query=request.url.query.encode())
+        return _refusal(503, "pgAdmin is not configured.")
+    try:
+        # copy_with retains the configured host even for a path beginning with //.
+        url = config.upstream.copy_with(path=f"/{path}", query=request.url.query.encode())
+    except httpx.InvalidURL:
+        # A control character, for one, cannot be sent upstream at all.
+        return _refusal(404, "pgAdmin has no page at this address.")
     client = pgadmin_client()
     try:
         upstream = await client.send(
@@ -381,7 +505,7 @@ async def pgadmin_proxy(
         )
     except httpx.HTTPError:
         await client.aclose()
-        raise HTTPException(status_code=503, detail="pgAdmin is temporarily unavailable.") from None
+        return _refusal(503, "pgAdmin is temporarily unavailable.")
     except BaseException:
         await client.aclose()
         raise
@@ -400,6 +524,7 @@ async def pgadmin_proxy(
     }
     headers = []
     for name, value in upstream.headers.multi_items():
+        # pgAdmin's own Content-Security-Policy is kept and enforced beside ours.
         if name in excluded or name in _REPLACED_HEADERS:
             continue
         if name == "set-cookie":
@@ -408,7 +533,12 @@ async def pgadmin_proxy(
             if name == "location":
                 value = _location(value, config)
             headers.append((name.encode("latin-1"), value.encode("latin-1")))
-    response.raw_headers = [*headers, (b"cache-control", b"no-store"), *_SECURITY_HEADERS]
+    response.raw_headers = [
+        *headers,
+        (b"cache-control", b"no-store"),
+        *_SECURITY_HEADERS,
+        *_isolation(config),
+    ]
     # The launch link opens the root, but a browser can enter pgAdmin at any
     # URL. A request with no pgAdmin session cookie is the first of a new
     # pgAdmin session wherever it lands, so that is recorded as well.

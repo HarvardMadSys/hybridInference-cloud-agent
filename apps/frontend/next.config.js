@@ -68,7 +68,8 @@ if (rawApiPrefix.startsWith('/') && rawApiPrefix !== derivedApiPrefix) {
 // terminates TLS in front of this process, not to a server that speaks plain
 // HTTP behind it (see `deploy/control-plane/edge.nginx.conf`).
 //
-// `securityHeaders.test.ts` reads these from this file.
+// `securityHeaders.test.ts` reads these from this file, and the runtime-config
+// build check asserts that the built server sends them.
 const SECURITY_HEADERS = [
   { key: 'X-Content-Type-Options', value: 'nosniff' },
   // Cross-origin requests and links learn the origin only, never a
@@ -80,6 +81,8 @@ const SECURITY_HEADERS = [
 const nextConfig = {
   reactStrictMode: true,
   output: 'standalone',
+  // No `X-Powered-By`: it tells nobody anything but which framework to probe.
+  poweredByHeader: false,
   // Omitted entirely when empty: Next rejects `basePath: ''`, and empty means
   // a deployment that owns its hostname.
   ...(basePath ? { basePath } : {}),

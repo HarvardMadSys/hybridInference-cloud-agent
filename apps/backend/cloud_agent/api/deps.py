@@ -45,8 +45,12 @@ worth re-reading a diff of this file for.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import hmac
+import itertools
 import os
+import time
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 
 import jwt
@@ -70,6 +74,8 @@ from cloud_agent.source_control_runtime import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator
+
     from cloud_agent.gateway import GatewayClient
     from cloud_agent.grants import GrantClient
     from cloud_agent.ports import AuditRepository
@@ -333,7 +339,11 @@ async def require_agent_access(
     gateway: Any, user_id: str, permission: str = "agent.use"
 ) -> AgentAccessDecision:
     """Require an explicit current Gateway permission before accessing Agent data."""
-    decision = await resolve_agent_access(gateway, user_id)
+    return _permitted(await resolve_agent_access(gateway, user_id), permission)
+
+
+def _permitted(decision: AgentAccessDecision, permission: str) -> AgentAccessDecision:
+    """Return ``decision`` if it grants ``permission``; refuse the request otherwise."""
     if not decision.permits(permission):
         raise HTTPException(
             status_code=403,
@@ -344,6 +354,140 @@ async def require_agent_access(
             ),
         )
     return decision
+
+
+#: How long an owner request may be admitted on an earlier ``agent.use`` grant.
+#: A page load sends a burst of owner requests, and a running turn makes every
+#: open tab send more; each used to wait on its own Gateway round trip. A
+#: withdrawal therefore reaches owner requests within this bound — well inside
+#: the one an open stream already has (see agent-access-policy.md).
+AGENT_ACCESS_ALLOW_TTL_S = 10.0
+
+
+class AgentAccessAdmission:
+    """Owner-request admission that shares Gateway lookups and briefly keeps a grant.
+
+    Two things, both per process and per account:
+
+    - **Concurrent lookups are shared.** Requests that arrive while a lookup
+      for their account is in flight wait for that lookup instead of starting
+      their own.
+    - **A grant is kept for** :data:`AGENT_ACCESS_ALLOW_TTL_S`. Only a decision
+      that grants ``agent.use`` is kept. A denial, an unknown account and an
+      unavailable Gateway are never kept, and any fresh answer that is not a
+      grant drops the one kept before it. A grant from a lookup that began
+      before the account's last recorded denial is older than that denial,
+      and is not kept either.
+
+    Only owner admission reads it. Sign-in, ``/v1/session/me``, the admin
+    surface and the checks made when a turn starts all ask the Gateway every
+    time; ``/v1/session/me`` also records what it was told, so a withdrawal it
+    sees ends the kept grant at once.
+    """
+
+    def __init__(
+        self,
+        ttl_s: float = AGENT_ACCESS_ALLOW_TTL_S,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._ttl_s = ttl_s
+        self._clock = clock
+        self._granted: dict[str, tuple[float, AgentAccessDecision]] = {}
+        self._lookups: dict[str, asyncio.Task[AgentAccessDecision]] = {}
+        # Every Gateway ask takes the next ticket when it starts; a denial takes
+        # one when it is recorded. A grant asked for before the account's last
+        # recorded denial is older than that denial, and is not kept.
+        self._tickets = itertools.count(1)
+        self._asking: set[int] = set()
+        self._denied: dict[str, int] = {}
+
+    async def decision(self, gateway: Any, user_id: str) -> AgentAccessDecision:
+        """The kept grant if still fresh, else the Gateway's current decision."""
+        kept = self._granted.get(user_id)
+        if kept is not None and self._clock() < kept[0]:
+            return kept[1]
+        lookup = self._lookups.get(user_id)
+        if lookup is None:
+            lookup = asyncio.get_running_loop().create_task(self._look_up(gateway, user_id))
+            self._lookups[user_id] = lookup
+            lookup.add_done_callback(lambda done: self._finished(user_id, done))
+        # A caller that gives up (a closed connection) must not cancel the
+        # lookup the other callers are waiting on.
+        return await asyncio.shield(lookup)
+
+    @contextlib.contextmanager
+    def asking(self) -> Iterator[int]:
+        """A ticket for one Gateway lookup, held while it is under way."""
+        ticket = next(self._tickets)
+        self._asking.add(ticket)
+        try:
+            yield ticket
+        finally:
+            self._asking.discard(ticket)
+
+    def record(self, decision: AgentAccessDecision, asked: int) -> None:
+        """Keep a fresh grant, or drop the kept one if this decision is not a grant.
+
+        Args:
+            decision: What the Gateway answered.
+            asked: The :meth:`asking` ticket of the lookup that answered.
+        """
+        user_id = decision.user_id
+        if not decision.permits("agent.use"):
+            self._granted.pop(user_id, None)
+            # A lookup already under way may have been answered before this
+            # denial. Requests from now on start one of their own; those
+            # already waiting on it still get its answer.
+            self._lookups.pop(user_id, None)
+            if len(self._denied) >= 1024:
+                # A denial matters only to a lookup that began before it and
+                # is still under way.
+                oldest = min(self._asking, default=None)
+                self._denied = {
+                    user: ticket
+                    for user, ticket in self._denied.items()
+                    if oldest is not None and oldest < ticket
+                }
+            self._denied[user_id] = next(self._tickets)
+            return
+        if asked < self._denied.get(user_id, 0):
+            return
+        now = self._clock()
+        if len(self._granted) >= 1024:
+            self._granted = {user: kept for user, kept in self._granted.items() if now < kept[0]}
+        self._granted[user_id] = (now + self._ttl_s, decision)
+
+    async def _look_up(self, gateway: Any, user_id: str) -> AgentAccessDecision:
+        # A failure is no verdict on the owner, and drops nothing: a lookup
+        # starts only when no grant is fresh, so a fresh one now was recorded
+        # while it waited, and is newer than anything it could have said.
+        with self.asking() as asked:
+            decision = await resolve_agent_access(gateway, user_id)
+            self.record(decision, asked)
+        return decision
+
+    def _finished(self, user_id: str, lookup: asyncio.Task[AgentAccessDecision]) -> None:
+        if self._lookups.get(user_id) is lookup:
+            del self._lookups[user_id]
+        # Retrieve a failure even when every waiter has gone, so it is not
+        # reported as never retrieved.
+        if not lookup.cancelled():
+            lookup.exception()
+
+
+def agent_access_admission(request: Request) -> AgentAccessAdmission:
+    """The application's :class:`AgentAccessAdmission`, created on first use."""
+    admission = getattr(request.app.state, "agent_access_admission", None)
+    if admission is None:
+        admission = AgentAccessAdmission()
+        request.app.state.agent_access_admission = admission
+    return admission
+
+
+async def admit_agent_owner(request: Request, gateway: Any, user_id: str) -> AgentAccessDecision:
+    """Admit an owner request on a current or briefly kept ``agent.use`` grant."""
+    decision = await agent_access_admission(request).decision(gateway, user_id)
+    return _permitted(decision, "agent.use")
 
 
 #: The namespace :func:`cloud_agent.tokens.mint_worker_token` mints into. Kept
@@ -358,8 +502,9 @@ HOST_TOKEN_PREFIX = "aht."
 ENV_ADMIN_TOKEN = "ADMIN_TOKEN"
 
 #: Off by default. An ``X-Forwarded-For`` header is caller-controlled input
-#: unless a proxy this deployment trusts overwrote it, so believing it without
-#: being told to would let anyone write any address into the audit trail.
+#: except for the entry a proxy this deployment trusts wrote into it, so
+#: believing it without being told to would let anyone write any address into
+#: the audit trail.
 ENV_TRUST_PROXY_HEADERS = "AGENT_TRUST_PROXY_HEADERS"
 
 
@@ -495,12 +640,20 @@ def get_client_ip(request: Request) -> str:
     rewrites ``X-Forwarded-For`` — see ``AGENT_TRUST_PROXY_HEADERS``. Believing
     the header unconditionally would let any caller write any address into the
     audit trail, which is worse than recording the proxy's address honestly.
+
+    Even then only the **rightmost** entry is believed: it is the one the
+    nearest proxy wrote, whether that proxy overwrites the header or appends
+    to it. Everything to its left arrived from the caller, and an appending
+    proxy such as nginx's ``$proxy_add_x_forwarded_for`` passes it through
+    verbatim, so the leftmost entry is whatever the caller typed. Repeated
+    header lines count as one list in order: HAProxy appends a line of its own
+    rather than editing the caller's, and the first line is then all theirs.
     """
     if (setting_env(ENV_TRUST_PROXY_HEADERS) or "").strip().lower() in ("1", "true", "yes"):
-        forwarded = request.headers.get("x-forwarded-for") or ""
-        first_hop = forwarded.split(",")[0].strip()
-        if first_hop:
-            return first_hop
+        forwarded = ",".join(request.headers.getlist("x-forwarded-for"))
+        nearest_hop = forwarded.split(",")[-1].strip()
+        if nearest_hop:
+            return nearest_hop
         real_ip = (request.headers.get("x-real-ip") or "").strip()
         if real_ip:
             return real_ip

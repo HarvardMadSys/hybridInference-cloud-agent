@@ -1,0 +1,48 @@
+# Verbatim excerpt of apps/backend/cloud_agent/schemas.py at commit
+# 6556746e5a99, the parent of the squash commit that added the profiling fields
+# (#258). It keeps only the three response models that
+# tests/servers/test_operation_measurement_routes.py executes as its baseline.
+#
+# The excerpt is the contract a deployment with profiling switched off must keep
+# serving. Never edit it to agree with the current code. It lives here, not
+# behind `git show`, because a shallow clone does not have that commit.
+
+class AgentWorkspaceEntry(BaseModel):
+    """One safe child in an agent job's read-only workspace browser."""
+
+    name: str
+    path: str
+    kind: Literal["file", "directory", "symlink"]
+    size: int | None = None
+    binary: bool = False
+    truncated: bool = False
+    status: Literal["added", "modified", "deleted"] | None = None
+    omitted_reason: str | None = None
+
+
+class AgentWorkspaceResponse(BaseModel):
+    """A directory listing or bounded text-file preview from a job workspace."""
+
+    path: str
+    kind: Literal["file", "directory", "symlink"]
+    entries: list[AgentWorkspaceEntry] | None = None
+    content: str | None = None
+    size: int | None = None
+    binary: bool = False
+    truncated: bool = False
+    status: Literal["added", "modified", "deleted"] | None = None
+    omitted_reason: str | None = None
+    writable: bool = False
+    source: Literal["workspace"] = "workspace"
+
+
+class AgentTerminalSessionResponse(BaseModel):
+    """Owner-safe metadata for one interactive terminal session."""
+
+    id: str = Field(..., pattern=r"^term_[A-Za-z0-9_-]{1,80}$")
+    shell: str = Field(..., min_length=1, max_length=4096)
+    state: str = Field(..., min_length=1, max_length=32)
+    cwd: str = Field(..., min_length=1, max_length=4096)
+    rows: int = Field(..., ge=2, le=200)
+    cols: int = Field(..., ge=20, le=500)
+    last_seq: int = Field(..., ge=0)

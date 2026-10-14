@@ -8,7 +8,8 @@ resets, or after ``_IDLE_READ_S`` as a backstop. What has to hold:
 * one stored *during* a read is not left for the timeout either;
 * a job that ends closes its stream as soon as it says so;
 * nothing listening means the old one-second clock, not a stalled stream;
-* another job's notification costs this stream nothing.
+* another job's notification costs this stream nothing;
+* no stream outlives the owner-stream cap, however long its job runs.
 
 The endpoint's generator is driven directly: an HTTP client test transport
 collects the whole body before returning, so it cannot see when a frame left.
@@ -264,6 +265,32 @@ async def test_a_backlog_longer_than_a_page_is_caught_up_without_waiting(
 
     assert [frame.split("\n")[0] for frame in frames] == [f"id: {n}" for n in range(1, 8)]
     await stream.aclose()
+
+
+@pytest.mark.parametrize("signal", [None, _listening()], ids=["no signal", "listening"])
+async def test_a_running_jobs_stream_ends_at_the_cap_for_the_client_to_resume(
+    signal, idle_read_never, monkeypatch
+):
+    """Admission is checked once per connection, so no connection outlives the cap.
+
+    The job is still running: the stream ends without ``job_finished``, having
+    sent each event with its id, and the client reconnects from the last one.
+    That reconnect is admitted again.
+    """
+    monkeypatch.setattr(threads, "OWNER_STREAM_MAX_S", 0.2)
+    queries = Queries()
+    queries.store("before the cap")
+    stream = await _open(queries, signal)
+
+    async def drain() -> list[str]:
+        return [frame async for frame in stream]
+
+    frames = await asyncio.wait_for(drain(), 2)
+
+    assert [frame.split("\n")[0] for frame in frames] == ["id: 1"]
+    assert queries.job["state"] == "running"
+    if signal is not None:
+        assert signal.subscribers(JOB) == 0, "an ended stream leaves no subscription behind"
 
 
 async def test_an_idle_stream_sends_a_keepalive_at_the_backstop(monkeypatch):

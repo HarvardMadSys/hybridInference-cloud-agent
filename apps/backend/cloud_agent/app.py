@@ -1,26 +1,13 @@
-"""The control plane as its own service.
+"""Assemble the public API and the separate MCP-only listener.
 
-In the gateway this was forty lines inside a much larger ``bootstrap`` that
-also built routers, adapters and observability. Here it is the whole process,
-and the lifecycle is the same three things it always was: a store, a reaper,
-and a publisher.
+Bootstrap owns resources, background workers, and shutdown. This module mounts
+HTTP surfaces and installs shared exception and response policies. The MCP
+listener exposes sandbox tools separately from the owner and admin API.
 
-**The reaper is what makes a vanished sandbox recoverable.** It supersedes
-attempts whose lease expired and requeues, fails or cancels the job per the
-store's policy. It never dies on an error, because a transient database blip
-must not permanently stop reaping — a stopped reaper is invisible until jobs
-start hanging.
-
-**The snapshot coordinator** asks an owning sandbox manager for short,
-quiescent Git captures. It has its own schedule so a slow Docker/Git operation
-cannot delay grant renewal or attempt recovery.
-
-**The publisher is the only component holding a git credential**, which is
-precisely what keeps the sandbox credential-free. A deployment without one
-simply never publishes, rather than failing to start.
-
-All three are background tasks held in a module-level set: a task the loop can
-garbage-collect mid-run is a task that stops silently.
+Source-control account credentials remain in the control plane, which mints
+short-lived repository-scoped GitHub tokens. Hosts inject authorized tokens
+into the owning sandbox member as described in AGENTS.md. Session recovery
+requires the retained container and native CLI state.
 """
 
 from __future__ import annotations
@@ -60,20 +47,13 @@ def install_repository_access_errors(app: FastAPI) -> None:
     app.add_exception_handler(RepoAccessUnavailable, unavailable)
 
 
-#: The admin observation reads. Their bodies are time-varying and describe
-#: other users' runs, so no intermediary may store one.
-ADMIN_READ_PREFIXES = (
-    "/admin/agent/database",
-    "/admin/agent/database-tools",
-    "/admin/agent/pgadmin",
-    "/admin/agent/audit-log",
-    "/admin/agent/runs",
-    "/admin/agent/steps",
-    "/admin/agent/measurements",
-    "/admin/agent/measurement-writer",
-    "/admin/agent/profiling-runs",
-    "/admin/agent/settings",
-)
+#: Every admin surface. Their bodies are time-varying and describe other
+#: users' runs, hosts and settings, so no intermediary may store one.
+#:
+#: The whole prefix rather than a list of routers: a list drifted, and the
+#: refusals of the admin routers added after it — conversations, sandboxes,
+#: usage, runner hosts, compute — went out without ``no-store``.
+ADMIN_READ_PREFIXES = ("/admin",)
 
 
 def install_admin_no_store(
@@ -180,6 +160,7 @@ def create_app() -> FastAPI:
         admin_settings,
         admin_steps,
         admin_usage,
+        agent_memory,
         compute_registration,
         environments,
         host_profiling,
@@ -192,8 +173,8 @@ def create_app() -> FastAPI:
         skills,
         uploads,
         usage,
-        user_memory,
         user_profile,
+        work_insights,
     )
 
     app = FastAPI(
@@ -244,8 +225,8 @@ def create_app() -> FastAPI:
         app.add_exception_handler(failure, environment_failure)
 
     app.include_router(environments.router)
-    app.include_router(user_memory.router)
-    app.include_router(user_memory.project_router)
+    app.include_router(work_insights.router)
+    app.include_router(agent_memory.router)
     app.include_router(user_profile.router)
     app.include_router(uploads.router)
     app.include_router(mcp_connections.router)
@@ -286,8 +267,8 @@ def create_app() -> FastAPI:
         app,
         prefixes=(
             *ADMIN_READ_PREFIXES,
-            "/v1/agent/user-memory",
-            "/v1/agent/project-memory",
+            "/v1/agent/memories",
+            "/v1/agent/insights",
             "/v1/agent/profile",
         ),
     )

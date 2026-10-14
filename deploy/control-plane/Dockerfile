@@ -1,15 +1,12 @@
 # syntax=docker/dockerfile:1.7
 # The control plane: the API, the reaper, the publisher.
 #
-# **It ships the host package too, and that is not an oversight.**
-# `cloud_agent/api/routes.py` still imports the runtime registry —
-# `registered_runtimes`, `runtime_reasoning_efforts` and
-# `runtimes_supporting_mcp` — from `cloud_agent_host.runtimes`, and
-# `create_app()` imports that router, so dropping `cloud_agent_host/` here
-# produces an image whose control plane cannot start. The publisher's patch
-# gate and archive builders are no longer part of that reach: they live in
-# `cloud_agent_shared/git/`, which this image and the runner image both ship. See
-# MIGRATION.md, "Manifest corrections".
+# Runtime dependencies are cloud_agent and cloud_agent_shared. Discovery facts
+# live in cloud_agent_shared/runtime_catalog.py; Git/archive algorithms live
+# in cloud_agent_shared/git/. Import-boundary tests prohibit control-plane
+# imports of the host implementation. This image's existing package layout
+# still includes host source; the automatic Server setup archive below also
+# contains it as a separate release artifact.
 #
 # **No agent runtimes, no docker socket, no git credentials at build time.**
 # This image never executes an agent and never checks a repository out.
@@ -55,7 +52,7 @@ COPY pyproject.toml uv.lock README.md LICENSE ./
 RUN uv sync --frozen --no-dev --no-install-project
 ENV PATH="/app/.venv/bin:$PATH"
 
-# All three packages. See the header for why this image needs the host one.
+# Preserve the image's package layout; runtime dependencies are described above.
 COPY apps/backend/cloud_agent/ apps/backend/cloud_agent/
 COPY apps/backend/cloud_agent_shared/ apps/backend/cloud_agent_shared/
 COPY apps/backend/cloud_agent_host/ apps/backend/cloud_agent_host/

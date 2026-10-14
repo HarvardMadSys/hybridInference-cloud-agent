@@ -152,7 +152,9 @@ export async function streamAgentChanges(
         }
       }
     } catch {
-      // A drop mid-stream is expected when the server's stream cap fires.
+      // A connection dropped mid-stream. The server's stream cap ends a stream
+      // cleanly instead, through `done` above; either way the tab reconnects
+      // below, and the next `hello` has it read its lists again.
     } finally {
       reader.releaseLock();
     }

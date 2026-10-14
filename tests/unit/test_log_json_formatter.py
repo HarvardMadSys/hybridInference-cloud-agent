@@ -1,10 +1,12 @@
-"""The JSON log format — and that both copies of it behave the same.
+"""The JSON log format, and that both packages emit it the same way.
 
-The two packages keep their own ``logging_utils`` by decision: separate
-deployment units, and no import from the host into the web service. So the
-formatter is duplicated, and every case here runs against both copies. That
-parametrisation is what keeps "duplicated deliberately" from becoming
-"diverged quietly".
+The formatter and the uvicorn hand-over live once, in
+``cloud_agent_shared.logging_utils``, which both images ship. Each package
+still configures its own process logging, and those two functions have
+already diverged: the control plane keeps its handler for admin settings, and
+the host configures once from its entrypoint. So every case here runs against
+both packages' ``logging_utils``. That parametrisation keeps the two
+entrypoints from producing different logs without anyone noticing.
 
 The format exists because the text format renders ``%(message)s`` and nothing
 else, so the ``extra={"event": ..., "job_id": ...}`` fields that call sites
@@ -22,12 +24,24 @@ import pytest
 
 from cloud_agent import logging_utils as control_plane
 from cloud_agent_host import logging_utils as host
+from cloud_agent_shared import logging_utils as shared
 
 
 @pytest.fixture(params=[control_plane, host], ids=["control_plane", "host"])
 def module(request):
-    """Each test runs once per copy of the shim."""
+    """Each test runs once per package's logging module."""
     return request.param
+
+
+def test_both_packages_render_with_the_one_shared_formatter() -> None:
+    """A fix to the format lands in both images at once.
+
+    Two copies of this class used to be kept in step by hand. If a package
+    grows its own copy again, the parametrised cases below keep passing until
+    the copies drift. This test fails at the moment of the copy.
+    """
+    assert control_plane.JsonLogFormatter is shared.JsonLogFormatter
+    assert host.JsonLogFormatter is shared.JsonLogFormatter
 
 
 @contextlib.contextmanager

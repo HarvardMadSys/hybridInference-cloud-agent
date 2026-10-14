@@ -25,7 +25,7 @@ from __future__ import annotations
 import hashlib
 import json
 import secrets
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -62,6 +62,7 @@ from cloud_agent.mcp.models import (
     HeaderAuth,
     InvocationStatus,
     LaunchSpec,
+    Mount,
     ToolPolicy,
     Transport,
 )
@@ -578,9 +579,9 @@ async def _view(store: _McpConnectionsStorage, row: Mapping[str, Any]) -> Connec
         error_detail=connection.error_detail,
         account_label=row.get("account_label"),
         connector_id=int(row["connector_id"]) if row.get("connector_id") else None,
-        has_credential=bool(
-            row.get("access_token_ciphertext") or row.get("client_secret_ciphertext")
-        ),
+        # The credential the server is sent. A stored OAuth client secret is
+        # not one: until a sign-in completes there is nothing to send.
+        has_credential=bool(row.get("access_token_ciphertext")),
         # The stored hint is already two characters and two more; rendering it
         # here rather than masking again keeps it recognisable without ever
         # having held the whole value.
@@ -846,7 +847,11 @@ async def update_connection(
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _McpConnectionsStorage | None = Depends(get_storage),
 ) -> ConnectionView:
-    """Edit a connection. A target change invalidates approvals made against it."""
+    """Edit a connection. A target change invalidates approvals made against it.
+
+    A new address or authentication kind also drops the stored credential, so
+    the connection has to be signed in to (or given its secret) again.
+    """
     job_store = _require_store(store)
     existing = await job_store.mcp.get_mcp_connection(
         connection_id=connection_id, user_id=user["user_id"]
@@ -2560,8 +2565,13 @@ def _validate_target(
     location: ExecutionLocation,
     url: str | None,
     launch: Mapping[str, Any] | None,
+    mounts: Sequence[Mount] = (),
 ) -> tuple[str | None, dict[str, Any] | None]:
-    """Check a connection's target and return its storable form."""
+    """Check a connection's target and return its storable form.
+
+    ``mounts`` are the ones the platform derived and the owner was shown; a
+    submitted launch document's own ``mounts`` are never read.
+    """
     if location is ExecutionLocation.REMOTE:
         if transport is Transport.STDIO:
             raise _bad_request("a remote connection cannot use the stdio transport")
@@ -2583,6 +2593,7 @@ def _validate_target(
             args=tuple(str(arg) for arg in launch.get("args") or ()),
             env={str(k): str(v) for k, v in (launch.get("env") or {}).items()},
             cwd=str(launch["cwd"]) if launch.get("cwd") else None,
+            mounts=tuple(mounts),
         )
         plan = build_launch_plan(
             spec, connection_id="draft", location=location, policy=ManagedLaunchPolicy()
@@ -2694,13 +2705,20 @@ def _prepare_import_draft(
             "args": list(draft.launch.args),
             "env": dict(draft.launch.env),
             "cwd": draft.launch.cwd,
-            "mounts": [
-                {"source": mount.source, "target": mount.target, "read_only": mount.read_only}
-                for mount in config_import.mounts_for(draft.paths)
-            ]
-            if parsed_location is ExecutionLocation.MANAGED_WORKER
-            else [],
         }
+    # The checks create applies, and only the form they render is stored: the
+    # run location must fit the transport, an address must pass the egress
+    # policy and a command must build a launch plan. The local paths a command
+    # names become a managed worker's mounts under that plan's mount rules.
+    url, launch_spec = _validate_target(
+        transport=draft.transport,
+        location=parsed_location,
+        url=draft.url,
+        launch=launch_spec,
+        mounts=config_import.mounts_for(draft.paths)
+        if parsed_location is ExecutionLocation.MANAGED_WORKER
+        else (),
+    )
     auth_config: dict[str, Any] = {}
     if draft.auth_kind is AuthKind.STATIC and draft.secrets:
         header_name = draft.secrets[0].name
@@ -2731,7 +2749,7 @@ def _prepare_import_draft(
         "label": draft.label,
         "transport": draft.transport.value,
         "location": parsed_location.value,
-        "url": draft.url,
+        "url": url,
         "launch_spec": launch_spec,
         "auth_kind": draft.auth_kind.value,
         "auth_config": auth_config,

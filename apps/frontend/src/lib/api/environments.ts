@@ -90,6 +90,8 @@ export const listEnvironments = (repo?: string) =>
   call<{ environments: EnvironmentConfig[]; globals: EnvironmentConfig }>(
     `environments${repo ? `?repo=${encodeURIComponent(repo)}` : ''}`,
   );
+/** The owner's global variables alone, for a task that has no repository. */
+export const getGlobalEnvironment = () => call<EnvironmentConfig>('environment-globals');
 export const saveEnvironment = (
   value: Omit<EnvironmentConfig, 'variables'> & { variables: VariableEdit[] },
 ) => {

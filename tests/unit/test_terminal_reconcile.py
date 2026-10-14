@@ -20,14 +20,17 @@ terminal lives on the machine that ran it — so the double is injected through
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
 from tests.support.storage import OneFake
 
 from cloud_agent.sandbox_manager_client import SandboxManagerError
-from cloud_agent.workers.attempts import _reconcile_settled_terminals
+from cloud_agent.workers.attempts import _reconcile_settled_terminals, reap_expired_attempts
 
 pytestmark = pytest.mark.asyncio
 
@@ -152,3 +155,47 @@ async def test_one_broken_host_does_not_skip_other_terminal_markers(
         "athr_ready",
         job_id="ajob_ready",
     )
+
+
+async def test_a_sandbox_manager_that_never_answers_does_not_hold_up_the_reaper(
+    monkeypatch, store: SimpleNamespace
+) -> None:
+    """Replay runs beside the reaper's pass, so a silent host delays only its markers.
+
+    A host that drops packets costs each of its markers a full request timeout,
+    and its markers stay set, so inside the pass that wait came back on every
+    pass -- before any lease was reaped or any grant renewed.
+    """
+    replay_started = asyncio.Event()
+    replay_cancelled = asyncio.Event()
+
+    async def silent_sandbox_manager(_store: Any, _job_id: str | None) -> Any:
+        replay_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            replay_cancelled.set()
+
+    monkeypatch.setattr(
+        "cloud_agent.sandbox_manager_routing.sandbox_manager_for_job", silent_sandbox_manager
+    )
+    store.reap_expired = AsyncMock(return_value=[])
+    store.take_revocable_grants = AsyncMock(return_value=[])
+    store.list_renewable_grants = AsyncMock(return_value=[])
+    grants = SimpleNamespace(renew=AsyncMock(), revoke=AsyncMock(return_value=True))
+    task = asyncio.create_task(
+        reap_expired_attempts(store, interval_seconds=0.001, grants=grants)  # type: ignore[arg-type]
+    )
+    try:
+        async with asyncio.timeout(10):
+            await replay_started.wait()
+            while store.list_renewable_grants.await_count < 2:
+                await asyncio.sleep(0.005)
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    assert store.reap_expired.await_count >= 2
+    store.mark_terminal_resume_complete.assert_not_awaited()
+    assert replay_cancelled.is_set(), "stopping the reaper must stop the replay with it"

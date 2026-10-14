@@ -27,7 +27,7 @@ from cloud_agent.schemas import (
     WorkerFinishRequest,
 )
 from cloud_agent_host.runner import default_worker_id
-from cloud_agent_host.shared_protocol import (
+from cloud_agent_shared.shared_protocol import (
     NATIVE_FORK_AT_ANCHOR_CAPABILITY,
     SHARED_SANDBOX_CAPABILITY,
     SHARED_SANDBOX_HELPER_PINS,

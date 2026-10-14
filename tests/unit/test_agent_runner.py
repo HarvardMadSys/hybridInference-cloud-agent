@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import logging
+import socket
+import threading
 import time
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -14,7 +16,7 @@ from unittest.mock import Mock
 import httpx
 import pytest
 
-from cloud_agent_host import runner as runner_mod
+from cloud_agent_host import control_plane_client, runner as runner_mod
 from cloud_agent_host.chat_sandbox import ChatSandboxSpec
 from cloud_agent_host.runner import ClaimedJob, LeaseLost
 from cloud_agent_host.runtimes import ClaudeCodeRuntime, get_runtime
@@ -80,6 +82,7 @@ def test_shared_live_is_the_only_capability_without_feature_switches(monkeypatch
         "mid-turn-input-v1:claude-code",
         "mid-turn-input-v1:codex",
         "sandbox-archive-settings-v1",
+        "sandbox-checkpoints-v1",
     ]
 
 
@@ -97,6 +100,7 @@ def test_exact_deployment_capability_requires_the_completed_marker(monkeypatch, 
         "mid-turn-input-v1:claude-code",
         "mid-turn-input-v1:codex",
         "sandbox-archive-settings-v1",
+        "sandbox-checkpoints-v1",
     ]
 
     ready_file.write_text("different-sha\n")
@@ -107,6 +111,7 @@ def test_exact_deployment_capability_requires_the_completed_marker(monkeypatch, 
         "mid-turn-input-v1:claude-code",
         "mid-turn-input-v1:codex",
         "sandbox-archive-settings-v1",
+        "sandbox-checkpoints-v1",
     ]
 
     ready_file.write_text("target-sha\n")
@@ -117,6 +122,7 @@ def test_exact_deployment_capability_requires_the_completed_marker(monkeypatch, 
         "mid-turn-input-v1:claude-code",
         "mid-turn-input-v1:codex",
         "sandbox-archive-settings-v1",
+        "sandbox-checkpoints-v1",
         "shared-sandbox-deployment:target-sha",
     ]
 
@@ -237,7 +243,7 @@ def test_reconstructed_running_group_reports_unknown_activity(monkeypatch):
         def close(self):
             pass
 
-    monkeypatch.setattr(runner_mod, "_session_supervisor_from_env", Supervisor)
+    monkeypatch.setattr(runner_mod, "_session_supervisor_from_env", lambda **_kwargs: Supervisor())
 
     rows = runner_mod._retained_sandbox_heartbeat_rows()
 
@@ -274,7 +280,7 @@ def test_retained_heartbeat_passes_group_resources_and_terminal_count(
         ],
         close=Mock(),
     )
-    monkeypatch.setattr(runner_mod, "_session_supervisor_from_env", lambda: supervisor)
+    monkeypatch.setattr(runner_mod, "_session_supervisor_from_env", lambda **_kwargs: supervisor)
     rows = runner_mod._retained_sandbox_heartbeat_rows()
     assert rows is not None
     assert rows[0]["container_id"] == "container-source"
@@ -288,6 +294,137 @@ def test_retained_heartbeat_passes_group_resources_and_terminal_count(
         assert rows[0]["resource_usage"]["memory_bytes"] == 1024
         assert rows[0]["resource_usage"]["scope"] == "container"
     supervisor.close.assert_called_once()
+
+
+def test_a_sandbox_manager_that_never_answers_costs_the_host_beat_only_its_observation(
+    monkeypatch,
+):
+    """The observation runs on the host-heartbeat thread, ahead of the beat itself.
+
+    It used the sandbox manager client's 180-second ceiling, so a sandbox
+    manager that accepted the request and never answered held the beat for
+    three minutes -- twice the silence after which the control plane counts
+    the host offline and refuses its claims.
+    """
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    # Connections complete in the backlog and are never read or answered.
+    listener.listen(8)
+    monkeypatch.setenv("AGENT_SANDBOX_MANAGER_URL", f"http://127.0.0.1:{listener.getsockname()[1]}")
+    monkeypatch.setenv("AGENT_SANDBOX_MANAGER_TOKEN", "sandbox-manager-token")
+    monkeypatch.setattr(runner_mod, "_HOST_BEAT_SANDBOX_MANAGER_TIMEOUT_S", 0.2)
+    observed: list[Any] = []
+    beat = threading.Thread(
+        target=lambda: observed.append(runner_mod._retained_sandbox_heartbeat_rows()),
+        daemon=True,
+    )
+    try:
+        beat.start()
+        beat.join(timeout=10)
+        assert not beat.is_alive(), "the host beat waited on the sandbox manager"
+        # "Not observed this beat", never an authoritative empty list.
+        assert observed == [None]
+    finally:
+        listener.close()
+
+
+def test_residency_cleanup_waits_on_a_silent_sandbox_manager_no_longer_than_the_beat(
+    monkeypatch,
+):
+    """The cleanup a beat's answer asks for runs on the same heartbeat thread.
+
+    It still used the 180-second sandbox manager client, so a sandbox manager
+    that never answered held the next beat for three minutes and the host went
+    offline.
+    """
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(8)
+    monkeypatch.setenv("AGENT_SANDBOX_MANAGER_URL", f"http://127.0.0.1:{listener.getsockname()[1]}")
+    monkeypatch.setenv("AGENT_SANDBOX_MANAGER_TOKEN", "sandbox-manager-token")
+    monkeypatch.setattr(runner_mod, "_HOST_BEAT_SANDBOX_MANAGER_TIMEOUT_S", 0.2)
+    beat = threading.Thread(
+        target=runner_mod._handle_host_residencies_lost,
+        args=([{"thread_id": "athr_1", "generation": 3}],),
+        daemon=True,
+    )
+    try:
+        beat.start()
+        beat.join(timeout=10)
+        assert not beat.is_alive(), "the host beat waited on the sandbox manager"
+    finally:
+        listener.close()
+
+
+def test_residency_cleanup_leaves_the_rest_to_a_later_beat_once_its_time_is_spent(
+    monkeypatch,
+):
+    """A slow sandbox manager gets one call per beat, not one ceiling per lost member.
+
+    Each verdict is named again by every beat while the sandbox manager still
+    reports the member live, so nothing is lost by stopping; waiting out one
+    ceiling per member would hold the next beat past the host's offline
+    threshold.
+    """
+    clock = SimpleNamespace(now=0.0)
+    monkeypatch.setattr(runner_mod.time, "monotonic", lambda: clock.now)
+    members = [{"thread_id": f"athr_{index}"} for index in range(3)]
+    fenced: list[tuple[str, int]] = []
+
+    class SandboxManager:
+        def list(self):
+            return [{"members": members}]
+
+        def shared_residency_lost(self, thread_id, *, generation):
+            fenced.append((thread_id, generation))
+            # A call that used the whole ceiling before it was answered.
+            clock.now += runner_mod._HOST_BEAT_SANDBOX_MANAGER_TIMEOUT_S
+            raise SessionSupervisorError(503, "shared Session Supervisor is unavailable")
+
+        def close(self):
+            pass
+
+    timeouts: list[float | None] = []
+
+    def sandbox_manager(*, timeout=None):
+        timeouts.append(timeout)
+        return SandboxManager()
+
+    monkeypatch.setattr(runner_mod, "_session_supervisor_from_env", sandbox_manager)
+
+    runner_mod._handle_host_residencies_lost(
+        [{"thread_id": f"athr_{index}", "generation": index + 1} for index in range(3)]
+    )
+
+    assert timeouts == [runner_mod._HOST_BEAT_SANDBOX_MANAGER_TIMEOUT_S]
+    assert fenced == [("athr_0", 1)]
+
+
+def test_residency_cleanup_fences_every_named_member_a_prompt_sandbox_manager_holds(
+    monkeypatch,
+):
+    fenced: list[tuple[str, int]] = []
+    sandbox_manager = SimpleNamespace(
+        list=lambda: [{"members": [{"thread_id": "athr_1"}, {"thread_id": "athr_2"}]}],
+        shared_residency_lost=lambda thread_id, *, generation: fenced.append(
+            (thread_id, generation)
+        ),
+        close=Mock(),
+    )
+    monkeypatch.setattr(
+        runner_mod, "_session_supervisor_from_env", lambda **_kwargs: sandbox_manager
+    )
+
+    runner_mod._handle_host_residencies_lost(
+        [
+            {"thread_id": "athr_1", "generation": 4},
+            {"thread_id": "athr_gone", "generation": 1},
+            {"thread_id": "athr_2", "generation": 7},
+        ]
+    )
+
+    assert fenced == [("athr_1", 4), ("athr_2", 7)]
+    sandbox_manager.close.assert_called_once()
 
 
 def test_resume_requires_the_exact_native_session():
@@ -373,6 +510,7 @@ def test_run_once_dispatches_only_to_shared_live(monkeypatch):
         "mid-turn-input-v1:claude-code",
         "mid-turn-input-v1:codex",
         "sandbox-archive-settings-v1",
+        "sandbox-checkpoints-v1",
         "environment-v1",
     ]
     assert dispatched[0]["job"] is _JOB
@@ -518,6 +656,7 @@ def _run_shared_boundary_case(
     sandbox_manager_records=True,
     sandbox_manager_truncated=False,
     thread_sandbox=None,
+    heart=None,
 ):
     backend = ContainerBackend(image="img")
     monkeypatch.setattr(backend, "version_stamp", _stamp)
@@ -594,7 +733,7 @@ def _run_shared_boundary_case(
             thread_sandbox=thread_sandbox,
         ),
         control=control,
-        heart=SimpleNamespace(),
+        heart=heart or SimpleNamespace(cancel_requested=False, lease_lost=False),
         backend=backend,
         host="host-a",
         gateway_base_url="http://gateway",
@@ -707,6 +846,115 @@ def test_error_upload_failure_does_not_skip_terminal_transition(monkeypatch, fai
     assert control.abandon_chat_sandbox.call_args.kwargs["lost"] is False
 
 
+def test_a_stop_before_admission_spends_no_prompt_and_keeps_the_context(monkeypatch):
+    """A Stop that arrives while the turn is resuming is honoured before admission.
+
+    It used to be read only inside the stream, after the prompt had been
+    admitted and dispatched: the turn spent tokens, was interrupted, and its
+    intact conversation was abandoned as lost.
+    """
+    stream = Mock()
+
+    def configure(_control, _supervisor, _finish):
+        monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream)
+
+    result, control, supervisor, finish = _run_shared_boundary_case(
+        monkeypatch,
+        0,
+        None,
+        "claude-code",
+        configure=configure,
+        heart=SimpleNamespace(cancel_requested=True, lease_lost=False),
+    )
+
+    assert result == 0
+    control.admit_chat_turn.assert_not_called()
+    stream.assert_not_called()
+    assert supervisor.abandon_shared.call_args.kwargs["lost"] is False
+    assert control.abandon_chat_sandbox.call_args.kwargs["lost"] is False
+    finish.assert_called_once()
+    assert finish.call_args.args[:2] == ("cancelled", "cancelled by owner")
+    supervisor.settle_shared.assert_not_called()
+
+
+def test_a_lease_lost_before_admission_admits_nothing(monkeypatch):
+    stream = Mock()
+
+    def configure(_control, _supervisor, _finish):
+        monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream)
+
+    result, control, _supervisor, finish = _run_shared_boundary_case(
+        monkeypatch,
+        0,
+        None,
+        "claude-code",
+        configure=configure,
+        heart=SimpleNamespace(cancel_requested=True, lease_lost=True),
+    )
+
+    assert result == 3
+    control.admit_chat_turn.assert_not_called()
+    stream.assert_not_called()
+    finish.assert_not_called()
+    assert control.abandon_chat_sandbox.call_args.kwargs["lost"] is False
+
+
+def test_a_stop_during_the_container_start_prepares_nothing_more(monkeypatch):
+    """A Stop seen once the container is up is honoured before the workspace work.
+
+    The heartbeat now keeps renewing after a Stop, so a turn that only looked
+    for it right before admission went through every remaining startup step
+    first, and the owner waited for all of them to see the cancel.
+    """
+    heart = SimpleNamespace(cancel_requested=False, lease_lost=False)
+
+    def configure(_control, supervisor, _finish):
+        acquire = supervisor.acquire_shared.side_effect
+
+        def stopped_while_starting(*args, **kwargs):
+            heart.cancel_requested = True
+            return acquire(*args, **kwargs)
+
+        supervisor.acquire_shared.side_effect = stopped_while_starting
+
+    result, control, supervisor, finish = _run_shared_boundary_case(
+        monkeypatch, 0, None, "claude-code", configure=configure, heart=heart
+    )
+
+    assert result == 0
+    control.suspend_terminals.assert_not_called()
+    supervisor.ensure_shared_resident.assert_not_called()
+    control.admit_chat_turn.assert_not_called()
+    assert supervisor.abandon_shared.call_args.kwargs["lost"] is False
+    assert control.abandon_chat_sandbox.call_args.kwargs["lost"] is False
+    finish.assert_called_once()
+    assert finish.call_args.args[:2] == ("cancelled", "cancelled by owner")
+
+
+def test_a_stop_during_the_resident_start_is_honoured_right_before_admission(monkeypatch):
+    """The last startup step can carry the Stop too; the prompt is still never admitted."""
+    heart = SimpleNamespace(cancel_requested=False, lease_lost=False)
+
+    def configure(_control, supervisor, _finish):
+        start = supervisor.ensure_shared_resident.side_effect
+
+        def stopped_while_launching(*args, **kwargs):
+            heart.cancel_requested = True
+            return start(*args, **kwargs)
+
+        supervisor.ensure_shared_resident.side_effect = stopped_while_launching
+
+    result, control, supervisor, finish = _run_shared_boundary_case(
+        monkeypatch, 0, None, "claude-code", configure=configure, heart=heart
+    )
+
+    assert result == 0
+    supervisor.ensure_shared_resident.assert_called_once()
+    control.admit_chat_turn.assert_not_called()
+    assert control.abandon_chat_sandbox.call_args.kwargs["lost"] is False
+    assert finish.call_args.args[:2] == ("cancelled", "cancelled by owner")
+
+
 @pytest.mark.parametrize(
     ("error", "expected_code"),
     [(httpx.ReadTimeout("completion notice unavailable"), 0), (LeaseLost("expired"), 3)],
@@ -739,6 +987,196 @@ def test_settled_success_survives_a_failed_completion_event_upload(
         assert finish.call_args.args[0] == "succeeded"
     else:
         finish.assert_not_called()
+
+
+def _status_error(status: int) -> httpx.HTTPStatusError:
+    request = httpx.Request("POST", "http://control.internal/v1/agent/worker/jobs/ajob_1/finish")
+    response = httpx.Response(status, request=request)
+    return httpx.HTTPStatusError(f"{status} for {request.url}", request=request, response=response)
+
+
+@pytest.mark.parametrize(
+    ("code", "frame", "state", "expected_code"),
+    [
+        (0, {"kind": "result", "status": "completed"}, "succeeded", 0),
+        (1, {"kind": "result", "status": "failed", "native_turn_settled": True}, "failed", 1),
+    ],
+)
+@pytest.mark.parametrize(
+    "failures",
+    [
+        [_status_error(503)],
+        [httpx.ReadTimeout("finish answer lost"), _status_error(502)],
+        [httpx.ReadTimeout("down")] * 3,
+        [_status_error(500)],
+    ],
+)
+def test_a_settled_turn_is_never_reported_failed_because_its_finish_was(
+    monkeypatch, caplog, code, frame, state, expected_code, failures
+):
+    """Settlement decided the outcome; a finish error is retried, never downgraded.
+
+    The closing transition used to be one request: a 503 there fell into the
+    generic handler, which reported the settled, successful turn as failed --
+    with the control plane's URL in the owner's detail.
+    """
+    monkeypatch.setattr(runner_mod.time, "sleep", lambda _seconds: None)
+    pending = list(failures)
+
+    def configure(_control, _supervisor, finish):
+        def answer(*_args, **_kwargs):
+            if pending:
+                raise pending.pop(0)
+
+        finish.side_effect = answer
+
+    result, control, supervisor, finish = _run_shared_boundary_case(
+        monkeypatch, code, frame, "claude-code", configure=configure
+    )
+
+    assert result == expected_code
+    supervisor.settle_shared.assert_called_once()
+    control.settle_chat_sandbox.assert_called_once()
+    supervisor.abandon_shared.assert_not_called()
+    control.abandon_chat_sandbox.assert_not_called()
+    # Every try reports the settled outcome itself, with its own detail.
+    assert {call.args[0] for call in finish.call_args_list} == {state}
+    assert len({call.args[1] for call in finish.call_args_list}) == 1
+    assert "control.internal" not in str(finish.call_args_list)
+    # A 500 is the control plane refusing the transition, not a lost answer.
+    retried = not any(
+        isinstance(error, httpx.HTTPStatusError) and error.response.status_code == 500
+        for error in failures
+    )
+    assert finish.call_count == (min(len(failures) + 1, 3) if retried else 1)
+    if finish.call_count == len(failures):
+        assert "operation=finish " in caplog.text
+    for call in control.append_event.call_args_list:
+        assert call.args[0].event_type != "error"
+
+
+def test_a_settled_turn_whose_finish_is_fenced_on_retry_reports_nothing_more(monkeypatch):
+    """A retry refused by the fence is usually the first try having landed."""
+    monkeypatch.setattr(runner_mod.time, "sleep", lambda _seconds: None)
+
+    def configure(_control, _supervisor, finish):
+        finish.side_effect = [httpx.ReadTimeout("answer lost"), LeaseLost("finished")]
+
+    result, control, _supervisor, finish = _run_shared_boundary_case(
+        monkeypatch,
+        0,
+        {"kind": "result", "status": "completed"},
+        "claude-code",
+        configure=configure,
+    )
+
+    assert result == 3
+    assert [call.args[0] for call in finish.call_args_list] == ["succeeded", "succeeded"]
+    control.abandon_chat_sandbox.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("admitted", "code", "heart"),
+    [
+        (False, 0, SimpleNamespace(cancel_requested=True, lease_lost=False)),
+        (True, 130, None),
+    ],
+    ids=["stop_before_admission", "stop_after_admission"],
+)
+@pytest.mark.parametrize(
+    "failures",
+    [
+        [_status_error(503)],
+        [httpx.ReadTimeout("finish answer lost"), _status_error(502)],
+        [httpx.ReadTimeout("down")] * 3,
+    ],
+)
+def test_a_stopped_turn_is_never_reported_failed_because_its_finish_was(
+    monkeypatch, admitted, code, heart, failures
+):
+    """The owner's Stop decided the outcome; a finish error is retried, never downgraded.
+
+    Both cancel paths finished with one request: a 503 there fell into the
+    generic handler, which reported the cancelled turn as a failure -- with the
+    control plane's URL in the owner's detail.
+    """
+    monkeypatch.setattr(runner_mod.time, "sleep", lambda _seconds: None)
+    pending = list(failures)
+
+    def configure(_control, _supervisor, finish):
+        def answer(*_args, **_kwargs):
+            if pending:
+                raise pending.pop(0)
+
+        finish.side_effect = answer
+
+    result, control, _supervisor, finish = _run_shared_boundary_case(
+        monkeypatch,
+        code,
+        {"kind": "result", "status": "cancelled"},
+        "claude-code",
+        configure=configure,
+        heart=heart,
+    )
+
+    assert result == 0
+    assert {call.args[:2] for call in finish.call_args_list} == {
+        ("cancelled", "cancelled by owner")
+    }
+    assert finish.call_count == min(len(failures) + 1, 3)
+    assert control.admit_chat_turn.called is admitted
+    control.abandon_chat_sandbox.assert_called_once()
+    assert control.abandon_chat_sandbox.call_args.kwargs["lost"] is admitted
+    for call in control.append_event.call_args_list:
+        assert call.args[0].event_type != "error"
+
+
+def test_a_control_plane_error_reaches_the_owner_without_its_address(monkeypatch):
+    """httpx names the URL it called; the owner's failure detail must not."""
+
+    def configure(control, _supervisor, _finish):
+        control.suspend_terminals.side_effect = _status_error(503)
+
+    result, control, _supervisor, finish = _run_shared_boundary_case(
+        monkeypatch,
+        0,
+        {"kind": "result", "status": "completed"},
+        "claude-code",
+        configure=configure,
+    )
+
+    assert result == 2
+    finish.assert_called_once()
+    state, detail = finish.call_args.args[:2]
+    assert state == "failed"
+    assert detail == "shared live chat failed unexpectedly: the control plane answered HTTP 503"
+    reported = [call.args[0].payload for call in control.append_event.call_args_list]
+    assert {"text": detail} in reported
+    assert "control.internal" not in str(finish.call_args_list) + str(reported)
+
+
+@pytest.mark.parametrize(
+    ("error", "described"),
+    [
+        (_status_error(503), "the control plane answered HTTP 503"),
+        # A transport error names no address, and its text is what it always was.
+        (httpx.ConnectError("[Errno 111] Connection refused"), "[Errno 111] Connection refused"),
+    ],
+)
+def test_a_refused_reservation_reaches_the_owner_without_the_address(monkeypatch, error, described):
+    def configure(control, _supervisor, _finish):
+        control.reserve_chat_sandbox.side_effect = error
+
+    result, _control, _supervisor, finish = _run_shared_boundary_case(
+        monkeypatch, 0, None, "claude-code", configure=configure
+    )
+
+    assert result == 2
+    finish.assert_called_once()
+    state, detail = finish.call_args.args[:2]
+    assert state == "failed"
+    assert detail == f"could not reserve shared chat sandbox: {described}"
+    assert "control.internal" not in detail
 
 
 @pytest.mark.parametrize("stage", ["admission", "supervisor_settle", "control_settle"])
@@ -1124,6 +1562,145 @@ def test_shared_turn_does_not_report_dispatch_when_prompt_handoff_is_rejected():
         )
 
     assert control.events == []
+
+
+def _virtual_clock(monkeypatch) -> SimpleNamespace:
+    """Make the runner's waits advance a fake clock instead of real time.
+
+    The ``time`` module is shared, so its control-plane client's event retries
+    wait on the same fake clock.
+    """
+    clock = SimpleNamespace(now=0.0, sleeps=[])
+
+    def sleep(seconds):
+        clock.sleeps.append(seconds)
+        clock.now += seconds
+
+    monkeypatch.setattr(runner_mod.time, "monotonic", lambda: clock.now)
+    monkeypatch.setattr(runner_mod.time, "sleep", sleep)
+    return clock
+
+
+def _event_control(endpoint) -> runner_mod.ControlPlane:
+    """A real worker client whose only wire is ``endpoint``."""
+    control = runner_mod.ControlPlane("https://control.test", "test-token")
+    control.close()
+    control._client = httpx.Client(timeout=30, transport=httpx.MockTransport(endpoint))
+    control.job_id = _JOB.job_id
+    return control
+
+
+def test_a_control_plane_restart_mid_turn_does_not_lose_the_turn(monkeypatch):
+    """Events refused for ten seconds are replayed; the turn still settles.
+
+    A deploy recreates the control-plane container, so connections are refused
+    for a while. That used to escape the stream after one immediate retry, and
+    the turn failed with its native context marked lost.
+    """
+    clock = _virtual_clock(monkeypatch)
+    delivered: list[dict[str, Any]] = []
+    refused: list[int] = []
+
+    def endpoint(request):
+        body = json.loads(request.content)
+        if body["event_type"] == "assistant" and clock.now < 10:
+            refused.append(body["event_seq"])
+            raise httpx.ConnectError("connection refused", request=request)
+        delivered.append(body)
+        return httpx.Response(201, json={"event_id": len(delivered)})
+
+    events = _event_control(endpoint)
+    stream = _Stream(
+        [
+            {"kind": "event", "event_type": "assistant", "payload": {"text": "hi"}},
+            {"kind": "result", "status": "completed", "exit_code": 0},
+        ]
+    )
+    stream_turn = runner_mod._stream_shared_agent_turn
+
+    def configure(control, supervisor, _finish):
+        control.append_event.side_effect = events.append_event
+        supervisor.start_shared_turn.return_value = stream
+        monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream_turn)
+
+    try:
+        result, control, supervisor, finish = _run_shared_boundary_case(
+            monkeypatch, 0, None, "claude-code", configure=configure
+        )
+    finally:
+        events.close()
+
+    assert result == 0
+    finish.assert_called_once()
+    assert finish.call_args.args[0] == "succeeded"
+    supervisor.abandon_shared.assert_not_called()
+    control.abandon_chat_sandbox.assert_not_called()
+    assert len(refused) > 2 and clock.now >= 10
+    # Every try carried the same number, so the owner's stream holds it once.
+    assistant = [body for body in delivered if body["event_type"] == "assistant"]
+    assert [body["event_seq"] for body in assistant] == [refused[0]]
+    assert set(refused) == {refused[0]}
+    assert [body["event_seq"] for body in delivered] == list(range(1, len(delivered) + 1))
+
+
+@pytest.mark.parametrize(
+    ("answers", "outcome", "requests"),
+    [
+        ([httpx.ConnectError("refused"), 502, 503, 201], None, 4),
+        ([408, 429, 500, 504, 201], None, 5),
+        ([409], LeaseLost, 1),
+        ([422], httpx.HTTPStatusError, 1),
+        ([401], httpx.HTTPStatusError, 1),
+    ],
+)
+def test_event_upload_retries_only_what_a_replay_can_fix(monkeypatch, answers, outcome, requests):
+    """Transient refusals back off and replay; a fence or a rejection does not."""
+    clock = _virtual_clock(monkeypatch)
+    pending = list(answers)
+    bodies: list[dict[str, Any]] = []
+
+    def endpoint(request):
+        bodies.append(json.loads(request.content))
+        answer = pending.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return httpx.Response(answer, json={"event_id": 1})
+
+    control = _event_control(endpoint)
+    event = runner_mod.NormalizedEvent("assistant", {"text": "hi"})
+    try:
+        if outcome is None:
+            control.append_event(event)
+        else:
+            with pytest.raises(outcome):
+                control.append_event(event)
+    finally:
+        control.close()
+
+    assert len(bodies) == requests
+    assert all(body["event_seq"] == 1 for body in bodies)
+    assert clock.sleeps == ([1.0, 2.0, 4.0, 8.0][: requests - 1] if outcome is None else [])
+
+
+def test_event_upload_gives_up_inside_its_budget(monkeypatch):
+    """A control plane that never answers ends the turn before the lease would."""
+    clock = _virtual_clock(monkeypatch)
+    tries: list[float] = []
+
+    def endpoint(request):
+        tries.append(clock.now)
+        raise httpx.ConnectError("refused", request=request)
+
+    control = _event_control(endpoint)
+    try:
+        with pytest.raises(httpx.ConnectError):
+            control.append_event(runner_mod.NormalizedEvent("assistant", {"text": "hi"}))
+    finally:
+        control.close()
+
+    assert len(tries) > 2
+    assert max(clock.sleeps) == control_plane_client._EVENT_RETRY_MAX_DELAY_S
+    assert clock.now <= control_plane_client._EVENT_RETRY_BUDGET_S < runner_mod.DEFAULT_LEASE_TTL_S
 
 
 def test_run_forever_refuses_to_enroll_a_host_that_cannot_attest(monkeypatch):
@@ -1950,3 +2527,29 @@ def test_environment_capability_disappears_when_broker_or_container_support_is_l
     monkeypatch.delenv("AGENT_SANDBOX_MANAGER_TOKEN")
     assert runner_mod._environment_host_capabilities(backend, _stamp()) == []
     assert runner_mod._environment_host_capabilities(SimpleNamespace(), _stamp()) == []
+
+
+@pytest.mark.parametrize("checkpoint", [{"checkpoint_id": "c" * 32}, "not-a-receipt", None])
+def test_retained_heartbeat_forwards_the_latest_checkpoint_receipt(monkeypatch, checkpoint):
+    supervisor = SimpleNamespace(
+        list=lambda: [
+            {
+                "thread_id": "athr_source",
+                "sandbox_id": "asbx_source",
+                "container_id": "container-source",
+                "generation": 1,
+                "activation_generation": 1,
+                "running": False,
+                "shared_live": True,
+                "members": [],
+                "checkpoint": checkpoint,
+            }
+        ],
+        close=Mock(),
+    )
+    monkeypatch.setattr(runner_mod, "_session_supervisor_from_env", lambda **_kwargs: supervisor)
+
+    rows = runner_mod._retained_sandbox_heartbeat_rows()
+
+    assert rows is not None
+    assert rows[0]["checkpoint"] == (checkpoint if isinstance(checkpoint, dict) else None)

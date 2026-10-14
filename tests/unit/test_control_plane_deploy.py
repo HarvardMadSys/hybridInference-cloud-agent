@@ -10,9 +10,9 @@ properties worth pinning are different:
 - **The schema is Alembic's.** Nothing creates a table at startup, so an API
   container that can start before migrations have run is a crash loop against
   tables that do not exist.
-- **The image ships the host package.** `patch_gate` crosses the host/control
-  boundary; without it this image builds, starts, serves, and fails at the
-  first publish.
+- **The image keeps the host package's source.** The control plane imports
+  none of it, which the import-boundary tests enforce, but the image preserves
+  its package layout, host source included (see the Dockerfile's header).
 - **Every variable it sets is one the code reads.** A compose that configures
   something nothing consumes is documentation that lies — and two such
   variables were found and removed while writing it.
@@ -98,11 +98,15 @@ async def test_saved_gateway_dispatch_credential_needs_no_environment_default(
         assert not client.configured
         with pytest.raises(GatewayError):
             await client._post("/internal/agent-grants", {})
-        encoded = settings.encode_changes({"gateway_dispatch_token": "saved-credential"})
+        encoded = settings.encode_changes(
+            {"gateway_dispatch_token": "saved-gateway-dispatch-credential-32b"}
+        )
         settings.apply_settings(2, {"gateway_base_url": "https://gateway.example", **encoded})
         assert client.configured
         assert "GATEWAY_GRANT_DISPATCH_TOKEN" not in os.environ
-        assert "saved-credential" not in str(settings.settings_response(2, encoded))
+        assert "saved-gateway-dispatch-credential-32b" not in str(
+            settings.settings_response(2, encoded)
+        )
     finally:
         settings.reset_settings()
 
@@ -163,16 +167,19 @@ def test_the_cookie_and_proxy_switches_default_to_the_safe_answer(
 
 
 def test_the_image_ships_the_host_package() -> None:
-    """`patch_gate` is imported by the publisher and the publish worker here
-    and by the runner and the snapshotter on a host. The manifest called it
-    host-only, which was wrong; an image without it builds, starts, serves, and
-    fails at the first publish."""
+    """The image preserves its package layout, host source included.
+
+    Nothing in the control plane imports `cloud_agent_host` any more: runtime
+    discovery facts live in `cloud_agent_shared/runtime_catalog.py`, and the
+    import-boundary tests forbid the import. Dropping the copy changes the
+    image's layout, which is a decision for the Dockerfile's header, not a
+    side effect of another edit."""
     dockerfile = DOCKERFILE_PATH.read_text()
     assert re.search(
         r"^COPY apps/backend/cloud_agent_host/ apps/backend/cloud_agent_host/",
         dockerfile,
         re.MULTILINE,
-    ), "the control-plane image drops cloud_agent_host/, so publishing will fail at runtime"
+    ), "the control-plane image drops cloud_agent_host/; change its layout in the header first"
 
 
 def test_the_image_ships_the_migrations_it_is_told_to_run() -> None:
@@ -200,6 +207,7 @@ def test_the_compose_only_sets_variables_the_code_reads(control_plane_env: dict)
         for root, pattern in (
             (REPO_ROOT / "apps" / "backend" / "cloud_agent", "*.py"),
             (REPO_ROOT / "apps" / "backend" / "cloud_agent_shared", "operation_profiling.py"),
+            (REPO_ROOT / "apps" / "backend" / "cloud_agent_shared" / "profiling", "*.py"),
         )
         for path in root.rglob(pattern)
         if "__pycache__" not in str(path)

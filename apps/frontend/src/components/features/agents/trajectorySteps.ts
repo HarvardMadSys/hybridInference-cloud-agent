@@ -426,6 +426,16 @@ function blockOf(event: StoredEvent): AssistantBlock | null {
 }
 
 /**
+ * Add one record to its group in place. A long command stores one output
+ * record per chunk, so copying the group for each one is quadratic in its output.
+ */
+function appendTo(groups: Map<string, StoredEvent[]>, key: string, event: StoredEvent): void {
+  const group = groups.get(key);
+  if (group) group.push(event);
+  else groups.set(key, [event]);
+}
+
+/**
  * Project stored events into the steps a reader can select.
  *
  * Every stored event remains reachable: tool results join their call, known
@@ -452,14 +462,10 @@ export function buildTrajectorySteps(
     const event = events[index];
     if (event.event_type === 'tool_output') {
       const id = asText(asRecord(event.payload).tool_use_id);
-      const key = `${scopeOf(event)}:${id}`;
-      outputByCall.set(key, [...(outputByCall.get(key) ?? []), event]);
+      appendTo(outputByCall, `${scopeOf(event)}:${id}`, event);
     }
     const callId = resultCallIdOf(event);
-    if (callId) {
-      const key = `${scopeOf(event)}:${callId}`;
-      resultsByCall.set(key, [...(resultsByCall.get(key) ?? []), event]);
-    }
+    if (callId) appendTo(resultsByCall, `${scopeOf(event)}:${callId}`, event);
     const call = callIdOf(event);
     if (call) {
       const key = `${scopeOf(event)}:${call}`;

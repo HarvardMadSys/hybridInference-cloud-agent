@@ -384,6 +384,57 @@ async def test_approved_dispatch_records_unknown_outcome_after_sse_limit(monkeyp
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "body",
+    [
+        b'{"jsonrpc":"2.0","id":"c1","error":"boom"}',
+        b'{"jsonrpc":"2.0","id":"c1","error":{"code":"nope"}}',
+        b'{"jsonrpc":"2.0","id":"c1","error":[1]}',
+        b'{"jsonrpc":"2.0","id":"c1","result":{"text":"\xff"}}',
+    ],
+    ids=["error-string", "error-code-text", "error-list", "not-utf8"],
+)
+async def test_approved_dispatch_records_unknown_outcome_after_a_malformed_reply(monkeypatch, body):
+    """A reply the protocol layer cannot read still ends the dispatch it answered."""
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda _: httpx.Response(
+                200, headers={"content-type": "application/json"}, content=body
+            )
+        )
+    ) as http:
+        transport = transports.StreamableHttpTransport(_config(), http, owns_client=True)
+        session = host.Session(
+            key=host.SessionKey(connection_id="1", member="job:1"),
+            transport=transport,
+            handshake=protocol.Handshake(protocol_version="2025-11-25"),
+        )
+        authorized = SimpleNamespace(job_id="job", alias="example", dispatches=[(7, 2)])
+        capability = SimpleNamespace(name="search")
+        entry = (authorized, capability)
+        monkeypatch.setattr(mcp_relay, "_host_catalogue", AsyncMock(return_value={"tool": entry}))
+        monkeypatch.setattr(mcp_relay, "_refresh_catalogue_entry", AsyncMock(return_value=entry))
+        monkeypatch.setattr(mcp_relay, "_decide_call", AsyncMock(return_value=None))
+        monkeypatch.setattr(mcp_relay, "_host_session", AsyncMock(return_value=session))
+        built = host.McpHost()
+        monkeypatch.setattr(mcp_relay, "_host", lambda: built)
+        store = SimpleNamespace(mcp=AsyncMock())
+        reply = await mcp_relay._host_call(
+            {"params": {"name": "tool"}},
+            request_id="request",
+            identity={},
+            store=store,
+            authorization=None,
+            stateless=True,
+        )
+    assert "error" in reply
+    store.mcp.finish_mcp_invocation.assert_awaited_once_with(
+        invocation_id=7, dispatch_generation=2, status="outcome_unknown"
+    )
+    assert authorized.dispatches == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("reader", ["body", "post_stream", "legacy_stream", "event_iterator"])
 async def test_compressed_responses_are_refused_before_any_body_is_pulled(reader):
     body = _UnconsumedBody()

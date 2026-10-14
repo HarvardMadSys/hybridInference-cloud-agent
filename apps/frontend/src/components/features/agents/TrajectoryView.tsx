@@ -60,6 +60,7 @@ const LANES: { key: TrajectoryLane; label: string; tone: string }[] = [
   { key: 'other', label: 'Other', tone: 'bg-gray-300 dark:bg-gray-600' },
 ];
 const EMPTY_TIMING_JOBS: AgentJobApi[] = [];
+const EMPTY_SUBAGENT_OPTIONS: readonly { value: string; label: string }[] = [];
 
 const ACTOR_TONE: Record<TrajectoryStep['actor'], string> = {
   user: 'bg-sky-50 dark:bg-sky-500/10 text-sky-700 dark:text-sky-400',
@@ -671,6 +672,9 @@ export function TrajectoryView({
   onOpenRun,
   focusJobId,
   jobs = EMPTY_TIMING_JOBS,
+  subagents = EMPTY_SUBAGENT_OPTIONS,
+  subagentFilter = '',
+  onSubagentFilterChange,
 }: {
   events: (AgentJobEventApi | AgentThreadEventApi)[];
   steps: TrajectoryStep[];
@@ -682,6 +686,11 @@ export function TrajectoryView({
   /** A turn opened from Chat: bring its header into view without selecting it. */
   focusJobId?: string | null;
   jobs?: AgentJobApi[];
+  /** The conversation's subagents; `steps` are already narrowed to the chosen one. */
+  subagents?: readonly { value: string; label: string }[];
+  /** The chosen subagent's option value, or '' for every agent. */
+  subagentFilter?: string;
+  onSubagentFilterChange?: (value: string) => void;
 }) {
   const [mode, setMode] = useState<TimelineMode>('steps');
   const [range, setRange] = useState<DomainRange | null>(null);
@@ -755,7 +764,7 @@ export function TrajectoryView({
     URL.revokeObjectURL(url);
   }
 
-  if (allSteps.length === 0) {
+  if (allSteps.length === 0 && !subagentFilter) {
     return (
       <p className="py-8 text-center text-[13px] text-gray-500 dark:text-gray-400">
         This conversation stored no events. A thread that ran before event capture, or one whose
@@ -822,6 +831,21 @@ export function TrajectoryView({
             aria-label="Search steps"
             className="min-w-0 basis-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-[13px] text-gray-900 outline-none focus:border-gray-300 dark:border-white/10 dark:bg-gray-950 dark:text-gray-100 sm:flex-1 sm:basis-auto"
           />
+          {subagents.length > 0 && onSubagentFilterChange ? (
+            <select
+              value={subagentFilter}
+              onChange={(event) => onSubagentFilterChange(event.target.value)}
+              aria-label="Show steps from"
+              className="min-w-0 max-w-full shrink rounded-lg border border-gray-200 bg-white px-2 py-1.5 text-[12px] text-gray-700 outline-none focus:border-gray-300 dark:border-white/10 dark:bg-gray-950 dark:text-gray-200 sm:max-w-64"
+            >
+              <option value="">All agents</option>
+              {subagents.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          ) : null}
           {focused !== null ? (
             <button
               type="button"
@@ -963,9 +987,11 @@ export function TrajectoryView({
         })}
         {visible.length === 0 ? (
           <p className="px-3 py-6 text-center text-[12px] text-gray-500 dark:text-gray-400">
-            {steps.length === 0
-              ? 'No execution steps recorded yet. Runtime records for a turn are in Run details.'
-              : `No step matches “${query}”.`}
+            {steps.length === 0 && subagentFilter
+              ? 'No steps were recorded for this subagent.'
+              : steps.length === 0
+                ? 'No execution steps recorded yet. Runtime records for a turn are in Run details.'
+                : `No step matches “${query}”.`}
           </p>
         ) : null}
       </div>

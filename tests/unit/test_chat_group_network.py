@@ -86,6 +86,7 @@ class FakeGuard:
         self.ensured = 0
         self.fail: Exception | None = None
         self.relays: dict[str, set[tuple[str, int]]] = {}
+        self.network_ids: dict[str, str | None] = {}
         self.events: list[str] = []
 
     def ensure(self, **_kwargs: Any) -> None:
@@ -94,9 +95,12 @@ class FakeGuard:
             raise self.fail
         self.ensured += 1
 
-    def sync_relays(self, bridge: str, endpoints: set[tuple[str, int]]) -> None:
+    def sync_relays(
+        self, bridge: str, endpoints: set[tuple[str, int]], *, network_id: str | None = None
+    ) -> None:
         self.events.append("sync_relays")
         self.relays[bridge] = set(endpoints)
+        self.network_ids[bridge] = network_id
 
 
 class FakeDocker:
@@ -281,6 +285,8 @@ class FakeDocker:
             if len(payload) != len(argv[3:]):
                 return subprocess.CompletedProcess(argv, 1, json.dumps(payload), "No such object")
             return self._ok(json.dumps(payload))
+        if argv[1] == "create":
+            return self._create_container(argv)
         if argv[1] == "start":
             container = self.container(argv[2])
             assert container is not None
@@ -320,6 +326,26 @@ class FakeDocker:
             labels=labels,
         )
         return self._ok(name)
+
+    def _create_container(self, argv: list[str]) -> subprocess.CompletedProcess[str]:
+        name = argv[argv.index("--name") + 1]
+        if self.container(name) is not None:
+            return self._fail(f'Conflict. The container name "/{name}" is already in use')
+        bootstrap = self.network(argv[argv.index("--network") + 1])
+        if bootstrap is None:
+            return self._fail("network not found")
+        labels = dict(
+            argv[i + 1].split("=", 1) for i, value in enumerate(argv) if value == "--label"
+        )
+        container = self.add_container(
+            f"created-{next(self._ids)}",
+            name=name,
+            status="created",
+            labels=labels,
+            image=argv[argv.index("--entrypoint") + 2],
+        )
+        self.connect(bootstrap["Id"], container["Id"], [])
+        return self._ok(container["Id"])
 
     def _network_json(self, network: dict[str, Any]) -> dict[str, Any]:
         length = network["IPAM"]["Config"][0]["Subnet"].split("/")[1]
@@ -569,6 +595,40 @@ def test_a_relay_rollout_swaps_the_endpoint_and_the_host_exception(monkeypatch):
     assert (old_ip, 8080) not in guard.relays[bridge] or old_ip == new_ip
 
 
+def test_one_relay_serving_both_services_gets_an_exception_for_each_port(monkeypatch):
+    """The configuration accepts one relay name for both services; so must the rules.
+
+    Keyed by name, the second port replaced the first, the in-guest check then
+    found the gateway port refused, and every wake of every group failed.
+    """
+    config = network_from_env(
+        {
+            "AGENT_SANDBOX_NAMESPACE": _NAMESPACE,
+            "AGENT_EGRESS_CHAT_NETWORK_POOL": "10.240.0.0/16",
+            "AGENT_EGRESS_DNS_SERVER": "1.1.1.1",
+            "AGENT_RELAY_NETWORK": "agent-relays",
+            "AGENT_GATEWAY_URL": "http://agent-relay:8080",
+            "AGENT_SANDBOX_MCP_URL": "http://agent-relay:8001",
+        }
+    )
+    backend = ContainerBackend(image="img", sandbox_network=config, sandbox_namespace=_NAMESPACE)
+    guard = FakeGuard()
+    backend._network_guard = guard  # type: ignore[assignment]
+    manager = ChatSandboxManager(backend)
+    docker = FakeDocker(config)
+    monkeypatch.setattr(manager, "_run", docker)
+    docker.add_container("relay-both", running=True)
+    docker.connect(docker.network("agent-relays")["Id"], "relay-both", ["agent-relay"])
+
+    name = manager._ensure_group_network(_spec())
+
+    address = docker.network(name)["endpoints"]["relay-both"]["ip"]
+    assert guard.relays[manager._network().bridge_name(name)] == {
+        (address, 8080),
+        (address, 8001),
+    }
+
+
 def test_relay_owners_are_read_in_one_inspect_and_must_be_unambiguous(monkeypatch):
     manager, docker, _ = _world(monkeypatch)
     assert manager._relay_owners() == {
@@ -676,6 +736,86 @@ def test_wake_reconnects_a_same_name_bridge_when_docker_kept_the_old_id(monkeypa
     assert refreshed.networks == (name,)
 
 
+def _record_relay_syncs(guard: FakeGuard, docker: FakeDocker) -> list[int]:
+    """How many Docker commands had run each time the relay exceptions were synced."""
+    synced_after: list[int] = []
+    sync = guard.sync_relays
+
+    def recording(bridge: str, endpoints: set[tuple[str, int]], **kwargs: Any) -> None:
+        synced_after.append(len(docker.calls))
+        sync(bridge, endpoints, **kwargs)
+
+    guard.sync_relays = recording  # type: ignore[method-assign]
+    return synced_after
+
+
+def test_a_new_sandbox_meets_its_bridge_only_when_it_first_starts(monkeypatch):
+    """Creating leaves the bridge to the start, which attaches and proves it once.
+
+    Creation used to reconcile the bridge three times and the start a fourth,
+    each pass reading the host's relay exceptions through a helper container.
+    The host's rules are still checked before anything is created.
+    """
+    manager, docker, guard = _world(monkeypatch)
+    docker.add_network(CHAT_BOOTSTRAP_NETWORK, subnet="172.17.0.0/16")
+    spec = _spec()
+    name = manager.network_for(spec)
+    synced_after = _record_relay_syncs(guard, docker)
+    checked: list[str] = []
+    monkeypatch.setattr(
+        manager, "_verify_guest_network", lambda s, **_kwargs: checked.append(s.sandbox_id)
+    )
+
+    created = manager.create(spec)
+
+    assert created.status is ChatSandboxStatus.CREATED
+    assert created.networks == (CHAT_BOOTSTRAP_NETWORK,)
+    assert [argv[1:2] if argv[1] == "create" else argv[1:3] for argv in docker.calls] == [
+        ["container", "inspect"],
+        ["create"],
+        ["container", "inspect"],
+    ]
+    assert docker.network(name) is None
+    assert guard.events == ["ensure"]
+
+    started = manager.start(spec)
+
+    assert started.running is True
+    assert started.networks == (name,)
+    assert docker.names_on(name) == {"relay-gateway", "relay-mcp", created.container_id}
+    joined = docker.calls.index(["docker", "network", "connect", name, created.container_id])
+    assert len(synced_after) == 1
+    assert synced_after[0] > joined, "the exceptions are written once the sandbox has joined"
+    bridge = manager._network().bridge_name(name)
+    assert guard.network_ids[bridge] == docker.network(name)["Id"]
+    endpoints = docker.network(name)["endpoints"]
+    assert guard.relays[bridge] == {
+        (endpoints["relay-gateway"]["ip"], 8080),
+        (endpoints["relay-mcp"]["ip"], 8000),
+    }
+    assert checked == [spec.sandbox_id]
+
+
+def test_a_wake_writes_the_relay_exceptions_once_the_sandbox_has_rejoined(monkeypatch):
+    manager, docker, guard = _world(monkeypatch)
+    spec = _spec()
+    docker.add_sandbox(spec)
+    name = manager.network_for(spec)
+    synced_after = _record_relay_syncs(guard, docker)
+    monkeypatch.setattr(manager, "_verify_guest_network", lambda *_args, **_kwargs: None)
+
+    manager.start(spec)
+
+    joined = docker.calls.index(["docker", "network", "connect", name, "sandbox-container"])
+    assert len(synced_after) == 1
+    assert synced_after[0] > joined
+    endpoints = docker.network(name)["endpoints"]
+    assert guard.relays[manager._network().bridge_name(name)] == {
+        (endpoints["relay-gateway"]["ip"], 8080),
+        (endpoints["relay-mcp"]["ip"], 8000),
+    }
+
+
 def test_start_proves_the_network_from_inside_and_stops_a_sandbox_that_fails(monkeypatch):
     manager, docker, _ = _world(monkeypatch)
     spec = _spec()
@@ -694,6 +834,78 @@ def test_start_proves_the_network_from_inside_and_stops_a_sandbox_that_fails(mon
     assert failed.value.inspection.container_id == "sandbox-container"
     assert docker.containers["sandbox-container"]["running"] is False
     assert docker.network(manager.network_for(spec)) is None
+
+
+def _check_that_times_out_once(monkeypatch, manager) -> list[str]:
+    """The in-guest check raises the first time it runs and passes after that."""
+    checks: list[str] = []
+
+    def capture(_spec, argv, **_kwargs):
+        checks.append(argv[3])
+        if len(checks) == 1:
+            raise SandboxError("chat sandbox exec failed: timed out after 45 seconds")
+        return subprocess.CompletedProcess(argv, 0, b"[]", b"")
+
+    monkeypatch.setattr(manager, "exec_capture", capture)
+    return checks
+
+
+def test_a_start_that_fails_before_its_check_passes_stops_its_guest(monkeypatch):
+    """No guest is left running unproven, so the next wake is a cold, checked one.
+
+    A check that raises (here, its exec timing out) used to leave the started
+    guest running; the next activation then took the reuse path, which never
+    ran the check, and repository code ran in a guest nothing had proved.
+    """
+    manager, docker, _ = _world(monkeypatch)
+    spec = _spec()
+    docker.add_sandbox(spec)
+    checks = _check_that_times_out_once(monkeypatch, manager)
+
+    with pytest.raises(RetainedChatFailStopped, match="timed out") as failed:
+        manager.start(spec)
+    assert failed.value.inspection.running is False
+    assert docker.containers["sandbox-container"]["running"] is False
+    assert docker.network(manager.network_for(spec)) is None
+
+    started = manager.start(spec)
+
+    assert started.running is True
+    assert checks == [_GUEST_NETWORK_CHECK, _GUEST_NETWORK_CHECK]
+
+
+def test_a_guest_that_could_not_be_stopped_is_proved_before_it_is_reused(monkeypatch):
+    """If the stop after a failed check fails too, the running guest stays unproven."""
+    manager, docker, _ = _world(monkeypatch)
+    spec = _spec()
+    docker.add_sandbox(spec)
+    checks = _check_that_times_out_once(monkeypatch, manager)
+    refuse_stop = True
+
+    def run(argv, **kwargs):
+        if refuse_stop and argv[1] == "stop":
+            return subprocess.CompletedProcess(argv, 1, "", "daemon busy")
+        return docker(argv, **kwargs)
+
+    monkeypatch.setattr(manager, "_run", run)
+
+    with pytest.raises(SandboxError, match="timed out") as failed:
+        manager.start(spec)
+    assert not isinstance(failed.value, RetainedChatFailStopped)
+    assert docker.containers["sandbox-container"]["running"] is True
+    # Nothing runs in it meanwhile: commands are refused until it is proved.
+    with pytest.raises(SandboxError, match="without passing its network check"):
+        manager.require_network(spec)
+
+    refuse_stop = False
+    reused = manager.start(spec)
+
+    assert reused.running is True
+    assert checks == [_GUEST_NETWORK_CHECK, _GUEST_NETWORK_CHECK]
+    manager.require_network(spec)
+    # Once proved, reuse is the ordinary cheap path again.
+    manager.start(spec)
+    assert len(checks) == 2
 
 
 def test_the_guest_check_expects_the_resolver_each_runtime_really_uses(monkeypatch):
@@ -845,8 +1057,8 @@ def test_activation_refuses_topology_changes_after_the_rule_sync(monkeypatch, mu
     manager, docker, guard, spec, name, synced = _running_kata_group(monkeypatch)
     sync = guard.sync_relays
 
-    def mutate_after_sync(bridge, endpoints):
-        sync(bridge, endpoints)
+    def mutate_after_sync(bridge, endpoints, **kwargs):
+        sync(bridge, endpoints, **kwargs)
         network = docker.network(name)
         if mutation == "peer":
             docker.add_container("stranger", running=True)

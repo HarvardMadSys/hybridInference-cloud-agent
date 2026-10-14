@@ -45,7 +45,12 @@ function LoginContent() {
   const temporary = signInError === 'temporary';
   const expired = signInError === 'expired';
   const accountUnavailable = signInError === 'account_unavailable';
+  const unconfigured = signInError === 'unavailable';
   const hasError = params?.has('sign_in_error') ?? false;
+  // The control plane sends only the four codes above. Any other value came
+  // from a link someone else wrote, so it is no reason to take away the way
+  // in: the visitor is told sign-in did not finish and can start it again.
+  const canSignIn = !unconfigured && !accountUnavailable;
   const authority = authorityName(branding.gatewayUrl);
 
   return (
@@ -79,10 +84,12 @@ function LoginContent() {
                   ? 'Sign-in is temporarily unavailable. Please try again shortly.'
                   : accountUnavailable
                     ? 'This account cannot sign in. Contact the service administrator for help.'
-                    : 'Sign-in is not configured correctly for this deployment. Contact the service administrator.'}
+                    : unconfigured
+                      ? 'Sign-in is not configured correctly for this deployment. Contact the service administrator.'
+                      : 'Sign-in did not finish. Please sign in again.'}
             </p>
           )}
-          {(!hasError || temporary || expired) && (
+          {canSignIn && (
             <>
               {/* A plain link, not a button with a handler: the destination is a
                   server route that answers with a redirect, and a full

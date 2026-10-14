@@ -23,6 +23,7 @@ from tests.servers.test_mcp_relay_host import (
 
 from cloud_agent.api import mcp_relay
 from cloud_agent.api.deps import get_storage
+from cloud_agent.mcp import runtime as mcp_runtime
 from cloud_agent.mcp.host import McpHost
 from cloud_agent.mcp.jsonrpc import JsonRpcError
 from cloud_agent.mcp.protocol import Handshake, ProtocolError
@@ -52,7 +53,7 @@ def waiting_store():
 def upstream(monkeypatch):
     """Observe external dispatch separately from the pending approval."""
     host = StubHost()
-    monkeypatch.setattr(mcp_relay, "_HOST_INSTANCE", host)
+    monkeypatch.setattr(mcp_runtime, "_HOST_INSTANCE", host)
     return host
 
 
@@ -353,7 +354,7 @@ async def test_upstream_failure_finishes_approval_and_returns_a_protocol_error(
 
     actual_host = McpHost()
     monkeypatch.setattr(actual_host, "_connect", connect)
-    monkeypatch.setattr(mcp_relay, "_HOST_INSTANCE", actual_host)
+    monkeypatch.setattr(mcp_runtime, "_HOST_INSTANCE", actual_host)
     task = await _pending_call(client, waiting_store)
     invocation = waiting_store.created_invocations[0]
     waiting_store.approved = {**invocation, "status": "approved"}

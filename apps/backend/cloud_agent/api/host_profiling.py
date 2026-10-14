@@ -109,14 +109,20 @@ async def build_policy_for_host(
         # it states its mode and nothing else. Reporting an error here would
         # make a host retry a question that has no answer yet.
         return _empty_policy(mode=mode, revision=0, now=now)
-    from cloud_agent.application.profiling_control import ProfilingControlService
+    from cloud_agent.application.profiling_control import (
+        DEFAULT_MAX_OPERATIONS,
+        ProfilingControlService,
+    )
 
     service = ProfilingControlService(
         control=store.profiling_control,
         deployment=profiling_control_deployment(),
         host_pool=store.host_pool,
     )
-    snapshot = await service.control_snapshot(now=now)
+    # Every runner asks every few seconds while a run is in force, so this is
+    # the producers' read: the revision and the run, not the Admin card's sample
+    # count, whose cost grows with every row the run has stored.
+    snapshot = await service.policy_snapshot(now=now)
     run = snapshot.get("run") if snapshot.get("run_active") else None
     policy_run = None
     if mode == MODE_ADMIN and run is not None:
@@ -127,9 +133,7 @@ async def build_policy_for_host(
             "expires_at": run["expires_at"],
             "continuous": run.get("continuous") is True,
             "config_version": 1,
-            "max_operations": 0
-            if run.get("continuous") is True
-            else int(snapshot.get("bounds", {}).get("default_max_operations") or 100),
+            "max_operations": 0 if run.get("continuous") is True else DEFAULT_MAX_OPERATIONS,
             "admission_instances": [],
         }
     return {

@@ -159,7 +159,7 @@ function ConversationDetails({ threadId, query }: { threadId: string; query: str
             <dl className={`${CARD} mt-5 grid grid-cols-2 gap-5 p-5 text-sm lg:grid-cols-4`}>
               {[
                 ['User', conversation.user_id],
-                ['Repository', conversation.repo],
+                ['Repository', conversation.repo ?? 'Start from scratch'],
                 ['Created', dateTime(conversation.created_at)],
                 ['Last activity', dateTime(conversation.last_activity_at)],
               ].map(([label, value]) => (

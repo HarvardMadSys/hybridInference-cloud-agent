@@ -92,7 +92,8 @@ class AdminSandbox(BaseModel):
     generation: int = Field(1, ge=1)
     origin_thread_id: str
     title: str | None = None
-    repo: str
+    #: Null for a temporary workspace.
+    repo: str | None
     user_id: str
     host: str
     container_id: str | None = None
@@ -166,6 +167,20 @@ class AdminSandboxMember(BaseModel):
     updated_at: datetime
 
 
+class AdminSandboxCheckpoint(BaseModel):
+    """The latest restorable checkpoint a host reported for this sandbox."""
+
+    id: str
+    generation: int
+    host: str
+    size_bytes: int
+    new_layer_bytes: int
+    state: Literal["reported", "verified", "superseded", "deleted"]
+    captured_at: datetime
+    recorded_at: datetime
+    durations_ms: dict[str, int] = Field(default_factory=dict)
+
+
 class AdminSandboxDetail(BaseModel):
     """A consistent sandbox inspection with at most 128 current members."""
 
@@ -173,6 +188,7 @@ class AdminSandboxDetail(BaseModel):
     members: list[AdminSandboxMember] = Field(max_length=128)
     observed_at: datetime
     terminal_activity_error: str | None = None
+    latest_checkpoint: AdminSandboxCheckpoint | None = None
 
 
 class AdminSandboxStopRequest(BaseModel):
@@ -230,3 +246,4 @@ class AdminSandboxTrajectoryPage(BaseModel):
     events: list[AdminSandboxTrajectoryEvent]
     observed_at: datetime
     next_cursor: str | None = None
+    latest_checkpoint: AdminSandboxCheckpoint | None = None

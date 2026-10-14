@@ -34,12 +34,13 @@ import re
 import secrets
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
 import threading
 import time
-from dataclasses import dataclass, field, replace
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent_shared.sandbox_manager_compat import SANDBOX_MANAGER_PRODUCER, manager_env
@@ -56,6 +57,18 @@ from cloud_agent_host.chat_sandbox import (
     ChatSandboxManager,
     ChatSandboxSpec,
     RetainedChatBackend,
+)
+
+# Preserve the runner's public value/client API and its factory patch points.
+from cloud_agent_host.claimed_job import (
+    ClaimedJob as ClaimedJob,
+    ClaimUnreachable as ClaimUnreachable,
+    LeaseLost as LeaseLost,
+    WorkWaitUnsupported as WorkWaitUnsupported,
+)
+from cloud_agent_host.control_plane_client import (
+    _HEARTBEAT_TIMEOUT_S,
+    ControlPlane as ControlPlane,
 )
 from cloud_agent_host.drivers import (
     LINE,
@@ -92,12 +105,11 @@ from cloud_agent_host.measurement_delivery import (
     DELIVERY_DRAIN_S,
     DELIVERY_HANDOFF_DRAIN_S,
     DELIVERY_QUEUE_MAX,
-    DELIVERY_TIMEOUT_S,
+    DELIVERY_TIMEOUT_S as DELIVERY_TIMEOUT_S,
     attempts_exhausted,
     classify_exception,
     classify_response,
 )
-from cloud_agent_host.patch_gate import branch_name_for
 from cloud_agent_host.profiling_policy import ProfilingPolicySync
 from cloud_agent_host.resident_transport import ResidentLaunch
 from cloud_agent_host.resources import shared_member_resource_rollup
@@ -122,36 +134,45 @@ from cloud_agent_host.session_supervisor_client import (
     SessionSupervisorError,
 )
 from cloud_agent_host.setup import run_setup
-from cloud_agent_host.shared_protocol import (
-    GOAL_REPORT_CAPABILITY,
-    NATIVE_FORK_AT_ANCHOR_CAPABILITY,
-    PROFILING_CONTROL_CAPABILITY,
-    SHARED_SANDBOX_CAPABILITY,
-    SHARED_SANDBOX_HELPER_PINS,
-    SHARED_SANDBOX_RUNTIME_PINS,
-    shared_deployment_capability,
-)
-from cloud_agent_host.source_archive import build_base_bundle, build_source_archive
 from cloud_agent_host.storage_admission import new_sandbox_storage_error
 from cloud_agent_shared import operation_profiling
-from cloud_agent_shared.environment import ENVIRONMENT_CAPABILITY, BoundEnvironment
+from cloud_agent_shared.environment import ENVIRONMENT_CAPABILITY
+from cloud_agent_shared.git.patch_gate import branch_name_for
 from cloud_agent_shared.git.source_archive import (
     DEFAULT_MAX_SOURCE_ARCHIVE_BYTES,
+    build_base_bundle,
+    build_source_archive,
     build_upload_archive,
+)
+from cloud_agent_shared.git.temporary_workspace import (
+    EMPTY_TREE_SHA,
+    TEMPORARY_WORKSPACE_BASE_SHA,
+    TEMPORARY_WORKSPACE_BRANCH,
+    TEMPORARY_WORKSPACE_COMMIT_MESSAGE,
+    temporary_workspace_commit_env,
 )
 from cloud_agent_shared.host_settings import (
     HOST_SETTINGS_BY_KEY,
     RUNNER_SETTING_KEYS,
     reported_values,
 )
-from cloud_agent_shared.plugins import MAX_SANDBOX_PLUGINS, validate_sandbox_plugins
-from cloud_agent_shared.sandbox_archive_settings import SANDBOX_ARCHIVE_CAPABILITY
+from cloud_agent_shared.sandbox_archive_settings import (
+    SANDBOX_ARCHIVE_CAPABILITY,
+    SANDBOX_CHECKPOINT_CAPABILITY,
+)
 from cloud_agent_shared.sandbox_resources import parse_sandbox_resource_sample
 from cloud_agent_shared.secret_redaction import SecretRedactor
 from cloud_agent_shared.shared_protocol import (
     FORK_HELPER,
+    GOAL_REPORT_CAPABILITY,
     HOST_SETTINGS_CAPABILITY,
+    NATIVE_FORK_AT_ANCHOR_CAPABILITY,
+    PROFILING_CONTROL_CAPABILITY,
+    SHARED_SANDBOX_CAPABILITY,
+    SHARED_SANDBOX_HELPER_PINS,
+    SHARED_SANDBOX_RUNTIME_PINS,
     mid_turn_input_capability,
+    shared_deployment_capability,
 )
 
 DEFAULT_LEASE_TTL_S = 120.0
@@ -165,16 +186,21 @@ FIRST_SETTINGS_WAIT_S = 30.0
 # control request cannot consume the remaining lease in normal cadence sleeps.
 # Idempotent lifecycle receipts reuse the same short retry interval.
 _CONTROL_RETRY_INTERVAL_S = 5.0
-_HEARTBEAT_TIMEOUT_S = 10.0
+#: Heartbeat answers no retry can change. The worker token and the job it names
+#: are fixed for the attempt, so a renewal refused for either is refused every
+#: time, and the lease runs out regardless.
+_HEARTBEAT_REFUSALS = frozenset({401, 403, 404})
+#: The longest lease that still cannot be renewed: the first renewal is sent
+#: one heartbeat interval in and may take a whole request timeout to land, so a
+#: lease no longer than that expires first and every attempt is lost at its
+#: first beat. The control plane itself only requires a positive number.
+_UNRENEWABLE_LEASE_S = HEARTBEAT_INTERVAL_S + _HEARTBEAT_TIMEOUT_S
 #: How long a host polls before asking again for the wait endpoint a control
 #: plane did not have. Hosts deploy first, so this is the rest of a rollout.
 WORK_WAIT_RETRY_S = 300.0
 #: Added to a wait's own timeout for the client's, so the control plane always
 #: answers first.
 _WORK_WAIT_GRACE_S = 10.0
-#: One upload is capped at 5 MB by the control plane, but the connection can be
-#: slow; the default 30 s client timeout is too tight for a file transfer.
-_ATTACHMENT_TIMEOUT_S = 120.0
 DEFAULT_AGENT_TIMEOUT_S = float(HOST_SETTINGS_BY_KEY["agent_timeout_s"].default)
 # How often the control checks run while the agent is silent.
 _POLL_INTERVAL_S = 0.5
@@ -185,6 +211,10 @@ _POLL_INTERVAL_S = 0.5
 # the turn stream gets the execution budget plus this drain window.
 _SHARED_TURN_INTERRUPT_DRAIN_S = 180.0
 _GIT_TIMEOUT_S = 300.0
+#: The shortest wait between two looks at how much a size-bounded clone has
+#: written. A look walks the whole checkout, so the wait also grows with what
+#: the last look cost, which keeps a large tree from being walked continuously.
+_CLONE_WATCH_INTERVAL_S = 0.5
 
 #: The root profiling operation covering one attempt's startup chain, from the
 #: claim request to the moment the prompt is handed to the resident CLI. It is
@@ -204,6 +234,20 @@ def _log_control_failure(operation: str, job_id: str, exc: Exception) -> None:
         type(exc).__name__,
         status,
     )
+
+
+def _owner_visible_error(exc: Exception) -> str:
+    """Describe a failure for the chat's owner without the control plane's address.
+
+    The owner reads a failed turn's detail, and httpx names the URL it called
+    in every status error, which put this deployment's internal control-plane
+    address in front of them. A status error says what the control plane
+    answered instead; the log line written beside the detail keeps its type
+    and status for an operator. Other failures read as they always have.
+    """
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"the control plane answered HTTP {exc.response.status_code}"
+    return str(exc)
 
 
 def _retry_lifecycle_receipt(operation: str, job_id: str, call: Callable[[], Any]) -> Any:
@@ -287,489 +331,8 @@ _SAFE_DIRECTORY_ENV = {
 }
 
 
-class LeaseLost(Exception):
-    """Raised when this attempt no longer owns the job and must stop."""
-
-
-class ClaimUnreachable(Exception):
-    """The gateway could not be reached *to claim*, so no job was taken.
-
-    Distinct from a transport failure later in the run: that one leaves an
-    attempt running until its lease expires, and an operator needs to be sent
-    to the job rather than told nothing was claimed.
-    """
-
-
-class WorkWaitUnsupported(Exception):
-    """The control plane has no wait endpoint, so an idle host polls instead."""
-
-
 class WorktreeError(Exception):
     """Raised when the job's repository could not be materialized."""
-
-
-@dataclass
-class ClaimedJob:
-    """What the control plane handed the enrolled host."""
-
-    job_id: str
-    thread_id: str
-    attempt_id: int
-    attempt_no: int
-    repo: str
-    base_sha: str | None
-    task_prompt: str
-    runtime: str
-    model: str
-    worker_token: str
-    # The inference credential that enters the sandbox: a gateway grant.
-    sandbox_token: str
-    execution_profile: str = "trusted-v1"
-    # The MCP credential. A *second* credential, because tools and inference
-    # are two services now: a leaked MCP token buys no inference and a leaked
-    # grant buys no tools. The relay it opens is this host's own, from
-    # `_sandbox_mcp_url`, not anything the claim says.
-    mcp_token: str = ""
-    # How hard the model should think on this turn, in the runtime's own
-    # vocabulary. None is Auto: no flag, whatever the CLI and model default to.
-    # Defaulted rather than required, because absent and Auto are the same
-    # state — there is nothing a caller could pass to mean "unknown".
-    reasoning_effort: str | None = None
-    # Shell run in the sandbox before the agent, on the group's one network.
-    # Optional, so it carries a default rather than forcing every caller to
-    # pass one.
-    setup_script: str | None = None
-    environment: BoundEnvironment | None = field(default=None, repr=False)
-    # Explicit CLI plugins installed in this chat's private member state.
-    plugins: list[dict[str, str]] = field(default_factory=list)
-    # Read-only, single-repo, short-lived: what the runner clones with. Never
-    # put in .git/config or the sandbox environment.
-    clone_token: str | None = None
-    # A separate repository-scoped contents/PR write token for sandbox gh.
-    github_token: str | None = field(default=None, repr=False)
-    parent_job_id: str | None = None
-    turn_no: int = 1
-    # MCP connection aliases this job was granted. Aliases only: the runner
-    # learns nothing about where they actually are or how they authenticate,
-    # because the sandbox reaches them through this service's MCP-only relay
-    # rather than directly.
-    mcp_bindings: list[str] = field(default_factory=list)
-    # The CLI version the control plane stamped on this attempt, resolved from
-    # the thread's pin, the deployment's selection, or this host's default.
-    # ``None`` from a control plane that predates selection — the image's
-    # symlinked default then applies, which is what that control plane means.
-    runtime_version: str | None = None
-    # Durable shared-container membership. It is absent only until the first
-    # claimed turn reserves its sandbox; every executable claim uses this
-    # topology and remains pinned to the owning host afterwards.
-    thread_sandbox: dict[str, Any] | None = None
-    # How many uploads this whole conversation holds, counted by the control
-    # plane. Zero means skip the fetch, which is every turn of every task that
-    # attached nothing. Absent from a control plane that predates uploads, and
-    # absent means the same thing as none.
-    thread_attachment_count: int = 0
-    # How many this turn itself added. A retained container already holds the
-    # earlier turns' files, so only a new container or a turn that attached
-    # something needs the import to run.
-    turn_attachment_count: int = 0
-
-    @classmethod
-    def from_response(cls, body: dict[str, Any]) -> ClaimedJob:
-        """Build from the claim endpoint's response."""
-        raw_plugins = body.get("plugins", [])
-        if not isinstance(raw_plugins, list) or len(raw_plugins) > MAX_SANDBOX_PLUGINS:
-            raise ValueError("claim plugins must be a bounded list")
-        plugins = validate_sandbox_plugins(body["runtime"], raw_plugins)
-        return cls(
-            job_id=body["job_id"],
-            thread_id=body["thread_id"],
-            parent_job_id=body.get("parent_job_id"),
-            turn_no=int(body.get("turn_no") or 1),
-            attempt_id=body["attempt_id"],
-            attempt_no=body["attempt_no"],
-            repo=body["repo"],
-            base_sha=body.get("base_sha"),
-            task_prompt=body["task_prompt"],
-            setup_script=body.get("setup_script"),
-            environment=BoundEnvironment.model_validate(body["environment"])
-            if body.get("environment")
-            else None,
-            plugins=plugins,
-            runtime=body["runtime"],
-            model=body["model"],
-            execution_profile=body.get("execution_profile") or "trusted-v1",
-            # Absent from a control plane that predates the control, which is
-            # the same thing as Auto — no separate "unknown" state to carry.
-            reasoning_effort=body.get("reasoning_effort"),
-            worker_token=body["worker_token"],
-            sandbox_token=body["sandbox_token"],
-            mcp_token=body.get("mcp_token") or "",
-            clone_token=body.get("clone_token") or None,
-            github_token=body.get("github_token") or None,
-            mcp_bindings=list(body.get("mcp_bindings") or []),
-            runtime_version=body.get("runtime_version") or None,
-            thread_sandbox=(
-                dict(body["thread_sandbox"])
-                if isinstance(body.get("thread_sandbox"), dict)
-                else None
-            ),
-            thread_attachment_count=int(body.get("thread_attachment_count") or 0),
-            turn_attachment_count=int(body.get("turn_attachment_count") or 0),
-        )
-
-
-class ControlPlane:
-    """Thin client for the worker endpoints, using the capability token."""
-
-    def __init__(self, base_url: str, token: str, *, timeout: float = 30.0) -> None:
-        self._base = base_url.rstrip("/")
-        self._client = httpx.Client(timeout=timeout, headers={"Authorization": f"Bearer {token}"})
-        # This client serves exactly one attempt (one claim, one token), so a
-        # plain counter is the whole numbering scheme. It makes each upload
-        # idempotent server-side, which is what licenses the retry below.
-        self._event_seq = 0
-        self._redactor = SecretRedactor({})
-        self._preview_redactors: dict[str, SecretRedactor] = {}
-        self._preview_contexts: dict[str, tuple[str, dict[str, Any]]] = {}
-        self._secret_values: dict[str, str] = {}
-
-    def close(self) -> None:
-        """Release the HTTP connection pool."""
-        self._client.close()
-
-    def _post(
-        self,
-        path: str,
-        payload: dict[str, Any] | None = None,
-        *,
-        timeout: float | None = None,
-        already_redacted: bool = False,
-    ) -> dict[str, Any]:
-        response = self._client.post(
-            f"{self._base}{path}",
-            json=(payload or {}) if already_redacted else self._redactor.payload(payload or {}),
-            timeout=self._client.timeout if timeout is None else timeout,
-        )
-        if response.status_code == 409:
-            raise LeaseLost(response.text[:200])
-        response.raise_for_status()
-        return response.json() if response.content else {}
-
-    def record_measurement(self, job_id: str, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
-        """Post one measurement and return its status and body.
-
-        Returns the answer rather than raising on a non-2xx, because delivery
-        decides what a status means: a 409 here is a *measurement* conflict,
-        not a lost lease, and the shared ``_post`` would raise ``LeaseLost``
-        for it and end a turn that had already succeeded.
-        """
-        response = self._client.post(
-            f"{self._base}/v1/agent/worker/jobs/{job_id}/measurements",
-            json=self._redactor.payload(body),
-            timeout=DELIVERY_TIMEOUT_S,
-        )
-        try:
-            parsed = response.json() if response.content else {}
-        except ValueError:
-            parsed = {}
-        return response.status_code, parsed if isinstance(parsed, dict) else {}
-
-    def append_event(self, event: NormalizedEvent) -> None:
-        """Report one normalized event, retrying once now that replay is safe.
-
-        The retry exists *because of* ``event_seq``: before it, a response
-        lost on the wire left the runner unable to tell "never stored" from
-        "stored, answer dropped", and re-sending risked a duplicate row in the
-        owner's stream. With the number attached, the server answers a replay
-        with the already-stored id, so one transport error no longer kills an
-        otherwise healthy turn.
-        """
-        payload = self._redactor.payload(event.payload)
-        if isinstance(event.payload, dict) and isinstance(event.payload.get("delta"), str):
-            stream_id = str(
-                event.payload.get("preview_id") or event.payload.get("id") or event.event_type
-            )
-            if event.payload.get("reset") or stream_id not in self._preview_redactors:
-                self._preview_redactors[stream_id] = SecretRedactor(self._secret_values)
-            payload["delta"] = self._preview_redactors[stream_id].feed(event.payload["delta"])
-            self._preview_contexts[stream_id] = (
-                event.event_type,
-                {k: v for k, v in payload.items() if k not in {"delta", "reset"}},
-            )
-        self._event_seq += 1
-        body = {
-            "event_type": event.event_type,
-            "payload": payload,
-            "event_seq": self._event_seq,
-        }
-        try:
-            self._post(f"/v1/agent/worker/jobs/{self.job_id}/events", body, already_redacted=True)
-        except httpx.TransportError:
-            self._post(f"/v1/agent/worker/jobs/{self.job_id}/events", body, already_redacted=True)
-
-    def _get(self, path: str, *, timeout: float | None = None) -> dict[str, Any]:
-        """Read from the worker surface, with the same fencing as a write."""
-        response = self._client.get(
-            f"{self._base}{path}",
-            timeout=self._client.timeout if timeout is None else timeout,
-        )
-        if response.status_code == 409:
-            raise LeaseLost(response.text[:200])
-        response.raise_for_status()
-        return response.json() if response.content else {}
-
-    def list_attachments(self) -> list[dict[str, Any]]:
-        """Every upload in this conversation, without the bytes."""
-        body = self._get(f"/v1/agent/worker/jobs/{self.job_id}/attachments")
-        return list(body.get("attachments") or [])
-
-    def read_attachment(self, attachment_id: int) -> tuple[str, bytes]:
-        """One upload's path and bytes."""
-        body = self._get(
-            f"/v1/agent/worker/jobs/{self.job_id}/attachments/{attachment_id}",
-            timeout=_ATTACHMENT_TIMEOUT_S,
-        )
-        return str(body["path"]), base64.b64decode(body["content_base64"])
-
-    def heartbeat(self, ttl: float) -> dict[str, Any]:
-        """Renew the lease and learn whether cancellation is pending."""
-        return self._post(
-            f"/v1/agent/worker/jobs/{self.job_id}/heartbeat",
-            {"lease_ttl_seconds": ttl},
-            timeout=_HEARTBEAT_TIMEOUT_S,
-        )
-
-    def report_continuity(self, mode: str, *, context_status: str | None = None) -> None:
-        """Record this attempt's continuity rung. Best-effort observability."""
-        try:
-            body = {"mode": mode}
-            if context_status is not None:
-                body["context_status"] = context_status
-            self._post(f"/v1/agent/worker/jobs/{self.job_id}/continuity", body)
-        except LeaseLost:
-            raise
-        except Exception:
-            pass
-
-    def report_context_status(self, context_status: str) -> None:
-        """Record NEW/LIVE/RESTORED/LOST without inventing a continuity rung."""
-        try:
-            self._post(
-                f"/v1/agent/worker/jobs/{self.job_id}/continuity",
-                {"context_status": context_status},
-            )
-        except LeaseLost:
-            raise
-        except Exception:
-            pass
-
-    def report_resources(self, rollup: dict[str, Any]) -> None:
-        """Report one closed attempt's resource and timing telemetry. Best-effort.
-
-        Swallowed like every other observability write: a turn that ran must
-        not fail because the platform could not record its telemetry.
-        """
-        try:
-            self._post(f"/v1/agent/worker/jobs/{self.job_id}/resources", rollup)
-        except LeaseLost:
-            raise
-        except Exception:
-            pass
-
-    def report_turn_resources(self, payload: dict[str, Any]) -> None:
-        """Report one cumulative whole-turn member execution snapshot.
-
-        The same method serves a running ``collecting`` checkpoint and the
-        closing ``final`` snapshot: the body carries its own state and
-        ``report_seq``, and the endpoint treats a resend at the same sequence
-        as the same report. Swallowed like every other observability write --
-        a turn that ran must not fail because the platform could not record
-        its telemetry -- with the loss of the lease still fatal.
-
-        There is deliberately no retry here. The payload is a cumulative
-        snapshot with a monotonic ``report_seq``, so a checkpoint lost to a
-        transport error is superseded by the next one: retrying would upload
-        a stale picture while the current one is already being assembled.
-        """
-        try:
-            self._post(f"/v1/agent/worker/jobs/{self.job_id}/turn-resources", payload)
-        except LeaseLost:
-            raise
-        except Exception:
-            pass
-
-    def reserve_chat_sandbox(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Reserve immutable thread/container identity under this attempt fence."""
-        return self._post(
-            f"/v1/agent/worker/jobs/{self.job_id}/sandbox/reserve",
-            payload,
-        )
-
-    def mark_chat_sandbox_running(
-        self,
-        *,
-        sandbox_generation: int,
-        activation_generation: int,
-        container_id: str,
-        context_status: str,
-    ) -> dict[str, Any]:
-        """Record that Docker started the reserved activation."""
-        return self._post(
-            f"/v1/agent/worker/jobs/{self.job_id}/sandbox/running",
-            {
-                "sandbox_generation": sandbox_generation,
-                "activation_generation": activation_generation,
-                "container_id": container_id,
-                "context_status": context_status,
-            },
-        )
-
-    def record_chat_process(
-        self,
-        *,
-        sandbox_generation: int,
-        activation_generation: int,
-        residency_generation: int,
-        process_generation: int,
-    ) -> None:
-        """Record a CLI process rotation inside the same chat container."""
-        self._post(
-            f"/v1/agent/worker/jobs/{self.job_id}/sandbox/process",
-            {
-                "sandbox_generation": sandbox_generation,
-                "activation_generation": activation_generation,
-                "residency_generation": residency_generation,
-                "process_generation": process_generation,
-            },
-        )
-
-    def establish_shared_residency(
-        self,
-        *,
-        sandbox_id: str,
-        runtime_id: str,
-        runtime_version: str | None,
-    ) -> dict[str, Any]:
-        """Obtain the member-scoped renewable credential owned by the sandbox manager."""
-        return self._post(
-            f"/v1/agent/worker/jobs/{self.job_id}/sandbox/residency",
-            {
-                "sandbox_id": sandbox_id,
-                "runtime_id": runtime_id,
-                "runtime_version": runtime_version,
-            },
-        )
-
-    def admit_chat_turn(
-        self,
-        *,
-        sandbox_generation: int,
-        activation_generation: int,
-        residency_generation: int,
-    ) -> None:
-        """Reserve this job before its prompt may reach Agent CLI stdin."""
-        self._post(
-            f"/v1/agent/worker/jobs/{self.job_id}/sandbox/admit",
-            {
-                "sandbox_generation": sandbox_generation,
-                "activation_generation": activation_generation,
-                "residency_generation": residency_generation,
-            },
-            timeout=10.0,
-        )
-
-    def settle_chat_sandbox(
-        self,
-        *,
-        sandbox_generation: int,
-        activation_generation: int,
-        residency_generation: int,
-        context_status: str,
-        native_session_id: str | None,
-        idle_timeout_seconds: float,
-        base_sha: str | None = None,
-    ) -> dict[str, Any]:
-        """Persist a native context boundary before the host starts its idle timer."""
-        return self._post(
-            f"/v1/agent/worker/jobs/{self.job_id}/sandbox/settle",
-            {
-                "sandbox_generation": sandbox_generation,
-                "activation_generation": activation_generation,
-                "residency_generation": residency_generation,
-                "context_status": context_status,
-                "native_session_id": native_session_id,
-                "base_sha": base_sha,
-                "idle_timeout_seconds": idle_timeout_seconds,
-            },
-            timeout=10.0,
-        )
-
-    def abandon_chat_sandbox(
-        self,
-        *,
-        sandbox_generation: int,
-        activation_generation: int,
-        lost: bool,
-        detail: str | None,
-        idle_timeout_seconds: float,
-    ) -> dict[str, Any]:
-        """Release a failed activation without claiming context continuity."""
-        return self._post(
-            f"/v1/agent/worker/jobs/{self.job_id}/sandbox/abandon",
-            {
-                "sandbox_generation": sandbox_generation,
-                "activation_generation": activation_generation,
-                "lost": lost,
-                "detail": detail,
-                "idle_timeout_seconds": idle_timeout_seconds,
-            },
-        )
-
-    def suspend_terminals(self, phase: str) -> None:
-        """Freeze owner PTYs before workspace preparation or group snapshot capture."""
-        self._post(
-            f"/v1/agent/worker/jobs/{self.job_id}/terminals/suspend",
-            {"phase": phase},
-        )
-
-    def resume_terminals(self) -> None:
-        """Resume retained PTYs and publish readiness for this attempt."""
-        self._post(f"/v1/agent/worker/jobs/{self.job_id}/terminals/resume")
-
-    def finish(self, state: str, detail: str | None = None, base_sha: str | None = None) -> None:
-        """Drive the fenced terminal transition.
-
-        ``base_sha`` reports the commit the agent actually worked from. A job
-        may be submitted without one, and the publisher cannot apply a patch
-        without knowing its base — so the runner, which resolves it when it
-        checks the repository out, is the component that knows.
-        """
-        for stream_id, redactor in tuple(self._preview_redactors.items()):
-            final = redactor.flush()
-            if final:
-                event_type, payload = self._preview_contexts[stream_id]
-                self._event_seq += 1
-                body = {
-                    "event_type": event_type,
-                    "payload": {**payload, "delta": final},
-                    "event_seq": self._event_seq,
-                }
-                try:
-                    self._post(
-                        f"/v1/agent/worker/jobs/{self.job_id}/events", body, already_redacted=True
-                    )
-                except httpx.TransportError:
-                    self._post(
-                        f"/v1/agent/worker/jobs/{self.job_id}/events", body, already_redacted=True
-                    )
-        self._preview_redactors.clear()
-        self._preview_contexts.clear()
-        self._post(
-            f"/v1/agent/worker/jobs/{self.job_id}/finish",
-            {"state": state, "detail": detail, "base_sha": base_sha},
-        )
-
-    job_id: str = ""
 
 
 class Heartbeater:
@@ -808,6 +371,23 @@ class Heartbeater:
                 self.lease_lost = True
                 return
             except Exception as exc:
+                refused = (
+                    isinstance(exc, httpx.HTTPStatusError)
+                    and exc.response.status_code in _HEARTBEAT_REFUSALS
+                )
+                if refused or time.monotonic() - last_success >= self._ttl:
+                    # A refused renewal is refused on every retry, and once the
+                    # last acknowledged renewal has run out no request can fit
+                    # inside it. Either way the lease is gone, so the agent is
+                    # stopped as for a 409 rather than left writing to a
+                    # workspace the reaper has already taken back.
+                    _log_control_failure(
+                        "heartbeat_refused" if refused else "heartbeat_expired",
+                        self._control.job_id,
+                        exc,
+                    )
+                    self.lease_lost = True
+                    return
                 # A transient control-plane blip must not kill a healthy run;
                 # the next request still has to fit inside the original lease.
                 failures += 1
@@ -837,8 +417,11 @@ class Heartbeater:
             last_success = time.monotonic()
             delay = self._interval
             if reply.get("cancel_requested"):
+                # Renewal goes on until the runner stops it: releasing the
+                # activation, or draining an interrupted turn, still happens
+                # under this lease, and one left to expire meanwhile makes the
+                # reaper mark the chat's context lost.
                 self.cancel_requested = True
-                return
 
 
 def claim(
@@ -1024,6 +607,101 @@ def _run_git(
     )
 
 
+def _checkout_bytes(workdir: str) -> int:
+    """Total size of the regular files under ``workdir``, as the import limit counts it."""
+    total = 0
+    for directory, _names, files in os.walk(workdir):
+        for name in files:
+            try:
+                info = os.lstat(os.path.join(directory, name))
+            except OSError:
+                # Git renames its temporary and lock files as it goes.
+                continue
+            if stat.S_ISREG(info.st_mode):
+                total += info.st_size
+    return total
+
+
+def _run_git_within(
+    args: list[str],
+    *,
+    cwd: str,
+    max_bytes: int,
+    env_extra: dict[str, str] | None = None,
+    stop: threading.Event | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run one git command that writes into ``cwd``, stopping it past ``max_bytes``.
+
+    The import limit used to be checked only once the whole clone was on disk,
+    and that disk is the Docker data root every retained chat on this host
+    writes to. A repository far over the limit -- or a small pack that checks
+    out into a huge tree -- filled it first and was refused after. Here the
+    checkout is measured the way the archive is while git writes it, and git
+    is killed once it is over; a step that finished between two looks is
+    refused as soon as it ends. Anything refused here the archive would have
+    refused too: nothing git writes here is removed by a later step.
+
+    Its own process group keeps a terminal's Ctrl-C from reaching git, so the
+    caller's ``stop`` is what ends a clone nobody will use any more: once it is
+    set, git is killed the same way.
+    """
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), **_GIT_ENV, **(env_extra or {})}
+    ended = threading.Event()
+    over = threading.Event()
+    abandoned = threading.Event()
+    # A process group of its own: a fetch writes through children it starts,
+    # the transport helper and index-pack, and stopping git must stop them too.
+    with subprocess.Popen(
+        ["git", *args],
+        cwd=cwd,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    ) as process:
+
+        def kill_group() -> None:
+            if process.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGKILL)
+
+        def watch() -> None:
+            while not ended.is_set():
+                started = time.monotonic()
+                if stop is not None and stop.is_set():
+                    abandoned.set()
+                    kill_group()
+                    return
+                if _checkout_bytes(cwd) > max_bytes:
+                    over.set()
+                    kill_group()
+                    return
+                ended.wait(max(_CLONE_WATCH_INTERVAL_S, 4 * (time.monotonic() - started)))
+
+        watcher = threading.Thread(target=watch, daemon=True, name="git-checkout-budget")
+        watcher.start()
+        try:
+            stdout, stderr = process.communicate(timeout=_GIT_TIMEOUT_S)
+        except BaseException:
+            # What subprocess.run does on a timeout or an interrupt, for the
+            # whole group; leaving the block then reaps git.
+            kill_group()
+            raise
+        finally:
+            ended.set()
+            watcher.join()
+    if abandoned.is_set():
+        raise WorktreeError("the clone was abandoned before it finished")
+    if over.is_set() or _checkout_bytes(cwd) > max_bytes:
+        raise WorktreeError(
+            f"source checkout exceeds this host's {max_bytes / (1 << 20):g} MiB retained "
+            "import size limit; the clone was stopped before it finished"
+        )
+    return subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
+
+
 def _auth_env(clone_token: str | None) -> dict[str, str]:
     """Carry the clone credential in git's environment, never in argv.
 
@@ -1035,12 +713,16 @@ def _auth_env(clone_token: str | None) -> dict[str, str]:
     """
     if not clone_token:
         return {}
-    basic = base64.b64encode(f"x-access-token:{clone_token}".encode()).decode()
     return {
         "GIT_CONFIG_COUNT": "1",
         "GIT_CONFIG_KEY_0": "http.extraHeader",
-        "GIT_CONFIG_VALUE_0": f"Authorization: Basic {basic}",
+        "GIT_CONFIG_VALUE_0": f"Authorization: Basic {_basic_credential(clone_token)}",
     }
+
+
+def _basic_credential(clone_token: str) -> str:
+    """Return the HTTP Basic value git is given for the clone credential."""
+    return base64.b64encode(f"x-access-token:{clone_token}".encode()).decode()
 
 
 def _assert_no_credential_on_disk(workdir: str, clone_token: str | None) -> None:
@@ -1053,6 +735,15 @@ def _assert_no_credential_on_disk(workdir: str, clone_token: str | None) -> None
     """
     if not clone_token:
         return
+    # Git is only ever handed the Basic header value, so that -- not the raw
+    # token -- is what it would persist. The 15-byte ``x-access-token:`` prefix
+    # is a whole number of base64 groups, so the token's own encoding appears
+    # verbatim inside the header value; it is searched for on its own as well.
+    forms = (
+        clone_token,
+        _basic_credential(clone_token),
+        base64.b64encode(clone_token.encode()).decode().rstrip("="),
+    )
     git_dir = pathlib.Path(workdir) / ".git"
     for path in git_dir.rglob("*"):
         # Object and pack files hold repository content, not our configuration,
@@ -1065,7 +756,7 @@ def _assert_no_credential_on_disk(workdir: str, clone_token: str | None) -> None
             text = path.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             continue
-        if clone_token in text:
+        if any(form in text for form in forms):
             raise WorktreeError(
                 f"refusing to run: the clone credential was written to .git/{path.name}, "
                 "which the sandbox would be able to read"
@@ -1080,6 +771,8 @@ def prepare_worktree(
     clone_token: str | None = None,
     remote_base: str = "https://github.com",
     depth: int = 1,
+    max_bytes: int | None = None,
+    stop: threading.Event | None = None,
 ) -> str:
     """Materialize the job's repository in ``workdir`` and return its commit.
 
@@ -1092,6 +785,10 @@ def prepare_worktree(
     the runner has no reason to offer the agent a push path it must not use.
     ``depth`` 2 also brings the commit's parent, for a caller that bundles only
     what the commit adds to it.
+
+    ``max_bytes`` is the import limit the checkout is about to be held to. The
+    fetch and the checkout are stopped once ``workdir`` holds more than that,
+    rather than being written out whole first, or once ``stop`` is set.
     """
     if depth < 1:
         raise ValueError("fetch depth must be at least 1")
@@ -1108,6 +805,15 @@ def prepare_worktree(
     url = f"{remote_base.rstrip('/')}/{repo}.git"
     auth = _auth_env(clone_token)
 
+    def run_writing(
+        args: list[str], env_extra: dict[str, str] | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        if max_bytes is None:
+            return _run_git(args, cwd=workdir, env_extra=env_extra)
+        return _run_git_within(
+            args, cwd=workdir, max_bytes=max_bytes, env_extra=env_extra, stop=stop
+        )
+
     init = _run_git(["init", "--quiet", workdir])
     if init.returncode != 0:
         raise WorktreeError(f"git init failed: {init.stderr.strip()[:200]}")
@@ -1115,10 +821,8 @@ def prepare_worktree(
     # `--end-of-options` so a ref that survived the shape check above still
     # cannot be parsed as an option by a git version we did not anticipate.
     ref = base_sha or "HEAD"
-    fetch = _run_git(
-        ["fetch", "--quiet", "--depth", str(depth), url, "--end-of-options", ref],
-        cwd=workdir,
-        env_extra=auth,
+    fetch = run_writing(
+        ["fetch", "--quiet", "--depth", str(depth), url, "--end-of-options", ref], auth
     )
     if fetch.returncode != 0:
         detail = (fetch.stderr or fetch.stdout).strip().splitlines()
@@ -1126,13 +830,58 @@ def prepare_worktree(
             f"could not fetch {repo}@{ref}: {detail[-1] if detail else 'no output'}"
         )
 
-    checkout = _run_git(["checkout", "--quiet", "--detach", "FETCH_HEAD"], cwd=workdir)
+    checkout = run_writing(["checkout", "--quiet", "--detach", "FETCH_HEAD"])
     if checkout.returncode != 0:
         raise WorktreeError(f"could not check out {ref}: {checkout.stderr.strip()[:200]}")
 
     resolved = _run_git(["rev-parse", "HEAD"], cwd=workdir).stdout.strip()
     _assert_no_credential_on_disk(workdir, clone_token)
     return resolved or (base_sha or "")
+
+
+def prepare_temporary_worktree(*, workdir: str) -> str:
+    """Start a temporary workspace in ``workdir`` and return its first commit.
+
+    A temporary workspace has no repository, so nothing is fetched and no
+    credential is involved: the directory becomes a Git repository holding one
+    empty commit on ``main``. It is the same commit in every temporary
+    workspace (see :mod:`cloud_agent_shared.git.temporary_workspace`), which
+    the control plane already recorded as the job's base, so it is checked
+    rather than trusted. As in :func:`prepare_worktree`, running git here is
+    safe because the agent has not touched this directory yet.
+    """
+
+    def git(
+        args: list[str],
+        *,
+        env_extra: dict[str, str] | None = None,
+        input_text: str | None = None,
+    ) -> str:
+        result = _run_git(args, cwd=workdir, env_extra=env_extra, input_text=input_text)
+        if result.returncode != 0:
+            raise WorktreeError(
+                f"could not start the temporary workspace: git {args[0]} failed: "
+                f"{result.stderr.strip()[:200]}"
+            )
+        return result.stdout.strip()
+
+    git(["init", "--quiet", workdir])
+    # Written rather than assumed: commit-tree refuses a tree it cannot read.
+    if git(["mktree"], input_text="") != EMPTY_TREE_SHA:
+        raise WorktreeError("could not start the temporary workspace: unexpected empty tree")
+    commit = git(
+        ["commit-tree", "--no-gpg-sign", EMPTY_TREE_SHA, "-m", TEMPORARY_WORKSPACE_COMMIT_MESSAGE],
+        env_extra=temporary_workspace_commit_env(),
+    )
+    if commit != TEMPORARY_WORKSPACE_BASE_SHA:
+        raise WorktreeError(
+            f"temporary workspace commit {commit[:12]} is not the expected "
+            f"{TEMPORARY_WORKSPACE_BASE_SHA[:12]}"
+        )
+    branch = f"refs/heads/{TEMPORARY_WORKSPACE_BRANCH}"
+    git(["update-ref", branch, commit])
+    git(["symbolic-ref", "HEAD", branch])
+    return commit
 
 
 def repo_clone_base_url(
@@ -1406,6 +1155,9 @@ def _shared_live_host_capabilities(
         # over its authenticated sandbox manager channel. A claim also attests the
         # exact revision that sandbox manager confirmed.
         SANDBOX_ARCHIVE_CAPABILITY,
+        # The same-deployment sandbox manager understands the policy's
+        # checkpoint switch and reports checkpoint receipts.
+        SANDBOX_CHECKPOINT_CAPABILITY,
     ]
     deployment_sha = (os.environ.get("AGENT_DEPLOYMENT_SHA") or "").strip()
     ready_file = _shared_live_ready_file()
@@ -1488,7 +1240,16 @@ def _claim_attestation(
     return stamp
 
 
-def _session_supervisor_from_env() -> SessionSupervisorClient:
+#: How long the host-heartbeat thread waits on the sandbox manager: for the
+#: Docker observation a beat carries, and for the residency cleanup its answer
+#: asks for. The beat is the host's liveness signal, and the control plane
+#: counts a host offline after three missed intervals: a sandbox manager that
+#: is restarting, or whose request workers are all busy, costs one beat its
+#: observation or its cleanup, never the beat.
+_HOST_BEAT_SANDBOX_MANAGER_TIMEOUT_S = 10.0
+
+
+def _session_supervisor_from_env(*, timeout: float = 180) -> SessionSupervisorClient:
     url = (manager_env("AGENT_SANDBOX_MANAGER_URL") or "").strip()
     token = (manager_env("AGENT_SANDBOX_MANAGER_TOKEN") or "").strip()
     if not url or not token:
@@ -1496,7 +1257,7 @@ def _session_supervisor_from_env() -> SessionSupervisorClient:
             "restartable chat execution needs AGENT_SANDBOX_MANAGER_URL and "
             "AGENT_SANDBOX_MANAGER_TOKEN"
         )
-    return SessionSupervisorClient(url, token, timeout=180)
+    return SessionSupervisorClient(url, token, timeout=timeout)
 
 
 def _retained_sandbox_heartbeat_rows() -> list[dict[str, Any]] | None:
@@ -1508,7 +1269,7 @@ def _retained_sandbox_heartbeat_rows() -> list[dict[str, Any]] | None:
     """
     client: SessionSupervisorClient | None = None
     try:
-        client = _session_supervisor_from_env()
+        client = _session_supervisor_from_env(timeout=_HOST_BEAT_SANDBOX_MANAGER_TIMEOUT_S)
         rows = client.list()
         observations: list[dict[str, Any]] = []
         now = time.monotonic()
@@ -1559,6 +1320,9 @@ def _retained_sandbox_heartbeat_rows() -> list[dict[str, Any]] | None:
                     else resource_usage.model_dump(),
                     "shared_live": True,
                     "members": members,
+                    "checkpoint": (
+                        row.get("checkpoint") if isinstance(row.get("checkpoint"), dict) else None
+                    ),
                 }
             )
         return observations
@@ -1736,10 +1500,18 @@ def _stop_retained_sandboxes(commands: list[dict[str, Any]]) -> None:
 
 
 def _handle_host_residencies_lost(lost: list[dict[str, Any]]) -> None:
-    """Fence supervisor-owned shared members whose renewable grant was lost."""
+    """Fence supervisor-owned shared members whose renewable grant was lost.
+
+    This runs on the host-heartbeat thread, between one beat and the next, so
+    it waits on the sandbox manager no longer than the beat's own observation
+    does and starts no further call once that much time is spent. A member left
+    for now is named again by a later beat, for as long as the sandbox manager
+    still reports it live under the generation the control plane refused.
+    """
     client: SessionSupervisorClient | None = None
+    deadline = time.monotonic() + _HOST_BEAT_SANDBOX_MANAGER_TIMEOUT_S
     try:
-        client = _session_supervisor_from_env()
+        client = _session_supervisor_from_env(timeout=_HOST_BEAT_SANDBOX_MANAGER_TIMEOUT_S)
         shared_members = {
             str(member.get("thread_id"))
             for row in client.list()
@@ -1751,6 +1523,8 @@ def _handle_host_residencies_lost(lost: list[dict[str, Any]]) -> None:
             generation = item.get("generation")
             if thread_id not in shared_members or not isinstance(generation, int):
                 continue
+            if time.monotonic() >= deadline:
+                break
             with contextlib.suppress(SessionSupervisorError):
                 client.shared_residency_lost(thread_id, generation=generation)
     except (SandboxError, SessionSupervisorError) as exc:
@@ -1776,6 +1550,7 @@ class _SourcePrefetch:
 
     The thread is not a daemon: a turn that ends while the clone is still
     running waits for it at exit, so its temporary directory is always removed.
+    Discarding stops a clone still running, so that wait is short.
     """
 
     def __init__(self, job: ClaimedJob, *, uid: int, gid: int, max_bytes: int | None) -> None:
@@ -1785,6 +1560,7 @@ class _SourcePrefetch:
         self._max_bytes = source_import_max_bytes() if max_bytes is None else max_bytes
         self._lock = threading.Lock()
         self._done = threading.Event()
+        self._stop = threading.Event()
         self._discarded = False
         self._base_sha = ""
         self._archive: Any = None
@@ -1796,14 +1572,20 @@ class _SourcePrefetch:
         archive: Any = None
         try:
             with tempfile.TemporaryDirectory(prefix="freeinference-source-") as source:
-                base_sha = prepare_worktree(
-                    workdir=source,
-                    repo=self._job.repo,
-                    base_sha=self._job.base_sha,
-                    clone_token=self._job.clone_token,
-                    remote_base=repo_clone_base_url(clone_token=self._job.clone_token),
-                )
-                checkout_output_branch(source, self._job.thread_id)
+                if self._job.repo is None:
+                    # Nothing to clone and nothing to publish, so no output branch.
+                    base_sha = prepare_temporary_worktree(workdir=source)
+                else:
+                    base_sha = prepare_worktree(
+                        workdir=source,
+                        repo=self._job.repo,
+                        base_sha=self._job.base_sha,
+                        clone_token=self._job.clone_token,
+                        remote_base=repo_clone_base_url(clone_token=self._job.clone_token),
+                        max_bytes=self._max_bytes,
+                        stop=self._stop,
+                    )
+                    checkout_output_branch(source, self._job.thread_id)
                 # Unnamed and outside the checkout: the archive is spooled to
                 # disk, not held in this process, and gone when it is closed,
                 # which import_into or discard does once the clone is done.
@@ -1856,7 +1638,8 @@ class _SourcePrefetch:
         return self._base_sha
 
     def discard(self) -> None:
-        """Release the archive now, or as soon as a clone still running finishes."""
+        """Release the archive now, and stop a clone that is still running."""
+        self._stop.set()
         with self._lock:
             self._discarded = True
             archive, self._archive = self._archive, None
@@ -1929,18 +1712,24 @@ def _import_retained_base(
     lacks the parent too.
     """
     with tempfile.TemporaryDirectory(prefix="freeinference-base-") as source:
-        resolved = prepare_worktree(
-            workdir=source,
-            repo=job.repo,
-            base_sha=job.base_sha,
-            clone_token=job.clone_token,
-            remote_base=repo_clone_base_url(clone_token=job.clone_token),
-            depth=2,
-        )
-        parent = _run_git(["rev-parse", "--verify", "--quiet", "HEAD^1"], cwd=source)
-        held = (parent.stdout.strip() or None) if parent.returncode == 0 else None
-        if held and not _sandbox_has_commit(CHAT_WORKDIR, held, backend):
-            held = None
+        held: str | None = None
+        if job.repo is None:
+            # A temporary workspace's base is its fixed empty commit, which a
+            # fresh empty repository rebuilds exactly; it has no parent.
+            resolved = prepare_temporary_worktree(workdir=source)
+        else:
+            resolved = prepare_worktree(
+                workdir=source,
+                repo=job.repo,
+                base_sha=job.base_sha,
+                clone_token=job.clone_token,
+                remote_base=repo_clone_base_url(clone_token=job.clone_token),
+                depth=2,
+            )
+            parent = _run_git(["rev-parse", "--verify", "--quiet", "HEAD^1"], cwd=source)
+            held = (parent.stdout.strip() or None) if parent.returncode == 0 else None
+            if held and not _sandbox_has_commit(CHAT_WORKDIR, held, backend):
+                held = None
         bundle = build_base_bundle(source, commit=resolved, prerequisite=held)
         manager.import_base_bundle(
             spec,
@@ -2430,7 +2219,9 @@ def _run_shared_live_attempt(
     except LeaseLost:
         return 3
     except Exception as exc:
-        finish_attempt("failed", f"could not reserve shared chat sandbox: {exc}")
+        finish_attempt(
+            "failed", f"could not reserve shared chat sandbox: {_owner_visible_error(exc)}"
+        )
         return 2
 
     if (
@@ -2509,6 +2300,46 @@ def _run_shared_live_attempt(
             finish_attempt("failed", detail)
         except Exception as exc:
             _log_control_failure("finish", job.job_id, exc)
+
+    def finish_decided(state: str, detail: str, base_sha: str | None) -> None:
+        # The outcome is already decided: both settlements are durable, or the
+        # owner's Stop has released or interrupted the turn. The receipt is
+        # retried through a brief control-plane error and never downgraded to
+        # a failure of its own: an exhausted retry is logged and left to the
+        # lease reaper, which ends the job from that durable state (a settled
+        # context is kept, a requested cancel stays a cancel) and never
+        # replays the prompt. A fence refusing a retry (LeaseLost) is usually
+        # the earlier try having landed, and there is nothing left to report
+        # either way.
+        try:
+            _retry_lifecycle_receipt(
+                "finish_retry",
+                job.job_id,
+                lambda: finish_attempt(state, detail, base_sha=base_sha),
+            )
+        except LeaseLost:
+            raise
+        except Exception as exc:
+            _log_control_failure("finish", job.job_id, exc)
+
+    def stopped_before_admission(base_sha: str | None) -> bool:
+        # Nothing has reached the CLI yet, so a Stop costs nothing here: the
+        # activation is released with the conversation intact and the job is
+        # finished cancelled. Admitting anyway would spend the prompt only to
+        # interrupt it, and an interrupted turn leaves its native context
+        # lost. The heartbeat may carry the Stop, or a lost lease, at any time
+        # while the turn starts, so this is asked after the container starts,
+        # around the setup script, and once more right before admission.
+        nonlocal failure_detail
+        if heart.lease_lost:
+            raise LeaseLost("lease lost before prompt admission")
+        if not heart.cancel_requested:
+            return False
+        failure_detail = "cancelled by owner before prompt admission"
+        operation_profiling.finish(measurement, outcome="cancelled", failure_stage=stage)
+        abandon_before_finish(lost=False, detail=failure_detail)
+        finish_decided("cancelled", "cancelled by owner", base_sha)
+        return True
 
     try:
         if not has_context:
@@ -2595,6 +2426,8 @@ def _run_shared_live_attempt(
                 },
             )
         )
+        if stopped_before_admission(None):
+            return 0
         stage = _stage(measurement, "terminal_suspend")
         control.suspend_terminals("workspace_preparing")
         terminals_suspended = True
@@ -2651,10 +2484,13 @@ def _run_shared_live_attempt(
                 reused_workspace = False
                 if job.setup_script and job.environment is None:
                     stage = _stage(measurement, "setup")
+                    if stopped_before_admission(base_sha):
+                        return 0
                     setup = run_setup(
                         script=job.setup_script,
                         workdir=CHAT_WORKDIR,
                         backend=retained,
+                        stop=lambda: heart.cancel_requested or heart.lease_lost,
                     )
                     control.append_event(
                         NormalizedEvent(
@@ -2662,6 +2498,8 @@ def _run_shared_live_attempt(
                             {"phase": "setup", "ran": setup.ran},
                         )
                     )
+                    if stopped_before_admission(base_sha):
+                        return 0
                     if setup.exit_code != 0:
                         failure_detail = f"setup failed ({setup.exit_code}): {setup.detail}"
                         abandon_before_finish(lost=False, detail=failure_detail)
@@ -2773,6 +2611,9 @@ def _run_shared_live_attempt(
                     "reused": reused_workspace,
                     "storage": "docker_writable_layer",
                     "workspace_shared": True,
+                    # Nothing was cloned: the tree is the one empty commit, and
+                    # the owner is told so instead of "repository ready".
+                    **({"temporary": True} if job.repo is None else {}),
                 },
             )
         )
@@ -2825,7 +2666,7 @@ def _run_shared_live_attempt(
             credential=None,
             github_token=job.github_token,
             environment=job.environment,
-            github_repo=job.repo,
+            github_repo=job.repo or "",
             plugins=tuple(job.plugins),
             mcp_server_ids=tuple(job.mcp_bindings),
             # The MCP relay token is attempt-fenced. It is process-fixed only
@@ -2922,6 +2763,9 @@ def _run_shared_live_attempt(
             control.report_context_status("new")
 
         stage = _stage(measurement, "prompt_admission")
+        # The last point at which a Stop costs nothing.
+        if stopped_before_admission(base_sha):
+            return 0
         _retry_lifecycle_receipt(
             "prompt_admission_retry",
             job.job_id,
@@ -3000,7 +2844,7 @@ def _run_shared_live_attempt(
         if exit_code == 130:
             failure_detail = "cancelled by owner after shared-session admission"
             abandon_before_finish(lost=True, detail=failure_detail)
-            finish_attempt("cancelled", "cancelled by owner", base_sha=base_sha)
+            finish_decided("cancelled", "cancelled by owner", base_sha)
             return 0
         if exit_code == 124:
             failure_detail = "shared Agent CLI turn exceeded its execution timeout"
@@ -3067,10 +2911,10 @@ def _run_shared_live_attempt(
         if settled_failure:
             # Record the native turn ordinal before failing the job, so later
             # retries and historical forks keep matching the CLI transcript.
-            finish_attempt(
+            finish_decided(
                 "failed",
                 reported_failure or f"agent failed at native turn boundary: {tail[-500:]}",
-                base_sha=base_sha,
+                base_sha,
             )
             return 1
         try:
@@ -3090,10 +2934,10 @@ def _run_shared_live_attempt(
             # Both authoritative settlements succeeded. A missing UI notice
             # must not turn that success into a failed terminal transition.
             _log_control_failure("completion_event", job.job_id, exc)
-        finish_attempt(
+        finish_decided(
             "succeeded",
             "agent completed (shared workspace; publication snapshot pending)",
-            base_sha=base_sha,
+            base_sha,
         )
         return 0
     except LeaseLost:
@@ -3107,7 +2951,7 @@ def _run_shared_live_attempt(
         report_failure()
         return 2
     except Exception as exc:
-        failure_detail = f"shared live chat failed unexpectedly: {exc}"
+        failure_detail = f"shared live chat failed unexpectedly: {_owner_visible_error(exc)}"
         _log_control_failure(stage, job.job_id, exc)
         abandon_before_finish(lost=turn_admitted, detail=failure_detail)
         report_failure()
@@ -4766,6 +4610,32 @@ def _env_float(name: str, fallback: float) -> float:
         return fallback
 
 
+def _lease_ttl_arg(raw: str) -> float:
+    """Parse ``--lease-ttl``, refusing a lease that expires before its first renewal."""
+    try:
+        ttl = float(raw)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"not a number: {raw!r}") from exc
+    if not ttl > _UNRENEWABLE_LEASE_S:
+        raise argparse.ArgumentTypeError(
+            f"{raw!r} is not longer than {_UNRENEWABLE_LEASE_S:g} seconds, one heartbeat "
+            "interval plus one request timeout: such a lease expires before it is renewed"
+        )
+    return ttl
+
+
+def _env_lease_ttl() -> float:
+    """Read ``AGENT_LEASE_TTL``, keeping the default for a value no lease can use."""
+    raw = os.environ.get("AGENT_LEASE_TTL")
+    if not raw:
+        return DEFAULT_LEASE_TTL_S
+    try:
+        return _lease_ttl_arg(raw)
+    except argparse.ArgumentTypeError as exc:
+        print(f"ignoring AGENT_LEASE_TTL: {exc}", file=sys.stderr)
+        return DEFAULT_LEASE_TTL_S
+
+
 def _chat_idle_timeout_s() -> float:
     """Read the one product-level chat inactivity clock.
 
@@ -4926,8 +4796,8 @@ def build_parser() -> argparse.ArgumentParser:
     # defaults regardless of what the operator configured, silently.
     parser.add_argument(
         "--lease-ttl",
-        type=float,
-        default=_env_float("AGENT_LEASE_TTL", DEFAULT_LEASE_TTL_S),
+        type=_lease_ttl_arg,
+        default=_env_lease_ttl(),
     )
     parser.add_argument(
         "--agent-timeout",
@@ -4992,6 +4862,7 @@ __all__ = [
     "WorktreeError",
     "checkout_output_branch",
     "main",
+    "prepare_temporary_worktree",
     "prepare_worktree",
     "run_forever",
     "run_once",

@@ -24,6 +24,7 @@ from cloud_agent.storage.admin_queries import AdminRunQueries
 from cloud_agent.storage.admin_sandbox_queries import AdminSandboxQueries
 from cloud_agent.storage.admin_usage_queries import AdminUsageQueries
 from cloud_agent.storage.repositories import (
+    PostgresAgentMemoryRepository,
     PostgresAttachmentRepository,
     PostgresAttemptCommands,
     PostgresAuditLogRepository,
@@ -52,9 +53,9 @@ from cloud_agent.storage.repositories import (
     PostgresSkillRepository,
     PostgresSnapshotRepository,
     PostgresSourceControlRepository,
-    PostgresUserMemoryRepository,
     PostgresUserProfileRepository,
     PostgresWebSearchRepository,
+    PostgresWorkInsightsRepository,
 )
 from cloud_agent.storage.repositories.environments import PostgresEnvironmentRepository
 
@@ -62,6 +63,7 @@ if TYPE_CHECKING:
     import asyncpg
 
     from cloud_agent.ports import (
+        AgentMemoryRepository,
         AttachmentRepository,
         AttemptCommands,
         AuditLogQueries,
@@ -90,9 +92,9 @@ if TYPE_CHECKING:
         SkillRepository,
         SnapshotRepository,
         SourceControlRepository,
-        UserMemoryRepository,
         UserProfileRepository,
         WebSearchRepository,
+        WorkInsightsRepository,
     )
     from cloud_agent.ports.environments import EnvironmentRepository
 
@@ -143,6 +145,7 @@ class Storage:
         self.attachments: AttachmentRepository = PostgresAttachmentRepository(pool)
         self.snapshot: SnapshotRepository = PostgresSnapshotRepository(pool)
         self.source_control: SourceControlRepository = PostgresSourceControlRepository(pool)
-        self.user_memory: UserMemoryRepository = PostgresUserMemoryRepository(pool)
+        self.work_insights: WorkInsightsRepository = PostgresWorkInsightsRepository(pool)
+        self.agent_memory: AgentMemoryRepository = PostgresAgentMemoryRepository(pool)
         self.user_profile: UserProfileRepository = PostgresUserProfileRepository(pool)
         self.web_search: WebSearchRepository = PostgresWebSearchRepository(pool)

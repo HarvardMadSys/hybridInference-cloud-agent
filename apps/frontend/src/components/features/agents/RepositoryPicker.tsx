@@ -11,6 +11,7 @@ import {
   type RefObject,
 } from 'react';
 import { useT } from '@/components/providers';
+import { TEMPORARY_WORKSPACE } from '@/lib/temporaryWorkspace';
 import { COMPOSER_MENU_ROW, COMPOSER_MENU_SURFACE } from './composerMenuStyles';
 import { useComposerMenuLayout } from './useComposerMenuLayout';
 
@@ -26,6 +27,9 @@ import { useComposerMenuLayout } from './useComposerMenuLayout';
 // installations cover, and one organization can bring a hundred. The footer is
 // where a missing repository is fixed: GitHub decides what the App can see,
 // and Refresh reads GitHub's answer again.
+//
+// The first row is not a repository: a temporary workspace starts empty and
+// publishes nothing, so it is always on offer, GitHub connected or not.
 
 const CONFIGURE_CLASS =
   'flex min-w-0 flex-1 items-center gap-2 rounded-lg px-3 py-2 text-left text-[13px] text-gray-700 hover:bg-gray-100 focus:bg-gray-100 focus:outline-none dark:text-gray-200 dark:hover:bg-white/10 dark:focus:bg-white/10';
@@ -34,6 +38,39 @@ const CONFIGURE_CLASS =
 function splitRepository(repo: string): [string, string] {
   const slash = repo.indexOf('/');
   return slash < 0 ? ['', repo] : [repo.slice(0, slash + 1), repo.slice(slash + 1)];
+}
+
+/** A box: a temporary workspace's sandbox, with no repository behind it. */
+function TemporaryMark({ className }: { className: string }) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.8}
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="m4 7.5 8-4 8 4v9l-8 4-8-4v-9Z" />
+      <path d="m4 7.5 8 4 8-4M12 11.5v9" />
+    </svg>
+  );
+}
+
+function Check() {
+  return (
+    <svg
+      aria-hidden
+      viewBox="0 0 20 20"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.8}
+      className="h-4 w-4 shrink-0 text-gray-500 dark:text-gray-400"
+    >
+      <path strokeLinecap="round" strokeLinejoin="round" d="m5 10.5 3.2 3L15 6.5" />
+    </svg>
+  );
 }
 
 function GitHubMark({ className }: { className: string }) {
@@ -56,6 +93,8 @@ export function RepositoryPicker({
   onCreate,
   createDisabled = false,
   returnFocusTo,
+  disconnected = false,
+  onConnect,
 }: {
   repos: string[];
   value: string;
@@ -73,6 +112,12 @@ export function RepositoryPicker({
   createDisabled?: boolean;
   /** Where focus goes after a choice. The trigger, unless the composer asked. */
   returnFocusTo?: RefObject<HTMLElement>;
+  /**
+   * GitHub is not connected, so there is no repository to manage: the footer
+   * offers the connection when there is one to make, and nothing otherwise.
+   */
+  disconnected?: boolean;
+  onConnect?: () => void;
 }) {
   const t = useT();
   const id = useId();
@@ -96,6 +141,20 @@ export function RepositoryPicker({
   const matches = needle
     ? sorted.filter((repo) => repo.toLocaleLowerCase().includes(needle))
     : sorted;
+  const temporaryLabel = t('temporaryWorkspace.option');
+  // Found by its name only: "(no repository)" would answer a search for a
+  // repository. A search is for a repository, so the matches come first then,
+  // and Enter takes the first row shown either way.
+  const showTemporary =
+    !needle || t('temporaryWorkspace.name').toLocaleLowerCase().includes(needle);
+  const first = needle
+    ? (matches[0] ?? (showTemporary ? TEMPORARY_WORKSPACE : undefined))
+    : TEMPORARY_WORKSPACE;
+  // Nothing matches the search; or, connected, no repository has been given to
+  // the App yet. Until GitHub is connected there is no access to be missing.
+  const nothingToChoose = needle
+    ? matches.length === 0 && !showTemporary
+    : sorted.length === 0 && !disconnected;
 
   // The open menu must own the caret as soon as it appears, including when a
   // restored draft opens it during an asynchronous config update.
@@ -147,7 +206,29 @@ export function RepositoryPicker({
     options[next]?.focus();
   }
 
+  const temporary = value === TEMPORARY_WORKSPACE;
+  const shown = temporary ? t('temporaryWorkspace.name') : value;
   const [owner, name] = splitRepository(value);
+  const temporaryRow = showTemporary ? (
+    <button
+      type="button"
+      data-repository-option
+      aria-label={temporaryLabel}
+      aria-current={temporary ? 'true' : undefined}
+      title={t('temporaryWorkspace.optionHint')}
+      onClick={() => choose(TEMPORARY_WORKSPACE)}
+      className={COMPOSER_MENU_ROW}
+    >
+      <TemporaryMark className="h-3.5 w-3.5 shrink-0 text-gray-400 dark:text-gray-500" />
+      <span className="min-w-0 flex-1">
+        <span className="block truncate">{temporaryLabel}</span>
+        <span className="block truncate text-[11px] text-gray-500 dark:text-gray-400">
+          {t('temporaryWorkspace.optionHint')}
+        </span>
+      </span>
+      {temporary ? <Check /> : null}
+    </button>
+  ) : null;
   const configure = (
     <>
       <svg
@@ -174,16 +255,26 @@ export function RepositoryPicker({
         aria-controls={open ? id : undefined}
         // Named for the control and its value together, so a screen reader
         // hears which repository — or that none is chosen yet.
-        aria-label={`${t('composer.repository')}: ${value || t('composer.repositoryPlaceholder')}`}
-        title={value || t('composer.repositoryPlaceholder')}
+        aria-label={`${t('composer.repository')}: ${shown || t('composer.repositoryPlaceholder')}`}
+        title={
+          temporary
+            ? t('temporaryWorkspace.optionHint')
+            : value || t('composer.repositoryPlaceholder')
+        }
         onClick={() => onOpenChange(!open)}
         className={`ui-focus-ring inline-flex min-h-10 min-w-0 max-w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-colors hover:bg-surface-hover [@media(pointer:coarse)]:min-h-11 ${
           open ? 'bg-surface-hover' : ''
         } ${value ? 'text-foreground' : 'text-accent'}`}
       >
-        <GitHubMark className="h-3.5 w-3.5 shrink-0" />
+        {temporary ? (
+          <TemporaryMark className="h-3.5 w-3.5 shrink-0" />
+        ) : (
+          <GitHubMark className="h-3.5 w-3.5 shrink-0" />
+        )}
         <span className="max-w-[10rem] truncate sm:max-w-[13rem]">
-          {value ? (
+          {temporary ? (
+            shown
+          ) : value ? (
             <>
               <span className="text-muted">{owner}</span>
               {name}
@@ -242,13 +333,14 @@ export function RepositoryPicker({
               if (event.key !== 'Enter' || event.nativeEvent.isComposing) return;
               // Enter takes the first match, so typing part of a name is enough.
               event.preventDefault();
-              if (matches[0]) choose(matches[0]);
+              if (first) choose(first);
             }}
             aria-label={t('composer.repositorySearch')}
             placeholder={t('composer.repositorySearch')}
             className="mb-1 w-full shrink-0 rounded-lg bg-transparent px-3 py-2 text-[13px] text-gray-900 placeholder:text-gray-400 focus:outline-none dark:text-gray-100 dark:placeholder:text-gray-500"
           />
           <div className="min-h-0 flex-1 overflow-y-auto border-t border-gray-100 pt-1 dark:border-white/5">
+            {needle ? null : temporaryRow}
             {matches.map((repo) => {
               const [repoOwner, repoName] = splitRepository(repo);
               return (
@@ -267,31 +359,36 @@ export function RepositoryPicker({
                     <span className="text-gray-500 dark:text-gray-400">{repoOwner}</span>
                     {repoName}
                   </span>
-                  {repo === value ? (
-                    <svg
-                      aria-hidden
-                      viewBox="0 0 20 20"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth={1.8}
-                      className="h-4 w-4 shrink-0 text-gray-500 dark:text-gray-400"
-                    >
-                      <path strokeLinecap="round" strokeLinejoin="round" d="m5 10.5 3.2 3L15 6.5" />
-                    </svg>
-                  ) : null}
+                  {repo === value ? <Check /> : null}
                 </button>
               );
             })}
-            {matches.length === 0 ? (
+            {needle ? temporaryRow : null}
+            {nothingToChoose ? (
               <p className="px-3 py-3 text-[13px] leading-relaxed text-gray-500 dark:text-gray-400">
-                {sorted.length === 0
-                  ? t('composer.repositoryEmpty')
-                  : t('composer.repositoryNoMatch', { query: query.trim() })}{' '}
-                {t('composer.repositoryMissing')}
+                {needle
+                  ? t('composer.repositoryNoMatch', { query: query.trim() })
+                  : t('composer.repositoryEmpty')}
+                {disconnected ? null : <> {t('composer.repositoryMissing')}</>}
               </p>
             ) : null}
           </div>
-          {onCreate ? (
+          {disconnected && onConnect ? (
+            <div className="mt-1 flex shrink-0 items-center gap-1 border-t border-gray-100 pt-1 dark:border-white/5">
+              <button
+                type="button"
+                onClick={() => {
+                  onOpenChange(false);
+                  onConnect();
+                }}
+                className={CONFIGURE_CLASS}
+              >
+                <GitHubMark className="h-4 w-4 shrink-0" />
+                <span className="truncate">{t('temporaryWorkspace.connect')}</span>
+              </button>
+            </div>
+          ) : null}
+          {disconnected ? null : onCreate ? (
             <button
               type="button"
               disabled={createDisabled}
@@ -308,43 +405,47 @@ export function RepositoryPicker({
               {t('repositoryCreate.title')}
             </button>
           ) : null}
-          <div className="mt-1 flex shrink-0 items-center gap-1 border-t border-gray-100 pt-1 dark:border-white/5">
-            <a
-              href="https://github.com/new"
-              target="_blank"
-              rel="noreferrer"
-              className={CONFIGURE_CLASS}
-            >
-              <GitHubMark className="h-4 w-4 shrink-0" />
-              <span className="truncate">{t('composer.repositoryCreate')}</span>
-            </a>
-            {onConfigure ? (
-              <button
-                type="button"
-                onClick={() => {
-                  onOpenChange(false);
-                  onConfigure();
-                }}
+          {disconnected ? null : (
+            <div className="mt-1 flex shrink-0 items-center gap-1 border-t border-gray-100 pt-1 dark:border-white/5">
+              <a
+                href="https://github.com/new"
+                target="_blank"
+                rel="noreferrer"
                 className={CONFIGURE_CLASS}
               >
-                {configure}
-              </button>
-            ) : (
-              <Link href="/integrations" className={CONFIGURE_CLASS}>
-                {configure}
-              </Link>
-            )}
-            {onRefresh ? (
-              <button
-                type="button"
-                onClick={onRefresh}
-                disabled={refreshing}
-                className="shrink-0 rounded-lg px-3 py-2 text-[13px] text-gray-500 hover:bg-gray-100 hover:text-gray-800 focus:bg-gray-100 focus:outline-none disabled:cursor-wait disabled:opacity-60 dark:text-gray-400 dark:hover:bg-white/10 dark:hover:text-gray-100 dark:focus:bg-white/10"
-              >
-                {refreshing ? t('composer.repositoryRefreshing') : t('composer.repositoryRefresh')}
-              </button>
-            ) : null}
-          </div>
+                <GitHubMark className="h-4 w-4 shrink-0" />
+                <span className="truncate">{t('composer.repositoryCreate')}</span>
+              </a>
+              {onConfigure ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    onOpenChange(false);
+                    onConfigure();
+                  }}
+                  className={CONFIGURE_CLASS}
+                >
+                  {configure}
+                </button>
+              ) : (
+                <Link href="/integrations" className={CONFIGURE_CLASS}>
+                  {configure}
+                </Link>
+              )}
+              {onRefresh ? (
+                <button
+                  type="button"
+                  onClick={onRefresh}
+                  disabled={refreshing}
+                  className="shrink-0 rounded-lg px-3 py-2 text-[13px] text-gray-500 hover:bg-gray-100 hover:text-gray-800 focus:bg-gray-100 focus:outline-none disabled:cursor-wait disabled:opacity-60 dark:text-gray-400 dark:hover:bg-white/10 dark:hover:text-gray-100 dark:focus:bg-white/10"
+                >
+                  {refreshing
+                    ? t('composer.repositoryRefreshing')
+                    : t('composer.repositoryRefresh')}
+                </button>
+              ) : null}
+            </div>
+          )}
         </div>
       ) : null}
     </>

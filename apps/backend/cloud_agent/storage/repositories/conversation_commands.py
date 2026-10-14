@@ -84,7 +84,7 @@ class PostgresConversationCommands:
         self,
         *,
         user_id: str,
-        repo: str,
+        repo: str | None,
         task_prompt: str,
         runtime: str,
         model: str,
@@ -103,6 +103,9 @@ class PostgresConversationCommands:
         client_request_fingerprint: str | None = None,
     ) -> dict[str, Any]:
         """Create a queued job and return it.
+
+        A null ``repo`` creates a temporary workspace: a conversation whose
+        sandbox starts empty and whose turns are never published.
 
         ``goal`` sets the conversation's completion condition in the same
         transaction that creates it, so the first turn is already working
@@ -968,6 +971,7 @@ async def insert_follow_up(
     yield_to_queued: bool = False,
     client_request_id: str | None = None,
     client_request_fingerprint: str | None = None,
+    pending_message_id: str | None = None,
 ) -> dict[str, Any] | None:
     """Append a user turn inside the caller's transaction.
 
@@ -978,6 +982,10 @@ async def insert_follow_up(
     returned from inside it, and whether what was written before that answer
     commits is the caller's decision, exactly as it was when this was the body
     of ``create_follow_up``'s own transaction.
+
+    ``pending_message_id`` names the waiting message this turn is sent from,
+    whose pinned uploads it may claim; every other turn claims only uploads no
+    message holds.
     """
     job_id = new_job_id()
     requested = await conn.fetchrow(
@@ -1145,6 +1153,7 @@ async def insert_follow_up(
         job_id=job_id,
         thread_id=thread_id,
         attachments=attachments,
+        pending_message_id=pending_message_id,
     )
     row = await conn.fetchrow(f"{JOB_SELECT} WHERE j.id = $1", job_id)
     await conn.execute(

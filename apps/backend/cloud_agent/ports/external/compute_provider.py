@@ -147,6 +147,15 @@ class ExtendRequest(ComputeValue):
     target_expires_at: datetime
     reason: str = Field(min_length=1, max_length=2048)
 
+    def granted_by(self, expires_at: datetime) -> bool:
+        """Whether an observed expiration is the full requested extension.
+
+        A provider may keep an expiration to the second or the minute, more
+        coarsely than it was requested. One that reaches the requested minute
+        grants the request; anything earlier is a partial extension.
+        """
+        return expires_at >= self.target_expires_at.replace(second=0, microsecond=0)
+
 
 class ProviderError(Exception):
     """A deliberately safe diagnostic; never include HTTP/SSH output or secrets."""

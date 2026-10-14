@@ -154,14 +154,18 @@ class _StagedChangeSet:
 
     paths: list[str]
     symlinks: list[str]
+    gitlinks: list[str]
     blobs: list[_StagedBlob]
 
 
-def _remote_branch_tip(repo: Path, branch: str) -> str | None:
+def _remote_branch_tip(
+    repo: Path, branch: str, auth_env: dict[str, str] | None = None
+) -> str | None:
     """Return the remote tip of ``branch``, or ``None`` when it does not exist."""
     raw = _run_git(
         ["ls-remote", "origin", "--end-of-options", f"refs/heads/{branch}"],
         cwd=repo,
+        env_extra=auth_env,
         remote=True,
     ).strip()
     if not raw:
@@ -180,21 +184,29 @@ def _branch_moved(branch: str, tip: str, base_sha: str) -> PublishError:
     )
 
 
-def _displaced_remote_tip(repo: Path, branch: str, base_sha: str) -> str | None:
+def _displaced_remote_tip(
+    repo: Path, branch: str, base_sha: str, auth_env: dict[str, str] | None = None
+) -> str | None:
     """Return a remote tip that is not the base this patch was built on.
 
     ``None`` when the branch is absent or still at ``base_sha``: the push
     creates it or fast-forwards it. Another tip may be this publication's own
     previous push, which the caller reuses instead of force-pushing.
     """
-    tip = _remote_branch_tip(repo, branch)
+    tip = _remote_branch_tip(repo, branch, auth_env)
     if tip is None or tip.lower().startswith(base_sha.lower()):
         return None
     return tip
 
 
 def _reuse_pushed_commit(
-    repo: Path, *, branch: str, tip: str, base_sha: str, local_sha: str
+    repo: Path,
+    *,
+    branch: str,
+    tip: str,
+    base_sha: str,
+    local_sha: str,
+    auth_env: dict[str, str] | None = None,
 ) -> str:
     """Return ``tip`` when it is already this patch; otherwise the branch moved.
 
@@ -215,6 +227,7 @@ def _reuse_pushed_commit(
             f"refs/heads/{branch}",
         ],
         cwd=repo,
+        env_extra=auth_env,
         remote=True,
     )
     fetched = _run_git(["rev-parse", "FETCH_HEAD"], cwd=repo).strip()
@@ -235,6 +248,7 @@ def _reuse_pushed_commit(
     _run_git(
         ["push", "--quiet", "origin", f"{fetched}:refs/heads/{branch}"],
         cwd=repo,
+        env_extra=auth_env,
         remote=True,
     )
     # The retained bundle names HEAD, so the recorded commit has to be the one
@@ -253,6 +267,7 @@ def _staged_change_set(repo: Path) -> _StagedChangeSet:
     raw = _run_git(["diff", "--cached", "--raw", "-z", "--find-renames", "--abbrev=64"], cwd=repo)
     paths: list[str] = []
     symlinks: list[str] = []
+    gitlinks: list[str] = []
     blobs: list[_StagedBlob] = []
     # `:<srcmode> <dstmode> <srcsha> <dstsha> <status>\0<path>\0`
     fields = raw.split("\0")
@@ -276,6 +291,8 @@ def _staged_change_set(repo: Path) -> _StagedChangeSet:
             paths.extend((source_path, path) if path_count == 2 else (path,))
             if dst_mode == "120000":
                 symlinks.append(path)
+            if dst_mode == "160000":
+                gitlinks.append(path)
             if dst_mode in ("100644", "100755"):
                 unchanged_rename = status.startswith("R") and parts[2] == parts[3]
                 blobs.append(
@@ -291,7 +308,7 @@ def _staged_change_set(repo: Path) -> _StagedChangeSet:
                     )
                 )
         index += path_count + 1
-    return _StagedChangeSet(paths=paths, symlinks=symlinks, blobs=blobs)
+    return _StagedChangeSet(paths=paths, symlinks=symlinks, gitlinks=gitlinks, blobs=blobs)
 
 
 def _blob_size(repo: Path, sha: str) -> int:
@@ -376,16 +393,24 @@ def publish_patch(
     branch_id: str | None = None,
     allow_workflow_changes: bool = False,
     include_base_bundle: bool = False,
+    auth_env: dict[str, str] | None = None,
     known_secrets: dict[str, str] | None = None,
 ) -> PublishResult:
     """Validate and publish one run's patch on its stable thread branch.
 
-    ``clone_url`` should already carry whatever short-lived credential the
-    caller minted — it never leaves this process and never enters the sandbox.
-    ``allow_workflow_changes`` is the explicit human release for patches that
-    touch ``.github/``; it defaults to False so the gate holds by default.
+    ``clone_url`` names the repository and carries no credential. The
+    short-lived one the caller minted arrives as ``auth_env``, git
+    configuration in the environment of only the commands that reach the
+    remote: inside the URL it was written to the clone's ``.git/config`` and
+    passed in the arguments of every ``git-remote-https`` process, where any
+    process able to read ``/proc`` could see it. It never enters the sandbox.
+    ``allow_workflow_changes`` would release the block on patches that touch
+    ``.github/``. It defaults to False, and the platform never sets it: there
+    is no release path, and the publish worker's token cannot push workflows.
     Actual staged files, including binary assets, are size-checked and scanned
-    for newly introduced credentials before committing or pushing.
+    for newly introduced credentials before committing or pushing;
+    ``known_secrets`` adds the values of the job's environment secrets to that
+    scan.
 
     Raises :class:`PublishError` with a reviewer-readable message on any gate
     violation or git failure.
@@ -410,7 +435,7 @@ def publish_patch(
         # A tip other than this base may be our own previous push. It is reused
         # after the local commit when the tree matches, and refused when it
         # does not — never force-pushed.
-        displaced = _displaced_remote_tip(repo, branch, base_sha)
+        displaced = _displaced_remote_tip(repo, branch, base_sha, auth_env)
         # `--end-of-options` plus the shape check above: git parses a leading
         # `--` argument as an option even after the remote name, so an
         # owner-supplied base_sha of `--upload-pack=/bin/sh -c ...` would run a
@@ -419,6 +444,7 @@ def publish_patch(
         _run_git(
             ["fetch", "--quiet", "--depth", "1", "origin", "--end-of-options", base_sha],
             cwd=repo,
+            env_extra=auth_env,
             remote=True,
         )
         _run_git(["checkout", "--quiet", "-b", branch, "FETCH_HEAD"], cwd=repo)
@@ -451,7 +477,7 @@ def publish_patch(
         # the paths and modes come from the index itself, so there is nothing
         # left to misread.
         staged = _staged_change_set(repo)
-        post = validate_change_set(staged.paths, staged.symlinks)
+        post = validate_change_set(staged.paths, staged.symlinks, staged.gitlinks)
         if not _gate_permits(post, allow_workflow_changes=allow_workflow_changes):
             raise PublishError(f"patch rejected after apply: {post.reason}")
         _validate_staged_blobs(
@@ -467,6 +493,7 @@ def publish_patch(
                 tip=displaced,
                 base_sha=base_sha,
                 local_sha=commit_sha,
+                auth_env=auth_env,
             )
         base_bundle = (
             build_base_bundle(str(repo), commit=commit_sha, prerequisite=_head_parent(repo))
@@ -481,6 +508,7 @@ def publish_patch(
             _run_git(
                 ["push", "--quiet", "origin", f"refs/heads/{branch}:refs/heads/{branch}"],
                 cwd=repo,
+                env_extra=auth_env,
                 remote=True,
             )
         logger.info(
@@ -511,10 +539,14 @@ def _head_parent(repo: Path) -> str:
     return _run_git(["rev-parse", "--verify", "HEAD^1"], cwd=repo).strip()
 
 
-def fetch_base_bundle(*, clone_url: str, commit_sha: str) -> bytes:
+def fetch_base_bundle(
+    *, clone_url: str, commit_sha: str, auth_env: dict[str, str] | None = None
+) -> bytes:
     """Fetch one published commit and return its bounded credential-free bundle.
 
-    Two commits deep, so the parent is at hand to leave out of the bundle.
+    Two commits deep, so the parent is at hand to leave out of the bundle. The
+    credential travels as in :func:`publish_patch`: in ``auth_env``, never in
+    ``clone_url``.
     """
     if not _COMMIT_SHA.fullmatch(commit_sha or ""):
         raise PublishError(f"commit_sha must be a full commit hash, got {commit_sha!r}")
@@ -526,6 +558,7 @@ def fetch_base_bundle(*, clone_url: str, commit_sha: str) -> bytes:
         _run_git(
             ["fetch", "--quiet", "--depth", "2", "origin", "--end-of-options", commit_sha],
             cwd=repo,
+            env_extra=auth_env,
             remote=True,
         )
         _run_git(["checkout", "--quiet", "--detach", "FETCH_HEAD"], cwd=repo)
@@ -541,12 +574,17 @@ def _gate_permits(gate: PatchGateResult, *, allow_workflow_changes: bool) -> boo
     """Return whether a gate result may proceed to publication.
 
     The only overridable violation is the workflow-file block, and only when a
-    human explicitly released it. Every other violation (secrets, path escape,
-    symlinks, size) is unconditional.
+    caller explicitly released it. Every other violation (secrets, path escape,
+    symlinks, submodules, size) is unconditional. The block is matched as the
+    exact violation the gate marked, never by its wording: a substring match
+    also dropped a path-escape or symlink violation naming a file such as
+    ``../human release.md``.
     """
     if gate.ok:
         return True
     if not allow_workflow_changes or not gate.requires_human_release:
         return False
-    remaining = [violation for violation in gate.violations if "human release" not in violation]
+    remaining = [
+        violation for violation in gate.violations if violation != gate.releasable_violation
+    ]
     return not remaining

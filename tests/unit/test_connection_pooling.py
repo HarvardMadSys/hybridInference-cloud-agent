@@ -167,3 +167,16 @@ async def test_a_host_with_no_sandbox_manager_url_still_gets_no_client(
     assert sandbox_manager_routing._client_for(_row("host-a", "")) is None
     assert sandbox_manager_routing._client_for({}) is None
     assert not sandbox_manager_routing._POOLS
+
+
+async def test_a_stored_metadata_address_gets_no_client(sandbox_manager_pools, monkeypatch) -> None:
+    """A row written before the refusal existed is refused when it is used.
+
+    The address is checked where the token is about to be lent, so a sandbox
+    manager URL already stored as the metadata service never receives the
+    pool's credential, with or without an allowlist.
+    """
+    monkeypatch.delenv(sandbox_manager_routing.ENV_SANDBOX_MANAGER_HOSTS, raising=False)
+
+    assert sandbox_manager_routing._client_for(_row("host-a", "http://169.254.169.254:80")) is None
+    assert not sandbox_manager_routing._POOLS

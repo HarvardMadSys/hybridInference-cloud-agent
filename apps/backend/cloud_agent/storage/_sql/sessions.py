@@ -22,7 +22,11 @@ from cloud_agent.storage._sql.jobs import (
 
 def session_query(*, filter_repo: bool = False) -> str:
     """Filter project rows before looking up each conversation's latest turn."""
-    repo_filter = "AND ($5::text IS NULL OR t.repo = $5)" if filter_repo else ""
+    repo_filter = (
+        "AND ($5::text IS NULL OR t.repo = $5) AND (NOT $9::boolean OR t.repo IS NULL)"
+        if filter_repo
+        else ""
+    )
     return f"""
 WITH latest AS (
     SELECT {QUALIFIED_JOB_COLUMNS}, {MCP_BINDING_COLUMNS}, t.id AS session_id, t.title AS session_title, t.title_source,
@@ -56,10 +60,23 @@ WITH latest AS (
 
 
 def session_cursor_scope(
-    user_id: str, archived: bool, search: str | None, repo: str | None, state: str | None
+    user_id: str,
+    archived: bool,
+    search: str | None,
+    repo: str | None,
+    state: str | None,
+    *,
+    temporary: bool = False,
 ) -> str:
-    """Bind pagination to the same owner's filter selection."""
-    return hashlib.sha256(json.dumps([user_id, archived, search, repo, state]).encode()).hexdigest()
+    """Bind pagination to the same owner's filter selection.
+
+    The temporary-workspace filter joins the scope only when set, so the
+    cursors issued before it existed stay valid.
+    """
+    selection: list[object] = [user_id, archived, search, repo, state]
+    if temporary:
+        selection.append("temporary")
+    return hashlib.sha256(json.dumps(selection).encode()).hexdigest()
 
 
 def decode_session_cursor(cursor: str | None, scope: str) -> tuple[datetime | None, str | None]:

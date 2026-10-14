@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AgentJobApi, AgentSessionApi, AgentSessionListOptions } from '@/lib/api/agents';
 import { announceAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
 import { APIError } from '@/lib/utils/errors';
+import { isTemporaryWorkspace } from '@/lib/temporaryWorkspace';
 
 const mocks = vi.hoisted(() => ({
   list: vi.fn(),
@@ -85,9 +86,16 @@ function listing(options: AgentSessionListOptions = {}) {
             ? item.job.state === 'succeeded' || item.job.state === 'cancelled'
             : item.job.state === options.state)),
   );
-  const facets = new Map<string, number>();
+  const facets = new Map<string | null, number>();
   for (const item of matches) facets.set(item.job.repo, (facets.get(item.job.repo) ?? 0) + 1);
-  const filtered = matches.filter((item) => !options.repo || item.job.repo === options.repo);
+  // The API sends the temporary workspaces' key as `temporary=true`.
+  const filtered = matches.filter(
+    (item) =>
+      !options.repo ||
+      (isTemporaryWorkspace(options.repo)
+        ? item.job.repo === null
+        : item.job.repo === options.repo),
+  );
   const start = Number(options.cursor ?? '0');
   const end = start + (options.limit ?? 50);
   return {

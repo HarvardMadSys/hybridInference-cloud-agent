@@ -865,6 +865,23 @@ async def test_partial_extension_is_not_success_and_retries_keep_absolute_target
 
 
 @pytest.mark.asyncio
+async def test_an_expiration_the_portal_keeps_to_the_minute_confirms_the_extension():
+    target = NOW + timedelta(hours=12, seconds=42, microseconds=5)
+    stored = target.replace(second=0, microsecond=0)
+
+    def respond(request):
+        return httpx.Response(200, json=resource(expires_at=stored.isoformat()))
+
+    receipt = await provider(respond).extend(
+        ResourceRef(external_id=EXPERIMENT, config=CONFIG),
+        ExtendRequest(target_expires_at=target, reason="research experiments"),
+    )
+    assert receipt.outcome == "confirmed"
+    short = ExtendRequest(target_expires_at=target + timedelta(minutes=1), reason="research")
+    assert not short.granted_by(stored)
+
+
+@pytest.mark.asyncio
 async def test_release_checkpoints_documented_204_deletion_without_another_get():
     requests = []
 

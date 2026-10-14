@@ -4,23 +4,13 @@ import { cleanup, fireEvent, render, screen, within } from '@testing-library/rea
 import type { ComponentProps } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LocaleProvider } from '@/components/providers/LocaleProvider';
-import type { UserMemoryView } from '@/lib/api/userMemory';
+import type { WorkInsights } from '@/lib/api/insights';
 import { LOCALE_STORAGE_KEY } from '@/lib/i18n/locales';
 import { UserHomeInsights } from './UserHomeInsights';
 
-const view: UserMemoryView = {
-  enabled: true,
-  revision: 1,
-  updated_at: null,
+const view: WorkInsights = {
   avatar: { data_url: 'data:image/svg+xml,<svg></svg>', style: 'illustrated' },
-  portrait: {
-    summary: '',
-    projects: [],
-    focus_areas: [],
-    preferred_runtime: null,
-    preferred_model: null,
-  },
-  memories: [],
+  focus_areas: [],
   suggestions: [
     {
       id: 'validation',
@@ -52,7 +42,7 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe('homepage user insights', () => {
-  it('presents each suggestion with its reason and a concrete next action alongside memory settings', () => {
+  it('presents each suggestion with its reason and a concrete next action', () => {
     render(panel());
 
     const region = screen.getByRole('region', { name: 'Suggestions for your next request' });
@@ -64,14 +54,12 @@ describe('homepage user insights', () => {
     ).toBeVisible();
     expect(within(suggestion).getByText(view.suggestions[0].reason)).toBeVisible();
     expect(within(suggestion).getByText(view.suggestions[0].action)).toBeVisible();
-    expect(within(region).getByRole('link', { name: 'Manage user memory' })).toHaveAttribute(
-      'href',
-      '/integrations#settings-user-memory',
-    );
+    // Suggestions are not memory: nothing here links to or depends on memory settings.
+    expect(within(region).queryByRole('link')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Retry suggestions' })).not.toBeInTheDocument();
   });
 
-  it('explains when suggestions become available when memory has no suggestions', () => {
+  it('explains when suggestions become available when there are none', () => {
     render(panel({ view: { ...view, suggestions: [] } }));
 
     expect(
@@ -81,20 +69,6 @@ describe('homepage user insights', () => {
       screen.queryByRole('heading', { name: view.suggestions[0].title }),
     ).not.toBeInTheDocument();
     expect(screen.getByText('How your avatar is generated')).toBeVisible();
-    expect(screen.queryByText(/Automatic user memory is paused/)).not.toBeInTheDocument();
-  });
-
-  it('keeps existing suggestions available while explaining paused updates and how to manage them', () => {
-    render(panel({ view: { ...view, enabled: false } }));
-
-    expect(screen.getByText(view.suggestions[0].action)).toBeVisible();
-    expect(screen.getByText(/Automatic user memory is paused/)).toHaveTextContent(
-      'Existing suggestions and your avatar theme are kept until you enable updates or clear memory in settings.',
-    );
-    expect(screen.getByRole('link', { name: 'Manage user memory' })).toHaveAttribute(
-      'href',
-      '/integrations#settings-user-memory',
-    );
   });
 
   it('announces loading and offers a retry after failure before displaying recovered suggestions', () => {
@@ -157,8 +131,10 @@ describe('homepage user insights', () => {
       within(guide).getByText(/account-specific default habitat with decorative details/),
     ).toBeVisible();
     expect(
-      within(guide).getByText(/Clearing user memory restores the default habitat/),
-    ).toHaveTextContent('Both keep the same Pokémon, pose, and expression.');
+      within(guide).getByText(/worked out from your latest requests each time/),
+    ).toHaveTextContent(
+      'Nothing is stored, and memory settings do not affect them; your companion, pose and expression never change.',
+    );
 
     const legend = within(guide).getByRole('list');
     expect(
@@ -181,16 +157,11 @@ describe('homepage user insights', () => {
     expect(generation).not.toBeVisible();
   });
 
-  it('translates the suggestion context, paused state, and avatar guide into Chinese', () => {
+  it('translates the suggestion context and avatar guide into Chinese', () => {
     localStorage.setItem(LOCALE_STORAGE_KEY, 'zh-CN');
-    render(panel({ view: { ...view, enabled: false } }));
+    render(panel());
 
     expect(screen.getByRole('region', { name: '下一次请求的改进建议' })).toBeVisible();
-    expect(screen.getByText(/已暂停自动建立用户记忆/)).toBeVisible();
-    expect(screen.getByRole('link', { name: '管理用户记忆' })).toHaveAttribute(
-      'href',
-      '/integrations#settings-user-memory',
-    );
 
     const summary = screen.getByText('头像是如何生成的');
     fireEvent.click(summary);
@@ -204,8 +175,8 @@ describe('homepage user insights', () => {
     expect(within(guide).getByText('栖息地配色')).toBeVisible();
     expect(within(guide).getByText('工作徽章轨道')).toBeVisible();
     expect(within(guide).getByText('默认栖息地')).toBeVisible();
-    expect(within(guide).getByText(/清除用户记忆会恢复默认栖息地/)).toHaveTextContent(
-      '两项操作都会保留同一只宝可梦及其姿态与表情',
+    expect(within(guide).getByText(/每次打开页面时根据你最近的请求计算/)).toHaveTextContent(
+      '不会保存，也不受记忆设置影响；宝可梦及其姿态与表情始终不变。',
     );
     expect(within(guide).getByRole('heading', { name: '工作领域的配色与徽章' })).toBeVisible();
     expect(

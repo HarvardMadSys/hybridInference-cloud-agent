@@ -11,13 +11,16 @@ import hashlib
 import secrets
 from typing import TYPE_CHECKING, Any
 
+import asyncpg
+
+from cloud_agent.logging_utils import get_logger
 from cloud_agent.storage._sql.events import insert_event
 from cloud_agent.storage._sql.rows import load_json
 
 if TYPE_CHECKING:
     from datetime import datetime
 
-    import asyncpg
+logger = get_logger(__name__)
 
 #: How long a capture handed back by a busy or unreachable host waits before it
 #: is claimed again. Until then the coordinator captures the workspaces behind
@@ -28,8 +31,56 @@ BASE_IMPORT_RETRY_S = 15.0
 #: A publication whose entitlement preflight failed waits before retrying.
 PUBLISH_RETRY_S = 30.0
 #: How many transient failures may return a publication to the durable queue.
-#: The next failure exhausts it and preserves the lineage block for review.
+#: The next failure fails the snapshot, and the group's next capture supersedes it.
 PUBLISH_MAX_ATTEMPTS = 5
+
+
+async def _fold_into_pending_snapshot(
+    conn: Any, *, snapshot_id: int, sandbox_id: str
+) -> int | None:
+    """Give a capture's turns to its group's pending snapshot; ``None`` if there is none.
+
+    A turn is not refused while its workspace is captured, so a turn that
+    settles meanwhile opens a pending snapshot of its own: settlement only ever
+    extends a *pending* one. A group may hold one pending snapshot, so a capture
+    handed back cannot become pending beside it. It is folded in instead: the
+    pending snapshot takes the capture's turns and keeps its own boundary,
+    anchor and base -- what settlement would have left had the capture never
+    been claimed -- and the capture's row goes. A capture is the whole diff
+    from the published base, so the pending snapshot, captured later, covers
+    every turn of both.
+
+    Called with the capture and its group locked; the pending snapshot is taken
+    after the group, as settlement takes it. The turns' rows are moved, not
+    copied, and the anchor is left alone: a new row or a new anchor would
+    share-lock its turn through the foreign key after the group, the reverse of
+    a follow-up, which holds the newest turn while it waits for the group.
+    """
+    pending = await conn.fetchval(
+        """
+        SELECT id FROM agent_sandbox_snapshots
+        WHERE sandbox_id = $1 AND state = 'pending'
+        FOR UPDATE
+        """,
+        sandbox_id,
+    )
+    if pending is None:
+        return None
+    await conn.execute(
+        """
+        UPDATE agent_snapshot_jobs moved
+        SET snapshot_id = $2
+        WHERE moved.snapshot_id = $1
+          AND NOT EXISTS (
+              SELECT 1 FROM agent_snapshot_jobs kept
+              WHERE kept.snapshot_id = $2 AND kept.job_id = moved.job_id
+          )
+        """,
+        snapshot_id,
+        pending,
+    )
+    await conn.execute("DELETE FROM agent_sandbox_snapshots WHERE id = $1", snapshot_id)
+    return int(pending)
 
 
 class PostgresSnapshotRepository:
@@ -51,6 +102,12 @@ class PostgresSnapshotRepository:
         The host revalidates quiescence against its live operation ledger; a
         turn that entered between this transaction and the sandbox manager call simply
         makes the capture retry later.
+
+        An earlier snapshot still on its way to publication holds this one
+        back. One that failed does not, and neither does the ``dirty`` state
+        it left on the group: a capture is the whole diff from the group's
+        published base, which a failure never advances, so this later one
+        carries the failed one's changes, or their reversal, and supersedes it.
         """
         async with self._pool.acquire() as conn, conn.transaction():
             row = await conn.fetchrow(
@@ -86,7 +143,10 @@ class PostgresSnapshotRepository:
                   AND g.state IN ('running', 'stopped')
                   AND g.stop_requested_at IS NULL
                   AND g.deletion_state NOT IN ('pending', 'archived', 'deleted')
-                  AND g.snapshot_state = 'pending'
+                  -- A group's one pending snapshot is its newest epoch, so in a
+                  -- dirty group it is the later capture that supersedes the
+                  -- failure that dirtied it.
+                  AND g.snapshot_state IN ('pending', 'dirty')
                   AND g.active_operation_count = 0
                   AND NOT EXISTS (
                       SELECT 1 FROM agent_thread_sandbox_memberships active
@@ -104,7 +164,7 @@ class PostgresSnapshotRepository:
                       SELECT 1 FROM agent_sandbox_snapshots prior
                       WHERE prior.sandbox_id = s.sandbox_id
                         AND prior.workspace_epoch < s.workspace_epoch
-                        AND prior.state <> 'published'
+                        AND prior.state NOT IN ('published', 'failed')
                   )
                 ORDER BY s.created_at, s.id
                 LIMIT 1
@@ -129,7 +189,7 @@ class PostgresSnapshotRepository:
                 UPDATE agent_sandboxes
                 SET snapshot_state = 'snapshotting', idle_deadline = NULL,
                     updated_at = NOW()
-                WHERE id = $1 AND snapshot_state = 'pending'
+                WHERE id = $1 AND snapshot_state IN ('pending', 'dirty')
                 """,
                 row["sandbox_id"],
             )
@@ -253,7 +313,10 @@ class PostgresSnapshotRepository:
         """Release a failed host capture; busy retries, unsafe census dirties.
 
         A capture handed back for a retry is not claimed again before its
-        ``retry_at``, so a busy host is asked on that clock, not in a loop.
+        ``retry_at``, so a busy host is asked on that clock, not in a loop. A
+        turn that settled meanwhile left a pending snapshot, and the capture is
+        folded into it, which then waits for that retry instead. A dirtied
+        capture fails for good; the group's next capture supersedes it.
         """
         next_state = "failed" if dirty else "pending"
         group_state = "dirty" if dirty else "pending"
@@ -296,15 +359,23 @@ class PostgresSnapshotRepository:
                     snapshot_id,
                 )
                 return False
+            retried = snapshot_id
+            if not dirty:
+                retried = (
+                    await _fold_into_pending_snapshot(
+                        conn, snapshot_id=snapshot_id, sandbox_id=sandbox_id
+                    )
+                    or snapshot_id
+                )
             await conn.execute(
                 """
                 UPDATE agent_sandbox_snapshots
                 SET state = $2, last_error = $3, updated_at = NOW(),
                     retry_at = CASE WHEN $2 = 'pending'
                                     THEN clock_timestamp() + make_interval(secs => $4) END
-                WHERE id = $1 AND state = 'capturing'
+                WHERE id = $1 AND state IN ('capturing', 'pending')
                 """,
-                snapshot_id,
+                retried,
                 next_state,
                 detail[:2000],
                 CAPTURE_RETRY_S,
@@ -337,40 +408,101 @@ class PostgresSnapshotRepository:
     async def reap_stalled_sandbox_snapshot_captures(
         self, *, stall_seconds: float = 300.0
     ) -> list[int]:
-        """Return abandoned CAPTURING claims to the retryable pending queue."""
-        async with self._pool.acquire() as conn, conn.transaction():
-            rows = await conn.fetch(
+        """Return abandoned CAPTURING claims to the retryable pending queue.
+
+        A claim whose workspace settled another turn while it was out is
+        folded into that turn's pending snapshot, as a deferred capture is.
+        Each claim is reaped in a transaction of its own, so one the database
+        refuses stays capturing for the next pass instead of holding back the
+        claims of every other workspace. Returns the claims reaped.
+        """
+        reaped: list[int] = []
+        async with self._pool.acquire() as conn:
+            stalled = await conn.fetch(
                 """
-                UPDATE agent_sandbox_snapshots
-                SET state = 'pending',
-                    last_error = 'snapshot coordinator stopped during capture',
-                    updated_at = NOW()
+                SELECT id FROM agent_sandbox_snapshots
                 WHERE state = 'capturing'
                   AND updated_at < NOW() - make_interval(secs => $1)
-                RETURNING id, sandbox_id
+                ORDER BY id
                 """,
                 stall_seconds,
             )
-            if rows:
-                await conn.execute(
-                    """
-                    UPDATE agent_sandboxes
-                    SET snapshot_state = 'pending',
-                        idle_deadline = CASE
-                            WHEN active_operation_count = 0
-                             AND NOT EXISTS (
-                                SELECT 1 FROM agent_thread_sandbox_memberships active
-                                WHERE active.sandbox_id = agent_sandboxes.id
-                                  AND active.active_attempt_id IS NOT NULL
-                             )
-                            THEN clock_timestamp() + make_interval(secs => idle_timeout_seconds)
-                            ELSE NULL END,
-                        updated_at = NOW()
-                    WHERE id = ANY($1::text[]) AND snapshot_state = 'snapshotting'
-                    """,
-                    [row["sandbox_id"] for row in rows],
-                )
-        return [int(row["id"]) for row in rows]
+            for candidate in stalled:
+                snapshot_id = int(candidate["id"])
+                try:
+                    async with conn.transaction():
+                        handed_back = await self._reap_stalled_capture(
+                            conn, snapshot_id=snapshot_id, stall_seconds=stall_seconds
+                        )
+                except asyncpg.PostgresError:
+                    logger.warning(
+                        "agent_snapshot_capture_reap_failed",
+                        exc_info=True,
+                        extra={
+                            "event": "agent_snapshot_capture_reap_failed",
+                            "snapshot_id": snapshot_id,
+                        },
+                    )
+                    continue
+                if handed_back:
+                    reaped.append(snapshot_id)
+        return reaped
+
+    @staticmethod
+    async def _reap_stalled_capture(conn: Any, *, snapshot_id: int, stall_seconds: float) -> bool:
+        """Hand one stalled claim back inside the caller's transaction.
+
+        ``False`` when it is no longer a stalled claim, or a writer holds it:
+        that writer is settling it now. The claim is locked before its group
+        and the group before its pending snapshot, as a deferred capture does.
+        """
+        claim = await conn.fetchrow(
+            """
+            SELECT sandbox_id FROM agent_sandbox_snapshots
+            WHERE id = $1 AND state = 'capturing'
+              AND updated_at < NOW() - make_interval(secs => $2)
+            FOR UPDATE SKIP LOCKED
+            """,
+            snapshot_id,
+            stall_seconds,
+        )
+        if claim is None:
+            return False
+        sandbox_id = str(claim["sandbox_id"])
+        await conn.execute("SELECT id FROM agent_sandboxes WHERE id = $1 FOR UPDATE", sandbox_id)
+        retried = (
+            await _fold_into_pending_snapshot(conn, snapshot_id=snapshot_id, sandbox_id=sandbox_id)
+            or snapshot_id
+        )
+        await conn.execute(
+            """
+            UPDATE agent_sandbox_snapshots
+            SET state = 'pending',
+                last_error = 'snapshot coordinator stopped during capture',
+                updated_at = NOW()
+            WHERE id = $1 AND state IN ('capturing', 'pending')
+            """,
+            retried,
+        )
+        await conn.execute(
+            """
+            UPDATE agent_sandboxes
+            SET snapshot_state = 'pending',
+                idle_deadline = CASE
+                    WHEN active_operation_count = 0
+                     AND NOT EXISTS (
+                        SELECT 1 FROM agent_thread_sandbox_memberships active
+                        WHERE active.sandbox_id = agent_sandboxes.id
+                          AND active.active_attempt_id IS NOT NULL
+                     )
+                    THEN clock_timestamp() + make_interval(secs => idle_timeout_seconds)
+                    ELSE NULL END,
+                updated_at = NOW()
+            WHERE id = $1 AND snapshot_state = 'snapshotting'
+            """,
+            sandbox_id,
+        )
+        return True
 
     async def claim_for_publish(self) -> dict[str, Any] | None:
         """Take one immutable shared-workspace snapshot.
@@ -381,6 +513,11 @@ class PostgresSnapshotRepository:
         publisher may start mutating its lineage, but those operations cannot
         overlap. Returns the snapshot and its publication metadata, or ``None``.
         Deferred publications are eligible only after their ``retry_at``.
+
+        Epochs publish in order: an earlier snapshot not yet published holds
+        this one back. A failed one does not. It is never claimed again, and
+        this later one was cut from the same published base, so it carries
+        the failed one's changes and supersedes it.
         """
         async with self._pool.acquire() as conn, conn.transaction():
             snapshot = await conn.fetchrow(
@@ -490,7 +627,7 @@ class PostgresSnapshotRepository:
                       SELECT 1 FROM agent_sandbox_snapshots earlier
                       WHERE earlier.sandbox_id = s.sandbox_id
                         AND earlier.workspace_epoch < s.workspace_epoch
-                        AND earlier.state <> 'published'
+                        AND earlier.state NOT IN ('published', 'failed')
                   )
                 ORDER BY s.created_at, s.id
                 LIMIT 1
@@ -604,8 +741,9 @@ class PostgresSnapshotRepository:
 
         Deterministic branch and PR reconciliation makes replay safe even when
         the process died after a remote effect. The counter survives restarts;
-        exhaustion marks the artifact and group dirty for manual review rather
-        than skipping it and publishing a later workspace epoch out of order.
+        exhaustion fails the artifact, keeping why, and marks its group dirty.
+        A later epoch never publishes while this one may still be retried;
+        once it has failed, the group's next capture supersedes it.
         The expected counter rejects a publisher whose stalled claim was
         reclaimed. Returns ``False`` unless this exact claim is still
         ``publishing``.
@@ -613,7 +751,7 @@ class PostgresSnapshotRepository:
         retry_detail = detail[:2000]
         exhausted_detail = (
             f"{detail[:1800]} Publication retry limit ({PUBLISH_MAX_ATTEMPTS}) exhausted; "
-            "manual review is required."
+            "the workspace's next snapshot supersedes this one."
         )[:2000]
         async with self._pool.acquire() as conn, conn.transaction():
             row = await conn.fetchrow(
@@ -725,6 +863,19 @@ class PostgresSnapshotRepository:
             )
             if row is None:
                 return False
+            # The included turns before their group, in id order: a follow-up,
+            # a settlement and a Fork hold a turn while they wait for the group.
+            await conn.fetch(
+                """
+                SELECT id FROM agent_jobs
+                WHERE id IN (
+                    SELECT job_id FROM agent_snapshot_jobs WHERE snapshot_id = $1
+                ) AND state = 'succeeded'
+                ORDER BY id
+                FOR NO KEY UPDATE
+                """,
+                snapshot_id,
+            )
             await conn.execute(
                 """
                 UPDATE agent_sandboxes
@@ -779,7 +930,13 @@ class PostgresSnapshotRepository:
     async def fail_snapshot_publish(
         self, *, snapshot_id: int, expected_publish_attempt_count: int, detail: str
     ) -> None:
-        """Retain a rejected group artifact without failing included turns."""
+        """Retain a rejected group artifact without failing included turns.
+
+        The snapshot stays ``failed`` with the reason, and its group ``dirty``
+        until a later turn settles or a later snapshot is captured. That
+        capture, cut from the same published base, supersedes this one and is
+        refused in turn if it still carries what was rejected.
+        """
         async with self._pool.acquire() as conn, conn.transaction():
             row = await conn.fetchrow(
                 """

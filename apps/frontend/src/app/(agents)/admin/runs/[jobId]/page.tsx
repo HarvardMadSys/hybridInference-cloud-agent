@@ -221,7 +221,7 @@ function RunDetails({ jobId }: { jobId: string }) {
               {(
                 [
                   ['User ID', detail.run.user_id],
-                  ['Repository', detail.run.repo],
+                  ['Repository', detail.run.repo ?? 'Start from scratch'],
                   ['Agent', detail.run.runtime],
                   ['Model', detail.run.model],
                   ['Effort', detail.run.reasoning_effort || 'Auto'],

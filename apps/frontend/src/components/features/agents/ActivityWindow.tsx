@@ -1,12 +1,9 @@
 'use client';
 
-import type { HTMLAttributes } from 'react';
+import type { HTMLAttributes, MouseEvent } from 'react';
 import { hasActivityOverview, type ActivityOverview } from './activityOverview';
 import type { MaximizeControl } from './FloatingActivityWindow';
-import type { AgentEvent } from './types';
 import { DelegationReplyDetails, ToolActivityDetails } from './ToolActivityDetails';
-
-type ToolEvent = Extract<AgentEvent, { kind: 'tool_use' }>;
 
 export function ActivityIcon() {
   return (
@@ -27,14 +24,28 @@ export function ActivityIcon() {
   );
 }
 
+/**
+ * Whether a click on a subagent card belongs to something inside it rather
+ * than the card: its own controls, its expandable instructions, or the end of
+ * selecting its text.
+ */
+function ownClick(event: MouseEvent<HTMLElement>): boolean {
+  const target = event.target as Element;
+  if (target.closest('a, button, details, input, select, textarea')) return true;
+  const selection = window.getSelection();
+  return (
+    !!selection && !selection.isCollapsed && event.currentTarget.contains(selection.anchorNode)
+  );
+}
+
 /** A floating overview of the selected turn's recorded tasks and delegated agents. */
 export function ActivityWindow({
   overview,
   turnNo,
   attemptNo,
   onClose,
-  stepKeyForEvent,
-  onSelectStep,
+  openSubagentKey,
+  onOpenSubagent,
   moveHandleProps,
   maximize,
 }: {
@@ -42,8 +53,9 @@ export function ActivityWindow({
   turnNo: number;
   attemptNo: number;
   onClose: () => void;
-  stepKeyForEvent: (event: ToolEvent) => string | undefined;
-  onSelectStep: (stepKey: string) => void;
+  /** The subagent whose conversation the page is showing, if any. */
+  openSubagentKey?: string | null;
+  onOpenSubagent: (key: string) => void;
   moveHandleProps?: HTMLAttributes<HTMLDivElement>;
   maximize?: MaximizeControl;
 }) {
@@ -139,12 +151,45 @@ export function ActivityWindow({
             </div>
             <ul className="space-y-3">
               {overview.subagents.map((agent) => {
-                const stepKey = stepKeyForEvent(agent.sourceEvent);
+                const open = agent.key === openSubagentKey;
+                const title = agent.activity.description ?? agent.activity.title;
                 return (
                   <li
                     key={agent.key}
-                    className="min-w-0 space-y-2.5 rounded-lg border border-gray-200 p-3 dark:border-white/10"
+                    aria-current={open || undefined}
+                    onClick={(event) => {
+                      if (!open && !ownClick(event)) onOpenSubagent(agent.key);
+                    }}
+                    className={`relative min-w-0 space-y-2.5 rounded-lg border p-3 pr-10 ${
+                      open
+                        ? 'border-crimson/50 dark:border-crimson-light/50'
+                        : 'cursor-pointer border-gray-200 transition-colors hover:border-gray-300 hover:bg-gray-50 dark:border-white/10 dark:hover:border-white/20 dark:hover:bg-white/5'
+                    }`}
                   >
+                    {open ? (
+                      <span className="absolute right-3 top-3 text-[11px] font-medium text-crimson dark:text-crimson-light">
+                        Current
+                      </span>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => onOpenSubagent(agent.key)}
+                        aria-label={`Switch subagent: ${title}`}
+                        title="Switch to this subagent"
+                        className="absolute right-2 top-2 rounded-md p-1 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700 focus-visible:outline-crimson dark:text-gray-500 dark:hover:bg-white/10 dark:hover:text-gray-200"
+                      >
+                        <svg
+                          aria-hidden="true"
+                          className="h-4 w-4"
+                          fill="none"
+                          viewBox="0 0 24 24"
+                          stroke="currentColor"
+                          strokeWidth={1.8}
+                        >
+                          <path strokeLinecap="round" strokeLinejoin="round" d="m9 6 6 6-6 6" />
+                        </svg>
+                      </button>
+                    )}
                     <ToolActivityDetails activity={agent.activity} />
                     {agent.reply ? (
                       <DelegationReplyDetails reply={agent.reply} />
@@ -152,15 +197,6 @@ export function ActivityWindow({
                       <p className="text-[11px] text-gray-400 dark:text-gray-500">
                         Agent state not recorded
                       </p>
-                    ) : null}
-                    {stepKey ? (
-                      <button
-                        type="button"
-                        onClick={() => onSelectStep(stepKey)}
-                        className="rounded text-[11px] font-medium text-crimson hover:underline focus-visible:outline-crimson dark:text-crimson-light"
-                      >
-                        View subagent execution
-                      </button>
                     ) : null}
                   </li>
                 );

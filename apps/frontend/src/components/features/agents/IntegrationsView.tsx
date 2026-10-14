@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useT } from '@/components/providers';
+import { useSiteConfig } from '@/components/providers/SiteConfigProvider';
+import { BookIcon } from '@/components/features/settings/icons';
 import { GettingStartedSettings } from '@/components/features/settings/GettingStartedSettings';
 import { ProfileSettings } from '@/components/features/settings/ProfileSettings';
 import { NotificationSettings } from '@/components/features/settings/NotificationSettings';
@@ -10,7 +12,6 @@ import {
   disconnectAgentIntegration,
   disconnectGitHubAccount,
   getAgentIntegrations,
-  getAgentConfig,
 } from '@/lib/api/agents';
 import type { AgentIntegrationProvider, AgentIntegrationProviderApi } from '@/lib/api/agents';
 import { EnvironmentManager } from './environment/EnvironmentManager';
@@ -235,24 +236,9 @@ export function IntegrationsView({
   mcpAuthorization?: McpAuthorizationResult;
 }) {
   const t = useT();
-  const [companion, setCompanion] = useState<{ userId: string; dataUrl?: string } | null>(null);
-  const updateCompanion = useCallback((userId: string, dataUrl?: string) => {
-    setCompanion({ userId, dataUrl });
-  }, []);
+  const { docsUrl } = useSiteConfig().branding;
   const [providers, setProviders] = useState<AgentIntegrationProviderApi[]>([]);
   const [loading, setLoading] = useState(true);
-  const [environmentsEnabled, setEnvironmentsEnabled] = useState(false);
-  useEffect(() => {
-    let active = true;
-    void getAgentConfig()
-      .then((value) => {
-        if (active) setEnvironmentsEnabled(Boolean(value.environment_limits));
-      })
-      .catch(() => {});
-    return () => {
-      active = false;
-    };
-  }, []);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [disconnecting, setDisconnecting] = useState<string | null>(null);
@@ -358,6 +344,17 @@ export function IntegrationsView({
           {t('settings.title')}
         </h1>
         <p className="mt-1 max-w-xl text-sm leading-5 text-muted">{t('settings.description')}</p>
+        {docsUrl ? (
+          <a
+            href={docsUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="ui-focus-ring mt-2 inline-flex items-center gap-1.5 rounded text-sm font-medium text-accent hover:underline"
+          >
+            <BookIcon className="h-4 w-4" />
+            {t('nav.docs')}
+          </a>
+        ) : null}
       </header>
 
       {notice ? (
@@ -384,7 +381,7 @@ export function IntegrationsView({
         </div>
       ) : null}
 
-      <ProfileSettings companion={companion} />
+      <ProfileSettings />
 
       <section
         aria-labelledby="source-control-heading"
@@ -454,9 +451,9 @@ export function IntegrationsView({
       <div className="ui-card mt-4 bg-surface p-3 sm:p-4">
         <McpConnectionsSection authorizationResult={mcpAuthorization} />
       </div>
-      {environmentsEnabled && <EnvironmentManager />}
+      <EnvironmentManager />
       <SkillsSection />
-      <MemorySettings onAvatarChange={updateCompanion} />
+      <MemorySettings />
       <NotificationSettings />
       <GettingStartedSettings />
     </section>

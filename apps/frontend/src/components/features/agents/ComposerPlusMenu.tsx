@@ -67,6 +67,22 @@ function McpIcon() {
   );
 }
 
+function EnvironmentIcon() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.6}
+      aria-hidden="true"
+      className="h-[17px] w-[17px] shrink-0"
+    >
+      <rect x="3" y="5" width="18" height="14" rx="3" />
+      <path strokeLinecap="round" strokeLinejoin="round" d="m7 9 3 3-3 3m6 0h4" />
+    </svg>
+  );
+}
+
 export function GoalIcon({ className = 'h-[17px] w-[17px] shrink-0' }: { className?: string }) {
   return (
     <svg
@@ -128,6 +144,8 @@ export function ComposerPlusMenu({
   mcpBlockedReason,
   onOpenPlugins,
   pluginSummary,
+  onOpenEnvironment,
+  environmentSummary,
   onOpen,
   disabled = false,
 }: {
@@ -149,6 +167,8 @@ export function ComposerPlusMenu({
   mcpBlockedReason?: string;
   onOpenPlugins?: () => void;
   pluginSummary?: string;
+  onOpenEnvironment?: () => void;
+  environmentSummary?: string;
   onOpen?: () => void;
   disabled?: boolean;
 }) {
@@ -405,6 +425,29 @@ export function ComposerPlusMenu({
                   </button>
                 ) : null}
               </div>
+              {onOpenEnvironment ? (
+                <div role="group" aria-label={t('attach.workspace')} className="mt-2">
+                  <p className={COMPOSER_MENU_HEADING}>{t('attach.workspace')}</p>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    tabIndex={-1}
+                    aria-haspopup="dialog"
+                    className={COMPOSER_MENU_ROW}
+                    onClick={() => {
+                      close();
+                      onOpenEnvironment();
+                    }}
+                  >
+                    <EnvironmentIcon />
+                    <span className="shrink-0">{t('environment.title')}</span>
+                    <span className={COMPOSER_MENU_DETAIL} title={environmentSummary}>
+                      {environmentSummary}
+                    </span>
+                    <ChevronIcon />
+                  </button>
+                </div>
+              ) : null}
             </>
           )}
         </div>

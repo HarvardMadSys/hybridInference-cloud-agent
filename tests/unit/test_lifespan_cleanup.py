@@ -33,7 +33,7 @@ _EXPECTED_SHUTDOWN_TASKS = (
     "sandbox_deletion_task",
     "ledger_task",
     "capacity_task",
-    "user_memory_task",
+    "agent_memory_task",
     "queue_monitor_task",
     "publish_task",
     "pr_archive_task",
@@ -130,7 +130,7 @@ _STAGES = [
         ("sandbox_deletions", True, False),
         ("ledger", True, False),
         ("capacity", True, False),
-        ("user_memory", True, False),
+        ("agent_memory", True, False),
         ("profiling_deployment", True, False),
         ("profiling_service", True, False),
         ("profiling_worker", True, False),
@@ -312,7 +312,7 @@ def _prepare(
     async def close_sandbox_managers() -> None:
         events.append("sandbox_managers")
 
-    monkeypatch.setattr("cloud_agent.api.mcp_relay.close_host", close_host)
+    monkeypatch.setattr("cloud_agent.mcp.runtime.close_host", close_host)
     monkeypatch.setattr(
         "cloud_agent.sandbox_manager_routing.close_sandbox_manager_clients", close_sandbox_managers
     )
@@ -330,14 +330,14 @@ def _prepare(
         ("cloud_agent.bootstrap.lifespan.reap_expired_attempts", "reaper_task"),
         ("cloud_agent.bootstrap.lifespan.coordinate_shared_snapshots", "snapshot_task"),
         ("cloud_agent.bootstrap.lifespan.coordinate_sandbox_deletions", "sandbox_deletion_task"),
-        ("cloud_agent.bootstrap.lifespan.refresh_user_memories", "user_memory_task"),
+        ("cloud_agent.bootstrap.lifespan.maintain_agent_memories", "agent_memory_task"),
         ("cloud_agent.bootstrap.lifespan.listen", "notification_listener_task"),
         ("cloud_agent.ledger.collect_usage_snapshots", "ledger_task"),
         ("cloud_agent.capacity_history.prune_host_capacity_history", "capacity_task"),
         ("cloud_agent.operational_health.monitor_queue", "queue_monitor_task"),
         ("cloud_agent.publish_worker.publish_loop", "publish_task"),
         ("cloud_agent.workers.pr_archive.pr_archive_loop", "pr_archive_task"),
-        ("cloud_agent.api.mcp_relay.maintain_host_sessions", "mcp_maintenance_task"),
+        ("cloud_agent.mcp.runtime.maintain_host_sessions", "mcp_maintenance_task"),
     ):
         monkeypatch.setattr(target, _idle(events, label))
     monkeypatch.setattr(
@@ -358,7 +358,7 @@ def _prepare(
         async def fail_maintenance(*_args: object, **_kwargs: object) -> None:
             raise RuntimeError(maintenance_error)
 
-        monkeypatch.setattr("cloud_agent.api.mcp_relay.maintain_host_sessions", fail_maintenance)
+        monkeypatch.setattr("cloud_agent.mcp.runtime.maintain_host_sessions", fail_maintenance)
 
     _inject(monkeypatch, stage)
     return _Prepared(FastAPI(), pool, clients, events, resets, writer_resets)
@@ -397,7 +397,7 @@ def _inject(monkeypatch: pytest.MonkeyPatch, stage: str | None) -> None:
         ),
         "ledger": ("cloud_agent.ledger.collect_usage_snapshots", _boom(stage)),
         "capacity": ("cloud_agent.capacity_history.prune_host_capacity_history", _boom(stage)),
-        "user_memory": ("cloud_agent.bootstrap.lifespan.refresh_user_memories", _boom(stage)),
+        "agent_memory": ("cloud_agent.bootstrap.lifespan.maintain_agent_memories", _boom(stage)),
         "profiling_deployment": (
             "cloud_agent.profiling_control_config.profiling_control_deployment",
             _boom(stage),
@@ -421,7 +421,7 @@ def _inject(monkeypatch: pytest.MonkeyPatch, stage: str | None) -> None:
         "listen": ("cloud_agent.bootstrap.lifespan.listen", _boom(stage)),
         "publisher": ("cloud_agent.publish_worker.publish_loop", _boom(stage)),
         "pr_archiver": ("cloud_agent.workers.pr_archive.pr_archive_loop", _boom(stage)),
-        "mcp_maintenance": ("cloud_agent.api.mcp_relay.maintain_host_sessions", _boom(stage)),
+        "mcp_maintenance": ("cloud_agent.mcp.runtime.maintain_host_sessions", _boom(stage)),
         "mcp_decision_signal": ("cloud_agent.bootstrap.lifespan.McpDecisionSignal", _boom(stage)),
         "measurement_writer": ("cloud_agent.measurement_writer.MeasurementWriter", _boom(stage)),
     }
@@ -609,7 +609,7 @@ async def test_a_failed_background_task_cannot_skip_later_cleanup(
 
 async def test_shutdown_cancellation_joins_send_now_before_closing_resources() -> None:
     """Cancellation is restored only after eager handoffs and later cleanup finish."""
-    from cloud_agent.api import turns
+    from cloud_agent.application import send_now
 
     events: list[str] = []
     unwinding = asyncio.Event()
@@ -624,8 +624,8 @@ async def test_shutdown_cancellation_joins_send_now_before_closing_resources() -
             events.append("handoff")
 
     handoff_task = asyncio.create_task(handoff())
-    turns._hand_overs.add(handoff_task)
-    handoff_task.add_done_callback(turns._hand_overs.discard)
+    send_now._hand_overs.add(handoff_task)
+    handoff_task.add_done_callback(send_now._hand_overs.discard)
     await asyncio.sleep(0)
 
     async def close_host() -> None:
@@ -796,3 +796,48 @@ async def test_primary_error_survives_owner_cancellation_during_cleanup() -> Non
     assert len(cancellation_notes) == 1
     assert child.cancelled()
     assert events[-2:] == ["pool", "reset_settings"]
+
+
+@pytest.mark.parametrize(
+    ("background", "attribute", "target"),
+    [
+        (True, "publish_task", "cloud_agent.publish_worker.publish_loop"),
+        (False, "mcp_maintenance_task", "cloud_agent.mcp.runtime.maintain_host_sessions"),
+    ],
+    ids=["publisher", "mcp-maintenance"],
+)
+async def test_a_background_task_that_dies_is_reported_when_it_dies(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    background: bool,
+    attribute: str,
+    target: str,
+) -> None:
+    """A loop that stops with an error says so then, not first at shutdown.
+
+    Until shutdown re-raises it, nothing else would: the process goes on
+    serving with no publisher, or no reaper, and nothing in its log says why.
+    """
+    caplog.set_level("INFO", logger="cloud_agent.app")
+    prepared = _prepare(monkeypatch)
+
+    async def crash(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError(f"{attribute} crashed")
+
+    monkeypatch.setattr(target, crash)
+
+    with pytest.raises(RuntimeError, match=f"{attribute} crashed"):
+        async with lifespan(prepared.app, background=background):
+            await asyncio.wait([getattr(prepared.app.state, attribute)])
+            await asyncio.sleep(0)
+            died = [
+                record
+                for record in caplog.records
+                if getattr(record, "event", "") == "agent_background_task_failed"
+            ]
+            assert len(died) == 1, "a background task died without a word"
+            assert died[0].levelname == "ERROR"
+            assert died[0].exc_info is not None
+            assert f"{attribute} crashed" in str(died[0].exc_info[1])
+
+    assert prepared.pool.closes == 1

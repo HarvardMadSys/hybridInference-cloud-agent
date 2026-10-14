@@ -37,7 +37,6 @@ from cloud_agent.schemas import (
     PLATFORM_REASONING_EFFORTS,
     RESET_REASONING_EFFORT,
 )
-from cloud_agent.settings import setting_env
 from cloud_agent.skills.models import SkillError
 from cloud_agent.skills.selection import resolve_skills
 from cloud_agent.visible_models import (
@@ -45,12 +44,13 @@ from cloud_agent.visible_models import (
     agent_model_reasoning_efforts,
     agent_visible_models,
 )
-from cloud_agent_host.runtimes import (
+from cloud_agent_shared.git.temporary_workspace import TEMPORARY_WORKSPACE_BASE_SHA
+from cloud_agent_shared.plugins import validate_sandbox_plugins
+from cloud_agent_shared.runtime_catalog import (
     registered_runtimes,
     runtime_reasoning_efforts,
     runtimes_supporting_mcp,
 )
-from cloud_agent_shared.plugins import validate_sandbox_plugins
 
 if TYPE_CHECKING:
     from typing import Any
@@ -386,6 +386,14 @@ async def _resolve_skill_selection(
         ) from exc
 
 
+def _attachment_selection_error(exc: AttachmentError) -> HTTPException:
+    """The owner-facing refusal for uploads a submission cannot carry."""
+    return HTTPException(
+        status_code=400,
+        detail={"error": {"type": "invalid_attachment_selection", "message": str(exc)}},
+    )
+
+
 async def _resolve_attachment_selection(
     store: AttachmentRepository, *, user_id: str, attachment_ids: list[int] | None
 ) -> list[dict[str, Any]] | None:
@@ -393,10 +401,7 @@ async def _resolve_attachment_selection(
     try:
         return await resolve_attachments(store, user_id=user_id, attachment_ids=attachment_ids)
     except AttachmentError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail={"error": {"type": "invalid_attachment_selection", "message": str(exc)}},
-        ) from exc
+        raise _attachment_selection_error(exc) from exc
 
 
 async def _require_base_on_branch(
@@ -435,6 +440,63 @@ async def _require_base_on_branch(
                 }
             },
         ) from exc
+
+
+async def _admit_repository(
+    body: AgentJobCreate,
+    repo: str,
+    user: dict[str, Any],
+    *,
+    source_control: SourceControlPort,
+    app_credentials: Any | None,
+) -> str | None:
+    """Check the owner may work on ``repo`` and return the commit the job starts from."""
+    # The requester chooses the repository and the platform later mints a real
+    # installation token for it. Without this the two combine into a confused
+    # deputy: name any repository the App reaches, and read it back through
+    # your own job's events and patch.
+    try:
+        await require_entitled_repo(
+            repo,
+            user["user_id"],
+            store=source_control,
+            app_credentials=app_credentials,
+        )
+    except RepoNotAllowed as exc:
+        raise HTTPException(
+            status_code=403,
+            detail={"error": {"type": "repo_not_allowed", "message": str(exc)}},
+        ) from exc
+    # A branch is resolved to the commit it points at *now*. The job stores the
+    # sha: a branch moves, so a job that recorded "dev" would silently mean a
+    # different tree by the time it ran, and the publisher applies its patch
+    # onto a pinned commit.
+    base_sha = body.base_sha
+    if base_sha is None and body.base_ref and app_credentials is not None:
+        try:
+            base_sha = await app_credentials.resolve_ref(repo, body.base_ref)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": {
+                        "type": "invalid_request",
+                        "message": f"could not resolve {body.base_ref!r} in {repo}: {exc}",
+                    }
+                },
+            ) from exc
+    # The publisher fetches the base by hash and pushes a branch built on it.
+    # GitHub serves any object of the repository's network by hash, a fork's
+    # pull request head included, and a ref resolves to whatever commit it
+    # names — so neither a named commit nor a resolved ref is, by itself, part
+    # of the repository's history. Checked once here: a job's base is fixed at
+    # creation (a host fills only an absent one, from its own checkout), and a
+    # follow-up builds on the branch the platform published.
+    if base_sha is not None and app_credentials is not None:
+        await _require_base_on_branch(
+            app_credentials, repo=repo, base_sha=base_sha, base_ref=body.base_ref
+        )
+    return base_sha
 
 
 async def _create_job_as(
@@ -516,50 +578,19 @@ async def _create_job_as(
     reasoning_effort = await _require_offered_effort(
         body.reasoning_effort, runtime=body.runtime, model=model, gateway=gateway, user=user
     )
-    # The requester chooses the repository and the platform later mints a real
-    # installation token for it. Without this the two combine into a confused
-    # deputy: name any repository the App reaches, and read it back through
-    # your own job's events and patch.
-    try:
-        await require_entitled_repo(
+    if body.repo is None:
+        # A temporary workspace: there is no repository to be entitled to and no
+        # branch to pin. Its base is the one empty commit every temporary
+        # workspace starts from, recorded now so that later turns and forks
+        # carry it like any other base.
+        base_sha: str | None = TEMPORARY_WORKSPACE_BASE_SHA
+    else:
+        base_sha = await _admit_repository(
+            body,
             body.repo,
-            user["user_id"],
-            store=job_store.source_control,
+            user,
+            source_control=job_store.source_control,
             app_credentials=app_credentials,
-        )
-    except RepoNotAllowed as exc:
-        raise HTTPException(
-            status_code=403,
-            detail={"error": {"type": "repo_not_allowed", "message": str(exc)}},
-        ) from exc
-    # A branch is resolved to the commit it points at *now*. The job stores the
-    # sha: a branch moves, so a job that recorded "dev" would silently mean a
-    # different tree by the time it ran, and the publisher applies its patch
-    # onto a pinned commit.
-    base_sha = body.base_sha
-    if base_sha is None and body.base_ref and app_credentials is not None:
-        try:
-            base_sha = await app_credentials.resolve_ref(body.repo, body.base_ref)
-        except Exception as exc:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "error": {
-                        "type": "invalid_request",
-                        "message": f"could not resolve {body.base_ref!r} in {body.repo}: {exc}",
-                    }
-                },
-            ) from exc
-    # The publisher fetches the base by hash and pushes a branch built on it.
-    # GitHub serves any object of the repository's network by hash, a fork's
-    # pull request head included, and a ref resolves to whatever commit it
-    # names — so neither a named commit nor a resolved ref is, by itself, part
-    # of the repository's history. Checked once here: a job's base is fixed at
-    # creation (a host fills only an absent one, from its own checkout), and a
-    # follow-up builds on the branch the platform published.
-    if base_sha is not None and app_credentials is not None:
-        await _require_base_on_branch(
-            app_credentials, repo=body.repo, base_sha=base_sha, base_ref=body.base_ref
         )
 
     metadata = dict(body.metadata or {})
@@ -597,52 +628,50 @@ async def _create_job_as(
     attachments = await _resolve_attachment_selection(
         job_store.attachments, user_id=user["user_id"], attachment_ids=body.attachment_ids
     )
-    if setting_env("AGENT_REPOSITORY_ENVIRONMENTS_ENABLED", "false") != "true" and (
-        body.environment_id
-        or body.environment_overrides
-        or body.environment_revision
-        or body.global_revision
-    ):
-        raise HTTPException(503, "Repository environments are disabled for new workspaces")
-    job = await job_store.conversation_commands.create_job(
-        user_id=user["user_id"],
-        repo=body.repo,
-        task_prompt=body.task_prompt,
-        runtime=body.runtime,
-        model=model,
-        execution_profile=execution_profile,
-        reasoning_effort=reasoning_effort,
-        base_sha=base_sha,
-        setup_script=body.setup_script,
-        environment_selection={
-            "environment_id": body.environment_id,
-            "environment_id_provided": "environment_id" in body.model_fields_set,
-            "environment_revision": body.environment_revision,
-            "global_revision": body.global_revision,
-            "overrides": [v.model_dump() for v in body.environment_overrides],
-            "has_setup_override": "setup_script" in body.model_fields_set,
-            "setup_override": body.setup_script,
-        }
-        if setting_env("AGENT_REPOSITORY_ENVIRONMENTS_ENABLED", "false") == "true"
-        else None,
-        plugins=plugins,
-        metadata=metadata or None,
-        mcp_bindings=mcp_bindings,
-        # Named rather than splatted: see the note on the same call in
-        # ``turns.py`` — an unpacked dict defeats the argument types.
-        skills=skills,
-        attachments=attachments,
-        # Set in the same transaction that creates the conversation, so the
-        # first turn is already working toward the objective rather than
-        # learning about it one turn later.
-        goal=body.goal,
-        client_request_id=client_request_id,
-        # Over the request as sent, not as resolved: a branch that moved
-        # between two sends of one submission is still one submission. The
-        # same value the replay lookup above used, so the pre-check and the
-        # unique index cannot disagree about what was sent.
-        client_request_fingerprint=fingerprint,
-    )
+    try:
+        job = await job_store.conversation_commands.create_job(
+            user_id=user["user_id"],
+            repo=body.repo,
+            task_prompt=body.task_prompt,
+            runtime=body.runtime,
+            model=model,
+            execution_profile=execution_profile,
+            reasoning_effort=reasoning_effort,
+            base_sha=base_sha,
+            setup_script=body.setup_script,
+            environment_selection={
+                "environment_id": body.environment_id,
+                "environment_id_provided": "environment_id" in body.model_fields_set,
+                "environment_revision": body.environment_revision,
+                "global_revision": body.global_revision,
+                "overrides": [v.model_dump() for v in body.environment_overrides],
+                "has_setup_override": "setup_script" in body.model_fields_set,
+                "setup_override": body.setup_script,
+            },
+            plugins=plugins,
+            metadata=metadata or None,
+            mcp_bindings=mcp_bindings,
+            # Named rather than splatted: see the note on the same call in
+            # ``turns.py`` — an unpacked dict defeats the argument types.
+            skills=skills,
+            attachments=attachments,
+            # Set in the same transaction that creates the conversation, so the
+            # first turn is already working toward the objective rather than
+            # learning about it one turn later.
+            goal=body.goal,
+            client_request_id=client_request_id,
+            # Over the request as sent, not as resolved: a branch that moved
+            # between two sends of one submission is still one submission. The
+            # same value the replay lookup above used, so the pre-check and the
+            # unique index cannot disagree about what was sent.
+            client_request_fingerprint=fingerprint,
+        )
+    except AttachmentError as exc:
+        # The claim inside the store's transaction is the authoritative check:
+        # another submission, the stale-upload sweep or a waiting message can
+        # hold an upload the resolution above still saw as free. Nothing was
+        # written, and the owner can attach the file again.
+        raise _attachment_selection_error(exc) from exc
     if job.get("error") == "client_request_conflict":
         raise _idempotency_conflict()
     logger.info(

@@ -23,6 +23,10 @@ export interface SiteBranding {
   orgName: string;
   orgUrl: string;
   statusUrl: string;
+  /** User documentation for this deployment. Empty hides the link. */
+  docsUrl: string;
+  /** A support page, or `mailto:` and one address. Empty hides the link. */
+  contactUrl: string;
   /**
    * The gateway's *origin*, for the links this app does not host itself.
    * Never the browser's API address — that is `basePath` plus `/api`, and it
@@ -57,6 +61,8 @@ export const NEUTRAL_SITE_CONFIG: RuntimeSiteConfig = {
     orgName: '',
     orgUrl: '',
     statusUrl: '',
+    docsUrl: '',
+    contactUrl: '',
     gatewayUrl: '',
   },
   features: {
@@ -77,6 +83,8 @@ export const SITE_CONFIG_ENV = {
   orgName: 'AGENT_WEB_ORG_NAME',
   orgUrl: 'AGENT_WEB_ORG_URL',
   statusUrl: 'AGENT_WEB_STATUS_URL',
+  docsUrl: 'AGENT_WEB_DOCS_URL',
+  contactUrl: 'AGENT_WEB_CONTACT_URL',
   gatewayUrl: 'AGENT_WEB_GATEWAY_URL',
   featureRag: 'AGENT_WEB_FEATURE_RAG',
   version: 'AGENT_DEPLOYMENT_SHA',
@@ -114,6 +122,24 @@ function optionalName(env: EnvSource, name: string): string {
 function optionalUrl(env: EnvSource, name: string): string {
   const raw = trimmed(env[name]);
   if (!raw) return '';
+  return parseUrl(name, raw).toString();
+}
+
+// The control plane's rule for `site.contact_url`: one plain address, so the
+// link cannot prefill a subject, body or extra recipients.
+const MAILTO =
+  /^mailto:[A-Za-z0-9.!#$%&'*+/=^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)+$/i;
+
+/** An optional http(s) URL or `mailto:` with a single address. */
+function optionalContact(env: EnvSource, name: string): string {
+  const raw = trimmed(env[name]);
+  if (!raw) return '';
+  if (raw.slice(0, 7).toLowerCase() === 'mailto:') {
+    if (!MAILTO.test(raw)) {
+      throw new SiteConfigError(`${name} must be mailto: and one address, got: ${raw}`);
+    }
+    return `mailto:${raw.slice(7)}`;
+  }
   return parseUrl(name, raw).toString();
 }
 
@@ -167,6 +193,8 @@ export function parseRuntimeSiteConfig(env: EnvSource): RuntimeSiteConfig {
       orgName: optionalName(env, SITE_CONFIG_ENV.orgName),
       orgUrl: optionalUrl(env, SITE_CONFIG_ENV.orgUrl),
       statusUrl: optionalUrl(env, SITE_CONFIG_ENV.statusUrl),
+      docsUrl: optionalUrl(env, SITE_CONFIG_ENV.docsUrl),
+      contactUrl: optionalContact(env, SITE_CONFIG_ENV.contactUrl),
       gatewayUrl: optionalOrigin(env, SITE_CONFIG_ENV.gatewayUrl),
     },
     features: {
@@ -210,6 +238,15 @@ function checkedSavedSiteConfig(value: unknown, metadata: EnvSource): RuntimeSit
     if (typeof branding[key] !== 'string')
       throw new SiteConfigError('Invalid application settings.');
     env[SITE_CONFIG_ENV[key]] = branding[key];
+  }
+  // Added after the other fields. The web server and the control plane deploy
+  // separately, so a control plane that predates them omits them; that means
+  // "not configured", not an invalid response that discards the rest of the
+  // saved appearance.
+  for (const key of ['docsUrl', 'contactUrl'] as const) {
+    if (branding[key] !== undefined && typeof branding[key] !== 'string')
+      throw new SiteConfigError('Invalid application settings.');
+    env[SITE_CONFIG_ENV[key]] = (branding[key] as string | undefined) ?? '';
   }
   return parseRuntimeSiteConfig(env);
 }

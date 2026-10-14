@@ -15,17 +15,12 @@ because each decision writes its own outcome in the same commit.
 
 from __future__ import annotations
 
-import math
 import uuid
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
-from cloud_agent.goals.models import (
-    MAX_WAKEUP_ATTEMPTS,
-    WAKEUP_BACKOFF_MAX_S,
-    WAKEUP_BACKOFF_S,
-)
-from cloud_agent.settings import integer_setting, number_setting
+from cloud_agent.goals.models import WAKEUP_BACKOFF_MAX_S
+from cloud_agent.settings import number_setting
 
 if TYPE_CHECKING:
     import asyncpg
@@ -146,11 +141,18 @@ class PostgresGoalWakeupRepository:
                 acquired, thread_id, goal_id, revision, trigger, trigger_ref, waiting_job_id
             )
 
-    async def claim_wakeups(self, *, limit: int = 1) -> list[dict[str, Any]]:
-        """Lease up to ``limit`` due wakeups and return them.
+    async def claim_wakeups(
+        self, *, limit: int = 1, thread_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Lease up to ``limit`` due wakeups, oldest first, and return them.
 
-        A lease is short and the work under it is one decision against the
-        database, never a network call.
+        ``thread_id`` takes only that conversation's, which is what a finished
+        turn drains; ``None`` takes the deployment's, which is the reaper's
+        pass. The lease lasts two minutes. The decision under it commits in one
+        transaction, but its consumer may first ask the Gateway and GitHub
+        whether the owner and the repository still allow the work, so a lease
+        can be held across network calls. Each claim spends one attempt, which
+        stays spent only if the consumer backs off or its lease expires.
         """
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
@@ -164,6 +166,7 @@ class PostgresGoalWakeupRepository:
                       AND waiting_job_id IS NULL
                       AND not_before <= NOW()
                       AND (lease_expires_at IS NULL OR lease_expires_at < clock_timestamp())
+                      AND ($4::text IS NULL OR thread_id = $4)
                     ORDER BY created_at
                     LIMIT $3
                     FOR UPDATE SKIP LOCKED
@@ -173,6 +176,7 @@ class PostgresGoalWakeupRepository:
                 uuid.uuid4().hex,
                 120.0,
                 limit,
+                thread_id,
             )
         return [dict(row) for row in rows]
 
@@ -194,8 +198,13 @@ class PostgresGoalWakeupRepository:
         will clear ``waiting_job_id``. ``retry_in_seconds`` is for the other
         case — a temporary scheduling failure — and it defers the row's
         ``not_before`` rather than its lease, so a backoff and a dead worker's
-        expiry never look alike. ``lease_owner`` fences a consumer's write;
-        ``restore_attempt`` preserves scheduling retries during access-service outages.
+        expiry never look alike. ``lease_owner`` fences a consumer's write.
+
+        Only a backoff keeps the attempt its claim spent. A release without
+        ``retry_in_seconds`` gives it back, so a goal that waited behind its
+        owner's turns still has its retries for a real failure;
+        ``restore_attempt`` gives it back for a backoff that is not the
+        wakeup's failure either, such as an access-service outage.
         """
         if conn is not None:
             await _release_on(
@@ -303,6 +312,10 @@ async def _release_on(
         if retry_in_seconds is not None
         else None
     )
+    # ``attempts`` is what ``is_exhausted`` reads, and it counts failures: a
+    # claim spends one, and every release that is not a backoff — a park
+    # behind a turn, a yield, or a hand-back to be judged again — gives it back.
+    restore = restore_attempt or retry_in_seconds is None
     if lease_owner is not None and not await _lock_live_wakeup(conn, wakeup_id, lease_owner):
         return
     await conn.execute(
@@ -323,31 +336,10 @@ async def _release_on(
         detail,
         delay,
         lease_owner,
-        restore_attempt,
+        restore,
     )
-
-
-def wakeup_backoff(attempts: int) -> float:
-    """How long to wait before trying a failed wakeup again.
-
-    Doubling from a few seconds to the cap. The point is to stop a hot loop over
-    a database that is refusing writes, not to schedule anything precisely:
-    every wakeup that matters is also re-armed by the finish that unblocks it.
-    """
-    backoff = number_setting("goals.wakeup_backoff_seconds", WAKEUP_BACKOFF_S)
-    max_backoff = number_setting("goals.wakeup_backoff_max_seconds", WAKEUP_BACKOFF_MAX_S)
-    if attempts <= 1:
-        return min(backoff, max_backoff)
-    return min(backoff * math.pow(2, min(attempts - 1, 100)), max_backoff)
-
-
-def is_exhausted(attempts: int) -> bool:
-    """Whether a wakeup has failed often enough to stop retrying it."""
-    return attempts >= integer_setting("goals.max_wakeup_attempts", MAX_WAKEUP_ATTEMPTS)
 
 
 __all__ = [
     "PostgresGoalWakeupRepository",
-    "is_exhausted",
-    "wakeup_backoff",
 ]

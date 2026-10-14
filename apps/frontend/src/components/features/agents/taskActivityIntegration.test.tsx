@@ -277,8 +277,7 @@ describe('task and delegation activity in the conversation', () => {
           turnNo={1}
           attemptNo={1}
           onClose={() => {}}
-          stepKeyForEvent={() => undefined}
-          onSelectStep={() => {}}
+          onOpenSubagent={() => {}}
         />,
       );
       return screen.getByRole('region', { name: 'Subagents overview' });
@@ -373,8 +372,7 @@ describe('task and delegation activity in the conversation', () => {
           turnNo={1}
           attemptNo={1}
           onClose={() => {}}
-          stepKeyForEvent={() => undefined}
-          onSelectStep={() => {}}
+          onOpenSubagent={() => {}}
         />,
       );
       return screen.getByRole('region', { name: 'Subagents overview' });

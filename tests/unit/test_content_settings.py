@@ -19,11 +19,11 @@ from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api.deps import get_storage
 from cloud_agent.attachments.models import AttachmentError, AttachmentLimits
 from cloud_agent.attachments.selection import check_selection as check_attachments
+from cloud_agent.goals.retry_policy import is_exhausted, wakeup_backoff
 from cloud_agent.skills.imports import parse_skill_document
 from cloud_agent.skills.models import SkillContent, SkillError, SkillLimits
 from cloud_agent.skills.selection import check_selection as check_skills
 from cloud_agent.storage.repositories.attachments import PostgresAttachmentRepository
-from cloud_agent.storage.repositories.goal_wakeups import is_exhausted, wakeup_backoff
 from cloud_agent.storage.repositories.goals import PostgresGoalRepository
 from cloud_agent.storage.repositories.skills import PostgresSkillRepository
 
@@ -68,6 +68,9 @@ def test_upload_advertisement_and_selections_follow_saved_limits(saved_settings)
         "max_total_bytes": 8,
         "max_file_bytes": 4,
         "max_path_length": 512,
+        # A conversation's own bounds follow the host's import limit, not a setting.
+        "max_thread_files": 200,
+        "max_thread_bytes": 60 * 1024 * 1024,
     }
     check_attachments([{"size_bytes": 4}, {"size_bytes": 4}])
     with pytest.raises(AttachmentError, match="8 bytes"):

@@ -25,6 +25,9 @@ const api = vi.hoisted(() => ({
   params: '',
   user: 'alice',
 }));
+// The account menu loads the profile and has its own tests.
+vi.mock('./AccountMenu', () => ({ AccountMenu: () => <div data-testid="account-menu" /> }));
+
 vi.mock('next/navigation', () => ({
   usePathname: () => api.pathname,
   useSearchParams: () => new URLSearchParams(api.params),
@@ -65,6 +68,7 @@ import { useAgentJob } from './useAgentJobs';
 import { ArchivedTasksView } from './ArchivedTasksView';
 import { announceConversationRestored } from './conversationEvents';
 import { DEFAULT_PREFERENCES, sidebarPreferencesKey } from './sidebarPreferences';
+import { SIDEBAR_ACTIVITY_REFRESH_MS } from './sidebarRecordChanges';
 import {
   PUSH_BATCH_MS,
   receiveHint,
@@ -180,24 +184,17 @@ describe('sidebar navigation interactions', () => {
     expect(api.projects).toHaveBeenCalledTimes(1);
   });
 
-  it('shows one Setting link and highlights it on the integrations route', async () => {
+  it('leaves My Settings to the account menu and resolves no job on its route', async () => {
     const view = render(<AgentsSidebar />);
     await screen.findByText('Task a');
-    const setting = screen.getByRole('link', { name: 'My Settings' });
-    expect(screen.getAllByText('My Settings')).toHaveLength(1);
-    expect(setting).toHaveAttribute('href', '/integrations');
-    expect(setting).not.toHaveAttribute('aria-current');
+    expect(screen.getByTestId('account-menu')).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'My Settings' })).not.toBeInTheDocument();
     expect(screen.queryByRole('link', { name: /^Integrations?$/ })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /^Settings?$/ })).not.toBeInTheDocument();
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
 
     api.pathname = '/integrations';
     view.rerender(<AgentsSidebar />);
-    expect(screen.getByRole('link', { name: 'My Settings' })).toHaveAttribute(
-      'aria-current',
-      'page',
-    );
-    expect(screen.getAllByRole('link', { name: 'My Settings' })).toHaveLength(1);
+    expect(screen.getByTestId('account-menu')).toBeInTheDocument();
     expect(api.get).not.toHaveBeenCalled();
     expect(api.thread).not.toHaveBeenCalled();
   });
@@ -448,6 +445,45 @@ describe('sidebar navigation interactions', () => {
       );
     },
   );
+
+  it('reads the lists once per window while only a conversation’s activity moves', async () => {
+    render(<AgentsSidebar />);
+    await screen.findByText('Task a');
+    vi.useFakeTimers();
+    const thread = { id: 'thread-a', title: 'Task a', title_source: 'manual' as const };
+    await act(async () => {
+      receiveThreadChange({ ...thread, revision: 1, updated_at: '2026-10-14T10:00:00Z' });
+      receiveJobChange({ id: 'a', thread_id: 'thread-a', revision: 1, state: 'running' });
+      await vi.advanceTimersByTimeAsync(PUSH_BATCH_MS);
+    });
+    api.list.mockClear();
+    api.projects.mockClear();
+
+    // Each stored reply bumps the conversation; none of them relabels a row.
+    for (let revision = 2; revision <= 6; revision += 1) {
+      await act(async () => {
+        receiveThreadChange({ ...thread, revision, updated_at: `2026-10-14T10:00:0${revision}Z` });
+        receiveJobChange({ id: 'a', thread_id: 'thread-a', revision, state: 'running' });
+        await vi.advanceTimersByTimeAsync(PUSH_BATCH_MS);
+      });
+    }
+    expect(api.list).not.toHaveBeenCalled();
+    expect(api.projects).not.toHaveBeenCalled();
+
+    await act(async () => vi.advanceTimersByTimeAsync(SIDEBAR_ACTIVITY_REFRESH_MS));
+    expect(api.projects).toHaveBeenCalledOnce();
+    expect(api.list).toHaveBeenCalledTimes(2);
+
+    // A rename is read at once.
+    api.list.mockClear();
+    api.projects.mockClear();
+    await act(async () => {
+      receiveThreadChange({ ...thread, revision: 7, title: 'Renamed' });
+      await vi.advanceTimersByTimeAsync(PUSH_BATCH_MS);
+    });
+    expect(api.projects).toHaveBeenCalledOnce();
+    expect(api.list).toHaveBeenCalledTimes(2);
+  });
 
   it('refreshes a delayed automatic title after the conversation is idle', async () => {
     localStorage.setItem(

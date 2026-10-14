@@ -210,7 +210,9 @@ function stepTime(value: string): string {
 }
 
 /** The repository's own name; the owner is the same for nearly every row. */
-function repoName(repo: string): string {
+function repoName(repo: string | null): string {
+  // A temporary workspace has no repository.
+  if (repo === null) return 'Start from scratch';
   return repo.split('/').pop() || repo;
 }
 
@@ -299,7 +301,7 @@ function StepsTable({ page, turns }: { page: AdminStepsPage; turns: Map<string, 
                       <TurnLink turn={turn} />
                       <span
                         className="min-w-0 truncate text-xs text-gray-400 dark:text-gray-500"
-                        title={turn.repo}
+                        title={turn.repo ?? 'Start from scratch'}
                       >
                         {repoName(turn.repo)}
                       </span>

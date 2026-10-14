@@ -15,11 +15,11 @@ from cloud_agent.entitlement import (
     RepoNotAllowed,
     allowed_repos,
     repo_is_allowed,
-    require_allowed_repo,
+    require_entitled_repo,
 )
 
 
-def test_an_unconfigured_deployment_allows_nothing():
+async def test_an_unconfigured_deployment_allows_nothing():
     """Unset must mean "no repositories", not "every repository".
 
     This is the whole posture: a deployment nobody configured has to refuse
@@ -28,8 +28,15 @@ def test_an_unconfigured_deployment_allows_nothing():
     """
     assert allowed_repos({}) == []
     assert repo_is_allowed("owner/name", {}) is False
-    with pytest.raises(RepoNotAllowed, match="not configured"):
-        require_allowed_repo("owner/name", {})
+    with pytest.raises(RepoNotAllowed, match="allowlist"):
+        await require_entitled_repo("owner/name", "user_1", env={})
+
+
+async def test_the_allowlist_entitles_every_admitted_user_without_a_connection():
+    """Not per user: anyone admitted may have the platform work on a listed repo."""
+    env = {"AGENT_REPO_ALLOWLIST": "owner/*"}
+    for user_id in ("user_1", "user_2"):
+        await require_entitled_repo("owner/name", user_id, env=env)
 
 
 def test_an_exact_entry_is_allowed_and_its_neighbours_are_not():
@@ -67,12 +74,12 @@ def test_an_owner_wildcard_covers_that_owner_only():
         "",
     ],
 )
-def test_a_malformed_repo_is_refused_whatever_the_allowlist_says(repo: str):
+async def test_a_malformed_repo_is_refused_whatever_the_allowlist_says(repo: str):
     """The value is interpolated into a clone URL and handed to git."""
     env = {"AGENT_REPO_ALLOWLIST": f"{repo},owner/name"}
     assert repo_is_allowed(repo, env) is False
     with pytest.raises(RepoNotAllowed):
-        require_allowed_repo(repo, env)
+        await require_entitled_repo(repo, "user_1", env=env)
 
 
 def test_a_list_is_read_with_whitespace_and_blanks_tolerated():

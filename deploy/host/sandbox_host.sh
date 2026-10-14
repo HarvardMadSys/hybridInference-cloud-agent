@@ -381,6 +381,23 @@ validate_retained_config() {
       "$default_pin is a source-level shared protocol pin, not a host override. Remove it and put ${default_pin%_VERSION}_EXTRA_VERSIONS=$configured_pin in this host's configuration, then select that version in Admin; or update the Dockerfile and SHARED_SANDBOX_RUNTIME_PINS together in a reviewed change."
   done
 
+  # Every menu entry is an exact version. npm reads a partial one such as `2.1`
+  # as a range, so the image would label whatever the build resolved with the
+  # partial string, and a rebuild could put a different binary under the same
+  # label. install-runtimes.sh refuses it as well; this refuses it before the
+  # image build starts.
+  local menu entry
+  local -a entries
+  for menu in CLAUDE_CODE_EXTRA_VERSIONS CODEX_EXTRA_VERSIONS PI_EXTRA_VERSIONS \
+              OPENCODE_EXTRA_VERSIONS KILO_EXTRA_VERSIONS; do
+    [[ -n "${!menu}" ]] || continue
+    IFS=',' read -r -a entries <<<"${!menu}"
+    for entry in "${entries[@]}"; do
+      [[ "$entry" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || die \
+        "$menu entry '$entry' is not an exact version (MAJOR.MINOR.PATCH, optionally -PRERELEASE); a partial version, a range or a dist-tag would make the image's version label describe whatever npm resolved."
+    done
+  done
+
   # One spelling, checked once. The runner normalises this value too, and its
   # own vocabulary is wider than the script's; a value only one side recognises
   # is how a rollout log comes to say "storage verified" for a host whose page
@@ -803,7 +820,7 @@ storage_host_helper() {
   # rejects the whole `--mount` with "use bind-recursive=disabled instead" and
   # exits 125. Trying to reach older hosts with the old key therefore breaks
   # every host that is not old, which is all of them; this deployment needs
-  # Docker 25 or newer for the helper path, and `docs/operations.md` says so.
+  # Docker 25 or newer for the helper path, and `docs/developer/operations.md` says so.
   # A host below that gets `unverified` and a warning quoting the CLI's own
   # complaint, which is the honest outcome. Nothing here requires root: the
   # helper opens its two binds with `O_PATH`, which needs no permission on the

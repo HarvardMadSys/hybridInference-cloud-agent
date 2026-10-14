@@ -302,6 +302,21 @@ HOST_SETTINGS: tuple[HostSetting, ...] = (
         scope="sandbox_manager",
     ),
     HostSetting(
+        key="workspace_download_max_mib",
+        env="AGENT_WORKSPACE_DOWNLOAD_MAX_MIB",
+        label="Workspace download size limit",
+        description=(
+            "Largest workspace a person may download as one archive, measured before "
+            "compression. A larger workspace is refused rather than sent in part. "
+            "Applies to new requests."
+        ),
+        unit="MiB",
+        default=1024,
+        minimum=1,
+        maximum=16384,
+        scope="sandbox_manager",
+    ),
+    HostSetting(
         key="terminal_buffer_max_mib",
         env="AGENT_TERMINAL_BUFFER_MAX_MIB",
         label="Terminal output buffer size",

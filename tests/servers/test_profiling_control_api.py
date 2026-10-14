@@ -13,13 +13,17 @@ application served in-process.
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from cloud_agent import profiling_control_config
 from cloud_agent.api import admin_profiling_control, host_profiling
 from cloud_agent.application.profiling_control import ProfilingControlService
 from cloud_agent.domain.profiling_control import (
@@ -29,11 +33,9 @@ from cloud_agent.domain.profiling_control import (
     CONTROL_REFUSED_ALREADY_ACTIVE,
     CONTROL_REFUSED_ALREADY_FINISHED,
     CONTROL_REFUSED_STALE_REVISION,
-    ControlCommandResult,
-)
-from cloud_agent.storage.repositories.profiling_control import (
     LIFECYCLE_PENDING,
     LIFECYCLE_STOPPED,
+    ControlCommandResult,
 )
 from cloud_agent_shared import operation_profiling
 
@@ -65,6 +67,9 @@ class _FakeControl:
         self.runs: dict[str, dict[str, Any]] = {}
         self.commands: dict[tuple[str, str], dict[str, Any]] = {}
         self.stored = 0
+        #: How often the stored samples were counted, which only the Admin
+        #: card may pay for.
+        self.counted = 0
 
     async def get_control_state(self, *, deployment: str) -> dict[str, Any] | None:
         """Return the control row, if this deployment has one."""
@@ -208,6 +213,7 @@ class _FakeControl:
 
     async def count_stored_measurements(self, *, run_id: str) -> int:
         """Return how many samples this experiment stored."""
+        self.counted += 1
         return self.stored
 
     async def mark_run_lifecycle(self, **kwargs: Any) -> None:
@@ -294,6 +300,33 @@ def test_default_control_is_available_but_collection_is_disabled(monkeypatch) ->
     assert control["run"] is None
     assert control["run_active"] is False
     assert control["stored_samples"] == 0
+
+
+def test_a_malformed_deployment_name_falls_back_and_says_so(monkeypatch, caplog) -> None:
+    """A typo must not quietly merge two deployments' control namespaces.
+
+    Regression: a name that failed the pattern fell back to ``default`` without
+    a word, so a stack configured as ``staging/eu`` commanded -- and could stop
+    -- the experiment of whichever deployment really is ``default``.
+    """
+    monkeypatch.setenv("AGENT_OPERATION_PROFILING_DEPLOYMENT", "staging/eu")
+    # Forget an earlier test's report of the same value: the warning is once
+    # per value per process.
+    monkeypatch.setattr(profiling_control_config, "_REPORTED_REFUSAL", None, raising=False)
+    caplog.set_level(logging.WARNING, logger=profiling_control_config.__name__)
+    with _client(_FakeStorage()) as client:
+        for _ in range(3):
+            response = client.get("/admin/agent/profiling-control")
+            assert response.status_code == 200
+            assert response.json()["deployment"] == "default"
+    refusals = [
+        record.getMessage()
+        for record in caplog.records
+        if "is not a usable deployment name" in record.getMessage()
+    ]
+    # Once, not on every read that asks for the name, and naming both.
+    assert len(refusals) == 1
+    assert "'staging/eu'" in refusals[0] and "'default'" in refusals[0]
 
 
 def test_a_start_creates_the_experiment_and_reports_it() -> None:
@@ -494,6 +527,50 @@ def test_stop_is_idempotent_and_states_what_it_stopped() -> None:
     assert all(e["success"] is True for e in stops)
 
 
+def test_an_accepted_start_or_stop_wakes_this_processs_policy_loop() -> None:
+    """The process that took the command applies it now, not at its next poll.
+
+    The loop's ``wake`` had no caller: a Start waited out the 30-second idle
+    interval even on the process that wrote it. A refused command changed
+    nothing, so it wakes nothing.
+    """
+    storage = _FakeStorage()
+    app = _control_app(storage)
+    worker = SimpleNamespace(wake=Mock())
+    app.state.profiling_policy_worker = worker
+    with TestClient(app, headers=ADMIN) as client:
+        refused = client.post(
+            "/admin/agent/profiling-runs",
+            json={
+                "request_id": "req-0",
+                "expected_revision": 7,
+                "operations": ["files.open"],
+                "target": {},
+                "duration_seconds": 600,
+            },
+        )
+        assert refused.status_code == 409, refused.text
+        worker.wake.assert_not_called()
+        started = client.post(
+            "/admin/agent/profiling-runs",
+            json={
+                "request_id": "req-1",
+                "expected_revision": 0,
+                "operations": ["files.open"],
+                "target": {},
+                "duration_seconds": 600,
+            },
+        )
+        assert started.status_code == 201, started.text
+        assert worker.wake.call_count == 1
+        stopped = client.post(
+            f"/admin/agent/profiling-runs/{started.json()['run_id']}/stop",
+            json={"request_id": "stop-1"},
+        )
+        assert stopped.status_code == 200, stopped.text
+    assert worker.wake.call_count == 2
+
+
 def test_a_retried_stop_of_an_old_experiment_leaves_the_new_one_running() -> None:
     """Start A, stop A, start B, retry A's Stop: a replay, and B keeps running."""
     storage = _FakeStorage()
@@ -660,6 +737,28 @@ def test_a_host_is_told_the_configuration_in_force() -> None:
     # lease is issued: the experiment's own deadline is the bound.
     assert "lease" not in policy
     assert "applied" not in answer.text
+
+
+def test_a_host_poll_never_counts_the_runs_samples() -> None:
+    """Every runner polls every five seconds while a run is in force.
+
+    Regression: the route answered from the Admin card's snapshot, which counts
+    every measurement the run has stored -- a scan that grows for as long as a
+    continuous run is on, run once per host per poll, on a path with a
+    two-second budget that is also how a Stop reaches the host.
+    """
+    storage = _FakeStorage()
+    service = ProfilingControlService(
+        control=storage.profiling_control, deployment="test", host_pool=storage.host_pool
+    )
+    started = _run_sync(service.start, service, now=datetime.now(UTC))
+
+    with TestClient(_host_app(storage, None)) as client:
+        for _ in range(3):
+            answer = client.post("/v1/agent/hosts/profiling-policy", json={"host": HOST})
+            assert answer.status_code == 200, answer.text
+            assert answer.json()["run"]["run_id"] == started.run_id
+    assert storage.profiling_control.counted == 0
 
 
 def test_the_configuration_exchange_records_nothing_about_the_host() -> None:

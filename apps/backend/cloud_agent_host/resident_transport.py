@@ -207,8 +207,14 @@ class ResidentTurn(Generic[_RuntimeT_co]):
 
     def lines(self) -> Iterator[HarnessEvent]:
         """Yield normalized driver events through the exact turn boundary."""
-        for line in self._turn.raw_lines():
-            yield from self._turn.events_for_line(line)
+        try:
+            for line in self._turn.raw_lines():
+                yield from self._turn.events_for_line(line)
+        except Exception:
+            # A stream that breaks before its boundary still reports what the
+            # driver had gathered from it, ahead of the failure.
+            yield from self._turn.flush_events()
+            raise
 
     def wait(self) -> TurnResult:
         """Return the settled result while leaving a healthy transport alive."""

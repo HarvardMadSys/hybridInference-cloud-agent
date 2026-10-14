@@ -261,17 +261,23 @@ async def _revoke_dead_grants(store: GrantRepository, grants: Any) -> None:
             )
 
 
-async def _abandon_unrenewable_attempt(store: AttemptCommands, row: dict[str, Any]) -> None:
-    """Stop an attempt whose grant the gateway will not renew.
+async def _abandon_unrenewable_attempt(store: AttemptCommands, row: dict[str, Any]) -> bool:
+    """Hand back an attempt whose grant the gateway will not renew, if it never started.
 
-    **Giving up has to be something the attempt notices.** Simply stopping the
-    renewal calls would leave the sandbox running until its capability expired
-    and then failing at a model call, with the cause several minutes and one
-    process away. Releasing the claim is the same answer the claim path already
-    gives when a grant cannot be minted at all: the attempt is aborted, the
-    worker's next heartbeat says ``ok: False`` — stop immediately — and the job
-    goes back to the queue **without spending a retry**, where the next claim
-    asks for a fresh grant rather than nursing a dead one.
+    Releasing the claim is the same answer the claim path already gives when a
+    grant cannot be minted at all: the attempt is aborted, the worker's next
+    heartbeat says ``ok: False`` — stop immediately — and the job goes back to
+    the queue **without spending a retry**, where the next claim asks for a
+    fresh grant rather than nursing a dead one.
+
+    **Only a turn that never started can be handed back.** ``release_claim``
+    refuses once the turn's prompt has been admitted to its CLI, because a
+    replayed admitted turn runs the same instruction twice, and by the time
+    the refusals have been counted the turn usually has been admitted. An
+    admitted turn is left to finish: its member process does not spend this
+    grant but the residency's own credential, which its host's heartbeat
+    renews and which is revoked with the residency. The caller stops renewing
+    this grant instead.
 
     Nothing revokes the grant here. The release makes the attempt non-current,
     which is exactly what ``take_revocable_grants`` selects, so the revocation
@@ -282,6 +288,9 @@ async def _abandon_unrenewable_attempt(store: AttemptCommands, row: dict[str, An
     Args:
         store: The agent store.
         row: A ``list_renewable_grants`` row, carrying the attempt's fence.
+
+    Returns:
+        Whether the attempt was handed back to the queue.
     """
     released = await store.release_claim(
         job_id=row["job_id"],
@@ -297,6 +306,7 @@ async def _abandon_unrenewable_attempt(store: AttemptCommands, row: dict[str, An
             "requeued": released,
         },
     )
+    return released
 
 
 async def _renew_live_grants(
@@ -315,9 +325,10 @@ async def _renew_live_grants(
     A failed renewal is retried on the next pass — one bad minute at the
     gateway must not end a job — but a *definitively refused* one is not
     retried forever. After :data:`GRANT_RENEWAL_GIVE_UP_AFTER` consecutive
-    definitive refusals of the same grant the attempt is abandoned rather than
-    left running toward a capability that is about to expire; see
-    :func:`_abandon_unrenewable_attempt`.
+    definitive refusals the grant is given up on and not asked about again: an
+    attempt whose turn never started is handed back to the queue, and an
+    admitted turn, which runs on its residency's credential rather than on this
+    grant, is left to finish; see :func:`_abandon_unrenewable_attempt`.
 
     **Only a refusal that names this grant counts toward that** — see
     :data:`DEAD_GRANT_REFUSALS`. An unreachable gateway, a rotated dispatch
@@ -334,8 +345,9 @@ async def _renew_live_grants(
         store: The agent store.
         grants: The grant client.
         failures: Consecutive definitive refusals per grant id, owned by the
-            caller so it survives between passes. Pruned here to the grants
-            still live, so a finished job leaves nothing behind.
+            caller so it survives between passes. A count at the give-up
+            threshold marks a grant that was given up on. Pruned here to the
+            grants still live, so a finished job leaves nothing behind.
     """
     seen: set[str] = set()
     renewed: list[str] = []
@@ -353,6 +365,12 @@ async def _renew_live_grants(
     async def _renew_one(row: dict[str, Any]) -> None:
         grant_id = row["grant_id"]
         seen.add(grant_id)
+        if failures.get(grant_id, 0) >= GRANT_RENEWAL_GIVE_UP_AFTER:
+            # Given up on, and its turn could not be handed back: it had been
+            # admitted. The gateway has said this grant is dead, so asking again
+            # would only repeat the refusal -- and, with a count started over,
+            # the futile give-up -- for as long as the turn runs.
+            return
         try:
             await grants.renew(grant_id)
         except Exception as exc:
@@ -377,18 +395,26 @@ async def _renew_live_grants(
             )
             if definitive and refusals >= GRANT_RENEWAL_GIVE_UP_AFTER:
                 try:
-                    await _abandon_unrenewable_attempt(store.attempt_commands, row)
+                    released = await _abandon_unrenewable_attempt(store.attempt_commands, row)
+                except asyncio.CancelledError:
+                    # The pass deadline cut the release short; see below.
+                    failures[grant_id] = GRANT_RENEWAL_GIVE_UP_AFTER - 1
+                    raise
                 except Exception:
-                    # Leave the count at or above the threshold, so the next
-                    # pass that is again definitively refused retries the
-                    # release rather than resuming renewals this one has
-                    # already decided are hopeless. A pass that merely cannot
-                    # reach the gateway retries neither: releasing an attempt
-                    # requires the gateway too, and there is nothing to gain by
-                    # asking a second time in the same outage.
+                    # The give-up did not happen, so the count must not say it
+                    # did. One short of the threshold, the next pass asks once
+                    # more and a definitive refusal retries the release at once,
+                    # rather than after a whole new run of refusals. A pass that
+                    # merely cannot reach the gateway retries neither: there is
+                    # nothing to gain by asking a second time in the same outage.
+                    failures[grant_id] = GRANT_RENEWAL_GIVE_UP_AFTER - 1
                     logger.warning("Abandoning an unrenewable attempt failed", exc_info=True)
                 else:
-                    seen.discard(grant_id)
+                    if released:
+                        # No longer current, so never listed again: its count
+                        # goes with it. An admitted turn keeps its count at the
+                        # threshold, which is what stops the asking above.
+                        seen.discard(grant_id)
             return
         # Consecutive, not cumulative: one refused pass followed by a good one
         # is a gateway blip, and must not accumulate toward a give-up over the
@@ -542,6 +568,44 @@ async def _cleanup_reaped_shared_residencies(
                 await grants.revoke(grant_id)
 
 
+async def _cleanup_failed_session_fork(
+    store: HostPoolRepository, operation: dict[str, Any], grants: Any | None
+) -> None:
+    """Fence the member processes and grants one failed Fork left behind.
+
+    The store failed the operation and closed these residencies in its own
+    commit, and it never returns that operation again, so this is the only
+    cleanup it gets. A sandbox manager that cannot be resolved or reached still leaves
+    the revocations to run: a later host heartbeat is told the residency was
+    lost and stops its process, but nothing else would end its grant early.
+    """
+    from cloud_agent.sandbox_manager_routing import sandbox_manager_for_job
+
+    sandbox_manager = None
+    try:
+        sandbox_manager = await sandbox_manager_for_job(store, operation["source_job_id"])
+    except Exception:
+        logger.warning(
+            "agent_session_fork_cleanup_sandbox_manager_unavailable",
+            extra={
+                "event": "agent_session_fork_cleanup_sandbox_manager_unavailable",
+                "operation_id": operation.get("id"),
+            },
+            exc_info=True,
+        )
+    for residency in operation.get("cleanup_residencies") or []:
+        if sandbox_manager is not None:
+            with contextlib.suppress(Exception):
+                await sandbox_manager.shared_residency_lost(
+                    str(residency["thread_id"]),
+                    generation=int(residency["generation"]),
+                )
+        grant_id = residency.get("grant_id")
+        if grant_id and grants is not None:
+            with contextlib.suppress(Exception):
+                await grants.revoke(grant_id)
+
+
 async def _run_attempt_reaper(
     store: _Reaping,
     *,
@@ -573,10 +637,6 @@ async def _run_attempt_reaper(
             without one, a message naming either waits for a settlement that
             can check it.
     """
-    try:
-        await _reconcile_settled_terminals(store)
-    except Exception:
-        logger.warning("Initial settled terminal reconciliation failed", exc_info=True)
     # Consecutive renewal refusals, per grant. Held by the loop rather than by
     # the module, so two reapers (a test's and a running app's) cannot count
     # each other's failures toward a give-up — and so a restart forgets, which
@@ -614,10 +674,11 @@ async def _run_attempt_reaper(
             await store.attempt_commands.sweep_queued_follow_ups()
         except Exception:
             logger.warning("Queued follow-up sweep failed", exc_info=True)
-        # Goal wakeups before the attempt pass. The obligation is written in the
-        # same transaction as the terminal transition, and it is normally
-        # drained synchronously by the finish that armed it — this pass exists
-        # for a process that died between the two. The sweep after it is the
+        # Goal wakeups before the attempt pass, every conversation's. A finish
+        # writes its obligation in the same transaction as the terminal
+        # transition and drains its own conversation's synchronously; this pass
+        # takes what an owner's write armed, and what a process that died
+        # between a finish and its drain left behind. The sweep after it is the
         # backstop for a *missing* obligation, and the only thing that pauses a
         # goal: every ordinary way an active goal stops being able to continue
         # says so where and when it happens.
@@ -654,12 +715,17 @@ async def _run_attempt_reaper(
                 )
             )
             await _cleanup_reaped_shared_residencies(store.host_pool, actions, grants)
-            await _reconcile_settled_terminals(store)
             if actions:
                 logger.info(
                     "agent_attempts_reaped",
                     extra={"event": "agent_attempts_reaped", "count": len(actions)},
                 )
+        except Exception:
+            logger.warning("Agent attempt reaper pass failed", exc_info=True)
+        # Stalled captures, publishes and Forks each in a try of their own: they
+        # recover different workspaces, so one that fails on every pass must
+        # not stop the others -- or the attempt pass above -- from running.
+        try:
             stalled_captures = await store.snapshot.reap_stalled_sandbox_snapshot_captures()
             if stalled_captures:
                 logger.warning(
@@ -669,6 +735,9 @@ async def _run_attempt_reaper(
                         "snapshot_ids": stalled_captures,
                     },
                 )
+        except Exception:
+            logger.warning("Stalled snapshot capture reaper pass failed", exc_info=True)
+        try:
             stalled_snapshot_publishes = await store.snapshot.reap_stalled_snapshot_publishes()
             if stalled_snapshot_publishes:
                 logger.warning(
@@ -678,34 +747,36 @@ async def _run_attempt_reaper(
                         "snapshot_ids": stalled_snapshot_publishes,
                     },
                 )
+        except Exception:
+            logger.warning("Stalled snapshot publish reaper pass failed", exc_info=True)
+        try:
             stalled_session_forks = await store.session_fork.reap_stalled_session_forks()
             if stalled_session_forks:
-                from cloud_agent.sandbox_manager_routing import sandbox_manager_for_job
-
                 recovered: list[str] = []
                 cleaned: list[str] = []
                 for operation in stalled_session_forks:
                     operation_id = str(operation["id"])
-                    if operation.get("recovery_action") == "finalize":
-                        if await store.session_fork.finalize_session_fork(
-                            operation_id=operation_id
-                        ):
-                            recovered.append(operation_id)
+                    # Each operation in a try of its own. The failed ones are
+                    # never returned again, so an error on one must not leave
+                    # the processes and grants of the ones after it running.
+                    try:
+                        if operation.get("recovery_action") == "finalize":
+                            if await store.session_fork.finalize_session_fork(
+                                operation_id=operation_id
+                            ):
+                                recovered.append(operation_id)
+                            continue
+                        await _cleanup_failed_session_fork(store.host_pool, operation, grants)
+                    except Exception:
+                        logger.warning(
+                            "agent_session_fork_reconcile_failed",
+                            extra={
+                                "event": "agent_session_fork_reconcile_failed",
+                                "operation_id": operation_id,
+                            },
+                            exc_info=True,
+                        )
                         continue
-                    sandbox_manager = await sandbox_manager_for_job(
-                        store.host_pool, operation["source_job_id"]
-                    )
-                    for residency in operation.get("cleanup_residencies") or []:
-                        if sandbox_manager is not None:
-                            with contextlib.suppress(Exception):
-                                await sandbox_manager.shared_residency_lost(
-                                    str(residency["thread_id"]),
-                                    generation=int(residency["generation"]),
-                                )
-                        grant_id = residency.get("grant_id")
-                        if grant_id and grants is not None:
-                            with contextlib.suppress(Exception):
-                                await grants.revoke(grant_id)
                     cleaned.append(operation_id)
                 logger.warning(
                     "agent_session_forks_reconciled",
@@ -716,7 +787,7 @@ async def _run_attempt_reaper(
                     },
                 )
         except Exception:
-            logger.warning("Agent attempt reaper pass failed", exc_info=True)
+            logger.warning("Stalled Fork reaper pass failed", exc_info=True)
         # Abandoned staged uploads count against staging quota until collected.
         # Pending-message and job-claimed rows are kept by the repository
         # predicate. Own try: a failure here must not skip later reaping.
@@ -764,6 +835,25 @@ async def _recover_send_now_handoffs(store: _Reaping, *, interval_seconds: float
         await asyncio.sleep(interval_seconds)
 
 
+async def _replay_settled_terminals(store: _SettledTerminals, *, interval_seconds: float) -> None:
+    """Replay settled-terminal markers without delaying attempt or grant safety passes.
+
+    Every marker is a round trip to the sandbox manager of the host that ran its turn,
+    and a marker stays set until that sandbox manager confirms. A host that stopped
+    answering therefore costs each of its markers a full request timeout on
+    every pass, and the turns the reaper ends because their host died are
+    among the ones that leave markers behind. Inside the reaper's pass that
+    wait held up lease reaping, goal scheduling, queue settlement and grant
+    renewal for the whole pool.
+    """
+    while True:
+        try:
+            await _reconcile_settled_terminals(store)
+        except Exception:
+            logger.warning("Settled terminal reconciliation pass failed", exc_info=True)
+        await asyncio.sleep(interval_seconds)
+
+
 async def reap_expired_attempts(
     store: _Reaping,
     *,
@@ -775,11 +865,19 @@ async def reap_expired_attempts(
 ) -> None:
     """Run attempt maintenance alongside independently bounded handoff recovery.
 
-    The owned recovery task runs once at startup and then on the same cadence,
-    but a slow host sandbox manager cannot hold up attempt reaping, queue settlement, or
-    grant revocation and renewal. Cancelling this worker also cancels and joins
-    the recovery task, including any sandbox manager calls it currently owns.
+    Send-now handoff recovery and settled-terminal replay each run in an owned
+    task, once at startup and then on the same cadence, so a slow host sandbox
+    manager cannot hold up attempt reaping, queue settlement, or grant
+    revocation and renewal. Cancelling this worker also cancels and joins both
+    tasks, including any sandbox manager calls they currently own.
     """
+    # Created first, so a restarted control plane still replays settled
+    # terminals before anything else, as it did when that replay ran ahead of
+    # the first pass.
+    terminals = asyncio.create_task(
+        _replay_settled_terminals(store, interval_seconds=interval_seconds),
+        name="agent-settled-terminal-replay",
+    )
     recovery = asyncio.create_task(
         _recover_send_now_handoffs(store, interval_seconds=interval_seconds),
         name="agent-send-now-recovery",
@@ -795,4 +893,5 @@ async def reap_expired_attempts(
         )
     finally:
         recovery.cancel()
-        await asyncio.gather(recovery, return_exceptions=True)
+        terminals.cancel()
+        await asyncio.gather(recovery, terminals, return_exceptions=True)

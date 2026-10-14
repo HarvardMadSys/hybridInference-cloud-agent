@@ -200,7 +200,11 @@ export function AddWorkspace({
                 ))}
               {config && (!config.github_connected || !matches.length) && (
                 <p className="px-2 py-3 text-gray-500 dark:text-gray-400">
-                  {t(!config.github_connected ? 'composer.connectToRun' : 'sidebar.noRepositories')}
+                  {t(
+                    !config.github_connected
+                      ? 'temporaryWorkspace.connect'
+                      : 'sidebar.noRepositories',
+                  )}
                 </p>
               )}
             </div>

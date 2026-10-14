@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from cloud_agent.session_statistics import summarize_session_statistics
 from cloud_agent.thread_stats import summarize_thread
 
 _T0 = datetime(2026, 8, 19, 12, 0, 0, tzinfo=timezone.utc)
@@ -408,6 +409,72 @@ def test_multiple_turns_aggregate_across_the_thread() -> None:
     assert stats.failed_tool_calls == 1
     assert stats.tool_seconds == 5.0  # 2s in turn 1, 3s in turn 2
     assert stats.wall_seconds == 7.0  # 4s in turn 1, 3s in turn 2
+
+
+def test_the_wait_before_a_retry_is_not_model_time() -> None:
+    """A retried turn is two executions, and the wait between them is neither.
+
+    Regression: the wall span ran from the first attempt's first event to the
+    retry's last, so ten minutes of queueing and backoff were charged to the
+    model -- 611 s of model time and 0.33 tok/s here, where the run detail's
+    session statistics, which time each execution, said 21 s and 18.2 tok/s.
+    """
+    events = [
+        _event(seq=1, event_type="thinking", offset=0),
+        _event(seq=2, event_type="error", payload={"message": "lost"}, offset=10),
+        _event(seq=1, attempt_id=2, event_type="thinking", offset=600),
+        _event(
+            seq=2,
+            attempt_id=2,
+            event_type="message",
+            payload={"has_text": True, "usage": {"output_tokens": 200}},
+            offset=611,
+        ),
+    ]
+    stats = summarize_thread(job_ids=["job-1"], attempts=[_attempt()], events=events)
+
+    assert stats.wall_seconds == 21.0  # 10 s + 11 s, not 611 s
+    assert stats.model_seconds == 21.0
+    # The retry's 200 tokens over its own 11 s: the first attempt reported no
+    # count, so its time is not divided into another attempt's tokens.
+    assert stats.output_tokens_per_second == pytest.approx(200 / 11)
+
+    # The owner's stats bar and the run detail now say the same thing.
+    session = summarize_session_statistics(
+        job_ids=["job-1"],
+        attempts=[{**_attempt(), "attempt_id": 1}, {**_attempt(offset=598), "attempt_id": 2}],
+        events=events,
+    )
+    assert session.model_seconds == stats.model_seconds
+    assert session.output_tokens_per_second == pytest.approx(stats.output_tokens_per_second)
+
+
+def test_a_retry_cannot_finish_the_previous_attempts_tool_call() -> None:
+    """Tool-call ids restart with each process, so a call pairs within its attempt.
+
+    Regression: a call the first attempt never finished paired with the retry's
+    result for the same id, making a ten-minute tool window out of the gap.
+    """
+    stats = summarize_thread(
+        job_ids=["job-1"],
+        attempts=[_attempt()],
+        events=[
+            _event(seq=1, event_type="tool_use", payload={"id": "item_1"}, offset=1),
+            _event(seq=2, event_type="error", offset=10),
+            _event(
+                seq=1,
+                attempt_id=2,
+                event_type="tool_result",
+                payload={"tool_use_id": "item_1"},
+                offset=601,
+            ),
+            _event(seq=2, attempt_id=2, event_type="message", payload={"text": "ok"}, offset=611),
+        ],
+    )
+
+    assert stats.tool_seconds == 0.0
+    assert stats.wall_seconds == 19.0  # 9 s + 10 s
+    assert stats.model_seconds == 19.0
 
 
 def test_empty_thread_is_all_zero_and_never_raises() -> None:

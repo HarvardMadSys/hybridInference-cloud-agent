@@ -24,8 +24,7 @@ function Harness({ visible = true, bottom = 100 }: { visible?: boolean; bottom?:
           turnNo={1}
           attemptNo={1}
           onClose={vi.fn()}
-          stepKeyForEvent={() => undefined}
-          onSelectStep={vi.fn()}
+          onOpenSubagent={vi.fn()}
         />
       )}
     </FloatingActivityWindow>

@@ -367,6 +367,49 @@ async def test_host_moves_to_a_staged_replacement_and_the_old_node_is_released(
     assert target["release_committed_at"] is None
 
 
+async def test_a_move_after_an_observation_reaches_each_node_by_its_pinned_key(
+    db, store, hosts, monkeypatch
+):
+    """Observations never carry the key a node registered, so they must not drop it."""
+    r = await rig(store, hosts, monkeypatch)
+    source, _ = await ready_slot(r, db)
+    unpinned = []
+
+    def check(effect, *nodes):
+        for node in nodes:
+            if not (node.connection and node.connection.host_key == HOST_KEY):
+                unpinned.append((effect, node.display_name))
+
+    for effect in ("deploy", "readiness", "inventory", "stage", "stop", "wipe"):
+
+        async def checked(node, *args, _effect=effect, _original=getattr(r.nodes, effect), **kw):
+            check(_effect, node)
+            return await _original(node, *args, **kw)
+
+        monkeypatch.setattr(r.nodes, effect, checked)
+    original_transfer = r.nodes.transfer
+
+    async def transfer(source_node, target_node, *args, **kwargs):
+        check("transfer", source_node, target_node)
+        return await original_transfer(source_node, target_node, *args, **kwargs)
+
+    monkeypatch.setattr(r.nodes, "transfer", transfer)
+    # The scheduler observes every server periodically; observe the source once.
+    await r.commands.queue_inspection(source, request_key="observe-source")
+    await run_all(r, db)
+    source = await r.repo.get_allocation(r.allocation_id)
+    await r.commands.rotate(
+        r.allocation_id,
+        RotateComputeRequest(request_id="move-now", expected_revision=source["revision"]),
+        actor="admin",
+    )
+    await run_all(r, db)
+    rotation = await rotation_of(r, r.allocation_id)
+    assert rotation["state"] == "succeeded", rotation
+    assert unpinned == []
+    assert ("inventory", "first-node") in r.nodes.calls
+
+
 async def test_autoscaling_ownership_blocks_rotation_even_with_a_compatible_spare(
     db, store, hosts, monkeypatch
 ):

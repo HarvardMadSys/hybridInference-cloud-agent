@@ -12,6 +12,47 @@ import hmac
 import json
 from typing import Any
 
+#: The top-level fields whose value, null included, has always been part of a
+#: fingerprint: a create's and a thread message's own fields, plus the thread a
+#: message is for. Fingerprints already stored against live keys hash these, so
+#: they stay exactly as they are. Frozen on purpose — a field added to either
+#: request later is not listed here, and is therefore left out while unset.
+#: Top-level only: a field added inside a nested value (``goal``, an
+#: ``mcp_bindings`` entry) still changes the hash of a request carrying one,
+#: and dropping nested nulls instead would change every hash stored with them.
+_HISTORICAL_FIELDS = frozenset(
+    {
+        "attachment_ids",
+        "base_ref",
+        "base_sha",
+        "goal",
+        "mcp_bindings",
+        "metadata",
+        "model",
+        "prompt",
+        "reasoning_effort",
+        "repo",
+        "runtime",
+        "setup_script",
+        "task_prompt",
+        "thread_id",
+    }
+)
+
+#: Later fields whose omitted value is ``False`` rather than null.
+_FALSE_WHEN_OMITTED = frozenset({"require_idle"})
+#: Later fields whose omitted value is an empty list rather than null.
+_EMPTY_WHEN_OMITTED = frozenset({"environment_overrides"})
+
+
+def _omitted(key: str, value: Any) -> bool:
+    """Whether a field added after the frozen set carries its omitted value."""
+    return (
+        value is None
+        or (key in _FALSE_WHEN_OMITTED and value is False)
+        or (key in _EMPTY_WHEN_OMITTED and not value)
+    )
+
 
 def request_fingerprint(kind: str, payload: dict[str, Any], *, sensitive: bool = False) -> str:
     """Hash what a submission asked for, so a replayed key must ask the same thing.
@@ -23,16 +64,14 @@ def request_fingerprint(kind: str, payload: dict[str, Any], *, sensitive: bool =
     """
     # Keep historical hashes byte-compatible: existing nullable fields are part
     # of their historical hash. New optional extensions must not change it when
-    # omitted. Centralize that rule instead of repeating it in endpoint callers.
+    # omitted. Centralize that rule instead of repeating it in endpoint callers:
+    # callers hash ``model_dump()``, which names every declared field, so a
+    # field added to a request model reaches here as null on every send — and
+    # a retry that spans the deploy adding it must still match its first send.
     payload = {
         key: value
         for key, value in payload.items()
-        if (key not in {"skill_ids", "plugins", "expected_latest_job_id"} or value is not None)
-        and (key != "require_idle" or value is not False)
-        and not (
-            key in {"environment_id", "environment_revision", "global_revision"} and value is None
-        )
-        and not (key == "environment_overrides" and not value)
+        if key in _HISTORICAL_FIELDS or not _omitted(key, value)
     }
     canonical = json.dumps(
         {"kind": kind, **payload}, sort_keys=True, separators=(",", ":"), default=str

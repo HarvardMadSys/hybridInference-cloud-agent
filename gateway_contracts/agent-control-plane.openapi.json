@@ -166,6 +166,38 @@
         "title": "AddDeploymentProfile",
         "type": "object"
       },
+      "AddMemory": {
+        "additionalProperties": false,
+        "description": "A memory the owner writes; ``repo`` is null for every project.",
+        "properties": {
+          "content": {
+            "maxLength": 240,
+            "minLength": 1,
+            "title": "Content",
+            "type": "string"
+          },
+          "repo": {
+            "anyOf": [
+              {
+                "maxLength": 140,
+                "minLength": 1,
+                "pattern": "\\S",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo"
+          }
+        },
+        "required": [
+          "repo",
+          "content"
+        ],
+        "title": "AddMemory",
+        "type": "object"
+      },
       "AddServerRequest": {
         "additionalProperties": false,
         "description": "Acquire or attach a resource and deploy a configured Host profile.",
@@ -610,8 +642,15 @@
             "type": "string"
           },
           "repo": {
-            "title": "Repo",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo"
           },
           "state": {
             "title": "State",
@@ -793,8 +832,15 @@
             "type": "string"
           },
           "repo": {
-            "title": "Repo",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo"
           },
           "state": {
             "title": "State",
@@ -904,8 +950,15 @@
             "title": "Reasoning Effort"
           },
           "repo": {
-            "title": "Repo",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo"
           },
           "resource_summary": {
             "anyOf": [
@@ -1472,8 +1525,15 @@
             "title": "Reasoning Effort"
           },
           "repo": {
-            "title": "Repo",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo"
           },
           "resource_summary": {
             "anyOf": [
@@ -1854,8 +1914,15 @@
             "type": "string"
           },
           "repo": {
-            "title": "Repo",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo"
           },
           "resident_slot_capacity": {
             "default": 8,
@@ -2020,9 +2087,83 @@
         "title": "AdminSandboxArchiveRequest",
         "type": "object"
       },
+      "AdminSandboxCheckpoint": {
+        "description": "The latest restorable checkpoint a host reported for this sandbox.",
+        "properties": {
+          "captured_at": {
+            "format": "date-time",
+            "title": "Captured At",
+            "type": "string"
+          },
+          "durations_ms": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Durations Ms",
+            "type": "object"
+          },
+          "generation": {
+            "title": "Generation",
+            "type": "integer"
+          },
+          "host": {
+            "title": "Host",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "new_layer_bytes": {
+            "title": "New Layer Bytes",
+            "type": "integer"
+          },
+          "recorded_at": {
+            "format": "date-time",
+            "title": "Recorded At",
+            "type": "string"
+          },
+          "size_bytes": {
+            "title": "Size Bytes",
+            "type": "integer"
+          },
+          "state": {
+            "enum": [
+              "reported",
+              "verified",
+              "superseded",
+              "deleted"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "generation",
+          "host",
+          "size_bytes",
+          "new_layer_bytes",
+          "state",
+          "captured_at",
+          "recorded_at"
+        ],
+        "title": "AdminSandboxCheckpoint",
+        "type": "object"
+      },
       "AdminSandboxDetail": {
         "description": "A consistent sandbox inspection with at most 128 current members.",
         "properties": {
+          "latest_checkpoint": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AdminSandboxCheckpoint"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "members": {
             "items": {
               "$ref": "#/components/schemas/AdminSandboxMember"
@@ -2500,6 +2641,16 @@
             "title": "Events",
             "type": "array"
           },
+          "latest_checkpoint": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AdminSandboxCheckpoint"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "member_history_count": {
             "minimum": 0.0,
             "title": "Member History Count",
@@ -2744,8 +2895,15 @@
             "title": "Reason"
           },
           "repo": {
-            "title": "Repo",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo"
           },
           "runtime": {
             "title": "Runtime",
@@ -3441,16 +3599,9 @@
             "$ref": "#/components/schemas/AttachmentLimits"
           },
           "environment_limits": {
-            "anyOf": [
-              {
-                "additionalProperties": true,
-                "type": "object"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Environment Limits"
+            "additionalProperties": true,
+            "title": "Environment Limits",
+            "type": "object"
           },
           "github_connected": {
             "default": false,
@@ -4332,11 +4483,12 @@
                 "type": "null"
               }
             ],
-            "description": "Opaque caller metadata.",
+            "description": "Opaque caller metadata: at most 64 keys and 16 KiB as JSON.",
             "title": "Metadata"
           },
           "model": {
             "description": "Gateway model id the runtime should use.",
+            "maxLength": 255,
             "title": "Model",
             "type": "string"
           },
@@ -4370,15 +4522,23 @@
             "title": "Reasoning Effort"
           },
           "repo": {
-            "description": "Target repository, e.g. 'owner/name'.",
-            "maxLength": 140,
-            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,38}/[A-Za-z0-9][A-Za-z0-9._-]{0,99}$",
-            "title": "Repo",
-            "type": "string"
+            "anyOf": [
+              {
+                "maxLength": 140,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,38}/[A-Za-z0-9][A-Za-z0-9._-]{0,99}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Target repository, e.g. 'owner/name'. An explicit null starts a temporary workspace: the sandbox starts empty, and nothing it does is published.",
+            "title": "Repo"
           },
           "runtime": {
             "default": "claude-code",
             "description": "Agent runtime id.",
+            "maxLength": 64,
             "title": "Runtime",
             "type": "string"
           },
@@ -4414,6 +4574,8 @@
           },
           "task_prompt": {
             "description": "What the agent should do.",
+            "maxLength": 100000,
+            "minLength": 1,
             "title": "Task Prompt",
             "type": "string"
           }
@@ -4944,8 +5106,15 @@
             "title": "Reasoning Effort"
           },
           "repo": {
-            "title": "Repo",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo"
           },
           "resident_state": {
             "anyOf": [
@@ -5173,6 +5342,148 @@
           "state"
         ],
         "title": "AgentJobResponse",
+        "type": "object"
+      },
+      "AgentMemoryScopeView": {
+        "description": "The memories of one scope: the user (``repo`` is null) or a repository.",
+        "properties": {
+          "archived": {
+            "items": {
+              "$ref": "#/components/schemas/AgentMemoryView"
+            },
+            "title": "Archived",
+            "type": "array"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "memories": {
+            "items": {
+              "$ref": "#/components/schemas/AgentMemoryView"
+            },
+            "title": "Memories",
+            "type": "array"
+          },
+          "repo": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo"
+          }
+        },
+        "required": [
+          "repo",
+          "enabled"
+        ],
+        "title": "AgentMemoryScopeView",
+        "type": "object"
+      },
+      "AgentMemoryView": {
+        "description": "One durable memory as its owner sees it.",
+        "properties": {
+          "archived_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Archived At"
+          },
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "last_used_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Used At"
+          },
+          "origin": {
+            "enum": [
+              "agent",
+              "manual"
+            ],
+            "title": "Origin",
+            "type": "string"
+          },
+          "repo": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo"
+          },
+          "source_job_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Source Job Ids",
+            "type": "array"
+          },
+          "status": {
+            "enum": [
+              "active",
+              "archived"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "repo",
+          "content",
+          "description",
+          "status",
+          "origin",
+          "version",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "AgentMemoryView",
         "type": "object"
       },
       "AgentOperationProfilingFragment": {
@@ -5551,8 +5862,15 @@
             "type": "integer"
           },
           "repo": {
-            "title": "Repo",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo"
           },
           "task_count": {
             "title": "Task Count",
@@ -6234,8 +6552,15 @@
             "type": "integer"
           },
           "repo": {
-            "title": "Repo",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo"
           }
         },
         "required": [
@@ -7084,8 +7409,15 @@
             "title": "Queue Paused Reason"
           },
           "repo": {
-            "title": "Repo",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo"
           },
           "thread_id": {
             "title": "Thread Id",
@@ -7489,6 +7821,18 @@
           "max_path_length": {
             "default": 512,
             "title": "Max Path Length",
+            "type": "integer"
+          },
+          "max_thread_bytes": {
+            "default": 62914560,
+            "description": "Bytes one conversation's turns may hold together.",
+            "title": "Max Thread Bytes",
+            "type": "integer"
+          },
+          "max_thread_files": {
+            "default": 200,
+            "description": "Files one conversation's turns may hold together.",
+            "title": "Max Thread Files",
             "type": "integer"
           },
           "max_total_bytes": {
@@ -8844,35 +9188,6 @@
           "status"
         ],
         "title": "ConnectorView",
-        "type": "object"
-      },
-      "ConsolidateMemoryRequest": {
-        "additionalProperties": false,
-        "description": "Consolidate only the version the owner currently sees.",
-        "properties": {
-          "model": {
-            "anyOf": [
-              {
-                "maxLength": 200,
-                "minLength": 1,
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Model"
-          },
-          "revision": {
-            "minimum": 0.0,
-            "title": "Revision",
-            "type": "integer"
-          }
-        },
-        "required": [
-          "revision"
-        ],
-        "title": "ConsolidateMemoryRequest",
         "type": "object"
       },
       "ConversationUsage": {
@@ -11363,6 +11678,12 @@
             "title": "Aws Secret Access Key",
             "type": "string"
           },
+          "checkpoints_enabled": {
+            "default": false,
+            "description": "Whether clean stops also store a restorable checkpoint (the container's changes over its image). On by default whenever archives are enabled; always off while they are disabled.",
+            "title": "Checkpoints Enabled",
+            "type": "boolean"
+          },
           "enabled": {
             "default": false,
             "title": "Enabled",
@@ -12407,53 +12728,67 @@
         "title": "McpIntegrationResponse",
         "type": "object"
       },
-      "MemoryEdit": {
-        "additionalProperties": false,
-        "description": "A bounded owner edit; provenance remains server controlled.",
+      "MemoryProjects": {
+        "description": "Repositories that can have project memory.",
         "properties": {
-          "content": {
-            "maxLength": 240,
-            "minLength": 1,
-            "title": "Content",
-            "type": "string"
-          },
-          "id": {
-            "maxLength": 100,
-            "minLength": 1,
-            "title": "Id",
-            "type": "string"
-          },
-          "scope": {
-            "enum": [
-              "repo",
-              "user"
-            ],
-            "title": "Scope",
-            "type": "string"
+          "projects": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Projects",
+            "type": "array"
           }
         },
         "required": [
-          "id",
-          "content",
-          "scope"
+          "projects"
         ],
-        "title": "MemoryEdit",
+        "title": "MemoryProjects",
         "type": "object"
       },
-      "MemoryEntryRevision": {
+      "MemorySetting": {
         "additionalProperties": false,
-        "description": "Require the version the owner examined before changing an entry.",
+        "description": "Turn one scope's memory on or off; ``repo`` is null for every project.",
         "properties": {
-          "expected_revision": {
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "repo": {
+            "anyOf": [
+              {
+                "maxLength": 140,
+                "minLength": 1,
+                "pattern": "\\S",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo"
+          }
+        },
+        "required": [
+          "repo",
+          "enabled"
+        ],
+        "title": "MemorySetting",
+        "type": "object"
+      },
+      "MemoryVersion": {
+        "additionalProperties": false,
+        "description": "The version the owner examined before removing or restoring a memory.",
+        "properties": {
+          "expected_version": {
             "minimum": 0.0,
-            "title": "Expected Revision",
+            "title": "Expected Version",
             "type": "integer"
           }
         },
         "required": [
-          "expected_revision"
+          "expected_version"
         ],
-        "title": "MemoryEntryRevision",
+        "title": "MemoryVersion",
         "type": "object"
       },
       "MessageRequestDetail": {
@@ -12746,8 +13081,12 @@
         "type": "object"
       },
       "ProfileResponse": {
-        "description": "Combine Agent-owned display fields with a read-only account email.",
+        "description": "Combine Agent-owned display fields with a read-only account email.\n\n``companion_data_url`` is the account's fixed Pokémon companion, shown\nwherever no picture was uploaded. It depends on the account alone, unlike\nthe home page's, whose habitat follows recent work.",
         "properties": {
+          "companion_data_url": {
+            "title": "Companion Data Url",
+            "type": "string"
+          },
           "email": {
             "title": "Email",
             "type": "string"
@@ -12780,62 +13119,10 @@
           }
         },
         "required": [
-          "email"
+          "email",
+          "companion_data_url"
         ],
         "title": "ProfileResponse",
-        "type": "object"
-      },
-      "ProjectMemoryView": {
-        "description": "An owner's independently controlled memory for one exact repository.",
-        "properties": {
-          "enabled": {
-            "default": true,
-            "title": "Enabled",
-            "type": "boolean"
-          },
-          "memories": {
-            "items": {
-              "$ref": "#/components/schemas/UserMemory"
-            },
-            "title": "Memories",
-            "type": "array"
-          },
-          "portrait": {
-            "$ref": "#/components/schemas/UserPortrait"
-          },
-          "repo": {
-            "title": "Repo",
-            "type": "string"
-          },
-          "revision": {
-            "default": 0,
-            "title": "Revision",
-            "type": "integer"
-          },
-          "suggestions": {
-            "items": {
-              "$ref": "#/components/schemas/UserSuggestion"
-            },
-            "title": "Suggestions",
-            "type": "array"
-          },
-          "updated_at": {
-            "anyOf": [
-              {
-                "format": "date-time",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Updated At"
-          }
-        },
-        "required": [
-          "repo"
-        ],
-        "title": "ProjectMemoryView",
         "type": "object"
       },
       "PromptRewriteAnswer": {
@@ -13260,6 +13547,16 @@
             "description": "Whether this exact supervisor generation currently has a turn, terminal, or bounded workspace operation open. Null means the sandbox manager could not prove activity state after reconstruction.",
             "title": "Activity Active"
           },
+          "checkpoint": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SandboxCheckpointBeat"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "container_id": {
             "maxLength": 128,
             "minLength": 12,
@@ -13620,6 +13917,12 @@
             "title": "Aws Secret Access Key Configured",
             "type": "boolean"
           },
+          "checkpoints_enabled": {
+            "default": false,
+            "description": "Whether clean stops also store a restorable checkpoint (the container's changes over its image). On by default whenever archives are enabled; always off while they are disabled.",
+            "title": "Checkpoints Enabled",
+            "type": "boolean"
+          },
           "enabled": {
             "default": false,
             "title": "Enabled",
@@ -13681,6 +13984,191 @@
           }
         },
         "title": "SandboxArchiveSettingsResponse",
+        "type": "object"
+      },
+      "SandboxCheckpointBeat": {
+        "description": "The latest restorable checkpoint a host stored for one retained group.",
+        "properties": {
+          "base_image": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Base Image",
+            "type": "string"
+          },
+          "checkpoint_id": {
+            "pattern": "^[0-9a-f]{32}$",
+            "title": "Checkpoint Id",
+            "type": "string"
+          },
+          "container_id": {
+            "maxLength": 128,
+            "minLength": 12,
+            "title": "Container Id",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "durations_ms": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "maxProperties": 16,
+            "title": "Durations Ms",
+            "type": "object"
+          },
+          "format_version": {
+            "const": 1,
+            "default": 1,
+            "title": "Format Version",
+            "type": "integer"
+          },
+          "generation": {
+            "minimum": 1.0,
+            "title": "Generation",
+            "type": "integer"
+          },
+          "layer_count": {
+            "maximum": 1024.0,
+            "minimum": 1.0,
+            "title": "Layer Count",
+            "type": "integer"
+          },
+          "members": {
+            "items": {
+              "$ref": "#/components/schemas/SandboxCheckpointMember"
+            },
+            "maxItems": 128,
+            "title": "Members",
+            "type": "array"
+          },
+          "new_layer_bytes": {
+            "minimum": 0.0,
+            "title": "New Layer Bytes",
+            "type": "integer"
+          },
+          "object_key": {
+            "maxLength": 256,
+            "pattern": "^cloud-agent/sandbox/v2/[0-9a-f]{64}/g[0-9]+/[0-9a-f]{32}\\.oci\\.tar$",
+            "title": "Object Key",
+            "type": "string"
+          },
+          "runtime_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Runtime Id",
+            "type": "string"
+          },
+          "runtime_version": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Runtime Version"
+          },
+          "sandbox_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Sandbox Id",
+            "type": "string"
+          },
+          "sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Sha256",
+            "type": "string"
+          },
+          "size_bytes": {
+            "minimum": 1.0,
+            "title": "Size Bytes",
+            "type": "integer"
+          },
+          "version_id": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version Id"
+          }
+        },
+        "required": [
+          "checkpoint_id",
+          "sandbox_id",
+          "generation",
+          "container_id",
+          "base_image",
+          "runtime_id",
+          "object_key",
+          "sha256",
+          "size_bytes",
+          "new_layer_bytes",
+          "layer_count",
+          "created_at"
+        ],
+        "title": "SandboxCheckpointBeat",
+        "type": "object"
+      },
+      "SandboxCheckpointMember": {
+        "description": "One chat's native-session position inside a checkpoint.",
+        "properties": {
+          "context_status": {
+            "anyOf": [
+              {
+                "maxLength": 32,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Status"
+          },
+          "last_settled_job_id": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Settled Job Id"
+          },
+          "native_session_id": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Native Session Id"
+          },
+          "thread_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Thread Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "thread_id"
+        ],
+        "title": "SandboxCheckpointMember",
         "type": "object"
       },
       "SandboxPlugin": {
@@ -14252,6 +14740,12 @@
             "maxLength": 256,
             "title": "Aws Secret Access Key",
             "type": "string"
+          },
+          "checkpoints_enabled": {
+            "default": true,
+            "description": "Clear to skip checkpoints while archives stay enabled.",
+            "title": "Checkpoints Enabled",
+            "type": "boolean"
           },
           "enabled": {
             "title": "Enabled",
@@ -15779,9 +16273,9 @@
         "title": "UpdateConnectorRequest",
         "type": "object"
       },
-      "UpdateMemoryEntry": {
+      "UpdateMemory": {
         "additionalProperties": false,
-        "description": "Edit content while retaining the entry's original kind and project.",
+        "description": "New text and scope for a memory, at the version the owner examined.",
         "properties": {
           "content": {
             "maxLength": 240,
@@ -15789,63 +16283,32 @@
             "title": "Content",
             "type": "string"
           },
-          "expected_revision": {
+          "expected_version": {
             "minimum": 0.0,
-            "title": "Expected Revision",
+            "title": "Expected Version",
             "type": "integer"
+          },
+          "repo": {
+            "anyOf": [
+              {
+                "maxLength": 140,
+                "minLength": 1,
+                "pattern": "\\S",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo"
           }
         },
         "required": [
-          "expected_revision",
-          "content"
+          "repo",
+          "content",
+          "expected_version"
         ],
-        "title": "UpdateMemoryEntry",
-        "type": "object"
-      },
-      "UpdateMemorySettings": {
-        "additionalProperties": false,
-        "description": "Enable or pause automatic memory creation and use.",
-        "properties": {
-          "enabled": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Enabled"
-          },
-          "memories": {
-            "anyOf": [
-              {
-                "items": {
-                  "$ref": "#/components/schemas/MemoryEdit"
-                },
-                "maxItems": 12,
-                "type": "array"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Memories"
-          },
-          "revision": {
-            "anyOf": [
-              {
-                "minimum": 0.0,
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Revision"
-          }
-        },
-        "title": "UpdateMemorySettings",
+        "title": "UpdateMemory",
         "type": "object"
       },
       "UpdateProfile": {
@@ -15990,221 +16453,6 @@
         "title": "UserAvatar",
         "type": "object"
       },
-      "UserMemory": {
-        "description": "A compact preference or task with its original job reference.",
-        "properties": {
-          "content": {
-            "title": "Content",
-            "type": "string"
-          },
-          "created_at": {
-            "anyOf": [
-              {
-                "format": "date-time",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Created At"
-          },
-          "edited": {
-            "default": false,
-            "title": "Edited",
-            "type": "boolean"
-          },
-          "id": {
-            "title": "Id",
-            "type": "string"
-          },
-          "kind": {
-            "enum": [
-              "preference",
-              "task"
-            ],
-            "title": "Kind",
-            "type": "string"
-          },
-          "scope": {
-            "default": "repo",
-            "enum": [
-              "repo",
-              "user"
-            ],
-            "title": "Scope",
-            "type": "string"
-          },
-          "source_ids": {
-            "items": {
-              "type": "string"
-            },
-            "title": "Source Ids",
-            "type": "array"
-          },
-          "source_job_id": {
-            "title": "Source Job Id",
-            "type": "string"
-          },
-          "source_repo": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Source Repo"
-          },
-          "user_edited": {
-            "default": false,
-            "title": "User Edited",
-            "type": "boolean"
-          }
-        },
-        "required": [
-          "id",
-          "kind",
-          "content",
-          "source_job_id"
-        ],
-        "title": "UserMemory",
-        "type": "object"
-      },
-      "UserMemoryView": {
-        "description": "Public view of a user's bounded recent work profile and memory.",
-        "properties": {
-          "avatar": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/UserAvatar"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "enabled": {
-            "default": true,
-            "title": "Enabled",
-            "type": "boolean"
-          },
-          "memories": {
-            "items": {
-              "$ref": "#/components/schemas/UserMemory"
-            },
-            "title": "Memories",
-            "type": "array"
-          },
-          "portrait": {
-            "$ref": "#/components/schemas/UserPortrait"
-          },
-          "revision": {
-            "default": 0,
-            "title": "Revision",
-            "type": "integer"
-          },
-          "suggestions": {
-            "items": {
-              "$ref": "#/components/schemas/UserSuggestion"
-            },
-            "title": "Suggestions",
-            "type": "array"
-          },
-          "updated_at": {
-            "anyOf": [
-              {
-                "format": "date-time",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Updated At"
-          }
-        },
-        "title": "UserMemoryView",
-        "type": "object"
-      },
-      "UserPortrait": {
-        "description": "Observed work areas and commonly used agent settings.",
-        "properties": {
-          "focus_areas": {
-            "items": {
-              "type": "string"
-            },
-            "title": "Focus Areas",
-            "type": "array"
-          },
-          "preferred_model": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Preferred Model"
-          },
-          "preferred_runtime": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Preferred Runtime"
-          },
-          "projects": {
-            "items": {
-              "type": "string"
-            },
-            "title": "Projects",
-            "type": "array"
-          },
-          "summary": {
-            "default": "No recent work recorded yet.",
-            "title": "Summary",
-            "type": "string"
-          }
-        },
-        "title": "UserPortrait",
-        "type": "object"
-      },
-      "UserSuggestion": {
-        "description": "An actionable improvement supported by recent requests.",
-        "properties": {
-          "action": {
-            "title": "Action",
-            "type": "string"
-          },
-          "id": {
-            "title": "Id",
-            "type": "string"
-          },
-          "reason": {
-            "title": "Reason",
-            "type": "string"
-          },
-          "title": {
-            "title": "Title",
-            "type": "string"
-          }
-        },
-        "required": [
-          "id",
-          "title",
-          "reason",
-          "action"
-        ],
-        "title": "UserSuggestion",
-        "type": "object"
-      },
       "ValidationError": {
         "properties": {
           "ctx": {
@@ -16294,6 +16542,62 @@
           "name"
         ],
         "title": "VariableEdit",
+        "type": "object"
+      },
+      "WorkInsights": {
+        "description": "What the owner's recent requests show, for the home page and avatar.",
+        "properties": {
+          "avatar": {
+            "$ref": "#/components/schemas/UserAvatar"
+          },
+          "focus_areas": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Focus Areas",
+            "type": "array"
+          },
+          "suggestions": {
+            "items": {
+              "$ref": "#/components/schemas/WorkSuggestion"
+            },
+            "title": "Suggestions",
+            "type": "array"
+          }
+        },
+        "required": [
+          "avatar"
+        ],
+        "title": "WorkInsights",
+        "type": "object"
+      },
+      "WorkSuggestion": {
+        "description": "An actionable improvement supported by recent requests.",
+        "properties": {
+          "action": {
+            "title": "Action",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "reason",
+          "action"
+        ],
+        "title": "WorkSuggestion",
         "type": "object"
       },
       "WorkerAckResponse": {
@@ -16653,8 +16957,15 @@
             "title": "Reasoning Effort"
           },
           "repo": {
-            "title": "Repo",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo"
           },
           "runtime": {
             "title": "Runtime",
@@ -16674,7 +16985,7 @@
           },
           "sandbox_token": {
             "default": "",
-            "description": "The inference credential that enters the sandbox: a gateway grant, scoped to the models this attempt may call.",
+            "description": "This attempt's gateway grant, scoped to the models it may call. It does not enter the sandbox: each member's CLI runs on its own residency grant from the sandbox residency route.",
             "title": "Sandbox Token",
             "type": "string"
           },
@@ -24259,7 +24570,7 @@
     },
     "/v1/agent/changes": {
       "get": {
-        "description": "Stream the caller's changed jobs and conversations as SSE.\n\nEvents: ``hello`` and ``resync`` carry ``{\"live\": bool}``; ``job`` and\n``thread`` carry the row's current values and its ``revision``, or\n``{\"id\": ..., \"deleted\": true}`` once it is gone; ``usage`` carries the\njob's ``{\"id\": ..., \"usage\": ...}`` as ``GET /v1/agent/jobs/{id}/usage``\nreturns it; ``mcp`` (a job) and ``queue``, ``publication`` (a\nconversation) carry only ``{\"id\": ...}``: read that again. 404 where this\nprocess pushes nothing, which a tab treats as \"keep reading on a clock\".\n429 when the account already holds as many streams as this process allows\none account (:mod:`cloud_agent.api._stream_slots`).",
+        "description": "Stream the caller's changed jobs and conversations as SSE.\n\nEvents: ``hello`` and ``resync`` carry ``{\"live\": bool}``; ``job`` and\n``thread`` carry the row's current values and its ``revision``, or\n``{\"id\": ..., \"deleted\": true}`` once it is gone; ``usage`` carries the\njob's ``{\"id\": ..., \"usage\": ...}`` as ``GET /v1/agent/jobs/{id}/usage``\nreturns it; ``mcp`` (a job) and ``queue``, ``publication`` (a\nconversation) carry only ``{\"id\": ...}``: read that again. 404 where this\nprocess pushes nothing, which a tab treats as \"keep reading on a clock\".\nThe stream ends after at most ``OWNER_STREAM_MAX_S`` (15 minutes); the tab\nreconnects, is admitted again, and its ``hello`` has it read its lists.\n429 when the account already holds as many streams as this process allows\none account (:mod:`cloud_agent.api._stream_slots`).",
         "operationId": "stream_owner_changes_v1_agent_changes_get",
         "parameters": [
           {
@@ -24393,6 +24704,18 @@
                 }
               ],
               "title": "Repo"
+            }
+          },
+          {
+            "description": "Only temporary workspaces: the conversations without a repository.",
+            "in": "query",
+            "name": "temporary",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Only temporary workspaces: the conversations without a repository.",
+              "title": "Temporary",
+              "type": "boolean"
             }
           },
           {
@@ -26228,6 +26551,56 @@
         ]
       }
     },
+    "/v1/agent/insights": {
+      "get": {
+        "description": "Derive the owner's suggestions and avatar from their latest requests.",
+        "operationId": "read_insights_v1_agent_insights_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkInsights"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Read Insights",
+        "tags": [
+          "insights"
+        ]
+      }
+    },
     "/v1/agent/integrations": {
       "get": {
         "description": "Return configured and connected state for source control and MCP.\n\nOne response for one page, deliberately: the settings screen shows both\nkinds of connection together, and two requests would let it render a\nhalf-refreshed state after a disconnect. The MCP half is a summary — adding,\ntesting and selecting a connection live under ``/v1/agent/mcp``.\n\nAnswers while the GitHub App is unavailable, and says so, rather than\nfailing the whole page: that is the one place a user sees the outage.",
@@ -26550,7 +26923,7 @@
     },
     "/v1/agent/jobs": {
       "get": {
-        "description": "List jobs from the authenticated user's active or archived threads.\n\n``repo`` narrows the page to one project. It is a filter over what the\ncaller already owns, not an access grant, so an unentitled repo is not an\nerror here — it simply matches none of their rows.",
+        "description": "List jobs from the authenticated user's active or archived threads.\n\n``repo`` narrows the page to one project. It is a filter over what the\ncaller already owns, not an access grant, so an unentitled repo is not an\nerror here — it simply matches none of their rows. ``temporary`` narrows it\nto the temporary workspaces instead.",
         "operationId": "list_agent_jobs_v1_agent_jobs_get",
         "parameters": [
           {
@@ -26591,6 +26964,18 @@
                 }
               ],
               "title": "Repo"
+            }
+          },
+          {
+            "description": "Only temporary workspaces: the conversations without a repository.",
+            "in": "query",
+            "name": "temporary",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Only temporary workspaces: the conversations without a repository.",
+              "title": "Temporary",
+              "type": "boolean"
             }
           },
           {
@@ -27032,7 +27417,7 @@
     },
     "/v1/agent/jobs/{job_id}/cancel": {
       "post": {
-        "description": "Request cancellation of one of the caller's agent jobs.\n\nQueued jobs cancel immediately; a running job is flagged and the worker\nperforms the fenced terminal transition when it next heartbeats. Messages\nthe owner has waiting are paused by the same commit — Stop does not start\nthe next one — and stay until the owner continues. Stop answers whether or\nnot the GitHub App can be loaded right now (issue #47).",
+        "description": "Request cancellation of one of the caller's agent jobs.\n\nQueued jobs cancel immediately; a running job is flagged and the worker\nperforms the fenced terminal transition when it next heartbeats. Messages\nthe owner has waiting are paused by the same commit — Stop does not start\nthe next one — and stay until the owner continues. Stop answers whether or\nnot the GitHub App can be loaded right now (issue #47), and whether or not\nthe workspace's host can be reached.",
         "operationId": "cancel_agent_job_v1_agent_jobs__job_id__cancel_post",
         "parameters": [
           {
@@ -27550,7 +27935,7 @@
     },
     "/v1/agent/jobs/{job_id}/stream": {
       "get": {
-        "description": "Stream a job's events as SSE, resumable via ``Last-Event-ID``.\n\nEach SSE frame carries the event's global id, so a client that reconnects\nwith ``Last-Event-ID`` resumes exactly where it left off — which is what\nmakes the finite stream cap (applied by the timeout middleware to\n``text/event-stream``) safe for jobs that outlive one connection. 429 when\nthe account already holds as many streams as this process allows one\naccount (:mod:`cloud_agent.api._stream_slots`).",
+        "description": "Stream a job's events as SSE, resumable via ``Last-Event-ID``.\n\nEach SSE frame carries the event's global id, so a client that reconnects\nwith ``Last-Event-ID`` (or ``after``) resumes exactly where it left off —\nwhich is what makes the finite stream cap safe for jobs that outlive one\nconnection. A stream ends after at most ``OWNER_STREAM_MAX_S`` (15\nminutes), without ``job_finished`` if the job is still going; the client\nreconnects from its cursor, and that request is admitted again. 429 when\nthe account already holds as many streams as this process allows one\naccount (:mod:`cloud_agent.api._stream_slots`).",
         "operationId": "stream_agent_job_events_v1_agent_jobs__job_id__stream_get",
         "parameters": [
           {
@@ -28035,7 +28420,7 @@
     },
     "/v1/agent/jobs/{job_id}/terminals/{terminal_id}/stream": {
       "get": {
-        "description": "Relay a resumable private PTY stream without exposing its sandbox manager token.",
+        "description": "Relay a resumable private PTY stream without exposing its sandbox manager token.\n\nThe relay ends after about ``OWNER_STREAM_MAX_S`` (15 minutes), between two\nframes; the client reconnects with ``after`` set to the last sequence it\napplied, and that request is admitted again.",
         "operationId": "stream_agent_job_terminal_v1_agent_jobs__job_id__terminals__terminal_id__stream_get",
         "parameters": [
           {
@@ -28820,6 +29205,60 @@
         ]
       }
     },
+    "/v1/agent/jobs/{job_id}/workspace/archive": {
+      "get": {
+        "description": "Download the chat's whole workspace as one gzipped tar.\n\nHow a temporary workspace's files leave its sandbox, since nothing else\ncopies them; a repository chat may use it too. The owning host builds the\narchive completely before answering, so a workspace over its download limit\nis refused with 413 instead of arriving truncated.",
+        "operationId": "download_agent_job_workspace_v1_agent_jobs__job_id__workspace_archive_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Download Agent Job Workspace"
+      }
+    },
     "/v1/agent/mcp/catalog": {
       "get": {
         "description": "Browse the last complete official Registry sync without calling it live.",
@@ -29194,7 +29633,7 @@
         ]
       },
       "patch": {
-        "description": "Edit a connection. A target change invalidates approvals made against it.",
+        "description": "Edit a connection. A target change invalidates approvals made against it.\n\nA new address or authentication kind also drops the stored credential, so\nthe connection has to be signed in to (or given its secret) again.",
         "operationId": "update_connection_v1_agent_mcp_connections__connection_id__patch",
         "parameters": [
           {
@@ -30539,6 +30978,501 @@
         ]
       }
     },
+    "/v1/agent/memories": {
+      "delete": {
+        "description": "Delete every memory for every project, or for one repository.",
+        "operationId": "clear_memories_v1_agent_memories_delete",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "repo",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 140,
+                  "minLength": 1,
+                  "pattern": "\\S",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Repo"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Clear Memories",
+        "tags": [
+          "agent-memory"
+        ]
+      },
+      "get": {
+        "description": "Read the owner's memories for every project, or for one repository.",
+        "operationId": "list_memories_v1_agent_memories_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "repo",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 140,
+                  "minLength": 1,
+                  "pattern": "\\S",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Repo"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentMemoryScopeView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Memories",
+        "tags": [
+          "agent-memory"
+        ]
+      },
+      "post": {
+        "description": "Save a memory the owner wrote; it applies from the next task.",
+        "operationId": "add_memory_v1_agent_memories_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AddMemory"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentMemoryView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Add Memory",
+        "tags": [
+          "agent-memory"
+        ]
+      }
+    },
+    "/v1/agent/memories/projects": {
+      "get": {
+        "description": "List repositories the owner worked in or keeps memories for.",
+        "operationId": "list_memory_projects_v1_agent_memories_projects_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryProjects"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Memory Projects",
+        "tags": [
+          "agent-memory"
+        ]
+      }
+    },
+    "/v1/agent/memories/settings": {
+      "put": {
+        "description": "Turn a scope off to stop showing its memories to tasks and refuse agent writes.",
+        "operationId": "set_memory_enabled_v1_agent_memories_settings_put",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MemorySetting"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentMemoryScopeView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set Memory Enabled",
+        "tags": [
+          "agent-memory"
+        ]
+      }
+    },
+    "/v1/agent/memories/{memory_id}": {
+      "delete": {
+        "description": "Delete one memory permanently.",
+        "operationId": "delete_memory_v1_agent_memories__memory_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "memory_id",
+            "required": true,
+            "schema": {
+              "title": "Memory Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MemoryVersion"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Memory",
+        "tags": [
+          "agent-memory"
+        ]
+      },
+      "patch": {
+        "description": "Rewrite or move a memory; the owner's edit makes it manual.",
+        "operationId": "update_memory_v1_agent_memories__memory_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "memory_id",
+            "required": true,
+            "schema": {
+              "title": "Memory Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateMemory"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentMemoryView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Memory",
+        "tags": [
+          "agent-memory"
+        ]
+      }
+    },
+    "/v1/agent/memories/{memory_id}/restore": {
+      "post": {
+        "description": "Make an archived memory active again.",
+        "operationId": "restore_memory_v1_agent_memories__memory_id__restore_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "memory_id",
+            "required": true,
+            "schema": {
+              "title": "Memory Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MemoryVersion"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentMemoryView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Restore Memory",
+        "tags": [
+          "agent-memory"
+        ]
+      }
+    },
     "/v1/agent/profile": {
       "get": {
         "description": "Read the signed-in owner's display profile and current account email.",
@@ -30644,496 +31578,6 @@
         "summary": "Save Profile",
         "tags": [
           "profile"
-        ]
-      }
-    },
-    "/v1/agent/project-memory": {
-      "delete": {
-        "description": "Forget only this project's past activity, preserving its enabled setting.",
-        "operationId": "clear_project_memory_v1_agent_project_memory_delete",
-        "parameters": [
-          {
-            "in": "query",
-            "name": "repo",
-            "required": true,
-            "schema": {
-              "maxLength": 140,
-              "minLength": 1,
-              "pattern": "\\S",
-              "title": "Repo",
-              "type": "string"
-            }
-          },
-          {
-            "in": "header",
-            "name": "authorization",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ProjectMemoryView"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Clear Project Memory",
-        "tags": [
-          "project-memory"
-        ]
-      },
-      "get": {
-        "description": "Refresh memory from this owner's activity in the requested repository.",
-        "operationId": "read_project_memory_v1_agent_project_memory_get",
-        "parameters": [
-          {
-            "in": "query",
-            "name": "repo",
-            "required": true,
-            "schema": {
-              "maxLength": 140,
-              "minLength": 1,
-              "pattern": "\\S",
-              "title": "Repo",
-              "type": "string"
-            }
-          },
-          {
-            "in": "header",
-            "name": "authorization",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ProjectMemoryView"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Read Project Memory",
-        "tags": [
-          "project-memory"
-        ]
-      },
-      "patch": {
-        "description": "Change project settings or save revision-checked edits and scope changes.",
-        "operationId": "update_project_memory_v1_agent_project_memory_patch",
-        "parameters": [
-          {
-            "in": "query",
-            "name": "repo",
-            "required": true,
-            "schema": {
-              "maxLength": 140,
-              "minLength": 1,
-              "pattern": "\\S",
-              "title": "Repo",
-              "type": "string"
-            }
-          },
-          {
-            "in": "header",
-            "name": "authorization",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/UpdateMemorySettings"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ProjectMemoryView"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Update Project Memory",
-        "tags": [
-          "project-memory"
-        ]
-      }
-    },
-    "/v1/agent/project-memory/consolidate": {
-      "post": {
-        "description": "Merge and classify durable preferences using the owner's available model.",
-        "operationId": "consolidate_project_memory_v1_agent_project_memory_consolidate_post",
-        "parameters": [
-          {
-            "in": "query",
-            "name": "repo",
-            "required": true,
-            "schema": {
-              "maxLength": 140,
-              "minLength": 1,
-              "pattern": "\\S",
-              "title": "Repo",
-              "type": "string"
-            }
-          },
-          {
-            "in": "header",
-            "name": "authorization",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ConsolidateMemoryRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ProjectMemoryView"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Consolidate Project Memory",
-        "tags": [
-          "project-memory"
-        ]
-      }
-    },
-    "/v1/agent/project-memory/entries/{memory_id}": {
-      "delete": {
-        "description": "Forget an entry and suppress it during subsequent automatic refreshes.",
-        "operationId": "delete_project_memory_entry_v1_agent_project_memory_entries__memory_id__delete",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "memory_id",
-            "required": true,
-            "schema": {
-              "title": "Memory Id",
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "repo",
-            "required": true,
-            "schema": {
-              "maxLength": 140,
-              "minLength": 1,
-              "pattern": "\\S",
-              "title": "Repo",
-              "type": "string"
-            }
-          },
-          {
-            "in": "header",
-            "name": "authorization",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/MemoryEntryRevision"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ProjectMemoryView"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "404": {
-            "description": "The owner has no such visible memory entry."
-          },
-          "409": {
-            "description": "Memory changed since the expected revision."
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Delete Project Memory Entry",
-        "tags": [
-          "project-memory"
-        ]
-      },
-      "patch": {
-        "description": "Save a durable correction to one of the owner's existing memories.",
-        "operationId": "edit_project_memory_entry_v1_agent_project_memory_entries__memory_id__patch",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "memory_id",
-            "required": true,
-            "schema": {
-              "title": "Memory Id",
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "repo",
-            "required": true,
-            "schema": {
-              "maxLength": 140,
-              "minLength": 1,
-              "pattern": "\\S",
-              "title": "Repo",
-              "type": "string"
-            }
-          },
-          {
-            "in": "header",
-            "name": "authorization",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/UpdateMemoryEntry"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ProjectMemoryView"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "404": {
-            "description": "The owner has no such visible memory entry."
-          },
-          "409": {
-            "description": "Memory changed since the expected revision."
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Edit Project Memory Entry",
-        "tags": [
-          "project-memory"
-        ]
-      }
-    },
-    "/v1/agent/project-memory/projects": {
-      "get": {
-        "description": "List only repositories with activity or memory owned by this user.",
-        "operationId": "list_memory_projects_v1_agent_project_memory_projects_get",
-        "parameters": [
-          {
-            "in": "header",
-            "name": "authorization",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "items": {
-                    "type": "string"
-                  },
-                  "title": "Response List Memory Projects V1 Agent Project Memory Projects Get",
-                  "type": "array"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "List Memory Projects",
-        "tags": [
-          "project-memory"
         ]
       }
     },
@@ -31325,9 +31769,26 @@
     },
     "/v1/agent/service/oncall/jobs": {
       "post": {
-        "description": "Queue one on-call analysis job for the configured service account.\n\nThe body is the owner surface's own :class:`AgentJobCreate`, so the relay\nchooses the runtime, model, repository and prompt — and every one of those\nchoices passes the owner route's checks under the service account: the\nmodel must resolve for that user, the repository must be entitled (for a\nheadless account that means the deployment's ``AGENT_REPO_ALLOWLIST``), and\na ``base_ref`` is pinned to the commit it names right now. Skill selection\nhas the same semantics: omitted IDs use this service account's defaults;\nthe relay can send ``skill_ids=[]`` to opt out explicitly.",
+        "description": "Queue one on-call analysis job for the configured service account.\n\nThe body is the owner surface's own :class:`AgentJobCreate`, so the relay\nchooses the runtime, model, repository and prompt — and every one of those\nchoices passes the owner route's checks under the service account: the\nmodel must resolve for that user, the repository must be entitled (for a\nheadless account that means the deployment's ``AGENT_REPO_ALLOWLIST``), and\na ``base_ref`` is pinned to the commit it names right now. Skill selection\nhas the same semantics: omitted IDs use this service account's defaults;\nthe relay can send ``skill_ids=[]`` to opt out explicitly.\n\nAn optional ``Idempotency-Key`` names one dispatch, as on the owner route:\na relay that retries after a timeout gets the job its first send created,\nnot a second analysis on the service account's quota, and the same key\nwith a different body is a 409 ``idempotency_conflict``. Without the\nheader every request creates a job.",
         "operationId": "create_oncall_job_v1_agent_service_oncall_jobs_post",
         "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 256,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          },
           {
             "in": "header",
             "name": "authorization",
@@ -31661,6 +32122,18 @@
                 }
               ],
               "title": "Repo"
+            }
+          },
+          {
+            "description": "Only temporary workspaces: the conversations without a repository.",
+            "in": "query",
+            "name": "temporary",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Only temporary workspaces: the conversations without a repository.",
+              "title": "Temporary",
+              "type": "boolean"
             }
           },
           {
@@ -32738,7 +33211,7 @@
     },
     "/v1/agent/threads/{thread_id}/messages/{message_id}": {
       "delete": {
-        "description": "Withdraw a waiting message, at the revision the caller read.\n\nIts uploads go back to being staged. A stale ``revision`` is a 409\n``revision_conflict`` carrying the message as it is now.",
+        "description": "Withdraw a waiting message, at the revision the caller read.\n\nIts uploads go back to being staged. A stale ``revision`` is a 409\n``revision_conflict`` carrying the message as it is now. Withdrawing\nneeds no GitHub App, so it is not refused while the App cannot be loaded.",
         "operationId": "delete_thread_message_v1_agent_threads__thread_id__messages__message_id__delete",
         "parameters": [
           {
@@ -32811,7 +33284,7 @@
         "summary": "Delete Thread Message"
       },
       "patch": {
-        "description": "Change a waiting message, at the revision the caller read.\n\nOnly the fields sent change. ``state: held`` is how an editor stops the\nqueue at this message while it is being rewritten; ``state: queued`` lets\nit go again. A stale ``revision`` is a 409 ``revision_conflict`` carrying\nthe message as it is now.",
+        "description": "Change a waiting message, at the revision the caller read.\n\nOnly the fields sent change. ``state: held`` is how an editor stops the\nqueue at this message while it is being rewritten; ``state: queued`` lets\nit go again. A stale ``revision`` is a 409 ``revision_conflict`` carrying\nthe message as it is now.\n\nA new prompt or state is saved whether or not the GitHub App can be loaded\nright now. A changed skill, upload, model or effort is checked as a new\nmessage is, which needs the App: 503 ``source_control_unavailable`` while\nit cannot be loaded.",
         "operationId": "edit_thread_message_v1_agent_threads__thread_id__messages__message_id__patch",
         "parameters": [
           {
@@ -33247,370 +33720,6 @@
         ]
       }
     },
-    "/v1/agent/user-memory": {
-      "delete": {
-        "description": "Forget historical memory; only newer requests can build it again.",
-        "operationId": "clear_user_memory_v1_agent_user_memory_delete",
-        "parameters": [
-          {
-            "in": "header",
-            "name": "authorization",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/UserMemoryView"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Clear User Memory",
-        "tags": [
-          "user-memory"
-        ]
-      },
-      "get": {
-        "description": "Create the owner's avatar and refresh their preferences across projects.",
-        "operationId": "read_user_memory_v1_agent_user_memory_get",
-        "parameters": [
-          {
-            "in": "header",
-            "name": "authorization",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/UserMemoryView"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Read User Memory",
-        "tags": [
-          "user-memory"
-        ]
-      },
-      "patch": {
-        "description": "Pause generation and prompt personalization, or resume future updates.",
-        "operationId": "update_user_memory_v1_agent_user_memory_patch",
-        "parameters": [
-          {
-            "in": "header",
-            "name": "authorization",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/UpdateMemorySettings"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/UserMemoryView"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Update User Memory",
-        "tags": [
-          "user-memory"
-        ]
-      }
-    },
-    "/v1/agent/user-memory/consolidate": {
-      "post": {
-        "description": "Merge and classify durable preferences using the owner's available model.",
-        "operationId": "consolidate_user_memory_v1_agent_user_memory_consolidate_post",
-        "parameters": [
-          {
-            "in": "header",
-            "name": "authorization",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ConsolidateMemoryRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/UserMemoryView"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Consolidate User Memory",
-        "tags": [
-          "user-memory"
-        ]
-      }
-    },
-    "/v1/agent/user-memory/entries/{memory_id}": {
-      "delete": {
-        "description": "Forget an entry and suppress it during subsequent automatic refreshes.",
-        "operationId": "delete_user_memory_entry_v1_agent_user_memory_entries__memory_id__delete",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "memory_id",
-            "required": true,
-            "schema": {
-              "title": "Memory Id",
-              "type": "string"
-            }
-          },
-          {
-            "in": "header",
-            "name": "authorization",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/MemoryEntryRevision"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/UserMemoryView"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "404": {
-            "description": "The owner has no such visible memory entry."
-          },
-          "409": {
-            "description": "Memory changed since the expected revision."
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Delete User Memory Entry",
-        "tags": [
-          "user-memory"
-        ]
-      },
-      "patch": {
-        "description": "Save a durable correction to one of the owner's existing memories.",
-        "operationId": "edit_user_memory_entry_v1_agent_user_memory_entries__memory_id__patch",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "memory_id",
-            "required": true,
-            "schema": {
-              "title": "Memory Id",
-              "type": "string"
-            }
-          },
-          {
-            "in": "header",
-            "name": "authorization",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/UpdateMemoryEntry"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/UserMemoryView"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "404": {
-            "description": "The owner has no such visible memory entry."
-          },
-          "409": {
-            "description": "Memory changed since the expected revision."
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Edit User Memory Entry",
-        "tags": [
-          "user-memory"
-        ]
-      }
-    },
     "/v1/agent/worker/claim": {
       "post": {
         "description": "Claim the next queued job and mint this attempt's capability token.\n\nReturns ``null`` (HTTP 200) when the queue is empty, and equally when an\noperator has pinned agent jobs to a different host than the one this runner\nreports. The two are deliberately the same answer on the wire: a runner\nthat has been switched away from should idle exactly as it does when there\nis no work, not treat it as an error worth retrying differently. Which host\nis active is an admin question, answered on the admin surface.\n\n**Enrolled-host only.** ``claim_job`` takes the oldest queued job across all\ntenants, and the response carries that job's repo, prompt, and metadata\nplus a working capability token for it — so ordinary API-key auth here\nwould let any customer dequeue and read another customer's job, and drain\nthe queue besides.\n\nThe per-host credential opens registration/heartbeat/claim surfaces and\nnever enters the sandbox; only the returned per-attempt tokens go in.",
@@ -33872,7 +33981,7 @@
     },
     "/v1/agent/worker/jobs/{job_id}/attachments": {
       "get": {
-        "description": "List every upload in this conversation, so /uploads can be rebuilt.\n\nScoped to the thread rather than the claimed turn: a retry on a fresh\ncontainer has to restore all of them, and re-importing into a retained one\nsimply overwrites the same paths.",
+        "description": "List what this conversation's /uploads holds, so it can be rebuilt.\n\nScoped to the thread rather than the claimed turn: a retry on a fresh\ncontainer has to restore all of them, and re-importing into a retained one\nsimply overwrites the same paths. A file attached again by a later turn is\nlisted once, as its newest upload.",
         "operationId": "worker_list_attachments_v1_agent_worker_jobs__job_id__attachments_get",
         "parameters": [
           {

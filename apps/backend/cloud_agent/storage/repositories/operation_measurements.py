@@ -85,13 +85,12 @@ class PostgresOperationMeasurementRepository:
                 # colliding id under a fresh run commits a phantom run row.
                 return "conflict"
             if run is not None:
-                # The row is created first and locked second, in that order.
-                # ``SELECT ... FOR UPDATE`` cannot lock a row that does not
-                # exist yet, so two writers reporting one run for the first time
-                # would both read nothing and then race the primary key -- one
-                # of them surfacing a UniqueViolation instead of the outcome
-                # this port promises. DO NOTHING makes the loser of that race
-                # wait for the winner to commit and then continue to the lock.
+                # The row is created first and read second, in that order. Two
+                # writers reporting one run for the first time would otherwise
+                # both read nothing and then race the primary key -- one of them
+                # surfacing a UniqueViolation instead of the outcome this port
+                # promises. DO NOTHING makes the loser of that race wait for the
+                # winner to commit and then continue to the read.
                 await conn.execute(
                     """
                     INSERT INTO agent_operation_profiling_runs (
@@ -108,13 +107,17 @@ class PostgresOperationMeasurementRepository:
                     int(run.get("config_version") or 1),
                     json.dumps(list(run.get("admission_instances") or [])),
                 )
+                # Read without a lock. Every sample of a run passes here, and a
+                # lock on the run's one catalogue row would queue all of them
+                # behind each other until commit. Nothing compared below changes
+                # once the row is written, and an admission instance, once
+                # listed, is never altered or removed.
                 existing = await conn.fetchrow(
                     """
                     SELECT operations, target, expires_at, config_version,
                            admission_instances
                     FROM agent_operation_profiling_runs
                     WHERE run_id = $1
-                    FOR UPDATE
                     """,
                     str(run["run_id"]),
                 )
@@ -129,15 +132,34 @@ class PostgresOperationMeasurementRepository:
                 merged = _merge_admissions(existing["admission_instances"], run)
                 if merged is None:
                     return "run_conflict"
-                await conn.execute(
-                    """
-                    UPDATE agent_operation_profiling_runs
-                    SET admission_instances = $2::jsonb
-                    WHERE run_id = $1
-                    """,
-                    str(run["run_id"]),
-                    json.dumps(merged),
-                )
+                if merged != json.loads(existing["admission_instances"]):
+                    # Only a writer with an instance to add rewrites the list,
+                    # and that read-modify-write needs the row lock -- taken
+                    # now, with a fresh read, because another writer may have
+                    # appended since the read above.
+                    locked = await conn.fetchval(
+                        """
+                        SELECT admission_instances
+                        FROM agent_operation_profiling_runs
+                        WHERE run_id = $1
+                        FOR UPDATE
+                        """,
+                        str(run["run_id"]),
+                    )
+                    if locked is None:  # pragma: no cover - run rows are never deleted
+                        return "conflict"
+                    merged = _merge_admissions(locked, run)
+                    if merged is None:
+                        return "run_conflict"
+                    await conn.execute(
+                        """
+                        UPDATE agent_operation_profiling_runs
+                        SET admission_instances = $2::jsonb
+                        WHERE run_id = $1
+                        """,
+                        str(run["run_id"]),
+                        json.dumps(merged),
+                    )
             inserted = await conn.fetchval(
                 """
                 INSERT INTO agent_operation_measurements (
@@ -194,12 +216,17 @@ class PostgresOperationMeasurementRepository:
             )
             if inserted is not None:
                 # Catalogue recency means the latest newly stored sample, not
-                # merely the first row that happened to create the manifest.
+                # merely the first row that happened to create the manifest --
+                # to the second. Bumped at most once a second, because each
+                # bump locks the run's one row until commit and leaves a dead
+                # version of it (and of the index entries that order by it), and
+                # a run's samples would otherwise all pay that in turn.
                 await conn.execute(
                     """
                     UPDATE agent_operation_profiling_runs
                     SET received_at = NOW()
                     WHERE run_id = $1
+                      AND received_at < NOW() - INTERVAL '1 second'
                     """,
                     str(measurement["profiling_run_id"]),
                 )

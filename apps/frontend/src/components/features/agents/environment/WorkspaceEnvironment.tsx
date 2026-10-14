@@ -1,5 +1,6 @@
 'use client';
 
+import { isTemporaryWorkspace } from '@/lib/temporaryWorkspace';
 import { useEffect, useRef, useState } from 'react';
 import { useT } from '@/components/providers';
 import {
@@ -253,14 +254,19 @@ export function WorkspaceEnvironment({
           </div>
         </>
       )}
-      <button
-        type="button"
-        className="ui-button ui-button-secondary"
-        onClick={() => setEditing(!editing)}
-      >
-        {t('environment.editSaved')}
-      </button>
-      {editing && <EnvironmentManager repo={repo} onChanged={() => setReload((v) => v + 1)} />}
+      {/* Saved environments belong to one repository; a temporary workspace has none. */}
+      {isTemporaryWorkspace(repo) ? null : (
+        <button
+          type="button"
+          className="ui-button ui-button-secondary"
+          onClick={() => setEditing(!editing)}
+        >
+          {t('environment.editSaved')}
+        </button>
+      )}
+      {editing && !isTemporaryWorkspace(repo) && (
+        <EnvironmentManager repo={repo} onChanged={() => setReload((v) => v + 1)} />
+      )}
       {error && (
         <p role="alert" className="text-sm text-red-600 dark:text-red-400">
           {error}

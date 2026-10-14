@@ -2,8 +2,8 @@
 
 Three properties the R3 split established and nothing would notice breaking:
 
-* every route the application serves under the agent prefix comes from one of
-  the nine surface routers, and each surface is mounted exactly once;
+* every route the surface routers in `routes.SURFACE_ROUTERS` declare is served
+  under the agent prefix, and each surface is mounted exactly once;
 * no two of those surfaces shadow each other — the mount order in
   `api/routes.py` is only safe because their patterns do not overlap (design
   §6.4), so a new pattern that could match a sibling's URL has to fail here
@@ -40,11 +40,11 @@ _METHODS = ("get", "post", "put", "patch", "delete")
 
 
 def _surface_routes() -> list[tuple[APIRouter, APIRoute]]:
-    """Every route the nine surfaces declare, with the surface it came from.
+    """Every route the surfaces declare, with the surface it came from.
 
-    The router object is the identity and not its prefix: all nine surfaces
-    carry ``/v1/agent``, so a comparison that tells them apart by prefix tells
-    nothing apart at all.
+    The router object is the identity and not its prefix: every surface
+    carries ``/v1/agent``, so a comparison that tells them apart by prefix
+    tells nothing apart at all.
     """
     found: list[tuple[APIRouter, APIRoute]] = []
     for surface in routes.SURFACE_ROUTERS:
@@ -133,7 +133,7 @@ def test_every_agent_route_comes_from_a_surface_router() -> None:
 
     # The app also mounts routers this tuple does not own — hosts, usage, the
     # MCP relay, the admin surfaces — so the surfaces are a subset of what is
-    # served. That each of the nine still *is* served is what this asserts: a
+    # served. That each of them still *is* served is what this asserts: a
     # router dropped from the tuple, or mounted under a doubled prefix, stops
     # being covered here (``/v1/agent/v1/agent/...`` is what that looked like).
     # That none of them was lost outright is the contract file's job below: the
@@ -166,12 +166,12 @@ def test_no_two_surfaces_shadow_each_other() -> None:
     """No surface's pattern can match another surface's URL.
 
     The pairs are told apart by router identity. They used to be skipped by
-    comparing prefixes — and all nine surfaces carry ``/v1/agent``, so every
+    comparing prefixes — and every surface carries ``/v1/agent``, so every
     pair was skipped and the loop below compared nothing.
 
     The overlaps between the *other* routers the app mounts (`mcp/catalog`
     against `mcp/{server_name}`, for one) predate this split and are not this
-    test's subject — these nine are.
+    test's subject — the surfaces in ``SURFACE_ROUTERS`` are.
     """
     overlapping = _shadowing_pairs(_surface_routes())
 

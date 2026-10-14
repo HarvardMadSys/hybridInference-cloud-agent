@@ -15,11 +15,6 @@ from cloud_agent_shared.environment import EnvironmentScripts
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
 
-@pytest.fixture(autouse=True)
-def enable_environments(monkeypatch):
-    monkeypatch.setenv("AGENT_REPOSITORY_ENVIRONMENTS_ENABLED", "true")
-
-
 async def _save(
     store,
     *,
@@ -607,13 +602,15 @@ async def test_preflight_failure_releases_claim_without_decrypting_again(store, 
     assert not await store.environments.fail_environment_preflight(run["id"], "runner", 2)
 
 
-async def test_disabled_switch_blocks_new_bindings_but_preserves_existing(store, pool, monkeypatch):
+async def test_legacy_disabled_setting_cannot_block_bindings_or_runtime_refresh(
+    store, pool, monkeypatch
+):
     monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "environment-test-key")
     env = await _save(store)
     job = await _job(store, env)
     monkeypatch.setenv("AGENT_REPOSITORY_ENVIRONMENTS_ENABLED", "false")
-    with pytest.raises(ValueError, match="disabled"):
-        await _job(store, env)
+    created = await _job(store, env)
+    assert (await store.environments.get_job_environment(created["id"])).setup_script == "install"
     assert (await store.environments.get_job_environment(job["id"])).setup_script == "install"
     empty = await store.conversation_commands.create_job(
         user_id="bob",
@@ -639,10 +636,14 @@ async def test_disabled_switch_blocks_new_bindings_but_preserves_existing(store,
         name="Global",
         variables=[{"name": "TOKEN", "value": "private-example"}],
     )
-    with pytest.raises(ValueError, match="disabled"):
+    assert (
         await store.environments.refresh_runtime_environment(
             "bob", empty["environment_binding_id"], 0
         )
+    )["runtime_revision"] == 1
+    refreshed = await store.environments.get_job_environment(empty["id"])
+    assert refreshed.required
+    assert refreshed.values("runtime")["TOKEN"] == "private-example"
     assert (
         await store.environments.refresh_runtime_environment(
             "alice", job["environment_binding_id"], 0

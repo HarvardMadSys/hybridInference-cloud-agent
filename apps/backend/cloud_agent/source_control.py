@@ -160,25 +160,52 @@ def github_connect_configured(app_credentials: Any, env: dict[str, str] | None =
     )
 
 
-def github_authorization_url(base_url: str, *, state: str) -> str:
-    """Add state to an operator-configured GitHub authorization URL safely."""
+def github_install_url_is_usable(base_url: str) -> bool:
+    """Whether :func:`github_authorization_url` will send people to this URL.
+
+    Also the settings editor's rule for the saved value, so a URL that saves
+    is one that works.
+    """
     parsed = urlparse(base_url)
     try:
         invalid_port = parsed.port not in {None, 443}
     except ValueError:
         invalid_port = True
-    if (
+    return not (
         parsed.scheme != "https"
         or parsed.hostname not in {"github.com", "www.github.com"}
         or parsed.username
         or parsed.password
         or parsed.fragment
         or invalid_port
-    ):
+    )
+
+
+def github_authorization_url(base_url: str, *, state: str) -> str:
+    """Add state to an operator-configured GitHub authorization URL safely."""
+    if not github_install_url_is_usable(base_url):
         raise SourceControlError("AGENT_GITHUB_APP_INSTALL_URL must be an https://github.com URL")
+    parsed = urlparse(base_url)
     query = [(key, value) for key, value in parse_qsl(parsed.query) if key != "state"]
     query.append(("state", state))
     return urlunparse(parsed._replace(query=urlencode(query)))
+
+
+def gitlab_redirect_uri_is_usable(redirect_uri: str) -> bool:
+    """Whether GitLab may send an authorization code here: HTTPS, or HTTP on localhost.
+
+    Also the settings editor's rule for the saved value, so a URL that saves
+    is one the GitLab provider loads with.
+    """
+    parsed = urlparse(redirect_uri)
+    local_http = parsed.scheme == "http" and parsed.hostname in {"localhost", "127.0.0.1"}
+    return not (
+        not parsed.hostname
+        or (parsed.scheme != "https" and not local_http)
+        or parsed.username
+        or parsed.password
+        or parsed.fragment
+    )
 
 
 @dataclass(frozen=True)
@@ -202,15 +229,7 @@ class GitLabOAuthConfig:
             raise SourceControlError(
                 "GitLab OAuth requires client id, client secret, and redirect URI"
             )
-        parsed = urlparse(redirect_uri)
-        local_http = parsed.scheme == "http" and parsed.hostname in {"localhost", "127.0.0.1"}
-        if (
-            not parsed.hostname
-            or (parsed.scheme != "https" and not local_http)
-            or parsed.username
-            or parsed.password
-            or parsed.fragment
-        ):
+        if not gitlab_redirect_uri_is_usable(redirect_uri):
             raise SourceControlError(
                 "AGENT_GITLAB_OAUTH_REDIRECT_URI must be HTTPS (HTTP is allowed only on localhost)"
             )

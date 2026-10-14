@@ -61,6 +61,7 @@ class _ClaimStore(EmptyAttachments, AllCapabilities):
         self.fence_still_current = fence_still_current
         self.released: list[tuple[str, int]] = []
         self.retry_delays: list[float] = []
+        self.release_reasons: list[str] = []
         self.failed: list[str] = []
         # Named apart from the capability: `store.linked` is now the grant
         # repository the route reaches for, not this fake's record of what it
@@ -109,9 +110,11 @@ class _ClaimStore(EmptyAttachments, AllCapabilities):
         job_id: str,
         attempt_id: int,
         lease_generation: int | None = None,
+        reason: str = "credential_unavailable",
         retry_after_seconds: float = 0,
     ) -> bool:
         self.released.append((job_id, attempt_id))
+        self.release_reasons.append(reason)
         self.retry_delays.append(retry_after_seconds)
         return True
 
@@ -536,6 +539,73 @@ async def test_a_repository_refusal_is_decided_before_any_grant_is_minted(
     else:
         assert store.failed == []
         assert store.retry_delays == [30]
+
+
+@pytest.mark.parametrize("failing_step", ["mcp_bindings", "attachment_count", "response"])
+async def test_an_unexpected_failure_after_the_claim_hands_the_job_back(
+    claim, monkeypatch, failing_step
+):
+    """A claim that cannot be assembled must not be left holding the job.
+
+    Every refusal above releases its claim, but anything else that raised
+    between the claim and the answer — the MCP bindings read, the upload
+    count, building the response — used to escape as a 500 with the claim
+    still held. The job then waited out a lease nothing was using, and the
+    reaper charged it a retry for a turn no agent ever started.
+    """
+    store, grants = _ClaimStore(), _Grants()
+
+    async def broken_read(**_kwargs: Any) -> Any:
+        raise RuntimeError("the store dropped the connection")
+
+    if failing_step == "mcp_bindings":
+        monkeypatch.setattr(agent_worker, "resolve_for_thread", broken_read)
+    elif failing_step == "attachment_count":
+        monkeypatch.setattr(store, "count_thread_attachments", broken_read)
+    else:
+        original_claim = store.claim_job
+
+        async def claim_the_response_refuses(**kwargs: Any) -> dict[str, Any] | None:
+            job = await original_claim(**kwargs)
+            assert job is not None
+            # A stored value the response model will not accept.
+            return {**job, "metadata": ["not", "a", "mapping"]}
+
+        monkeypatch.setattr(store, "claim_job", claim_the_response_refuses)
+
+    response = await claim(store, grants)
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["error"]["type"] == "claim_failed"
+    assert store.released == [(_JOB, _ATTEMPT)]
+    assert store.release_reasons == ["claim_failed"]
+    assert store.retry_delays == [30]
+    assert store.failed == []
+
+
+async def test_a_grant_whose_link_raises_is_revoked_and_the_job_handed_back(claim):
+    """A minted grant the store could not record is withdrawn at once.
+
+    The link is the only thing that will ever renew or revoke it, so a write
+    that raised — rather than answering "fenced out" — would otherwise leave a
+    live capability that nothing owns until its TTL.
+    """
+
+    class BrokenLinkStore(_ClaimStore):
+        async def record_attempt_grant(
+            self, *, attempt_id: int, lease_generation: int, grant_id: str
+        ) -> bool:
+            raise RuntimeError("the store dropped the connection")
+
+    store, grants = BrokenLinkStore(), _Grants()
+
+    response = await claim(store, grants)
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["error"]["type"] == "claim_failed"
+    assert grants.revoked == ["agr_7"]
+    assert store.released == [(_JOB, _ATTEMPT)]
+    assert store.linked == {}
 
 
 @pytest.mark.parametrize("pending", [True, False])

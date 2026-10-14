@@ -313,6 +313,18 @@ class ComputeResourceRepository(Protocol):
         """Read the newest registration of an allocation, without its token."""
         ...
 
+    async def reopen_node_registration(
+        self,
+        *,
+        allocation_id: str,
+        ttl_seconds: float,
+        operation_id: str,
+        generation: int,
+        worker_id: str,
+    ) -> bool:
+        """Give an allocation's newest, never-completed registration another window."""
+        ...
+
     async def record_host_key(
         self,
         *,

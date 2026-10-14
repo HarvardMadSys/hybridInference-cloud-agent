@@ -39,6 +39,7 @@ def run_setup(
     workdir: str,
     backend: Any,
     timeout_s: float = 900.0,
+    stop: Callable[[], bool] | None = None,
     env: dict[str, str] | None = None,
     secrets: dict[str, str] | None = None,
     on_output: Callable[[str], None] | None = None,
@@ -50,6 +51,10 @@ def run_setup(
 
     Output is retained only as a bounded diagnostic tail; the durable result is
     already in the container layer.
+
+    ``stop`` is polled while the script runs. Once it answers true -- the
+    owner pressed Stop, or the attempt's lease is gone -- the script is killed
+    rather than left to run out its timeout for a turn that will not use it.
     """
     if not script.strip():
         return SetupResult(ran=False)
@@ -103,6 +108,11 @@ def run_setup(
                     exit_code=124,
                     detail=f"setup exceeded {timeout_s:.0f}s",
                 )
+            if stop is not None and stop():
+                output.close(drain=True)
+                process.kill()
+                process.wait()
+                return SetupResult(ran=True, exit_code=130, detail="setup was stopped")
             if (
                 phase
                 and hasattr(backend, "spawn_environment_script")

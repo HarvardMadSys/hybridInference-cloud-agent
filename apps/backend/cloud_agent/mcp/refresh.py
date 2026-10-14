@@ -70,12 +70,20 @@ REFRESH_MARGIN_SECONDS = 120
 
 #: How long one worker may hold the exclusive claim on a refresh.
 #:
-#: Comfortably longer than the token request's own 20-second timeout, because a
-#: lease that expires while its holder is still waiting would let a second
-#: caller spend the same refresh token -- the race the lease exists to prevent.
-#: Short enough that a worker which died mid-flight blocks the connection for a
-#: minute rather than until somebody notices.
+#: Longer than the whole token exchange (:data:`REFRESH_EXCHANGE_SECONDS`), with
+#: room for the fenced write that follows it, because a lease that expires while
+#: its holder is still waiting would let a second caller spend the same refresh
+#: token -- the race the lease exists to prevent. Short enough that a worker
+#: which died mid-flight blocks the connection for a minute rather than until
+#: somebody notices.
 REFRESH_LEASE_SECONDS = 60.0
+
+#: How long the token exchange may take as a whole: resolving the endpoint,
+#: sending the request and reading the answer, together. ``httpx``'s timeout is
+#: per operation -- the connect, each write, each read -- so on its own it
+#: bounds none of that: a slow issuer, or one that trickles its answer, could
+#: outlast the lease while the request was still in flight.
+REFRESH_EXCHANGE_SECONDS = REFRESH_LEASE_SECONDS - 10.0
 
 
 class RefreshRefused(RuntimeError):
@@ -526,6 +534,11 @@ async def _post(
     cannot diagnose and a lease nobody releases, which is how a single timeout
     turns into a connection that reports "somebody else is refreshing" for the
     rest of the minute and then fails the same way again.
+
+    The whole exchange runs under :data:`REFRESH_EXCHANGE_SECONDS`, so it ends
+    while the lease is still held. Running out of time before the request could
+    be sent is certain, like a name that did not resolve; running out after is
+    not, because the issuer may already have rotated the token.
     """
     del fetcher  # Reserved for a caller that wants to inject a client.
     import asyncio
@@ -537,17 +550,25 @@ async def _post(
         validate_endpoint,
     )
 
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + REFRESH_EXCHANGE_SECONDS
     try:
-        endpoint = validate_endpoint(request.url, policy)
-        loop = asyncio.get_running_loop()
-        infos = await loop.getaddrinfo(dial_host(endpoint.host), endpoint.port, type=0)
-        check_addresses(endpoint.host, {str(info[4][0]) for info in infos}, policy)
+        async with asyncio.timeout_at(deadline):
+            endpoint = validate_endpoint(request.url, policy)
+            infos = await loop.getaddrinfo(dial_host(endpoint.host), endpoint.port, type=0)
+            check_addresses(endpoint.host, {str(info[4][0]) for info in infos}, policy)
     except EndpointRejected as exc:
         # Refused by policy, or not a URL a request can be built for. Nothing
         # was sent and nothing will be. The policy's own kind is carried through
         # -- it distinguishes "your network refuses this address" from "that is
         # not an address" -- and the refusal is certain, so the lease goes back.
         raise RefreshRefused(str(exc), kind=str(exc.kind)) from exc
+    except TimeoutError as exc:
+        # The resolver did not answer in time. Certain: no socket was opened.
+        raise RefreshRefused(
+            "the token endpoint could not be resolved in time",
+            kind=ConnectionErrorKind.UNREACHABLE.value,
+        ) from exc
     except OSError as exc:
         # Resolution itself failed. Certain, because no socket was ever opened.
         raise RefreshRefused(
@@ -556,12 +577,15 @@ async def _post(
         ) from exc
 
     try:
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(20.0),
-            follow_redirects=False,
-            headers=IDENTITY_ENCODING_HEADERS,
-            transport=pinned_transport(),
-        ) as client:
+        async with (
+            asyncio.timeout_at(deadline),
+            httpx.AsyncClient(
+                timeout=httpx.Timeout(20.0),
+                follow_redirects=False,
+                headers=IDENTITY_ENCODING_HEADERS,
+                transport=pinned_transport(),
+            ) as client,
+        ):
             response = await client.send(
                 client.build_request(
                     "POST",
@@ -590,6 +614,14 @@ async def _post(
                     ) from exc
             finally:
                 await response.aclose()
+    except TimeoutError as exc:
+        raise RefreshRefused(
+            "the token endpoint did not answer in time",
+            kind=ConnectionErrorKind.UNREACHABLE.value,
+            # The request may already have been on the wire, so it keeps the
+            # lease like any other answer that never arrived.
+            uncertain=True,
+        ) from exc
     except _NOT_SENT_ERRORS as exc:
         raise RefreshRefused(
             f"the token endpoint could not be reached: {exc}",
@@ -619,9 +651,10 @@ async def _post(
         )
     try:
         document = json.loads(payload or b"{}")
-    except ValueError as exc:
-        # A 2xx we cannot read. The exchange may well have completed, so this is
-        # treated like a timeout rather than like a refusal.
+    except (ValueError, RecursionError) as exc:
+        # A 2xx we cannot read -- including one nested deeper than the parser
+        # recurses. The exchange may well have completed, so this is treated
+        # like a timeout rather than like a refusal.
         raise RefreshRefused(
             "the token endpoint's answer could not be read",
             kind=ConnectionErrorKind.PROTOCOL_INCOMPATIBLE.value,
@@ -640,6 +673,7 @@ async def _post(
 
 
 __all__ = [
+    "REFRESH_EXCHANGE_SECONDS",
     "REFRESH_LEASE_SECONDS",
     "REFRESH_MARGIN_SECONDS",
     "RefreshOutcome",

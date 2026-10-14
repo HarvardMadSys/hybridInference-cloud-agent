@@ -19,7 +19,7 @@
 # Start it with:
 #   docker compose -f deploy/control-plane/docker-compose.yml up -d
 # after filling in an env file; see ENVIRONMENT.md for every variable and
-# `docs/smoke.md` for a first run.
+# `docs/developer/smoke.md` for a first run.
 
 services:
   # Runs to completion before the API is allowed to start. Alembic owns the
@@ -101,7 +101,6 @@ services:
       AGENT_SETTINGS_ENCRYPTION_KEY: ${AGENT_SETTINGS_ENCRYPTION_KEY:-}
       AGENT_CONTROL_TOKEN_SECRET: ${AGENT_CONTROL_TOKEN_SECRET:-}
       AGENT_SOURCE_CONTROL_ENCRYPTION_KEY: ${AGENT_SOURCE_CONTROL_ENCRYPTION_KEY:-}
-      AGENT_REPOSITORY_ENVIRONMENTS_ENABLED: ${AGENT_REPOSITORY_ENVIRONMENTS_ENABLED:-false}
       # The API enforces the same exact host-generation capability as the
       # deploy gate. Without this, a pending runner could claim queued work
       # while deploy.sh correctly refused to replace the old API.
@@ -117,6 +116,8 @@ services:
       AGENT_WEB_ORG_NAME: ${AGENT_WEB_ORG_NAME:-}
       AGENT_WEB_ORG_URL: ${AGENT_WEB_ORG_URL:-}
       AGENT_WEB_STATUS_URL: ${AGENT_WEB_STATUS_URL:-}
+      AGENT_WEB_DOCS_URL: ${AGENT_WEB_DOCS_URL:-}
+      AGENT_WEB_CONTACT_URL: ${AGENT_WEB_CONTACT_URL:-}
       AGENT_WEB_GATEWAY_URL: ${AGENT_WEB_GATEWAY_URL:-}
       AGENT_WEB_FEATURE_RAG: ${AGENT_WEB_FEATURE_RAG:-}
       # Optional compute management runs only on this stable main listener.
@@ -124,6 +125,8 @@ services:
       AGENT_COMPUTE_CONFIG: ${AGENT_COMPUTE_CONFIG:-}
       AGENT_COMPUTE_SECRET_KEY: ${AGENT_COMPUTE_SECRET_KEY:-}
       AGENT_CLOUDLAB_API_URL: ${AGENT_CLOUDLAB_API_URL:-}
+      # Imported once; blank derives it from AGENT_SESSION_REDIRECT_URI.
+      AGENT_COMPUTE_REGISTRATION_URL: ${AGENT_COMPUTE_REGISTRATION_URL:-}
       # How long a member-scoped resident credential lives between runner
       # heartbeats. Chat inactivity is a separate group clock on the host
       # (AGENT_CHAT_IDLE_TIMEOUT_S); refreshing this lease does not keep an
@@ -192,6 +195,10 @@ services:
       AGENT_GIT_AUTHOR_NAME: ${AGENT_GIT_AUTHOR_NAME:-}
       AGENT_GIT_AUTHOR_EMAIL: ${AGENT_GIT_AUTHOR_EMAIL:-}
       AGENT_REPO_ALLOWLIST: ${AGENT_REPO_ALLOWLIST:-}
+      # Archiving a session once its published PR merged. Imported once into
+      # Admin Settings; blank keeps the defaults (on, every 30 seconds).
+      AGENT_PR_ARCHIVE_ENABLED: ${AGENT_PR_ARCHIVE_ENABLED:-}
+      AGENT_PR_ARCHIVE_POLL_S: ${AGENT_PR_ARCHIVE_POLL_S:-}
       # The GitHub App and GitLab OAuth behind Integrations. Optional as a
       # group: a deployment that configures neither simply offers no
       # connections.
@@ -303,7 +310,6 @@ services:
       # listener. Without this, health stays green but every connected server
       # is reported as unavailable at the first tool call.
       AGENT_SOURCE_CONTROL_ENCRYPTION_KEY: ${AGENT_SOURCE_CONTROL_ENCRYPTION_KEY:-}
-      AGENT_REPOSITORY_ENVIRONMENTS_ENABLED: ${AGENT_REPOSITORY_ENVIRONMENTS_ENABLED:-false}
       AGENT_LOG_LEVEL: ${AGENT_LOG_LEVEL:-INFO}
       AGENT_LOG_FORMAT: ${AGENT_LOG_FORMAT:-text}
     depends_on:
@@ -358,6 +364,8 @@ services:
       AGENT_WEB_ORG_NAME: ${AGENT_WEB_ORG_NAME:-}
       AGENT_WEB_ORG_URL: ${AGENT_WEB_ORG_URL:-}
       AGENT_WEB_STATUS_URL: ${AGENT_WEB_STATUS_URL:-}
+      AGENT_WEB_DOCS_URL: ${AGENT_WEB_DOCS_URL:-}
+      AGENT_WEB_CONTACT_URL: ${AGENT_WEB_CONTACT_URL:-}
       # The gateway's origin, for links this app does not host. Sign-in does
       # not pass through the browser any more, so nothing here starts one.
       AGENT_WEB_GATEWAY_URL: ${AGENT_WEB_GATEWAY_URL:-}

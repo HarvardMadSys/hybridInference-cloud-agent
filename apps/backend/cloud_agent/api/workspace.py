@@ -13,7 +13,10 @@ the owner may still reach the repository the workspace was cloned from.
 
 from __future__ import annotations
 
+import asyncio
+import re
 from typing import TYPE_CHECKING, Any, Protocol
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response
 from fastapi.responses import StreamingResponse
@@ -26,7 +29,7 @@ from cloud_agent.api._operation_measurements import (
     profiling_answer_headers,
     record_measurement,
 )
-from cloud_agent.api._owner_auth import _owned_job, require_agent_owner
+from cloud_agent.api._owner_auth import OWNER_STREAM_MAX_S, _owned_job, require_agent_owner
 from cloud_agent.api._workspace_access import (
     _TERMINAL_ID_PATTERN,
     _sandbox_manager_for_job,
@@ -81,6 +84,7 @@ if TYPE_CHECKING:
         SourceControlRepository as SourceControlPort,
     )
     from cloud_agent.ports.environments import EnvironmentRepository
+    from cloud_agent.sandbox_manager_client import SandboxManagerStream
 
 
 router = APIRouter(prefix="/v1/agent")
@@ -140,7 +144,13 @@ async def _require_workspace_entitlement(
     store: Any,
     app_credentials: Any | None,
 ) -> None:
-    """Recheck that the owner may still access the workspace repository."""
+    """Recheck that the owner may still access the workspace repository.
+
+    A temporary workspace has no repository: ownership of the job, already
+    checked by every caller, is the whole question.
+    """
+    if job["repo"] is None:
+        return
     try:
         await require_entitled_repo(
             job["repo"],
@@ -339,6 +349,82 @@ async def get_agent_job_workspace_file(
                         measure=measure,
                         failure="failed",
                     )
+
+
+#: Characters a downloaded file's name cannot carry on common filesystems.
+_UNSAFE_FILENAME = re.compile(r'[\x00-\x1f\x7f/\\:*?"<>|]+')
+
+
+def _archive_filename(job: dict[str, Any]) -> tuple[str, str]:
+    """The download's name: an ASCII fallback, and the conversation title in UTF-8."""
+    fallback = f"workspace-{job.get('thread_id') or job['id']}.tar.gz"
+    title = _UNSAFE_FILENAME.sub("-", str(job.get("title") or "")).strip(" .-")[:80]
+    return fallback, f"{title}.tar.gz" if title else fallback
+
+
+@router.get("/jobs/{job_id}/workspace/archive")
+async def download_agent_job_workspace(
+    job_id: str,
+    user: dict[str, Any] = Depends(require_agent_owner),
+    store: _WorkspaceStorage | None = Depends(get_storage),
+    app_credentials: Any | None = Depends(get_agent_app_credentials),
+) -> StreamingResponse:
+    """Download the chat's whole workspace as one gzipped tar.
+
+    How a temporary workspace's files leave its sandbox, since nothing else
+    copies them; a repository chat may use it too. The owning host builds the
+    archive completely before answering, so a workspace over its download limit
+    is refused with 413 instead of arriving truncated.
+    """
+    job_store = _require_store(store)
+    job = await _owned_job(job_store.conversation_queries, job_id, user)
+    await _require_workspace_entitlement(
+        job=job, user=user, store=job_store, app_credentials=app_credentials
+    )
+    if job.get("thread_sandbox") is None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": {
+                    "type": "workspace_unavailable",
+                    "message": "This chat has no retained workspace.",
+                }
+            },
+        )
+    sandbox_manager = await _sandbox_manager_for_job(job_store, job)
+    if sandbox_manager is None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": {
+                    "type": "workspace_unavailable",
+                    "message": "This chat has no owning sandbox manager.",
+                }
+            },
+        )
+    try:
+        stream = await sandbox_manager.workspace_archive(_workspace_id(job))
+    except SandboxManagerError as exc:
+        raise _sandbox_manager_http_error(exc) from exc
+    fallback, filename = _archive_filename(job)
+    headers = {
+        "Content-Disposition": (
+            f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quote(filename, safe='')}"
+        ),
+        "Cache-Control": "no-store",
+        "X-Content-Type-Options": "nosniff",
+    }
+    if stream.content_length is not None:
+        headers["Content-Length"] = str(stream.content_length)
+
+    async def body() -> AsyncIterator[bytes]:
+        try:
+            async for chunk in stream:
+                yield chunk
+        finally:
+            await stream.aclose()
+
+    return StreamingResponse(body(), media_type="application/gzip", headers=headers)
 
 
 @router.put("/jobs/{job_id}/files", response_model=AgentWorkspaceResponse)
@@ -574,6 +660,36 @@ async def list_agent_job_terminals(
             raise
 
 
+#: How the sandbox manager ends each terminal SSE frame, keepalives included.
+_SSE_FRAME_END = b"\n\n"
+
+
+async def _relay_terminal_stream(
+    upstream: SandboxManagerStream, request: Request
+) -> AsyncIterator[bytes]:
+    """Relay the sandbox manager's PTY stream until the client leaves or the cap passes.
+
+    The cap, ``OWNER_STREAM_MAX_S``, ends the relay only between two frames:
+    the client resumes after the last sequence it applied, and must never be
+    handed half a frame. The sandbox manager writes a keepalive frame into a quiet
+    stream every 15 seconds, so a boundary is never far off.
+    """
+    clock = asyncio.get_running_loop().time
+    closes_at = clock() + OWNER_STREAM_MAX_S
+    tail = b""
+    try:
+        async for chunk in upstream:
+            if await request.is_disconnected():
+                break
+            yield chunk
+            # Chunks are cut where the network cut them, not at frames.
+            tail = (tail + chunk)[-len(_SSE_FRAME_END) :]
+            if tail == _SSE_FRAME_END and clock() >= closes_at:
+                break
+    finally:
+        await upstream.aclose()
+
+
 @router.get("/jobs/{job_id}/terminals/{terminal_id}/stream")
 async def stream_agent_job_terminal(
     job_id: str,
@@ -584,7 +700,12 @@ async def stream_agent_job_terminal(
     store: _WorkspaceStorage | None = Depends(get_storage),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
 ) -> StreamingResponse:
-    """Relay a resumable private PTY stream without exposing its sandbox manager token."""
+    """Relay a resumable private PTY stream without exposing its sandbox manager token.
+
+    The relay ends after about ``OWNER_STREAM_MAX_S`` (15 minutes), between two
+    frames; the client reconnects with ``after`` set to the last sequence it
+    applied, and that request is admitted again.
+    """
     job, sandbox_manager = await _terminal_owner_workspace(
         job_id=job_id,
         user=user,
@@ -618,17 +739,8 @@ async def stream_agent_job_terminal(
                 )
                 measure.outcome = "completed"
 
-            async def relay() -> AsyncIterator[Any]:
-                try:
-                    async for chunk in upstream:
-                        if await request.is_disconnected():
-                            break
-                        yield chunk
-                finally:
-                    await upstream.aclose()
-
             response = StreamingResponse(
-                relay(),
+                _relay_terminal_stream(upstream, request),
                 media_type="text/event-stream",
                 headers=(
                     _SSE_HEADERS

@@ -5,7 +5,7 @@
 // the credential is the cookie and nothing else, and a 401 is terminal.
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { APIError } from '@/lib/utils/errors';
+import { APIError, getErrorMessage } from '@/lib/utils/errors';
 import { AUTH_EXPIRED_EVENT, fetchWithAuth, jsonOrThrow, safeFetch } from './client';
 
 function jsonResponse(status: number, body: unknown): Response {
@@ -126,6 +126,37 @@ describe('jsonOrThrow', () => {
       message: 'historical fork could not be reconciled',
       statusCode: 409,
     });
+  });
+
+  // The control plane's own refusals, as it sends them. Their wording mentions
+  // an expired page or a lost authorization; their type is what callers
+  // recover on, and the wording must not swap it for a gateway sign-in code.
+  it.each([
+    [409, 'request_cursor_expired', 'That page expired. Load the first page again.'],
+    [
+      409,
+      'request_window_changed',
+      "This execution's attribution changed; load the first page again.",
+    ],
+    [409, 'conflict', 'this call was already decided, or it expired'],
+    [400, 'oauth_state_invalid', 'The source-control authorization expired or is invalid.'],
+    [401, 'permission_error', 'This MCP session is no longer authorized.'],
+  ])('keeps the type of a %i %s refusal and shows its message', async (status, type, message) => {
+    const error = await jsonOrThrow(
+      jsonResponse(status, { detail: { error: { type, message } } }),
+    ).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({ code: type, message, statusCode: status });
+    expect(getErrorMessage(error)).toBe(message);
+  });
+
+  it('does not report an untyped 401 as a wrong password', async () => {
+    const error = await jsonOrThrow(
+      jsonResponse(401, { error: { message: 'Sign in again to continue.' } }),
+    ).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({ code: 'UNKNOWN_ERROR', statusCode: 401 });
+    expect(getErrorMessage(error)).toBe('Sign in again to continue.');
   });
 
   it('throws an APIError, so callers can narrow on it', async () => {

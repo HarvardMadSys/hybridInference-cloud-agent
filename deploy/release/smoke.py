@@ -509,7 +509,7 @@ def _control_environment(dsn: str) -> dict[str, str]:
         "GATEWAY_BASE_URL": "https://gateway.smoke.invalid",
         "GATEWAY_JWKS_URL": "https://gateway.smoke.invalid/v1/identity/jwks",
         "GATEWAY_AUTHORIZE_URL": "https://gateway.smoke.invalid/authorize",
-        "GATEWAY_GRANT_DISPATCH_TOKEN": "smoke-dispatch-token",
+        "GATEWAY_GRANT_DISPATCH_TOKEN": "smoke-dispatch-token-placeholder-32-bytes",
         "AGENT_SESSION_REDIRECT_URI": "https://agents.smoke.invalid/api/v1/session/callback",
         "AGENT_WEB_BASE_URL": "https://agents.smoke.invalid",
         "AGENT_SESSION_COOKIE_SECURE": "false",

@@ -1882,6 +1882,124 @@ class TestTheDynamicClientIdentity:
         assert store.connections[connection_id]["status"] == "active"
 
 
+class TestTheClientSecretIsNotACredential:
+    """A client secret authenticates to the authorization server, never upstream.
+
+    A user who brings a client id and secret has them stored before the browser
+    flow starts, so an abandoned or failed sign-in leaves a row holding a client
+    secret and no access token. That row needs authorizing; it has no credential.
+    """
+
+    def test_an_unfinished_sign_in_needs_authorizing_rather_than_reconnecting(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        store = FakeStore()
+        connection_id = _seed(
+            store, auth_kind="oauth", auth_config={}, access_token_ciphertext=None
+        )
+        with _client(store) as client:
+            client.post(
+                f"/v1/agent/mcp/connections/{connection_id}/authorize",
+                json={"client_id": "our-client", "client_secret": "shh"},
+            )
+            assert store.connections[connection_id]["client_secret_ciphertext"]
+            view = client.get(f"/v1/agent/mcp/connections/{connection_id}").json()
+            with caplog.at_level("WARNING"):
+                result = client.post(f"/v1/agent/mcp/connections/{connection_id}/test").json()
+        assert view["has_credential"] is False
+        assert result["ok"] is False
+        assert result["error_kind"] == "needs_authorization"
+        assert result["message"] == "This connection needs to be authorized."
+        assert "agent_mcp_credential_unreadable" not in caplog.text
+
+    async def test_a_client_secret_is_never_resolved_as_the_bearer(self) -> None:
+        """Not even one the credential cipher could read."""
+        from cloud_agent.mcp.registry import resolve_connection, server_for
+
+        store = FakeStore()
+        connection_id = _seed(
+            store,
+            auth_kind="oauth",
+            auth_config={},
+            access_token_ciphertext=None,
+            client_secret_ciphertext=mcp_cipher(_ENCRYPTION_KEY).encrypt("client-secret"),
+        )
+        resolved = await resolve_connection(store, row=store._row(connection_id))
+        assert not resolved.usable
+        assert "client-secret" not in json.dumps(dict(resolved.credential))
+        assert resolved.error == "This connection needs to be authorized."
+        assert "client-secret" not in json.dumps(
+            server_for(resolved, _binding(connection_id)).headers
+        )
+
+
+class TestATokenStaysWithItsResource:
+    """An OAuth token is sent only to an address its resource covers.
+
+    Editing a connection's address used to keep its token, so rows edited before
+    edits cleared credentials still hold one minted for the old server.
+    """
+
+    def test_a_token_for_the_old_address_is_not_sent_to_the_new_one(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        store = FakeStore()
+        connection_id = _seed(
+            store,
+            auth_kind="oauth",
+            auth_config={"client_id": "client"},
+            url="https://elsewhere.example.com/mcp",
+            issuer="https://auth.example.com",
+            resource="https://mcp.example.com/mcp",
+        )
+        discover = AsyncMock(side_effect=AssertionError("the old token was sent"))
+        monkeypatch.setattr(mcp_connections.McpHost, "discover", discover)
+        with _client(store) as client:
+            result = client.post(f"/v1/agent/mcp/connections/{connection_id}/test").json()
+        discover.assert_not_called()
+        assert result["ok"] is False
+        assert result["error_kind"] == "needs_authorization"
+        assert "another address" in result["message"]
+
+    @pytest.mark.parametrize(
+        "resource",
+        [
+            "https://mcp.example.com/mcp",
+            # Discovery accepts a resource that differs only by a trailing
+            # slash, and stores the server's spelling of it.
+            "https://mcp.example.com/mcp/",
+            "https://mcp.example.com/",
+            None,
+        ],
+    )
+    async def test_a_covering_or_unrecorded_resource_is_still_used(
+        self, resource: str | None
+    ) -> None:
+        """Connections signed in for their own address are unaffected."""
+        from cloud_agent.mcp.registry import resolve_connection
+
+        store = FakeStore()
+        connection_id = _seed(
+            store,
+            auth_kind="oauth",
+            auth_config={"client_id": "client"},
+            issuer="https://auth.example.com",
+            resource=resource,
+        )
+        resolved = await resolve_connection(store, row=store._row(connection_id))
+        assert resolved.usable
+        assert resolved.credential["secret"] == "upstream-secret"
+
+
+def _binding(connection_id: int) -> Any:
+    """A default selection for one connection, as a new conversation gets."""
+    from cloud_agent.mcp.registry import binding_from_row
+
+    return binding_from_row(
+        {"thread_id": "thread-1", "connection_id": connection_id, "alias": "docs"}
+    )
+
+
 class TestImport:
     """Pasting a configuration."""
 
@@ -2103,6 +2221,70 @@ class TestImport:
         assert response.status_code == 503
         assert store.connections == {}
         assert store.created == []
+
+    @pytest.mark.parametrize(
+        ("entry", "locations", "refusal"),
+        [
+            ({"url": "http://wiki.example.com/mcp"}, {}, "http is not allowed"),
+            ({"url": "https://wiki.example.com/mcp"}, {"wiki": "managed-worker"}, "stdio"),
+            ({"command": "npx", "args": ["-y", "@scope/wiki@1.0.0"]}, {"wiki": "remote"}, "stdio"),
+            ({"command": "npx", "args": ["-y", "@scope/wiki"]}, {}, "pin"),
+            ({"command": "bash", "args": ["-c", "npx -y @scope/wiki@1.0.0"]}, {}, "shell"),
+            (
+                {"command": "npx", "args": ["-y", "@scope/wiki@1.0.0", "~/notes"]},
+                {"wiki": "managed-worker"},
+                "absolute path",
+            ),
+        ],
+    )
+    def test_a_draft_that_create_would_refuse_saves_nothing(
+        self, entry: dict[str, Any], locations: dict[str, str], refusal: str
+    ) -> None:
+        """Saving checks each draft the way adding one by hand does.
+
+        The import used to store whatever the paste and the chosen locations
+        said -- a cleartext address, an address saved as a worker process, an
+        unpinned package, a shell, a home-relative mount -- which are rows the
+        connection form refuses and a future runner would trust.
+        """
+        store = FakeStore()
+        paste = {"mcpServers": {"public": {"url": "https://public.example.com/mcp"}, "wiki": entry}}
+        with _client(store) as client:
+            response = client.post(
+                "/v1/agent/mcp/connections/import",
+                json={"text": json.dumps(paste), "save": True, "locations": locations},
+            )
+        assert response.status_code == 400
+        assert refusal in response.json()["detail"]["error"]["message"]
+        assert store.connections == {}
+        assert store.created == []
+
+    def test_a_saved_draft_is_stored_in_the_form_create_stores(self) -> None:
+        """The address normalised, and a worker's mounts the ones its plan accepts."""
+        store = FakeStore()
+        paste = {
+            "mcpServers": {
+                "wiki": {"url": "https://Wiki.Example.com/mcp#tools"},
+                "files": {"command": "npx", "args": ["-y", "@scope/files@1.2.3", "/srv/data"]},
+            }
+        }
+        with _client(store) as client:
+            response = client.post(
+                "/v1/agent/mcp/connections/import",
+                json={
+                    "text": json.dumps(paste),
+                    "save": True,
+                    "locations": {"files": "managed-worker"},
+                },
+            )
+        assert response.status_code == 200, response.text
+        stored = {row["label"]: row for row in store.connections.values()}
+        assert stored["wiki"]["url"] == "https://wiki.example.com/mcp"
+        assert stored["files"]["location"] == "managed-worker"
+        assert stored["files"]["launch_spec"]["args"] == ["-y", "@scope/files@1.2.3", "/srv/data"]
+        assert stored["files"]["launch_spec"]["mounts"] == [
+            {"source": "/srv/data", "target": "/workspace/mcp/0", "read_only": True}
+        ]
 
 
 class TestBindings:

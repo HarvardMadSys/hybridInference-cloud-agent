@@ -27,6 +27,7 @@ import re
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -956,29 +957,32 @@ def test_a_scoped_run_reports_the_facts_the_route_proved(monkeypatch, records):
 # ---------------------------------------------------------------------------
 
 
+#: The parent commit's three response models, copied verbatim from
+#: ``git show 6556746e5a99:apps/backend/cloud_agent/schemas.py``.
+_PARENT_SCHEMAS = (
+    Path(__file__).resolve().parents[1] / "fixtures" / "parent_schemas_6556746e5a99.py.txt"
+)
+
+
 def _parent_models() -> dict[str, Any]:
     """Build the response models exactly as the parent commit declared them.
 
-    Read from git rather than copied by hand, so this baseline cannot quietly
-    drift into agreeing with whatever the current code happens to emit. The
-    parent is the commit that had no profiling fields at all, which makes it
-    the contract a switched-off deployment must still honour.
+    Copied from that commit verbatim rather than rewritten by hand, so this
+    baseline cannot quietly drift into agreeing with whatever the current code
+    happens to emit. The parent is the commit that had no profiling fields at
+    all, which makes it the contract a switched-off deployment must still
+    honour. The copy is vendored under ``tests/fixtures`` instead of read with
+    ``git show``, because a shallow clone does not have that commit.
 
     It is the parent of the squash commit that landed the profiling fields
     (#258), not ``e77e3e6^`` on the feature branch: the three models are
     byte-identical in both, and only the first stays reachable from ``dev``
     once that branch is deleted.
     """
-    import subprocess
     import sys
     import types
 
-    source = subprocess.run(
-        ["git", "show", "6556746e5a99:apps/backend/cloud_agent/schemas.py"],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout
+    source = _PARENT_SCHEMAS.read_text(encoding="utf-8")
     wanted = ["AgentWorkspaceEntry", "AgentWorkspaceResponse", "AgentTerminalSessionResponse"]
     chunks = []
     for name in wanted:

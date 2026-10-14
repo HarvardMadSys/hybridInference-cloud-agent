@@ -540,7 +540,11 @@ async def test_reclaimed_publish_rejects_every_stale_publisher_write(store, pool
 
 
 async def test_the_sixth_transient_failure_fails_instead_of_deferring(store, pool, monkeypatch):
-    """Five recorded defers is the budget; the next 503 fails the snapshot."""
+    """Five recorded defers is the budget; the next 503 fails the snapshot.
+
+    The failed snapshot no longer holds the later one back: the same pass goes
+    on to it, and it spends a retry of its own on the same outage.
+    """
     job, capture, patch = await _capture_settled_workspace(store, "budget")
     later_snapshot_id = await _insert_later_snapshot(pool, job=job, capture=capture, patch=patch)
     async with pool.acquire() as conn:
@@ -574,8 +578,10 @@ async def test_the_sixth_transient_failure_fails_instead_of_deferring(store, poo
             "SELECT snapshot_state, idle_deadline FROM agent_sandboxes WHERE id = $1",
             capture["sandbox_id"],
         )
-        later_state = await conn.fetchval(
-            "SELECT state FROM agent_sandbox_snapshots WHERE id = $1", later_snapshot_id
+        later = await conn.fetchrow(
+            "SELECT state, publish_attempt_count, retry_at IS NOT NULL AS waits "
+            "FROM agent_sandbox_snapshots WHERE id = $1",
+            later_snapshot_id,
         )
         event_count = await conn.fetchval(
             """
@@ -592,13 +598,22 @@ async def test_the_sixth_transient_failure_fails_instead_of_deferring(store, poo
     assert "retry limit" in failed["last_error"].lower()
     assert group["snapshot_state"] == "dirty"
     assert group["idle_deadline"] is not None
-    assert later_state == "captured"
+    assert dict(later) == {"state": "captured", "publish_attempt_count": 1, "waits": True}, (
+        "the later snapshot was tried next, and deferred by the same outage"
+    )
     assert event_count == 1
-    assert await store.snapshot.claim_for_publish() is None
+    assert await store.snapshot.claim_for_publish() is None, (
+        "the later one waits for its retry, and the failed one is never retried"
+    )
 
 
-async def test_a_failed_earlier_snapshot_still_blocks_the_lineage(store, pool):
-    """A terminal publication failure still holds every later snapshot back."""
+async def test_a_failed_earlier_snapshot_no_longer_blocks_the_lineage(store, pool):
+    """A terminal publication failure is superseded by the later snapshot.
+
+    The later one was cut from the same published base, so it carries the
+    failed one's changes; holding it back left the group unpublishable for
+    good. The failed one stays failed, with its reason, and is not retried.
+    """
     job, capture, _patch = await _capture_settled_workspace(store, "lineage")
     claimed = await store.snapshot.claim_for_publish()
     assert claimed is not None and claimed["snapshot_id"] == capture["snapshot_id"]
@@ -631,16 +646,20 @@ async def test_a_failed_earlier_snapshot_still_blocks_the_lineage(store, pool):
             job["id"],
         )
 
-    assert await store.snapshot.claim_for_publish() is None
+    later = await store.snapshot.claim_for_publish()
+    assert later is not None and later["snapshot_id"] == later_id
+    assert later["patch"] == later_patch
     async with pool.acquire() as conn:
         assert (
             await conn.fetchval("SELECT state FROM agent_sandbox_snapshots WHERE id = $1", later_id)
-            == "captured"
+            == "publishing"
         )
-        assert (
-            await conn.fetchval(
-                "SELECT state FROM agent_sandbox_snapshots WHERE id = $1",
-                capture["snapshot_id"],
-            )
-            == "failed"
+        failed = await conn.fetchrow(
+            "SELECT state, last_error FROM agent_sandbox_snapshots WHERE id = $1",
+            capture["snapshot_id"],
         )
+    assert dict(failed) == {
+        "state": "failed",
+        "last_error": "publisher rejected the immutable patch",
+    }
+    assert await store.snapshot.claim_for_publish() is None

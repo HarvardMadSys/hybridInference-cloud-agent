@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from cloud_agent.api._job_views import _iso, _job_response
 from cloud_agent.api._owner_auth import require_agent_owner
+from cloud_agent.api._project_filter import TemporaryFilter, require_single_project_filter
 from cloud_agent.api.deps import get_grant_client, get_storage, require_store
 from cloud_agent.application.residency import close_released_residencies
 from cloud_agent.entitlement import REPO_PATTERN
@@ -68,11 +69,13 @@ async def list_agent_sessions(
     cursor: str | None = Query(None, max_length=1024),
     search: str | None = Query(None, max_length=200, pattern=r"^[^\x00]*$"),
     repo: str | None = Query(None, pattern=REPO_PATTERN, max_length=140),
+    temporary: TemporaryFilter = False,
     state: AgentSessionState | None = Query(None),
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _CatalogStorage | None = Depends(get_storage),
 ) -> AgentSessionListResponse:
     """Search complete conversations by stable title, project and display state."""
+    require_single_project_filter(repo, temporary)
     job_store = _require_store(store)
     try:
         result = await job_store.conversation_queries.list_sessions(
@@ -84,6 +87,7 @@ async def list_agent_sessions(
             repo=repo,
             state=state,
             include_summary=include_summary,
+            temporary=temporary,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -172,6 +176,7 @@ async def delete_agent_sessions(
 async def list_agent_conversations(
     q: str = Query("", max_length=200),
     repo: str | None = Query(None, pattern=REPO_PATTERN, max_length=140),
+    temporary: TemporaryFilter = False,
     include_archived: bool = Query(False),
     pinned: bool | None = Query(None),
     limit: int = Query(50, ge=1, le=200),
@@ -180,6 +185,7 @@ async def list_agent_conversations(
     store: _CatalogStorage | None = Depends(get_storage),
 ) -> AgentConversationListResponse:
     """Search owned conversation titles and repositories across all history."""
+    require_single_project_filter(repo, temporary)
     job_store = _require_store(store)
     try:
         page = await job_store.conversation_queries.list_conversations(
@@ -190,6 +196,7 @@ async def list_agent_conversations(
             pinned=pinned,
             limit=limit,
             cursor=cursor,
+            temporary=temporary,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc

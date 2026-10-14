@@ -16,10 +16,15 @@ changes, so a tab that reads its lists after that misses none, and
 ``resync`` when changes may have been missed while the process was not
 listening. ``live`` in both says whether pushes are flowing at all; while it is
 false a tab keeps reading on its own clock.
+
+It ends after ``OWNER_STREAM_MAX_S``, as every owner stream does: admission is
+checked when it opens, and the tab's reconnect, whose ``hello`` has it read its
+lists again, is admitted afresh.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -27,7 +32,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from cloud_agent.api._job_views import _iso
-from cloud_agent.api._owner_auth import require_agent_owner
+from cloud_agent.api._owner_auth import OWNER_STREAM_MAX_S, require_agent_owner
 from cloud_agent.api._stream_slots import STREAM_SLOTS
 from cloud_agent.api.deps import get_owner_change_signal, get_storage, require_store
 from cloud_agent.api.usage import job_usage_response
@@ -114,6 +119,8 @@ async def stream_owner_changes(
     returns it; ``mcp`` (a job) and ``queue``, ``publication`` (a
     conversation) carry only ``{"id": ...}``: read that again. 404 where this
     process pushes nothing, which a tab treats as "keep reading on a clock".
+    The stream ends after at most ``OWNER_STREAM_MAX_S`` (15 minutes); the tab
+    reconnects, is admitted again, and its ``hello`` has it read its lists.
     429 when the account already holds as many streams as this process allows
     one account (:mod:`cloud_agent.api._stream_slots`).
     """
@@ -132,12 +139,17 @@ async def stream_owner_changes(
     slot = STREAM_SLOTS.acquire(user_id)
 
     async def frames() -> AsyncIterator[str]:
+        clock = asyncio.get_running_loop().time
+        # Admission was checked once, for this connection, so the connection
+        # does not outlive the cap.
+        closes_at = clock() + OWNER_STREAM_MAX_S
         with signal.subscribe(user_id) as subscription:
             yield _frame("hello", {"live": signal.listening})
             while True:
-                if await request.is_disconnected():
+                remaining = closes_at - clock()
+                if remaining <= 0 or await request.is_disconnected():
                     return
-                woken = await subscription.wait(_KEEPALIVE_S)
+                woken = await subscription.wait(min(_KEEPALIVE_S, remaining))
                 changes = subscription.take()
                 if changes.resync:
                     yield _frame("resync", {"live": signal.listening})
@@ -164,7 +176,7 @@ async def stream_owner_changes(
                             yield _frame(kind, await _usage(job_store, user_id, row_id))
                         else:
                             yield _frame(kind, {"id": row_id})
-                if not (woken or changes.resync):
+                if not (woken or changes.resync) and clock() < closes_at:
                     yield ": keepalive\n\n"
 
     return StreamingResponse(

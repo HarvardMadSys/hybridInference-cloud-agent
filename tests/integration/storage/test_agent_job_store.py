@@ -351,6 +351,8 @@ async def _reserve_shared_chat(
     fork_helper_version: str | None = None,
     disk_limit_mib: int = 0,
     environment_selection: dict | None = None,
+    repo: str | None = "example-org/example-repo",
+    base_sha: str = "a" * 40,
 ) -> tuple[dict, dict, dict]:
     """Create, claim, and reserve one capability-gated shared-live chat."""
     await store.host_pool.register_host(
@@ -367,7 +369,8 @@ async def _reserve_shared_chat(
     assert online is not None and online["status"] == "online"
     job = await _create_job(
         store,
-        base_sha="a" * 40,
+        repo=repo,
+        base_sha=base_sha,
         metadata=metadata,
         plugins=plugins,
         task_prompt=task_prompt,
@@ -1494,7 +1497,6 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
     monkeypatch,
 ):
     """The durable saga creates a second session alias, never a Docker clone."""
-    monkeypatch.setenv("AGENT_REPOSITORY_ENVIRONMENTS_ENABLED", "true")
     monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "native-fork-environment-key")
     environment = await store.environments.save_environment(
         "user-1",

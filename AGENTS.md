@@ -34,20 +34,21 @@ gateway_contracts/             OpenAPI mirrors of the gateway contracts we consu
 migrations/                    Alembic migrations (agent-owned database only)
 deploy/{control-plane,host,sandbox}/
 tests/{unit,servers,integration,external}/  # plus fixtures/ and support/
-docs/
+docs/{developer,user,agents}/  maintained guides, user notes, agent records
 ```
 
 Not every module is worth a line here; these are the ones a newcomer needs to
 find early. The control plane's database schema is **one baseline revision plus
 additive ones** (`migrations/versions/0001_schema_baseline.py` and on), not a
 long chain — `MIGRATION.md` § *Schema baseline rewrite* explains why, and
-`docs/operations.md` § *Rebuilding the agent database* is the runbook for a
+`docs/developer/operations.md` § *Rebuilding the agent database* is the runbook for a
 database stamped with the chain that predates it.
 
 | Module | What it owns |
 |---|---|
 | `apps/backend/cloud_agent/app.py` | The two listeners: the main API and the MCP-only one |
 | `apps/backend/cloud_agent/api/` | One router module per surface — jobs, hosts, admin, session, MCP relay |
+| `apps/backend/cloud_agent/schemas/` | Domain-organized wire models, explicitly exported by `cloud_agent.schemas` |
 | `apps/backend/cloud_agent/application/` | Flows that run without a request: job admission and creation, native Fork materialization, residency credentials |
 | `apps/backend/cloud_agent/bootstrap/` | Internal assembly: the resources the listeners are built from, and the lifespan that starts and stops them |
 | `apps/backend/cloud_agent/workers/` | The background loops — attempt reaping, grant renewal, shared-workspace snapshot capture |
@@ -56,13 +57,23 @@ database stamped with the chain that predates it.
 | `apps/backend/cloud_agent/gateway.py`, `agent_access.py`, `identity.py` | The three gateway contracts: lookups, admission, identity |
 | `apps/backend/cloud_agent/identity_namespace.py` | Which Gateway minted the `user_id`s this database is keyed by |
 | `apps/backend/cloud_agent/mcp/`, `api/mcp_connections.py`, `api/mcp_relay.py` | Per-user connections, protocol hosting, authorization and the MCP relay |
+| `apps/backend/cloud_agent/mcp/runtime.py` | Process-local MCP host, fenced session maintenance, and shutdown |
 | `apps/backend/cloud_agent/publisher.py`, `publish_worker.py`, `source_control.py` | Branch and draft-PR publication, and the GitHub/GitLab credentials behind it |
 | `apps/backend/cloud_agent/admin_observability.py` | The cross-user admin reading surface and its audit |
 | `apps/backend/cloud_agent_host/enrollment.py` | Host registration and the persisted host credential |
 | `apps/backend/cloud_agent_host/runner.py` | Claims, executes one turn, heartbeats, drains on SIGTERM |
+| `apps/backend/cloud_agent_host/claimed_job.py`, `control_plane_client.py` | Claim payloads, lease errors, and attempt-scoped worker HTTP calls |
 | `apps/backend/cloud_agent_host/chat_sandbox.py`, `sandbox.py` | Retained group lifecycle and the Docker/Kata boundary |
+| `apps/backend/cloud_agent_host/chat_sandbox_network.py` | Per-group bridge and relay lifecycle, guest network proof, and exact network release |
+| `apps/backend/cloud_agent_host/chat_sandbox_models.py` | Retained-container specs, inspection/status values, and identity vocabulary |
 | `apps/backend/cloud_agent_shared/egress.py`, `apps/backend/cloud_agent_host/network_guard.py` | The one sandbox network: its configuration and host rules, and the helper that installs and verifies them |
-| `apps/backend/cloud_agent_host/runtimes.py`, `shared_protocol.py` | The five Agent CLI adapters and the version pins they attest |
+| `apps/backend/cloud_agent_host/runtimes/`, `cloud_agent_shared/runtime_catalog.py`, `shared_protocol.py` | The five Agent CLI adapters, shared discovery facts, and version pins |
+
+[Code structure](docs/developer/code-structure.md) maps module responsibilities and
+dependency direction, including the shared profiler and frontend API/UI modules.
+Neither implementation package imports the other; shared facts live in
+`cloud_agent_shared`. Lifecycle wiring must not import HTTP routers, and callers
+outside storage must not import repository implementations.
 
 ## 3. Quality gates
 
@@ -87,6 +98,13 @@ as blocked. From `apps/frontend`, run `npm ci`, `npm run type-check`, and
 
 - Branch off `dev` as `<user>/<scope>/<name>`. Pull requests target `dev`.
 - Keep each pull request focused on one feature, fix, or documentation change.
+- Put documentation where [docs/README.md](docs/README.md) expects it.
+  Maintained guides go in `docs/developer/`. New designs and implementation
+  plans go in `docs/agents/specs/`; verification and review records
+  (acceptance runs, reviews of a revision) go in `docs/agents/reviews/`. Name
+  records `YYYY-MM-DD-<topic>.md`. Do not create other top-level folders under
+  `docs/`: tools that default elsewhere, such as the superpowers plugin's
+  `docs/superpowers/`, must write to these folders instead.
 - Never commit secrets. This repository will be made public; treat every commit
   as already public.
 
@@ -121,11 +139,15 @@ requirement, and rules 4 and 5 remain permanent service boundaries.
   execution of it on one host. Attempts carry a lease with a fencing
   generation — a superseded attempt's writes are rejected by the store, which
   is what makes retries safe and stops duplicate pull requests.
-- **Grant.** A short-lived, per-attempt capability token minted by the gateway,
-  scoped to a user, a job, and a model allowlist. It authorizes inference and is
-  revoked when the attempt is superseded. MCP servers are resolved per user by
-  the control plane and reached through its MCP-only relay with a separate
-  scoped credential; they are no longer named in the inference grant.
+- **Grant.** A short-lived capability token minted by the gateway, scoped to a
+  user, a job or chat, and a model allowlist; it authorizes inference. Each
+  claim mints a per-attempt grant, revoked when the attempt is superseded or
+  ends. The sandbox CLI does not run on that grant: each chat member's CLI runs
+  on its own residency grant, minted before the CLI starts, renewed by host
+  heartbeats while the member stays resident (so it can outlive one turn), and
+  revoked with the residency. MCP servers are resolved per user by the control
+  plane and reached through its MCP-only relay with a separate scoped
+  credential; no inference grant names them.
   **There is no per-task dollar budget** — that design was considered and
   rejected. All inference spend stays subject to the gateway's existing
   per-user quota; a grant narrows *what* can be called, never re-implements
@@ -139,10 +161,10 @@ requirement, and rules 4 and 5 remain permanent service boundaries.
   has its own native session and active CLI process; Fork adds a member to the
   same group and workspace. Native resume stays in that container. There is no
   transcript-replay or platform-checkpoint recovery path. See the implemented
-  [session design](docs/specs/2026-08-31-native-session-fork-shared-workspace-design.md).
+  [session design](docs/agents/specs/2026-08-31-native-session-fork-shared-workspace-design.md).
   The group has **one network**, the same for setup and for the agent, with
   nothing to select
-  ([design](docs/specs/2026-09-23-agent-public-egress-design.zh-CN.md)).
+  ([design](docs/agents/specs/2026-09-23-agent-public-egress-design.zh-CN.md)).
   Each group gets its own routable bridge, and before anything joins one the
   host installs this deployment's nftables table (`cloud_agent_shared/egress.py`
   renders it, `cloud_agent_host/network_guard.py` installs and verifies it):
@@ -176,11 +198,16 @@ requirement, and rules 4 and 5 remain permanent service boundaries.
   turns, so a short TTL is not a fixed total exposure window. This accepted
   risk replaces the separate internal inference entry as a release prerequisite;
   neither that entry nor a host credential-substitution relay is required.
-  See the [decision and remaining boundaries](docs/specs/2026-09-23-agent-public-egress-design.zh-CN.md).
+  See the [decision and remaining boundaries](docs/agents/specs/2026-09-23-agent-public-egress-design.zh-CN.md).
 - Platform-held long-lived account and service credentials never enter the sandbox. Each
-  member receives its own scoped inference and MCP credentials; sibling
-  members cannot read or reuse them. Spend remains governed by the gateway's
-  per-user quota. The runner also injects a separate short-lived GitHub App
+  member receives its own scoped inference and MCP credentials, which a
+  sibling member cannot read: members have distinct UIDs, private provider
+  homes and tmpfs, and no credential is passed as a process argument. That
+  stops reading, not writing: siblings share one writable workspace, `.git`
+  included, so code a member plants there — a Git hook or `core.fsmonitor`,
+  a build or test script — runs with the credentials of whichever member
+  executes it next. Spend remains governed by the gateway's per-user quota.
+  The runner also injects a separate short-lived GitHub App
   token as `GH_TOKEN` in the owning member's environment, restricted to
   `contents: write` and `pull_requests: write` on the job's repository. Account
   tokens, refresh tokens, and the App's private key remain outside. Direct
@@ -197,7 +224,12 @@ requirement, and rules 4 and 5 remain permanent service boundaries.
   Git pushes. Same-owner Fork inherits the binding; no cross-owner sharing is
   introduced. Reserved platform/host variable names and the existing fixed
   network and member credential boundaries still apply. See the
-  [environment design](docs/specs/2026-10-12-repository-environment-design.zh-CN.md).
+  [environment design](docs/agents/specs/2026-10-12-repository-environment-design.zh-CN.md).
 - Public multi-tenant use requires Kata isolation, non-root, dropped
   capabilities, seccomp, and resource limits — plain Docker containers are for
   trusted internal repositories only.
+- The Docker socket is the host's authority. Only the runner and the workspace
+  broker mount it, and `:ro` on that mount does not narrow the Docker API:
+  either can start a privileged container, so a flaw in either is a host
+  compromise. No other service may mount it; the deployment tests and CI's
+  Compose check pin the holders.

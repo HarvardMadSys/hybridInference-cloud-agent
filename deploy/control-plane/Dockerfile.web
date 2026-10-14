@@ -22,7 +22,10 @@
 # a runtime variable passed only as a build argument is discarded before the
 # server starts.
 
-FROM node:20-alpine AS builder
+# The Node major CI lints, tests and builds the app with (`NODE_VERSION` in
+# .github/workflows/ci.yml), in both stages; `test_artifacts_workflow.py`
+# fails if they drift apart.
+FROM node:22-alpine AS builder
 WORKDIR /app
 
 # Dependencies first, so a source-only change does not reinstall them.
@@ -53,7 +56,7 @@ ENV NEXT_PUBLIC_BASE_PATH=$NEXT_PUBLIC_BASE_PATH \
 
 RUN npm run build
 
-FROM node:20-alpine AS runtime
+FROM node:22-alpine AS runtime
 WORKDIR /app
 ENV NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1 \

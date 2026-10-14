@@ -58,6 +58,7 @@ from fastapi.responses import RedirectResponse
 
 from cloud_agent import identity
 from cloud_agent.api.deps import (
+    agent_access_admission,
     get_current_user,
     get_gateway_client,
     resolve_agent_access,
@@ -415,6 +416,20 @@ async def session_callback(
     return response
 
 
+def _log_unverified_identity(exc: identity.IdentityError) -> None:
+    """Tell the operator which check an identity token failed, never the token.
+
+    The browser's answer stays deliberately vague; the cause's type (a key
+    fetch, the audience, the clock) is what an operator needs to act on.
+    """
+    cause = type(exc.__cause__ if exc.__cause__ is not None else exc).__name__
+    logger.warning(
+        "agent_identity_token_unverified cause=%s",
+        cause,
+        extra={"event": "agent_identity_token_unverified", "cause": cause},
+    )
+
+
 async def _establish_session(identity_token: str, gateway: Any) -> tuple[str, dict[str, Any]]:
     """Verify an identity token and mint this service's session from it.
 
@@ -428,7 +443,8 @@ async def _establish_session(identity_token: str, gateway: Any) -> tuple[str, di
     Raises:
         HTTPException: 401 if the identity token does not verify, 403 if the
             gateway says this account may not sign in, 503 if this deployment
-            cannot verify identity or could not reach the gateway.
+            cannot verify identity, could not fetch the gateway's signing keys
+            or could not reach the gateway.
     """
     try:
         # PyJWKClient performs a synchronous HTTP fetch on a cold cache or an
@@ -436,12 +452,14 @@ async def _establish_session(identity_token: str, gateway: Any) -> tuple[str, di
         claims = await asyncio.to_thread(identity.verify_identity_token, identity_token)
     except identity.IdentityNotConfigured:
         raise AgentConfigurationError() from None
-    except identity.IdentityUnavailable:
+    except identity.IdentityUnavailable as exc:
+        _log_unverified_identity(exc)
         raise HTTPException(
             status_code=503,
             detail="Cannot verify identity with the gateway; try again shortly.",
         ) from None
-    except identity.IdentityError:
+    except identity.IdentityError as exc:
+        _log_unverified_identity(exc)
         # Deliberately not echoing the reason. "Signed by an unknown key" and
         # "expired" are the same answer to a browser, and the difference is
         # useful mostly to somebody probing.
@@ -535,7 +553,13 @@ async def session_me(
     user = await get_current_user(
         request=request, authorization=request.headers.get("authorization")
     )
-    decision = await resolve_agent_access(gateway, user["user_id"])
+    # Always asked for here, and it replaces what owner admission keeps: a page
+    # load's owner requests are admitted on it, and a withdrawal seen here
+    # stops admitting them at once.
+    admission = agent_access_admission(request)
+    with admission.asking() as asked:
+        decision = await resolve_agent_access(gateway, user["user_id"])
+        admission.record(decision, asked)
     return SessionUserResponse(
         id=user["user_id"],
         agent_access=decision.public(),

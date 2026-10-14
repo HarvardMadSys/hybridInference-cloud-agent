@@ -32,6 +32,7 @@ from cloud_agent.execution_profiles import (
     shared_sandbox_claim_attested,
 )
 from cloud_agent.host_pool import CLAIMABLE_STATUSES, HOST_ONLINE
+from cloud_agent.logging_utils import get_logger
 from cloud_agent.sandbox_archive_credentials import load_stored_archive_policy
 from cloud_agent.storage._sql.compute_admission import host_compute_admission, lock_compute_topology
 from cloud_agent.storage._sql.events import insert_event
@@ -54,6 +55,7 @@ from cloud_agent.storage._sql.ledger import (
 from cloud_agent.storage._sql.pending_messages import PAUSE_QUEUE_SQL
 from cloud_agent.storage._sql.rows import job_row_to_dict, load_json
 from cloud_agent.storage._sql.sandbox import THREAD_SANDBOX_SOURCE
+from cloud_agent.storage.deadlocks import retry_deadlock_victim
 from cloud_agent.task_titles import thread_title_needs_generation
 from cloud_agent_shared.sandbox_archive_settings import (
     SANDBOX_ARCHIVE_CAPABILITY,
@@ -63,6 +65,8 @@ from cloud_agent_shared.sandbox_archive_settings import (
 if TYPE_CHECKING:
     from cloud_agent.goals.report import GoalReportEnvelope
     from cloud_agent.ports.attempt_commands import TurnSummaryWrite
+
+logger = get_logger(__name__)
 
 #: What the ordering rules decide, before the caller writes anything.
 #: ``accept`` is this function's own answer and never leaves the repository:
@@ -923,7 +927,32 @@ class PostgresAttemptCommands:
         Returns the global event id (the SSE ``Last-Event-ID`` cursor), or
         ``None`` when the caller lost the lease. The row lock on the attempt
         serializes ``seq`` assignment for the single legitimate writer.
+
+        An append the database aborted as a deadlock's victim is tried again:
+        its runner takes a refused append as a lost turn, and marks the chat's
+        retained context lost.
         """
+        return await retry_deadlock_victim(
+            "append_event",
+            lambda: self._append_event(
+                attempt_id=attempt_id,
+                lease_generation=lease_generation,
+                event_type=event_type,
+                payload=payload,
+                event_seq=event_seq,
+            ),
+        )
+
+    async def _append_event(
+        self,
+        *,
+        attempt_id: int,
+        lease_generation: int,
+        event_type: str,
+        payload: dict[str, Any] | None,
+        event_seq: int | None,
+    ) -> int | None:
+        """Append one event in one transaction."""
         async with self._pool.acquire() as conn, conn.transaction():
             if not await self._lock_live_attempt(conn, attempt_id, lease_generation):
                 return None
@@ -1412,325 +1441,355 @@ class PostgresAttemptCommands:
         pending, ``failed`` once ``max_attempts`` is exhausted. Publication is
         a snapshot's lifecycle, not the job's, so no job is ever caught
         mid-publish here. Returns a summary per reaped attempt.
+
+        Each attempt is reaped in a transaction of its own. One the database
+        refuses -- a deadlock against a live writer -- stays expired for the
+        next pass, instead of taking back every attempt this pass closed.
         """
         actions: list[dict[str, Any]] = []
-        async with self._pool.acquire() as conn, conn.transaction():
+        async with self._pool.acquire() as conn:
             expired = await conn.fetch(
-                """
-                SELECT a.id AS attempt_id, a.job_id, j.thread_id, a.attempt_no, a.host_id,
-                       j.state, j.cancel_requested, j.current_attempt_id,
-                       member.thread_id AS sandbox_thread_id,
-                       member.sandbox_id,
-                       member.active_attempt_id AS sandbox_active_attempt_id,
-                       member.admitted_job_id AS sandbox_admitted_job_id,
-                       member.last_settled_job_id AS sandbox_last_settled_job_id,
-                       member.residency_generation
-                FROM agent_attempts a
-                JOIN agent_jobs j ON j.id = a.job_id
-                JOIN agent_threads t ON t.id = j.thread_id
-                LEFT JOIN (
-                    agent_thread_sandbox_memberships member
-                    JOIN agent_sandboxes sandbox
-                      ON sandbox.id = member.sandbox_id
-                ) ON member.thread_id = j.thread_id
-                WHERE a.status = 'running' AND a.lease_expires_at < clock_timestamp()
-                ORDER BY a.id
-                -- The conversation is locked here, with the attempt and the
-                -- job, rather than reached for later when this pass pauses a
-                -- goal: taken in one statement it is covered by SKIP LOCKED,
-                -- so a conversation somebody is already pausing is left for
-                -- the next pass instead of waiting on a row that is waiting
-                -- on this one.
-                FOR UPDATE OF a, j, t SKIP LOCKED
-                """
+                "SELECT id FROM agent_attempts "
+                "WHERE status = 'running' AND lease_expires_at < clock_timestamp() ORDER BY id"
             )
-            for row in expired:
-                attempt_id = row["attempt_id"]
-                job_id = row["job_id"]
-                await conn.execute(
-                    "UPDATE agent_attempts SET status = 'superseded', finished_at = NOW() "
-                    "WHERE id = $1",
-                    attempt_id,
-                )
-                # The SELECT took this row ``FOR UPDATE`` while it was still
-                # ``running``, so this loop body runs once per attempt however
-                # many reaper passes overlap — which is what makes the slot
-                # release safe here without a second predicate.
-                await release_host_slot(conn, row["host_id"])
-                await insert_event(
-                    conn,
-                    job_id=job_id,
-                    attempt_id=attempt_id,
-                    event_type=EVENT_ATTEMPT_SUPERSEDED,
-                    payload={"attempt_no": row["attempt_no"], "reason": "lease_expired"},
-                )
-                sandbox_thread_id = row["sandbox_thread_id"]
-                sandbox_active_attempt_id = row["sandbox_active_attempt_id"]
-                sandbox_admitted_job_id = row["sandbox_admitted_job_id"]
-                sandbox_last_settled_job_id = row["sandbox_last_settled_job_id"]
-                settled_retained_turn = sandbox_last_settled_job_id == job_id
-                admitted_ambiguously = (
-                    sandbox_admitted_job_id == job_id and not settled_retained_turn
-                )
-                owns_retained_activation = sandbox_active_attempt_id == attempt_id
-                retained_activation_expired = (
-                    admitted_ambiguously or owns_retained_activation
-                ) and not settled_retained_turn
-                settled_finalization_expired = (
-                    settled_retained_turn and sandbox_admitted_job_id == job_id
-                )
-                cleanup_residency: dict[str, Any] | None = None
-                if retained_activation_expired:
-                    # The admission receipt identifies a definitely ambiguous
-                    # prompt. Even before admission, an expired runner may
-                    # have created a container without returning its identity
-                    # to the control plane. The preview therefore fails all
-                    # expired retained activations closed instead of guessing
-                    # that a retry is safe; ordinary CLI/process replacement
-                    # at a clean turn boundary remains supported.
-                    lost_member = await conn.fetchrow(
-                        """
-                        UPDATE agent_thread_sandbox_memberships
-                        SET native_state = 'lost', context_status = 'lost',
-                            resident_state = 'lost',
-                            active_attempt_id = CASE
-                                WHEN active_attempt_id = $2 THEN NULL
-                                ELSE active_attempt_id
-                            END,
-                            admitted_job_id = CASE
-                                WHEN admitted_job_id = $1 THEN NULL
-                                ELSE admitted_job_id
-                            END,
-                            admitted_at = CASE
-                                WHEN admitted_job_id = $1 THEN NULL
-                                ELSE admitted_at
-                            END,
-                            last_error = CASE
-                                WHEN admitted_job_id = $1
-                                    THEN 'attempt lease expired after prompt admission'
-                                ELSE 'retained activation lease expired'
-                            END,
-                            updated_at = NOW()
-                        WHERE thread_id = $3 AND sandbox_id = $4
-                          AND last_settled_job_id IS DISTINCT FROM $1
-                          AND (active_attempt_id = $2 OR admitted_job_id = $1)
-                        RETURNING residency_generation
-                        """,
-                        job_id,
-                        attempt_id,
-                        sandbox_thread_id,
-                        row["sandbox_id"],
-                    )
-                    if lost_member is not None:
-                        await conn.execute(
-                            """
-                            UPDATE agent_sandboxes g
-                            SET state = CASE
-                                    WHEN g.container_id IS NULL THEN 'lost'
-                                    WHEN g.active_operation_count > 0 OR EXISTS (
-                                        SELECT 1
-                                        FROM agent_thread_sandbox_memberships peer
-                                        WHERE peer.sandbox_id = g.id
-                                          AND peer.active_attempt_id IS NOT NULL
-                                    ) THEN 'running'
-                                    WHEN EXISTS (
-                                        SELECT 1
-                                        FROM agent_thread_sandbox_memberships peer
-                                        WHERE peer.sandbox_id = g.id
-                                          AND peer.context_status <> 'lost'
-                                          AND peer.native_state <> 'lost'
-                                    ) THEN 'running'
-                                    ELSE 'stopping'
-                                END,
-                                last_activity_at = NOW(),
-                                idle_deadline = CASE
-                                    WHEN g.container_id IS NOT NULL
-                                     AND g.active_operation_count = 0
-                                     AND NOT EXISTS (
-                                        SELECT 1
-                                        FROM agent_thread_sandbox_memberships peer
-                                        WHERE peer.sandbox_id = g.id
-                                          AND peer.active_attempt_id IS NOT NULL
-                                     )
-                                     AND EXISTS (
-                                        SELECT 1
-                                        FROM agent_thread_sandbox_memberships peer
-                                        WHERE peer.sandbox_id = g.id
-                                          AND peer.context_status <> 'lost'
-                                          AND peer.native_state <> 'lost'
-                                     )
-                                    THEN clock_timestamp() + make_interval(
-                                        secs => g.idle_timeout_seconds
-                                    )
-                                    ELSE NULL
-                                END,
-                                updated_at = NOW()
-                            WHERE g.id = $1
-                            """,
-                            row["sandbox_id"],
+            for candidate in expired:
+                try:
+                    async with conn.transaction():
+                        action = await self._reap_attempt(
+                            conn, attempt_id=candidate["id"], max_attempts=max_attempts
                         )
-                        residency_generation = int(lost_member["residency_generation"] or 0)
-                        if residency_generation > 0:
-                            released = await conn.fetchrow(
-                                """
-                                UPDATE agent_thread_sandbox_memberships m
-                                SET residency_status = 'none',
-                                    residency_last_active_at = NOW()
-                                FROM agent_sandboxes g
-                                WHERE m.thread_id = $1 AND m.residency_generation = $2
-                                  AND m.residency_status <> 'none'
-                                  AND g.id = m.sandbox_id
-                                RETURNING m.thread_id,
-                                          m.residency_generation AS generation,
-                                          g.host, m.residency_grant_id AS grant_id
-                                """,
-                                sandbox_thread_id,
-                                residency_generation,
-                            )
-                            if released is not None:
-                                cleanup_residency = dict(released)
-                    await conn.execute(
-                        "UPDATE agent_attempts SET context_status = 'lost' WHERE id = $1",
-                        attempt_id,
+                except asyncpg.PostgresError:
+                    logger.warning(
+                        "agent_attempt_reap_failed",
+                        exc_info=True,
+                        extra={
+                            "event": "agent_attempt_reap_failed",
+                            "attempt_id": candidate["id"],
+                        },
                     )
-                    await fail_unrunnable_follow_ups(
-                        conn,
-                        thread_id=sandbox_thread_id,
-                    )
-                elif settled_finalization_expired:
-                    # The native context boundary is durable; only the final
-                    # job transition was lost. Never replay this prompt and
-                    # never relabel its usable context LOST. Close admission,
-                    # preserve the settled idle deadline, and fail the job for
-                    # explicit operator/user review.
-                    await conn.execute(
-                        """
-                        UPDATE agent_thread_sandbox_memberships
-                        SET active_attempt_id = CASE
-                                WHEN active_attempt_id = $2 THEN NULL
-                                ELSE active_attempt_id
-                            END,
-                            admitted_job_id = CASE
-                                WHEN admitted_job_id = $1 THEN NULL
-                                ELSE admitted_job_id
-                            END,
-                            admitted_at = CASE
-                                WHEN admitted_job_id = $1 THEN NULL
-                                ELSE admitted_at
-                            END,
-                            last_error = 'job finalization expired after context settlement',
-                            updated_at = NOW()
-                        WHERE thread_id = $3
-                          AND last_settled_job_id = $1
-                        """,
-                        job_id,
-                        attempt_id,
-                        sandbox_thread_id,
-                    )
-                if row["current_attempt_id"] != attempt_id or row["state"] in TERMINAL_STATES:
-                    # Stale attempt of an already-moved-on job: closing it is enough.
-                    action = "closed_stale"
-                elif retained_activation_expired:
-                    action = CANCELLED if row["cancel_requested"] else FAILED
-                    await conn.execute(
-                        """
-                        UPDATE agent_jobs
-                        SET state = $2,
-                            detail = $3,
-                            terminal_resume_pending = TRUE,
-                            updated_at = NOW()
-                        WHERE id = $1
-                        """,
-                        job_id,
-                        action,
-                        (
-                            "cancelled after an indeterminate retained Agent CLI turn"
-                            if row["cancel_requested"]
-                            else (
-                                "retained Agent CLI turn became indeterminate after prompt admission"
-                                if admitted_ambiguously
-                                else "retained sandbox activation lease expired; context marked lost"
-                            )
-                        ),
-                    )
-                elif settled_finalization_expired:
-                    action = CANCELLED if row["cancel_requested"] else FAILED
-                    await conn.execute(
-                        """
-                        UPDATE agent_jobs
-                        SET state = $2,
-                            detail = $3,
-                            terminal_resume_pending = TRUE,
-                            updated_at = NOW()
-                        WHERE id = $1
-                        """,
-                        job_id,
-                        action,
-                        (
-                            "cancelled after the Agent CLI turn settled"
-                            if row["cancel_requested"]
-                            else (
-                                "Agent CLI context settled, but job finalization expired; "
-                                "the prompt was not replayed"
-                            )
-                        ),
-                    )
-                elif row["cancel_requested"]:
-                    action = CANCELLED
-                    await conn.execute(
-                        "UPDATE agent_jobs SET state = 'cancelled', "
-                        "terminal_resume_pending = TRUE, updated_at = NOW() WHERE id = $1",
-                        job_id,
-                    )
-                elif await self._attempts_spent(conn, job_id) >= max_attempts:
-                    action = FAILED
-                    await conn.execute(
-                        "UPDATE agent_jobs SET state = 'failed', detail = $2, "
-                        "terminal_resume_pending = TRUE, updated_at = NOW() WHERE id = $1",
-                        job_id,
-                        f"exhausted {max_attempts} attempts (lease expired)",
-                    )
-                else:
-                    action = QUEUED
-                    # The next attempt answers for itself. A report the
-                    # abandoned attempt left behind is not evidence about the
-                    # retry: inheriting a `complete` from a turn that never
-                    # finished would complete the goal on the strength of a
-                    # claim whose work was thrown away.
-                    await conn.execute(
-                        "UPDATE agent_jobs SET state = 'queued', "
-                        "goal_report_parse = NULL, goal_report_outcome = NULL, "
-                        "goal_report_reason = NULL, goal_report_detail = NULL, "
-                        "goal_report_evidence = NULL, "
-                        "goal_report_digest = NULL, updated_at = NOW() "
-                        "WHERE id = $1",
-                        job_id,
-                    )
-                if action in TERMINAL_STATES:
-                    # Every terminal reaper outcome is a turn that did not end
-                    # workably from the goal's point of view. The ordinary
-                    # finish path arms the goal's next step in
-                    # ``arm_finish_wakeup``; a reaped turn never reaches it,
-                    # so it is decided here — and the only safe decision is
-                    # to stop and wait for the owner.
-                    await goal_after_terminal(
-                        conn, job_id=job_id, thread_id=row["thread_id"], state=action
-                    )
-                if action in TERMINAL_STATES and not retained_activation_expired:
-                    # A terminal reaper outcome is semantically the same turn
-                    # boundary as ``transition``. Keep the linear chat moving
-                    # when the context is usable; the LOST branch above has
-                    # already failed every unrunnable descendant instead.
-                    await fail_discontinuous_follow_ups(conn, parent_job_id=job_id)
-                action_result: dict[str, Any] = {
-                    "job_id": job_id,
-                    "attempt_id": attempt_id,
-                    "action": action,
-                }
-                if cleanup_residency is not None:
-                    action_result["cleanup_residency"] = cleanup_residency
-                actions.append(action_result)
+                    continue
+                if action is not None:
+                    actions.append(action)
         return actions
+
+    async def _reap_attempt(
+        self, conn: Any, *, attempt_id: int, max_attempts: int
+    ) -> dict[str, Any] | None:
+        """Reap one expired attempt inside the caller's transaction.
+
+        ``None`` when it is no longer expired and running, or a writer holds
+        its attempt, job or conversation: the next pass looks again.
+        """
+        row = await conn.fetchrow(
+            """
+            SELECT a.id AS attempt_id, a.job_id, j.thread_id, a.attempt_no, a.host_id,
+                   j.state, j.cancel_requested, j.current_attempt_id,
+                   member.thread_id AS sandbox_thread_id,
+                   member.sandbox_id,
+                   member.active_attempt_id AS sandbox_active_attempt_id,
+                   member.admitted_job_id AS sandbox_admitted_job_id,
+                   member.last_settled_job_id AS sandbox_last_settled_job_id,
+                   member.residency_generation
+            FROM agent_attempts a
+            JOIN agent_jobs j ON j.id = a.job_id
+            JOIN agent_threads t ON t.id = j.thread_id
+            LEFT JOIN (
+                agent_thread_sandbox_memberships member
+                JOIN agent_sandboxes sandbox
+                  ON sandbox.id = member.sandbox_id
+            ) ON member.thread_id = j.thread_id
+            WHERE a.id = $1 AND a.status = 'running' AND a.lease_expires_at < clock_timestamp()
+            -- The conversation is locked here, with the attempt and the
+            -- job, rather than reached for later when this pass pauses a
+            -- goal: taken in one statement it is covered by SKIP LOCKED,
+            -- so a conversation somebody is already pausing is left for
+            -- the next pass instead of waiting on a row that is waiting
+            -- on this one.
+            FOR UPDATE OF a, j, t SKIP LOCKED
+            """,
+            attempt_id,
+        )
+        if row is None:
+            return None
+        job_id = row["job_id"]
+        await conn.execute(
+            "UPDATE agent_attempts SET status = 'superseded', finished_at = NOW() WHERE id = $1",
+            attempt_id,
+        )
+        await insert_event(
+            conn,
+            job_id=job_id,
+            attempt_id=attempt_id,
+            event_type=EVENT_ATTEMPT_SUPERSEDED,
+            payload={"attempt_no": row["attempt_no"], "reason": "lease_expired"},
+        )
+        sandbox_thread_id = row["sandbox_thread_id"]
+        sandbox_active_attempt_id = row["sandbox_active_attempt_id"]
+        sandbox_admitted_job_id = row["sandbox_admitted_job_id"]
+        sandbox_last_settled_job_id = row["sandbox_last_settled_job_id"]
+        settled_retained_turn = sandbox_last_settled_job_id == job_id
+        admitted_ambiguously = sandbox_admitted_job_id == job_id and not settled_retained_turn
+        owns_retained_activation = sandbox_active_attempt_id == attempt_id
+        retained_activation_expired = (
+            admitted_ambiguously or owns_retained_activation
+        ) and not settled_retained_turn
+        settled_finalization_expired = settled_retained_turn and sandbox_admitted_job_id == job_id
+        cleanup_residency: dict[str, Any] | None = None
+        if retained_activation_expired:
+            # The admission receipt identifies a definitely ambiguous
+            # prompt. Even before admission, an expired runner may
+            # have created a container without returning its identity
+            # to the control plane. The preview therefore fails all
+            # expired retained activations closed instead of guessing
+            # that a retry is safe; ordinary CLI/process replacement
+            # at a clean turn boundary remains supported.
+            lost_member = await conn.fetchrow(
+                """
+                UPDATE agent_thread_sandbox_memberships
+                SET native_state = 'lost', context_status = 'lost',
+                    resident_state = 'lost',
+                    active_attempt_id = CASE
+                        WHEN active_attempt_id = $2 THEN NULL
+                        ELSE active_attempt_id
+                    END,
+                    admitted_job_id = CASE
+                        WHEN admitted_job_id = $1 THEN NULL
+                        ELSE admitted_job_id
+                    END,
+                    admitted_at = CASE
+                        WHEN admitted_job_id = $1 THEN NULL
+                        ELSE admitted_at
+                    END,
+                    last_error = CASE
+                        WHEN admitted_job_id = $1
+                            THEN 'attempt lease expired after prompt admission'
+                        ELSE 'retained activation lease expired'
+                    END,
+                    updated_at = NOW()
+                WHERE thread_id = $3 AND sandbox_id = $4
+                  AND last_settled_job_id IS DISTINCT FROM $1
+                  AND (active_attempt_id = $2 OR admitted_job_id = $1)
+                RETURNING residency_generation
+                """,
+                job_id,
+                attempt_id,
+                sandbox_thread_id,
+                row["sandbox_id"],
+            )
+            if lost_member is not None:
+                await conn.execute(
+                    """
+                    UPDATE agent_sandboxes g
+                    SET state = CASE
+                            WHEN g.container_id IS NULL THEN 'lost'
+                            WHEN g.active_operation_count > 0 OR EXISTS (
+                                SELECT 1
+                                FROM agent_thread_sandbox_memberships peer
+                                WHERE peer.sandbox_id = g.id
+                                  AND peer.active_attempt_id IS NOT NULL
+                            ) THEN 'running'
+                            WHEN EXISTS (
+                                SELECT 1
+                                FROM agent_thread_sandbox_memberships peer
+                                WHERE peer.sandbox_id = g.id
+                                  AND peer.context_status <> 'lost'
+                                  AND peer.native_state <> 'lost'
+                            ) THEN 'running'
+                            ELSE 'stopping'
+                        END,
+                        last_activity_at = NOW(),
+                        idle_deadline = CASE
+                            WHEN g.container_id IS NOT NULL
+                             AND g.active_operation_count = 0
+                             AND NOT EXISTS (
+                                SELECT 1
+                                FROM agent_thread_sandbox_memberships peer
+                                WHERE peer.sandbox_id = g.id
+                                  AND peer.active_attempt_id IS NOT NULL
+                             )
+                             AND EXISTS (
+                                SELECT 1
+                                FROM agent_thread_sandbox_memberships peer
+                                WHERE peer.sandbox_id = g.id
+                                  AND peer.context_status <> 'lost'
+                                  AND peer.native_state <> 'lost'
+                             )
+                            THEN clock_timestamp() + make_interval(
+                                secs => g.idle_timeout_seconds
+                            )
+                            ELSE NULL
+                        END,
+                        updated_at = NOW()
+                    WHERE g.id = $1
+                    """,
+                    row["sandbox_id"],
+                )
+                residency_generation = int(lost_member["residency_generation"] or 0)
+                if residency_generation > 0:
+                    released = await conn.fetchrow(
+                        """
+                        UPDATE agent_thread_sandbox_memberships m
+                        SET residency_status = 'none',
+                            residency_last_active_at = NOW()
+                        FROM agent_sandboxes g
+                        WHERE m.thread_id = $1 AND m.residency_generation = $2
+                          AND m.residency_status <> 'none'
+                          AND g.id = m.sandbox_id
+                        RETURNING m.thread_id,
+                                  m.residency_generation AS generation,
+                                  g.host, m.residency_grant_id AS grant_id
+                        """,
+                        sandbox_thread_id,
+                        residency_generation,
+                    )
+                    if released is not None:
+                        cleanup_residency = dict(released)
+            await conn.execute(
+                "UPDATE agent_attempts SET context_status = 'lost' WHERE id = $1",
+                attempt_id,
+            )
+            await fail_unrunnable_follow_ups(
+                conn,
+                thread_id=sandbox_thread_id,
+            )
+        elif settled_finalization_expired:
+            # The native context boundary is durable; only the final
+            # job transition was lost. Never replay this prompt and
+            # never relabel its usable context LOST. Close admission,
+            # preserve the settled idle deadline, and fail the job for
+            # explicit operator/user review.
+            await conn.execute(
+                """
+                UPDATE agent_thread_sandbox_memberships
+                SET active_attempt_id = CASE
+                        WHEN active_attempt_id = $2 THEN NULL
+                        ELSE active_attempt_id
+                    END,
+                    admitted_job_id = CASE
+                        WHEN admitted_job_id = $1 THEN NULL
+                        ELSE admitted_job_id
+                    END,
+                    admitted_at = CASE
+                        WHEN admitted_job_id = $1 THEN NULL
+                        ELSE admitted_at
+                    END,
+                    last_error = 'job finalization expired after context settlement',
+                    updated_at = NOW()
+                WHERE thread_id = $3
+                  AND last_settled_job_id = $1
+                """,
+                job_id,
+                attempt_id,
+                sandbox_thread_id,
+            )
+        if row["current_attempt_id"] != attempt_id or row["state"] in TERMINAL_STATES:
+            # Stale attempt of an already-moved-on job: closing it is enough.
+            action = "closed_stale"
+        elif retained_activation_expired:
+            action = CANCELLED if row["cancel_requested"] else FAILED
+            await conn.execute(
+                """
+                UPDATE agent_jobs
+                SET state = $2,
+                    detail = $3,
+                    terminal_resume_pending = TRUE,
+                    updated_at = NOW()
+                WHERE id = $1
+                """,
+                job_id,
+                action,
+                (
+                    "cancelled after an indeterminate retained Agent CLI turn"
+                    if row["cancel_requested"]
+                    else (
+                        "retained Agent CLI turn became indeterminate after prompt admission"
+                        if admitted_ambiguously
+                        else "retained sandbox activation lease expired; context marked lost"
+                    )
+                ),
+            )
+        elif settled_finalization_expired:
+            action = CANCELLED if row["cancel_requested"] else FAILED
+            await conn.execute(
+                """
+                UPDATE agent_jobs
+                SET state = $2,
+                    detail = $3,
+                    terminal_resume_pending = TRUE,
+                    updated_at = NOW()
+                WHERE id = $1
+                """,
+                job_id,
+                action,
+                (
+                    "cancelled after the Agent CLI turn settled"
+                    if row["cancel_requested"]
+                    else (
+                        "Agent CLI context settled, but job finalization expired; "
+                        "the prompt was not replayed"
+                    )
+                ),
+            )
+        elif row["cancel_requested"]:
+            action = CANCELLED
+            await conn.execute(
+                "UPDATE agent_jobs SET state = 'cancelled', "
+                "terminal_resume_pending = TRUE, updated_at = NOW() WHERE id = $1",
+                job_id,
+            )
+        elif await self._attempts_spent(conn, job_id) >= max_attempts:
+            action = FAILED
+            await conn.execute(
+                "UPDATE agent_jobs SET state = 'failed', detail = $2, "
+                "terminal_resume_pending = TRUE, updated_at = NOW() WHERE id = $1",
+                job_id,
+                f"exhausted {max_attempts} attempts (lease expired)",
+            )
+        else:
+            action = QUEUED
+            # The next attempt answers for itself. A report the
+            # abandoned attempt left behind is not evidence about the
+            # retry: inheriting a `complete` from a turn that never
+            # finished would complete the goal on the strength of a
+            # claim whose work was thrown away.
+            await conn.execute(
+                "UPDATE agent_jobs SET state = 'queued', "
+                "goal_report_parse = NULL, goal_report_outcome = NULL, "
+                "goal_report_reason = NULL, goal_report_detail = NULL, "
+                "goal_report_evidence = NULL, "
+                "goal_report_digest = NULL, updated_at = NOW() "
+                "WHERE id = $1",
+                job_id,
+            )
+        if action in TERMINAL_STATES:
+            # Every terminal reaper outcome is a turn that did not end
+            # workably from the goal's point of view. The ordinary
+            # finish path arms the goal's next step in
+            # ``arm_finish_wakeup``; a reaped turn never reaches it,
+            # so it is decided here — and the only safe decision is
+            # to stop and wait for the owner.
+            await goal_after_terminal(conn, job_id=job_id, thread_id=row["thread_id"], state=action)
+        if action in TERMINAL_STATES and not retained_activation_expired:
+            # A terminal reaper outcome is semantically the same turn
+            # boundary as ``transition``. Keep the linear chat moving
+            # when the context is usable; the LOST branch above has
+            # already failed every unrunnable descendant instead.
+            await fail_discontinuous_follow_ups(conn, parent_job_id=job_id)
+        # The slot last, after the membership and the group: claiming or
+        # finishing a sibling on this host takes the group before the host
+        # row. The SELECT took this row ``FOR UPDATE`` while it was still
+        # ``running``, so this runs once per attempt however many reaper
+        # passes overlap — which is what makes the slot release safe here
+        # without a second predicate.
+        await release_host_slot(conn, row["host_id"])
+        action_result: dict[str, Any] = {
+            "job_id": job_id,
+            "attempt_id": attempt_id,
+            "action": action,
+        }
+        if cleanup_residency is not None:
+            action_result["cleanup_residency"] = cleanup_residency
+        return action_result
 
     @staticmethod
     async def _attempts_spent(conn: Any, job_id: str) -> int:

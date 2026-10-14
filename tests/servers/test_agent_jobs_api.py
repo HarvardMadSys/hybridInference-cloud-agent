@@ -46,6 +46,7 @@ from cloud_agent.api import routes as agent_jobs_router, worker, workspace as ag
 from cloud_agent.api._owner_auth import authenticate_agent_owner
 from cloud_agent.api.deps import get_storage
 from cloud_agent.application.follow_ups import PreparedFollowUp
+from cloud_agent.attachments.models import AttachmentError
 from cloud_agent.domain.execution import JobStreamState
 from cloud_agent.domain.pending_messages import SettleOutcome
 from cloud_agent.goals.models import GoalConflict
@@ -138,7 +139,9 @@ class FakeGoalWakeups:
         self.rows.append(row)
         return row["id"]
 
-    async def claim_wakeups(self, *, limit: int = 1) -> list[dict[str, Any]]:
+    async def claim_wakeups(
+        self, *, limit: int = 1, thread_id: str | None = None
+    ) -> list[dict[str, Any]]:
         """Nothing is consumed here; the decision's own tests own that path."""
         return []
 
@@ -1548,6 +1551,7 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         limit: int = 50,
         archived: bool = False,
         repo: str | None = None,
+        temporary: bool = False,
     ) -> list[dict[str, Any]]:
         jobs = [
             {**job, "pinned_at": self.pinned_threads.get(job["thread_id"])}
@@ -1555,6 +1559,7 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
             if job["user_id"] == user_id
             and (job["thread_id"] in self.archived_threads) is archived
             and (repo is None or job["repo"] == repo)
+            and (not temporary or job["repo"] is None)
         ]
         minimum = datetime.min.replace(tzinfo=timezone.utc)
         jobs.sort(
@@ -2327,6 +2332,7 @@ async def test_conversation_search_forwards_owner_filters_and_shapes_latest_job(
         pinned=True,
         limit=17,
         cursor="previous-page",
+        temporary=False,
     )
     item = response.json()["conversations"][0]
     assert item["job"]["id"] == job_id
@@ -2384,7 +2390,14 @@ async def test_conversation_search_requires_owner_and_accepts_browser_session(
     assert response.status_code == 200
     assert response.json() == {"conversations": [], "next_cursor": None}
     search.assert_awaited_once_with(
-        user_id=_OWNER, q="", repo=None, include_archived=False, pinned=None, limit=50, cursor=None
+        user_id=_OWNER,
+        q="",
+        repo=None,
+        include_archived=False,
+        pinned=None,
+        limit=50,
+        cursor=None,
+        temporary=False,
     )
 
 
@@ -2860,6 +2873,78 @@ async def test_an_unregistered_runtime_is_refused_at_create(client: AsyncClient)
     assert "no-such-harness" in response.json()["detail"]["error"]["message"]
 
 
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"task_prompt": "   \n  "},
+        {"task_prompt": "x" * 100_001},
+        {"model": "m" * 256},
+        {"runtime": "r" * 65},
+        {"metadata": {f"key-{index}": index for index in range(65)}},
+        {"metadata": {"blob": "x" * (16 * 1024)}},
+    ],
+)
+async def test_a_first_turn_is_bounded_like_every_later_message(
+    client: AsyncClient, store: FakeStorage, change: dict[str, Any]
+):
+    """Whitespace is not a task, and nothing a turn stores is unbounded.
+
+    The first turn's prompt is stored twice and its metadata is copied onto
+    every later turn and returned with every job read, so neither may be
+    larger than a message to the same conversation could be.
+    """
+    response = await client.post(
+        "/v1/agent/jobs",
+        json={"repo": "owner/name", "task_prompt": "fix it", "model": "glm-5.1", **change},
+    )
+    assert response.status_code == 422, response.text
+    assert store.jobs == {}
+
+
+async def test_an_upload_lost_between_resolving_and_claiming_is_a_400(
+    client: AsyncClient, store: FakeStorage, monkeypatch
+):
+    """The claim inside the create's transaction is the boundary, and says why.
+
+    Another submission, the stale-upload sweep or a waiting message can take a
+    file after the selection resolved. The store then refuses the claim and
+    writes nothing; the owner gets the same refusal a vanished upload always
+    gets, not a bare ``500 Internal Server Error``.
+    """
+    upload = {"id": 7, "path": "notes.md", "size_bytes": 5, "content_type": "text/plain"}
+    monkeypatch.setattr(
+        store, "select_attachments", AsyncMock(return_value=[upload]), raising=False
+    )
+    lost = AttachmentError("One or more uploads are no longer available. Attach them again.")
+    monkeypatch.setattr(store, "create_job", AsyncMock(side_effect=lost))
+
+    response = await client.post(
+        "/v1/agent/jobs",
+        json={
+            "repo": "owner/name",
+            "task_prompt": "read the notes",
+            "model": "glm-5.1",
+            "attachment_ids": [7],
+        },
+    )
+
+    assert response.status_code == 400, response.text
+    assert response.json()["detail"]["error"] == {
+        "type": "invalid_attachment_selection",
+        "message": "One or more uploads are no longer available. Attach them again.",
+    }
+
+
+async def test_a_first_turn_keeps_the_trimmed_task(client: AsyncClient, store: FakeStorage):
+    """The same trimming a message gets, so a first turn reads like the rest."""
+    response = await client.post(
+        "/v1/agent/jobs",
+        json={"repo": "owner/name", "task_prompt": "  fix it \n", "model": "glm-5.1"},
+    )
+    assert response.status_code == 201, response.text
+    assert store.jobs[response.json()["id"]]["task_prompt"] == "fix it"
+
+
 async def test_a_message_cannot_name_a_harness(client: AsyncClient, store: FakeStorage):
     """The harness is fixed per thread; its session is the memory.
 
@@ -2887,8 +2972,15 @@ async def test_config_offers_the_models_the_create_endpoint_accepts(client: Asyn
     assert config.json()["github_connected"] is True
 
 
-async def test_config_reads_one_current_catalog_and_rechecks_admission(store: FakeStorage):
-    """One catalog response supplies both fields, for each admitted owner read."""
+async def test_config_reads_one_current_catalog_for_each_admitted_owner_read(
+    store: FakeStorage,
+):
+    """One catalog response supplies both fields, for each admitted owner read.
+
+    The catalog is read on every request. Admission asks the Gateway once per
+    account here: the second read for the same owner is admitted on the grant
+    kept from the first (``AGENT_ACCESS_ALLOW_TTL_S``).
+    """
     from httpx import MockTransport, Response
 
     from cloud_agent.api.deps import get_gateway_client
@@ -2918,6 +3010,7 @@ async def test_config_reads_one_current_catalog_and_rechecks_admission(store: Fa
         gateway = GatewayClient("https://gateway.example", "config-dispatch-token", client=upstream)
         app.dependency_overrides[get_gateway_client] = lambda: gateway
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            admitted_after = ([_OWNER], [_OWNER], [_OWNER, _OTHER])
             for index, owner in enumerate((_OWNER, _OWNER, _OTHER), start=1):
                 identity["user_id"] = owner
                 response = await client.get("/v1/agent/config")
@@ -2926,8 +3019,8 @@ async def test_config_reads_one_current_catalog_and_rechecks_admission(store: Fa
                 assert response.json()["models"] == [model]
                 assert response.json()["model_reasoning_efforts"] == {model: ["high"]}
                 assert len(catalog_owners) == index
-                assert len(admitted_owners) == index
-    assert catalog_owners == admitted_owners == [_OWNER, _OWNER, _OTHER]
+                assert admitted_owners == admitted_after[index - 1]
+    assert catalog_owners == [_OWNER, _OWNER, _OTHER]
 
 
 @pytest.mark.parametrize(
@@ -4156,6 +4249,55 @@ async def test_interactive_terminal_stream_is_relayed_byte_for_byte(
     assert sandbox_manager.stream.closed is True
 
 
+class _EndlessTerminalStream:
+    """A shell that never exits, its frames cut where a network might cut them."""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def __aiter__(self):
+        seq = 0
+        while True:
+            seq += 1
+            frame = f'event: output\ndata: {{"seq":{seq},"data":"aGk="}}\n\n'.encode()
+            for cut in (frame[:9], frame[9:-1], frame[-1:]):
+                await asyncio.sleep(0.005)
+                yield cut
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+async def test_a_live_terminal_stream_ends_at_the_owner_stream_cap_between_frames(
+    store: FakeStorage, monkeypatch
+):
+    """Admission is checked when a stream opens, so a live shell's is not open forever.
+
+    The relay stops after the cap, and only where a frame ends: the browser
+    resumes after the last sequence it applied, and that request is admitted
+    again. The sandbox manager's stream is released.
+    """
+    sandbox_manager = _TerminalSessionSandboxManager()
+    sandbox_manager.stream = _EndlessTerminalStream()  # type: ignore[assignment]
+    monkeypatch.setattr(sandbox_manager_routing, "_client_for", lambda _host: sandbox_manager)
+    monkeypatch.setattr(agent_workspace, "OWNER_STREAM_MAX_S", 0.1)
+    app = _build_app(store)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        job_id = await _create_job(client)
+        _attach_shared_workspace(store, job_id)
+        response = await asyncio.wait_for(
+            client.get(f"/v1/agent/jobs/{job_id}/terminals/term_1/stream"), 5
+        )
+
+    assert response.status_code == 200
+    *frames, rest = response.content.split(b"\n\n")
+    assert rest == b"", "the relay stopped where a frame ends"
+    sequences = [json.loads(frame.split(b"data: ", 1)[1])["seq"] for frame in frames]
+    assert sequences == list(range(1, len(frames) + 1))
+    assert sequences, "frames before the cap are relayed"
+    assert sandbox_manager.stream.closed is True
+
+
 async def test_full_terminal_lifecycle_is_available_while_agent_runs(
     store: FakeStorage, monkeypatch
 ):
@@ -4657,6 +4799,38 @@ async def test_cancel_requeued_job_authoritatively_resumes_terminals(
     assert response.json()["state"] == "cancelled"
     assert sandbox_manager.calls == [("resume_settled", thread_id, job_id)]
     assert store.jobs[job_id]["terminal_resume_pending"] is False
+
+
+async def test_cancel_reports_its_commit_when_the_workspace_host_cannot_be_reached(
+    store: FakeStorage,
+    monkeypatch,
+):
+    """Stop answers with the cancel it committed, not with the host it could not reach.
+
+    The retained group's sandbox manager cannot be hydrated, so the terminals are not
+    resumed now; the durable marker stays set for the reaper's next pass.
+    """
+    from cloud_agent.sandbox_manager_client import SandboxManagerError
+
+    sandbox_manager = _TerminalSessionSandboxManager()
+
+    async def unreachable(_sandbox: dict[str, Any]) -> None:
+        raise SandboxManagerError(503, "The shared chat supervisor is temporarily unavailable.")
+
+    monkeypatch.setattr(sandbox_manager, "register_shared_sandbox", unreachable)
+    monkeypatch.setattr(sandbox_manager_routing, "_client_for", lambda _host: sandbox_manager)
+    app = _build_app(store)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        job_id = await _create_job(client)
+        _attach_shared_workspace(store, job_id)
+        store.jobs[job_id]["current_attempt_id"] = 100
+        response = await client.post(f"/v1/agent/jobs/{job_id}/cancel")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["state"] == "cancelled"
+    assert response.json()["cancel_requested"] is True
+    assert sandbox_manager.calls == []
+    assert store.jobs[job_id]["terminal_resume_pending"] is True, "left for the reaper"
 
 
 async def test_worker_flow_claim_event_finish(client: AsyncClient, store: FakeStorage):
@@ -6640,9 +6814,11 @@ async def test_a_turn_finishes_while_the_app_is_unloaded_and_its_wakeup_waits(
     claimed_wakeups: list[int] = []
     original_claim = store.goal_wakeups.claim_wakeups
 
-    async def counting_claim(*, limit: int = 1) -> list[dict[str, Any]]:
+    async def counting_claim(
+        *, limit: int = 1, thread_id: str | None = None
+    ) -> list[dict[str, Any]]:
         claimed_wakeups.append(limit)
-        return await original_claim(limit=limit)
+        return await original_claim(limit=limit, thread_id=thread_id)
 
     store.goal_wakeups.claim_wakeups = counting_claim
     minter = _FakeGitHubApp(installations=[], repos_by_installation={})
@@ -6658,6 +6834,35 @@ async def test_a_turn_finishes_while_the_app_is_unloaded_and_its_wakeup_waits(
     assert finish.status_code == 200
     assert store.jobs[job_id]["state"] == "succeeded"
     assert claimed_wakeups == [], "no wakeup may be claimed while the App is unloaded"
+
+
+async def test_a_finish_drains_only_its_own_conversations_goal_wakeups(
+    client: AsyncClient, store: FakeStorage
+):
+    """The goal drain a finish runs names the finished turn's conversation.
+
+    Unnamed, the claim took the deployment's oldest due wakeups, and this
+    runner's request decided other owners' goals before it was acknowledged.
+    """
+    job_id = await _create_job(client)
+    claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
+    auth = {"Authorization": f"Bearer {claim.json()['worker_token']}"}
+    claims: list[tuple[int, str | None]] = []
+    original_claim = store.goal_wakeups.claim_wakeups
+
+    async def recording_claim(
+        *, limit: int = 1, thread_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        claims.append((limit, thread_id))
+        return await original_claim(limit=limit, thread_id=thread_id)
+
+    store.goal_wakeups.claim_wakeups = recording_claim
+    finish = await client.post(
+        f"/v1/agent/worker/jobs/{job_id}/finish", json={"state": "succeeded"}, headers=auth
+    )
+
+    assert finish.status_code == 200
+    assert claims == [(8, store.jobs[job_id]["thread_id"])]
 
 
 async def test_a_branch_is_pinned_to_a_commit_at_creation(store: FakeStorage, monkeypatch):
@@ -6762,6 +6967,44 @@ async def test_an_unresolvable_branch_is_refused_at_creation(store: FakeStorage,
 
     assert created.status_code == 400
     assert "nope" in created.text
+
+
+@pytest.mark.parametrize(
+    "base_ref", ["../../../../installation/repositories", "main?x=1", "-main", "a..b"]
+)
+async def test_a_base_ref_git_would_refuse_never_reaches_github(
+    store: FakeStorage, monkeypatch, base_ref
+):
+    """The ref is sent inside a GitHub API path, so only a real ref name is accepted."""
+    monkeypatch.setenv("AGENT_REPO_ALLOWLIST", "owner/name")
+    from cloud_agent.api.deps import get_agent_app_credentials
+
+    resolved: list[str] = []
+
+    class RecordingApp(_FakeGitHubApp):
+        async def resolve_ref(self, repo: str, ref: str) -> str:
+            resolved.append(ref)
+            return "f" * 40
+
+    app = _build_app(_store_with_grants(store))
+    app.dependency_overrides[get_agent_app_credentials] = lambda: RecordingApp(
+        installations=[], repos_by_installation={}
+    )
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        created = await client.post(
+            "/v1/agent/jobs",
+            json={
+                "repo": "owner/name",
+                "task_prompt": "fix it",
+                "model": "m",
+                "base_ref": base_ref,
+            },
+        )
+
+    assert created.status_code == 422
+    assert "base_ref" in created.text
+    assert resolved == []
 
 
 class _HistoryApp(_FakeGitHubApp):
@@ -7394,7 +7637,8 @@ async def test_the_claim_hands_the_runner_the_job_s_bindings(
     # Aliases, not summaries: the runtime builds the relay URL's path segment
     # from each name, so a dict here would either fail the schema or address a
     # server that does not exist.
-    assert body["mcp_bindings"] == ["deepwiki", "github"]
+    # The platform's memory tools ride the same endpoint, after the connections.
+    assert body["mcp_bindings"] == ["deepwiki", "github", worker.memory_tool.RUNTIME_SERVER_ID]
     assert "mcp.example.com" not in json.dumps(body)
     assert "wiki.example.com" not in json.dumps(body)
 
@@ -7461,7 +7705,10 @@ async def test_web_search_provider_enables_mcp_without_exposing_keys(
 
     body = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
 
-    assert body["mcp_bindings"] == [worker.web_search.RUNTIME_SERVER_ID]
+    assert body["mcp_bindings"] == [
+        worker.web_search.RUNTIME_SERVER_ID,
+        worker.memory_tool.RUNTIME_SERVER_ID,
+    ]
     assert body["mcp_token"]
     assert all(
         secret not in json.dumps(body) for secret in (serper_key, brave_key, parallel_key) if secret
@@ -8524,6 +8771,7 @@ async def test_session_listing_exposes_stable_titles_facets_and_archive_state(
         limit=20,
         cursor="previous-page",
         include_summary=True,
+        temporary=False,
     )
 
 
@@ -9383,5 +9631,51 @@ async def test_claim_loads_current_default_servers_and_skips_unavailable_ones(
             "/v1/agent/worker/claim", json={"worker_id": "w-1", "lease_ttl_seconds": 60}
         )
     assert claimed.status_code == 200, claimed.text
-    assert claimed.json()["mcp_bindings"] == [f"mcp{working['id']}"]
+    assert claimed.json()["mcp_bindings"] == [
+        f"mcp{working['id']}",
+        worker.memory_tool.RUNTIME_SERVER_ID,
+    ]
     assert claimed.json()["mcp_token"]
+
+
+async def test_claim_puts_durable_memories_with_their_ids_before_the_task(
+    client, store, monkeypatch
+):
+    read = AsyncMock(
+        return_value={
+            "repo": "owner/name",
+            "project": [{"id": "m-project", "content": "Use pnpm, not npm."}],
+            "user": [{"id": "m-user", "content": "Reply in Chinese."}],
+        }
+    )
+    mark = AsyncMock()
+    monkeypatch.setattr(store, "task_memories", read, raising=False)
+    monkeypatch.setattr(store, "mark_memories_used", mark, raising=False)
+    created = await client.post(
+        "/v1/agent/jobs",
+        json={"repo": "owner/name", "model": "glm-5.1", "task_prompt": "fix it"},
+    )
+    assert created.status_code == 201, created.text
+    claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
+    assert claim.status_code == 200, claim.text
+    prompt = claim.json()["task_prompt"]
+    read.assert_awaited_once_with(_OWNER, "owner/name")
+    mark.assert_awaited_once_with(_OWNER, ["m-project", "m-user"])
+    assert '{"id": "m-project", "content": "Use pnpm, not npm."}' in prompt
+    assert '{"id": "m-user", "content": "Reply in Chinese."}' in prompt
+    assert "memory_update" in prompt
+    assert prompt.endswith("Current task:\nfix it")
+
+
+async def test_unavailable_durable_memory_never_blocks_a_claim(client, store, monkeypatch):
+    monkeypatch.setattr(
+        store, "task_memories", AsyncMock(side_effect=RuntimeError("down")), raising=False
+    )
+    created = await client.post(
+        "/v1/agent/jobs",
+        json={"repo": "owner/name", "model": "glm-5.1", "task_prompt": "fix it"},
+    )
+    assert created.status_code == 201, created.text
+    claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
+    assert claim.status_code == 200, claim.text
+    assert claim.json()["task_prompt"] == "fix it"

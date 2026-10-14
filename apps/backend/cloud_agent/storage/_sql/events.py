@@ -69,6 +69,19 @@ async def insert_event(
         # answer and the part that was cut off may be the part that matters. A
         # reader that needs the *final* message — the goal report is one — has
         # to be able to tell that from a message that simply ended.
+        #
+        # The conversation is bumped first: the message row's foreign key locks
+        # its job, and the conversation comes before its jobs. Holding that job
+        # while waiting for the conversation deadlocked with a cancel.
+        await conn.execute(
+            """
+                UPDATE agent_threads t
+                SET updated_at = NOW()
+                FROM agent_jobs j
+                WHERE j.id = $1 AND t.id = j.thread_id
+                """,
+            job_id,
+        )
         await conn.execute(
             """
                 INSERT INTO agent_thread_messages
@@ -82,15 +95,6 @@ async def insert_event(
             text,
             event_id,
             (payload or {}).get("truncated") is True,
-        )
-        await conn.execute(
-            """
-                UPDATE agent_threads t
-                SET updated_at = NOW()
-                FROM agent_jobs j
-                WHERE j.id = $1 AND t.id = j.thread_id
-                """,
-            job_id,
         )
     elif event_type == USER_MESSAGE_EVENT:
         await _take_message_sent_into_turn(conn, job_id=job_id, event_id=event_id, payload=payload)

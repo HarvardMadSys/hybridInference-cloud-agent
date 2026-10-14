@@ -86,6 +86,9 @@ def archive_settings_payload(
 ) -> dict[str, Any]:
     """Return the shared read model: sandbox manager fields plus the admin configured flag."""
     payload = policy.as_sandbox_manager_dict()
+    # The wire form omits the default; admins and the heartbeat model read
+    # the resolved value.
+    payload["checkpoints_enabled"] = policy.checkpoints_enabled
     payload["aws_secret_access_key_configured"] = bool(policy.aws_secret_access_key)
     payload["updated_at"] = updated_at
     payload.update(extra)

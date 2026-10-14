@@ -2174,6 +2174,134 @@ async def test_target_edit_invalidates_only_its_previous_discovery_and_flow(stor
     assert (flow is None) is invalidated
 
 
+async def _authorized(store: Storage, auth_kind: str) -> dict[str, Any]:
+    """A connection holding everything a completed sign-in or saved secret leaves."""
+    row = await _connect(store, _OWNER, auth_kind=auth_kind, access_token=None)
+    oauth = auth_kind == "oauth"
+    assert await store.mcp.set_mcp_credential(
+        connection_id=row["id"],
+        expected_authorization_epoch=row["authorization_epoch"],
+        access_token_ciphertext="old-target-access",
+        refresh_token_ciphertext="old-target-refresh" if oauth else None,
+        client_secret_ciphertext="old-target-client-secret" if oauth else None,
+        expires_at=datetime.now(timezone.utc) + timedelta(hours=1) if oauth else None,
+        scopes=["read"] if oauth else None,
+        issuer="https://issuer.example.com" if oauth else None,
+        resource=_URL if oauth else None,
+        refresh_rotates=oauth,
+        client_auth_method="client_secret_basic" if oauth else None,
+        registration="dcr" if oauth else None,
+        token_endpoint="https://issuer.example.com/token" if oauth else None,
+        revocation_endpoint="https://issuer.example.com/revoke" if oauth else None,
+        registration_endpoint="https://issuer.example.com/register" if oauth else None,
+        auth_config_patch=(
+            {"client_id": "old-target-client", "managed_github_oauth": True}
+            if oauth
+            else {"hint": "olet"}
+        ),
+    )
+    stored = await store.mcp.get_mcp_connection(connection_id=row["id"])
+    assert stored is not None
+    return stored
+
+
+@pytest.mark.parametrize(
+    ("auth_kind", "edit"),
+    [
+        ("oauth", {"url": "https://elsewhere.example.com/mcp"}),
+        ("static", {"url": "https://elsewhere.example.com/mcp"}),
+        ("oauth", {"auth_kind": "static"}),
+        ("static", {"auth_kind": "oauth"}),
+        ("oauth", {"transport": "http-sse"}),
+    ],
+)
+async def test_a_new_target_does_not_inherit_the_old_targets_credential(store, auth_kind, edit):
+    """An edit that changes what a credential was issued for drops it.
+
+    The edit used to move the versions and drop the catalogue but keep the
+    tokens, so the next test or relay call sent a token minted for the old
+    server to whatever the address now named, and refreshes kept renewing it
+    against the old issuer for the old resource.
+    """
+    before = await _authorized(store, auth_kind)
+    edited = await store.mcp.update_mcp_connection(
+        connection_id=before["id"],
+        user_id=_OWNER,
+        expected_config_revision=before["config_revision"],
+        **edit,
+    )
+    assert edited is not None
+    for column in (
+        "access_token_ciphertext",
+        "refresh_token_ciphertext",
+        "client_secret_ciphertext",
+        "expires_at",
+        "issuer",
+        "resource",
+        "token_endpoint",
+        "revocation_endpoint",
+        "registration_endpoint",
+        "client_auth_method",
+        "registration",
+    ):
+        assert edited[column] is None, column
+    assert edited["scopes"] == []
+    assert edited["refresh_rotates"] is False
+    assert "client_id" not in edited["auth_config"]
+    assert "managed_github_oauth" not in edited["auth_config"]
+    assert "hint" not in edited["auth_config"]
+    assert edited["credential_version"] == before["credential_version"] + 1
+    assert edited["oauth_generation"] == before["oauth_generation"] + 1
+    assert await store.mcp.get_mcp_connection(connection_id=before["id"]) == edited
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [{"label": "Renamed"}, {"url": _URL}, {"auth_kind": "oauth"}, {"request_timeout_s": 120.0}],
+)
+async def test_an_edit_that_keeps_the_target_keeps_its_credential(store, edit):
+    """Renaming, or saving the same address again, is not a reason to sign in again."""
+    before = await _authorized(store, "oauth")
+    edited = await store.mcp.update_mcp_connection(
+        connection_id=before["id"],
+        user_id=_OWNER,
+        expected_config_revision=before["config_revision"],
+        **edit,
+    )
+    assert edited is not None
+    for column in (
+        "access_token_ciphertext",
+        "refresh_token_ciphertext",
+        "client_secret_ciphertext",
+        "expires_at",
+        "scopes",
+        "issuer",
+        "resource",
+        "refresh_rotates",
+        "token_endpoint",
+        "client_auth_method",
+        "auth_config",
+        "credential_version",
+        "oauth_generation",
+    ):
+        assert edited[column] == before[column], column
+
+
+async def test_settings_written_with_a_new_kind_are_kept(store):
+    """Clearing the old kind's settings never discards the ones the edit supplies."""
+    before = await _authorized(store, "static")
+    edited = await store.mcp.update_mcp_connection(
+        connection_id=before["id"],
+        user_id=_OWNER,
+        expected_config_revision=before["config_revision"],
+        auth_kind="oauth",
+        auth_config={"client_id": "new-kind-client"},
+    )
+    assert edited is not None
+    assert edited["auth_config"] == {"client_id": "new-kind-client"}
+    assert edited["access_token_ciphertext"] is None
+
+
 async def test_concurrent_diagnostics_publish_one_consistent_catalogue(store):
     """A late discovery cannot replace a result already stored under the same fence."""
     row = await _connect(store, _OWNER)

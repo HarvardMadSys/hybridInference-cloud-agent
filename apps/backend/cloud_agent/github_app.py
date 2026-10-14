@@ -50,11 +50,45 @@ _JWT_TTL_S = 540
 # Installation tokens last an hour; refresh early so a job never starts with a
 # credential that expires mid-push.
 _TOKEN_REFRESH_MARGIN_S = 300
+# How long a repository's installation id is reused. Installing the App again
+# gives the repository a new installation, and an id kept for the life of the
+# process minted against one that no longer exists until a restart.
+_INSTALLATION_TTL_S = 300.0
+# What the token endpoint answers for an installation it no longer knows: gone
+# (404), refused for this repository (422), or the JWT refused (401). Each is
+# worth exactly one fresh look at which installation covers the repository.
+_STALE_INSTALLATION_STATUSES = frozenset({401, 404, 422})
 # How long one user's repository answer is reused. Entitlement is asked on every
 # workspace file read and terminal open; a minute keeps those off GitHub while
 # bounding how long a revoked permission still reads as granted.
 _USER_REPOSITORIES_TTL_S = 60.0
 _COMMIT_SHA = re.compile(r"^[0-9a-fA-F]{7,64}$")
+# What the token endpoint answers when the refresh token itself is finished:
+# expired, already spent, or its authorization revoked. GitHub sends its own
+# code with HTTP 200; `invalid_grant` is the OAuth standard's, sent with 400.
+# A rate limit, abuse detection or the App's own client secret being refused
+# says nothing about the user's grant, and must not cost them their connection.
+_REVOKED_REFRESH_ERRORS = frozenset({"bad_refresh_token", "invalid_grant"})
+# Characters `git check-ref-format` refuses anywhere in a ref name.
+_REF_FORBIDDEN_CHARS = frozenset(" ~^:?*[\\")
+
+
+def is_ref_name(ref: str) -> bool:
+    """Whether git would accept ``ref`` as the name of a branch or tag.
+
+    The rules of ``git check-ref-format --allow-onelevel``, plus no leading
+    ``-``, which git refuses for a branch. A user's ref is sent to GitHub inside
+    an API path, and these rules are also what keep it a ref there: no ``..``
+    or dot-leading segment for the HTTP client to collapse into another
+    endpoint, no ``?`` to start a query string, no control characters.
+    """
+    if not ref or ref == "@" or ref.startswith(("-", "/")) or ref.endswith(("/", ".")):
+        return False
+    if ".." in ref or "//" in ref or "@{" in ref:
+        return False
+    if any(char in _REF_FORBIDDEN_CHARS or ord(char) < 0x20 or ord(char) == 0x7F for char in ref):
+        return False
+    return not any(part.startswith(".") or part.endswith(".lock") for part in ref.split("/"))
 
 
 class GitHubAppError(Exception):
@@ -227,7 +261,8 @@ class GitHubAppCredentials:
         self._config = config
         self._timeout_override = timeout_s
         self._tokens: dict[tuple[int, str], _CachedToken] = {}
-        self._installations: dict[str, int] = {}
+        #: Per repository: when its installation was looked up, and the id.
+        self._installations: dict[str, tuple[float, int]] = {}
         #: Per user, per set of connected installations: when the answer was
         #: read, and the repositories it named.
         self._user_repositories: dict[tuple[str, tuple[int, ...]], tuple[float, list[str]]] = {}
@@ -369,8 +404,9 @@ class GitHubAppCredentials:
         the user has not installed the App there, and the publisher must say so
         rather than appear to be broken.
         """
-        if repo in self._installations:
-            return self._installations[repo]
+        cached = self._installations.get(repo)
+        if cached is not None and time.monotonic() - cached[0] < _INSTALLATION_TTL_S:
+            return cached[1]
         owner, _, name = repo.partition("/")
         if not owner or not name:
             raise GitHubAppError(f"repo must be 'owner/name', got {repo!r}")
@@ -389,7 +425,7 @@ class GitHubAppCredentials:
         installation_id = body.get("id")
         if not isinstance(installation_id, int):
             raise AppNotInstalled(f"no App installation covers {repo}")
-        self._installations[repo] = installation_id
+        self._installations[repo] = (time.monotonic(), installation_id)
         return installation_id
 
     async def token_for(
@@ -398,6 +434,7 @@ class GitHubAppCredentials:
         *,
         permissions: dict[str, str] | None = None,
         repository_scoped: bool = False,
+        min_ttl_s: float = 0.0,
     ) -> str:
         """Return a live installation token for one repository.
 
@@ -407,13 +444,40 @@ class GitHubAppCredentials:
         ``repository_scoped``, which limits the token to this repository alone,
         that is how one App serves checkout (read), sandbox branch/PR writes,
         and the trusted publisher without sharing broader installation scope.
+
+        An installation that refuses to mint is looked up afresh once: the App
+        may have been installed again under a new id. If the installation
+        GitHub then names is gone too, the App does not cover the repository —
+        :class:`AppNotInstalled`, a settled answer rather than an outage.
+
+        ``min_ttl_s`` is how long the token must still live, for a caller whose
+        work outlasts the usual refresh margin: a cached token closer to its
+        expiry is replaced rather than handed out to fail midway.
         """
         installation_id = await self.installation_id_for(repo)
-        token, minted = await self._token_in_scope(
-            installation_id,
-            permissions=permissions,
-            repository=repo if repository_scoped else None,
-        )
+        scope = repo if repository_scoped else None
+        try:
+            token, minted = await self._token_in_scope(
+                installation_id, permissions=permissions, repository=scope, min_ttl_s=min_ttl_s
+            )
+        except GitHubAppError as exc:
+            if exc.status not in _STALE_INSTALLATION_STATUSES:
+                raise
+            self.forget(repo)
+            installation_id = await self.installation_id_for(repo)
+            try:
+                token, minted = await self._token_in_scope(
+                    installation_id,
+                    permissions=permissions,
+                    repository=scope,
+                    min_ttl_s=min_ttl_s,
+                )
+            except GitHubAppError as retry_exc:
+                if retry_exc.status == 404:
+                    raise AppNotInstalled(
+                        f"no App installation covers {repo}", status=404
+                    ) from retry_exc
+                raise
         if minted:
             logger.info(
                 "agent_github_app_token_minted",
@@ -432,6 +496,7 @@ class GitHubAppCredentials:
         *,
         permissions: dict[str, str] | None = None,
         repository: str | None = None,
+        min_ttl_s: float = 0.0,
     ) -> tuple[str, bool]:
         """Return a token for one installation and scope, and whether it is new.
 
@@ -447,7 +512,8 @@ class GitHubAppCredentials:
         """
         scope_key = json_module.dumps({"p": permissions, "r": repository}, sort_keys=True)
         cached = self._tokens.get((installation_id, scope_key))
-        if cached and cached.expires_at - _TOKEN_REFRESH_MARGIN_S > time.time():
+        margin = max(_TOKEN_REFRESH_MARGIN_S, min_ttl_s)
+        if cached and cached.expires_at - margin > time.time():
             return cached.token, False
 
         payload: dict[str, Any] = {}
@@ -506,7 +572,13 @@ class GitHubAppCredentials:
     async def refresh_user_token(
         self, refresh_token: str, *, timeout_s: float | None = None
     ) -> UserTokens:
-        """Spend a refresh token for a new pair. Each refresh token works once."""
+        """Spend a refresh token for a new pair. Each refresh token works once.
+
+        Only an answer about the refresh token itself is
+        :class:`UserAuthorizationRevoked`, on which the caller forgets the
+        stored tokens. Every other failure is a plain :class:`GitHubAppError`,
+        so the stored tokens stay and the next caller tries again.
+        """
         effective_timeout_s = self.request_timeout_s if timeout_s is None else timeout_s
         async with self._http(timeout_s=effective_timeout_s) as client:
             response = await client.post(
@@ -520,18 +592,20 @@ class GitHubAppCredentials:
                 },
                 timeout=effective_timeout_s,
             )
-        if response.status_code >= 500:
-            raise GitHubAppError(
-                f"GitHub could not refresh the user token ({response.status_code})",
-                status=response.status_code,
-            )
-        body = response.json() if response.status_code < 400 else {}
-        if not body.get("access_token"):
-            # `bad_refresh_token` and the rest: expired, spent, or revoked.
-            raise UserAuthorizationRevoked(
-                f"GitHub refused the refresh token: {body.get('error', response.status_code)}"
-            )
-        return _user_tokens(body)
+        status = response.status_code
+        try:
+            body = response.json() if status < 500 else {}
+        except ValueError:
+            body = {}
+        if not isinstance(body, dict):
+            body = {}
+        if status < 400 and body.get("access_token"):
+            return _user_tokens(body)
+        error = body.get("error")
+        if status in (200, 400) and isinstance(error, str) and error in _REVOKED_REFRESH_ERRORS:
+            raise UserAuthorizationRevoked(f"GitHub refused the refresh token: {error}")
+        detail = f"{status}: {error}" if isinstance(error, str) and error else str(status)
+        raise GitHubAppError(f"GitHub could not refresh the user token ({detail})", status=status)
 
     async def revoke_user_authorization(self, access_token: str) -> None:
         """Withdraw the user's authorization of the App, and every token it issued.
@@ -813,9 +887,7 @@ class GitHubAppCredentials:
         Read with the repository's own installation token, so a caller cannot
         learn anything about a repository the App does not cover.
         """
-        owner, _, name = repo.partition("/")
-        if not owner or not name:
-            raise GitHubAppError(f"repo must be 'owner/name', got {repo!r}")
+        endpoint = f"{self._config.api_base}{_repository_endpoint(repo)}"
         token = await self.token_for(repo, permissions={"contents": "read"}, repository_scoped=True)
         headers = {
             "Authorization": f"Bearer {token}",
@@ -823,11 +895,9 @@ class GitHubAppCredentials:
             "X-GitHub-Api-Version": "2022-11-28",
         }
         async with self._http() as client:
-            meta = await client.get(
-                f"{self._config.api_base}/repos/{owner}/{name}", headers=headers
-            )
+            meta = await client.get(endpoint, headers=headers)
             listing = await client.get(
-                f"{self._config.api_base}/repos/{owner}/{name}/branches",
+                f"{endpoint}/branches",
                 params={"per_page": 100},
                 headers=headers,
             )
@@ -845,14 +915,17 @@ class GitHubAppCredentials:
         The job stores the *sha*, never the branch name. A branch moves; a job
         that recorded "dev" would silently mean a different tree by the time it
         ran, and the publisher applies its patch onto a pinned commit.
+
+        ``ref`` is the requester's text: only a name git accepts is sent, and
+        encoded, so it can never select another endpoint or add a query.
         """
-        owner, _, name = repo.partition("/")
-        if not owner or not name:
-            raise GitHubAppError(f"repo must be 'owner/name', got {repo!r}")
+        endpoint = _repository_endpoint(repo)
+        if not is_ref_name(ref):
+            raise GitHubAppError(f"{ref!r} is not a valid Git ref name")
         token = await self.token_for(repo, permissions={"contents": "read"}, repository_scoped=True)
         async with self._http() as client:
             response = await client.get(
-                f"{self._config.api_base}/repos/{owner}/{name}/commits/{ref}",
+                f"{self._config.api_base}{endpoint}/commits/{quote(ref, safe='/')}",
                 headers={
                     "Authorization": f"Bearer {token}",
                     "Accept": "application/vnd.github+json",
@@ -1000,8 +1073,9 @@ class GitHubAppCredentials:
 
     def forget(self, repo: str) -> None:
         """Drop cached state for a repo, e.g. after the App is uninstalled."""
-        installation_id = self._installations.pop(repo, None)
-        if installation_id is not None:
+        cached = self._installations.pop(repo, None)
+        if cached is not None:
+            installation_id = cached[1]
             for key in [k for k in self._tokens if k[0] == installation_id]:
                 self._tokens.pop(key, None)
 
@@ -1054,12 +1128,17 @@ async def read_repository_contents(
     return body
 
 
-def _repository_content_endpoint(repo: str, path: str) -> str:
-    """Validate and encode a repository-relative GitHub Contents path."""
+def _repository_endpoint(repo: str) -> str:
+    """Validate ``owner/name`` and return its ``/repos/...`` path, each segment encoded."""
     owner, separator, name = repo.partition("/")
     if not owner or separator != "/" or not name or "/" in name:
         raise GitHubAppError(f"repo must be 'owner/name', got {repo!r}")
+    return f"/repos/{quote(owner, safe='')}/{quote(name, safe='')}"
 
+
+def _repository_content_endpoint(repo: str, path: str) -> str:
+    """Validate and encode a repository-relative GitHub Contents path."""
+    endpoint = f"{_repository_endpoint(repo)}/contents"
     parts = path.split("/") if path else []
     if (len(path) >= 3 and path[0].isalpha() and path[1:3] == ":/") or any(
         not part
@@ -1071,7 +1150,6 @@ def _repository_content_endpoint(repo: str, path: str) -> str:
     ):
         raise GitHubAppError("repository content path is not a safe relative path")
 
-    endpoint = f"/repos/{quote(owner, safe='')}/{quote(name, safe='')}/contents"
     if parts:
         endpoint += "/" + "/".join(quote(part, safe="") for part in parts)
     return endpoint

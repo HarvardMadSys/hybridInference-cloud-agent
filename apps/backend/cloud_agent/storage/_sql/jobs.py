@@ -172,7 +172,8 @@ async def fail_unrunnable_follow_ups(
 #: lock that serializes ``seq``. Putting the conversation ahead of the attempt
 #: instead trades one cycle for another, between a turn's events and the
 #: transition that ends it; that was tried, reproduced, and is why this reads
-#: the way it does.
+#: the way it does. The rest of the order, from the policy row down to the
+#: host, is in :mod:`cloud_agent.storage`.
 _LOCK_CONVERSATION_BY_JOB = """
 SELECT t.id FROM agent_threads t
 JOIN agent_jobs j ON j.thread_id = t.id

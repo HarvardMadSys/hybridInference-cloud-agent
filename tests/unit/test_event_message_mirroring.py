@@ -55,7 +55,8 @@ async def test_main_reply_keeps_its_transcript_mirror_without_a_recorded_parent(
 
     assert event_id == 42
     assert conn.execute.await_count == 2
-    mirror = conn.execute.await_args_list[0].args
+    bump, mirror = (call.args for call in conn.execute.await_args_list)
+    # The conversation before the message, whose foreign key locks the job.
+    assert "UPDATE agent_threads" in bump[0]
     assert "INSERT INTO agent_thread_messages" in mirror[0]
     assert mirror[1:] == ("job", "The main answer", 42, True)
-    assert "UPDATE agent_threads" in conn.execute.await_args_list[1].args[0]

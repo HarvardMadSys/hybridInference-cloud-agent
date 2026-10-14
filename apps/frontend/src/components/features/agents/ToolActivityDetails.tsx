@@ -27,7 +27,7 @@ const STATUS_LABELS: Record<string, string> = {
   notFound: 'Not found',
 };
 
-function Status({ value }: { value?: string }) {
+export function Status({ value }: { value?: string }) {
   const tone =
     value === 'completed'
       ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-400'

@@ -31,6 +31,7 @@ from cloud_agent_host.runtimes import (
     runtime_reasoning_efforts,
     runtimes_supporting_mcp,
 )
+from cloud_agent_shared.event_payloads import MAX_EVENT_PAYLOAD_BYTES, TRUNCATION_NOTICE
 
 _FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "agent_runtime_streams"
 
@@ -616,6 +617,44 @@ def test_pi_answer_becomes_a_message_event():
     messages = [e for e in events if e and e.event_type == "message"]
     assert len(messages) == 1
     assert messages[0].payload["text"] == "PWD_OK: synthetic agent loop round trip complete."
+
+
+def _pi_answer(content: str) -> dict[str, object]:
+    """Normalize one completed pi answer block and return its payload."""
+    event = PiRuntime().parse_event(
+        json.dumps(
+            {
+                "type": "message_update",
+                "assistantMessageEvent": {
+                    "type": "text_end",
+                    "contentIndex": 0,
+                    "content": content,
+                },
+            }
+        )
+    )
+    assert event is not None and event.event_type == "message"
+    return event.payload
+
+
+def test_pi_answer_preserves_content_past_4000_characters():
+    """A long pi answer survives normalization whole, as Claude's does.
+
+    The goal report sits at the end of a final message. Clipping pi's answer
+    at 4,000 characters removed exactly that part and marked every long pi goal
+    round's report unreadable.
+    """
+    content = "repository detail\n" * 500 + "END OF CONTENT"
+    payload = _pi_answer(content)
+    assert payload["text"] == content
+    assert payload.get("truncated") is not True
+
+
+def test_pi_answer_is_bounded_only_by_the_shared_event_limit():
+    """Past the shared payload bound the answer is clipped and says so."""
+    payload = _pi_answer("x" * (MAX_EVENT_PAYLOAD_BYTES + 1))
+    assert payload["truncated"] is True
+    assert str(payload["text"]).endswith(TRUNCATION_NOTICE)
 
 
 def test_pi_tool_call_and_result_carry_what_the_runner_reads():

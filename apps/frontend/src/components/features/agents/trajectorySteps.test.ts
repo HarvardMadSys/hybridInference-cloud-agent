@@ -387,6 +387,70 @@ describe('buildTrajectorySteps', () => {
     expect(steps[0].truncated).toBe(true);
   });
 
+  it('joins a long command’s output chunks to its call in order, in linear time', () => {
+    // Codex stores one record per output chunk; a build prints tens of
+    // thousands. A second command's chunks arrive in between.
+    const chunks = 50_000;
+    const stored = [
+      event({
+        id: 1,
+        job_id: 'a',
+        turn_no: 1,
+        event_type: 'tool_use',
+        payload: { id: 'build', name: 'Bash' },
+      }),
+      event({
+        id: 2,
+        job_id: 'a',
+        turn_no: 1,
+        event_type: 'tool_use',
+        payload: { id: 'lint', name: 'Bash' },
+      }),
+    ];
+    for (let index = 0; index < chunks; index += 1) {
+      stored.push(
+        event({
+          id: 3 + index,
+          job_id: 'a',
+          turn_no: 1,
+          event_type: 'tool_output',
+          payload: { tool_use_id: index % 10_000 === 7 ? 'lint' : 'build', text: `${index};` },
+        }),
+      );
+    }
+    for (const [offset, call] of ['build', 'lint'].entries()) {
+      stored.push(
+        event({
+          id: 3 + chunks + offset,
+          job_id: 'a',
+          turn_no: 1,
+          event_type: 'tool_result',
+          payload: { tool_use_id: call, content: `${call} done` },
+        }),
+      );
+    }
+
+    // A few milliseconds. Copying a call's chunks again for each new one took
+    // seconds at this size, well past the test's time limit.
+    const steps = buildTrajectorySteps(stored, idle);
+
+    for (const call of ['build', 'lint']) {
+      const own = stored.filter((row) => row.payload?.tool_use_id === call);
+      const step = steps.find((candidate) => candidate.callId === call)!;
+      expect(step.sourceEvents.map((row) => row.id)).toEqual([
+        call === 'build' ? 1 : 2,
+        ...own.map((row) => row.id),
+      ]);
+      expect(step.outputPreview).toBe(
+        own
+          .filter((row) => row.event_type === 'tool_output')
+          .map((row) => row.payload?.text)
+          .join(''),
+      );
+      expect(step.result?.text).toBe(`${call} done`);
+    }
+  }, 5_000);
+
   it('keeps an orphan result instead of dropping it', () => {
     const steps = buildTrajectorySteps(
       [

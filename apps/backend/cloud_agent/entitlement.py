@@ -10,15 +10,27 @@ installed on, have the platform clone it into a sandbox, and read the contents
 back through their own job's events and retained workspace. That is a confused
 deputy: the requester supplies the target, the platform supplies the authority.
 
-This is a single-tenant dogfood ("repo == our own"), so the entitlement is an
-explicit deployment allowlist rather than a per-user GitHub identity. That is
-the honest shape for the stage: it fails closed, it needs no OAuth linkage that
-does not exist yet, and it makes the multi-tenant version an obvious next step
-(replace :func:`repo_is_allowed` with a per-user installation lookup) instead of
-a hole nobody wrote down.
+:func:`require_entitled_repo` is the check, and a repository passes it on
+either of two independent grounds:
 
-Unset means *nothing* is allowed. A deployment that has not been configured
-must refuse jobs, not accept every repository on the internet.
+- **The user's own GitHub connection.** They authorized the App, and GitHub,
+  asked as them, says they can push to the repository.
+- **The deployment allowlist** (``AGENT_REPO_ALLOWLIST``). It is not per user:
+  every user the Gateway admits to Cloud Agent may have the platform clone and
+  publish to every listed repository, with the App's installation token or the
+  deployment's ``AGENT_GITHUB_TOKEN``, without connecting GitHub at all. It
+  belongs to repositories every such user may work on.
+
+It runs when a job or follow-up is created and again before every credential is
+minted or used for it (claim, publication, base import, pull-request archiving),
+so a row written while the allowlist was wider, or before a connection was
+lost, cannot produce a token now.
+
+Both grounds fail closed. An unset allowlist allows nothing, and neither does a
+missing connection: a deployment nobody configured must refuse jobs, not accept
+every repository on the internet. A connection GitHub cannot be asked about
+right now raises :class:`RepoAccessUnavailable`, a refusal to retry rather than
+a verdict, and never access.
 """
 
 from __future__ import annotations
@@ -80,26 +92,6 @@ def repo_is_allowed(repo: str, env: dict[str, str] | None = None) -> bool:
     candidate = repo.lower()
     owner = candidate.split("/", 1)[0]
     return any(entry == candidate or entry == f"{owner}/*" for entry in allowed_repos(env))
-
-
-def require_allowed_repo(repo: str, env: dict[str, str] | None = None) -> None:
-    """Raise :class:`RepoNotAllowed` unless ``repo`` is entitled.
-
-    Called both when the job is created and again when a credential is about to
-    be minted for it. The second call is not redundant: a row written before
-    this check existed, or while the allowlist was wider, must not be able to
-    produce a token now.
-    """
-    if not _REPO_RE.match(repo or ""):
-        raise RepoNotAllowed(f"repo must be 'owner/name', got {repo!r}")
-    if not repo_is_allowed(repo, env):
-        configured = allowed_repos(env)
-        detail = (
-            f"{_ALLOWLIST_VAR} is not configured, so no repository is allowed"
-            if not configured
-            else f"{repo!r} is not in {_ALLOWLIST_VAR}"
-        )
-        raise RepoNotAllowed(f"This deployment will not run agent jobs against {repo!r}: {detail}.")
 
 
 async def _connected_repos(
@@ -166,8 +158,8 @@ async def repos_for_user(
       installations' repositories they can push to. This is the design's "user
       authorizes the repo", and it is an entitlement because every step of it
       is GitHub's answer rather than the requester's.
-    - **The deployment allowlist.** The single-tenant dogfood, where the repo
-      is the operator's own and there is no user to connect.
+    - **The deployment allowlist.** Repositories the operator opens to every
+      admitted user, whether or not they connected GitHub.
 
     Both fail closed: with no connection and no allowlist the answer is empty,
     and an empty answer means no job can be created at all. So does a
@@ -237,6 +229,5 @@ __all__ = [
     "allowed_repos",
     "repo_is_allowed",
     "repos_for_user",
-    "require_allowed_repo",
     "require_entitled_repo",
 ]

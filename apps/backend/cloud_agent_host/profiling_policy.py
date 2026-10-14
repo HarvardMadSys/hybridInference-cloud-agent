@@ -15,7 +15,10 @@ ones retain the last applied configuration until synchronization returns.
 **A version never goes backwards.** Every answer carries the deployment's
 configuration version, and an answer older than the one already applied is
 ignored by the store. That is the whole anti-rollback protocol: a delayed or
-reordered reply cannot put a stopped experiment back into force.
+reordered reply cannot put a stopped experiment back into force. Versions only
+order one control row's answers, so a refusal is logged: a control plane that
+moved to another row (a renamed deployment, a rebuilt database) is only heard
+again once its version passes the applied one, or after a restart.
 
 **The sandbox manager is told on every pass, and its answer is not assumed.** The runner
 pushes the configuration over the sandbox manager's existing authenticated channel and
@@ -150,6 +153,13 @@ class ProfilingPolicySync:
         #: branches on them.
         self._applied_revision = 0
         self._applied_run_id: str | None = None
+        #: The control plane's own description of the applied run, kept so a
+        #: refused answer can re-offer the sandbox manager what is in force
+        #: rather than what was refused.
+        self._applied_run_payload: Mapping[str, Any] | None = None
+        #: The last revision refused as older than the applied one, so the
+        #: warning is written once per refused revision rather than per poll.
+        self._refused_revision: int | None = None
         #: Whether the last sandbox manager push was accepted, and why not when it was
         #: not. Local diagnostics only.
         self._sandbox_manager_ok: bool | None = None
@@ -275,7 +285,10 @@ class ProfilingPolicySync:
         """Read this host's configuration and publish it.
 
         The answer is reduced to a flat, already-validated form here, so no
-        later step re-interprets it.
+        later step re-interprets it. It describes what the store applied, which
+        is not always what the control plane just said: an answer older than
+        the applied revision is refused, and reporting or forwarding the refused
+        one would claim a Stop that never happened while the old run selects.
         """
         response = self._client.post(
             f"{self._base_url}/v1/agent/hosts/profiling-policy",
@@ -293,30 +306,62 @@ class ProfilingPolicySync:
         parsed: ProfilingRun | None = None
         if mode == MODE_ADMIN and isinstance(run_payload, Mapping):
             parsed = _parse_policy_run(run_payload)
+        offered = ControlState(
+            mode=mode,
+            config_version=revision,
+            run=parsed,
+            stop_reason="" if parsed is not None else "stopped",
+        )
+        published = policy_store().publish(offered, run=parsed)
+        applied = published.state
+        refused = applied is not offered
+        run_id = published.run.run_id if published.run is not None else None
         with self._lock:
             previous_run = self._applied_run_id
             previous_revision = self._applied_revision
-        published = policy_store().publish(
-            ControlState(
-                mode=mode,
-                config_version=revision,
-                run=parsed,
-                stop_reason="" if parsed is not None else "stopped",
-            ),
-            run=parsed,
-        )
-        applied = published.state
-        with self._lock:
+            if not refused:
+                self._applied_run_payload = run_payload if parsed is not None else None
+                self._refused_revision = None
             self._applied_revision = applied.config_version
-            self._applied_run_id = parsed.run_id if parsed is not None else None
+            self._applied_run_id = run_id
+            run_message = self._applied_run_payload if run_id is not None else None
+        if refused:
+            self._report_refused(offered=revision, applied=applied.config_version)
         return {
             "mode": applied.mode,
             "revision": applied.config_version,
-            "run_id": parsed.run_id if parsed is not None else None,
-            "run": run_payload if parsed is not None else None,
-            "changed": applied.config_version != previous_revision
-            or (parsed.run_id if parsed is not None else None) != previous_run,
+            "run_id": run_id,
+            "run": run_message,
+            "changed": applied.config_version != previous_revision or run_id != previous_run,
         }
+
+    def _report_refused(self, *, offered: int, applied: int) -> None:
+        """Say, once per refused revision, that the control plane is behind.
+
+        Revisions only order the answers of one control row. A control plane
+        that now reads another one -- a changed profiling deployment name, or a
+        rebuilt or restored database -- answers below what this runner applied,
+        and every Start and Stop it records is ignored until its revision passes
+        the applied one. The applied configuration stays in force, as the
+        anti-rollback rule requires; this is what makes that visible.
+        """
+        with self._lock:
+            if self._refused_revision == offered:
+                return
+            self._refused_revision = offered
+        logger.warning(
+            "agent_profiling_policy_revision_behind: the control plane answered revision "
+            "%d, below the %d this runner applied; the applied configuration stays in "
+            "force. If the profiling deployment changed or its database was rebuilt, "
+            "restart the runner and its sandbox manager to accept the new control row.",
+            offered,
+            applied,
+            extra={
+                "event": "agent_profiling_policy_revision_behind",
+                "offered_revision": offered,
+                "applied_revision": applied,
+            },
+        )
 
     def _push_to_sandbox_manager(self, answer: Mapping[str, Any]) -> None:
         """Hand the sandbox manager the same configuration, and record what it answered."""

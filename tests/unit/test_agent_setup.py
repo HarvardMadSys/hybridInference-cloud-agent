@@ -82,6 +82,31 @@ def test_silent_setup_is_killed_and_reaped_at_its_resource_deadline():
     assert process.killed is True
 
 
+def test_a_stop_kills_a_running_setup_instead_of_waiting_out_its_deadline():
+    """A turn the owner stopped, or whose lease is gone, will never use the setup."""
+    process = _Process(lines=[], silent=True)
+    backend = _Backend(process)
+    asked: list[bool] = []
+
+    def stop() -> bool:
+        asked.append(True)
+        return len(asked) >= 3
+
+    result = run_setup(
+        script="npm ci",
+        workdir="/workspace",
+        backend=backend,
+        timeout_s=60,
+        stop=stop,
+    )
+
+    assert result.ran is True
+    assert result.exit_code == 130
+    assert process.killed is True
+    assert process.waited is True
+    assert len(asked) == 3
+
+
 @pytest.mark.parametrize("script", ["", "   ", "\n"])
 def test_blank_script_does_not_spawn_a_process(script: str):
     backend = _Backend(_Process(lines=[]))

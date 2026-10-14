@@ -193,7 +193,7 @@ finally:
 
 
 _WRITE_PROGRAM = r"""
-import os, stat, sys
+import errno, os, stat, sys
 
 root_path, relative, max_raw = sys.argv[1:]
 max_bytes = int(max_raw)
@@ -201,6 +201,7 @@ max_bytes = int(max_raw)
 # file must remain writable by the whole chat group.
 os.umask(0o002)
 create_mode = 0o664
+no_room = (errno.ENOSPC, errno.EDQUOT, errno.EFBIG)
 parts = [] if not relative else relative.split("/")
 if not parts or any(not part or part in (".", "..") for part in parts):
     raise SystemExit(40)
@@ -229,23 +230,54 @@ try:
         raise SystemExit(49)
     if existing is not None and not stat.S_ISREG(existing.st_mode):
         raise SystemExit(49)
+    # No O_TRUNC: the old content stays until the new content has room.
+    # O_NONBLOCK keeps a FIFO swapped in since the check from blocking the
+    # open (the fstat below refuses it), and O_EXCL makes a file this program
+    # creates one it may remove again.
+    flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK
+    if existing is None:
+        flags |= os.O_EXCL
     try:
-        file_fd = os.open(
-            parts[-1],
-            os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW,
-            create_mode,
-            dir_fd=parent_fd,
-        )
-    except OSError:
-        raise SystemExit(49)
+        file_fd = os.open(parts[-1], flags, create_mode, dir_fd=parent_fd)
+    except OSError as exc:
+        # No room to create the file, or to copy it up out of an image layer,
+        # changes nothing either.
+        raise SystemExit(47 if exc.errno in no_room else 49)
     opened.append(file_fd)
+    original = os.fstat(file_fd)
+    if not stat.S_ISREG(original.st_mode):
+        raise SystemExit(49)
+    # Reserve the new content's blocks before overwriting any old byte, so a
+    # full disk or quota leaves the file exactly as it was.
+    try:
+        if raw:
+            os.posix_fallocate(file_fd, 0, len(raw))
+    except OSError as exc:
+        try:
+            if existing is None:
+                os.unlink(parts[-1], dir_fd=parent_fd)
+            else:
+                os.ftruncate(file_fd, original.st_size)
+        except OSError:
+            pass
+        raise SystemExit(47 if exc.errno in no_room else 49)
     view = memoryview(raw)
-    while view:
-        written = os.write(file_fd, view)
-        if written <= 0:
-            raise SystemExit(49)
-        view = view[written:]
-    os.fsync(file_fd)
+    offset = 0
+    try:
+        while offset < len(raw):
+            written = os.pwrite(file_fd, view[offset:], offset)
+            if written <= 0:
+                raise SystemExit(49)
+            offset += written
+        os.ftruncate(file_fd, len(raw))
+        os.fsync(file_fd)
+    except OSError as exc:
+        # Reserved blocks need not cover an overwrite where blocks are
+        # shared (copy-on-write, reflinked copies), so room can still run
+        # out here, after old bytes were replaced.
+        if exc.errno in no_room:
+            raise SystemExit(48)
+        raise
 finally:
     for fd in reversed(opened):
         try:
@@ -260,6 +292,8 @@ def _error_from_result(returncode: int, stdout: bytes, stderr: bytes) -> Retaine
         40: (400, "workspace path crosses an invalid directory"),
         43: (413, "file exceeds the workspace write limit"),
         44: (404, "workspace path does not exist"),
+        47: (507, "workspace has no room for this file; it was not changed"),
+        48: (507, "workspace ran out of room while writing this file; it may be incomplete"),
         49: (409, "workspace path cannot be accessed"),
     }
     status, message = messages.get(returncode, (502, "retained workspace operation failed"))
@@ -328,7 +362,14 @@ def write_retained_file(
     max_preview_bytes: int,
     max_directory_entries: int,
 ) -> dict[str, Any]:
-    """Replace one UTF-8 file atomically with respect to its opened inode."""
+    """Replace one UTF-8 file's content in place, keeping its inode, mode and owner.
+
+    Room for the new content is reserved before any old byte is overwritten,
+    so a full disk or quota answers 507 and leaves the file as it was. Where
+    blocks are shared (copy-on-write storage) room can still run out during
+    the overwrite, which answers 507 saying the file may be incomplete. The
+    replacement is not atomic: a concurrent reader can see it part-written.
+    """
     encoded = content.encode("utf-8")
     if len(encoded) > max_write_bytes:
         raise RetainedWorkspaceError(413, "file exceeds the workspace write limit")

@@ -1937,9 +1937,10 @@ class PostgresComputeResourceRepository:
             ON CONFLICT (allocation_id,provider_node_id) DO UPDATE
             SET name=EXCLUDED.name,updated_at=NOW(),
                 -- A registered host key belongs to this exact instance and
-                -- provider observations never carry it: keep it.
-                connection=CASE WHEN agent_compute_nodes.connection ? 'host_key'
-                    AND NOT EXCLUDED.connection ? 'host_key'
+                -- provider observations never carry it, at most a null
+                -- placeholder from the serialized connection: keep it.
+                connection=CASE WHEN agent_compute_nodes.connection->>'host_key' IS NOT NULL
+                    AND EXCLUDED.connection->>'host_key' IS NULL
                     THEN EXCLUDED.connection
                         || jsonb_build_object('host_key', agent_compute_nodes.connection->'host_key')
                     ELSE EXCLUDED.connection END
@@ -2041,6 +2042,38 @@ class PostgresComputeResourceRepository:
         result = dict(row)
         result["host_keys"] = load_json(result["host_keys"]) or []
         return result
+
+    async def reopen_node_registration(
+        self,
+        *,
+        allocation_id: str,
+        ttl_seconds: float,
+        operation_id: str,
+        generation: int,
+        worker_id: str,
+    ) -> bool:
+        """Give an allocation's newest, never-completed registration another window.
+
+        The node received its one token when it was created, so only that
+        token's validity moves. A completed or superseded registration, or one
+        of a retiring allocation, is never reopened.
+        """
+        async with self._pool.acquire() as conn, conn.transaction():
+            await self._fence(conn, operation_id, generation, worker_id, allocation_id)
+            return bool(
+                await conn.fetchval(
+                    """UPDATE agent_compute_node_registrations r
+                    SET expires_at=clock_timestamp()+make_interval(secs=>$2)
+                    FROM agent_compute_allocations a
+                    WHERE r.id=(SELECT id FROM agent_compute_node_registrations
+                                WHERE allocation_id=$1 ORDER BY created_at DESC,id DESC LIMIT 1)
+                      AND a.id=r.allocation_id AND r.registered_at IS NULL
+                      AND a.desired_state='present' AND a.release_committed_at IS NULL
+                    RETURNING r.id""",
+                    allocation_id,
+                    ttl_seconds,
+                )
+            )
 
     async def record_host_key(
         self,

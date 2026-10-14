@@ -22,6 +22,7 @@ import type {
 import { createDisplayJobAdapter } from './adapt';
 import { useAgentReads } from './AgentReadProvider';
 import { announceAgentSessionsChanged, onAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
+import { projectKey } from '@/lib/temporaryWorkspace';
 import type { AgentJob } from './types';
 import { isActiveJobState, isActiveConversationState } from './conversationJob';
 import { hasActiveGoal } from './goal/liveWork';
@@ -119,14 +120,17 @@ export function applyAgentLifecycleEvent(
 // error — the server's SSE cap is finite by design, so a drop is the expected
 // shape and the client resumes from the last event id.
 
+/** A project as the sidebar keys it: a repository, or `TEMPORARY_WORKSPACE`. */
+export type SidebarProject = Omit<AgentProjectApi, 'repo'> & { repo: string };
+
 /** The caller's projects, for the sidebar's folder tree. */
 export function useAgentProjects(archived = false): {
-  projects: AgentProjectApi[];
+  projects: SidebarProject[];
   loading: boolean;
   error: string | null;
   reload: () => void;
 } {
-  const [projects, setProjects] = useState<AgentProjectApi[]>([]);
+  const [projects, setProjects] = useState<SidebarProject[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
@@ -145,7 +149,7 @@ export function useAgentProjects(archived = false): {
     listAgentProjects(archived)
       .then((api) => {
         if (cancelled || requestGeneration !== generation.current) return;
-        setProjects(api);
+        setProjects(api.map((project) => ({ ...project, repo: projectKey(project.repo) })));
         setError(null);
       })
       .catch((cause: unknown) => {
@@ -175,6 +179,28 @@ function endsStreamingTurn(current: AgentJobApi | null, latest: AgentJobApi): bo
   return (
     current?.id === latest.id && isActiveJobState(current.state) && !isActiveJobState(latest.state)
   );
+}
+
+/**
+ * Where to read a conversation again when its earlier log is held.
+ *
+ * Stored events are never changed or removed, so a later read only has to
+ * reach what was added. It does not start after the newest held event: ids
+ * are taken before their writes commit, so a write still in flight during
+ * the earlier read could land below an id that read already returned. The
+ * running turn writes, and so do the snapshot and publication that follow
+ * the turn before it, which can still be committing when the next turn
+ * starts. The last two held turns are therefore read again in full. A write
+ * to an older turn takes an id from after they began, and is read either way.
+ */
+function resumeAfter(held: readonly AgentThreadEventApi[]): number {
+  const turns = [...new Set(held.map((event) => event.turn_no))].sort((a, b) => b - a);
+  const from = turns[1] ?? turns[0];
+  let first = Infinity;
+  for (const event of held) {
+    if (event.turn_no >= from && event.id < first) first = event.id;
+  }
+  return Number.isFinite(first) ? first - 1 : 0;
 }
 
 export function useAgentJob(
@@ -216,6 +242,14 @@ export function useAgentJob(
     lifecycleEvents: Map<number, AgentThreadEventApi>;
   } | null>(null);
   const generation = useRef(0);
+  // The conversation's log as of its last complete read. A follow-up turn, a
+  // turn's end and a stream reconnect read the same conversation again; this
+  // lets them read what was added instead of the whole log.
+  const heldLog = useRef<{
+    threadId: string;
+    reads: typeof reads;
+    events: AgentThreadEventApi[];
+  } | null>(null);
   const loadedStreamCursor = useRef<{
     jobId: string;
     reads: typeof reads;
@@ -261,6 +295,7 @@ export function useAgentJob(
         setEvents([]);
         setThreadEvents([]);
         setThread(null);
+        heldLog.current = null;
       }
       seen.current = new Map();
       seenScope.current = { jobId, reads };
@@ -301,19 +336,23 @@ export function useAgentJob(
         setApi((current) =>
           current?.id === jobId ? current : preserveResolvedTaskTitle(current, overlayPushed(job)),
         );
+        const held =
+          foundThread &&
+          heldLog.current?.reads === reads &&
+          heldLog.current.threadId === foundThread.thread_id
+            ? heldLog.current.events
+            : [];
         if (progressive && seen.current.size === 0) {
-          setEvents([]);
-          setThreadEvents([]);
+          setEvents(held.filter((event) => event.job_id === jobId));
+          setThreadEvents(held);
         }
         setThread(foundThread);
-        return [
-          job,
-          foundThread,
-          await listAllAgentThreadEvents(jobId, {
-            signal: controller.signal,
-            onPage: publishEvents,
-          }),
-        ] as const;
+        const added = await listAllAgentThreadEvents(jobId, {
+          after: resumeAfter(held),
+          signal: controller.signal,
+          onPage: (page) => publishEvents([...held, ...page]),
+        });
+        return [job, foundThread, [...held, ...added]] as const;
       })
       .then((snapshot) => {
         if (!snapshot || cancelled || requestGeneration !== generation.current) return;
@@ -329,6 +368,9 @@ export function useAgentJob(
         }
         for (const [id, event] of read.events) merged.set(id, event);
         const completeEvents = [...merged.values()].sort((left, right) => left.id - right.id);
+        heldLog.current = foundThread
+          ? { threadId: foundThread.thread_id, reads, events: completeEvents }
+          : null;
         if (historyRead.current === read) historyRead.current = null;
         const ownEvents = completeEvents.filter((event) => event.job_id === jobId);
         let cursor = 0;
@@ -421,6 +463,11 @@ export function useAgentJob(
     const controller = new AbortController();
     let finished = false;
     let retry: ReturnType<typeof setTimeout> | undefined;
+    // This opening follows one that could not connect, and the read made
+    // then may have failed too. Once the server answers again, read the
+    // conversation once more rather than leave that failure on screen for
+    // the rest of the turn.
+    let recovering = streamFailures.current > 0;
     streaming.current = true;
     void streamAgentJob(jobId, {
       signal: controller.signal,
@@ -428,6 +475,11 @@ export function useAgentJob(
         loadedStreamCursor.current?.jobId === jobId && loadedStreamCursor.current.reads === reads
           ? loadedStreamCursor.current.cursor
           : 0,
+      onOpen: () => {
+        if (!recovering) return;
+        recovering = false;
+        reload();
+      },
       onEvent: (event) => {
         streamFailures.current = 0;
         const threadEvent = { ...event, job_id: jobId, turn_no: currentTurnNo };
@@ -502,9 +554,12 @@ export function useAgentJob(
       if (!touched) return;
       setApi((current) => (current?.id === jobId ? overlayPushed(current) : current));
       const read = ++latestRead;
+      // A reload that starts while this read is out reads the row again, and
+      // may already have ended the turn: this older answer must not reopen it.
+      const version = generation.current;
       void getAgentJob(jobId)
         .then((latest) => {
-          if (cancelled || read !== latestRead) return;
+          if (cancelled || read !== latestRead || generation.current !== version) return;
           if (!streaming.current && endsStreamingTurn(shownApi.current, latest)) {
             reload();
             return;

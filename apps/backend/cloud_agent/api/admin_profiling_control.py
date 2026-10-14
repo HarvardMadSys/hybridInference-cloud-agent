@@ -258,6 +258,7 @@ async def start_profiling_run(
             revision=result.revision,
             run_id=result.run_id,
         )
+    _wake_policy_loop(request)
     snapshot = await service.control_snapshot(now=datetime.now(timezone.utc))
     snapshot["mode"] = MODE_ADMIN
     response.headers["Cache-Control"] = "no-store"
@@ -336,10 +337,24 @@ async def stop_profiling_run(
             revision=result.revision,
             run_id=result.run_id,
         )
+    _wake_policy_loop(request)
     snapshot = await service.control_snapshot(now=datetime.now(timezone.utc))
     snapshot["mode"] = MODE_ADMIN
     response.headers["Cache-Control"] = "no-store"
     return {"control": snapshot, "run_id": run_id, "revision": result.revision}
+
+
+def _wake_policy_loop(request: Request) -> None:
+    """Have this process read the control row now rather than at its next pass.
+
+    Only this process: other control-plane processes find the change on their
+    own interval, through the same database read (see
+    :meth:`ProfilingPolicyWorker.wake`). A process that runs no loop has
+    nothing to wake.
+    """
+    worker = getattr(request.app.state, "profiling_policy_worker", None)
+    if worker is not None:
+        worker.wake()
 
 
 def _refusal_reason(result: ControlCommandResult) -> dict[str, str]:

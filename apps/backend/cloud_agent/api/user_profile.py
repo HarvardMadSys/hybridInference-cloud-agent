@@ -14,10 +14,12 @@ from cloud_agent.api._body_limits import payload_too_large, read_bounded_body
 from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api.deps import get_gateway_client, get_storage, require_store
 from cloud_agent.gateway import GatewayClient, GatewayError
+from cloud_agent.user_avatar import generate_user_avatar
 from cloud_agent.user_profile import (
     MAX_PROFILE_REQUEST_BYTES,
     ProfileConflict,
     ProfileResponse,
+    ProfileView,
     UpdateProfile,
     sanitize_profile_image,
 )
@@ -62,6 +64,15 @@ class _ProfileStorage(Protocol):
     user_profile: UserProfileRepository
 
 
+def _response(saved: ProfileView, *, user_id: str, email: str) -> ProfileResponse:
+    """Answer with the saved fields, the email and the account's fixed companion."""
+    return ProfileResponse(
+        **saved.model_dump(),
+        email=email,
+        companion_data_url=generate_user_avatar(user_id).data_url,
+    )
+
+
 async def _email(gateway: GatewayClient, user_id: str) -> str:
     try:
         return await gateway.user_email(user_id)
@@ -82,7 +93,7 @@ async def read_profile(
     response.headers["Cache-Control"] = "no-store"
     saved = await require_store(store).user_profile.get_user_profile(user_id=user["user_id"])
     email = await _email(gateway, user["user_id"])
-    return ProfileResponse(**saved.model_dump(), email=email)
+    return _response(saved, user_id=user["user_id"], email=email)
 
 
 @router.patch("", response_model=ProfileResponse)
@@ -115,4 +126,4 @@ async def save_profile(
         )
     except ProfileConflict:
         raise HTTPException(409, "Your profile changed. Reload it before saving again.") from None
-    return ProfileResponse(**saved.model_dump(), email=email)
+    return _response(saved, user_id=user["user_id"], email=email)

@@ -19,11 +19,12 @@ minutes.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 from typing import TYPE_CHECKING, Any, Protocol
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException
 
 from cloud_agent.api._body_limits import HostBodyLimitRoute
 from cloud_agent.api.deps import get_grant_client, get_storage
@@ -48,6 +49,7 @@ from cloud_agent.schemas import (
 )
 from cloud_agent.tokens import InvalidHostToken, mint_host_token, parse_host_token
 from cloud_agent_shared.host_settings import merge_admin_values, reported_values
+from cloud_agent_shared.sandbox_archive_settings import SANDBOX_CHECKPOINT_CAPABILITY
 
 if TYPE_CHECKING:
     from cloud_agent.ports import (
@@ -273,6 +275,7 @@ async def register_host(
 @router.post("/heartbeat", response_model=HostHeartbeatResponse)
 async def heartbeat_host(
     body: HostHeartbeatRequest,
+    background_tasks: BackgroundTasks,
     host: dict[str, Any] = Depends(authenticate_host),
     store: _HostsStorage | None = Depends(get_storage),
     grants: Any = Depends(get_grant_client),
@@ -325,6 +328,9 @@ async def heartbeat_host(
     # so a beat from a taken-over residency extends nothing — it comes back in
     # residencies_lost and the host tears that sandbox down.
     lost: list[ResidencyBeat] = []
+    # The grants of every residency this beat extends, once each, renewed after
+    # the reply: see ``_renew_residency_grants``.
+    renewals: dict[str, None] = {}
     for residency_beat in body.residencies or []:
         extended = await job_store.residency.heartbeat_residency(
             thread_id=residency_beat.thread_id,
@@ -332,12 +338,10 @@ async def heartbeat_host(
             host=updated["host"],
             ttl_seconds=residency_ttl_s(),
         )
-        if extended and grants is not None:
+        if extended:
             # The credential lives exactly as long as the residency_beat: the residency_beat
-            # that extends the lease extends the grant. Best-effort — a missed
-            # renewal starves hot turns into warm, never into an outage.
-            with contextlib.suppress(Exception):
-                await grants.renew(extended)
+            # that extends the lease extends the grant.
+            renewals[extended] = None
         if extended is None:
             # Echo the generation back (review finding 5): a residency_beat carrying
             # gen N can be answered after the host re-established gen N+1,
@@ -369,6 +373,26 @@ async def heartbeat_host(
             members=[member.model_dump() for member in retained.members],
             **diagnostics,
         )
+        if retained.checkpoint is not None:
+            # Repeated on every beat until the group is gone; recording is
+            # idempotent and fenced to this host's current generation. A
+            # bookkeeping failure must not cost the host its liveness beat.
+            try:
+                await job_store.sandbox.record_sandbox_checkpoint(
+                    host=updated["host"],
+                    thread_id=retained.thread_id,
+                    checkpoint=retained.checkpoint.model_dump(mode="json"),
+                )
+            except Exception:
+                logger.warning(
+                    "sandbox checkpoint receipt could not be recorded",
+                    extra={
+                        "event": "sandbox_checkpoint_record_failed",
+                        "host": updated["host"],
+                        "sandbox_id": retained.sandbox_id,
+                    },
+                    exc_info=True,
+                )
         for member in retained.members:
             if member.residency_generation <= 0:
                 continue
@@ -397,9 +421,8 @@ async def heartbeat_host(
                 host=updated["host"],
                 ttl_seconds=residency_ttl_s(),
             )
-            if extended and grants is not None:
-                with contextlib.suppress(Exception):
-                    await grants.renew(extended)
+            if extended:
+                renewals[extended] = None
             if extended is None and not any(
                 item.thread_id == member.thread_id
                 and item.generation == member.residency_generation
@@ -420,7 +443,17 @@ async def heartbeat_host(
                 sandbox_generation=retained.generation,
             )
             if due is not None:
-                retained_stops.append(RetainedSandboxStop.model_validate(due))
+                # Fence the stop to the activation this beat reported idle. The
+                # sandbox manager refuses any other activation, so a database
+                # placeholder made every control-plane stop of a used chat
+                # stale; a newer activation still refuses this one.
+                retained_stops.append(
+                    RetainedSandboxStop.model_validate(
+                        {**due, "activation_generation": retained.activation_generation}
+                    )
+                )
+    if renewals and grants is not None:
+        background_tasks.add_task(_renew_residency_grants, grants, list(renewals))
     return HostHeartbeatResponse(
         host=updated["host"],
         status=updated["status"],
@@ -436,8 +469,9 @@ async def heartbeat_host(
             await job_store.host_pool.host_settings(),
             updated.get("settings_desired"),
         ),
-        sandbox_archive_settings=HostSandboxArchiveSettings.model_validate(
-            await job_store.host_pool.sandbox_archive_settings()
+        sandbox_archive_settings=_host_archive_settings(
+            await job_store.host_pool.sandbox_archive_settings(),
+            updated.get("capabilities") or body.capabilities or [],
         ),
         residencies_lost=lost,
         retained_sandboxes_stop=retained_stops,
@@ -454,6 +488,39 @@ async def heartbeat_host(
 
 
 from cloud_agent.application.residency import residency_ttl_s
+
+
+async def _renew_residency_grants(grants: Any, grant_ids: list[str]) -> None:
+    """Renew the grants a heartbeat extended, together, after its reply was sent.
+
+    Each renewal may take the gateway's whole request timeout, and the host
+    stops waiting for its heartbeat's answer at 15 s. Awaited one by one before
+    the reply, two slow renewals were enough for the host never to receive the
+    stops and lost residencies that answer carries. Best-effort, as before: a
+    missed renewal starves hot turns into warm, never into an outage.
+    """
+
+    async def renew(grant_id: str) -> None:
+        with contextlib.suppress(Exception):
+            await grants.renew(grant_id)
+
+    await asyncio.gather(*(renew(grant_id) for grant_id in grant_ids))
+
+
+def _host_archive_settings(
+    values: dict[str, Any],
+    capabilities: list[str],
+) -> HostSandboxArchiveSettings:
+    """Return the policy one host can apply.
+
+    A host whose sandbox manager predates checkpoints rejects the unknown key,
+    so an opt-out is reduced to the default (which serializes to nothing) for
+    it. It receives the same revision and keeps archiving without checkpoints.
+    """
+    settings = HostSandboxArchiveSettings.model_validate(values)
+    if SANDBOX_CHECKPOINT_CAPABILITY not in capabilities:
+        settings = settings.model_copy(update={"checkpoints_enabled": settings.enabled})
+    return settings
 
 
 async def _probed_sandbox_manager_error(

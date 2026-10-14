@@ -1,9 +1,5 @@
 #!/usr/bin/env bash
 
-# Claude Code passes the PreToolUse event as JSON on stdin. Drain it before
-# starting test processes so none of them can inherit unread hook input.
-cat >/dev/null
-
 set -uo pipefail
 
 deny() {
@@ -13,9 +9,20 @@ deny() {
 
 command -v git >/dev/null 2>&1 || deny "git is not available."
 command -v make >/dev/null 2>&1 || deny "make is not available."
+command -v python3 >/dev/null 2>&1 || deny "python3 is not available."
 
-repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" || \
-  deny "the hook is not running inside a Git worktree."
+# Claude Code passes the PreToolUse event as JSON on stdin. Read it in full
+# before starting test processes so none of them can inherit unread hook input.
+# pr_target.py decides whether the call creates a pull request at all (this
+# hook also starts for commands Claude Code cannot classify) and which checkout
+# holds the commit under review: the hook starts in the session directory, but
+# the pull request may be created from another worktree.
+target="$(python3 "$(dirname "${BASH_SOURCE[0]}")/pr_target.py")" || \
+  deny "cannot determine the checkout under review."
+[[ "$target" == "skip" ]] && exit 0
+
+repo_root="$(git -C "$target" rev-parse --show-toplevel 2>/dev/null)" || \
+  deny "$target is not inside a Git worktree."
 cd "$repo_root" || deny "cannot enter the active worktree root: $repo_root"
 
 worktree_status="$(git status --porcelain --untracked-files=all)" || \

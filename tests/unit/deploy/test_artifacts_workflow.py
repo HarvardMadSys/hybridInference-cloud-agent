@@ -13,6 +13,7 @@ table, and the job is only the wiring that runs it.
 
 from __future__ import annotations
 
+import copy
 import os
 import re
 import shlex
@@ -25,11 +26,14 @@ from typing import Any
 import pytest
 import yaml
 from deploy.release import build_host_bundle, release_manifest as rm, smoke
+from scripts.ci_image_matrix import image_matrix
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 CI = REPO_ROOT / ".github/workflows/ci.yml"
 CONSOLE_DOCKERFILE = REPO_ROOT / "deploy/control-plane/Dockerfile"
 RUNNER_DOCKERFILE = REPO_ROOT / "deploy/host/Dockerfile.agent-runner"
+HOST_STACK = REPO_ROOT / "deploy/host/docker-compose.sandbox.yml"
+WEB_DOCKERFILE = REPO_ROOT / "deploy/control-plane/Dockerfile.web"
 
 
 def workflow() -> dict[str, Any]:
@@ -37,7 +41,10 @@ def workflow() -> dict[str, Any]:
 
 
 def cells() -> list[dict[str, Any]]:
-    return workflow()["jobs"]["artifacts"]["strategy"]["matrix"]["artifact"]
+    assert workflow()["jobs"]["artifacts"]["strategy"]["matrix"]["artifact"] == (
+        "${{ fromJSON(needs.changes.outputs.artifacts) }}"
+    )
+    return image_matrix("all")
 
 
 def step(name_fragment: str, job: str = "artifacts") -> dict[str, Any]:
@@ -227,7 +234,8 @@ def test_pull_requests_give_kilo_its_own_vms_and_trusted_events_run_every_case_t
     assert in_cell["if"] == "matrix.artifact.name == 'sandbox'"
     assert in_cell["env"]["MCP_TEST_SELECTION"] == SANDBOX_CELL_SELECTION
     assert jobs["mcp"]["if"] == (
-        "github.event_name == 'pull_request' && needs.changes.outputs.docker == 'true'"
+        "github.event_name == 'pull_request' && needs.changes.outputs.docker == 'true' "
+        "&& needs.changes.outputs.image_scope != 'web'"
     )
     assert jobs["mcp"]["needs"] == "changes"
     assert jobs["mcp"]["strategy"]["fail-fast"] is False
@@ -319,6 +327,22 @@ def test_cleanup_cannot_reach_another_cell() -> None:
     assert "label=io.hybridinference.smoke.run=${SUFFIX}" in str(step("Drop this run's")["run"])
 
 
+def test_the_web_image_ships_the_node_major_ci_checks_the_app_with() -> None:
+    """CI lints, tests and builds the app on one Node major; the image must run that one.
+
+    Both stages stayed on node:20 after CI moved to 22, so every check ran on a
+    different runtime from the one serving traffic, and Node 20's end of life
+    on 2026-04-30 left that internet-facing server without security fixes.
+    """
+    majors = re.findall(r"^FROM node:(\d+)\b", WEB_DOCKERFILE.read_text(), re.MULTILINE)
+    stages = re.findall(r"^FROM ", WEB_DOCKERFILE.read_text(), re.MULTILINE)
+    assert len(majors) == len(stages) == 2, "a builder and a runtime stage, both on Node"
+    expected = str(workflow()["env"]["NODE_VERSION"])
+    assert set(majors) == {expected}, f"Dockerfile.web uses Node {majors}, CI uses {expected}"
+    caches = yaml.safe_load((REPO_ROOT / ".github/workflows/pr-caches.yml").read_text())
+    assert str(caches["env"]["NODE_VERSION"]) == expected
+
+
 def test_the_build_passes_the_commit_every_image_must_name() -> None:
     build = step("Build ${{ matrix.artifact.name }}")
     assert "SOURCE_COMMIT=${{ github.sha }}" in str(build["with"]["build-args"])
@@ -346,8 +370,8 @@ def test_the_commit_reaches_no_layer(dockerfile: str) -> None:
     )
 
 
-def _runs_the_image_jobs(path: str) -> bool:
-    """Execute the classifier with one changed path and a local-only Git double."""
+def _classify_paths(paths: list[str]) -> dict[str, str]:
+    """Execute the classifier with changed paths and a local-only Git double."""
     script = str(step("Classify changed paths", job="changes")["run"])
     with tempfile.TemporaryDirectory(prefix="ci-classifier-") as directory:
         temporary = Path(directory)
@@ -356,6 +380,7 @@ def _runs_the_image_jobs(path: str) -> bool:
             "#!/bin/sh\n"
             'case "$1" in\n'
             "cat-file) exit 0 ;;\n"
+            "describe) echo agent-release ;;\n"
             'diff) printf "%s\\n" "$CHANGED_PATH" ;;\n'
             "*) exit 1 ;;\n"
             "esac\n"
@@ -369,7 +394,7 @@ def _runs_the_image_jobs(path: str) -> bool:
             "GITHUB_SHA": "b" * 40,
             "BEFORE": "a" * 40,
             "GITHUB_OUTPUT": str(output),
-            "CHANGED_PATH": path,
+            "CHANGED_PATH": "\n".join(paths),
         }
         subprocess.run(
             ["bash", "--noprofile", "--norc", "-c", script],
@@ -380,7 +405,11 @@ def _runs_the_image_jobs(path: str) -> bool:
             text=True,
         )
         values = dict(line.split("=", 1) for line in output.read_text().splitlines())
-    return values["docker"] == "true"
+    return values
+
+
+def _runs_the_image_jobs(path: str) -> bool:
+    return _classify_paths([path])["docker"] == "true"
 
 
 def _copied_paths(dockerfile: Path) -> set[str]:
@@ -431,7 +460,7 @@ def test_every_release_image_input_selects_image_checks(entry: str) -> None:
     assert _runs_the_image_jobs(probe), f"image input {entry} selects no image checks"
 
 
-@pytest.mark.parametrize("path", ["docs/operations.md", "tests/unit/test_identity.py"])
+@pytest.mark.parametrize("path", ["docs/developer/operations.md", "tests/unit/test_identity.py"])
 def test_non_image_inputs_do_not_select_image_checks(path: str) -> None:
     """Full input coverage should preserve useful classification of unrelated changes."""
     assert not _runs_the_image_jobs(path)
@@ -442,12 +471,196 @@ def test_new_external_tests_select_image_checks() -> None:
     assert _runs_the_image_jobs("tests/external/test_new_container_integration.py")
 
 
+def test_the_default_test_tier_runs_whatever_changed() -> None:
+    """Its tests read files the classifier counts as docs or the web app.
+
+    The credential backstop scans every tracked file, the environment
+    inventory reads apps/frontend/ and ENVIRONMENT.md, and the deployment tests
+    read every Markdown file under docs/. Gated on `backend`, a docs- or
+    frontend-only change that broke one of them skipped this job, passed the
+    gate, and left the failure to the next backend change.
+    """
+    jobs = workflow()["jobs"]
+    assert "if" not in jobs["test"], jobs["test"]["if"]
+    assert jobs["test"]["needs"] == "changes"
+    assert "test" in jobs["ci-gate"]["needs"]
+
+
+def _git(repository: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", *args], cwd=repository, check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+
+def _commit(repository: Path, path: str) -> str:
+    target = repository / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(f"{path}\n")
+    _git(repository, "add", path)
+    _git(repository, "commit", "--quiet", "-m", f"change {path}")
+    return _git(repository, "rev-parse", "HEAD")
+
+
+def _release(repository: Path, sha: str) -> None:
+    """What publication leaves behind: a lightweight `agent-<sha>` tag."""
+    _git(repository, "tag", f"agent-{sha}", sha)
+
+
+def _classify_push(repository: Path, sha: str, *, before: str) -> dict[str, str]:
+    """Run the real classifier for a push, against real history and tags."""
+    script = str(step("Classify changed paths", job="changes")["run"])
+    output = repository.parent / f"outputs-{sha}"
+    subprocess.run(
+        ["bash", "--noprofile", "--norc", "-c", script],
+        cwd=repository,
+        env={
+            **os.environ,
+            "GITHUB_EVENT_NAME": "push",
+            "GITHUB_SHA": sha,
+            "BEFORE": before,
+            "GITHUB_OUTPUT": str(output),
+        },
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return dict(line.split("=", 1) for line in output.read_text().splitlines())
+
+
+@pytest.fixture
+def history(tmp_path: Path) -> Path:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    _git(repository, "init", "--quiet", "--initial-branch=dev")
+    for key, value in (
+        ("user.name", "CI fixture"),
+        ("user.email", "ci@example.invalid"),
+        ("commit.gpgsign", "false"),
+        ("tag.gpgsign", "false"),
+        ("core.hooksPath", str(tmp_path / "no-hooks")),
+    ):
+        _git(repository, "config", key, value)
+    return repository
+
+
+SELECTS_NOTHING = {
+    "backend": "false",
+    "web": "false",
+    "docker": "false",
+    "docs": "false",
+    "image_scope": "all",
+}
+SELECTS_EVERYTHING = {
+    "backend": "true",
+    "web": "true",
+    "docker": "true",
+    "docs": "true",
+    "image_scope": "all",
+}
+
+
+def test_a_push_is_checked_against_the_newest_release_not_the_previous_push(
+    history: Path,
+) -> None:
+    """A docs-only push after an unreleased backend change still checks the backend.
+
+    The backend commit's own run failed, or was cancelled by the push after it,
+    so it was never released. Diffing from the previous push left its change
+    out: every job skipped, the gate passed, and publication released a commit
+    whose backend no run had checked.
+    """
+    released = _commit(history, "README.md")
+    _release(history, released)
+    unreleased = _commit(history, "apps/backend/cloud_agent/feature.py")
+    docs = _commit(history, "docs/feature.md")
+    selected = _classify_push(history, docs, before=unreleased)
+    assert selected["backend"] == "true"
+    assert selected["docker"] == "true"
+
+
+def test_a_push_right_after_a_release_keeps_the_path_filter(history: Path) -> None:
+    released = _commit(history, "apps/backend/cloud_agent/feature.py")
+    _release(history, released)
+    docs = _commit(history, "docs/feature.md")
+    # A Markdown change builds the documentation site and nothing else.
+    assert _classify_push(history, docs, before=released) == {**SELECTS_NOTHING, "docs": "true"}
+
+
+def test_a_push_with_no_release_behind_it_runs_everything(history: Path) -> None:
+    first = _commit(history, "README.md")
+    docs = _commit(history, "docs/feature.md")
+    assert _classify_push(history, docs, before=first) == SELECTS_EVERYTHING
+
+
+def test_a_rerun_of_a_released_commit_is_not_compared_with_its_own_release(
+    history: Path,
+) -> None:
+    """Otherwise the re-run would find nothing changed and check nothing."""
+    released = _commit(history, "README.md")
+    _release(history, released)
+    backend = _commit(history, "apps/backend/cloud_agent/feature.py")
+    first_run = _classify_push(history, backend, before=released)
+    _release(history, backend)
+    assert _classify_push(history, backend, before=released) == first_run
+    assert first_run["backend"] == "true"
+
+
 def test_real_upload_limits_are_checked_by_compose_ci() -> None:
     """Static caps also need a real nginx syntax/path/body-limit regression."""
     check = step("Upload limits match encoded attachments", job="compose")
     assert check["env"]["AGENT_UPLOAD_TEST_NGINX_IMAGE"] == "nginx:1.27.5-alpine"
     assert "docker --host=unix:///var/run/docker.sock pull" in check["run"]
     assert "pytest -q -m external tests/external/test_upload_edge_limits.py" in check["run"]
+
+
+def _check_rendered_stack(tmp_path: Path, stack: dict[str, Any]) -> subprocess.CompletedProcess:
+    """Run the compose job's security check on ``stack``, as the job runs it."""
+    run = str(step("The rendered stack keeps its security properties", job="compose")["run"])
+    source = run.split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+    (tmp_path / "rendered.yml").write_text(yaml.safe_dump(stack))
+    return subprocess.run(
+        [sys.executable, "-c", source],
+        env={**os.environ, "RUNNER_TEMP": str(tmp_path)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_the_compose_job_pins_who_holds_the_docker_socket(tmp_path: Path) -> None:
+    """`:ro` does not narrow the Docker API; the holders are what CI can pin.
+
+    Whatever can connect to the socket can start a privileged container with
+    the host's root mounted. The check used to fail only a writable mount and
+    report "docker socket read-only" as the property, so a third service
+    holding the socket read-only passed. The shipped stack is the positive
+    control: its values are uninterpolated, and every comparison still holds.
+    """
+    shipped = yaml.safe_load(HOST_STACK.read_text())
+    passed = _check_rendered_stack(tmp_path, shipped)
+    assert passed.returncode == 0, passed.stdout + passed.stderr
+    assert "held by runner and sandbox manager only" in passed.stdout
+    assert "read-only" not in passed.stdout
+
+    third = copy.deepcopy(shipped)
+    tunnel = third["services"]["control-plane-tunnel"]
+    tunnel["volumes"].append("/var/run/docker.sock:/var/run/docker.sock:ro")
+    refused = _check_rendered_stack(tmp_path, third)
+    assert refused.returncode == 1
+    assert "control-plane-tunnel" in refused.stdout
+
+    renamed = copy.deepcopy(shipped)
+    renamed["services"]["control-plane-tunnel"]["volumes"].append(
+        {
+            "type": "bind",
+            "source": "/var/run/docker.sock",
+            "target": "/run/engine.sock",
+            "read_only": True,
+        }
+    )
+    refused = _check_rendered_stack(tmp_path, renamed)
+    assert refused.returncode == 1, "a socket mounted under another name is still the socket"
+    assert "control-plane-tunnel" in refused.stdout
 
 
 def test_real_command_cleanup_is_checked_by_compose_ci() -> None:

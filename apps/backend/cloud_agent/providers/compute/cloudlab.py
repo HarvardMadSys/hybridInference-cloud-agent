@@ -750,7 +750,7 @@ class CloudLabProvider(ComputeProvider):
             return ProviderReceipt(outcome="unknown", resource=ref)
         outcome: Literal["confirmed", "pending"] = (
             "confirmed"
-            if observation.expires_at and observation.expires_at >= request.target_expires_at
+            if observation.expires_at and request.granted_by(observation.expires_at)
             else "pending"
         )
         return ProviderReceipt(outcome=outcome, resource=ref, observation=observation)

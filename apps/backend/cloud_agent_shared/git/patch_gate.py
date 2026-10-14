@@ -11,12 +11,16 @@ Four gates, in the order they matter:
 1. **Workflow files** (``.github/``). Pushing a branch that modifies a
    workflow can make GitHub execute it *with repository secrets* on the push
    event — before any human reads the draft PR. Draft-PR review is therefore
-   not a mitigation for this class, so such patches are blocked and must be
-   released by a human explicitly.
+   not a mitigation for this class, so such patches are not published. The
+   result marks the block as the one a caller may override, but the platform
+   offers no release, and its publishing token lacks the ``workflows``
+   permission in any case.
 2. **Path escape.** ``..`` segments, absolute paths, and symlink-mode entries
    let a patch write outside the worktree or turn a file into a link to one.
-   Names carrying control characters are refused too: the publisher renders
-   changed names into the pull request body.
+   Gitlink (submodule) entries are refused with them: they pull in code from
+   another repository that never appears in the diff, so none of these gates
+   would ever read it. Names carrying control characters are refused too: the
+   publisher renders changed names into the pull request body.
 3. **Secret scan.** An agent can inadvertently paste credentials it saw (env
    dumps, logs, a leaked token) into the diff; a match blocks publication.
 4. **Size limits.** A patch larger than the cap, or touching more files than
@@ -82,11 +86,14 @@ _DIFF_HEADER = re.compile(r"^diff --git (?P<a>.+?) (?P<b>.+)$")
 _RENAME_TO = re.compile(r"^rename to (?P<path>.+)$")
 _COPY_TO = re.compile(r"^copy to (?P<path>.+)$")
 _NEW_MODE = re.compile(r"^(?:new|new file) mode (?P<mode>\d{6})$")
+# A modified entry names its mode only here, after the two object ids.
+_INDEX_MODE = re.compile(r"^index [0-9a-fA-F]+\.\.[0-9a-fA-F]+ (?P<mode>\d{6})$")
 # Traditional hunk name lines. git omits the `diff --git` header in some diff
 # formats, and a patch that carries only these still applies perfectly well —
 # so a parser that keys solely off the header sees an empty change set.
 _NAME_LINE = re.compile(r"^(?:---|\+\+\+) (?P<path>.+?)(?:\t.*)?$")
 _SYMLINK_MODE = "120000"
+_GITLINK_MODE = "160000"
 _BINARY_BLOCK = re.compile(r"^(literal|delta) ([0-9]+)$")
 
 
@@ -266,6 +273,8 @@ class PatchGateResult:
     violations: list[str] = field(default_factory=list)
     changed_files: list[str] = field(default_factory=list)
     requires_human_release: bool = False
+    #: The one violation an explicit release may override, word for word.
+    releasable_violation: str | None = None
 
     @property
     def reason(self) -> str:
@@ -273,10 +282,11 @@ class PatchGateResult:
         return "; ".join(self.violations) if self.violations else "ok"
 
 
-def _collect_paths(patch: str) -> tuple[list[str], list[str]]:
-    """Return (changed paths, paths introduced with a symlink mode)."""
+def _collect_paths(patch: str) -> tuple[list[str], list[str], list[str]]:
+    """Return (changed paths, paths given a symlink mode, paths given a gitlink mode)."""
     changed: list[str] = []
     symlinks: list[str] = []
+    gitlinks: list[str] = []
     pending_paths: list[str] = []
 
     def remember(path: str) -> None:
@@ -318,8 +328,11 @@ def _collect_paths(patch: str) -> tuple[list[str], list[str]]:
         mode = _NEW_MODE.match(line)
         if mode and mode.group("mode") == _SYMLINK_MODE:
             symlinks.extend(pending_paths)
+        mode = mode or _INDEX_MODE.match(line)
+        if mode and mode.group("mode") == _GITLINK_MODE:
+            gitlinks.extend(pending_paths)
 
-    return changed, symlinks
+    return changed, symlinks, gitlinks
 
 
 def _is_escaping(path: str) -> bool:
@@ -364,6 +377,7 @@ def _scan_secrets(patch: str, paths: list[str]) -> list[str]:
 def validate_change_set(
     paths: list[str],
     symlinks: list[str] | None = None,
+    gitlinks: list[str] | None = None,
     *,
     max_files: int = MAX_CHANGED_FILES,
 ) -> PatchGateResult:
@@ -388,11 +402,13 @@ def validate_change_set(
         if any(path.startswith(prefix) for prefix in _BLOCKED_PREFIXES)
     ]
     requires_human_release = bool(blocked)
+    releasable_violation = None
     if blocked:
-        violations.append(
-            "patch modifies CI/workflow configuration and needs explicit human "
-            f"release: {', '.join(sorted(blocked))}"
+        releasable_violation = (
+            "patch modifies CI/workflow configuration, which agent publication does "
+            f"not push: {', '.join(sorted(blocked))}"
         )
+        violations.append(releasable_violation)
 
     escaping = [path for path in unique_files if _is_escaping(path)]
     if escaping:
@@ -410,6 +426,10 @@ def validate_change_set(
     if symlink_paths:
         violations.append(f"patch introduces symlinks: {', '.join(symlink_paths)}")
 
+    gitlink_paths = sorted({path for path in (gitlinks or []) if path and path != "/dev/null"})
+    if gitlink_paths:
+        violations.append(f"patch introduces submodule entries: {', '.join(gitlink_paths)}")
+
     secrets = _scan_secrets("", unique_files)
     if secrets:
         violations.append(f"patch contains credential-shaped paths: {', '.join(secrets)}")
@@ -419,6 +439,7 @@ def validate_change_set(
         violations=violations,
         changed_files=unique_files,
         requires_human_release=requires_human_release,
+        releasable_violation=releasable_violation,
     )
 
 
@@ -432,9 +453,10 @@ def validate_patch(
 ) -> PatchGateResult:
     """Validate an agent-produced patch before it is allowed near git.
 
-    Returns a :class:`PatchGateResult`; ``requires_human_release`` marks the
-    workflow-file case, which a human may still choose to release after
-    reading the diff, as opposed to hard violations like a leaked credential.
+    Returns a :class:`PatchGateResult`; ``requires_human_release`` and
+    ``releasable_violation`` mark the workflow-file block, the one violation
+    an explicit release could override, as opposed to hard violations like a
+    leaked credential. Nothing in the platform releases it.
     """
     violations: list[str] = []
     requires_human_release = False
@@ -452,12 +474,12 @@ def validate_patch(
             )
         )
 
-    changed, symlinks = _collect_paths(patch)
+    changed, symlinks, gitlinks = _collect_paths(patch)
     unique_files = sorted({path for path in changed if path != "/dev/null"})
     if not unique_files:
         violations.append("patch contains no recognizable file headers")
 
-    path_result = validate_change_set(unique_files, symlinks, max_files=max_files)
+    path_result = validate_change_set(unique_files, symlinks, gitlinks, max_files=max_files)
     violations.extend(path_result.violations)
     requires_human_release = path_result.requires_human_release
 
@@ -470,6 +492,7 @@ def validate_patch(
         violations=violations,
         changed_files=unique_files,
         requires_human_release=requires_human_release,
+        releasable_violation=path_result.releasable_violation,
     )
 
 

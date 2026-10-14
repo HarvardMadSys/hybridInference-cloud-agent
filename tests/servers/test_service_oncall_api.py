@@ -77,6 +77,18 @@ class FakeOnCallStore(EmptySkillLibrary, AllCapabilities):
     async def get_job(self, job_id: str) -> dict[str, Any] | None:
         return self.jobs.get(job_id)
 
+    async def replayed_submission(
+        self, *, user_id: str, client_request_id: str, fingerprint: str | None
+    ) -> dict[str, Any] | None:
+        """The job this account's key already made, a conflict, or ``None``."""
+        for job in self.jobs.values():
+            if (job["user_id"], job.get("client_request_id")) != (user_id, client_request_id):
+                continue
+            if job.get("client_request_fingerprint") != fingerprint:
+                return {"error": "client_request_conflict"}
+            return job
+        return None
+
     async def list_mcp_connections(self, *, user_id: str) -> list[dict[str, Any]]:
         """The service account holds no MCP connections — the truthful answer."""
         return []
@@ -270,6 +282,34 @@ async def test_create_pins_job_to_service_account(client, store):
     assert job["user_id"] == _SERVICE_USER
     assert job["runtime"] == "codex"
     assert job["model"] == "glm-5.2"
+
+
+async def test_a_retried_dispatch_with_one_idempotency_key_creates_one_job(client, store):
+    """A relay that retries after a timeout gets the job its first send made.
+
+    The key is optional, so a relay that sends none still gets a job per
+    request; the same key with a different body is a different dispatch.
+    """
+    keyed = {**_auth(), "Idempotency-Key": "alert-1234"}
+    first = await client.post("/v1/agent/service/oncall/jobs", json=_create_body(), headers=keyed)
+    retried = await client.post("/v1/agent/service/oncall/jobs", json=_create_body(), headers=keyed)
+    different = await client.post(
+        "/v1/agent/service/oncall/jobs",
+        json=_create_body(task_prompt="Investigate a different alert."),
+        headers=keyed,
+    )
+    unkeyed = [
+        await client.post("/v1/agent/service/oncall/jobs", json=_create_body(), headers=_auth())
+        for _ in range(2)
+    ]
+
+    assert (first.status_code, retried.status_code) == (201, 201)
+    assert retried.json()["id"] == first.json()["id"]
+    assert different.status_code == 409
+    assert different.json()["detail"]["error"]["type"] == "idempotency_conflict"
+    assert [response.status_code for response in unkeyed] == [201, 201]
+    assert len(store.jobs) == 3, "one keyed dispatch and two without a key"
+    assert store.jobs[first.json()["id"]]["user_id"] == _SERVICE_USER
 
 
 async def test_oncall_mark_cannot_be_spoofed_away(client, store):

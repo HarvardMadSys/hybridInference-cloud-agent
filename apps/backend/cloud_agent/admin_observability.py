@@ -34,7 +34,8 @@ class AdminRun(BaseModel):
     title: str | None = None
     turn_no: int
     user_id: str
-    repo: str
+    #: Null for a temporary workspace.
+    repo: str | None
     runtime: str
     model: str
     reasoning_effort: str | None = None
@@ -402,7 +403,8 @@ class AdminStepTurn(BaseModel):
     thread_id: str | None
     turn_no: int
     user_id: str
-    repo: str
+    #: Null for a temporary workspace.
+    repo: str | None
     runtime: str
     state: str
     created_at: datetime

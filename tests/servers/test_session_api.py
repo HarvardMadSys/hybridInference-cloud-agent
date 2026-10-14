@@ -43,11 +43,12 @@ import jwt
 import pytest
 import pytest_asyncio
 from cryptography.hazmat.primitives.asymmetric import rsa
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from cloud_agent import identity
 from cloud_agent.api import session as session_router
+from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api.deps import get_gateway_client
 from cloud_agent.gateway import GatewayError
 
@@ -647,6 +648,82 @@ async def test_a_token_for_another_audience_is_refused(key):
     assert gateway.asked == [], "a token that did not verify must not reach the gateway"
 
 
+async def test_a_jwks_outage_offers_a_retry_and_logs_its_cause(
+    client_and_gateway, monkeypatch, caplog
+):
+    """A key fetch the CDN refused says nothing about the token.
+
+    It used to answer as one: a raw ``Invalid identity token`` 401 to the
+    browser, and only ``invalid_identity`` in the log.
+    """
+    client, gateway = client_and_gateway
+
+    class _Refused:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        def get_signing_key_from_jwt(self, token: str):
+            raise jwt.PyJWKClientConnectionError(
+                'Fail to fetch data from the url, err: "HTTP Error 403: Forbidden"'
+            )
+
+    monkeypatch.setattr(identity, "PyJWKClient", _Refused)
+    caplog.set_level(logging.WARNING, logger=session_router.__name__)
+
+    response = await _sign_in(client)
+
+    assert response.status_code == 303
+    assert "sign_in_error=temporary" in response.headers["location"]
+    assert not client.cookies.get(identity.SESSION_COOKIE)
+    assert gateway.access_asked == []
+    causes = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "agent_identity_token_unverified"
+    ]
+    assert [record.cause for record in causes] == ["PyJWKClientConnectionError"]
+    assert gateway.identity_token not in str(causes[0].__dict__)
+
+
+async def test_a_gateway_clock_a_moment_ahead_still_signs_in(key):
+    """``iat`` a second or two in the future is clock skew, not a forged token."""
+    gateway = _FakeGateway(
+        {"exists": True, "active": True},
+        identity_token=_identity_token(key, iat=int(time.time()) + 2),
+    )
+    transport = ASGITransport(app=_app(gateway))
+    async with AsyncClient(
+        transport=transport, base_url="https://test", follow_redirects=False
+    ) as client:
+        response = await _sign_in(client)
+
+    assert response.status_code == 303
+    assert response.headers["location"] == f"{_WEB_BASE_URL}/"
+    assert identity.verify_session(client.cookies[identity.SESSION_COOKIE])["sub"] == _USER
+
+
+async def test_an_unverified_identity_token_logs_why_without_the_token(key, caplog):
+    """The refusal stays a bare 401; the operator still learns which check failed."""
+    token = _identity_token(key, aud="some-other-service")
+    gateway = _FakeGateway({"exists": True, "active": True}, identity_token=token)
+    caplog.set_level(logging.WARNING, logger=session_router.__name__)
+    transport = ASGITransport(app=_app(gateway))
+    async with AsyncClient(
+        transport=transport, base_url="https://test", follow_redirects=False
+    ) as client:
+        response = await _sign_in(client)
+
+    assert response.status_code == 401
+    assert response.json() == {"detail": "Invalid identity token."}
+    causes = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "agent_identity_token_unverified"
+    ]
+    assert [record.cause for record in causes] == ["InvalidAudienceError"]
+    assert token not in str(causes[0].__dict__)
+
+
 async def test_a_garbage_identity_token_is_a_401(key):
     """Not a 500: an unverifiable credential is an ordinary refusal."""
     gateway = _FakeGateway(
@@ -922,6 +999,74 @@ async def test_me_reports_revocation_without_erasing_authenticated_identity(clie
     assert response.json()["id"] == _USER
     assert response.json()["agent_access"] == {"allowed": False, "permissions": []}
     assert gateway.access_asked == [_USER, _USER, _USER]
+
+
+async def test_a_withdrawal_me_sees_stops_owner_requests_at_once(key):
+    gateway = _FakeGateway(
+        {"exists": True, "active": True, "role": "internal"},
+        identity_token=_identity_token(key),
+    )
+    app = _app(gateway)
+
+    @app.get("/probe")
+    async def probe(user: dict[str, Any] = Depends(require_agent_owner)):
+        return user
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="https://test", follow_redirects=False
+    ) as client:
+        await _sign_in(client)
+        assert (await client.get("/v1/session/me")).json()["agent_access"]["allowed"] is True
+        # Admitted on the grant /me was just given, without asking again.
+        assert (await client.get("/probe")).status_code == 200
+        assert gateway.access_asked == [_USER, _USER]
+        gateway.permissions = []
+        assert (await client.get("/v1/session/me")).json()["agent_access"]["allowed"] is False
+        assert (await client.get("/probe")).status_code == 403
+    assert gateway.access_asked == [_USER, _USER, _USER, _USER]
+
+
+class _HeldGateway(_FakeGateway):
+    """Holds the answer to the next Agent-access lookup until released."""
+
+    hold: asyncio.Event | None = None
+
+    async def agent_access(self, user_id: str) -> dict[str, Any]:
+        answer = await super().agent_access(user_id)
+        if self.hold is not None:
+            hold, self.hold = self.hold, None
+            await hold.wait()
+        return answer
+
+
+async def test_an_earlier_me_grant_cannot_outlast_a_later_me_denial(key):
+    gateway = _HeldGateway(
+        {"exists": True, "active": True, "role": "internal"},
+        identity_token=_identity_token(key),
+    )
+    app = _app(gateway)
+
+    @app.get("/probe")
+    async def probe(user: dict[str, Any] = Depends(require_agent_owner)):
+        return user
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="https://test", follow_redirects=False
+    ) as client:
+        await _sign_in(client)
+        # The first /me is answered "allowed", but that answer is held.
+        gateway.hold = asyncio.Event()
+        held = gateway.hold
+        earlier = asyncio.create_task(client.get("/v1/session/me"))
+        while len(gateway.access_asked) < 2:
+            await asyncio.sleep(0)
+        # Access is withdrawn, and a second /me records the denial first.
+        gateway.permissions = []
+        assert (await client.get("/v1/session/me")).json()["agent_access"]["allowed"] is False
+        held.set()
+        assert (await earlier).json()["agent_access"]["allowed"] is True
+        # The held grant is older than the denial, so it admits nothing.
+        assert (await client.get("/probe")).status_code == 403
 
 
 async def test_me_fails_closed_after_an_earlier_allow_when_gateway_is_unavailable(

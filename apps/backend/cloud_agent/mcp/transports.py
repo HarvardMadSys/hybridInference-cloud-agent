@@ -19,9 +19,9 @@ What both share with the rest of the package:
 - **The credential is bound to an origin.** It is attached when the request
   goes to the origin it belongs to and never otherwise, so a redirect or an
   announced endpoint on another host is a diagnosis rather than a leak.
-- **Nothing is unbounded.** One message, one response, one stream and one wait
-  each have a limit, and exceeding one ends the exchange with an error instead
-  of growing a buffer.
+- **Nothing is unbounded.** One message, one response, one stream, one wait and
+  one whole call each have a limit, and exceeding one ends the exchange with an
+  error instead of growing a buffer or holding a socket.
 - **A server request is answered, not ignored.** ``elicitation/create`` and
   ``sampling/createMessage`` arrive while a call is in flight; the handler is
   injected, and a server whose request we cannot answer gets a JSON-RPC error
@@ -68,6 +68,7 @@ from cloud_agent.mcp.net_policy import (
 )
 from cloud_agent.mcp.oauth import MetadataFetcher
 from cloud_agent.mcp.protocol import (
+    INITIALIZED,
     ROOTS_LIST,
     Handshake,
     discover_server,
@@ -215,6 +216,25 @@ def _connect_timeout(config: RemoteTransportConfig) -> float:
 
 def _http_timeout(config: RemoteTransportConfig) -> httpx.Timeout:
     return httpx.Timeout(_request_timeout(config), connect=_connect_timeout(config))
+
+
+@contextlib.asynccontextmanager
+async def _call_deadline(config: RemoteTransportConfig, method: str) -> AsyncIterator[None]:
+    """Bound one whole call -- request, reply and any stream -- by the request timeout.
+
+    httpx's timeouts are per operation: each read may take that long, so a
+    server that keeps its reply stream alive with comments, or trickles a body
+    a few bytes at a time, never trips one. The request timeout is how long
+    one call to a server may take, so it is applied to the call as a whole.
+    """
+    try:
+        async with asyncio.timeout(_request_timeout(config)):
+            yield
+    except TimeoutError as exc:
+        raise TransportError(
+            f"the server did not answer {method!r} before the timeout",
+            kind="unreachable",
+        ) from exc
 
 
 def _auth_headers(config: RemoteTransportConfig) -> dict[str, str]:
@@ -438,6 +458,13 @@ class _HttpCore:
                                     await read_bounded(answered)
                                 finally:
                                     await answered.aclose()
+                    if found is not None:
+                        # The answer is in, and nothing after it changes it. A
+                        # server that holds the stream open afterwards -- with
+                        # keep-alive comments, say -- would otherwise hold this
+                        # call, its socket and its session for as long as it
+                        # liked. The caller closes the response.
+                        return [found]
             for event in decoder.close():
                 if event.data:
                     try:
@@ -548,6 +575,17 @@ class StreamableHttpTransport(_HttpCore):
         *,
         input_schema: Mapping[str, Any] | None = None,
     ) -> Any:
+        """Send one request and return its result, within the call's deadline."""
+        async with _call_deadline(self._config, method):
+            return await self._exchange(method, params, input_schema=input_schema)
+
+    async def _exchange(
+        self,
+        method: str,
+        params: Mapping[str, Any] | None,
+        *,
+        input_schema: Mapping[str, Any] | None,
+    ) -> Any:
         """Send one request and return its result."""
         request_id = self._new_id()
         request_params = self._params_for(params)
@@ -601,15 +639,16 @@ class StreamableHttpTransport(_HttpCore):
         handshake era does use them -- ``notifications/initialized`` above all.
         """
         request_params = dict(params) if params is not None else None
-        response = await self._post(
-            encode_notification(method, request_params), method=method, params=request_params
-        )
-        try:
-            await self._raise_for_status(response, method)
-            self._capture(response)
-            await read_bounded(response)
-        finally:
-            await response.aclose()
+        async with _call_deadline(self._config, method):
+            response = await self._post(
+                encode_notification(method, request_params), method=method, params=request_params
+            )
+            try:
+                await self._raise_for_status(response, method)
+                self._capture(response)
+                await read_bounded(response)
+            finally:
+                await response.aclose()
 
     async def _post(
         self,
@@ -785,6 +824,11 @@ class LegacySseTransport(_HttpCore):
         return event
 
     async def request(self, method: str, params: Mapping[str, Any] | None = None) -> Any:
+        """Send one request and wait for its reply, within the call's deadline."""
+        async with _call_deadline(self._config, method):
+            return await self._exchange(method, params)
+
+    async def _exchange(self, method: str, params: Mapping[str, Any] | None) -> Any:
         """Send one request and wait for its reply on the stream."""
         request_id = self._new_id()
         key = id_key(request_id)
@@ -835,15 +879,9 @@ class LegacySseTransport(_HttpCore):
                 await read_bounded(response)
             finally:
                 await response.aclose()
-            try:
-                async with asyncio.timeout(_request_timeout(config)):
-                    await waiter.wait()
-            except TimeoutError as exc:
-                self._waiters.pop(key, None)
-                raise TransportError(
-                    f"the server did not answer {method!r} before the timeout",
-                    kind="unreachable",
-                ) from exc
+            # Bounded by the deadline :meth:`request` holds over the whole call,
+            # the POST included, rather than by a second timer of its own.
+            await waiter.wait()
             message = self._inbox.pop(key, None)
             if message is None:
                 # A stream that ended is a different diagnosis from a reply that
@@ -865,27 +903,28 @@ class LegacySseTransport(_HttpCore):
             self._inbox.pop(key, None)
 
     async def notify(self, method: str, params: Mapping[str, Any] | None = None) -> None:
-        """Send one notification on the message endpoint."""
+        """Send one notification on the message endpoint, within the call's deadline."""
         config = self._config_with_state()
-        message_url = self._message_url or await self.announcement()
-        await self._guard(message_url)
-        try:
-            response = await self._client.send(
-                self._client.build_request(
-                    "POST",
-                    message_url,
-                    content=encode_notification(method, params),
-                    headers=build_headers(config, body=True),
-                    timeout=_http_timeout(config),
-                ),
-                stream=True,
-            )
-        except httpx.HTTPError as exc:
-            raise TransportError(f"the server could not be reached: {exc}") from exc
-        try:
-            await read_bounded(response)
-        finally:
-            await response.aclose()
+        async with _call_deadline(config, method):
+            message_url = self._message_url or await self.announcement()
+            await self._guard(message_url)
+            try:
+                response = await self._client.send(
+                    self._client.build_request(
+                        "POST",
+                        message_url,
+                        content=encode_notification(method, params),
+                        headers=build_headers(config, body=True),
+                        timeout=_http_timeout(config),
+                    ),
+                    stream=True,
+                )
+            except httpx.HTTPError as exc:
+                raise TransportError(f"the server could not be reached: {exc}") from exc
+            try:
+                await read_bounded(response)
+            finally:
+                await response.aclose()
 
     async def consume(self, response: httpx.Response) -> None:
         """Read the GET stream until it ends, routing everything that arrives."""
@@ -1183,14 +1222,29 @@ async def connect_streamable(
     transport.set_era("handshake")
     transport.set_protocol_version("")
     try:
-        handshake = await initialize(transport)
+        handshake = await _handshake(transport)
     except BaseException:
         if owned:
             await http.aclose()
         raise
-    transport.set_protocol_version(handshake.protocol_version)
     del modern_error
     return transport, handshake
+
+
+async def _handshake(transport: StreamableHttpTransport | LegacySseTransport) -> Handshake:
+    """Agree a revision through ``initialize``, then tell the server we are ready.
+
+    The handshake is not finished until ``notifications/initialized`` is sent:
+    the lifecycle requires it before any other request, and a server that
+    enforces that -- the Python SDK in stateful mode, which covers every
+    legacy SSE server built on it -- refuses the catalogue and every call until
+    it arrives. It is sent after the agreed revision is recorded, so it carries
+    the version header every request after initialization must.
+    """
+    handshake = await initialize(transport)
+    transport.set_protocol_version(handshake.protocol_version)
+    await transport.notify(INITIALIZED)
+    return handshake
 
 
 async def connect_legacy_sse(
@@ -1239,14 +1293,13 @@ async def connect_legacy_sse(
             ) from exc
         # The reader validates announcements before resolving the future. Its
         # refusal stays inside this cleanup boundary, including later events.
-        handshake = await initialize(transport)
+        handshake = await _handshake(transport)
     except httpx.HTTPError as exc:
         await transport.aclose()
         raise TransportError(f"the server could not be reached: {exc}") from exc
     except BaseException:
         await transport.aclose()
         raise
-    transport.set_protocol_version(handshake.protocol_version)
     return transport, handshake, stream_task
 
 

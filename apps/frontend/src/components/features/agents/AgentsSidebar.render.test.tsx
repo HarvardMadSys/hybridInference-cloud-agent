@@ -13,6 +13,9 @@ const mocks = vi.hoisted(() => ({
   unpinAgentJob: vi.fn(),
 }));
 
+// The account menu loads the profile and has its own tests.
+vi.mock('./AccountMenu', () => ({ AccountMenu: () => <div data-testid="account-menu" /> }));
+
 vi.mock('next/navigation', () => ({
   usePathname: () => '/',
   useSearchParams: () => new URLSearchParams(),
@@ -135,6 +138,20 @@ describe('AgentsSidebar layout', () => {
     expect(document.getElementById('agents-sidebar')).not.toBeInTheDocument();
     expect(screen.queryByRole('separator', { name: 'Resize task list' })).not.toBeInTheDocument();
     expect(screen.queryByRole('link', { name: 'New task' })).not.toBeInTheDocument();
+  });
+
+  it('ends with the account menu instead of separate settings and documentation links', async () => {
+    render(<AgentsSidebar />);
+    await waitFor(() => expect(screen.getByText('No jobs yet.')).toBeInTheDocument());
+
+    const sidebar = document.getElementById('agents-sidebar')!;
+    const archived = within(sidebar).getByRole('link', { name: 'Archived' });
+    const account = within(sidebar).getByTestId('account-menu');
+    expect(
+      archived.compareDocumentPosition(account) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(screen.queryByRole('link', { name: 'My Settings' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Documentation' })).not.toBeInTheDocument();
   });
 });
 

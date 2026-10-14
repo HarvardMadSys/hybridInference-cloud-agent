@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -22,8 +23,6 @@ from cloud_agent.storage._sql.sandbox import THREAD_SANDBOX_SOURCE
 from cloud_agent_shared.sandbox_resources import parse_sandbox_resource_sample
 
 if TYPE_CHECKING:
-    from datetime import datetime
-
     import asyncpg
 
 logger = get_logger(__name__)
@@ -1168,6 +1167,15 @@ class PostgresSandboxRepository:
         """
         async with self._pool.acquire() as conn, conn.transaction():
             await lock_compute_entry(conn)
+            # The attempt, then the conversation, then the turn. A first
+            # reservation creates the group and membership, whose foreign keys
+            # share-lock the conversation: taken only then, after the turn, it
+            # crossed a cancel, which holds the conversation and waits for the
+            # turn.
+            await conn.execute("SELECT id FROM agent_attempts WHERE id = $1 FOR SHARE", attempt_id)
+            await conn.execute(
+                "SELECT id FROM agent_threads WHERE id = $1 FOR KEY SHARE", thread_id
+            )
             earns = await conn.fetchrow(
                 """
                 SELECT j.id, j.thread_id, j.user_id
@@ -1573,12 +1581,17 @@ class PostgresSandboxRepository:
             )
             if locked_attempt is None:
                 return None
-            locked_thread = await conn.fetchval(
-                "SELECT id FROM agent_threads WHERE id = $1 FOR UPDATE",
+            locked_thread = await conn.fetchrow(
+                "SELECT id, repo FROM agent_threads WHERE id = $1 FOR UPDATE",
                 thread_id,
             )
             if locked_thread is None:
                 return None
+            # A temporary workspace publishes nothing, so its turns open no
+            # snapshot and the capture and publication workers never see it.
+            # Every member of a group shares its origin's repository, so this
+            # thread's answer is the group's.
+            publishes = locked_thread["repo"] is not None
             locked_job = await conn.fetchval(
                 "SELECT id FROM agent_jobs WHERE id = $1 AND thread_id = $2 FOR UPDATE",
                 job_id,
@@ -1720,6 +1733,11 @@ class PostgresSandboxRepository:
                     "SELECT base_sha FROM agent_jobs WHERE id = $1",
                     job_id,
                 )
+            # A capture or a base import in progress keeps its state, and finds
+            # this turn's pending snapshot when it ends. A dirty group goes
+            # back to pending: the snapshot this turn opens or extends is cut
+            # from the published base the failure left, so it supersedes the
+            # snapshot that failed.
             group = await conn.fetchrow(
                 """
                     UPDATE agent_sandboxes g
@@ -1739,7 +1757,8 @@ class PostgresSandboxRepository:
                         workspace_epoch = workspace_epoch + 1,
                         published_base_sha = COALESCE(g.published_base_sha, $3),
                         snapshot_state = CASE
-                            WHEN g.snapshot_state IN ('snapshotting', 'importing', 'dirty')
+                            WHEN NOT $4::boolean
+                                OR g.snapshot_state IN ('snapshotting', 'importing')
                                 THEN g.snapshot_state
                             ELSE 'pending'
                         END,
@@ -1750,60 +1769,75 @@ class PostgresSandboxRepository:
                 shared["sandbox_id"],
                 idle_timeout_seconds,
                 base_sha,
+                publishes,
             )
             if group is None or not group["published_base_sha"]:
                 raise ValueError("shared workspace settlement has no resolved Git base")
-            pending = await conn.fetchrow(
-                """
-                    SELECT id FROM agent_sandbox_snapshots
-                    WHERE sandbox_id = $1 AND state = 'pending'
-                    FOR UPDATE
-                    """,
-                shared["sandbox_id"],
-            )
-            # The anchor must be one of the included jobs — a deferred foreign
-            # key checks that at commit, so the snapshot row and its
-            # membership row land in this same transaction, in either order.
-            if pending is None:
-                snapshot_id = await conn.fetchval(
-                    """
-                    INSERT INTO agent_sandbox_snapshots (
-                        sandbox_id, workspace_epoch, anchor_job_id, base_sha
-                    )
-                    VALUES ($1, $2, $3, $4)
-                    RETURNING id
-                    """,
-                    shared["sandbox_id"],
-                    group["workspace_epoch"],
-                    job_id,
-                    group["published_base_sha"],
+            if publishes:
+                await self._open_turn_snapshot(
+                    conn,
+                    sandbox_id=shared["sandbox_id"],
+                    workspace_epoch=group["workspace_epoch"],
+                    base_sha=group["published_base_sha"],
+                    job_id=job_id,
                 )
-            else:
-                snapshot_id = pending["id"]
-                await conn.execute(
-                    """
-                    UPDATE agent_sandbox_snapshots
-                    SET workspace_epoch = $2, anchor_job_id = $3, updated_at = NOW()
-                    WHERE id = $1 AND state = 'pending'
-                    """,
-                    snapshot_id,
-                    group["workspace_epoch"],
-                    job_id,
-                )
-            await conn.execute(
-                """
-                INSERT INTO agent_snapshot_jobs (snapshot_id, job_id)
-                VALUES ($1, $2)
-                ON CONFLICT DO NOTHING
-                """,
-                snapshot_id,
-                job_id,
-            )
             row = await conn.fetchrow(
                 f"SELECT s.* FROM {THREAD_SANDBOX_SOURCE} WHERE s.thread_id = $1",
                 thread_id,
             )
         return None if row is None else sandbox_row_to_dict(row)
+
+    @staticmethod
+    async def _open_turn_snapshot(
+        conn: Any, *, sandbox_id: str, workspace_epoch: int, base_sha: str, job_id: str
+    ) -> None:
+        """Open or extend the group's pending snapshot and enter this turn in it."""
+        pending = await conn.fetchrow(
+            """
+            SELECT id FROM agent_sandbox_snapshots
+            WHERE sandbox_id = $1 AND state = 'pending'
+            FOR UPDATE
+            """,
+            sandbox_id,
+        )
+        # The anchor must be one of the included jobs — a deferred foreign
+        # key checks that at commit, so the snapshot row and its
+        # membership row land in this same transaction, in either order.
+        if pending is None:
+            snapshot_id = await conn.fetchval(
+                """
+                INSERT INTO agent_sandbox_snapshots (
+                    sandbox_id, workspace_epoch, anchor_job_id, base_sha
+                )
+                VALUES ($1, $2, $3, $4)
+                RETURNING id
+                """,
+                sandbox_id,
+                workspace_epoch,
+                job_id,
+                base_sha,
+            )
+        else:
+            snapshot_id = pending["id"]
+            await conn.execute(
+                """
+                UPDATE agent_sandbox_snapshots
+                SET workspace_epoch = $2, anchor_job_id = $3, updated_at = NOW()
+                WHERE id = $1 AND state = 'pending'
+                """,
+                snapshot_id,
+                workspace_epoch,
+                job_id,
+            )
+        await conn.execute(
+            """
+            INSERT INTO agent_snapshot_jobs (snapshot_id, job_id)
+            VALUES ($1, $2)
+            ON CONFLICT DO NOTHING
+            """,
+            snapshot_id,
+            job_id,
+        )
 
     async def reconcile_thread_sandbox_observation(
         self,
@@ -1834,6 +1868,63 @@ class PostgresSandboxRepository:
             resource_usage=resource_usage,
             terminal_count=terminal_count,
         )
+
+    async def record_sandbox_checkpoint(
+        self,
+        *,
+        host: str,
+        thread_id: str,
+        checkpoint: dict[str, Any],
+    ) -> bool:
+        """Record one host-reported checkpoint receipt for its current group.
+
+        The receipt must name the group's current host, generation and exact
+        container; anything else is a stale or foreign report and is ignored.
+        Hosts repeat the latest receipt on every heartbeat, so an existing id
+        is a no-op. Returns whether a new receipt was stored. The object is
+        not verified here: restore will check it before trusting it.
+        """
+        captured_at = checkpoint["created_at"]
+        if isinstance(captured_at, str):
+            captured_at = datetime.fromisoformat(captured_at)
+        async with self._pool.acquire() as conn:
+            inserted = await conn.fetchval(
+                """
+                INSERT INTO agent_sandbox_checkpoints (
+                    id, sandbox_id, generation, host, container_id, base_image,
+                    runtime_id, runtime_version, object_key, object_version_id,
+                    sha256, size_bytes, new_layer_bytes, layer_count, members,
+                    durations_ms, format_version, captured_at
+                )
+                SELECT $1, g.id, $3, $4, $5, $6, $7, $8, $9, $10,
+                       $11, $12, $13, $14, $15::jsonb, $16::jsonb, $17, $18
+                FROM agent_sandboxes g
+                WHERE g.id = $2 AND g.origin_thread_id = $19 AND g.host = $4
+                  AND g.generation = $3 AND g.container_id = $5
+                ON CONFLICT (id) DO NOTHING
+                RETURNING TRUE
+                """,
+                checkpoint["checkpoint_id"],
+                checkpoint["sandbox_id"],
+                int(checkpoint["generation"]),
+                host,
+                checkpoint["container_id"],
+                checkpoint["base_image"],
+                checkpoint["runtime_id"],
+                checkpoint.get("runtime_version"),
+                checkpoint["object_key"],
+                checkpoint.get("version_id"),
+                checkpoint["sha256"],
+                int(checkpoint["size_bytes"]),
+                int(checkpoint["new_layer_bytes"]),
+                int(checkpoint["layer_count"]),
+                json.dumps(checkpoint.get("members") or []),
+                json.dumps(checkpoint.get("durations_ms") or {}),
+                int(checkpoint.get("format_version") or 1),
+                captured_at,
+                thread_id,
+            )
+        return bool(inserted)
 
     async def due_thread_sandbox_stop(
         self,
@@ -1904,6 +1995,13 @@ class PostgresSandboxRepository:
     ) -> dict[str, Any] | None:
         """Release a failed shared-member activation without replaying it."""
         async with self._pool.acquire() as conn, conn.transaction():
+            if lost:
+                # Marking the attempt's context lost writes the attempt, so it
+                # is taken before its membership and group, as the reaper,
+                # reservation and residency take it.
+                await conn.execute(
+                    "SELECT id FROM agent_attempts WHERE id = $1 FOR NO KEY UPDATE", attempt_id
+                )
             shared = await conn.fetchrow(
                 """
                 UPDATE agent_thread_sandbox_memberships m

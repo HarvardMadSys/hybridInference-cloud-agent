@@ -65,17 +65,20 @@ async def test_profiles_are_persistent_owner_scoped_and_revision_checked(store, 
 
 async def test_profile_migration_round_trip_preserves_unrelated_owner_data(store, pool):
     config = _db_config()
-    async with pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO agent_user_memories (user_id, portrait) "
-            "VALUES ('profile-migration-owner', '{}'::jsonb)"
-        )
     try:
+        # The owner's memory row of that time; 0071 later drops its table, so
+        # the round trip stays between 0062 and 0063.
+        downgrade_to(config, "0062_native_session_locator")
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO agent_user_memories (user_id, portrait) "
+                "VALUES ('profile-migration-owner', '{}'::jsonb)"
+            )
         for _ in range(2):
             downgrade_to(config, "0062_native_session_locator")
             async with pool.acquire() as conn:
                 assert await conn.fetchval("SELECT to_regclass('agent_user_profiles')") is None
-            apply_migrations(config)
+            apply_migrations(config, "0063_user_profiles")
             assert await store.user_profile.get_user_profile("alice") == ProfileView()
             async with pool.acquire() as conn:
                 assert (

@@ -168,12 +168,12 @@ the rollback window closes.
 
 ## Where this differs from the design document
 
-The [original release design](../../docs/specs/2026-09-10-cloud-agent-release-fi-deploy-design.zh.md)
+The [original release design](../../docs/agents/specs/2026-09-10-cloud-agent-release-fi-deploy-design.zh.md)
 is historical. The implemented differences are:
 
 - **Deployment protocol v4.** `shared-live-exact-sha-v4` replaced the design's
   v2. v3 introduced the schema baseline rewrite; v4 introduced the
-  [single sandbox network](../../docs/specs/2026-09-23-agent-public-egress-design.zh-CN.md).
+  [single sandbox network](../../docs/agents/specs/2026-09-23-agent-public-egress-design.zh-CN.md).
   It retired the Squid `egress` artifact and requires
   `AGENT_EGRESS_CHAT_NETWORK_POOL` and `AGENT_EGRESS_DNS_SERVER` on every runner
   host. v3 deployers cannot install v4 releases, and rollback does not cross
@@ -317,7 +317,7 @@ consuming distribution must:
 Retain previous verified manifests, recipes, reviewed hashes and digest-addressed
 images separately from the persistent deployment roots. Artifact-mode host
 rollouts receive only one manifest and cannot automatically select an older
-release. Follow the [backup and recovery runbook](../../docs/disaster-recovery.md#recover-a-previous-artifact-release)
+release. Follow the [backup and recovery runbook](../../docs/developer/disaster-recovery.md#recover-a-previous-artifact-release)
 to check database/protocol compatibility and run the same phased readiness
 sequence with a previous verified recipe; a previous release is not automatically
 compatible with newer installed migrations.

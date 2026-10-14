@@ -43,6 +43,10 @@ from cloud_agent.domain.profiling_control import (
     CONTROL_REFUSED_CONFLICTING_REQUEST,
     CONTROL_REFUSED_STALE_REVISION,
     CONTROL_REFUSED_UNKNOWN_RUN,
+    LIFECYCLE_EXPIRED,
+    LIFECYCLE_PENDING,
+    LIFECYCLE_STOPPED,
+    TERMINAL_LIFECYCLES,
     ControlCommandResult,
 )
 
@@ -51,17 +55,6 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     import asyncpg
-
-#: Lifecycle values, in the order an experiment moves through them.
-LIFECYCLE_PENDING = "pending"
-LIFECYCLE_ACTIVE = "active"
-LIFECYCLE_STOPPED = "stopped"
-LIFECYCLE_EXPIRED = "expired"
-LIFECYCLE_FAILED = "failed"
-
-#: Lifecycles that are over: nothing more will be collected for the run, and a
-#: new experiment may start.
-TERMINAL_LIFECYCLES = frozenset({LIFECYCLE_STOPPED, LIFECYCLE_EXPIRED, LIFECYCLE_FAILED})
 
 
 class PostgresProfilingControlRepository:
@@ -713,11 +706,5 @@ def _refuse(
 
 
 __all__ = [
-    "LIFECYCLE_ACTIVE",
-    "LIFECYCLE_EXPIRED",
-    "LIFECYCLE_FAILED",
-    "LIFECYCLE_PENDING",
-    "LIFECYCLE_STOPPED",
-    "TERMINAL_LIFECYCLES",
     "PostgresProfilingControlRepository",
 ]

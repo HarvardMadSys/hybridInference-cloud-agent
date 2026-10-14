@@ -67,6 +67,12 @@ JWKS_CACHE_LIFESPAN_S = 5 * 60
 #: the gateway contract client's default request timeout.
 JWKS_FETCH_TIMEOUT_S = 10.0
 
+#: How far the gateway's clock may disagree with this host's. An identity
+#: token is minted and verified within a second or two, so with no allowance a
+#: gateway clock one second ahead puts ``iat`` in the future and refuses a
+#: token that is fine. The token lives ten minutes; this does not extend that.
+IDENTITY_TOKEN_LEEWAY_S = 30
+
 #: Our own identity session, with a fixed thirty-day expiry.
 #:
 #: Every protected request resolves Agent permissions afresh at the Gateway.
@@ -240,6 +246,7 @@ def verify_identity_token(token: str) -> dict[str, Any]:
             algorithms=["RS256"],
             audience=AUDIENCE,
             issuer=issuer,
+            leeway=IDENTITY_TOKEN_LEEWAY_S,
             options={"require": ["iss", "aud", "iat", "exp", "sub"]},
         )
         if not isinstance(claims["sub"], str) or not claims["sub"]:
@@ -450,4 +457,6 @@ def state_matches(presented: str, expected: str) -> bool:
     """
     if not presented or not expected:
         return False
+    # Bytes, not str: ``presented`` is the callback's query value, and
+    # compare_digest raises TypeError for a non-ASCII str.
     return hmac.compare_digest(presented.encode(), expected.encode())

@@ -170,6 +170,7 @@ def _oncall_owner() -> dict[str, Any]:
 @router.post("/jobs", response_model=AgentJobResponse, status_code=201)
 async def create_oncall_job(
     body: AgentJobCreate,
+    idempotency_key: str | None = Header(None, alias="Idempotency-Key", max_length=256),
     _caller: str = Depends(verify_oncall_dispatch),
     store: _ServiceJobsStorage | None = Depends(get_storage),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
@@ -185,6 +186,12 @@ async def create_oncall_job(
     a ``base_ref`` is pinned to the commit it names right now. Skill selection
     has the same semantics: omitted IDs use this service account's defaults;
     the relay can send ``skill_ids=[]`` to opt out explicitly.
+
+    An optional ``Idempotency-Key`` names one dispatch, as on the owner route:
+    a relay that retries after a timeout gets the job its first send created,
+    not a second analysis on the service account's quota, and the same key
+    with a different body is a 409 ``idempotency_conflict``. Without the
+    header every request creates a job.
     """
     job_store = _require_store(store)
     user = _oncall_owner()
@@ -196,6 +203,7 @@ async def create_oncall_job(
         app_credentials=app_credentials,
         gateway=gateway,
         reserved_metadata={ONCALL_METADATA_KEY: True},
+        client_request_id=idempotency_key,
     )
     logger.info(
         "oncall_job_created",

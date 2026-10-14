@@ -13,6 +13,9 @@ const api = vi.hoisted(() => ({
   thread: vi.fn(),
   pathname: '/',
 }));
+// The account menu loads the profile and has its own tests.
+vi.mock('./AccountMenu', () => ({ AccountMenu: () => <div data-testid="account-menu" /> }));
+
 vi.mock('next/navigation', () => ({
   usePathname: () => api.pathname,
   useSearchParams: () => new URLSearchParams(),

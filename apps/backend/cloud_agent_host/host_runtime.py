@@ -54,7 +54,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
 from cloud_agent_host.logging_utils import get_logger
-from cloud_agent_host.shared_protocol import (
+from cloud_agent_shared.shared_protocol import (
     HOST_CONCURRENCY_CAPABILITY,
     HOST_CONCURRENCY_MAX_SLOTS,
     HOST_CONCURRENCY_MIN_SLOTS,

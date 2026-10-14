@@ -65,6 +65,20 @@ class _BrokenProvider:
         raise RuntimeError("control source is unreachable")
 
 
+class _FlakyProvider(_FakeProvider):
+    """A control source that answers until a test breaks it."""
+
+    def __init__(self, state: profiling.ControlState | None = None) -> None:
+        super().__init__(state)
+        self.broken = False
+
+    def snapshot(self) -> profiling.ControlState:
+        """Answer, or fail once the test has broken this source."""
+        if self.broken:
+            raise RuntimeError("control source is unreachable")
+        return super().snapshot()
+
+
 @pytest.fixture(autouse=True)
 def _clean_profiling_state(monkeypatch):
     """Every test starts from a process that never read a control source."""
@@ -269,6 +283,29 @@ def test_an_unrecognised_mode_is_disabled_and_says_so(monkeypatch, caplog):
     assert "is not a profiling mode" in caplog.text
 
 
+def test_an_unrecognised_mode_is_reported_once_not_on_every_check(monkeypatch, caplog):
+    """Every request asks for the mode, so the refusal must not be said on each.
+
+    ``profile_mode`` runs inside every ``active_run`` and ``start_operation`` --
+    every file and terminal request, every claim poll, every policy poll.
+    Regression: the refused value was never marked as reported, so each of those
+    wrote the same warning again.
+    """
+    monkeypatch.setenv(profiling.ENV_PROFILING_MODE, "admn")
+    profiling.reset_cache()
+    caplog.set_level(logging.WARNING, logger=profiling.__name__)
+
+    for _ in range(3):
+        assert profiling.active_run() is None
+        assert profiling.start_operation(operation="attempt.startup", host="host-a") is None
+    assert profiling.profile_mode() == profiling.MODE_DISABLED
+
+    refusals = [r for r in caplog.records if "is not a profiling mode" in r.getMessage()]
+    assert len(refusals) == 1
+    # Still refused, and still disabled: only the repetition is gone.
+    assert "'admn'" in refusals[0].getMessage()
+
+
 def test_the_mode_is_read_once_per_process(monkeypatch):
     """Changing how a deployment may be controlled is a redeploy, not a request."""
     assert profiling.profile_mode() == profiling.MODE_ADMIN
@@ -347,6 +384,42 @@ def test_a_control_source_that_fails_collects_nothing(monkeypatch, caplog):
     assert profiling.active_run() is None
     assert profiling.start_operation(operation="terminal.open", host="host-a") is None
     assert "control source is unavailable" in caplog.text
+
+
+def test_a_source_that_fails_after_answering_withdraws_its_run(monkeypatch):
+    """A failure after a real answer stops selection, without lowering the floor.
+
+    Regression: the failure was published as a fresh ``ControlState()`` at
+    version 0, which the store refused as older than the version already
+    applied -- so the last run stayed in force, and a continuous one has no
+    deadline that would ever end it.
+    """
+    monkeypatch.setenv(profiling.ENV_PROFILING_MODE, profiling.MODE_ADMIN)
+    profiling.reset_cache()
+    run = _run(run_id=RUN_A, continuous=True)
+    provider = _FlakyProvider(_state(run=run, revision=5))
+    profiling.install_policy_provider(provider)
+    assert profiling.active_run() is run
+
+    provider.broken = True
+    profiling.refresh_policy()
+
+    assert profiling.active_run() is None
+    assert profiling.start_operation(operation="terminal.open", host="host-a") is None
+    control = profiling.control_state()
+    assert control.config_version == 5
+    assert control.mode == profiling.MODE_ADMIN
+    assert control.stop_reason == profiling.STOP_REASON_UNAVAILABLE
+
+    # Still the anti-rollback floor: an older answer cannot bring the run back.
+    profiling.policy_store().publish(_state(run=run, revision=4), run=run)
+    assert profiling.active_run() is None
+
+    # The source answering again restores what it says, at the same version.
+    provider.broken = False
+    profiling.refresh_policy()
+    assert profiling.active_run() is run
+    assert profiling.start_operation(operation="terminal.open", host="host-a") is not None
 
 
 def test_the_store_refuses_a_run_that_does_not_describe_its_policy():
@@ -595,6 +668,52 @@ def test_a_restarted_sandbox_manager_is_given_the_configuration_again(monkeypatc
 
     assert sandbox_manager.delivered is not None, "a restarted sandbox manager must be refilled"
     assert sandbox_manager.delivered["run"]["run_id"] == RUN_A
+
+
+def test_a_refused_lower_revision_is_neither_reported_nor_forwarded(monkeypatch, caplog):
+    """What the runner reports and hands on is what its store applied.
+
+    A control plane that starts reading another control row -- a changed
+    deployment name, a rebuilt database -- answers below the applied revision,
+    and the store keeps the applied run, as the anti-rollback rule requires.
+    Regression: the runner built its diagnostics, its poll interval and the
+    sandbox manager's message from the refused answer, so it reported
+    "stopped" and polled at the idle rate while the old run kept selecting, and
+    it pushed the sandbox manager the applied revision with no run -- a torn
+    configuration that a restarted sandbox manager would accept, dropping its
+    stages of the running experiment. Nothing said the answers were being
+    refused.
+    """
+    sandbox_manager = _FlakySandboxManager()
+    sync = _sync_with_sandbox_manager(monkeypatch, sandbox_manager)
+    control = sync._client
+    control.answer = {**control.answer, "revision": 57}
+    assert sync._sync_once() == 5.0
+    assert sandbox_manager.delivered is not None
+    assert sandbox_manager.delivered["revision"] == 57
+
+    caplog.set_level(logging.WARNING, logger="cloud_agent_host.profiling_policy")
+    control.answer = {**control.answer, "revision": 2, "run": None}
+    for _ in range(3):
+        # Still the applied run, so still polled at the active rate.
+        assert sync._sync_once() == 5.0
+
+    live = profiling.active_run()
+    assert live is not None and live.run_id == RUN_A
+    state = sync.state()
+    assert state["applied_revision"] == 57
+    assert state["run_id"] == RUN_A
+    assert sandbox_manager.delivered["revision"] == 57
+    assert sandbox_manager.delivered["run"] is not None
+    assert sandbox_manager.delivered["run"]["run_id"] == RUN_A
+    refusals = [
+        record.getMessage()
+        for record in caplog.records
+        if "agent_profiling_policy_revision_behind" in record.getMessage()
+    ]
+    # Said once for the refused revision, not on every poll, naming both.
+    assert len(refusals) == 1
+    assert "revision 2" in refusals[0] and "57" in refusals[0]
 
 
 # ---------------------------------------------------------------------------

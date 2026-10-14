@@ -60,6 +60,15 @@ _BOOTSTRAP_REASONS = {
     "data_mount_conflict": "Sandbox storage conflicts with an existing mount or retained daemon data.",
     "data_mount_failed": "The selected sandbox storage could not be prepared.",
     "machine_identity_changed": "The verified machine identity has changed.",
+    "deployment_identity_conflict": (
+        "The node already holds a different deployment. Inspect the node; a retry will not replace it."
+    ),
+    "unsafe_deployment_path": (
+        "The deployment directory on the node is a link or unsafe path. Repair it before retrying."
+    ),
+    "invalid_deployment_archive": (
+        "The deployment bundle contains an unsafe entry. Fix the deployment profile before retrying."
+    ),
     "prerequisites_update_failed": "The node could not refresh its package repositories.",
     "prerequisites_install_failed": "The node could not install the required packages.",
     "docker_start_failed": "Docker could not be started.",
@@ -87,6 +96,10 @@ _RELEASE_ATTEMPTS = 3
 
 # How long past its recorded deadline a missing resource is taken as ended.
 _EXPIRY_GRACE = timedelta(minutes=10)
+# How long an extension the provider neither applies nor refuses is awaited.
+# Every other operation of the allocation waits for it meanwhile; afterwards
+# it blocks, so a move can start and a retry can send the same target again.
+_EXTENSION_CONFIRMATION = timedelta(minutes=10)
 # A node registers at first boot; provisioning plus boot fit well inside this.
 _REGISTRATION_TTL_SECONDS = 2 * 3600
 _HOST_KEY_PREFERENCE = (
@@ -177,26 +190,31 @@ class ComputeReconciler:
             # A rollout already occupies this machine. Keep renewing the lease
             # it is still serving; do not start a node replacement beside it.
             release_moving = self._host_release_blocks_rotation(operations, release)
-            if trigger is not None and not release_moving:
-                await self.rotation.start(row, trigger, expires)
-            await self.rotation.remind(row, lifecycle, now, expires)
-            stalled = any(
-                op["kind"] == "rotate" and op["state"] in {"blocked", "failed"} for op in lifecycle
+            started = (
+                trigger is not None
+                and not release_moving
+                and await self.rotation.start(row, trigger, expires)
             )
+            await self.rotation.remind(row, lifecycle, now, expires)
             if (
                 self.rotation.replaces_renewal(row, policy, now)
-                and not stalled
                 and not release_moving
+                and (started or await self.rotation.replaces_in_time(lifecycle, now, expires))
             ):
-                # A node at its maximum age is replaced rather than extended,
-                # unless its replacement is stuck: then time still helps.
+                # A node at its maximum age is replaced rather than extended
+                # while its move can finish in time. A stuck, cancelled or late
+                # move, or none at all, still needs the lease.
                 continue
             request_id = f"renew:{row['id']}:{int(expires.timestamp())}:{row['revision']}"
             if any(op["request_id"] == request_id for op in operations):
                 continue
             request = ExtendComputeRequest(
                 request_id=request_id,
-                target_expires_at=now + timedelta(seconds=policy.extend_to_horizon_seconds),
+                # Whole seconds: a provider that keeps expirations to the
+                # second can then report exactly the target it was sent.
+                target_expires_at=(
+                    now + timedelta(seconds=policy.extend_to_horizon_seconds)
+                ).replace(microsecond=0),
                 reason=policy.reason,
             )
             try:
@@ -900,12 +918,35 @@ class ComputeReconciler:
         pinned = (node.get("connection") or {}).get("host_key")
         if not pinned:
             registration = await self.repository.node_registration(allocation_id=allocation["id"])
+            missed = (
+                registration is not None
+                and not registration.get("registered_at")
+                and registration.get("expired")
+            )
+            retried = any(
+                reason.get("code") == "registration_expired"
+                for reason in operation.get("result", {}).get("blocked_reasons") or []
+            )
+            # An administrator retried after the node missed its window. The
+            # node holds this token from its creation and posts it at every
+            # boot, so the same registration gets another window.
+            if (
+                missed
+                and retried
+                and await self.repository.reopen_node_registration(
+                    allocation_id=allocation["id"],
+                    ttl_seconds=_REGISTRATION_TTL_SECONDS,
+                    **self._fence(operation),
+                )
+            ):
+                registration = {**(registration or {}), "expired": False}
             if registration is None or (
                 not registration.get("registered_at") and registration.get("expired")
             ):
                 raise ProviderError(
                     "registration_expired",
-                    "The node did not register its SSH host keys in time",
+                    "The node did not register its SSH host keys in time. Retry to give it "
+                    "two more hours, then restart the node; or release the server.",
                 )
             if not registration.get("registered_at"):
                 await self._finish(
@@ -913,6 +954,7 @@ class ComputeReconciler:
                     "waiting",
                     "waiting_for_registration",
                     "Waiting for the node to register its SSH host keys.",
+                    result={"blocked_reasons": []},
                     retry=15,
                 )
                 return None
@@ -1006,10 +1048,7 @@ class ComputeReconciler:
             {key: operation["parameters"][key] for key in ("target_expires_at", "reason")}
         )
         observation = await self._inspect(operation, allocation)
-        if (
-            observation.expires_at is not None
-            and observation.expires_at >= request.target_expires_at
-        ):
+        if observation.expires_at is not None and request.granted_by(observation.expires_at):
             await self._finish(
                 operation,
                 "succeeded",
@@ -1034,6 +1073,10 @@ class ComputeReconciler:
                 and observation.expires_at is not None
                 and observation.expires_at > initial
             )
+            # A request recorded before its send time was kept is timed from now.
+            requested_at = (
+                _moment(operation.get("result", {}).get("extension_requested_at")) or _now()
+            )
             if operation.get("result", {}).get("extension_response_received") or progressed:
                 await self._finish(
                     operation,
@@ -1049,13 +1092,36 @@ class ComputeReconciler:
                         else None,
                     },
                 )
+            elif _now() - requested_at >= _EXTENSION_CONFIRMATION:
+                # The deadline has not moved since the request. Stop holding
+                # the allocation's other work: the target is absolute, so a
+                # retry may safely send the same request again.
+                message = (
+                    "The provider neither applied nor refused the extension. "
+                    "Check the provider, then retry to request the same expiration."
+                )
+                await self._finish(
+                    operation,
+                    "blocked",
+                    "extension_unconfirmed",
+                    message,
+                    result={
+                        "external_pending": False,
+                        "extension_requested": False,
+                        "extension_response_received": False,
+                        "blocked_reasons": [{"code": "extension_unconfirmed", "message": message}],
+                    },
+                )
             else:
                 await self._finish(
                     operation,
                     "waiting",
                     "confirming_extension",
                     "Waiting to confirm the previous extension request.",
-                    result={"external_pending": True},
+                    result={
+                        "external_pending": True,
+                        "extension_requested_at": requested_at.isoformat(),
+                    },
                     retry=30,
                 )
             return
@@ -1064,6 +1130,7 @@ class ComputeReconciler:
             "extending",
             {
                 "extension_requested": True,
+                "extension_requested_at": _now().isoformat(),
                 "external_pending": True,
                 "extension_response_received": False,
                 "extension_initial_expires_at": observation.expires_at.isoformat()
@@ -1092,7 +1159,7 @@ class ComputeReconciler:
         )
         observed = receipt.observation or await provider.inspect(self._ref(allocation))
         await self._save_observation(operation, allocation, observed)
-        if observed.expires_at is not None and observed.expires_at >= request.target_expires_at:
+        if observed.expires_at is not None and request.granted_by(observed.expires_at):
             await self._finish(
                 operation,
                 "succeeded",
@@ -1298,7 +1365,22 @@ class ComputeReconciler:
                     )
             except SandboxManagerError:
                 continue  # Never infer emptiness; require the full-node scan below.
+        # This control plane reaches a registering node only through the key
+        # its registration supplied, and binds a Host only after pinning it.
+        # A node that never registered, with no key and no Host, never ran
+        # anything of ours, and without a trusted key it cannot be scanned.
+        never_registered = False
+        if self._registers_host_keys(allocation):
+            registration = await self.repository.node_registration(allocation_id=allocation["id"])
+            never_registered = registration is None or not registration.get("registered_at")
+        bound = {host.get("compute_node_id") for host in allocation.get("hosts", [])}
         for node in allocation["nodes"]:
+            if (
+                never_registered
+                and not (node.get("connection") or {}).get("host_key")
+                and node["id"] not in bound
+            ):
+                continue
             proof = await self.bootstrap.inventory(
                 self._node(node), profile, self._bootstrap_intent(operation, allocation, node)
             )

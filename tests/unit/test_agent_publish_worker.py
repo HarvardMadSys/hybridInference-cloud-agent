@@ -234,6 +234,60 @@ async def test_a_stale_publisher_stops_before_any_remote_side_effect(monkeypatch
     pull_request.assert_not_awaited()
 
 
+async def test_publishing_asks_for_a_token_that_outlives_the_publish(monkeypatch):
+    """A cached token is served until five minutes before expiry; a publish can take longer."""
+    store = FakeStore(dict(_JOB))
+    _patch_publish(
+        monkeypatch, PublishResult(branch="agent/athr_1", commit_sha="s", changed_files=["x"])
+    )
+    _patch_pr(monkeypatch)
+    asked: dict[str, Any] = {}
+
+    class App:
+        async def token_for(self, repo: str, **kwargs: Any) -> str:
+            asked.update(kwargs)
+            return "ghs_fresh"
+
+    await publish_one(store, app_credentials=App())
+
+    assert asked["min_ttl_s"] >= 900
+
+
+async def test_cancelling_a_publish_while_its_heartbeat_stops_is_not_swallowed(monkeypatch):
+    """A shutdown that lands while the heartbeat winds down must still stop the publisher."""
+    beating = asyncio.Event()
+    stopping = asyncio.Event()
+    release = asyncio.Event()
+
+    async def heartbeat(_store: Any, **_fence: Any) -> None:
+        beating.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            stopping.set()
+            await release.wait()
+            raise
+
+    async def open_pr(**_kwargs: Any) -> str:
+        # Finish only once the heartbeat runs, as it does under any real push.
+        await beating.wait()
+        return "https://github.com/o/n/pull/7"
+
+    monkeypatch.setattr(publish_worker, "_heartbeat_snapshot_publish", heartbeat)
+    monkeypatch.setattr(publish_worker, "ensure_draft_pull_request", open_pr)
+    _patch_publish(
+        monkeypatch, PublishResult(branch="agent/athr_1", commit_sha="s", changed_files=["x"])
+    )
+    task = asyncio.create_task(publish_one(FakeStore(dict(_JOB)), credential=GitHubCredential("t")))
+    await stopping.wait()
+
+    task.cancel()
+    release.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
 async def test_default_publish_branch_uses_current_saved_setting(monkeypatch):
     values = {"AGENT_PUBLISH_BASE_BRANCH": "first"}
     monkeypatch.setattr(
@@ -497,11 +551,7 @@ async def test_publication_resolves_the_current_branch_pr(monkeypatch, prior_sta
         requests.append(request)
         assert request.headers["Authorization"] == "Bearer t"
         if request.method == "GET":
-            assert dict(request.url.params) == {
-                "state": "open",
-                "head": "o:agent/athr_1",
-                "base": "dev",
-            }
+            assert dict(request.url.params) == {"state": "open", "head": "o:agent/athr_1"}
             return httpx.Response(
                 200,
                 json=[{"number": 7, "state": "open", "html_url": old_url}]
@@ -548,6 +598,49 @@ async def test_publication_resolves_the_current_branch_pr(monkeypatch, prior_sta
         "GET",
         "PATCH" if prior_state == "open" else "POST",
     ]
+
+
+async def test_a_draft_retargeted_by_a_reviewer_is_refreshed_not_duplicated(monkeypatch):
+    """GitHub allows open PRs from one branch to several bases; there must stay one."""
+    requests: list[httpx.Request] = []
+    open_prs = [
+        {
+            "number": 7,
+            "state": "open",
+            "html_url": "https://github.com/o/n/pull/7",
+            "base": {"ref": "main"},
+        }
+    ]
+
+    def handle(request):
+        requests.append(request)
+        if request.method == "GET":
+            wanted = request.url.params.get("base")
+            return httpx.Response(
+                200, json=[pr for pr in open_prs if wanted in (None, pr["base"]["ref"])]
+            )
+        if request.method == "PATCH":
+            return httpx.Response(200, json={"state": "open"})
+        return httpx.Response(201, json={"html_url": "https://github.com/o/n/pull/8"})
+
+    original_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        lambda **kwargs: original_client(transport=httpx.MockTransport(handle), **kwargs),
+    )
+    url = await ensure_draft_pull_request(
+        repo="o/n",
+        head_branch="agent/athr_1",
+        base_branch="dev",
+        title="[agent] Fix retries",
+        body="Summary",
+        credential=GitHubCredential("t"),
+    )
+
+    assert url == "https://github.com/o/n/pull/7"
+    assert [request.method for request in requests] == ["GET", "PATCH"]
+    assert json.loads(requests[1].content) == {"title": "[agent] Fix retries", "body": "Summary"}
 
 
 async def test_pr_closed_during_update_creates_a_new_draft(monkeypatch):
@@ -960,6 +1053,66 @@ async def test_credential_never_appears_in_the_pr_body(monkeypatch):
     assert "super-secret-token" not in captured["title"]
 
 
+async def test_the_push_credential_never_rides_in_the_clone_url(monkeypatch):
+    """In the URL it reached the clone's .git/config and every git-remote-https argv."""
+    store = FakeStore(dict(_JOB))
+    called: dict[str, Any] = {}
+
+    def fake_publish(**kwargs):
+        called.update(kwargs)
+        return PublishResult(branch="agent/athr_1", commit_sha="s", changed_files=["x"])
+
+    monkeypatch.setattr(publish_worker, "publish_patch", fake_publish)
+    _patch_pr(monkeypatch)
+    await publish_one(store, credential=GitHubCredential("super-secret-token"))
+
+    assert called["clone_url"] == "https://github.com/o/n.git"
+    assert called["auth_env"] == GitHubCredential("super-secret-token").git_auth_env()
+
+
+async def test_the_git_credential_is_a_header_only_for_the_git_host(tmp_path):
+    """Git sends the token to the repository's host as a header, and nowhere else."""
+    import base64
+    import subprocess
+
+    env = {
+        "PATH": "/usr/bin:/bin:/usr/local/bin",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+        **GitHubCredential("ghs_secret").git_auth_env(),
+    }
+
+    def header_for(url: str) -> str:
+        return subprocess.run(
+            ["git", "config", "--get-urlmatch", "http.extraHeader", url],
+            cwd=tmp_path,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        ).stdout.strip()
+
+    basic = base64.b64encode(b"x-access-token:ghs_secret").decode()
+    assert header_for("https://github.com/o/n.git") == f"Authorization: Basic {basic}"
+    assert header_for("https://elsewhere.example/o/n.git") == ""
+
+
+@pytest.mark.parametrize(
+    ("api_base", "git_base"),
+    [
+        ("https://api.github.com", "https://github.com"),
+        ("https://ghe.example.com/api/v3", "https://ghe.example.com"),
+        ("http://127.0.0.1:8080", "http://127.0.0.1:8080"),
+    ],
+)
+async def test_a_token_goes_back_only_to_the_host_that_minted_it(api_base, git_base):
+    """Pushing to github.com whatever the API URL sent another host's token there."""
+    credential = GitHubCredential("t", api_base=api_base)
+
+    assert credential.clone_url("o/n") == f"{git_base}/o/n.git"
+    assert credential.git_auth_env()["GIT_CONFIG_KEY_0"] == f"http.{git_base}/.extraHeader"
+
+
 async def test_a_changed_file_name_cannot_break_out_of_its_code_span(monkeypatch):
     """The agent names the files; the App posts the body under its own name.
 
@@ -1047,6 +1200,59 @@ async def test_app_only_deployment_actually_publishes(monkeypatch):
     # And the token it published with is scoped to this repository, not to
     # everything the App happens to be installed on.
     assert app.scoped is True
+
+
+async def test_loop_cancellation_during_heartbeat_cleanup_still_stops_the_publisher(monkeypatch):
+    """An owner's stop cannot be mistaken for the heartbeat's expected stop."""
+    store = FakeStore(dict(_JOB))
+    _patch_publish(
+        monkeypatch, PublishResult(branch="agent/ajob_1", commit_sha="s", changed_files=["x"])
+    )
+    _patch_pr(monkeypatch)
+    heartbeat_started = asyncio.Event()
+    heartbeat_joining = asyncio.Event()
+
+    async def heartbeat(*_args, **_kwargs):
+        heartbeat_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            heartbeat_joining.set()
+            # Hold the join open until the owner is cancelled, so the test
+            # exercises the race directly without relying on timer alignment.
+            await asyncio.Event().wait()
+
+    async def scoped_credential():
+        await heartbeat_started.wait()
+        return "ghs_from_app"
+
+    class App:
+        async def token_for(self, _repo, **_kwargs):
+            return await scoped_credential()
+
+    class LoadedApp:
+        def get(self):
+            return App()
+
+    monkeypatch.setattr(publish_worker, "_heartbeat_snapshot_publish", heartbeat)
+    task = asyncio.create_task(
+        publish_loop(
+            store,
+            credential_provider=lambda: None,
+            github_app=LoadedApp(),
+            interval_seconds=0.001,
+        )
+    )
+    try:
+        await asyncio.wait_for(heartbeat_joining.wait(), timeout=1.0)
+        assert store.snapshot_recorded == (9, "https://github.com/o/n/pull/7", "s")
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(asyncio.shield(task), timeout=1.0)
+        assert task.cancelled()
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 async def test_the_running_loop_waits_out_an_unloaded_app_and_then_publishes_once(monkeypatch):

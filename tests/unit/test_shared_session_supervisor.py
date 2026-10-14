@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import os
 import shutil
 import stat
@@ -76,6 +77,9 @@ class _Manager:
         # The host-rule check: how many of the next checks fail, and how many ran.
         self.host_rule_failures = 0
         self.host_rule_checks = 0
+        # Renewals of the host-rule verification the sweep makes while idle.
+        self.host_rule_renewals = 0
+        self.host_rule_renewal_failures = 0
         self.pruned_specs: list[ChatSandboxSpec] = []
         self.process_baseline: tuple[tuple[int, int], ...] = ((41, 400),)
         self.initial_archive_marker: bytes | None = None
@@ -220,6 +224,12 @@ class _Manager:
 
     def prune_orphan_networks(self, specs: list[ChatSandboxSpec]) -> None:
         self.pruned_specs = specs
+
+    def renew_host_rules(self) -> None:
+        self.host_rule_renewals += 1
+        if self.host_rule_renewal_failures:
+            self.host_rule_renewal_failures -= 1
+            raise SandboxError("nft failed: Error: Could not process rule")
 
     def verify_host_rules(self) -> None:
         self.host_rule_checks += 1
@@ -1446,6 +1456,257 @@ def test_targeted_listing_rejects_a_changed_fence_during_inspection(monkeypatch,
     assert manager.stop_count == 0
 
 
+def _gated_inspect(manager, monkeypatch, container_name):
+    """Hold the next inspect of ``container_name`` until the test releases it."""
+    entered = threading.Event()
+    release = threading.Event()
+    inspect = manager.inspect
+
+    def gated(name):
+        observed = inspect(name)
+        if name == container_name and not entered.is_set():
+            entered.set()
+            assert release.wait(timeout=2)
+        return observed
+
+    monkeypatch.setattr(manager, "inspect", gated)
+    return entered, release
+
+
+def _in_thread(call):
+    """Run ``call`` on a thread; return the thread and its result holder."""
+    outcome: dict[str, Any] = {}
+
+    def run():
+        try:
+            outcome["value"] = call()
+        except BaseException as exc:  # pragma: no cover - asserted by callers
+            outcome["error"] = exc
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    return thread, outcome
+
+
+@pytest.mark.parametrize("call", ["status", "acquire", "snapshot", "initial_archive"])
+def test_a_member_inspection_does_not_block_another_groups_status(monkeypatch, call):
+    """Docker inspect runs outside the supervisor-wide lock.
+
+    Every terminal request resolves its member through ``status``; holding the
+    lock across its inspect stalled all other groups' lifecycle calls, and the
+    sandbox manager's event loop with them, for as long as Docker took to answer.
+    """
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager, transport_factory=_TransportFactory())
+    supervisor.register_manifest(_spec(), _members())
+    other = replace(_spec(), thread_id="athr_other", sandbox_id="asbx_other")
+    supervisor.register_manifest(other, [replace(_members()[0], thread_id=other.thread_id)])
+    lease = None
+    if call == "initial_archive":
+        lease = supervisor.acquire(
+            _spec(),
+            thread_id="athr_source",
+            owner="attempt:1",
+            activation_generation=1,
+            has_settled_context=False,
+            manifest=_members(),
+        )
+    entered, release = _gated_inspect(manager, monkeypatch, _spec().container_name)
+
+    def blocked():
+        if call == "status":
+            return supervisor.status("athr_source")
+        if call == "snapshot":
+            return supervisor.capture_snapshot("athr_source", capture=lambda _backend: {})
+        if call == "initial_archive":
+            assert lease is not None
+            return supervisor.capture_initial_archive(
+                "athr_source", lease.token, capture=lambda *_args: {}
+            )
+        return supervisor.acquire(
+            _spec(),
+            thread_id="athr_source",
+            owner="attempt:1",
+            activation_generation=1,
+            has_settled_context=True,
+            manifest=_members(),
+        )
+
+    blocked_thread, blocked_outcome = _in_thread(blocked)
+    try:
+        assert entered.wait(timeout=1)
+        status_thread, status_outcome = _in_thread(lambda: supervisor.status(other.thread_id))
+        status_thread.join(timeout=0.5)
+        assert not status_thread.is_alive(), "an inspection held the supervisor-wide lock"
+    finally:
+        release.set()
+        blocked_thread.join(timeout=2)
+
+    assert not blocked_thread.is_alive()
+    assert "error" not in blocked_outcome
+    assert "error" not in status_outcome
+
+
+@pytest.mark.parametrize("call", ["snapshot", "initial_archive"])
+def test_a_capture_that_finds_its_container_missing_lifts_its_barrier(call):
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager)
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=False,
+        manifest=_members(),
+    )
+    if call == "snapshot":
+        supervisor.abandon("athr_source", lease.token, lost=False)
+    group = supervisor._members["athr_source"]
+    del manager.items[_spec().container_name]
+
+    with pytest.raises(RetainedChatLost, match="missing"):
+        if call == "snapshot":
+            supervisor.capture_snapshot("athr_source", capture=lambda _backend: {})
+        else:
+            supervisor.capture_initial_archive(
+                "athr_source", lease.token, capture=lambda *_args: {}
+            )
+
+    assert group.snapshotting is False
+    assert manager.events == []
+
+
+def test_status_keeps_a_concurrent_starts_newer_observation(monkeypatch):
+    """A stopped observation taken before a start never replaces the start's."""
+    manager = _Manager()
+    spec = _spec()
+    manager.items[spec.container_name] = manager._inspection(spec, running=False)
+    supervisor = SharedChatSessionSupervisor(manager)
+    supervisor.register_manifest(spec, _members())
+    group = supervisor._members[spec.thread_id]
+    entered, release = _gated_inspect(manager, monkeypatch, spec.container_name)
+
+    status_thread, outcome = _in_thread(lambda: supervisor.status(spec.thread_id))
+    try:
+        assert entered.wait(timeout=1)
+        token, opened = supervisor.terminal_opened("athr_peer")
+        assert opened.running is True
+    finally:
+        release.set()
+        status_thread.join(timeout=2)
+
+    assert not status_thread.is_alive()
+    assert "error" not in outcome
+    assert outcome["value"].running is True
+    assert group.inspection.running is True
+    supervisor._arm_idle_if_quiescent(group)
+    supervisor.terminal_closed("athr_peer", token)
+    assert group.idle_deadline is not None
+
+
+def test_creating_a_group_does_not_hold_the_supervisor_lock():
+    """Docker create runs outside the lock; only that sandbox's callers wait."""
+    creating = threading.Event()
+    proceed = threading.Event()
+
+    class Manager(_Manager):
+        create_calls = 0
+
+        def create(self, spec, *, facts=None, observer=None):
+            self.create_calls += 1
+            inspection = super().create(spec, facts=facts, observer=observer)
+            if spec.sandbox_id == _spec().sandbox_id:
+                creating.set()
+                assert proceed.wait(timeout=5)
+            return inspection
+
+    manager = Manager()
+    supervisor = SharedChatSessionSupervisor(manager)
+    other = replace(_spec(), thread_id="athr_other", sandbox_id="asbx_other")
+    supervisor.register_manifest(other, [replace(_members()[0], thread_id=other.thread_id)])
+
+    first, first_outcome = _in_thread(lambda: supervisor.register_manifest(_spec(), _members()))
+    second = None
+    try:
+        assert creating.wait(timeout=2)
+        # Other groups are answered while this one is being created.
+        status_thread, status_outcome = _in_thread(lambda: supervisor.status(other.thread_id))
+        status_thread.join(timeout=0.5)
+        assert not status_thread.is_alive(), "Docker create held the supervisor-wide lock"
+        assert "error" not in status_outcome
+        # Host reconciliation sees the new container but leaves it to its
+        # registration rather than adopting (and stopping) it as an orphan.
+        supervisor.reconcile()
+        assert supervisor.owns("athr_source") is False
+        # A second registration of the same sandbox waits for the first.
+        second, second_outcome = _in_thread(
+            lambda: supervisor.register_manifest(_spec(), _members())
+        )
+        second.join(timeout=0.3)
+        assert second.is_alive()
+    finally:
+        proceed.set()
+        first.join(timeout=2)
+        if second is not None:
+            second.join(timeout=2)
+
+    assert "error" not in first_outcome
+    assert "error" not in second_outcome
+    assert manager.create_calls == 2  # the other group, and this one once
+    assert manager.stop_count == 0
+    assert supervisor.owns("athr_source") and supervisor.owns("athr_peer")
+    assert supervisor._creating == set()
+
+
+def test_a_failed_group_creation_lets_the_next_registration_try_again():
+    attempts = []
+
+    class Manager(_Manager):
+        def create(self, spec, *, facts=None, observer=None):
+            attempts.append(spec.sandbox_id)
+            if len(attempts) == 1:
+                raise SandboxError("docker create failed")
+            return super().create(spec, facts=facts, observer=observer)
+
+    supervisor = SharedChatSessionSupervisor(Manager())
+
+    with pytest.raises(SandboxError, match="docker create failed"):
+        supervisor.register_manifest(_spec(), _members())
+    assert supervisor._creating == set()
+    supervisor.register_manifest(_spec(), _members())
+
+    assert attempts == [_spec().sandbox_id, _spec().sandbox_id]
+    assert supervisor.owns("athr_source")
+
+
+def test_a_sandbox_still_being_created_is_never_proved_absent():
+    """Creation runs outside the lock, before its group is installed or Docker names it."""
+    creating = threading.Event()
+    proceed = threading.Event()
+
+    class Manager(_Manager):
+        def create(self, spec, *, facts=None, observer=None):
+            creating.set()
+            assert proceed.wait(timeout=5)
+            return super().create(spec, facts=facts, observer=observer)
+
+    supervisor = SharedChatSessionSupervisor(Manager())
+    registration, outcome = _in_thread(lambda: supervisor.register_manifest(_spec(), _members()))
+    try:
+        assert creating.wait(timeout=2)
+        absent = supervisor.admin_deletion_target_absent(
+            _spec().thread_id,
+            sandbox_id=_spec().sandbox_id,
+            container_id="container-not-created-yet",
+        )
+    finally:
+        proceed.set()
+        registration.join(timeout=2)
+
+    assert absent is False
+    assert "error" not in outcome
+
+
 def test_status_marks_a_same_name_running_replacement_lost_without_adopting_it():
     manager = _Manager()
     supervisor = SharedChatSessionSupervisor(manager)
@@ -1734,12 +1995,43 @@ def test_one_failed_check_is_retried_before_anything_is_stopped():
     assert manager.stop_count == 0
 
 
-def test_the_rules_are_not_checked_while_nothing_runs():
+def test_while_nothing_runs_the_rules_are_renewed_not_read_every_pass():
+    """An idle host keeps its verification fresh so the next start does not pay for it.
+
+    Nothing is read back every pass and nothing is stopped: the renewal is the
+    guard's own cached ensure, which installs and reads back only once the
+    last verification is old enough to need it.
+    """
     manager = _Manager()
     supervisor = SharedChatSessionSupervisor(manager)
 
     assert supervisor.guard_network() == []
     assert manager.host_rule_checks == 0
+    assert manager.host_rule_renewals == 1
+    assert manager.stop_count == 0
+
+
+def test_an_idle_renewal_that_fails_is_logged_once_and_stops_nothing(caplog):
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager)
+    manager.host_rule_renewal_failures = 2
+
+    with caplog.at_level(logging.WARNING):
+        assert supervisor.guard_network() == []
+        assert supervisor.guard_network() == []
+        assert supervisor.guard_network() == []
+        supervisor.guard_network()
+        manager.host_rule_renewal_failures = 1
+        supervisor.guard_network()
+
+    warnings = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "shared_chat_idle_host_rules_unavailable"
+    ]
+    assert len(warnings) == 2, "once per failing streak, not once per pass"
+    assert manager.host_rule_renewals == 5
+    assert manager.stop_count == 0
 
 
 def test_stale_activation_does_not_wake_a_stopped_shared_container():
@@ -4161,22 +4453,24 @@ def test_failed_start_marker_completion_is_retried_in_place_before_snapshot() ->
     assert manager.stop_count == 1
 
 
-def test_initial_archive_is_fenced_while_a_group_start_is_in_progress() -> None:
-    class BlockingStartManager(_Manager):
-        def __init__(self) -> None:
-            super().__init__()
-            self.block_start = False
-            self.start_entered = threading.Event()
-            self.start_release = threading.Event()
+class _BlockingStartManager(_Manager):
+    def __init__(self) -> None:
+        super().__init__()
+        self.block_start = False
+        self.start_entered = threading.Event()
+        self.start_release = threading.Event()
 
-        def start(self, spec, **kwargs):
-            current = self.items[spec.container_name]
-            if self.block_start and not current.running:
-                self.start_entered.set()
-                assert self.start_release.wait(timeout=2)
-            return super().start(spec, **kwargs)
+    def start(self, spec, **kwargs):
+        current = self.items[spec.container_name]
+        if self.block_start and not current.running:
+            self.start_entered.set()
+            assert self.start_release.wait(timeout=2)
+        return super().start(spec, **kwargs)
 
-    manager = BlockingStartManager()
+
+def test_initial_archive_waits_out_a_concurrent_start_and_workspace_request() -> None:
+    """The chat page reads the workspace while a new chat prepares (staging 409)."""
+    manager = _BlockingStartManager()
     supervisor = SharedChatSessionSupervisor(manager)
     lease = supervisor.acquire(
         _spec(),
@@ -4189,40 +4483,71 @@ def test_initial_archive_is_fenced_while_a_group_start_is_in_progress() -> None:
     manager.stop(_spec(), release_networks=False)
     manager.block_start = True
     opened: list[tuple[str, SharedSessionDescriptor]] = []
-    errors: list[BaseException] = []
-
-    def open_operation() -> None:
-        try:
-            opened.append(supervisor.operation_opened("athr_peer"))
-        except BaseException as exc:  # pragma: no cover - asserted below
-            errors.append(exc)
-
-    opening = threading.Thread(target=open_operation)
+    opening = threading.Thread(
+        target=lambda: opened.append(supervisor.operation_opened("athr_peer"))
+    )
     opening.start()
     assert manager.start_entered.wait(timeout=1)
-    captured = False
+    captured = threading.Event()
 
     def capture(*_args):
-        nonlocal captured
-        captured = True
+        captured.set()
         return {"enabled": True, "stored": True}
 
+    capturing, outcome = _in_thread(
+        lambda: supervisor.capture_initial_archive("athr_source", lease.token, capture=capture)
+    )
     try:
-        with pytest.raises(SessionBusy, match="start is in progress"):
-            supervisor.capture_initial_archive(
-                "athr_source",
-                lease.token,
-                capture=capture,
-            )
-    finally:
+        # Neither the start nor the workspace request it admits fails the archive.
+        capturing.join(timeout=0.3)
+        assert capturing.is_alive()
         manager.start_release.set()
         opening.join(timeout=2)
+        assert not opening.is_alive() and opened
+        capturing.join(timeout=0.3)
+        assert capturing.is_alive(), "the archive captured while a request was still running"
+        assert not captured.is_set()
+        token, _ = opened[0]
+        supervisor.operation_closed("athr_peer", token)
+        capturing.join(timeout=2)
+    finally:
+        manager.start_release.set()
 
-    assert not opening.is_alive()
-    assert errors == []
-    assert captured is False
-    token, _ = opened[0]
+    assert not capturing.is_alive()
+    assert "error" not in outcome
+    assert captured.is_set()
+    assert supervisor._members["athr_source"].snapshotting is False
+
+
+def test_initial_archive_reports_busy_once_a_request_outlasts_its_wait() -> None:
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager)
+    supervisor.initial_archive_wait_s = 0.3
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=False,
+        manifest=_members(),
+    )
+    token, _ = supervisor.operation_opened("athr_peer")
+    captured: list[bool] = []
+
+    with pytest.raises(SessionBusy, match="active mutations"):
+        supervisor.capture_initial_archive(
+            "athr_source", lease.token, capture=lambda *_args: captured.append(True) or {}
+        )
+
+    group = supervisor._members["athr_source"]
+    assert captured == []
+    assert group.snapshotting is False
+    # The barrier is gone: the request finishes, and the next attempt captures.
     supervisor.operation_closed("athr_peer", token)
+    supervisor.capture_initial_archive(
+        "athr_source", lease.token, capture=lambda *_args: captured.append(True) or {}
+    )
+    assert captured == [True]
 
 
 def test_failed_marked_initial_archive_stops_and_completes_the_final_archive() -> None:
@@ -5495,6 +5820,207 @@ def test_abandon_releases_observation_when_normal_turn_cleanup_fails(monkeypatch
     assert manager.events[-1] == ("observe-finish", 11001)
 
 
+def test_abandon_releases_the_member_lock_of_the_turn_it_detaches(monkeypatch):
+    """With normal cleanup failed, abandon owns the attached turn's release."""
+    supervisor = SharedChatSessionSupervisor(_Manager(), transport_factory=_TransportFactory())
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+    launch = _launch("athr_source", native_session_id="native-source", slot=0)
+    supervisor.ensure_resident("athr_source", lease.token, launch)
+    supervisor.start_turn(
+        "athr_source", lease.token, prompt="work", model="glm-5.1", reasoning_effort=None
+    )
+    member = supervisor._members["athr_source"].members["athr_source"]
+    assert member.turn_lock.locked() is True
+
+    def fail_cleanup(*_args, **_kwargs):
+        raise RuntimeError("cleanup failed")
+
+    monkeypatch.setattr(supervisor, "complete_turn", fail_cleanup)
+    supervisor.abandon("athr_source", lease.token, lost=False)
+
+    assert member.turn_lock.locked() is False
+    monkeypatch.undo()
+    successor = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:2",
+        activation_generation=2,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+    supervisor.ensure_resident("athr_source", successor.token, launch)
+    supervisor.start_turn(
+        "athr_source", successor.token, prompt="again", model="glm-5.1", reasoning_effort=None
+    )
+
+
+def test_a_turn_detached_by_complete_turn_releases_its_lock_even_if_it_then_fails():
+    """Once ``complete_turn`` detaches the turn, the member lock is its to release."""
+
+    class FlakyTransport(_Transport):
+        failing = False
+
+        @property
+        def alive(self) -> bool:
+            if self.failing:
+                raise RuntimeError("process table unavailable")
+            return True
+
+        @alive.setter
+        def alive(self, _value: bool) -> None:
+            return
+
+    class Factory(_TransportFactory):
+        def open(self, spec, launch):
+            transport = FlakyTransport(launch)
+            self.transports.append(transport)
+            return transport
+
+    factory = Factory()
+    supervisor = SharedChatSessionSupervisor(_Manager(), transport_factory=factory)
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+    supervisor.ensure_resident(
+        "athr_source",
+        lease.token,
+        _launch("athr_source", native_session_id="native-source", slot=0),
+    )
+    turn = supervisor.start_turn(
+        "athr_source", lease.token, prompt="work", model="glm-5.1", reasoning_effort=None
+    )
+    member = supervisor._members["athr_source"].members["athr_source"]
+    factory.transports[0].failing = True
+
+    with pytest.raises(RuntimeError, match="process table"):
+        supervisor.complete_turn("athr_source", lease.token, turn)
+
+    assert member.current_turn is None
+    assert member.turn_lock.locked() is False
+
+
+def test_abandon_leaves_a_resident_start_its_own_member_lock():
+    """A slow resident start keeps its exclusion, and its process, from abandon.
+
+    ``threading.Lock`` has no owner. Abandon released the member lock whenever
+    it was held, so a runner that gave up on a slow resident start freed the
+    lock that start still held: the start then installed a live process over
+    the abandoned member, and its own release raised ``RuntimeError``.
+    """
+    entered = threading.Event()
+    proceed = threading.Event()
+
+    class SlowFactory(_TransportFactory):
+        def open(self, spec, launch):
+            entered.set()
+            assert proceed.wait(5)
+            return super().open(spec, launch)
+
+    factory = SlowFactory()
+    supervisor = SharedChatSessionSupervisor(_Manager(), transport_factory=factory)
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+    member = supervisor._members["athr_source"].members["athr_source"]
+    errors: list[BaseException] = []
+
+    def start() -> None:
+        try:
+            supervisor.ensure_resident(
+                "athr_source",
+                lease.token,
+                _launch("athr_source", native_session_id="native-source", slot=0),
+            )
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    starter = threading.Thread(target=start)
+    starter.start()
+    assert entered.wait(5)
+
+    abandoned = supervisor.abandon("athr_source", lease.token, lost=True)
+
+    assert member.turn_lock.locked() is True
+    assert abandoned.resident_state == "lost"
+    proceed.set()
+    starter.join(5)
+    assert not starter.is_alive()
+    assert [type(error) for error in errors] == [SessionLeaseLost]
+    assert member.turn_lock.locked() is False
+    assert member.transport is None
+    assert (member.context_status, member.resident_state) == ("lost", "lost")
+    assert [transport.alive for transport in factory.transports] == [False]
+
+
+def test_abandon_leaves_a_turn_in_admission_its_own_member_lock():
+    """A turn still being admitted releases its own lock and is refused."""
+    admitting = threading.Event()
+    proceed = threading.Event()
+
+    class SlowCensus(_Manager):
+        def capture_member_processes(self, spec, **kwargs):
+            admitting.set()
+            assert proceed.wait(5)
+            return super().capture_member_processes(spec, **kwargs)
+
+    factory = _TransportFactory()
+    supervisor = SharedChatSessionSupervisor(SlowCensus(), transport_factory=factory)
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+    supervisor.ensure_resident(
+        "athr_source",
+        lease.token,
+        _launch("athr_source", native_session_id="native-source", slot=0),
+    )
+    member = supervisor._members["athr_source"].members["athr_source"]
+    errors: list[BaseException] = []
+
+    def admit() -> None:
+        try:
+            supervisor.start_turn(
+                "athr_source", lease.token, prompt="work", model="glm-5.1", reasoning_effort=None
+            )
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    admission = threading.Thread(target=admit)
+    admission.start()
+    assert admitting.wait(5)
+
+    supervisor.abandon("athr_source", lease.token, lost=False)
+
+    assert member.turn_lock.locked() is True
+    proceed.set()
+    admission.join(5)
+    assert not admission.is_alive()
+    assert [type(error) for error in errors] == [SessionLeaseLost]
+    assert member.turn_lock.locked() is False
+    assert member.current_turn is None
+
+
 def test_shared_claude_turn_fences_and_returns_exact_tool_marks():
     """The supervisor must carry the retained hook slice to the sandbox manager."""
 
@@ -6208,3 +6734,559 @@ def test_a_collection_cut_short_by_the_deadline_says_so(monkeypatch):
         # ...but every stage was skipped, so nothing was measured at all.
         assert answer.stages == []
         assert answer.profiling_truncated is True
+
+
+@pytest.mark.parametrize(
+    "operation", ["idle_stop", "begin_archive", "commit_archive", "reconcile_marker"]
+)
+def test_lifecycle_io_leaves_other_groups_available(monkeypatch, operation):
+    """A slow lifecycle check must fence its group without stalling siblings."""
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager)
+    spec = _spec()
+    supervisor.register_manifest(spec, _members())
+    other = replace(spec, thread_id="athr_other", sandbox_id="asbx_other")
+    supervisor.register_manifest(other, [replace(_members()[0], thread_id=other.thread_id)])
+    entered = threading.Event()
+    release = threading.Event()
+
+    def gate():
+        entered.set()
+        assert release.wait(timeout=5)
+
+    if operation == "idle_stop":
+        inspect = manager.inspect
+
+        def inspect_slow(name):
+            observed = inspect(name)
+            if name == spec.container_name and not entered.is_set():
+                gate()
+            return observed
+
+        monkeypatch.setattr(manager, "inspect", inspect_slow)
+
+        def call():
+            return supervisor.stop_if_idle(spec.thread_id, generation=spec.generation)
+    elif operation in {"begin_archive", "commit_archive"}:
+        manager.items[spec.container_name] = replace(
+            manager.items[spec.container_name], running=False, status=ChatSandboxStatus.STOPPED
+        )
+
+        def require_stopped(owned_spec, *, container_id):
+            current = manager.items[owned_spec.container_name]
+            assert current.container_id == container_id
+            assert not current.running
+            if operation == "begin_archive":
+                gate()
+            return current
+
+        monkeypatch.setattr(manager, "require_stopped_archive", require_stopped, raising=False)
+        kwargs = {
+            "request_id": "delete-1",
+            "generation": spec.generation,
+            "container_id": "container-shared",
+        }
+        if operation == "begin_archive":
+
+            def call():
+                return supervisor.begin_archive(spec.thread_id, **kwargs)
+        else:
+            supervisor.begin_archive(spec.thread_id, **kwargs)
+
+            def remove(owned_spec, *, container_id):
+                assert manager.items[owned_spec.container_name].container_id == container_id
+                gate()
+                manager.items.pop(owned_spec.container_name)
+
+            monkeypatch.setattr(manager, "remove_stopped_archived", remove, raising=False)
+
+            def call():
+                return supervisor.commit_archive(
+                    spec, request_id="delete-1", container_id="container-shared"
+                )
+    else:
+        orphan = replace(spec, thread_id="athr_orphan", sandbox_id="asbx_orphan")
+        manager.items[orphan.container_name] = manager._inspection(orphan)
+
+        def read_marker(owned_spec, **_kwargs):
+            if owned_spec == orphan:
+                gate()
+            return None
+
+        monkeypatch.setattr(manager, "read_running_final_archive_marker", read_marker)
+        call = supervisor.reconcile
+
+    worker, outcome = _in_thread(call)
+    other_worker = None
+    try:
+        assert entered.wait(timeout=2)
+        other_worker, other_outcome = _in_thread(lambda: supervisor.status(other.thread_id))
+        other_worker.join(timeout=0.5)
+        assert not other_worker.is_alive(), "lifecycle I/O held the supervisor-wide lock"
+        assert "error" not in other_outcome
+        if operation != "reconcile_marker":
+            with pytest.raises(SessionBusy):
+                supervisor.operation_opened(spec.thread_id)
+    finally:
+        release.set()
+        worker.join(timeout=5)
+        if other_worker is not None:
+            other_worker.join(timeout=5)
+    assert not worker.is_alive()
+    assert "error" not in outcome
+
+
+@pytest.mark.parametrize("operation", ["idle_stop", "begin_archive", "reconcile_marker"])
+@pytest.mark.parametrize("fence", ["index", "lifecycle", "spec", "container"])
+def test_lifecycle_check_rejects_superseded_observations(monkeypatch, operation, fence):
+    """An observation cannot commit to a group whose authority changed."""
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager)
+    spec = _spec()
+    supervisor.register_manifest(spec, _members())
+    group = supervisor._members[spec.thread_id]
+    observed = replace(group.inspection, running=False, status=ChatSandboxStatus.STOPPED)
+
+    def changed(*_args, **_kwargs):
+        with supervisor._lock:
+            if fence == "index":
+                supervisor._groups.pop(spec.sandbox_id)
+            elif fence == "lifecycle":
+                group.lifecycle_generation += 1
+            elif fence == "spec":
+                group.spec = replace(spec, generation=spec.generation + 1)
+            else:
+                group.inspection = replace(group.inspection, container_id="replacement")
+        return observed
+
+    if operation == "idle_stop":
+        monkeypatch.setattr(manager, "inspect", changed)
+
+        def call():
+            return supervisor.stop_if_idle(spec.thread_id, generation=spec.generation)
+    elif operation == "reconcile_marker":
+        group.orphan_marker_unreadable = True
+        monkeypatch.setattr(manager, "read_running_final_archive_marker", changed)
+        call = supervisor.reconcile
+    else:
+        monkeypatch.setattr(manager, "require_stopped_archive", changed, raising=False)
+
+        def call():
+            return supervisor.begin_archive(
+                spec.thread_id,
+                request_id="delete-1",
+                generation=spec.generation,
+                container_id=observed.container_id,
+            )
+
+    with pytest.raises(SessionLeaseLost, match="lifecycle changed"):
+        call()
+    assert manager.stop_count == 0
+    assert group.inspection.running is True
+    assert group.archive_request_id is None
+
+
+@pytest.mark.parametrize("operation", ["idle_stop", "begin_archive"])
+def test_failed_lifecycle_proof_releases_only_its_temporary_reservation(monkeypatch, operation):
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager)
+    spec = _spec()
+    supervisor.register_manifest(spec, _members())
+    group = supervisor._members[spec.thread_id]
+
+    def failed(*_args, **_kwargs):
+        raise SandboxError("Docker did not answer")
+
+    with monkeypatch.context() as patch:
+        if operation == "idle_stop":
+            patch.setattr(manager, "inspect", failed)
+            with pytest.raises(SandboxError, match="did not answer"):
+                supervisor.stop_if_idle(spec.thread_id, generation=spec.generation)
+        else:
+            patch.setattr(manager, "require_stopped_archive", failed, raising=False)
+            with pytest.raises(SandboxError, match="did not answer"):
+                supervisor.begin_archive(
+                    spec.thread_id,
+                    request_id="delete-1",
+                    generation=spec.generation,
+                    container_id=group.inspection.container_id,
+                )
+    assert group.lifecycle_check is None
+    assert group.archive_request_id is None
+    assert not group.stopping
+    token, descriptor = supervisor.operation_opened(spec.thread_id)
+    assert descriptor.running
+    supervisor.operation_closed(spec.thread_id, token)
+
+
+def test_absence_proof_rechecks_registration_after_slow_docker_reads(monkeypatch):
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager)
+    spec = _spec()
+    entered, release = _gated_inspect(manager, monkeypatch, spec.container_name)
+    worker, outcome = _in_thread(
+        lambda: supervisor.admin_deletion_target_absent(
+            spec.thread_id, sandbox_id=spec.sandbox_id, container_id="container-shared"
+        )
+    )
+    try:
+        assert entered.wait(timeout=2)
+        supervisor.register_manifest(spec, _members())
+    finally:
+        release.set()
+        worker.join(timeout=5)
+    assert not worker.is_alive()
+    assert outcome == {"value": False}
+
+
+@pytest.mark.parametrize("replacement", ["stable_name", "renamed_original"])
+def test_deletion_proves_both_container_identities_absent_before_forgetting_group(
+    monkeypatch, replacement
+):
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager)
+    spec = _spec()
+    supervisor.register_manifest(spec, _members())
+    group = supervisor._members[spec.thread_id]
+    manager.items[spec.container_name] = replace(
+        group.inspection, running=False, status=ChatSandboxStatus.STOPPED
+    )
+
+    def require_stopped(owned_spec, *, container_id):
+        current = manager.items[owned_spec.container_name]
+        assert current.container_id == container_id
+        return current
+
+    def remove(owned_spec, *, container_id):
+        original = manager.items.pop(owned_spec.container_name)
+        if replacement == "stable_name":
+            manager.items[owned_spec.container_name] = replace(original, container_id="replacement")
+        else:
+            manager.items[container_id] = replace(original, name="renamed")
+
+    monkeypatch.setattr(manager, "require_stopped_archive", require_stopped, raising=False)
+    monkeypatch.setattr(manager, "remove_stopped_archived", remove, raising=False)
+    supervisor.begin_archive(
+        spec.thread_id,
+        request_id="delete-1",
+        generation=spec.generation,
+        container_id=group.inspection.container_id,
+    )
+    with pytest.raises(RetainedChatLost, match="identity changed"):
+        supervisor.commit_archive(
+            spec, request_id="delete-1", container_id=group.inspection.container_id
+        )
+    assert supervisor._groups[spec.sandbox_id] is group
+    assert supervisor._members[spec.thread_id] is group
+    assert group.archive_request_id == "delete-1"
+    assert group.stopping
+    assert group.lifecycle_check is None
+
+
+def test_refused_busy_deletion_does_not_invalidate_active_lifecycle(monkeypatch):
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager)
+    spec = _spec()
+    supervisor.register_manifest(spec, _members())
+    token, _descriptor = supervisor.operation_opened(spec.thread_id)
+    group = supervisor._members[spec.thread_id]
+    generation = group.lifecycle_generation
+
+    def inspect(*_args):
+        pytest.fail("a refused busy deletion must not perform Docker I/O")
+
+    monkeypatch.setattr(manager, "inspect", inspect)
+    with pytest.raises(SessionBusy, match="idle group"):
+        supervisor.commit_archive(
+            spec, request_id="delete-1", container_id=group.inspection.container_id
+        )
+    assert group.lifecycle_generation == generation
+    assert group.lifecycle_check is None
+    assert group.archive_request_id is None
+    supervisor.operation_closed(spec.thread_id, token)
+
+
+class _RecheckingStartManager(_Manager):
+    """Hold the bridge recheck a concurrent workspace request performs."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.block_start = False
+        self.start_entered = threading.Event()
+        self.start_release = threading.Event()
+
+    def start(self, spec, **kwargs):
+        if self.block_start:
+            self.start_entered.set()
+            assert self.start_release.wait(timeout=5)
+        expected = kwargs.get("expected_container_id")
+        if expected is not None and self.items[spec.container_name].container_id != expected:
+            raise RetainedChatLost("chat sandbox container identity changed before start")
+        return super().start(spec, **kwargs)
+
+
+def _rechecking_activation():
+    manager = _RecheckingStartManager()
+    factory = _TransportFactory()
+    supervisor = SharedChatSessionSupervisor(manager, transport_factory=factory)
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+    launch = _launch("athr_source", native_session_id="native-source", slot=0)
+    supervisor.ensure_resident("athr_source", lease.token, launch)
+    manager.block_start = True
+    return manager, supervisor, factory, lease, launch
+
+
+@pytest.mark.parametrize("call", ["resident", "turn", "late_turn"])
+def test_prompt_start_waits_for_a_workspace_bridge_recheck(monkeypatch, call):
+    """A files/terminal request must not destroy an admitted but unsent turn."""
+    manager, supervisor, factory, lease, launch = _rechecking_activation()
+    waited = threading.Event()
+    wait = supervisor._condition.wait
+
+    def waiting(*args, **kwargs):
+        waited.set()
+        return wait(*args, **kwargs)
+
+    monkeypatch.setattr(supervisor._condition, "wait", waiting)
+    reading, read_outcome = _in_thread(lambda: supervisor.operation_opened("athr_peer"))
+    if call == "late_turn":
+        # Let the first admission check pass, then race the process census.
+        manager.start_release.set()
+        reading.join(timeout=2)
+        supervisor.operation_closed("athr_peer", read_outcome["value"][0])
+        manager.start_entered.clear()
+        manager.start_release.clear()
+        census = manager.capture_member_processes
+
+        def capture(*args, **kwargs):
+            nonlocal reading, read_outcome
+            reading, read_outcome = _in_thread(lambda: supervisor.operation_opened("athr_peer"))
+            assert manager.start_entered.wait(timeout=2)
+            return census(*args, **kwargs)
+
+        monkeypatch.setattr(manager, "capture_member_processes", capture)
+    else:
+        assert manager.start_entered.wait(timeout=2)
+
+    def activate():
+        if call == "resident":
+            return supervisor.ensure_resident("athr_source", lease.token, launch)
+        return supervisor.start_turn(
+            "athr_source",
+            lease.token,
+            prompt="read PR state",
+            model="glm-5.1",
+            reasoning_effort=None,
+        )
+
+    activating, outcome = _in_thread(activate)
+    try:
+        assert waited.wait(timeout=1), outcome
+        assert factory.transports[0].turns == []
+    finally:
+        manager.start_release.set()
+        reading.join(timeout=2)
+        activating.join(timeout=2)
+    assert not reading.is_alive() and not activating.is_alive()
+    assert "error" not in read_outcome
+    assert "error" not in outcome
+    assert len(factory.transports[0].turns) == (0 if call == "resident" else 1)
+    supervisor.operation_closed("athr_peer", read_outcome["value"][0])
+
+
+@pytest.mark.parametrize("invalidate", ["lease", "container"])
+def test_prompt_wait_rechecks_the_lease_and_container_before_dispatch(monkeypatch, invalidate):
+    manager, supervisor, factory, lease, _launch_spec = _rechecking_activation()
+    waited = threading.Event()
+    wait = supervisor._condition.wait
+
+    def waiting(*args, **kwargs):
+        waited.set()
+        return wait(*args, **kwargs)
+
+    monkeypatch.setattr(supervisor._condition, "wait", waiting)
+    reading, _read_outcome = _in_thread(lambda: supervisor.operation_opened("athr_peer"))
+    assert manager.start_entered.wait(timeout=2)
+    activating, outcome = _in_thread(
+        lambda: supervisor.start_turn(
+            "athr_source",
+            lease.token,
+            prompt="must not send",
+            model="glm-5.1",
+            reasoning_effort=None,
+        )
+    )
+    try:
+        assert waited.wait(timeout=1), outcome
+        if invalidate == "lease":
+            supervisor.abandon("athr_source", lease.token, lost=False)
+        else:
+            current = manager.items[_spec().container_name]
+            manager.items[_spec().container_name] = replace(current, container_id="replacement")
+    finally:
+        manager.start_release.set()
+        reading.join(timeout=2)
+        activating.join(timeout=2)
+    assert not reading.is_alive() and not activating.is_alive()
+    assert isinstance(
+        outcome.get("error"), SessionLeaseLost if invalidate == "lease" else RetainedChatLost
+    )
+    assert factory.transports[0].turns == []
+
+
+def test_prompt_wait_does_not_accept_a_failed_bridge_recheck(monkeypatch):
+    manager, supervisor, factory, lease, _launch_spec = _rechecking_activation()
+    waited = threading.Event()
+    wait = supervisor._condition.wait
+    start = manager.start
+
+    def waiting(*args, **kwargs):
+        waited.set()
+        return wait(*args, **kwargs)
+
+    def fail_start(*args, **kwargs):
+        start(*args, **kwargs)
+        raise SandboxError("bridge recheck failed")
+
+    monkeypatch.setattr(supervisor._condition, "wait", waiting)
+    monkeypatch.setattr(manager, "start", fail_start)
+    reading, read_outcome = _in_thread(lambda: supervisor.operation_opened("athr_peer"))
+    assert manager.start_entered.wait(timeout=2)
+    activating, outcome = _in_thread(
+        lambda: supervisor.start_turn(
+            "athr_source",
+            lease.token,
+            prompt="must not send",
+            model="glm-5.1",
+            reasoning_effort=None,
+        )
+    )
+    try:
+        assert waited.wait(timeout=1), outcome
+    finally:
+        manager.start_release.set()
+        reading.join(timeout=2)
+        activating.join(timeout=2)
+    assert not reading.is_alive() and not activating.is_alive()
+    assert isinstance(read_outcome.get("error"), SandboxError)
+    assert isinstance(outcome.get("error"), SandboxError)
+    assert factory.transports[0].turns == []
+    # A fresh, successful check lifts the failed-proof fence.
+    monkeypatch.setattr(manager, "start", start)
+    token, _ = supervisor.operation_opened("athr_peer")
+    supervisor.operation_closed("athr_peer", token)
+    supervisor.start_turn(
+        "athr_source", lease.token, prompt="now verified", model="glm-5.1", reasoning_effort=None
+    )
+    assert len(factory.transports[0].turns) == 1
+
+
+def test_failed_idle_stop_keeps_its_automatic_retry_deadline(monkeypatch):
+    """A temporary inspection reservation must not suppress the stop retry."""
+    manager = _Manager()
+    now = {"value": 100.0}
+    supervisor = SharedChatSessionSupervisor(manager, clock=lambda: now["value"])
+    spec = _spec()
+    supervisor.register_manifest(spec, _members())
+    group = supervisor._members[spec.thread_id]
+    group.idle_deadline = now["value"]
+    stop = manager.stop
+
+    def fail_stop(*_args, **_kwargs):
+        raise SandboxError("Docker stop is temporarily unavailable")
+
+    monkeypatch.setattr(manager, "stop", fail_stop)
+    with pytest.raises(SandboxError, match="temporarily unavailable"):
+        supervisor.stop_if_idle(spec.thread_id, generation=spec.generation)
+    assert group.lifecycle_check is None
+    assert group.stopping is False
+    assert group.idle_deadline == now["value"] + supervisor.idle_timeout_s
+    monkeypatch.setattr(manager, "stop", stop)
+    now["value"] += supervisor.idle_timeout_s + 1
+    stopped = supervisor.sweep()
+    assert len(stopped) == 1
+    assert stopped[0].running is False
+
+
+@pytest.mark.parametrize("entrypoint", ["operation", "terminal"])
+@pytest.mark.parametrize("race", ["before", "after", "membership", "container", "failure"])
+def test_workspace_admission_waits_for_bridge_rechecks(monkeypatch, entrypoint, race):
+    """Files and PTYs wait at both admission boundaries, then recheck identity."""
+    manager, supervisor, _factory, _lease, _launch_spec = _rechecking_activation()
+    group = supervisor._members["athr_source"]
+    opened = getattr(supervisor, f"{entrypoint}_opened")
+    closed = getattr(supervisor, f"{entrypoint}_closed")
+    waited = threading.Event()
+    wait = supervisor._condition.wait
+    rechecks = []
+
+    def waiting(*args, **kwargs):
+        waited.set()
+        return wait(*args, **kwargs)
+
+    def begin_recheck():
+        manager.block_start = True
+        rechecks.append(_in_thread(lambda: supervisor._start_group(group)))
+        assert manager.start_entered.wait(timeout=2)
+
+    monkeypatch.setattr(supervisor._condition, "wait", waiting)
+    if race == "before":
+        begin_recheck()
+    else:
+        # Start the competing check after this request's own check, before it
+        # can register its operation/PTY token. No sleep-based race timing.
+        manager.block_start = False
+        ensure_running = supervisor._ensure_running
+        start = manager.start
+
+        def ensure_then_recheck(current_group):
+            ensure_running(current_group)
+            if race == "failure":
+
+                def fail_start(*args, **kwargs):
+                    start(*args, **kwargs)
+                    raise SandboxError("bridge recheck failed")
+
+                monkeypatch.setattr(manager, "start", fail_start)
+            begin_recheck()
+
+        monkeypatch.setattr(supervisor, "_ensure_running", ensure_then_recheck)
+
+    opening, outcome = _in_thread(lambda: opened("athr_source"))
+    try:
+        assert waited.wait(timeout=1), outcome
+        assert group.operation_tokens == {} and group.terminal_tokens == {}
+        if race == "membership":
+            with supervisor._lock:
+                group.members["athr_source"] = replace(group.members["athr_source"])
+        elif race == "container":
+            current = manager.items[_spec().container_name]
+            manager.items[_spec().container_name] = replace(current, container_id="replacement")
+    finally:
+        manager.start_release.set()
+        opening.join(timeout=2)
+        for checking, _ in rechecks:
+            checking.join(timeout=2)
+    assert not opening.is_alive()
+    assert all(not checking.is_alive() for checking, _ in rechecks)
+    if race in {"before", "after"}:
+        assert "error" not in outcome
+        assert all("error" not in result for _, result in rechecks)
+        token, descriptor = outcome["value"]
+        assert descriptor.running is True
+        closed("athr_source", token)
+    else:
+        expected_error = {
+            "membership": SessionLeaseLost,
+            "container": RetainedChatLost,
+            "failure": SandboxError,
+        }[race]
+        assert isinstance(outcome.get("error"), expected_error), outcome
+    assert group.operation_tokens == {} and group.terminal_tokens == {}

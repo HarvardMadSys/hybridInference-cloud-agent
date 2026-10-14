@@ -186,6 +186,33 @@ async def test_token_is_cached_but_not_past_its_life(config):
     assert calls["n"] == 2
 
 
+async def test_a_caller_can_ask_for_a_token_that_outlives_its_work(config):
+    """A token with twenty minutes left serves a quick caller, not a long publish."""
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/installation"):
+            return httpx.Response(200, json={"id": 1})
+        calls["n"] += 1
+        expires = time.gmtime(time.time() + (1200 if calls["n"] == 1 else 3600))
+        return httpx.Response(
+            201,
+            json={
+                "token": f"ghs_{calls['n']}",
+                "expires_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", expires),
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        credentials = GitHubAppCredentials(config, client=client)
+        assert await credentials.token_for("o/n") == "ghs_1"
+        assert await credentials.token_for("o/n") == "ghs_1"
+        assert await credentials.token_for("o/n", min_ttl_s=1800) == "ghs_2"
+        assert await credentials.token_for("o/n", min_ttl_s=1800) == "ghs_2"
+
+    assert calls["n"] == 2
+
+
 async def test_a_long_lived_token_is_reused(config):
     """Within its window the token is served from cache, not re-minted."""
     calls = {"n": 0}
@@ -249,6 +276,83 @@ async def test_forget_drops_cached_state(config):
         assert not creds._tokens
     finally:
         httpx.AsyncClient = original
+
+
+async def test_a_reinstalled_app_is_looked_up_again_rather_than_minted_against_forever(config):
+    """Installing the App again gives the repository a new installation id.
+
+    The remembered installation then refuses to mint. One fresh lookup finds
+    the new one; before, every claim released with a 503 until a restart.
+    """
+    installation = {"id": 1}
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(f"{request.method} {request.url.path}")
+        if request.url.path == "/repos/o/n/installation":
+            return httpx.Response(200, json=installation)
+        if request.url.path == f"/app/installations/{installation['id']}/access_tokens":
+            return httpx.Response(
+                201,
+                json={"token": f"ghs_{installation['id']}", "expires_at": "2099-01-01T00:00:00Z"},
+            )
+        return httpx.Response(404, json={"message": "Not Found"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        credentials = GitHubAppCredentials(config, client=client)
+        assert await credentials.token_for("o/n", permissions={"contents": "read"}) == "ghs_1"
+        installation["id"] = 2
+        # Another scope has no cached token, so it mints against the remembered id.
+        assert await credentials.token_for("o/n", permissions={"contents": "write"}) == "ghs_2"
+
+    assert seen == [
+        "GET /repos/o/n/installation",
+        "POST /app/installations/1/access_tokens",
+        "POST /app/installations/1/access_tokens",
+        "GET /repos/o/n/installation",
+        "POST /app/installations/2/access_tokens",
+    ]
+
+
+@pytest.mark.parametrize("still_named", [True, False])
+async def test_an_installation_gone_for_good_is_settled_not_an_outage(config, still_named):
+    """A mint refused again after a fresh lookup means the App does not cover the repo."""
+    from cloud_agent.github_app import AppNotInstalled
+
+    lookups: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/repos/o/n/installation":
+            lookups.append(1)
+            if still_named or len(lookups) == 1:
+                return httpx.Response(200, json={"id": 1})
+        return httpx.Response(404, json={"message": "Not Found"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(AppNotInstalled):
+            await GitHubAppCredentials(config, client=client).token_for("o/n")
+
+    assert len(lookups) == 2
+
+
+async def test_a_repository_s_installation_is_not_remembered_forever(config, monkeypatch):
+    import cloud_agent.github_app as github_app
+
+    lookups: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        lookups.append(1)
+        return httpx.Response(200, json={"id": 1})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        credentials = GitHubAppCredentials(config, client=client)
+        assert await credentials.installation_id_for("o/n") == 1
+        assert await credentials.installation_id_for("o/n") == 1
+        assert len(lookups) == 1
+        monkeypatch.setattr(github_app, "_INSTALLATION_TTL_S", 0.0)
+        assert await credentials.installation_id_for("o/n") == 1
+
+    assert len(lookups) == 2
 
 
 def test_private_key_never_appears_in_an_error(config):
@@ -409,6 +513,76 @@ async def test_repository_contents_rejects_a_moving_ref(config):
     """A branch name must never make the Files tab diverge from the agent tree."""
     with pytest.raises(GitHubAppError, match="pinned"):
         await GitHubAppCredentials(config).repository_contents("o/n", ref="dev")
+
+
+async def test_a_ref_to_resolve_can_only_ever_name_a_ref(config):
+    """The requester's ref reaches the commits endpoint encoded, or not at all.
+
+    Interpolated raw, `../../../../installation/repositories` was collapsed by
+    the HTTP client into another endpoint and `main?x=1` added a query, both
+    sent with an installation token.
+    """
+    requested: list[bytes] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/repos/o/n/installation":
+            return httpx.Response(200, json={"id": 9})
+        if request.url.path == "/app/installations/9/access_tokens":
+            return httpx.Response(
+                201, json={"token": "ghs_read", "expires_at": "2099-01-01T00:00:00Z"}
+            )
+        requested.append(request.url.raw_path)
+        return httpx.Response(200, json={"sha": "f" * 40})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        credentials = GitHubAppCredentials(config, client=client)
+        for ref in ("../../../../installation/repositories", "main?x=1", "..", "-x", "a b"):
+            with pytest.raises(GitHubAppError, match="not a valid Git ref name"):
+                await credentials.resolve_ref("o/n", ref)
+        assert requested == []
+        assert await credentials.resolve_ref("o/n", "release/1.2") == "f" * 40
+        assert await credentials.resolve_ref("o/n", "fix#12%") == "f" * 40
+
+    assert requested == [b"/repos/o/n/commits/release/1.2", b"/repos/o/n/commits/fix%2312%25"]
+
+
+@pytest.mark.parametrize(
+    ("ref", "accepted"),
+    [
+        ("main", True),
+        ("release/1.2", True),
+        ("v1.0.0", True),
+        ("a" * 40, True),
+        ("feature/x#1", True),
+        ("", False),
+        ("@", False),
+        ("-main", False),
+        ("/main", False),
+        ("main/", False),
+        ("main.", False),
+        ("a..b", False),
+        ("a//b", False),
+        ("a@{1}", False),
+        (".hidden", False),
+        ("x/.hidden", False),
+        ("x.lock", False),
+        ("x.lock/y", False),
+        ("a b", False),
+        ("a~1", False),
+        ("a^", False),
+        ("a:b", False),
+        ("a?b", False),
+        ("a*", False),
+        ("a[b", False),
+        ("a\\b", False),
+        ("a\x7fb", False),
+        ("a\nb", False),
+    ],
+)
+def test_ref_names_follow_git_s_own_rules(ref, accepted):
+    from cloud_agent.github_app import is_ref_name
+
+    assert is_ref_name(ref) is accepted
 
 
 def _entitlement_handler(minted: list[dict], listed: list[int]):
@@ -696,6 +870,47 @@ async def test_github_down_while_renewing_is_not_a_revoked_authorization(config)
             await GitHubAppCredentials(_oauth(config), client=client).refresh_user_token("ghr_a")
 
     assert not isinstance(raised.value, UserAuthorizationRevoked)
+
+
+@pytest.mark.parametrize(
+    ("status", "headers", "body"),
+    [
+        (429, {"retry-after": "60"}, {"message": "rate limited"}),
+        (403, {"x-ratelimit-remaining": "0"}, {"message": "API rate limit exceeded"}),
+        (401, {}, {"error": "invalid_client"}),
+        (200, {}, {"error": "incorrect_client_credentials"}),
+        (400, {}, "<html>bad request</html>"),
+    ],
+)
+async def test_a_refusal_that_is_not_about_the_refresh_token_keeps_the_connection(
+    config, status, headers, body
+):
+    """A rate limit or the App's own refused secret must not make the user reconnect."""
+    from cloud_agent.github_app import UserAuthorizationRevoked
+
+    def respond(request):
+        if isinstance(body, str):
+            return httpx.Response(status, headers=headers, text=body)
+        return httpx.Response(status, headers=headers, json=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        with pytest.raises(GitHubAppError) as raised:
+            await GitHubAppCredentials(_oauth(config), client=client).refresh_user_token("ghr_a")
+
+    assert not isinstance(raised.value, UserAuthorizationRevoked)
+    assert raised.value.status == status
+
+
+@pytest.mark.parametrize(("status", "error"), [(200, "bad_refresh_token"), (400, "invalid_grant")])
+async def test_a_finished_refresh_token_is_a_revoked_authorization(config, status, error):
+    """GitHub's own code and the OAuth standard's both settle it: connect again."""
+    from cloud_agent.github_app import UserAuthorizationRevoked
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(status, json={"error": error}))
+    ) as client:
+        with pytest.raises(UserAuthorizationRevoked, match=error):
+            await GitHubAppCredentials(_oauth(config), client=client).refresh_user_token("ghr_a")
 
 
 async def test_only_repositories_the_user_can_push_to_are_theirs(config):

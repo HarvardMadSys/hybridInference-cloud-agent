@@ -7,17 +7,19 @@ the source modules: it sees the routes ``create_app`` actually serves, prefix
 composition included, and fails naming the exact path that would answer
 without the guard.
 
-The owner surface has its own registry-driven check in
-``test_owner_revalidation.py``; the two agree that a browser session reaches
-exactly the surfaces mounted on the main application.
+The owner surface has its own check in ``test_owner_revalidation.py``, which
+walks the same assembled application with this module's ``_flatten``: every
+route, of every method, must revalidate or carry a machine credential.
 """
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from fastapi import APIRouter, Depends, FastAPI
 from fastapi.routing import APIRoute
+from httpx import ASGITransport, AsyncClient
 
 from cloud_agent.api.deps import verify_admin_access
 
@@ -129,6 +131,31 @@ def test_the_admin_prefix_has_routes():
         "/admin/agent/conversations",
     ):
         assert expected in paths, f"{expected} is no longer served; the admin UI calls it"
+
+
+async def test_every_admin_refusal_is_kept_out_of_caches(monkeypatch):
+    """A refusal from any admin route carries ``no-store``, not only a success.
+
+    The routers' own dependency marks the responses they return; FastAPI
+    builds a fresh response for a raised refusal, so that one depends on the
+    application's handlers covering the path. They covered a hand-kept list of
+    prefixes, which every admin router added after it was missing from.
+    """
+    from cloud_agent.app import create_app
+
+    monkeypatch.delenv("ADMIN_TOKEN", raising=False)
+    app = create_app()
+    routes = _admin_routes(app)
+    assert routes
+    cacheable = []
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="https://test") as client:
+        for route in routes:
+            method = sorted(route.methods)[0]
+            path = re.sub(r"\{[^}]+\}", "x", route.path)
+            response = await client.request(method, path)
+            if response.status_code != 401 or response.headers.get("cache-control") != "no-store":
+                cacheable.append(f"{method} {route.path} -> {response.status_code}")
+    assert not cacheable, f"these admin refusals can be stored by an intermediary: {cacheable}"
 
 
 def test_nested_includes_preserve_the_served_path_and_guard():

@@ -17,6 +17,7 @@ from typing import Any
 
 import yaml
 from deploy.release import publish_inputs as pi, release_manifest as rm
+from scripts.ci_image_matrix import image_matrix
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 PUBLISH = REPO_ROOT / ".github/workflows/publish.yml"
@@ -69,9 +70,11 @@ def live_lines(script: str) -> list[str]:
 def test_publication_is_never_reachable_from_a_pull_request() -> None:
     """No `pull_request`: a run is a push to dev, CI finishing on dev, or a hand.
 
-    A `push` fires only for commits on dev, and `workflow_run` executes the copy
-    of this file on the default branch, which is dev: either runs merged code,
-    so a pull request cannot even edit its way in.
+    A `push` fires only for commits on dev and runs dev's copy, and
+    `workflow_run` executes the copy of this file on the default branch, which
+    is main: either runs merged code, so a pull request cannot even edit its way
+    in. A dispatch runs the copy on the ref it is dispatched from, which this
+    file cannot constrain.
     """
     assert set(triggers()) == {"push", "workflow_run", "workflow_dispatch"}
     assert triggers()["push"] == {"branches": ["dev"]}
@@ -176,7 +179,10 @@ def test_nothing_is_published_until_ci_passed_this_exact_commit() -> None:
 def test_the_matrix_is_the_one_ci_verifies() -> None:
     """Same cells, same pools, same build arguments, or the release is not what CI checked."""
     mine = job("artifacts")["strategy"]["matrix"]["artifact"]
-    theirs = yaml.safe_load(CI.read_text())["jobs"]["artifacts"]["strategy"]["matrix"]["artifact"]
+    assert yaml.safe_load(CI.read_text())["jobs"]["artifacts"]["strategy"]["matrix"][
+        "artifact"
+    ] == ("${{ fromJSON(needs.changes.outputs.artifacts) }}")
+    theirs = image_matrix("all")
     assert sorted(mine, key=lambda cell: cell["name"]) == sorted(
         theirs, key=lambda cell: cell["name"]
     )

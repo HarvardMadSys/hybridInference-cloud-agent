@@ -5,6 +5,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+from starlette.datastructures import Headers
 
 from cloud_agent import identity, settings, tokens
 from cloud_agent.api.deps import get_client_ip
@@ -65,7 +66,7 @@ def test_saved_encryption_keys_work_for_clients_constructed_before_admin_setup()
         1,
         settings.encode_changes(
             {
-                "source_control_encryption_key": "test-user-credential-key",
+                "source_control_encryption_key": "test-user-credential-key-of-32-bytes",
                 "compute_encryption_key": "test-compute-key-longer-than-thirty-two-bytes",
             }
         ),
@@ -91,7 +92,7 @@ def test_saved_cookie_proxy_sandbox_manager_and_execution_policies_are_applied()
     )
     assert _cookie_is_secure() is False
     assert (
-        get_client_ip(SimpleNamespace(headers={"x-forwarded-for": "198.51.100.1"}))
+        get_client_ip(SimpleNamespace(headers=Headers({"x-forwarded-for": "198.51.100.1"})))
         == "198.51.100.1"
     )
     assert (
@@ -115,6 +116,8 @@ def test_pgadmin_uses_saved_urls_and_a_saved_reset_ignores_stale_environment(mon
     settings.apply_settings(1, encoded)
     monkeypatch.setenv("AGENT_PGADMIN_URL", "http://stale.example")
     monkeypatch.setenv("AGENT_WEB_BASE_URL", "https://stale.example")
+    # Settings may select only a service the deployment names; this one is named.
+    monkeypatch.setenv("AGENT_PGADMIN_BOOTSTRAP_URL", "http://database-tools:5050")
     config = pgadmin_config()
     assert config is not None
     assert str(config.upstream) == "http://database-tools:5050"

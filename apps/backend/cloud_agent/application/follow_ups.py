@@ -164,12 +164,14 @@ async def prepare_follow_up(
             user=user,
         )
     try:
-        await require_entitled_repo(
-            parent["repo"],
-            user["user_id"],
-            store=store.source_control,
-            app_credentials=app_credentials,
-        )
+        # A temporary workspace has no repository to lose access to.
+        if parent["repo"] is not None:
+            await require_entitled_repo(
+                parent["repo"],
+                user["user_id"],
+                store=store.source_control,
+                app_credentials=app_credentials,
+            )
     except RepoNotAllowed as exc:
         raise HTTPException(
             status_code=403,

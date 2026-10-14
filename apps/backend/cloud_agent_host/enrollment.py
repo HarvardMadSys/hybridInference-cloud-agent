@@ -199,6 +199,14 @@ def store_credential(credential: str) -> None:
         with suppress(FileNotFoundError):
             os.unlink(tmp)
         raise
+    # The rename is durable only once the directory is: the enrollment token is
+    # already spent, and a crash that loses the new entry cannot re-enroll.
+    with suppress(OSError):
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
 
 
 def _post(url: str, body: dict[str, Any], *, bearer: str = "") -> dict[str, Any]:

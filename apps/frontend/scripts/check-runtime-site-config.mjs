@@ -59,7 +59,9 @@
 //  14. every document carries the security headers, its mount point included,
 //      and every script in it is one its Content-Security-Policy allows: the
 //      policy comes from middleware whose matcher is relative to `basePath`,
-//      so a page the matcher misses is only visible in a served build.
+//      so a page the matcher misses is only visible in a served build. A
+//      static script is served with the `next.config.js` headers too, and no
+//      response sends `X-Powered-By`.
 //
 // Run from `apps/frontend/`.
 // Use --saved-config-only to check request-scoped caching against an existing
@@ -107,6 +109,8 @@ function deployment(spec) {
       AGENT_WEB_ORG_NAME: spec.orgName,
       AGENT_WEB_ORG_URL: spec.orgUrl,
       AGENT_WEB_STATUS_URL: spec.statusUrl,
+      AGENT_WEB_DOCS_URL: spec.docsUrl,
+      AGENT_WEB_CONTACT_URL: spec.contactUrl,
       AGENT_WEB_GATEWAY_URL: spec.gatewayUrl,
       AGENT_WEB_FEATURE_RAG: String(spec.rag),
       AGENT_DEPLOYMENT_SHA: spec.version,
@@ -127,6 +131,8 @@ const DEPLOYMENTS = [
     orgName: 'Alpha Research',
     orgUrl: 'https://alpha.example',
     statusUrl: 'https://status.alpha.example/',
+    docsUrl: 'https://docs.alpha.example/agents/',
+    contactUrl: 'mailto:help@alpha.example',
     gatewayUrl: 'https://gateway-alpha.example/authorize',
     rag: true,
   }),
@@ -138,6 +144,8 @@ const DEPLOYMENTS = [
     orgName: 'Beta Research',
     orgUrl: 'https://beta.example',
     statusUrl: 'https://status.beta.example/',
+    docsUrl: 'https://docs.beta.example/',
+    contactUrl: 'https://support.beta.example/',
     gatewayUrl: 'https://gateway-beta.example',
     rag: false,
   }),
@@ -155,6 +163,8 @@ const NEUTRAL = {
   orgName: '',
   orgUrl: '',
   statusUrl: '',
+  docsUrl: '',
+  contactUrl: '',
   gatewayUrl: '',
   rag: false,
 };
@@ -194,6 +204,8 @@ function identityValues(target) {
     ['organisation', target.orgName],
     ['organisation URL', target.orgUrl],
     ['status URL', target.statusUrl],
+    ['documentation URL', target.docsUrl],
+    ['contact URL', target.contactUrl],
     ['gateway origin', target.gatewayOrigin],
   ];
 }
@@ -254,6 +266,8 @@ function expectedIdentity(target) {
     // report that normalization as a mismatch.
     orgUrl: new URL(target.orgUrl).toString(),
     statusUrl: new URL(target.statusUrl).toString(),
+    docsUrl: new URL(target.docsUrl).toString(),
+    contactUrl: new URL(target.contactUrl).toString(),
     gatewayUrl: target.gatewayOrigin,
   };
 }
@@ -563,6 +577,8 @@ function assertBundleIsClean(variant) {
       ['organisation', target.orgName],
       ['organisation URL', target.orgUrl],
       ['status URL', target.statusUrl],
+      ['documentation URL', target.docsUrl],
+      ['contact URL', target.contactUrl],
       ['gateway host', target.gatewayHost],
     ]) {
       if (bundle.includes(value)) {
@@ -649,6 +665,8 @@ async function assertNeutralDeployment(variant) {
     orgName: NEUTRAL.orgName,
     orgUrl: NEUTRAL.orgUrl,
     statusUrl: NEUTRAL.statusUrl,
+    docsUrl: NEUTRAL.docsUrl,
+    contactUrl: NEUTRAL.contactUrl,
     gatewayUrl: NEUTRAL.gatewayUrl,
   };
   if (JSON.stringify(identity) !== JSON.stringify(expected)) {
@@ -778,6 +796,8 @@ async function assertSavedConfigRequestScope(variant) {
       orgName: '',
       orgUrl: '',
       statusUrl: '',
+      docsUrl: '',
+      contactUrl: '',
       gatewayUrl: '',
     };
     for (const stalled of ['slow headers', 'slow body']) {
@@ -833,6 +853,8 @@ function assertStaticSecurityHeaders(where, headers) {
       fail(`${where}: ${name} is ${JSON.stringify(headers.get(name))}, expected ${value}`);
     }
   }
+  // `poweredByHeader: false` in `next.config.js`.
+  if (headers.has('x-powered-by')) fail(`${where}: the response still sends X-Powered-By`);
 }
 
 /**
@@ -900,6 +922,10 @@ async function assertSecurityHeaders(variant) {
     if (!asset) fail(`${variant.name}: no script asset to read the static headers from`);
     const response = await fetch(`${origin}${asset}`);
     await response.arrayBuffer();
+    // Headers on a 404 would say nothing about the handler that serves assets.
+    if (response.status !== 200) {
+      fail(`${variant.name}: GET ${asset} answered ${response.status}\n${server.logs.join('')}`);
+    }
     assertStaticSecurityHeaders(`${variant.name} / security headers of ${asset}`, response.headers);
   } finally {
     await server.stop();

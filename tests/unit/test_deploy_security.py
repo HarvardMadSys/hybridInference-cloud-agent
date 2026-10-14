@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from scripts.ci_image_matrix import image_matrix
 
 REPO = Path(__file__).resolve().parents[2]
 COMPOSE_PATH = REPO / "deploy/host/docker-compose.sandbox.yml"
@@ -90,7 +91,8 @@ def test_ci_images_build_on_their_deployment_architecture() -> None:
     workflow = yaml.safe_load((WORKFLOW_DIR / "ci.yml").read_text())
     matrix = workflow["jobs"]["artifacts"]["strategy"]["matrix"]
     assert set(matrix) == {"artifact"}
-    cells = matrix["artifact"]
+    assert matrix["artifact"] == "${{ fromJSON(needs.changes.outputs.artifacts) }}"
+    cells = image_matrix("all")
     x64 = ["self-hosted", "Linux", "X64", "image-verify-x64"]
     arm64 = ["self-hosted", "Linux", "ARM64", "image-verify-arm64"]
     expected = {
@@ -217,10 +219,12 @@ def test_every_docker_socket_holder_is_known_and_read_only(compose: dict) -> Non
     """The socket is the host's keys — the holder list is pinned, not open.
 
     Two services legitimately hold it: the runner starts each sandbox, and the
-    sandbox manager execs into a running one to serve terminals. Both read-only. This
-    asserts the *set*, so a third service acquiring the socket fails here
-    rather than being noticed later, and it asserts read-only per holder rather
-    than only for the runner.
+    sandbox manager execs into a running one to serve terminals. Both mount it
+    `:ro`, which is their convention and nothing more: a read-only bind mount
+    does not narrow the Docker API, and either holder can start a privileged
+    container. The *set* is the control, so a third service acquiring the
+    socket fails here rather than being noticed later; the convention is
+    asserted per holder rather than only for the runner.
     """
     holders = {
         name: [m for m in _mounts(svc) if "docker.sock" in m]

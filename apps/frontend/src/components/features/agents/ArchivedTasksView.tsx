@@ -10,9 +10,9 @@ import {
   setAgentSessionsArchived,
   type AgentSessionApi,
   type AgentSessionListOptions,
-  type AgentSessionProjectApi,
 } from '@/lib/api/agents';
 import { onAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
+import { projectKey } from '@/lib/temporaryWorkspace';
 import { APIError } from '@/lib/utils/errors';
 import {
   ARCHIVE_FOCUS,
@@ -21,7 +21,8 @@ import {
   SESSION_ERROR_KEYS,
 } from './ArchiveControls';
 import { ArchiveAutoLoad } from './ArchiveAutoLoad';
-import { ArchiveProjectSection } from './ArchiveProjectSection';
+import { ArchiveProjectSection, type ArchiveProject } from './ArchiveProjectSection';
+import { projectTitle } from './conversations';
 import { CONVERSATION_STATE_KEYS, type ConversationState } from './conversationState';
 
 const GROUPS_PER_PAGE = 6;
@@ -47,7 +48,7 @@ export function ArchivedTasksView() {
   const [query, setQuery] = useState('');
   const [repo, setRepo] = useState('');
   const [state, setState] = useState<ConversationState | ''>('');
-  const [projects, setProjects] = useState<AgentSessionProjectApi[]>([]);
+  const [projects, setProjects] = useState<ArchiveProject[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -123,7 +124,10 @@ export function ArchivedTasksView() {
         if (controller.signal.aborted) return;
         if (result.projects === null || result.total === null)
           throw new Error('Archive summary is missing');
-        setProjects(result.projects);
+        // Keyed like the sidebar, so the temporary workspaces are one project.
+        setProjects(
+          result.projects.map((project) => ({ ...project, repo: projectKey(project.repo) })),
+        );
         setTotal(result.total);
         loadedFilters.current = filters;
         setLoading(false);
@@ -467,11 +471,11 @@ export function ArchivedTasksView() {
           >
             <option value="">{t('archive.allProjects')}</option>
             {repo && !projects.some((project) => project.repo === repo) ? (
-              <option value={repo}>{repo}</option>
+              <option value={repo}>{projectTitle(repo, t)}</option>
             ) : null}
             {projects.map((project) => (
               <option key={project.repo} value={project.repo}>
-                {project.repo}
+                {projectTitle(project.repo, t)}
               </option>
             ))}
           </select>

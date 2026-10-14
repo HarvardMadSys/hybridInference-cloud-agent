@@ -751,6 +751,57 @@ async def test_a_token_from_a_superseded_generation_is_refused(
     assert store.measurements.rows == []
 
 
+async def test_a_measurement_lands_after_its_attempt_has_just_ended(
+    client: AsyncClient, store: FakeStorage
+):
+    """No live lease is needed: a short turn can end before its record arrives."""
+    job = await _claimed_job(client, store)
+    store.attempts[1]["status"] = "finished"
+    store.attempts[1]["finished_at"] = datetime.now(UTC) - timedelta(minutes=5)
+
+    response = await client.post(
+        f"/v1/agent/worker/jobs/{job['id']}/measurements",
+        json={"record": _record(), "run": _manifest()},
+        headers={"Authorization": f"Bearer {_token_for(job)}"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert len(store.measurements.rows) == 1
+
+
+@pytest.mark.parametrize(
+    "ended",
+    [
+        {"status": "finished", "finished_at": datetime.now(UTC) - timedelta(hours=2)},
+        {"status": "superseded", "finished_at": datetime.now(UTC) - timedelta(days=30)},
+        # Not running, and no end on record: nothing says it ended recently.
+        {"status": "aborted", "finished_at": None},
+    ],
+    ids=["finished_hours_ago", "superseded_long_ago", "no_recorded_end"],
+)
+async def test_a_token_for_an_attempt_long_over_files_nothing(
+    client: AsyncClient, store: FakeStorage, ended: dict[str, Any]
+):
+    """A worker token carries no expiry, so the window has to end somewhere.
+
+    Accepting a record for any attempt the token ever named let a token from a
+    finished or superseded attempt — or one a removed host still held — keep
+    inserting measurement rows for as long as it was kept.
+    """
+    job = await _claimed_job(client, store)
+    store.attempts[1].update(ended)
+
+    response = await client.post(
+        f"/v1/agent/worker/jobs/{job['id']}/measurements",
+        json={"record": _record(), "run": _manifest()},
+        headers={"Authorization": f"Bearer {_token_for(job)}"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["error"]["type"] == "lease_lost"
+    assert store.measurements.rows == []
+
+
 async def test_attribution_comes_from_the_attempt_that_ran_it(
     client: AsyncClient, store: FakeStorage
 ):

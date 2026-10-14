@@ -44,6 +44,11 @@ import { EnvironmentPicker, type EnvironmentSelection } from './environment/Envi
 import { UserAvatar } from './UserAvatar';
 import { UserHomeInsights } from './UserHomeInsights';
 import { useUserHomeProfile } from './useUserHomeProfile';
+import { TEMPORARY_WORKSPACE } from '@/lib/temporaryWorkspace';
+import {
+  TemporaryWorkspaceConfirm,
+  useTemporaryWorkspaceAcknowledgement,
+} from './TemporaryWorkspace';
 
 const SkillSelectionDialog = lazy(() =>
   import('./skills/SkillPicker').then((module) => ({ default: module.SkillSelectionDialog })),
@@ -97,6 +102,15 @@ function readNewTaskDraft(value: string): NewTaskDraft | null {
   }
 }
 
+/**
+ * The repositories a task may be sent to now. Choosing one needs a connected
+ * GitHub, allowlisted repositories included — `/config` lists those either
+ * way — so until then the temporary workspace is the only place to run.
+ */
+function selectableRepos(config: AgentConfigApi | null): string[] {
+  return config?.github_connected ? config.repos : [];
+}
+
 function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; userId?: string }) {
   const router = useRouter();
   const t = useT();
@@ -132,18 +146,29 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
   // failure: nothing was created and nothing was sent.
   const [goalHint, setGoalHint] = useState<string | null>(null);
   const [dropping, setDropping] = useState(false);
+  // Drops whose folders are still being walked; their files are not attached yet.
+  const [readingDrops, setReadingDrops] = useState(0);
   const taskBox = useRef<HTMLTextAreaElement>(null);
   const [config, setConfig] = useState<AgentConfigApi | null>(null);
   const [models, setModels] = useState<string[]>([]);
   // Empty until the owner picks one. A task changes a real repository, so
-  // where it runs is never a default — see RepositoryPicker.
+  // where it runs is never a default — see RepositoryPicker. The one exception
+  // is the temporary workspace (`TEMPORARY_WORKSPACE`), which changes no
+  // repository at all: with no repository to choose from it is chosen.
   const [repo, setRepo] = useState(draft?.repo ?? '');
+  const temporary = repo === TEMPORARY_WORKSPACE;
+  const acknowledgement = useTemporaryWorkspaceAcknowledgement(userId);
+  // The first temporary workspace's first message waits here for its owner to
+  // say they know what one keeps.
+  const [confirmOpen, setConfirmOpen] = useState(false);
   const [environmentStatus, setEnvironmentStatus] = useState<'loading' | 'ready' | 'error'>(
     'loading',
   );
   const [environmentSelection, setEnvironmentSelection] = useState<EnvironmentSelection | null>(
     null,
   );
+  const [environmentOpen, setEnvironmentOpen] = useState(false);
+  const [environmentSummary, setEnvironmentSummary] = useState('');
   const [repoPickerOpen, setRepoPickerOpen] = useState(false);
   // Enter with no repository opens the picker; the choice then hands the caret
   // back to the task, so a second Enter sends it.
@@ -155,10 +180,6 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
   const [createRepositoryOpen, setCreateRepositoryOpen] = useState(false);
   // Which trip to GitHub is starting: connecting, or adding repository access.
   const [leaving, setLeaving] = useState<'connect' | 'manage' | null>(null);
-  // The owner tried to run a task written before connecting GitHub. The card
-  // above is then the step still missing, so it is pointed at rather than the
-  // key ignored — and the text stays, because the trip to GitHub keeps it.
-  const [connectNudged, setConnectNudged] = useState(false);
   const headingId = useId();
   const keyboardHintId = useId();
   // Someone with no conversation yet is told, in one line, what a task becomes.
@@ -204,8 +225,18 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
     setConfig(cfg);
     setModels(modelIds);
     // A re-read keeps every choice still on offer and drops only the ones that
-    // are not. The repository is never filled in: see the effect below.
-    setRepo((current) => (current && cfg.repos.includes(current) ? current : ''));
+    // are not. A repository is never filled in: see the effect below. With no
+    // repository on offer — GitHub not connected, down, or giving the App none
+    // — the temporary workspace is the only place a task can run, and it
+    // changes no real repository, so it is chosen.
+    const repos = selectableRepos(cfg);
+    setRepo((current) =>
+      current === TEMPORARY_WORKSPACE || (current && repos.includes(current))
+        ? current
+        : repos.length === 0
+          ? TEMPORARY_WORKSPACE
+          : '',
+    );
     setRuntime((current) =>
       current && cfg.runtimes.includes(current) ? current : (cfg.runtimes[0] ?? ''),
     );
@@ -228,6 +259,15 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
   // the repositories come back.
   const appliedRequest = useRef<string | null>(null);
   useEffect(() => {
+    // "New task" in the temporary workspaces' folder asks for one, which needs
+    // no connection and is always on offer.
+    if (initialRepo === TEMPORARY_WORKSPACE) {
+      if (!config || appliedRequest.current === initialRepo) return;
+      appliedRequest.current = initialRepo;
+      setRepo(TEMPORARY_WORKSPACE);
+      setUnavailableRepo(null);
+      return;
+    }
     if (!config?.github_connected || appliedRequest.current === (initialRepo ?? '')) return;
     const first = appliedRequest.current === null;
     appliedRequest.current = initialRepo ?? '';
@@ -239,7 +279,7 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
       if (
         (!initialRepo || draft.repo === initialRepo) &&
         draft.repo &&
-        config.repos.includes(draft.repo)
+        (draft.repo === TEMPORARY_WORKSPACE || config.repos.includes(draft.repo))
       ) {
         setRepo(draft.repo);
         setUnavailableRepo(null);
@@ -247,7 +287,7 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
       }
     }
     const available = Boolean(initialRepo && config.repos.includes(initialRepo));
-    setRepo(available ? initialRepo! : '');
+    setRepo(available ? initialRepo! : config.repos.length === 0 ? TEMPORARY_WORKSPACE : '');
     setUnavailableRepo(initialRepo && !available ? initialRepo : null);
     // Back with a task written and nowhere to run it yet — the usual shape of
     // a first visit, which connects GitHub mid-sentence. Ask where, as Enter
@@ -334,7 +374,8 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
     setBranchOptionsRepo(null);
     setBranches([]);
     setBranch('');
-    if (!repo || !config?.github_connected) return undefined;
+    // A temporary workspace has no branches: it starts from one empty commit.
+    if (!repo || temporary || !config?.github_connected) return undefined;
     let cancelled = false;
     listRepoBranches(repo)
       .then((found) => {
@@ -358,7 +399,7 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
     return () => {
       cancelled = true;
     };
-  }, [config?.github_connected, repo, draft]);
+  }, [config?.github_connected, repo, temporary, draft]);
 
   // `mcp_runtimes` has been reported by /config since MCP landed and read by
   // nothing; an older control plane omits it, and not knowing is not the same
@@ -378,33 +419,30 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
   const pluginsBlocked = plugins.length > 0 && (!pluginsSupported || incompatiblePlugins);
 
   const disconnected = config?.github_connected === false;
-  // Someone who can go and connect may write the task first: the trip keeps
-  // it. Where nobody can connect right now — the deployment has no App, or its
-  // App is down — there is nothing for a draft to wait for.
+  // Whether the owner can go and connect GitHub right now. Nobody needs to:
+  // without a repository a task runs in a temporary workspace.
   const canConnect = Boolean(config?.github_install_url) && !githubUnavailable;
-  const locked = disconnected && !canConnect;
+  // A configured App that failed to load stops every new task, a temporary
+  // workspace's too: the create endpoint answers 503 until it is back. The
+  // composer looks again by itself (above), so there is nothing to do but wait.
+  const locked = githubUnavailable;
   // Connected, and GitHub has given the App no repository yet: a step still to
   // take, not a connection to make again.
   const noRepositories = config?.github_connected === true && config.repos.length === 0;
   const busy =
-    submitting ||
-    goalCommand.busy ||
-    rewriting ||
-    Boolean(config?.environment_limits && repo && environmentStatus === 'loading');
+    submitting || goalCommand.busy || rewriting || Boolean(repo && environmentStatus === 'loading');
   const missingRepository = config?.github_connected === true && !repo;
   const canRun =
-    config?.github_connected === true &&
+    !locked &&
+    (temporary || (config?.github_connected === true && Boolean(repo))) &&
     task.trim().length > 0 &&
     !busy &&
-    !(
-      config?.environment_limits &&
-      repo &&
-      !environmentSelection &&
-      environmentStatus !== 'error'
-    ) &&
+    !(repo && !environmentSelection && environmentStatus !== 'error') &&
     // A file still in flight has no id yet. Running now would queue a job
     // without the attachment the user can see on screen.
     !attachments.uploading &&
+    // Nor while a dropped folder is still being read, before its files exist.
+    readingDrops === 0 &&
     !pluginsBlocked &&
     Boolean(repo && runtime && model);
 
@@ -417,11 +455,18 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
   async function goToGitHub(kind: 'connect' | 'manage') {
     setLeaving(kind);
     setError(null);
+    if (temporary) {
+      // Either trip is for a repository: come back to the picker, not to the
+      // temporary workspace the owner is leaving to get one.
+      saveDraft(
+        JSON.stringify({ task, repo: '', runtime, model, effort, branch: savedBranch, plugins }),
+      );
+    }
     rememberReturn(
       initialRepo ? `/?repo=${encodeURIComponent(initialRepo)}` : '/',
       {
         task,
-        repo,
+        repo: temporary ? '' : repo,
         runtime,
         model,
       },
@@ -515,7 +560,8 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
    */
   function requestBody(prompt: string, goal?: GoalInputApi): CreateAgentJobRequest {
     return {
-      repo,
+      // Null starts a temporary workspace; the server pins its empty base.
+      repo: temporary ? null : repo,
       task_prompt: prompt,
       // Defaults are resolved by the server. Only an explicit picker change
       // belongs in the request, so retries are independent of library edits.
@@ -565,16 +611,17 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
     if (mounted.current) router.push(`/${job.id}`);
   }
 
-  async function run() {
+  async function run(acknowledged = acknowledgement.acknowledged) {
     if (!canRun) {
-      // Written before connecting GitHub: point at the step that is missing.
-      if (disconnected && canConnect && task.trim() && !busy) {
-        setConnectNudged(true);
-        return;
-      }
       // The one thing missing is where to run it: ask, rather than ignore the
       // key. Nothing is sent until a repository has actually been chosen.
       if (missingRepository && task.trim() && !busy) openRepositoryPicker(true);
+      return;
+    }
+    // The first temporary workspace waits for its owner to say they know its
+    // files are kept nowhere else. The draft stays in the box meanwhile.
+    if (temporary && !acknowledged) {
+      setConfirmOpen(true);
       return;
     }
     // A command is not a message. It runs the thing it names and, when that
@@ -625,25 +672,21 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
           {t('composer.heading')}
         </h1>
         <p className="mx-auto mt-1.5 max-w-md text-balance text-center text-[13px] leading-5 text-muted">
-          {firstVisit ? t('composer.subheadingFirstVisit') : t('composer.subheading')}
+          {temporary && firstVisit
+            ? t('composer.subheadingTemporary')
+            : firstVisit
+              ? t('composer.subheadingFirstVisit')
+              : t('composer.subheading')}
         </p>
       </div>
 
-      {disconnected ? (
+      {locked ? (
         <div className="mt-5">
-          <ConnectSourceControl
-            installUrl={config.github_install_url}
-            unavailable={githubUnavailable}
-            onAction={() => void goToGitHub('connect')}
-            pending={leaving === 'connect'}
-            highlight={connectNudged}
-          />
+          <ConnectSourceControl unavailable />
         </div>
       ) : noRepositories ? (
         <div className="mt-5">
           <ConnectSourceControl
-            installUrl={config.github_install_url}
-            step="repositories"
             onAction={() => void goToGitHub('manage')}
             pending={leaving === 'manage'}
           />
@@ -666,7 +709,7 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
         // takes files and folders in a single gesture — a file input can offer
         // one or the other, never both.
         onDragOver={(event) => {
-          if (disconnected || !event.dataTransfer.types.includes('Files')) return;
+          if (locked || !event.dataTransfer.types.includes('Files')) return;
           event.preventDefault();
           setDropping(true);
         }}
@@ -675,16 +718,19 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
           setDropping(false);
         }}
         onDrop={(event) => {
-          if (disconnected) return;
+          if (locked) return;
           event.preventDefault();
           setDropping(false);
-          void filesFromDataTransfer(event.dataTransfer).then((files) => {
-            if (files.length) attachments.add(files);
-          });
+          setReadingDrops((count) => count + 1);
+          void filesFromDataTransfer(event.dataTransfer)
+            .then((files) => {
+              if (files.length) attachments.add(files);
+            })
+            .finally(() => setReadingDrops((count) => count - 1));
         }}
         className={`ui-composer ${
           dropping ? 'border-accent/40 ring-4 ring-accent/[0.08]' : ''
-        } ${disconnected || noRepositories ? 'mt-3' : 'mt-5'} ${locked ? 'bg-surface-muted' : ''}`}
+        } ${locked || noRepositories ? 'mt-3' : 'mt-5'} ${locked ? 'bg-surface-muted' : ''}`}
       >
         <ComposerCommandMenu
           id={goalCommand.menuId}
@@ -698,7 +744,7 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
           rows={4}
           value={task}
           onPaste={(event) => {
-            if (disconnected || busy) return;
+            if (locked || busy) return;
             attachments.onPaste(event);
           }}
           onChange={(event) => {
@@ -724,136 +770,112 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
           // No placeholder: the heading above already asks the question, and
           // an example task read as a suggestion to run it.
           id={NEW_TASK_PROMPT_ID}
+          disabled={locked}
           aria-labelledby={headingId}
           aria-describedby={keyboardHintId}
-          disabled={locked}
           className="block min-h-[88px] w-full resize-y rounded-t-xl border-0 bg-transparent px-4 pb-2 pt-3 text-sm leading-6 text-foreground focus:outline-none focus:ring-0 disabled:cursor-not-allowed sm:min-h-[104px]"
         />
 
-        {disconnected ? null : (
-          <AttachmentStrip
-            entries={attachments.entries}
-            onRemove={attachments.remove}
-            disabled={submitting}
-          />
-        )}
+        <AttachmentStrip
+          entries={attachments.entries}
+          onRemove={attachments.remove}
+          disabled={submitting}
+        />
 
-        {!disconnected && (
-          <PromptRewrite
-            value={task}
-            model={model}
-            disabled={submitting || goalCommand.busy || /^\s*\//.test(task)}
-            onActiveChange={setRewriting}
-            onApply={(prompt) => {
-              setTask(prompt);
-              taskBox.current?.focus();
-            }}
-          />
-        )}
+        <PromptRewrite
+          value={task}
+          model={model}
+          disabled={submitting || goalCommand.busy || /^\s*\//.test(task)}
+          onActiveChange={setRewriting}
+          onApply={(prompt) => {
+            setTask(prompt);
+            taskBox.current?.focus();
+          }}
+        />
 
-        {config?.environment_limits && (
-          <EnvironmentPicker
-            repo={repo}
-            onChange={setEnvironmentSelection}
-            onStatusChange={setEnvironmentStatus}
-          />
-        )}
+        <EnvironmentPicker
+          key={repo}
+          repo={temporary ? '' : repo}
+          temporary={temporary}
+          open={environmentOpen}
+          onClose={() => setEnvironmentOpen(false)}
+          onChange={setEnvironmentSelection}
+          onStatusChange={setEnvironmentStatus}
+          onSummaryChange={setEnvironmentSummary}
+        />
         <div className="flex min-w-0 flex-nowrap items-center gap-1 rounded-b-xl border-t border-border bg-surface-muted/50 p-2">
-          {disconnected ? (
-            <span
-              aria-live="polite"
-              className={`inline-flex min-w-0 flex-1 items-center gap-2 text-[13px] ${
-                connectNudged
-                  ? 'text-crimson-dark dark:text-crimson-light'
-                  : 'text-gray-400 dark:text-gray-500'
-              }`}
-            >
-              <svg
-                className="h-4 w-4 shrink-0"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth={2}
-                aria-hidden="true"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  d="M8 10V7a4 4 0 0 1 8 0v3m-9 0h10a1 1 0 0 1 1 1v8H6v-8a1 1 0 0 1 1-1Z"
-                />
-              </svg>
-              {connectNudged ? t('composer.connectToRunKept') : t('composer.connectToRun')}
-            </span>
-          ) : (
-            <>
-              <ComposerPlusMenu
-                disabled={busy}
-                onOpen={goalCommand.dismiss}
-                onFiles={attachments.add}
-                onOpenSkills={() => setSkillsOpen(true)}
-                skillSummary={
-                  pendingSkillDefaults ? t('attach.skillsDefaults') : String(selectedSkills.length)
-                }
-                goalSummary={t('commands.goalHint')}
-                onOpenGoal={insertGoalCommand}
-                mcp={mcp}
-                mcpBlockedReason={mcpBlockedReason}
-                onOpenPlugins={
-                  pluginsSupported || plugins.length ? () => setPluginsOpen(true) : undefined
-                }
-                pluginSummary={String(plugins.length)}
-              />
-              <span aria-hidden="true" className="mx-0.5 h-4 w-px shrink-0 bg-border" />
-              {/* Leave the scroller unpositioned so the repository menu anchors
+          <ComposerPlusMenu
+            disabled={busy}
+            onOpen={goalCommand.dismiss}
+            onFiles={attachments.add}
+            onOpenSkills={() => setSkillsOpen(true)}
+            skillSummary={
+              pendingSkillDefaults ? t('attach.skillsDefaults') : String(selectedSkills.length)
+            }
+            goalSummary={t('commands.goalHint')}
+            onOpenGoal={insertGoalCommand}
+            mcp={mcp}
+            mcpBlockedReason={mcpBlockedReason}
+            onOpenPlugins={
+              pluginsSupported || plugins.length ? () => setPluginsOpen(true) : undefined
+            }
+            pluginSummary={String(plugins.length)}
+            onOpenEnvironment={repo ? () => setEnvironmentOpen(true) : undefined}
+            environmentSummary={environmentSummary}
+          />
+          <span aria-hidden="true" className="mx-0.5 h-4 w-px shrink-0 bg-border" />
+          {/* Leave the scroller unpositioned so the repository menu anchors
                   to the composer and can extend outside the scroll area. */}
-              <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto [&>button]:shrink-0 [&>button]:whitespace-nowrap [&>label]:shrink-0 [&>label]:whitespace-nowrap">
-                <RepositoryPicker
-                  repos={config?.repos ?? []}
-                  value={repo}
-                  onChange={chooseRepository}
-                  open={repoPickerOpen}
-                  onOpenChange={(next) => {
-                    if (next) openRepositoryPicker(false);
-                    else setRepoPickerOpen(false);
-                  }}
-                  onRefresh={() => void refreshRepositories()}
-                  refreshing={refreshing}
-                  onConfigure={
-                    config?.github_install_url ? () => void goToGitHub('manage') : undefined
-                  }
-                  onCreate={() => {
-                    if (!rewriting && !submitting) setCreateRepositoryOpen(true);
-                  }}
-                  createDisabled={rewriting || submitting}
-                  returnFocusTo={repoPickerFromTask ? taskBox : undefined}
-                />
-                <Picker
-                  label={t('composer.branch')}
-                  value={branch}
-                  options={branches}
-                  onChange={setBranch}
-                />
-                <Picker
-                  label={t('composer.agent')}
-                  value={runtime}
-                  options={config?.runtimes ?? []}
-                  onChange={setRuntime}
-                />
-                <Picker
-                  label={t('composer.model')}
-                  value={model}
-                  options={models}
-                  onChange={setModel}
-                />
-                <Picker
-                  label={t('composer.reasoning')}
-                  value={effort}
-                  options={efforts}
-                  onChange={setEffort}
-                />
-              </div>
-            </>
-          )}
+          <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto [&>button]:shrink-0 [&>button]:whitespace-nowrap [&>label]:shrink-0 [&>label]:whitespace-nowrap">
+            <RepositoryPicker
+              repos={selectableRepos(config)}
+              value={repo}
+              onChange={chooseRepository}
+              open={repoPickerOpen}
+              onOpenChange={(next) => {
+                if (next) openRepositoryPicker(false);
+                else setRepoPickerOpen(false);
+              }}
+              onRefresh={() => void refreshRepositories()}
+              onConfigure={config?.github_install_url ? () => void goToGitHub('manage') : undefined}
+              onCreate={() => {
+                if (!rewriting && !submitting) setCreateRepositoryOpen(true);
+              }}
+              // Repository access is GitHub's to give; until it is connected
+              // the picker offers the connection instead of managing any.
+              disconnected={disconnected}
+              onConnect={canConnect ? () => void goToGitHub('connect') : undefined}
+              refreshing={refreshing}
+              createDisabled={rewriting || submitting}
+              returnFocusTo={repoPickerFromTask ? taskBox : undefined}
+            />
+            {temporary ? null : (
+              <Picker
+                label={t('composer.branch')}
+                value={branch}
+                options={branches}
+                onChange={setBranch}
+              />
+            )}
+            <Picker
+              label={t('composer.agent')}
+              value={runtime}
+              options={config?.runtimes ?? []}
+              onChange={setRuntime}
+            />
+            <Picker
+              label={t('composer.model')}
+              value={model}
+              options={models}
+              onChange={setModel}
+            />
+            <Picker
+              label={t('composer.reasoning')}
+              value={effort}
+              options={efforts}
+              onChange={setEffort}
+            />
+          </div>
 
           <button
             type="button"
@@ -882,6 +904,20 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
           {pluginBlockedReason}{' '}
           <button type="button" className="underline" onClick={() => setPluginsOpen(true)}>
             {t('plugins.manage')}
+          </button>
+        </p>
+      ) : null}
+
+      {disconnected && canConnect ? (
+        // Never in the way: a task runs without it, in a temporary workspace.
+        <p className="mt-3 text-center text-xs leading-5">
+          <button
+            type="button"
+            onClick={() => void goToGitHub('connect')}
+            disabled={leaving === 'connect'}
+            className="ui-focus-ring rounded font-medium text-accent hover:underline disabled:cursor-wait disabled:opacity-70"
+          >
+            {leaving === 'connect' ? t('connect.leaving') : t('temporaryWorkspace.connect')}
           </button>
         </p>
       ) : null}
@@ -942,6 +978,17 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
             }}
           />
         </Suspense>
+      ) : null}
+      {confirmOpen ? (
+        <TemporaryWorkspaceConfirm
+          returnFocus={taskBox}
+          onCancel={() => setConfirmOpen(false)}
+          onConfirm={() => {
+            acknowledgement.acknowledge();
+            setConfirmOpen(false);
+            void run(true);
+          }}
+        />
       ) : null}
       <DeferredCreateRepositoryDialog
         open={createRepositoryOpen}

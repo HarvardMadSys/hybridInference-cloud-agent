@@ -386,10 +386,10 @@ def test_backend_refuses_claim_readiness_when_observer_probe_fails(monkeypatch):
 )
 def test_relay_names_use_the_current_bridge_endpoint(monkeypatch, address, alias, valid):
     manager = _network_manager()
-    monkeypatch.setattr(manager, "_relay_aliases", lambda: (alias,))
-    monkeypatch.setattr(manager, "_relay_owners", lambda: {"relay-id": [alias]})
+    monkeypatch.setattr(manager._network_lifecycle, "_relay_aliases", lambda: (alias,))
+    monkeypatch.setattr(manager._network_lifecycle, "_relay_owners", lambda: {"relay-id": [alias]})
     monkeypatch.setattr(
-        manager,
+        manager._network_lifecycle,
         "_inspect_network",
         lambda network: {
             "Containers": {
@@ -421,7 +421,7 @@ def test_guest_network_sync_replaces_relays_and_resolver_and_is_idempotent(monke
         networks=("group-net",),
         sandbox_runtime=KATA_RUNTIME,
     )
-    monkeypatch.setattr(manager, "network_for", lambda spec: "group-net")
+    monkeypatch.setattr(manager._network_lifecycle, "network_for", lambda spec: "group-net")
     hosts = tmp_path / "hosts"
     hosts.write_text(
         "127.0.0.1 localhost\n# BEGIN FREEINFERENCE RELAYS\n10.1.0.2 old-proxy\n"
@@ -433,7 +433,7 @@ def test_guest_network_sync_replaces_relays_and_resolver_and_is_idempotent(monke
         path.chmod(0o644)
     guest = {"/etc/hosts": hosts, "/etc/resolv.conf": resolv}
     addresses = {"agent-gateway": "10.2.0.2", "agent-mcp": "10.2.0.3"}
-    monkeypatch.setattr(manager, "relay_addresses", lambda network: addresses)
+    monkeypatch.setattr(manager._network_lifecycle, "relay_addresses", lambda network: addresses)
     actual_open, actual_stat = os.open, os.fstat
     monkeypatch.setattr(os, "open", lambda path, flags: actual_open(guest.get(path, path), flags))
     monkeypatch.setattr(
@@ -478,8 +478,8 @@ def test_guest_network_sync_refuses_a_file_the_guest_user_could_rewrite(monkeypa
         networks=("group-net",),
         sandbox_runtime=KATA_RUNTIME,
     )
-    monkeypatch.setattr(manager, "network_for", lambda spec: "group-net")
-    monkeypatch.setattr(manager, "relay_addresses", lambda network: {})
+    monkeypatch.setattr(manager._network_lifecycle, "network_for", lambda spec: "group-net")
+    monkeypatch.setattr(manager._network_lifecycle, "relay_addresses", lambda network: {})
     hosts = tmp_path / "hosts"
     hosts.write_text("127.0.0.1 localhost\n")
     hosts.chmod(0o644)

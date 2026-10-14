@@ -34,6 +34,7 @@ from cloud_agent.ports.external.compute_provider import (
 from cloud_agent.ports.external.host_bootstrap import (
     BootstrapResult,
     DeploymentProfile,
+    HostInventory,
     PreflightResult,
 )
 from cloud_agent.schemas_compute import RenewalPolicy
@@ -473,6 +474,66 @@ async def test_unknown_or_pending_extension_is_only_queried_until_confirmed(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("pending_receipt", [False, True])
+async def test_an_extension_never_applied_stops_holding_the_allocation(
+    monkeypatch, pending_receipt
+):
+    """Every other operation of the server waits for it: the wait must end."""
+    h = harness(monkeypatch, kind="extend", identified=True)
+    if pending_receipt:
+        # Accepted, but the expiration never moves.
+        h.provider.extend.return_value = ProviderReceipt(
+            outcome="pending", resource=REF, observation=observed()
+        )
+    else:
+        # The adapter's answer to an HTTP 5xx or a timeout on the request.
+        h.provider.extend.return_value = ProviderReceipt(outcome="unknown", resource=REF)
+    await h.reconciler.execute(h.operation)
+    assert (h.operation["state"], h.operation["result"]["external_pending"]) == ("waiting", True)
+    monkeypatch.setattr(compute_reconcile, "_now", lambda: NOW + timedelta(minutes=9))
+    await h.reconciler.execute(h.operation)
+    assert (h.operation["state"], h.operation["result"]["external_pending"]) == ("waiting", True)
+    monkeypatch.setattr(compute_reconcile, "_now", lambda: NOW + timedelta(minutes=11))
+    await h.reconciler.execute(h.operation)
+    assert (h.operation["state"], h.operation["step"]) == ("blocked", "extension_unconfirmed")
+    assert h.operation["result"]["external_pending"] is False
+    assert [reason["code"] for reason in h.operation["result"]["blocked_reasons"]] == [
+        "extension_unconfirmed"
+    ]
+    h.provider.extend.assert_awaited_once()
+    # An administrator's retry queries first, then sends the same absolute target.
+    h.provider.extend.return_value = ProviderReceipt(
+        outcome="confirmed", resource=REF, observation=observed(expires=TARGET)
+    )
+    await h.reconciler.execute(h.operation)
+    assert h.operation["state"] == "succeeded"
+    assert [call.args[1].target_expires_at for call in h.provider.extend.await_args_list] == [
+        TARGET,
+        TARGET,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_an_extension_recorded_without_its_send_time_is_timed_from_now(monkeypatch):
+    h = harness(monkeypatch, kind="extend", identified=True)
+    h.operation.update(
+        created_at=NOW - timedelta(days=1),
+        step="confirming_extension",
+        result={
+            "extension_requested": True,
+            "external_pending": True,
+            "extension_initial_expires_at": (NOW + timedelta(hours=4)).isoformat(),
+        },
+    )
+    await h.reconciler.execute(h.operation)
+    assert (h.operation["state"], h.operation["step"]) == ("waiting", "confirming_extension")
+    monkeypatch.setattr(compute_reconcile, "_now", lambda: NOW + timedelta(minutes=11))
+    await h.reconciler.execute(h.operation)
+    assert (h.operation["state"], h.operation["step"]) == ("blocked", "extension_unconfirmed")
+    h.provider.extend.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_partial_extension_is_not_reported_as_success(monkeypatch):
     h = harness(monkeypatch, kind="extend", identified=True)
     h.provider.extend.return_value = ProviderReceipt(
@@ -484,6 +545,46 @@ async def test_partial_extension_is_not_reported_as_success(monkeypatch):
     assert h.operation["state"] == "blocked"
     assert h.operation["step"] == "partial_extension"
     h.provider.extend.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_an_expiration_kept_to_the_minute_is_the_full_extension(monkeypatch):
+    """A provider that stores expirations coarsely has still granted the request."""
+    target = (NOW + timedelta(hours=8)).replace(second=30, microsecond=500000)
+    stored = target.replace(second=0, microsecond=0)
+    h = harness(monkeypatch, kind="extend", identified=True)
+    h.operation["parameters"]["target_expires_at"] = target.isoformat()
+    h.provider.extend.return_value = ProviderReceipt(
+        outcome="pending", resource=REF, observation=observed(expires=stored)
+    )
+    await h.reconciler.execute(h.operation)
+    assert (h.operation["state"], h.operation["step"]) == ("succeeded", "extended")
+    assert h.operation["result"]["actual_expires_at"] == stored.isoformat()
+    # A minute short of the requested minute remains a partial extension.
+    h = harness(monkeypatch, kind="extend", identified=True)
+    h.operation["parameters"]["target_expires_at"] = target.isoformat()
+    short = stored - timedelta(minutes=1)
+    h.provider.extend.return_value = ProviderReceipt(
+        outcome="pending", resource=REF, observation=observed(expires=short)
+    )
+    h.provider.inspect.side_effect = [observed(), observed(expires=short)]
+    await h.reconciler.execute(h.operation)
+    await h.reconciler.execute(h.operation)
+    assert (h.operation["state"], h.operation["step"]) == ("blocked", "partial_extension")
+
+
+@pytest.mark.asyncio
+async def test_automatic_renewal_requests_a_whole_second(monkeypatch):
+    h = harness(monkeypatch, kind="inspect", identified=True)
+    monkeypatch.setattr(compute_reconcile, "_now", lambda: NOW.replace(microsecond=123456))
+    h.allocation.update(
+        expires_at=NOW + timedelta(minutes=10),
+        policy=RenewalPolicy(enabled=True, reason="Keep the sandboxes").model_dump(),
+    )
+    await h.reconciler.schedule()
+    target = h.commands.extend.await_args.args[1].target_expires_at
+    assert target.microsecond == 0
+    assert target == (NOW + timedelta(hours=4)).replace(microsecond=0)
 
 
 @pytest.mark.asyncio
@@ -727,6 +828,10 @@ async def test_pending_extension_with_increased_but_short_deadline_requires_revi
     [
         (("kvm", "secret-looking-remote-output"), "kvm"),
         (("secret-looking-remote-output",), "bootstrap_not_ready"),
+        # Safety refusals of the deployment script are named, not opaque.
+        (("deployment_identity_conflict",), "deployment_identity_conflict"),
+        (("unsafe_deployment_path",), "unsafe_deployment_path"),
+        (("invalid_deployment_archive",), "invalid_deployment_archive"),
     ],
 )
 async def test_bootstrap_refusal_reports_only_public_diagnostics(
@@ -881,6 +986,98 @@ async def test_a_node_that_never_registers_blocks_instead_of_being_trusted(monke
     assert h.operation["state"] == "blocked"
     assert h.operation["result"]["blocked_reasons"][0]["code"] == "registration_expired"
     h.bootstrap.deploy.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_retry_after_a_missed_registration_reopens_the_same_one(monkeypatch):
+    h = registering(monkeypatch)
+    h.repository.node_registration.return_value = {
+        "registered_at": None,
+        "expired": True,
+        "host_keys": [],
+    }
+    h.repository.reopen_node_registration = AsyncMock(return_value=True)
+    await h.reconciler.execute(h.operation)
+    assert h.operation["state"] == "blocked"
+    assert h.operation["result"]["blocked_reasons"][0]["code"] == "registration_expired"
+    h.repository.reopen_node_registration.assert_not_awaited()
+    # The administrator retries: the node's own token gets another window.
+    await h.reconciler.execute(h.operation)
+    h.repository.reopen_node_registration.assert_awaited_once()
+    reopened = h.repository.reopen_node_registration.await_args.kwargs
+    assert reopened["allocation_id"] == h.allocation["id"]
+    assert (h.operation["state"], h.operation["step"]) == ("waiting", "waiting_for_registration")
+    assert h.operation["result"]["blocked_reasons"] == []
+    # Restarted, the node posts that token; no second experiment or token exists.
+    h.repository.node_registration.return_value = {
+        "registered_at": NOW,
+        "expired": False,
+        "host_keys": [REGISTERED_KEY],
+    }
+    await h.reconciler.execute(h.operation)
+    assert h.operation["state"] == "succeeded"
+    h.provider.acquire.assert_awaited_once()
+    h.repository.create_node_registration.assert_awaited_once()
+    assert h.bootstrap.deploy.await_args.args[0].connection.host_key == REGISTERED_KEY
+
+
+@pytest.mark.asyncio
+async def test_a_node_that_never_registered_is_released_without_an_ssh_scan(monkeypatch):
+    """No Host ever ran there, and without a pinned key it cannot be reached."""
+    h = harness(monkeypatch, kind="retire", identified=True)
+    # The adapter echoes the full validated configuration in each observation.
+    ref = REF.model_copy(update={"config": {**REF.config, "host_key_source": "registration"}})
+    h.allocation["configuration"] = ref.config
+    h.provider.inspect.return_value = observed().model_copy(update={"ref": ref})
+    h.allocation["hosts"] = []
+    h.repository.node_registration = AsyncMock(
+        return_value={"registered_at": None, "expired": True, "host_keys": []}
+    )
+    await h.reconciler.execute(h.operation)
+    assert (h.operation["state"], h.operation["step"]) == ("succeeded", "released")
+    h.bootstrap.inventory.assert_not_awaited()
+    recorded = h.repository.record_inventory.await_args.kwargs
+    assert recorded["verified_node_ids"] == ["node-id"] and recorded["hosts"] == []
+    h.repository.commit_release.assert_awaited_once()
+    h.provider.release.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reached", ["pinned_key", "bound_host", "registered"])
+async def test_a_registering_node_this_control_plane_reached_is_still_scanned(monkeypatch, reached):
+    h = harness(monkeypatch, kind="retire", identified=True)
+    ref = REF.model_copy(update={"config": {**REF.config, "host_key_source": "registration"}})
+    h.allocation["configuration"] = ref.config
+    h.provider.inspect.return_value = observed().model_copy(update={"ref": ref})
+    h.repository.node_registration = AsyncMock(
+        return_value={"registered_at": None, "expired": True, "host_keys": []}
+    )
+    if reached == "registered":
+        # A key an earlier observation cleared does not make the node unreached.
+        h.allocation["hosts"] = []
+        h.repository.node_registration.return_value = {
+            "registered_at": NOW,
+            "expired": False,
+            "host_keys": [REGISTERED_KEY],
+        }
+    elif reached == "pinned_key":
+        h.allocation["hosts"] = []
+        pinned = SshConnection(
+            address="node.example.org",
+            username="agent",
+            credential_ref="ssh-1",
+            host_key=REGISTERED_KEY,
+        )
+        node = NODE.model_copy(update={"connection": pinned})
+        h.provider.inspect.return_value = observed().model_copy(
+            update={"ref": ref, "nodes": (node,)}
+        )
+    else:
+        h.allocation["hosts"][0]["compute_node_id"] = "node-id"
+    h.bootstrap.inventory.return_value = HostInventory(complete=True)
+    await h.reconciler.execute(h.operation)
+    assert h.operation["state"] == "succeeded"
+    h.bootstrap.inventory.assert_awaited_once()
 
 
 @pytest.mark.asyncio

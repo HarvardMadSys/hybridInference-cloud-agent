@@ -467,11 +467,25 @@ class PostgresMcpConnectionRepository:
         the tools it already has.
 
         Target changes reset diagnosis and remove the old discovery and pending
-        OAuth flows in the same transaction as the edit.
+        OAuth flows in the same transaction as the edit. A change of address,
+        transport, location or authentication kind also clears the stored
+        credential and the OAuth state behind it, so the next request cannot
+        carry a token or secret to a target it was not issued for.
         """
         security_relevant = any(
             value is not None
             for value in (transport, location, url, launch_spec, auth_kind, auth_config)
+        )
+        # A credential belongs to the address and the kind of authentication
+        # it was issued for, so an edit that changes either drops it, with the
+        # OAuth issuer, resource, endpoints and client it would be refreshed
+        # and re-authorized through. Compared with the stored value -- SET sees
+        # the row as it was -- so re-saving an unchanged address keeps it.
+        retargeted = (
+            "(($6::boolean AND url IS DISTINCT FROM $7)"
+            " OR transport IS DISTINCT FROM COALESCE($4, transport)"
+            " OR location IS DISTINCT FROM COALESCE($5, location)"
+            " OR auth_kind IS DISTINCT FROM COALESCE($10, auth_kind))"
         )
         async with self._pool.acquire() as conn, conn.transaction():
             row = await conn.fetchrow(
@@ -483,7 +497,11 @@ class PostgresMcpConnectionRepository:
                     url = CASE WHEN $6::boolean THEN $7 ELSE url END,
                     launch_spec = CASE WHEN $8::boolean THEN $9::jsonb ELSE launch_spec END,
                     auth_kind = COALESCE($10, auth_kind),
-                    auth_config = CASE WHEN $11::boolean THEN $12::jsonb ELSE auth_config END,
+                    auth_config = CASE
+                        WHEN $11::boolean THEN $12::jsonb
+                        WHEN {retargeted}
+                            THEN auth_config - 'client_id' - 'managed_github_oauth' - 'hint'
+                        ELSE auth_config END,
                     account_label = COALESCE($13, account_label),
                     request_timeout_s = COALESCE($17, request_timeout_s),
                     connector_id = CASE
@@ -493,6 +511,29 @@ class PostgresMcpConnectionRepository:
                     status = CASE WHEN $14::boolean THEN 'draft' ELSE status END,
                     error_kind = CASE WHEN $14::boolean THEN 'none' ELSE error_kind END,
                     error_detail = CASE WHEN $14::boolean THEN NULL ELSE error_detail END,
+                    access_token_ciphertext = CASE
+                        WHEN {retargeted} THEN NULL ELSE access_token_ciphertext END,
+                    refresh_token_ciphertext = CASE
+                        WHEN {retargeted} THEN NULL ELSE refresh_token_ciphertext END,
+                    client_secret_ciphertext = CASE
+                        WHEN {retargeted} THEN NULL ELSE client_secret_ciphertext END,
+                    expires_at = CASE WHEN {retargeted} THEN NULL ELSE expires_at END,
+                    scopes = CASE WHEN {retargeted} THEN NULL ELSE scopes END,
+                    issuer = CASE WHEN {retargeted} THEN NULL ELSE issuer END,
+                    resource = CASE WHEN {retargeted} THEN NULL ELSE resource END,
+                    refresh_rotates = CASE WHEN {retargeted} THEN FALSE ELSE refresh_rotates END,
+                    token_endpoint = CASE WHEN {retargeted} THEN NULL ELSE token_endpoint END,
+                    revocation_endpoint = CASE
+                        WHEN {retargeted} THEN NULL ELSE revocation_endpoint END,
+                    registration_endpoint = CASE
+                        WHEN {retargeted} THEN NULL ELSE registration_endpoint END,
+                    client_auth_method = CASE
+                        WHEN {retargeted} THEN NULL ELSE client_auth_method END,
+                    registration = CASE WHEN {retargeted} THEN NULL ELSE registration END,
+                    credential_version = credential_version
+                        + CASE WHEN {retargeted} THEN 1 ELSE 0 END,
+                    oauth_generation = oauth_generation
+                        + CASE WHEN {retargeted} THEN 1 ELSE 0 END,
                     config_revision = config_revision + CASE WHEN $15::boolean THEN 1 ELSE 0 END,
                     authorization_epoch = authorization_epoch + CASE WHEN $15::boolean THEN 1 ELSE 0 END,
                     updated_at = NOW()
@@ -1250,21 +1291,6 @@ class PostgresMcpConnectionRepository:
                     bool(binding.get("selection_pending", False)),
                 )
 
-    async def bump_mcp_binding_policy_revision(self, *, thread_id: str, connection_id: int) -> int:
-        """Move a binding's policy revision, invalidating held approvals."""
-        async with self._pool.acquire() as conn:
-            revision = await conn.fetchval(
-                """
-                UPDATE agent_mcp_thread_bindings
-                SET policy_revision = nextval('agent_mcp_policy_revision_seq'), updated_at = NOW()
-                WHERE thread_id = $1 AND connection_id = $2
-                RETURNING policy_revision
-                """,
-                thread_id,
-                connection_id,
-            )
-        return int(revision or 0)
-
     async def create_mcp_invocation(
         self,
         *,
@@ -1826,16 +1852,6 @@ class PostgresMcpConnectionRepository:
                 UPDATE agent_mcp_invocations AS calls SET {self._EXPIRED}
                 FROM expired WHERE calls.id = expired.id RETURNING calls.id
                 """
-            )
-        return len(rows)
-
-    async def cancel_mcp_invocations_for_attempt(self, *, attempt_id: int) -> int:
-        """Expire a superseded attempt's undecided calls."""
-        async with self._pool.acquire() as conn:
-            rows = await conn.fetch(
-                f"UPDATE agent_mcp_invocations SET {self._EXPIRED} "
-                "WHERE attempt_id = $1 AND status IN ('pending', 'approved') RETURNING id",
-                attempt_id,
             )
         return len(rows)
 

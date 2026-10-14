@@ -19,6 +19,16 @@ the protected set, the pool registration. A table someone flushed, a set that
 lost its elements, a chain that is present but empty, all fail the check, and
 a failed check means no new group network and no activation.
 
+**One helper per step.** Starting a helper container costs far more than the
+nft calls it makes, and every activation waits for it. So an install and its
+read-back run in one helper, and a bridge's relay update reads, compares and
+writes in one helper. A relay update that would change nothing is skipped when
+this guard wrote or read those exact exceptions for that exact Docker network
+within the last :data:`GUARD_RECHECK_S`, and no reinstall or failed check has
+happened since. Every read-back of the tables (the sweep's, every few seconds
+while groups run) confirms or forgets those remembered exceptions, so the
+memory is never trusted longer than the rules themselves are.
+
 **Neighbours.** Every deployment registers its address pool in its own table.
 The check runs after the install, so of two deployments starting together with
 overlapping pools at least the later one sees the other and refuses. The pool
@@ -37,6 +47,7 @@ import subprocess
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 from cloud_agent_host.logging_utils import get_logger
@@ -44,7 +55,6 @@ from cloud_agent_shared.egress import (
     RELAY_FAMILIES,
     TABLE_PREFIX,
     SandboxNetwork,
-    render_relay_update,
     render_ruleset,
 )
 from cloud_agent_shared.errors import SandboxError
@@ -57,27 +67,99 @@ logger = get_logger(__name__)
 #: background sweep does not wait this long: :meth:`recheck` reads the kernel
 #: on every pass.
 GUARD_RECHECK_S = 60.0
+#: How old a verification may get before the sweep renews it. Earlier than
+#: :data:`GUARD_RECHECK_S` by more than a sweep pass and a renewal take, so an
+#: activation always finds a verification it may still trust and never pays
+#: the install and read-back itself.
+GUARD_RENEW_S = 45.0
 
 _HELPER_TIMEOUT_S = 60
 _RULE = re.compile(r"^add rule (\w+) (\S+) (\w+) ")
 _BASE_CHAIN = re.compile(r"^add chain (\w+) (\S+) (\w+) \{ type filter hook (\w+) ")
 
-# Reads still execute independently and in order, but share one disposable
-# helper. No shell, persistent helper or cached kernel state is involved.
-_NFT_LIST_BATCH = """
+# One guard step in one disposable helper: an optional install, then the reads
+# in order, then optionally one bridge's relay update, computed from what the
+# kernel holds at that moment and rendered as ``render_relay_update`` renders
+# it. Every nft call is checked, and the first failure ends the helper with
+# nft's own message and no output. No shell, persistent helper or cached
+# kernel state is involved.
+_NFT_BATCH = """
 import json
 import subprocess
 import sys
 
-listings = []
-for args in json.load(sys.stdin):
-    result = subprocess.run(["nft", "-j", *args], capture_output=True, text=True)
+request = json.load(sys.stdin)
+
+
+def nft(args, stdin=None):
+    result = subprocess.run(["nft", *args], input=stdin, capture_output=True, text=True)
     if result.returncode:
         sys.stderr.write(result.stderr or result.stdout)
         sys.exit(1)
-    listings.append(json.loads(result.stdout))
-json.dump(listings, sys.stdout)
+    return result.stdout
+
+
+def fail(message):
+    sys.stderr.write(message)
+    sys.exit(1)
+
+
+if request.get("install"):
+    nft(["-f", "-"], request["install"])
+answer = {"listings": [json.loads(nft(["-j", *args])) for args in request.get("reads", [])]}
+relays = request.get("relays")
+if relays:
+    table, bridge, families = relays["table"], relays["bridge"], relays["families"]
+    wanted = {(bridge, address, int(port)) for address, port in relays["wanted"]}
+    held = {}
+    for family in families:
+        listing = json.loads(nft(["-j", "list", "set", family, table, "relays"]))
+        found = [item["set"] for item in listing.get("nftables", []) if "set" in item]
+        if not found:
+            fail("%s %s has no set 'relays'" % (family, table))
+        elements = found[0].get("elem") or []
+        held[family] = set()
+        for element in elements if isinstance(elements, list) else [elements]:
+            value = element.get("elem", {}).get("val", element) if isinstance(element, dict) else element
+            parts = value.get("concat") if isinstance(value, dict) else None
+            if not isinstance(parts, list) or len(parts) != 3:
+                fail("unreadable relay set element: %r" % (element,))
+            if str(parts[0]) == bridge:
+                held[family].add((str(parts[0]), str(parts[1]), int(parts[2])))
+
+    def render(elements):
+        return ", ".join('"%s" . %s . %d' % element for element in sorted(elements))
+
+    lines = []
+    for family in families:
+        if held[family] - wanted:
+            doomed = render(held[family] - wanted)
+            lines.append("delete element %s %s relays { %s }" % (family, table, doomed))
+    add = set()
+    for family in families:
+        add |= wanted - held[family]
+    if add:
+        for family in families:
+            lines.append("add element %s %s relays { %s }" % (family, table, render(add)))
+    update = "\\n".join(lines) + ("\\n" if lines else "")
+    if update:
+        nft(["-f", "-"], update)
+    answer["relay_update"] = update
+json.dump(answer, sys.stdout)
 """
+
+
+@dataclass(frozen=True)
+class _HeldRelays:
+    """Relay exceptions this guard last wrote or read back for one bridge."""
+
+    #: The Docker network the exceptions were synced for. A bridge removed and
+    #: created again keeps its interface name but never its network id.
+    network_id: str
+    endpoints: frozenset[tuple[str, int]]
+    #: Monotonic time of the write or read-back that last showed them held.
+    confirmed_at: float
+
 
 Runner = Callable[[list[str], str | None], subprocess.CompletedProcess[str]]
 
@@ -151,6 +233,7 @@ class HostNetworkGuard:
         self._run = run or _run
         self._lock = threading.RLock()
         self._verified_at: float | None = None
+        self._held: dict[str, _HeldRelays] = {}
 
     # ── public surface ──────────────────────────────────────────────────
 
@@ -161,12 +244,19 @@ class HostNetworkGuard:
             if self._verified_at is not None and now - self._verified_at < max_age_s:
                 return
             self._verified_at = None
+            # Remembered exceptions survive only if the read-back after this
+            # install shows them still held.
+            held, self._held = self._held, {}
             rendered = render_ruleset(self.network)
-            self._nft(["-f", "-"], stdin=rendered)
-            listings = self._list_many([*self._verification_reads(), ["list", "tables", "inet"]])
+            read_at = time.monotonic()
+            listings = self._batch(
+                [*self._verification_reads(), ["list", "tables", "inet"]], install=rendered
+            )["listings"]
             self._verify(rendered, listings=listings[:-1])
             self._refuse_overlapping_pools(listing=listings[-1])
             self._refuse_overlapping_routes()
+            self._held = held
+            self._observe_relays(listings[: len(RELAY_FAMILIES)], read_at=read_at)
             self._verified_at = time.monotonic()
 
     def recheck(self) -> None:
@@ -180,14 +270,20 @@ class HostNetworkGuard:
         reinstalling, and only a difference (or a failed read) costs the full
         :meth:`ensure`: reinstall, read back, and the neighbour and route
         checks. That raises when the rules still cannot be shown, which is
-        what stops the running groups. A verification past its minute takes
-        the full path regardless, so those checks keep their cadence.
+        what stops the running groups. A verification past
+        :data:`GUARD_RENEW_S` takes the full path regardless, so those checks
+        keep their cadence and an activation never finds the verification
+        lapsed.
         """
         with self._lock:
             verified_at = self._verified_at
-        if verified_at is not None and time.monotonic() - verified_at < GUARD_RECHECK_S:
+        if verified_at is not None and time.monotonic() - verified_at < GUARD_RENEW_S:
             try:
-                self._verify(render_ruleset(self.network))
+                read_at = time.monotonic()
+                listings = self._list_many(self._verification_reads())
+                self._verify(render_ruleset(self.network), listings=listings)
+                with self._lock:
+                    self._observe_relays(listings[: len(RELAY_FAMILIES)], read_at=read_at)
                 return
             except NetworkGuardError as exc:
                 logger.warning(
@@ -199,32 +295,58 @@ class HostNetworkGuard:
                     },
                 )
                 self.invalidate()
-        self.ensure()
+        self.ensure(max_age_s=GUARD_RENEW_S)
 
     def invalidate(self) -> None:
         """Forget the last verification, so the next activation reads the kernel."""
         with self._lock:
             self._verified_at = None
+            self._held = {}
 
-    def sync_relays(self, bridge: str, endpoints: set[tuple[str, int]]) -> None:
-        """Make one bridge's relay exceptions exactly ``endpoints``, in both tables."""
+    def sync_relays(
+        self,
+        bridge: str,
+        endpoints: set[tuple[str, int]],
+        *,
+        network_id: str | None = None,
+    ) -> None:
+        """Make one bridge's relay exceptions exactly ``endpoints``, in both tables.
+
+        ``network_id`` names the Docker network the bridge belongs to. With
+        it, an update this guard already made, or saw held, for that network
+        within :data:`GUARD_RECHECK_S` is not made again; without it the
+        kernel is always read and corrected.
+        """
         if not bridge.startswith(self.network.interface_prefix):
             raise NetworkGuardError(f"{bridge!r} is not one of this deployment's bridges")
+        wanted = frozenset((str(address), int(port)) for address, port in endpoints)
         with self._lock:
-            wanted = {(bridge, address, port) for address, port in endpoints}
-            remove: dict[str, list[tuple[str, str, int]]] = {}
-            add: set[tuple[str, str, int]] = set()
-            for family, elements in self._relay_sets().items():
-                current = {element for element in elements if element[0] == bridge}
-                if doomed := sorted(current - wanted):
-                    remove[family] = doomed
-                add |= wanted - current
-            if not remove and not add:
+            held = self._held.pop(bridge, None)
+            now = time.monotonic()
+            if (
+                network_id
+                and held is not None
+                and held.network_id == network_id
+                and held.endpoints == wanted
+                # Never trusted longer than the rules themselves are.
+                and self._verified_at is not None
+                and now - self._verified_at < GUARD_RECHECK_S
+                and now - held.confirmed_at < GUARD_RECHECK_S
+            ):
+                self._held[bridge] = held
                 return
-            self._nft(
-                ["-f", "-"],
-                stdin=render_relay_update(self.network, remove=remove, add=sorted(add)),
+            written_at = time.monotonic()
+            self._batch(
+                [],
+                relays={
+                    "table": self.network.table,
+                    "families": list(RELAY_FAMILIES),
+                    "bridge": bridge,
+                    "wanted": sorted([address, port] for address, port in wanted),
+                },
             )
+            if network_id:
+                self._held[bridge] = _HeldRelays(network_id, wanted, written_at)
 
     def relay_endpoints(self, bridge: str) -> set[tuple[str, int]]:
         """The exceptions both tables currently hold for one bridge."""
@@ -385,15 +507,63 @@ class HostNetworkGuard:
                 return elements if isinstance(elements, list) else [elements]
         raise NetworkGuardError(f"{family} {table} has no set {name!r}")
 
+    def _observe_relays(self, tables: list[list[Any]], *, read_at: float) -> None:
+        """Confirm or forget remembered exceptions against one read-back of both tables.
+
+        ``tables`` are the ``list table`` listings of :data:`RELAY_FAMILIES`, in
+        order, read starting at ``read_at``. An exception is confirmed only
+        when every table holds exactly what was remembered for its bridge.
+        Anything unreadable forgets everything, so the next update reads the
+        kernel itself.
+        """
+        try:
+            per_family = []
+            for listing in tables:
+                elements: list[Any] = []
+                for item in listing:
+                    found = item.get("set") if isinstance(item, dict) else None
+                    if isinstance(found, dict) and found.get("name") == "relays":
+                        raw = found.get("elem") or []
+                        elements = raw if isinstance(raw, list) else [raw]
+                per_family.append(_relay_elements(elements))
+        except (NetworkGuardError, TypeError, ValueError, AttributeError):
+            self._held = {}
+            return
+        confirmed: dict[str, _HeldRelays] = {}
+        for bridge, held in self._held.items():
+            if per_family and all(
+                {(address, port) for owner, address, port in elements if owner == bridge}
+                == held.endpoints
+                for elements in per_family
+            ):
+                confirmed[bridge] = _HeldRelays(held.network_id, held.endpoints, read_at)
+        self._held = confirmed
+
     def _list_many(self, commands: list[list[str]]) -> list[list[Any]]:
         if not commands:
             return []
-        result = self._helper("python3", ["-c", _NFT_LIST_BATCH], stdin=json.dumps(commands))
+        return self._batch(commands)["listings"]
+
+    def _batch(
+        self,
+        reads: list[list[str]],
+        *,
+        install: str | None = None,
+        relays: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Run one guard step in one helper; see :data:`_NFT_BATCH`."""
+        request: dict[str, Any] = {"reads": reads}
+        if install is not None:
+            request["install"] = install
+        if relays is not None:
+            request["relays"] = relays
+        result = self._helper("python3", ["-c", _NFT_BATCH], stdin=json.dumps(request), label="nft")
         try:
-            payloads = json.loads(result.stdout)
+            answer = json.loads(result.stdout)
         except json.JSONDecodeError as exc:
             raise NetworkGuardError("nft returned unreadable JSON") from exc
-        if not isinstance(payloads, list) or len(payloads) != len(commands):
+        payloads = answer.get("listings") if isinstance(answer, dict) else None
+        if not isinstance(payloads, list) or len(payloads) != len(reads):
             raise NetworkGuardError("nft returned an unexpected listing")
         listings: list[list[Any]] = []
         for payload in payloads:
@@ -401,12 +571,9 @@ class HostNetworkGuard:
             if not isinstance(items, list):
                 raise NetworkGuardError("nft returned an unexpected listing")
             listings.append(items)
-        return listings
-
-    def _nft(
-        self, args: list[str], *, stdin: str | None = None
-    ) -> subprocess.CompletedProcess[str]:
-        return self._helper("nft", args, stdin=stdin)
+        if relays is not None and not isinstance(answer.get("relay_update"), str):
+            raise NetworkGuardError("nft returned no relay update")
+        return {**answer, "listings": listings}
 
     def _helper(
         self,
@@ -415,6 +582,7 @@ class HostNetworkGuard:
         *,
         stdin: str | None = None,
         net_admin: bool = True,
+        label: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         command = [
             self.docker_binary,
@@ -445,7 +613,7 @@ class HostNetworkGuard:
         result = self._run(command, stdin)
         if result.returncode != 0:
             raise NetworkGuardError(
-                f"{entrypoint} {' '.join(args[:4])} failed: "
+                f"{label or ' '.join([entrypoint, *args[:4]])} failed: "
                 + (result.stderr or result.stdout).strip()[:400]
             )
         return result

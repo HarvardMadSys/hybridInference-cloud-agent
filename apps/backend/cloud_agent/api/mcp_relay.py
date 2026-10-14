@@ -45,14 +45,14 @@ import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from cloud_agent import web_search
+from cloud_agent import memory_tool, web_search
+from cloud_agent.agent_memory import MemoryTask
 from cloud_agent.api.deps import get_mcp_decision_signal, get_storage
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp import protocol
 from cloud_agent.mcp.authorization import decide, visible_capabilities
 from cloud_agent.mcp.host import (
     HostError,
-    McpHost,
     SessionKey,
     arguments_digest,
     encode_arguments,
@@ -86,6 +86,7 @@ from cloud_agent.mcp.resources import (
     scope_resource_result,
     split_resource_uri,
 )
+from cloud_agent.mcp.runtime import get_host as _host
 from cloud_agent.mcp.transports import TransportError, guard_target, pinned_transport
 from cloud_agent.mcp_proxy import (
     MAX_BUFFERED_RESPONSE_BYTES,
@@ -105,6 +106,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
     from cloud_agent.ports import (
+        AgentMemoryRepository,
         CredentialQueries,
         McpConnectionRepository,
         WebSearchRepository,
@@ -122,6 +124,7 @@ class _McpRelayStorage(Protocol):
     this list rather than a call that happens to type-check.
     """
 
+    agent_memory: AgentMemoryRepository
     credential_queries: CredentialQueries
     mcp: McpConnectionRepository
     web_search: WebSearchRepository
@@ -439,9 +442,13 @@ async def _resolve_binding(
 
     try:
         # Before the credential is read, so a token that aged out during a long
-        # job is renewed instead of being sent and refused.
+        # job is renewed instead of being sent and refused. Under the deployment
+        # policy, the same one authorization, Test and the dial use: a token
+        # endpoint those doors admit must not be refused only when a job asks.
         if refresh_credentials:
-            connection_row = dict(await ensure_fresh(store.mcp, row=connection_row))
+            connection_row = dict(
+                await ensure_fresh(store.mcp, row=connection_row, policy=policy_from_environment())
+            )
     except RefreshRefused as exc:
         logger.warning(
             "agent_mcp_refresh_refused",
@@ -1237,81 +1244,6 @@ async def _stream_sse(
 # a second door onto the same decision function, never a second decision.
 
 
-def _host() -> McpHost:
-    """The process-wide protocol host, built once against the deployment policy."""
-    global _HOST_INSTANCE
-    if _HOST_INSTANCE is None:
-        _HOST_INSTANCE = McpHost(policy=policy_from_environment())
-    return _HOST_INSTANCE
-
-
-_HOST_INSTANCE: McpHost | None = None
-_HOST_MAINTENANCE_INTERVAL_S = 30.0
-
-
-async def reap_host_sessions(store: _McpRelayStorage) -> None:
-    """Reclaim sockets whose job or selected connection is no longer live."""
-
-    async def is_live(key: SessionKey) -> bool:
-        job_id, attempt_id = key.job_attempt
-        identity = await store.credential_queries.resolve_model_credential(
-            job_id=job_id,
-            attempt_id=int(attempt_id),
-            lease_generation=key.owner_lease_generation,
-        )
-        if identity is None:
-            return False
-        binding = next(
-            (
-                row
-                for row in identity.get("mcp_bindings") or []
-                if str(row["connection_id"]) == key.connection_id
-            ),
-            None,
-        )
-        if (
-            binding is None
-            or not binding.get("enabled", True)
-            or binding.get("deleted_at") is not None
-            or binding.get("owner_id") != identity["user_id"]
-        ):
-            return False
-        connection = await store.mcp.get_mcp_connection(connection_id=int(key.connection_id))
-        return (
-            connection is not None
-            and connection.get("status") != "disabled"
-            and connection.get("deleted_at") is None
-        )
-
-    if _HOST_INSTANCE is not None:
-        await _HOST_INSTANCE.reap_inactive(is_live)
-
-
-async def maintain_host_sessions(store: _McpRelayStorage) -> None:
-    """Run process-local socket cleanup and expire overdue approval rows."""
-    while True:
-        await asyncio.sleep(_HOST_MAINTENANCE_INTERVAL_S)
-        try:
-            async with asyncio.timeout(5.0):
-                await store.mcp.expire_mcp_invocations()
-        except Exception:
-            logger.warning("agent_mcp_invocation_expiry_failed", exc_info=True)
-        try:
-            async with asyncio.timeout(5.0):
-                await store.mcp.apply_pending_mcp_allow_rules()
-        except Exception:
-            logger.warning("agent_mcp_remembered_approval_failed", exc_info=True)
-        await reap_host_sessions(store)
-
-
-async def close_host() -> None:
-    """Release this listener's protocol host before its database pool closes."""
-    global _HOST_INSTANCE
-    instance, _HOST_INSTANCE = _HOST_INSTANCE, None
-    if instance is not None:
-        await instance.aclose()
-
-
 async def _host_catalogue(
     identity: dict[str, Any],
     store: _McpRelayStorage,
@@ -1640,7 +1572,10 @@ async def _host_document(
             ]
             if web_search.configured():
                 tools.append(web_search.TOOL_DEFINITION)
-                tools.sort(key=lambda tool: str(tool["name"]))
+            # Platform tools, served here rather than by a connection. Memory is
+            # offered to every task; a scope turned off refuses writes itself.
+            tools.extend(memory_tool.TOOL_DEFINITIONS)
+            tools.sort(key=lambda tool: str(tool["name"]))
             replies.append(
                 _result_reply(
                     request_id,
@@ -2030,6 +1965,30 @@ async def _host_call(
     params = payload.get("params")
     name = str(params.get("name") or "") if isinstance(params, dict) else ""
     arguments = params.get("arguments") if isinstance(params, dict) else None
+    if name in memory_tool.TOOL_NAMES:
+        # The owner and task come from the fence, never from the arguments. The
+        # attempt goes along so the write re-checks it in its own transaction:
+        # this request may have been accepted before the task was stopped.
+        attempt_id = _attempt_id_of(authorization)
+        lease_generation = _lease_of(authorization)
+        if attempt_id is None or lease_generation <= 0:
+            result: dict[str, Any] = {
+                "content": [{"type": "text", "text": "Memory authorization expired."}],
+                "isError": True,
+            }
+        else:
+            result = await memory_tool.call(
+                name,
+                arguments,
+                task=MemoryTask(
+                    user_id=str(identity["user_id"]),
+                    job_id=str(identity["job_id"]),
+                    attempt_id=attempt_id,
+                    lease_generation=lease_generation,
+                ),
+                repository=store.agent_memory,
+            )
+        return _result_reply(request_id, result, stateless=stateless)
     if name == web_search.TOOL_NAME and web_search.configured():
         return await _host_web_search(
             arguments,

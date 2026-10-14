@@ -45,10 +45,18 @@ export async function getSessionUser(): Promise<SessionUserApi | null> {
   }
 }
 
-/** Drop the session cookie. Best-effort: the UI signs out either way. */
+/**
+ * Drop the session cookie.
+ *
+ * Only the server's answer deletes it, and the session inside is a signed
+ * token that stays valid until it expires. A request that failed — an outage,
+ * a proxy's error page, no network — has left this browser signed in, so it
+ * is reported rather than treated as done.
+ */
 export async function endSession(): Promise<void> {
-  await safeFetch(`${agentApiBase}/v1/session/logout`, {
+  const resp = await safeFetch(`${agentApiBase}/v1/session/logout`, {
     method: 'POST',
     credentials: 'include',
   });
+  if (!resp.ok) await jsonOrThrow(resp);
 }

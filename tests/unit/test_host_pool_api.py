@@ -86,6 +86,8 @@ class FakeHostPoolStore(AllCapabilities):
         self.release_answer: str | None = None
         self.release_calls: list[tuple[str, int, str, int | None]] = []
         self.sandbox_observations: list[dict[str, Any]] = []
+        self.checkpoints: list[dict[str, Any]] = []
+        self.fail_checkpoint_record = False
         self.sandbox_stop_due: dict[str, Any] | None = None
         #: History rows per host, as the capacity-history route would read
         #: them out of ``agent_host_capacity_history``.
@@ -484,6 +486,12 @@ class FakeHostPoolStore(AllCapabilities):
     async def reconcile_thread_sandbox_observation(self, **kwargs: Any) -> str | None:
         self.sandbox_observations.append(dict(kwargs))
         return "running" if kwargs["running"] else "stopped"
+
+    async def record_sandbox_checkpoint(self, **kwargs: Any) -> bool:
+        if self.fail_checkpoint_record:
+            raise RuntimeError("database unavailable")
+        self.checkpoints.append(dict(kwargs))
+        return True
 
     async def due_thread_sandbox_stop(self, **_kwargs: Any) -> dict[str, Any] | None:
         return self.sandbox_stop_due
@@ -2212,6 +2220,68 @@ def test_a_sandbox_manager_url_that_is_not_http_is_refused(url: str) -> None:
         validate_sandbox_manager_url(url)
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://169.254.169.254/latest/meta-data/iam/security-credentials/role?x=",
+        "http://169.254.169.254.:8092",
+        # Spellings the resolver turns into the same address.
+        "http://2852039166:8092",
+        "http://0xa9fea9fe:8092",
+        "http://169.254.43518:8092",
+        "http://[::ffff:169.254.169.254]:8092",
+        "http://[fd00:ec2::254]:8092",
+        "http://[fe80::1]:8092",
+    ],
+)
+def test_a_link_local_sandbox_manager_url_is_refused_even_without_an_allowlist(
+    monkeypatch, url
+) -> None:
+    """No sandbox manager lives at a metadata address, whatever the allowlist says.
+
+    The control plane probes and calls a host's sandbox manager carrying the
+    pool's token. Pointed at the metadata service, that is a credentialed
+    request to the control plane's own instance identity, issued on the say-so
+    of one host credential.
+    """
+    monkeypatch.delenv(ENV_SANDBOX_MANAGER_HOSTS, raising=False)
+    with pytest.raises(SandboxManagerUrlRefused):
+        validate_sandbox_manager_url(url)
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["http://169.254.169.254\x00:8092", "http://1\x00:8092", "http://169.254.169.254 x:8092"],
+)
+def test_a_sandbox_manager_host_with_a_control_character_is_refused(monkeypatch, url) -> None:
+    """Refused as unusable, rather than parsed and either passed or crashed on.
+
+    The resolver stops reading a host at an embedded NUL, so
+    ``169.254.169.254\\x00`` names the metadata address to any client that
+    hands it on; and the address parser raises a plain ``ValueError`` on it,
+    which the heartbeat would have answered with a 500 instead of a 400.
+    """
+    monkeypatch.delenv(ENV_SANDBOX_MANAGER_HOSTS, raising=False)
+    with pytest.raises(SandboxManagerUrlRefused):
+        validate_sandbox_manager_url(url)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://127.0.0.1:8092",
+        "http://[::1]:8092",
+        "http://172.17.0.1:18092",
+        "http://10.0.0.5:8092",
+        "http://sandbox-manager:8092",
+    ],
+)
+def test_loopback_private_and_named_sandbox_managers_are_still_accepted(monkeypatch, url) -> None:
+    """Single-host and private pools put sandbox managers exactly there."""
+    monkeypatch.delenv(ENV_SANDBOX_MANAGER_HOSTS, raising=False)
+    assert validate_sandbox_manager_url(url) == url
+
+
 def test_an_allowlist_confines_the_pool_to_named_machines(monkeypatch) -> None:
     """Names, not patterns: a pattern is a thing to get subtly wrong, and the
     set of machines in a pool is small and known.
@@ -2339,6 +2409,90 @@ async def test_the_beat_that_extends_a_residency_renews_its_grant(residency_clie
     assert response.status_code == 200, response.text
     assert grants.renewed == ["agr-1"]
     assert response.json()["residencies_lost"] == [{"thread_id": "th-lost", "generation": 3}]
+
+
+async def test_a_slow_gateway_does_not_hold_the_heartbeat_reply():
+    """Renewals run after the reply, together, and once per grant.
+
+    A host's heartbeat times out at 15 s, and each renewal may take the
+    gateway's full request timeout. Awaited one by one before the reply, two
+    slow renewals were enough to time the beat out — and the host then never
+    received the stops and lost residencies the reply carries. Here every
+    renewal blocks until all of them have started: awaited inline the reply
+    never comes, and awaited one at a time the renewals never finish.
+    """
+    from fastapi import BackgroundTasks
+
+    from cloud_agent.schemas import HostHeartbeatRequest
+
+    class GatedGrants(RecordingGrants):
+        def __init__(self, expected: int) -> None:
+            super().__init__()
+            self.started: list[str] = []
+            self._expected = expected
+            self._all_started = asyncio.Event()
+
+        async def renew(self, grant_id: str) -> dict[str, Any]:
+            self.started.append(grant_id)
+            if len(self.started) >= self._expected:
+                self._all_started.set()
+            await self._all_started.wait()
+            return await super().renew(grant_id)
+
+    store = FakeHostPoolStore()
+    store.seed("runner-a", credential_hash="credential-hash", enrolled=True)
+    store.beat_answers = {("th-1", 1): "agr-1", ("th-2", 1): "agr-2"}
+    grants = GatedGrants(expected=2)
+    body = HostHeartbeatRequest.model_validate(
+        {
+            "residencies": [
+                {"thread_id": "th-1", "generation": 1},
+                {"thread_id": "th-2", "generation": 1},
+            ],
+            # The same member again, as a live member of its retained group:
+            # one extended residency is one renewal, however it was reported.
+            "retained_sandboxes": [
+                {
+                    "thread_id": "th-1",
+                    "sandbox_id": "asbx_1",
+                    "container_id": "0123456789abcdef",
+                    "generation": 3,
+                    "activation_generation": 7,
+                    "running": True,
+                    "activity_active": True,
+                    "idle_remaining_seconds": 1799.5,
+                    "shared_live": True,
+                    "members": [
+                        {
+                            "thread_id": "th-1",
+                            "native_session_id": "native-1",
+                            "process_generation": 2,
+                            "residency_generation": 1,
+                            "resident_state": "live",
+                            "resident_slot_id": 0,
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+    background = BackgroundTasks()
+
+    reply = await asyncio.wait_for(
+        hosts.heartbeat_host(
+            body,
+            background_tasks=background,
+            host={"host": "runner-a", "credential_hash": "credential-hash"},
+            store=store,
+            grants=grants,
+        ),
+        timeout=5,
+    )
+
+    assert reply.residencies_lost == []
+    assert grants.started == [], "the reply waited on the gateway"
+    await asyncio.wait_for(background(), timeout=5)
+    assert sorted(grants.renewed) == ["agr-1", "agr-2"]
 
 
 async def test_host_heartbeat_reconciles_exact_retained_docker_observations(residency_client):
@@ -2858,3 +3012,173 @@ async def test_capacity_history_returns_an_explicit_gap_per_missing_minute(clien
         point["cpu_percent"] is None for point in body["points"] if point["sampled_at"] is None
     )
     assert credential == ""
+
+
+def _enabled_archive(store: FakeHostPoolStore, **changes: Any) -> None:
+    store.archive_settings.update(
+        enabled=True,
+        region="us-east-1",
+        kms_key_arn=("arn:aws:kms:us-east-1:123456789012:key/00000000-0000-0000-0000-000000000000"),
+        expected_bucket_owner="123456789012",
+        revision=5,
+        **changes,
+    )
+
+
+@pytest.mark.parametrize("capable", [True, False])
+@pytest.mark.parametrize("opted_out", [True, False])
+async def test_only_a_capable_host_is_sent_a_checkpoint_opt_out(client, capable, opted_out):
+    async_client, store = client
+    credential = await _enroll(async_client, store)
+    _enabled_archive(store, checkpoints_enabled=not opted_out)
+    capabilities = ["sandbox-archive-settings-v1"]
+    if capable:
+        capabilities.append("sandbox-checkpoints-v1")
+
+    response = await async_client.post(
+        "/v1/agent/host/heartbeat",
+        json={"capabilities": capabilities},
+        headers={"Authorization": f"Bearer {credential}"},
+    )
+
+    assert response.status_code == 200
+    delivered = response.json()["sandbox_archive_settings"]
+    assert delivered["revision"] == 5
+    # The default (checkpoints on) is the absent key, which every manager
+    # parses. An older manager rejects the key, so it never sees the opt-out.
+    if capable and opted_out:
+        assert delivered["checkpoints_enabled"] is False
+    else:
+        assert "checkpoints_enabled" not in delivered
+
+
+def _retained_with_checkpoint(checkpoint: Any) -> dict[str, Any]:
+    return {
+        "thread_id": "athr_source",
+        "sandbox_id": "asbx_source",
+        "container_id": "container-source",
+        "generation": 2,
+        "activation_generation": 1,
+        "running": False,
+        "members": [],
+        "checkpoint": checkpoint,
+    }
+
+
+_CHECKPOINT = {
+    "checkpoint_id": "c" * 32,
+    "sandbox_id": "asbx_source",
+    "generation": 2,
+    "container_id": "container-source",
+    "base_image": "sha256:" + "b" * 64,
+    "runtime_id": "claude-code",
+    "runtime_version": "2.1.0",
+    "object_key": "cloud-agent/sandbox/v2/" + "d" * 64 + "/g2/" + "c" * 32 + ".oci.tar",
+    "version_id": "version-1",
+    "sha256": "e" * 64,
+    "size_bytes": 4096,
+    "new_layer_bytes": 2048,
+    "layer_count": 3,
+    "created_at": "2026-10-13T12:00:00+00:00",
+    "members": [{"thread_id": "athr_source", "last_settled_job_id": "ajob_1"}],
+    "durations_ms": {"commit": 10},
+    "format_version": 1,
+}
+
+
+async def test_a_heartbeat_records_the_latest_checkpoint_for_its_host(client):
+    async_client, store = client
+    credential = await _enroll(async_client, store)
+
+    response = await async_client.post(
+        "/v1/agent/host/heartbeat",
+        json={"retained_sandboxes": [_retained_with_checkpoint(_CHECKPOINT)]},
+        headers={"Authorization": f"Bearer {credential}"},
+    )
+
+    assert response.status_code == 200
+    assert len(store.checkpoints) == 1
+    recorded = store.checkpoints[0]
+    assert recorded["host"] == "runner-a"
+    assert recorded["thread_id"] == "athr_source"
+    assert recorded["checkpoint"]["checkpoint_id"] == "c" * 32
+    assert recorded["checkpoint"]["object_key"] == _CHECKPOINT["object_key"]
+
+
+@pytest.mark.parametrize(
+    "checkpoint",
+    [
+        {**_CHECKPOINT, "object_key": "../elsewhere"},
+        {**_CHECKPOINT, "sha256": "not-a-digest"},
+        {**_CHECKPOINT, "format_version": 2},
+        "not-a-receipt",
+    ],
+)
+async def test_an_unusable_checkpoint_never_costs_the_host_its_heartbeat(client, checkpoint):
+    async_client, store = client
+    credential = await _enroll(async_client, store)
+
+    response = await async_client.post(
+        "/v1/agent/host/heartbeat",
+        json={"retained_sandboxes": [_retained_with_checkpoint(checkpoint)]},
+        headers={"Authorization": f"Bearer {credential}"},
+    )
+
+    assert response.status_code == 200
+    assert store.checkpoints == []
+    assert len(store.sandbox_observations) == 1
+
+
+async def test_a_checkpoint_bookkeeping_failure_keeps_the_heartbeat(client):
+    async_client, store = client
+    credential = await _enroll(async_client, store)
+    store.fail_checkpoint_record = True
+
+    response = await async_client.post(
+        "/v1/agent/host/heartbeat",
+        json={"retained_sandboxes": [_retained_with_checkpoint(_CHECKPOINT)]},
+        headers={"Authorization": f"Bearer {credential}"},
+    )
+
+    assert response.status_code == 200
+    assert len(store.sandbox_observations) == 1
+
+
+async def test_a_due_stop_is_fenced_to_the_activation_the_beat_reported(residency_client):
+    """The database answers a placeholder; the stop must name the live activation.
+
+    The sandbox manager refuses a stop whose activation differs from its
+    member's, so a placeholder made every control-plane stop of a used chat
+    stale (staging: activation 0 sent, 3 current).
+    """
+    client, store, _grants = residency_client
+    credential = await _enroll(client, store)
+    store.sandbox_stop_due = {
+        "thread_id": "athr_1",
+        "generation": 3,
+        "activation_generation": 0,
+        "reason": "idle",
+        "member_activation_generations": {"athr_1": 3},
+    }
+
+    response = await client.post(
+        "/v1/agent/host/heartbeat",
+        json={
+            "retained_sandboxes": [
+                {
+                    "thread_id": "athr_1",
+                    "sandbox_id": "asbx_1",
+                    "container_id": "0123456789abcdef",
+                    "generation": 3,
+                    "activation_generation": 3,
+                    "running": True,
+                }
+            ]
+        },
+        headers={"Authorization": f"Bearer {credential}"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["retained_sandboxes_stop"] == [
+        {**store.sandbox_stop_due, "activation_generation": 3, "shared_live": True}
+    ]

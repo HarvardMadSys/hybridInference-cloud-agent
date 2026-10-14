@@ -1,7 +1,7 @@
 # Contributing
 
 Before changing this repository, read [AGENTS.md](AGENTS.md). See the
-[developer guide](docs/development.md) for local setup, code ownership,
+[developer guide](docs/developer/development.md) for local setup, code ownership,
 dependency boundaries, and checks for common changes.
 
 ## The short version
@@ -55,10 +55,10 @@ npm run test
 
 CI also runs build guards for server-only and runtime site configuration. If
 you change those boundaries, follow the
-[developer guide](docs/development.md#run-the-relevant-checks) and run the
+[developer guide](docs/developer/development.md#run-the-relevant-checks) and run the
 relevant guard locally.
 
-Use the [developer guide](docs/development.md#run-the-relevant-checks) to choose
+Use the [developer guide](docs/developer/development.md#run-the-relevant-checks) to choose
 the database and external tests you need. Database changes require the
 `dbtest` tier against a dedicated PostgreSQL test database. Schema changes
 need an additive Alembic migration. Service startup must not create or alter
@@ -72,13 +72,17 @@ when commands or behavior change.
 ## Continuous integration
 
 [CI](.github/workflows/ci.yml) classifies the changed paths and chooses the
-backend, frontend, and image jobs to run. It uses Python 3.12 and Node.js 22.
-The `CI Gate` requires the classifier to succeed. Every other job must either
-succeed or be deliberately skipped.
+backend, frontend, and image jobs to run. A pull request is compared with its
+base, and a push with the newest `agent-*` release, so a released commit has had
+every change since the previous release checked. It uses Python 3.12 and
+Node.js 22. The `CI Gate` requires the classifier to succeed. Every other job
+must either succeed or be deliberately skipped.
 
-Depending on the paths changed, jobs cover backend formatting, lint, mypy, the
-default and PostgreSQL test tiers, frontend checks, secret scanning, Compose
-rendering, image builds, and image smoke tests. CI also exercises selected real
+Secret scanning and the default test tier run for every change: the tier's
+tests also read documentation, `ENVIRONMENT.md` and the web app's sources.
+Depending on the paths changed, other jobs cover backend formatting, lint,
+mypy, the PostgreSQL test tier, frontend checks, Compose rendering, image
+builds, and image smoke tests. CI also exercises selected real
 CLI/session and MCP flows. After review, the real-Kata candidate check runs for
 relevant `dev` commits. Pull-request image jobs build and smoke-test without
 publishing.
@@ -88,7 +92,7 @@ GitHub-hosted runners; pushes to `dev` and `main` run on the self-hosted pools.
 Checked-in runner routing is not a security boundary: a fork can edit it. Issue
 [#464](https://github.com/HarvardMadSys/hybridInference-cloud-agent/issues/464)
 tracks the runner-group restrictions that are, and the
-[developer guide](docs/development.md#run-the-relevant-checks) describes them.
+[developer guide](docs/developer/development.md#run-the-relevant-checks) describes them.
 Release publication has its own
 [workflow](.github/workflows/publish.yml) and [guide](deploy/release/README.md).
 
@@ -103,7 +107,7 @@ another repository.
 
 `gateway_contracts/agent-control-plane.openapi.json` records this service's own
 API. For an intentional change, regenerate it with
-[the developer-guide command](docs/development.md#changing-an-api). Review the
+[the developer-guide command](docs/developer/development.md#changing-an-api). Review the
 diff, and explain the compatibility implications in the PR.
 
 The shared Python protocols in `apps/backend/cloud_agent_shared/` form a

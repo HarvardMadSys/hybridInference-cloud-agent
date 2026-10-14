@@ -176,6 +176,92 @@ async def test_cookie_scope_and_redirect_keep_the_public_proxy_prefix(database_a
     assert audit.record_admin_action.call_args.kwargs["actor_id"] == "admin-token"
 
 
+#: The proxy's framing policy, which every proxied page carries as well.
+FRAMING_POLICY = "frame-ancestors 'self'; object-src 'none'; base-uri 'self'"
+PGADMIN_ONLY = (
+    f"connect-src {PUBLIC}/ wss://agents.example.org/agents/api{ROOT}/ blob: data:; "
+    f"form-action {PUBLIC}/; frame-src {PUBLIC}/ blob: data:; worker-src {PUBLIC}/ blob:"
+)
+
+
+@pytest.mark.parametrize("status", [200, 404, 500])
+async def test_pgadmin_pages_cannot_reach_the_rest_of_the_shared_origin(database_api, status):
+    """pgAdmin shares the Agent origin and its session; its pages stay on its path."""
+    client, _, result, _, _, _ = database_api
+    own = "default-src 'self' ws: http: data: blob:; script-src 'self' 'nonce-abc'"
+    result["status"] = status
+    result["headers"] = [
+        ("content-type", "text/html"),
+        ("content-security-policy", own),
+        ("cross-origin-opener-policy", "unsafe-none"),
+    ]
+    response = await client.get(f"{ROOT}/browser/", headers=ADMIN)
+    assert response.status_code == status
+    # Every policy is enforced; pgAdmin's own is not replaced.
+    assert response.headers.get_list("content-security-policy") == [
+        own,
+        FRAMING_POLICY,
+        PGADMIN_ONLY,
+    ]
+    assert response.headers.get_list("cross-origin-opener-policy") == ["same-origin"]
+
+
+async def test_the_isolation_policy_follows_the_public_proxy_url(database_api, monkeypatch):
+    client, _, _, _, _, _ = database_api
+    monkeypatch.setenv("AGENT_PGADMIN_PUBLIC_URL", "http://localhost:3003/a;b,c/api" + ROOT)
+    response = await client.get(f"{ROOT}/", headers=ADMIN)
+    page = f"http://localhost:3003/a%3Bb%2Cc/api{ROOT}/"
+    assert response.headers.get_list("content-security-policy")[-1] == (
+        f"connect-src {page} ws://localhost:3003/a%3Bb%2Cc/api{ROOT}/ blob: data:; "
+        f"form-action {page}; frame-src {page} blob: data:; worker-src {page} blob:"
+    )
+    monkeypatch.setenv("AGENT_PGADMIN_PUBLIC_URL", "http://[::1]:3003/api" + ROOT)
+    response = await client.get(f"{ROOT}/", headers=ADMIN)
+    assert response.headers.get_list("content-security-policy")[-1] == (
+        "connect-src 'self' blob: data:; form-action 'self'; "
+        "frame-src 'self' blob: data:; worker-src 'self' blob:"
+    )
+
+
+@pytest.mark.parametrize(
+    ("path", "error", "status"),
+    [
+        # A control character cannot be sent upstream at all.
+        (f"{ROOT}/%7F", None, 404),
+        (f"{ROOT}/browser/", httpx.ConnectError("private diagnostics"), 503),
+    ],
+)
+async def test_the_proxys_own_answers_are_sandboxed(database_api, path, error, status):
+    """A pgAdmin page may frame these; sandboxed, they lend it no same-origin window."""
+    client, seen, result, _, _, _ = database_api
+    result["error"] = error
+    response = await client.get(path, headers=ADMIN)
+    assert response.status_code == status
+    assert response.headers["content-security-policy"] == "sandbox"
+    assert response.headers["cache-control"] == "no-store"
+    assert "private diagnostics" not in response.text
+    # Only the unreachable service was ever asked.
+    assert len(seen) == (1 if status == 503 else 0)
+
+
+@pytest.mark.parametrize("configuration", ["unset", "malformed", "not named"])
+async def test_refusals_for_the_configuration_are_sandboxed_too(
+    database_api, monkeypatch, configuration
+):
+    client, seen, _, _, _, _ = database_api
+    if configuration == "unset":
+        monkeypatch.delenv("AGENT_PGADMIN_URL")
+    elif configuration == "malformed":
+        monkeypatch.setenv("AGENT_PGADMIN_URL", "http://pgadmin/bad")
+    else:
+        save_pgadmin_url("http://169.254.169.254")
+    response = await client.get(f"{ROOT}/browser/", headers=ADMIN)
+    assert response.status_code == 503
+    assert response.headers["content-security-policy"] == "sandbox"
+    assert response.headers["cache-control"] == "no-store"
+    assert seen == []
+
+
 async def test_pgadmin_sessions_are_separate_for_each_request(database_api):
     client, seen, result, _, clients, _ = database_api
     result["headers"] = [("set-cookie", "pga4_session=admin-a; Path=/")]
@@ -229,6 +315,75 @@ async def test_path_cannot_change_the_private_upstream_host(database_api):
     client, seen, _, _, _, _ = database_api
     await client.get(f"{ROOT}//other.example/path", headers=ADMIN)
     assert seen[0].url.host == "pgadmin"
+
+
+def save_pgadmin_url(url: str) -> None:
+    """Save the URL the way Admin Settings does, after its own validation."""
+    settings.apply_settings(
+        1,
+        settings.encode_changes(
+            {"pgadmin_url": url, "web_base_url": "https://agents.example.org/agents"}
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    "saved",
+    [
+        "http://169.254.169.254",
+        "http://gateway:8000",
+        "http://pgadmin:5051",
+        "https://pgadmin:5050",
+    ],
+)
+async def test_a_saved_url_the_deployment_does_not_name_is_never_contacted(database_api, saved):
+    """Admin Settings choose the pgAdmin service; they cannot aim the proxy elsewhere."""
+    client, seen, _, audit, _, _ = database_api
+    save_pgadmin_url(saved)
+    for path in (
+        "/admin/agent/database-tools",
+        ROOT,
+        f"{ROOT}/",
+        f"{ROOT}/latest/meta-data/iam/security-credentials/",
+    ):
+        response = await client.get(path, headers=ADMIN)
+        assert response.status_code == 503, path
+        assert saved not in response.text
+    response = await client.put(f"{ROOT}/latest/api/token", headers=ADMIN, content=b"token")
+    assert response.status_code == 503
+    assert seen == []
+    audit.record_admin_action.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("environment", "saved"),
+    [
+        # The bundled service, saved in Admin Settings as #413 documented.
+        ({}, "http://pgadmin:5050"),
+        ({}, "HTTP://PGADMIN:5050/"),
+        (
+            {"AGENT_PGADMIN_URL": "http://database-tools.internal:8080"},
+            "http://database-tools.internal:8080",
+        ),
+        (
+            {"AGENT_PGADMIN_BOOTSTRAP_URL": "https://pgadmin.internal/"},
+            "https://pgadmin.internal:443",
+        ),
+    ],
+)
+async def test_a_saved_url_may_name_any_pgadmin_service_the_deployment_names(
+    database_api, monkeypatch, environment, saved
+):
+    client, seen, _, _, _, _ = database_api
+    monkeypatch.delenv("AGENT_PGADMIN_URL")
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
+    save_pgadmin_url(saved)
+    status = await client.get("/admin/agent/database-tools", headers=ADMIN)
+    assert status.json()["available"] is True
+    response = await client.get(f"{ROOT}/browser/", headers=ADMIN)
+    assert response.status_code == 200
+    assert {request.url.host for request in seen} == {httpx.URL(saved).host}
 
 
 SETUP = "/admin/agent/database-tools/setup"
@@ -384,9 +539,11 @@ async def test_first_setup_enables_saved_settings_but_later_resets_remain_author
 
 
 async def test_first_setup_does_not_replace_a_different_saved_pgadmin_service(
-    database_api, setup_volume
+    database_api, setup_volume, monkeypatch
 ):
     client, _, _, _, _, _ = database_api
+    # The deployment names the other service; only then may settings select it.
+    monkeypatch.setenv("AGENT_PGADMIN_URL", "http://other-private-pgadmin:5050")
     settings.apply_settings(
         1,
         {
@@ -398,6 +555,66 @@ async def test_first_setup_does_not_replace_a_different_saved_pgadmin_service(
     assert status.json()["setup_required"] is False
     assert (await client.post(SETUP, headers=ADMIN, json=CREDENTIALS)).status_code == 409
     assert list(setup_volume.iterdir()) == []
+
+
+def setup_actions(audit: AsyncMock) -> list[tuple[str, bool]]:
+    return [
+        (call.kwargs["action"], call.kwargs["success"])
+        for call in audit.record_admin_action.call_args_list
+    ]
+
+
+async def test_a_failed_first_setup_can_be_retried(database_api, monkeypatch, tmp_path):
+    """The operator's case: a slash on the bootstrap URL and a volume not yet writable."""
+    client, _, result, audit, _, app = database_api
+    monkeypatch.delenv("AGENT_PGADMIN_URL")
+    volume = tmp_path / "pgadmin-bootstrap"
+    monkeypatch.setenv("AGENT_PGADMIN_BOOTSTRAP_DIR", str(volume))
+    monkeypatch.setenv("AGENT_PGADMIN_BOOTSTRAP_URL", "http://pgadmin:5050/")
+    monkeypatch.setenv("AGENT_PGADMIN_BOOTSTRAP_PUBLIC_URL", PUBLIC)
+    result["error"] = httpx.ConnectError("pgAdmin is waiting for setup")
+    initial = {
+        "pgadmin_url": "",
+        "pgadmin_public_url": "",
+        "web_base_url": "https://agents.example.org/agents",
+    }
+    settings.apply_settings(1, initial)
+    saved = {**initial, "pgadmin_url": "http://pgadmin:5050", "pgadmin_public_url": PUBLIC}
+    repository = SimpleNamespace(update_settings=AsyncMock(return_value=(2, saved, initial)))
+    app.state.storage.settings = repository
+
+    failed = await client.post(SETUP, headers=ADMIN, json=CREDENTIALS)
+    assert failed.status_code == 503
+    # The connection is saved first, without the slash, and the failure is on record.
+    repository.update_settings.assert_awaited_once_with(
+        {"pgadmin_url": "http://pgadmin:5050", "pgadmin_public_url": PUBLIC}
+    )
+    assert setup_actions(audit) == [
+        ("agent.settings.update", True),
+        ("agent.database.pgadmin.setup", False),
+    ]
+    status = await client.get("/admin/agent/database-tools", headers=ADMIN)
+    assert status.json()["setup_required"] is True
+
+    volume.mkdir()
+    retried = await client.post(SETUP, headers=ADMIN, json=CREDENTIALS)
+    assert retried.status_code == 202
+    assert (volume / "email").read_text() == CREDENTIALS["email"]
+    assert repository.update_settings.await_count == 1
+    assert setup_actions(audit)[2:] == [("agent.database.pgadmin.setup", True)]
+
+
+async def test_a_saved_url_without_the_bootstrap_slash_is_the_same_service(
+    database_api, setup_volume, monkeypatch
+):
+    """A connection saved without the slash must not refuse setup as another service."""
+    client, _, _, _, _, _ = database_api
+    monkeypatch.setenv("AGENT_PGADMIN_BOOTSTRAP_URL", "http://pgadmin:5050/")
+    settings.apply_settings(1, {"pgadmin_url": "http://pgadmin:5050", "pgadmin_public_url": PUBLIC})
+    status = await client.get("/admin/agent/database-tools", headers=ADMIN)
+    assert status.json()["setup_required"] is True
+    assert (await client.post(SETUP, headers=ADMIN, json=CREDENTIALS)).status_code == 202
+    assert (setup_volume / "email").read_text() == CREDENTIALS["email"]
 
 
 async def test_proxied_pages_cannot_be_framed_elsewhere_or_sniffed(database_api):

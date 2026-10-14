@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import ipaddress
+import socket
 import time
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
@@ -70,6 +72,41 @@ def _allowlisted(entry: str, hostname: str, origin: str) -> bool:
     return _origin(parsed.scheme.lower(), parsed.hostname, port) == origin
 
 
+#: Addresses no sandbox manager lives at, whatever the allowlist says.
+#: Link-local holds the cloud metadata services (169.254.169.254, and AWS's
+#: fd00:ec2::254 over IPv6), and the control plane's probe of a sandbox manager
+#: carries the pool's token: aimed there, it is a credentialed request to the
+#: control plane's own instance identity. Loopback and private ranges stay
+#: allowed, because single-host and private pools put their sandbox managers
+#: exactly there.
+_NEVER_SANDBOX_MANAGER_NETWORKS = (
+    ipaddress.ip_network("169.254.0.0/16"),
+    ipaddress.ip_network("fe80::/10"),
+    ipaddress.ip_network("fd00:ec2::254/128"),
+)
+
+
+def _literal_address(hostname: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """The address a numeric host names, in any spelling the resolver accepts.
+
+    ``None`` for a name: what a name resolves to is the allowlist's business.
+    """
+    name = hostname.rstrip(".")
+    try:
+        address: ipaddress.IPv4Address | ipaddress.IPv6Address = ipaddress.ip_address(name)
+    except ValueError:
+        try:
+            # What the resolver applies to a numeric host, including shorthand
+            # spellings ``ip_address`` refuses: "2852039166", "0xa9fea9fe",
+            # "169.254.43518" all name 169.254.169.254.
+            address = ipaddress.IPv4Address(socket.inet_aton(name))
+        except (OSError, ValueError):
+            return None
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        return address.ipv4_mapped
+    return address
+
+
 def validate_sandbox_manager_url(url: str | None) -> str | None:
     """Return ``url`` if this deployment may send its sandbox manager token there.
 
@@ -88,19 +125,23 @@ def validate_sandbox_manager_url(url: str | None) -> str | None:
       a path would choose a different service behind it, and credentials in
       the authority are a second secret no sandbox manager needs. Each is refused; a
       single trailing slash is allowed.
+    * **Never a link-local address**, written in any spelling: that is where
+      cloud metadata services answer (see ``_NEVER_SANDBOX_MANAGER_NETWORKS``).
     * **Allowlist**, when configured. Names or exact origins, not patterns: a
       pattern is a thing to get subtly wrong, and the set of machines in a pool
       is small and known. A bare name admits that host on any port, as it
       always did; an origin entry also pins the scheme and port, which is what
       tells apart sandbox managers that share one tunnel address. Unconfigured means any
-      host, which is what this did before — the check is opt-in so that turning
+      other host, which is what this did before — the check is opt-in so that turning
       it on is a deployment's decision rather than something that breaks every
-      existing pool on upgrade.
+      existing pool on upgrade. It is also the only check on what a *name*
+      resolves to.
 
     Raises:
-        SandboxManagerUrlRefused: If the URL is unusable or names a host outside the
-            allowlist. Refused rather than dropped: a host whose address is
-            ignored looks enrolled and silently never serves a workspace.
+        SandboxManagerUrlRefused: If the URL is unusable, names a link-local
+            address, or names a host outside the allowlist. Refused rather than
+            dropped: a host whose address is ignored looks enrolled and
+            silently never serves a workspace.
     """
     if url is None or not url.strip():
         return None
@@ -131,6 +172,20 @@ def validate_sandbox_manager_url(url: str | None) -> str | None:
         raise SandboxManagerUrlRefused(
             f"sandbox_manager_url must be a scheme://host:port origin with no path, query or "
             f"fragment, got {candidate!r}"
+        )
+    if not parsed.hostname.isprintable():
+        # No name or address contains one, and the resolver stops reading a
+        # host at a NUL: what it would dial is not what was checked below.
+        raise SandboxManagerUrlRefused(
+            "sandbox_manager_url host must not contain control characters"
+        )
+    address = _literal_address(parsed.hostname)
+    if address is not None and any(
+        address in network for network in _NEVER_SANDBOX_MANAGER_NETWORKS
+    ):
+        raise SandboxManagerUrlRefused(
+            f"sandbox_manager_url host {parsed.hostname!r} is a link-local address, "
+            "where no sandbox manager runs"
         )
 
     allowed = [

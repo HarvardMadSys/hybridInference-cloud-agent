@@ -65,6 +65,50 @@ _RUNTIME_WEB_VAR = re.compile(r'["\'](AGENT_WEB_[A-Z0-9_]+)["\']')
 #: `next.config.js` reads them too, and it is not under `src/`.
 _WEB_SOURCES = ("apps/frontend/src/**/*.ts", "apps/frontend/src/**/*.tsx", "apps/frontend/*.js")
 
+#: Where the Python packages live. These patterns used to start at the
+#: repository root, matched nothing once the packages moved under
+#: `apps/backend/`, and every Python check here then passed without reading a
+#: file. `_sources` now refuses a pattern that matches nothing.
+_CONTROL_PLANE_SOURCES = "apps/backend/cloud_agent/**/*.py"
+_PYTHON_SOURCES = (
+    _CONTROL_PLANE_SOURCES,
+    "apps/backend/cloud_agent_host/**/*.py",
+    "apps/backend/cloud_agent_shared/**/*.py",
+    "migrations/**/*.py",
+)
+
+#: Control-plane modules that write a *host's* environment: compute setup and
+#: the host bootstrap render, require and forbid the names in a new machine's
+#: `.env`. Those names are host variables, which the control plane's compose
+#: file has no business setting, so in these two modules only an actual read of
+#: the control plane's own environment counts. The names still need rows in
+#: ENVIRONMENT.md, which the inventory check below enforces.
+_HOST_ENV_WRITERS = (
+    "apps/backend/cloud_agent/application/compute_setup.py",
+    "apps/backend/cloud_agent/providers/compute/host_bootstrap.py",
+)
+
+#: An actual read: `os.environ.get(...)`, `os.environ[...]`, `getenv(...)` or
+#: `setting_env(...)` with the name as its literal argument.
+_ENV_READ = re.compile(
+    r"(?:environ\.get\(|environ\[|getenv\(|setting_env\()\s*"
+    r'["\'](AGENT_[A-Z0-9_]+|GATEWAY_[A-Z0-9_]+|IDENTITY_[A-Z0-9_]+)["\']'
+)
+
+#: Quoted like a variable, and not one: Python names with a prefix this project
+#: owns that the code mentions as strings. Each entry needs a reason, for the
+#: same reason the exemptions below do.
+_NOT_VARIABLES = {
+    # A message constant that `owner_access.py` exports by name in `__all__`.
+    "AGENT_ACCESS_WITHDRAWN",
+}
+
+#: A row whose first cell is `AGENT_TUNNEL_*` documents a family: the code
+#: builds the names from the prefix, and the row lists the suffixes. Only a
+#: table row's first cell counts, so prose saying a family does *not* exist
+#: and a struck-through removed row document nothing.
+_FAMILY_ROW = re.compile(r"^\|\s*`([A-Z][A-Z0-9_]*)_\*`\s*\|", re.MULTILINE)
+
 #: Read by the control plane, and correctly absent from its compose file.
 #: Each entry needs a reason, because "add it to the exemption list" is the
 #: obvious way to make this test stop failing without fixing anything.
@@ -82,7 +126,17 @@ _COMPOSE_EXEMPT = {
 def _sources(*globs: str) -> list[Path]:
     found: list[Path] = []
     for pattern in globs:
-        found += [p for p in REPO_ROOT.glob(pattern) if "test" not in p.name]
+        # Test files only: a bare "test" in the name also skipped
+        # `storage_attestation.py`.
+        matched = [
+            p
+            for p in REPO_ROOT.glob(pattern)
+            if not (p.name.startswith("test_") or ".test." in p.name)
+        ]
+        # A pattern that matches nothing makes every check below a pass over
+        # an empty set, which is how the package move went unnoticed.
+        assert matched, f"{pattern} matches no source file; update the pattern"
+        found += matched
     return found
 
 
@@ -110,7 +164,16 @@ def _compose_environment_keys() -> set[str]:
 
 def test_control_plane_variables_are_wired_into_compose() -> None:
     """A variable the control plane reads can be set on the deployed stack."""
-    read = _vars_read(_sources("cloud_agent/**/*.py")) - _COMPOSE_EXEMPT
+    sources = _sources(_CONTROL_PLANE_SOURCES)
+    writers = [REPO_ROOT / path for path in _HOST_ENV_WRITERS]
+    moved = [str(path) for path in writers if path not in sources]
+    assert not moved, f"{moved} no longer exist; update _HOST_ENV_WRITERS"
+    read = (
+        _vars_read([path for path in sources if path not in writers])
+        | _vars_read(writers, _ENV_READ)
+    ) - _NOT_VARIABLES
+    assert read, "no variable reads found under apps/backend/cloud_agent/ — regex drift?"
+    read -= _COMPOSE_EXEMPT
     unreachable = sorted(read - _compose_environment_keys())
     assert not unreachable, (
         "the control plane reads these, but they are not keys under "
@@ -198,18 +261,47 @@ def test_web_runtime_variables_are_wired() -> None:
 
 def test_every_variable_read_has_an_inventory_row() -> None:
     """A variable an operator might need to set is written down."""
-    read = _vars_read(
-        _sources(
-            "cloud_agent/**/*.py",
-            "cloud_agent_host/**/*.py",
-            "migrations/**/*.py",
-        )
-    ) | _vars_read(_sources(*_WEB_SOURCES), _PUBLIC_VAR)
+    read = (
+        _vars_read(_sources(*_PYTHON_SOURCES)) | _vars_read(_sources(*_WEB_SOURCES), _PUBLIC_VAR)
+    ) - _NOT_VARIABLES
+    assert read, "no variable reads found — regex drift?"
     inventory = INVENTORY.read_text()
+    families = set(_FAMILY_ROW.findall(inventory))
     # Backticked, which is how every row writes them — and how a grouped row
-    # like ``AGENT_SANDBOX_UID`` / ``AGENT_SANDBOX_GID`` still matches both.
-    undocumented = sorted(name for name in read if f"`{name}`" not in inventory)
+    # like ``AGENT_SANDBOX_UID`` / ``AGENT_SANDBOX_GID`` still matches both. A
+    # family row covers its prefix and every name built from it.
+    undocumented = sorted(
+        name
+        for name in read
+        if f"`{name}`" not in inventory
+        and not any(name == family or name.startswith(f"{family}_") for family in families)
+    )
     assert not undocumented, (
         f"add a row to {INVENTORY.name} for each of these, in the right section, "
         f"marked NEW: {undocumented}"
     )
+
+
+def test_only_a_family_row_documents_a_prefix() -> None:
+    """Prose about a family, or a removed one, covers no name built from it."""
+    inventory = (
+        "| `AGENT_TUNNEL_*` | existing | Inference SSH tunnel. |\n"
+        "There is no `AGENT_SANDBOX_ARCHIVE_*` environment surface.\n"
+        "| ~~`AGENT_EGRESS_PROXY_*`~~ | **removed** | Nothing reads them. |\n"
+    )
+    assert _FAMILY_ROW.findall(inventory) == ["AGENT_TUNNEL"]
+
+
+def test_a_host_env_writer_still_counts_its_own_reads() -> None:
+    """A writer's host names are not reads; its own environment reads still are."""
+    source = (
+        'host_env = {"AGENT_HOST_SLOTS": "3"}\n'
+        'sha = os.environ.get("AGENT_DEPLOYMENT_SHA", "")\n'
+        'ssh = os.environ["AGENT_CONTROL_PLANE_SSH_HOST"]\n'
+        'url = setting_env("AGENT_COMPUTE_REGISTRATION_URL")\n'
+    )
+    assert set(_ENV_READ.findall(source)) == {
+        "AGENT_DEPLOYMENT_SHA",
+        "AGENT_CONTROL_PLANE_SSH_HOST",
+        "AGENT_COMPUTE_REGISTRATION_URL",
+    }

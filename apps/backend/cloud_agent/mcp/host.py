@@ -82,6 +82,21 @@ class HostError(RuntimeError):
         self.kind = kind
 
 
+def _unreadable(exc: Exception, *, connection_id: str) -> HostError:
+    """The host error for a failure no handler anticipated, logged with its cause.
+
+    The message carries no detail of the failure: a server's reply is what
+    produced it, and echoing it would put that server's bytes into the relay's
+    answer and a model's context. The log keeps the cause for an operator.
+    """
+    logger.warning(
+        "agent_mcp_unreadable_reply",
+        extra={"event": "agent_mcp_unreadable_reply", "connection_id": connection_id},
+        exc_info=exc,
+    )
+    return HostError("the server's reply could not be processed", kind="protocol_incompatible")
+
+
 class ConnectorRequired(HostError):
     """Raised for a stdio connection with no worker or connector behind it."""
 
@@ -275,12 +290,21 @@ class Session:
 
     @contextlib.asynccontextmanager
     async def using(self) -> AsyncIterator[None]:
-        """Keep the transport alive and expose upstream failures as host errors."""
+        """Keep the transport alive and expose upstream failures as host errors.
+
+        Every failure leaves as a :class:`HostError`, including one nothing here
+        anticipated: the relay records an approved call's outcome only for the
+        errors it handles, and anything else leaves that call dispatched with
+        no terminal state. An unanticipated failure also retires the session,
+        because nothing says what state it left the connection in.
+        """
         if self._closed or self._retired:
             raise HostError("the upstream session was replaced; start a new request")
         self._active_operations += 1
         try:
             yield
+        except HostError:
+            raise
         except TransportError as exc:
             self._retired = True
             raise HostError(str(exc), kind=exc.kind) from exc
@@ -289,6 +313,9 @@ class Session:
             raise HostError(str(exc), kind="protocol_incompatible") from exc
         except JsonRpcError as exc:
             raise HostError(str(exc), kind="protocol_incompatible") from exc
+        except Exception as exc:
+            self._retired = True
+            raise _unreadable(exc, connection_id=self.key.connection_id) from exc
         finally:
             self._active_operations -= 1
             if self._retired and not self._active_operations:
@@ -486,11 +513,6 @@ class McpHost:
             return False
         return recorded == SessionFingerprint.of(connection, secret=secret)
 
-    async def reap_superseded(self, key: SessionKey) -> int:
-        """Close older owners after any concurrent connection attempt settles."""
-        async with self._session_lock(key):
-            return await self._reap_superseded(key)
-
     async def _reap_superseded(self, key: SessionKey) -> int:
         """Close what this member held under an older owner, and forget it.
 
@@ -645,6 +667,10 @@ class McpHost:
             raise HostError(str(exc), kind=exc.kind) from exc
         except (JsonRpcError, protocol.ProtocolError) as exc:
             raise HostError(str(exc), kind="protocol_incompatible") from exc
+        except Exception as exc:
+            # Connecting is part of dispatching a call, so it keeps the same
+            # contract as using a session: nothing leaves but a host error.
+            raise _unreadable(exc, connection_id=connection.connection_id) from exc
 
     async def discover(
         self,

@@ -252,11 +252,13 @@ class PostgresConversationQueries:
         limit: int = 50,
         archived: bool = False,
         repo: str | None = None,
+        temporary: bool = False,
     ) -> list[dict[str, Any]]:
         """List a user's jobs with pinned threads first, then newest first.
 
         ``repo`` narrows the page to one project, which is how the sidebar
         pages a single project past the global newest-first window.
+        ``temporary`` narrows it to the conversations without a repository.
         """
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
@@ -267,6 +269,7 @@ class PostgresConversationQueries:
                 WHERE j.user_id = $1
                   AND t.deleted_at IS NULL
                   AND ($4::text IS NULL OR t.repo = $4)
+                  AND (NOT $5::boolean OR t.repo IS NULL)
                   AND (($3 AND t.archived_at IS NOT NULL)
                        OR (NOT $3 AND t.archived_at IS NULL))
                 ORDER BY t.pinned_at DESC NULLS LAST, j.created_at DESC
@@ -276,6 +279,7 @@ class PostgresConversationQueries:
                 limit,
                 archived,
                 repo,
+                temporary,
             )
         return [job_row_to_dict(row) for row in rows]
 
@@ -289,8 +293,11 @@ class PostgresConversationQueries:
         pinned: bool | None = None,
         limit: int = 50,
         cursor: str | None = None,
+        temporary: bool = False,
     ) -> dict[str, Any]:
         """Page complete owned conversations, searching their canonical title.
+
+        ``temporary`` keeps only the conversations without a repository.
 
         Activity is the thread's own update or the most recently updated of
         its turns, whichever is later. Any turn counts, not only the newest:
@@ -307,10 +314,13 @@ class PostgresConversationQueries:
         q = q.strip()
         if not 1 <= limit <= 200 or len(q) > 200 or "\x00" in q:
             raise ValueError("Invalid conversation search parameters")
-        scope_filters = [user_id, q, repo, include_archived]
+        scope_filters: list[Any] = [user_id, q, repo, include_archived]
         # Preserve issued cursors for searches that do not filter pin state.
         if pinned is not None:
             scope_filters.append(pinned)
+        # Likewise for the temporary-workspace filter, which older cursors lack.
+        if temporary:
+            scope_filters.append("temporary")
         scope = hashlib.sha256(json.dumps(scope_filters).encode()).hexdigest()
         boundary = (
             decode_conversation_cursor(cursor, scope)
@@ -334,6 +344,7 @@ class PostgresConversationQueries:
                     ) freshest
                     WHERE t.user_id = $1 AND t.deleted_at IS NULL
                       AND ($2::text IS NULL OR t.repo = $2)
+                      AND (NOT $11::boolean OR t.repo IS NULL)
                       AND ($3::text = '' OR POSITION(LOWER($3) IN LOWER(t.title)) > 0
                            OR POSITION(LOWER($3) IN LOWER(t.repo)) > 0)
                       AND ($4::boolean OR t.archived_at IS NULL)
@@ -371,6 +382,7 @@ class PostgresConversationQueries:
                 limit + 1,
                 *boundary,
                 pinned,
+                temporary,
             )
         next_cursor = None
         if len(rows) > limit:
@@ -455,15 +467,19 @@ class PostgresConversationQueries:
         repo: str | None = None,
         state: str | None = None,
         include_summary: bool = True,
+        temporary: bool = False,
     ) -> dict[str, Any]:
         """Page complete conversations independently of their number of turns.
+
+        ``temporary`` selects the conversations without a repository, the way
+        ``repo`` selects one project; the facets always count every project.
 
         Project facets apply search/state/archive filters before the selected
         repo. The page and its counts share a database snapshot; the opaque
         keyset remains valid when earlier rows are unarchived or deleted.
         Row-only requests skip the full-history aggregate and return null counts.
         """
-        scope = session_cursor_scope(user_id, archived, search, repo, state)
+        scope = session_cursor_scope(user_id, archived, search, repo, state, temporary=temporary)
         after_at, after_id = decode_session_cursor(cursor, scope)
         async with (
             self._pool.acquire() as conn,
@@ -498,8 +514,15 @@ class PostgresConversationQueries:
                 after_at,
                 after_id,
                 limit + 1,
+                temporary,
             )
         page = rows[:limit]
+
+        def selected(project: str | None) -> bool:
+            if temporary:
+                return project is None
+            return repo is None or project == repo
+
         return {
             "sessions": [
                 {
@@ -513,7 +536,7 @@ class PostgresConversationQueries:
                 for row in page
             ],
             "total": (
-                sum(int(item["count"]) for item in projects if repo is None or item["repo"] == repo)
+                sum(int(item["count"]) for item in projects if selected(item["repo"]))
                 if projects is not None
                 else None
             ),

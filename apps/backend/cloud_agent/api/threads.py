@@ -27,7 +27,7 @@ from cloud_agent.api._job_views import (
     _job_response,
     _pending_response,
 )
-from cloud_agent.api._owner_auth import _owned_job, require_agent_owner
+from cloud_agent.api._owner_auth import OWNER_STREAM_MAX_S, _owned_job, require_agent_owner
 from cloud_agent.api._stream_slots import STREAM_SLOTS
 from cloud_agent.api.deps import get_job_event_signal, get_storage, require_store
 from cloud_agent.domain.execution import TERMINAL_STATES
@@ -244,9 +244,11 @@ async def stream_agent_job_events(
     """Stream a job's events as SSE, resumable via ``Last-Event-ID``.
 
     Each SSE frame carries the event's global id, so a client that reconnects
-    with ``Last-Event-ID`` resumes exactly where it left off — which is what
-    makes the finite stream cap (applied by the timeout middleware to
-    ``text/event-stream``) safe for jobs that outlive one connection. 429 when
+    with ``Last-Event-ID`` (or ``after``) resumes exactly where it left off —
+    which is what makes the finite stream cap safe for jobs that outlive one
+    connection. A stream ends after at most ``OWNER_STREAM_MAX_S`` (15
+    minutes), without ``job_finished`` if the job is still going; the client
+    reconnects from its cursor, and that request is admitted again. 429 when
     the account already holds as many streams as this process allows one
     account (:mod:`cloud_agent.api._stream_slots`).
     """
@@ -263,6 +265,9 @@ async def stream_agent_job_events(
         nonlocal cursor
         clock = asyncio.get_running_loop().time
         last_frame = clock()
+        # Admission was checked once, for this connection, so the connection
+        # does not outlive the cap.
+        closes_at = clock() + OWNER_STREAM_MAX_S
         # Between reads the stream waits for its job to notify that it stored
         # an event or changed state, and reads again at once. The notification
         # only says when to read; the cursor says what, so one that is lost
@@ -273,7 +278,7 @@ async def stream_agent_job_events(
         try:
             with subscription as woken:
                 while True:
-                    if await request.is_disconnected():
+                    if await request.is_disconnected() or clock() >= closes_at:
                         return
                     events = await job_store.execution_queries.list_events_after(
                         job_id=job_id, after_id=cursor, limit=_EVENT_PAGE_SIZE
@@ -323,16 +328,18 @@ async def stream_agent_job_events(
                         yield f"event: job_finished\ndata: {final}\n\n"
                         return
 
+                    # No wait runs past the cap, so the stream ends on time.
+                    remaining = closes_at - clock()
                     if signal is None or woken is None:
-                        await asyncio.sleep(_POLL_INTERVAL_S)
+                        await asyncio.sleep(min(_POLL_INTERVAL_S, remaining))
                     else:
                         await signal.wait(
-                            woken, _IDLE_READ_S if signal.listening else _POLL_INTERVAL_S
+                            woken,
+                            min(_IDLE_READ_S if signal.listening else _POLL_INTERVAL_S, remaining),
                         )
         except asyncio.CancelledError:
-            # Client disconnect or the stream cap firing: the subscription ends
-            # with its block, the event log is durable and the client can
-            # resume by cursor.
+            # Client disconnect: the subscription ends with its block, the
+            # event log is durable and the client can resume by cursor.
             raise
 
     return StreamingResponse(

@@ -8,6 +8,7 @@ missing and is visible as coverage rather than as zero usage.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
@@ -143,6 +144,42 @@ async def get_admin_usage(
             503, _UNAVAILABLE, "Usage could not be read right now. Please try again."
         ) from None
 
+    # Resolving the stored reports is CPU work that grows with the selection:
+    # seconds at the published bounds. This process serves every request, host
+    # heartbeat and event stream from one event loop, so it runs on a thread.
+    response, size = await asyncio.to_thread(
+        _summarize,
+        cohort,
+        rows,
+        selection=AdminUsageSelection(
+            since=since, until=until, user_id=user_id, model=model, runtime=runtime, repo=repo
+        ),
+        generated_at=generated_at,
+        since=since,
+        until=until,
+    )
+    # The byte bound is on what actually leaves: a selection inside its row and
+    # snapshot budgets can still serialize past it when a report carries very
+    # wide counters. Refuse the whole response rather than trimming days or
+    # groups, which would answer a different question than the one asked.
+    if size > MAX_USAGE_RESPONSE_BYTES:
+        raise _error(422, _TOO_LARGE, "Narrow the time range or add a user or model filter.")
+    return response
+
+
+def _summarize(
+    cohort: list[dict[str, Any]],
+    rows: list[dict[str, Any]],
+    *,
+    selection: AdminUsageSelection,
+    generated_at: datetime,
+    since: datetime,
+    until: datetime,
+) -> tuple[AdminUsageResponse, int]:
+    """Reduce one selection to its response and that response's size in bytes.
+
+    CPU-bound and synchronous: the route runs it on a worker thread.
+    """
     ledger_by_job: dict[str, list[dict[str, Any]]] = {row["id"]: [] for row in cohort}
     for row in rows:
         ledger_by_job[row["job_id"]].append(row)
@@ -153,9 +190,7 @@ async def get_admin_usage(
     prepared = prepare_jobs(jobs, terminal_states=TERMINAL_STATES)
 
     response = AdminUsageResponse(
-        selection=AdminUsageSelection(
-            since=since, until=until, user_id=user_id, model=model, runtime=runtime, repo=repo
-        ),
+        selection=selection,
         generated_at=generated_at,
         summary=aggregate_prepared(prepared),
         days=days_breakdown(
@@ -177,10 +212,4 @@ async def get_admin_usage(
             prepared=prepared,
         ),
     )
-    # The byte bound is on what actually leaves: a selection inside its row and
-    # snapshot budgets can still serialize past it when a report carries very
-    # wide counters. Refuse the whole response rather than trimming days or
-    # groups, which would answer a different question than the one asked.
-    if len(response.model_dump_json().encode()) > MAX_USAGE_RESPONSE_BYTES:
-        raise _error(422, _TOO_LARGE, "Narrow the time range or add a user or model filter.")
-    return response
+    return response, len(response.model_dump_json().encode())

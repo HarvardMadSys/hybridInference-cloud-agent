@@ -71,7 +71,9 @@ class ThreadStats:
     tool_calls: int
     #: Tool calls whose result carried an error flag.
     failed_tool_calls: int
-    #: Wall time from each turn's first to last event, summed over turns.
+    #: Wall time from each execution's first to last event, summed over the
+    #: thread's turns and their attempts. The wait between a failed attempt and
+    #: its retry belongs to no execution, so it is not counted.
     wall_seconds: float
     #: Union (never the sum) of tool windows, so parallel calls cannot push
     #: tool time past wall time.
@@ -88,8 +90,10 @@ class ThreadStats:
     #: Cached share of all input tokens, from ``0.0`` to ``1.0``. ``None`` when the
     #: runtime reports no cache counters.
     cache_hit_ratio: float | None
-    #: Output tokens per second of ``model_seconds``. ``None`` without token
-    #: counts or without elapsed model time.
+    #: Output tokens per second of model time, over the executions that report
+    #: a believable output count: time without a count and a count without time
+    #: stay out of both sides. ``None`` without token counts or without elapsed
+    #: model time.
     output_tokens_per_second: float | None
     #: ``"runtime"`` when a runtime reported usage, ``"unavailable"`` when
     #: none did. The UI turns this into the tooltip that explains the dashes.
@@ -129,6 +133,8 @@ def summarize_thread(
     failed_tool_calls = 0
     wall_seconds = 0.0
     tool_seconds = 0.0
+    rate_tokens = 0
+    rate_seconds = 0.0
     ttft_samples: list[float] = []
     totals = _TokenTotals()
     produced_text = False
@@ -138,30 +144,41 @@ def summarize_thread(
         if not ordered:
             continue
 
-        timestamps = [ts for ts in (_timestamp(event) for event in ordered) if ts is not None]
-        if len(timestamps) >= 2:
-            wall_seconds += (timestamps[-1] - timestamps[0]).total_seconds()
-
         tool_calls += sum(1 for event in ordered if event.get("event_type") == _TOOL_USE)
         failed_tool_calls += sum(
             1
             for event in ordered
             if event.get("event_type") == _TOOL_RESULT and _payload(event).get("is_error")
         )
-        tool_seconds += _union_seconds(_tool_windows(ordered))
+
+        # Timed per execution -- one attempt of the turn -- and summed, as the
+        # run detail's session statistics are. The wait between a failed
+        # attempt and its retry is queueing and backoff, not model time, and a
+        # retry's process reuses tool-call ids, so a call the previous process
+        # never finished must not pair with the retry's result.
+        for execution in _executions(ordered):
+            timestamps = [ts for ts in map(_timestamp, execution) if ts is not None]
+            span = (timestamps[-1] - timestamps[0]).total_seconds() if len(timestamps) >= 2 else 0.0
+            in_tools = _union_seconds(_tool_windows(execution))
+            wall_seconds += span
+            tool_seconds += in_tools
+            counted = _TokenTotals()
+            for usage in _distinct_usage(execution):
+                totals.add(usage)
+                counted.add(usage)
+            output = counted.output_tokens
+            model = max(0.0, span - in_tools)
+            if output is not None and model > 0 and not (output == 0 and _has_text(execution)):
+                # Only an execution with both measurements feeds the rate: its
+                # count over its own model time, never another attempt's.
+                rate_tokens += output
+                rate_seconds += model
 
         ttft = _time_to_first_output(ordered, first_attempt_start.get(job_id))
         if ttft is not None:
             ttft_samples.append(ttft)
 
-        for usage in _distinct_usage(ordered):
-            totals.add(usage)
-        for event in ordered:
-            if event.get("event_type") == _MESSAGE and (
-                _payload(event).get("has_text") is True
-                or str(_payload(event).get("text") or "").strip()
-            ):
-                produced_text = True
+        produced_text = produced_text or _has_text(ordered)
 
     model_seconds = max(0.0, wall_seconds - tool_seconds)
     output_tokens = totals.output_tokens
@@ -188,7 +205,9 @@ def summarize_thread(
         output_tokens=output_tokens,
         cache_read_tokens=totals.cache_read_tokens,
         cache_hit_ratio=totals.cache_hit_ratio(),
-        output_tokens_per_second=_rate(output_tokens, model_seconds),
+        output_tokens_per_second=(
+            _rate(rate_tokens, rate_seconds) if output_tokens is not None else None
+        ),
         tokens_source="runtime" if totals.saw_usage else "unavailable",
     )
 
@@ -325,6 +344,31 @@ def _earliest_attempt_start_per_job(
         if current is None or started_at < current:
             starts[job_id] = started_at
     return starts
+
+
+def _executions(ordered: Sequence[Mapping[str, Any]]) -> list[list[Mapping[str, Any]]]:
+    """Split one turn's ordered events into its attempts, each still in order.
+
+    An attempt is one execution: its own process, its own span of time and its
+    own tool-call ids. The events arrive sorted by attempt and then sequence,
+    so grouping keeps each execution's own order.
+    """
+    executions: dict[Any, list[Mapping[str, Any]]] = {}
+    for event in ordered:
+        executions.setdefault(event.get("attempt_id"), []).append(event)
+    return list(executions.values())
+
+
+def _has_text(events: Iterable[Mapping[str, Any]]) -> bool:
+    """Whether any of these events is assistant text the user could see."""
+    return any(
+        event.get("event_type") == _MESSAGE
+        and (
+            _payload(event).get("has_text") is True
+            or bool(str(_payload(event).get("text") or "").strip())
+        )
+        for event in events
+    )
 
 
 def _tool_windows(ordered: Sequence[Mapping[str, Any]]) -> list[tuple[datetime, datetime]]:

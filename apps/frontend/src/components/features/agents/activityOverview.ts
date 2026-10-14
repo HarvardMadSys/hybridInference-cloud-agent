@@ -302,3 +302,33 @@ export function buildActivityOverview(events: AgentEvent[]): ActivityOverview {
 
   return { ...(taskActivity ? { taskActivity } : {}), subagents: [...subagents.values()] };
 }
+
+const overviews = new WeakMap<AgentEvent[], ActivityOverview>();
+
+/**
+ * `buildActivityOverview` for a turn's event list, built once per list. A
+ * stored turn keeps its list while the newest one streams, so finding the
+ * subagent behind an older call does not read that turn again.
+ */
+export function turnActivityOverview(events: AgentEvent[]): ActivityOverview {
+  let overview = overviews.get(events);
+  if (!overview) {
+    overview = buildActivityOverview(events);
+    overviews.set(events, overview);
+  }
+  return overview;
+}
+
+/** The subagent a delegating call started, if that call is the one that started it. */
+export function subagentStartedBy(
+  overview: ActivityOverview,
+  event: ToolUseEvent,
+): OverviewSubagent | undefined {
+  return overview.subagents.find(
+    ({ sourceEvent }) =>
+      sourceEvent === event ||
+      (sourceEvent.id === event.id &&
+        sourceEvent.attemptNo === event.attemptNo &&
+        sourceEvent.sourceEventId === event.sourceEventId),
+  );
+}

@@ -30,6 +30,8 @@ const CONFIG: RuntimeSiteConfig = {
     orgName: 'Acme Research',
     orgUrl: 'https://acme.example',
     statusUrl: 'https://status.acme.example',
+    docsUrl: 'https://docs.acme.example/agents/',
+    contactUrl: 'mailto:support@acme.example',
     gatewayUrl: 'https://gateway.acme.example',
   },
   features: { rag: true },

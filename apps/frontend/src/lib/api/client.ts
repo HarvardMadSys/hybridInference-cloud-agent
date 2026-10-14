@@ -14,12 +14,13 @@
 //   * the refresh-and-retry dance. A 401 here means the session is over, and
 //     the caller is sent back through the gateway's `/authorize` flow.
 //
-// `jsonOrThrow` below is carried over **verbatim** from the source client so
-// that error classification is unchanged for every call `agents.ts` makes.
-// Several of its branches (password reset, email verification, duplicate
-// signup) can only fire on gateway endpoints this service does not call; they
-// are inert here and kept rather than pruned, because a migration that edits
-// logic is a migration that cannot be diffed. Cleanup is a post-cutover PR.
+// `jsonOrThrow` below was carried over verbatim from the source client, and
+// its plain-`detail` and legacy `error_code` branches still are. Several of
+// their patterns (password reset, email verification, duplicate signup) can
+// only match gateway endpoints this service does not call. The structured
+// `{ error: { type, message } }` branch is this service's own shape, and it
+// now classifies by `type` alone: the source's message patterns ran first
+// there and replaced typed reasons callers recover on.
 
 import { APIError, httpStatusToErrorCode } from '@/lib/utils/errors';
 
@@ -121,59 +122,18 @@ export async function jsonOrThrow<T>(resp: Response): Promise<T> {
 
     if (structuredError) {
       // Backend error format, either direct or under FastAPI's `detail`.
+      //
+      // Its `type` is the control plane's machine-readable reason, and the one
+      // callers recover on: `request_cursor_expired` offers a restart,
+      // `revision_conflict` keeps the newer copy, `native_fork_failed` marks a
+      // fork failed, and `agent_configuration_error` is an operator's to fix.
+      // The message is prose for people, so it is shown and never parsed.
+      // Reading it here turned "That page expired" into a signed-out session
+      // and every typed 401 into a wrong password — the gateway's
+      // email-and-password codes, which no endpoint of this service issues.
       const error = structuredError;
       errorMessage = (error.message as string) || errorMessage;
-      const lowerMessage = errorMessage.toLowerCase();
-
-      // Configuration is an explicit recovery decision. Its wording must not
-      // turn an operator error into a retryable expired/invalid-token error.
-      if (error.type === 'agent_configuration_error') {
-        errorCode = error.type;
-      } else if (
-        lowerMessage.includes('reset link has already been used') ||
-        (lowerMessage.includes('reset token') && lowerMessage.includes('used'))
-      ) {
-        errorCode = 'RESET_TOKEN_USED';
-      } else if (lowerMessage.includes('reset link has expired')) {
-        errorCode = 'RESET_TOKEN_EXPIRED';
-      } else if (lowerMessage.includes('invalid or expired reset token')) {
-        errorCode = 'RESET_TOKEN_INVALID';
-      } else if (lowerMessage.includes('already been used')) {
-        errorCode = 'TOKEN_ALREADY_USED';
-      } else if (lowerMessage.includes('expired')) {
-        errorCode = 'TOKEN_EXPIRED';
-      } else if (lowerMessage.includes('invalid') && lowerMessage.includes('token')) {
-        errorCode = 'INVALID_TOKEN';
-      } else if (error.type === 'validation_error') {
-        errorCode = 'VALIDATION_ERROR';
-      } else if (
-        resp.status === 409 &&
-        (lowerMessage.includes('already registered') ||
-          (lowerMessage.includes('user') && lowerMessage.includes('already exists')))
-      ) {
-        errorCode = 'USER_ALREADY_EXISTS';
-      } else if (resp.status === 401) {
-        errorCode = 'INVALID_CREDENTIALS';
-      } else if (
-        resp.status === 403 &&
-        ((lowerMessage.includes('email') && lowerMessage.includes('not verified')) ||
-          lowerMessage.includes('verify your email'))
-      ) {
-        // Only a genuine unverified-email 403 should drive the login page's
-        // "resend verification" flow (mirrors the { detail } branch below).
-        // Other typed 403s — suspended account, insufficient permissions,
-        // plan/quota forbidden — must NOT be mislabeled as EMAIL_NOT_VERIFIED;
-        // they fall through so their real message is surfaced verbatim.
-        errorCode = 'EMAIL_NOT_VERIFIED';
-      } else if (resp.status === 403 && lowerMessage.includes('suspend')) {
-        errorCode = 'ACCOUNT_SUSPENDED';
-      } else if (typeof error.type === 'string' && error.type) {
-        // Preserve domain conflicts such as native_fork_failed. Treating every
-        // structured 409 as USER_ALREADY_EXISTS makes unrelated agent errors
-        // render as an email-registration failure wherever getErrorMessage is
-        // used.
-        errorCode = error.type;
-      }
+      if (typeof error.type === 'string' && error.type) errorCode = error.type;
     } else if (typeof detail?.code === 'string' && typeof detail.message === 'string') {
       // Typed resource errors retain their own recovery semantics. A provider
       // credential error must not be mistaken for an expired user session.

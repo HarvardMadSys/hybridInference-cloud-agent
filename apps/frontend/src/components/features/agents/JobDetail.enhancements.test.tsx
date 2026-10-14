@@ -192,21 +192,29 @@ describe('conversation work details', () => {
       />,
     );
     await waitFor(() => expect(getThreadQueue).toHaveBeenCalledWith('thread-first'));
-    const details = screen.getByRole('combobox', { name: 'Work details' });
+    const details = screen.getByRole('button', { name: 'Activity: Standard' });
     const activity = within(screen.getByLabelText('Agent activity'));
-    expect(details).toHaveValue('standard');
+    expect(details).toHaveAttribute('aria-expanded', 'false');
+    fireEvent.click(details);
+    expect(screen.getByRole('menuitemradio', { name: 'Standard' })).toHaveAttribute(
+      'aria-checked',
+      'true',
+    );
     expect(activity.getByText('Read: src/main.ts')).toBeVisible();
     expect(activity.getByText('Bash: npm test')).toBeVisible();
     expect(activity.queryByText('Checks passed')).not.toBeInTheDocument();
 
-    fireEvent.change(details, { target: { value: 'compact' } });
+    fireEvent.click(screen.getByRole('menuitemradio', { name: 'Compact' }));
+    expect(details).toHaveAccessibleName('Activity: Compact');
     expect(activity.getByText('update_plan')).toBeVisible();
     expect(activity.queryByText('Read')).not.toBeInTheDocument();
     expect(activity.queryByText('Bash')).not.toBeInTheDocument();
     expect(activity.getByRole('button', { name: 'Show process (2)' })).toBeVisible();
     expect(activity.getByText('The change is ready.')).toBeVisible();
 
-    fireEvent.change(details, { target: { value: 'detailed' } });
+    fireEvent.click(details);
+    fireEvent.click(screen.getByRole('menuitemradio', { name: 'Detailed' }));
+    expect(details).toHaveAccessibleName('Activity: Detailed');
     expect(activity.getByText('Review changes')).toBeVisible();
     expect(activity.getByText('Source file contents')).toBeVisible();
     expect(activity.getByText('Checks passed')).toBeVisible();

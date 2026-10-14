@@ -372,10 +372,6 @@ class McpConnectionRepository(Protocol):
         """
         ...
 
-    async def bump_mcp_binding_policy_revision(self, *, thread_id: str, connection_id: int) -> int:
-        """Move a binding's policy revision, invalidating held approvals."""
-        ...
-
     async def create_mcp_invocation(
         self,
         *,
@@ -522,10 +518,6 @@ class McpConnectionRepository(Protocol):
 
     async def expire_mcp_invocations(self) -> int:
         """Expire every pending or approved call whose deadline has passed."""
-        ...
-
-    async def cancel_mcp_invocations_for_attempt(self, *, attempt_id: int) -> int:
-        """Expire a superseded attempt's undecided calls."""
         ...
 
     async def open_mcp_transport_session(

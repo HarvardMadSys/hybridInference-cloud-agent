@@ -16,9 +16,14 @@ from uuid import uuid4
 import pytest
 
 from cloud_agent.domain.pending_messages import SettleOutcome
-from cloud_agent.goals.controller import client_request_id_for, consume_wakeup, run_goal_wakeups
+from cloud_agent.goals.controller import (
+    client_request_id_for,
+    consume_wakeup,
+    continue_after_finish,
+    run_goal_wakeups,
+)
 from cloud_agent.goals.models import MAX_WAKEUP_ATTEMPTS
-from cloud_agent.storage.repositories.goal_wakeups import wakeup_backoff
+from cloud_agent.goals.retry_policy import wakeup_backoff
 from cloud_agent.storage.repositories.goals import _action_columns
 
 pytestmark = pytest.mark.asyncio
@@ -131,18 +136,20 @@ class FakeWakeups:
         trigger_ref: str,
         goal_id: str | None = GOAL_ID,
         revision: int = 1,
+        thread_id: str = THREAD_ID,
     ) -> dict[str, Any]:
         """Record one obligation, idempotent on the event while it is pending."""
         for row in self.rows:
             if (
                 row["state"] == "pending"
+                and row["thread_id"] == thread_id
                 and row["trigger"] == trigger
                 and row["trigger_ref"] == trigger_ref
             ):
                 return row
         row = {
             "id": f"wakeup_{len(self.rows) + 1}",
-            "thread_id": THREAD_ID,
+            "thread_id": thread_id,
             "goal_id": goal_id,
             "revision": revision,
             "trigger": trigger,
@@ -158,13 +165,19 @@ class FakeWakeups:
         self.rows.append(row)
         return row
 
-    async def claim_wakeups(self, *, limit: int = 1) -> list[dict[str, Any]]:
-        """Lease what is due: pending, unparked, past any backoff, unleased."""
+    async def claim_wakeups(
+        self, *, limit: int = 1, thread_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Lease what is due, oldest first: pending, unparked, past any backoff, unleased.
+
+        ``thread_id`` narrows it to one conversation, as the store does.
+        """
         now = self._store.clock
         due = [
             row
             for row in self.rows
             if row["state"] == "pending"
+            and (thread_id is None or row["thread_id"] == thread_id)
             and row["waiting_job_id"] is None
             and row["not_before"] <= now
             and (row["lease_expires_at"] is None or row["lease_expires_at"] < now)
@@ -192,7 +205,8 @@ class FakeWakeups:
             return
         row["lease_expires_at"] = None
         row["lease_owner"] = None
-        if restore_attempt:
+        # Only a backoff keeps the attempt the claim spent, as in the store.
+        if restore_attempt or retry_in_seconds is None:
             row["attempts"] = max(0, row["attempts"] - 1)
         if retry_in_seconds is not None:
             # A backoff defers ``not_before``, never the lease: "do not touch
@@ -986,6 +1000,19 @@ async def test_a_failing_consumer_backs_off_and_then_pauses_with_scheduling_fail
     assert store.rounds() == []
 
 
+async def _reaper_pass(store: FakeStore) -> int:
+    """The reaper's consumer pass, over every conversation."""
+    return await run_goal_wakeups(store=store, gateway=store.gateway)
+
+
+async def _finish_drain(store: FakeStore) -> int:
+    """A finished turn's drain, over its own conversation."""
+    return await continue_after_finish(
+        store=store, job_id="job-1", thread_id=THREAD_ID, gateway=store.gateway
+    )
+
+
+@pytest.mark.parametrize("drain", [_reaper_pass, _finish_drain], ids=["reaper", "finish"])
 @pytest.mark.parametrize(
     ("current_goal", "trigger_ref", "detail"),
     [
@@ -1003,12 +1030,14 @@ async def test_an_exhausted_scheduling_failure_preserves_a_new_goal_authorizatio
     current_goal: dict[str, Any],
     trigger_ref: str,
     detail: str,
+    drain: Any,
 ):
     """A failure belongs to the goal revision that was being scheduled.
 
     The owner's replacement or pause/resume can commit while a scheduling
     attempt fails. Its new round and wakeup must survive the old attempt's
-    exhausted retry handler.
+    exhausted retry handler, whether the reaper's pass or the conversation's
+    own finish drain was consuming it.
     """
     store = FakeStore(goal=goal_row(), turns=[turn(id="job-1", input_seq_at_create=1)], input_seq=1)
     failed_wakeup = store.goal_wakeups.arm(trigger="owner", trigger_ref="set:1")
@@ -1038,7 +1067,7 @@ async def test_an_exhausted_scheduling_failure_preserves_a_new_goal_authorizatio
 
     monkeypatch.setattr(store.conversation_commands, "create_goal_round", fail_after_owner_write)
 
-    assert await run_goal_wakeups(store=store, gateway=store.gateway) == 1
+    assert await drain(store) == 1
 
     assert store.goal == current_goal
     assert [row["id"] for row in store.queued_rounds()] == ["current-round"]
@@ -1092,6 +1121,56 @@ async def test_an_unloaded_github_app_leaves_the_wakeup_unclaimed_until_it_loads
     assert await run_goal_wakeups(store=store, gateway=store.gateway, github_app=app) == 1
     assert store.wakeup(wakeup["id"])["state"] == "processed"
     assert len(store.rounds()) == 1
+
+
+async def test_a_finish_drains_its_own_conversation_and_no_one_elses():
+    """The finish request decides this conversation's goal and leaves the rest queued.
+
+    The claim used to take the deployment's oldest due wakeups, so a finish
+    decided up to eight other conversations' goals, each with its own Gateway
+    and GitHub calls, inside its runner's request; with that many waiting,
+    this turn's own wakeup was not even among them. Theirs are the reaper's.
+    """
+    store, own = _finished_round_store()
+    others = [
+        store.goal_wakeups.arm(
+            trigger="owner",
+            trigger_ref="set:1",
+            goal_id="goal-other",
+            thread_id=f"athr_other_{index}",
+        )
+        for index in range(8)
+    ]
+    # Every one of them has been due for longer than this turn's own.
+    store.goal_wakeups.rows = [*others, own]
+
+    assert (
+        await continue_after_finish(
+            store=store, job_id="job-2", thread_id=THREAD_ID, gateway=store.gateway
+        )
+        == 1
+    )
+
+    assert store.wakeup(own["id"])["state"] == "processed"
+    assert len(store.queued_rounds()) == 1
+    for other in others:
+        assert (other["state"], other["attempts"], other["lease_owner"]) == ("pending", 0, None)
+    # The reaper's pass names no conversation, and decides theirs.
+    assert await run_goal_wakeups(store=store, gateway=store.gateway) == 8
+    assert {(other["state"], other["detail"]) for other in others} == {
+        ("processed", "superseded goal")
+    }
+
+
+async def test_a_finish_without_a_conversation_drains_nothing():
+    """No conversation, no goal: nothing to claim, and no attempt spent."""
+    store, row = _finished_round_store()
+
+    assert (
+        await continue_after_finish(store=store, job_id="job-2", thread_id=None, gateway=None) == 0
+    )
+
+    assert (row["state"], row["attempts"], row["lease_owner"]) == ("pending", 0, None)
 
 
 async def test_an_owner_wakeup_does_not_re_judge_the_turn_that_paused_the_goal():
@@ -1184,6 +1263,57 @@ async def test_a_completion_is_refused_when_a_person_spoke_while_it_was_decided(
     assert await _consume(store) == "none"
     assert store.goal["state"] == "active"
     assert store.goal["completion_basis"] is None
+
+
+async def test_a_completion_overtaken_by_a_message_waits_behind_its_turn(monkeypatch):
+    """The overtaken completion's wakeup is the goal's only obligation; it is kept.
+
+    A message accepted while the decision runs arms no wakeup of its own,
+    because this one is still pending. Marking this one processed left an
+    active goal that nothing looked at again after the message's turn.
+    """
+    store = FakeStore(
+        goal=goal_row(rounds_used=1),
+        turns=[
+            turn(id="job-1", input_seq_at_create=1),
+            turn(
+                id="job-2",
+                turn_source="goal",
+                goal_id=GOAL_ID,
+                round_kind="work",
+                report_parse="valid",
+                report_outcome="complete",
+                report_reason="done",
+                input_seq_at_create=1,
+                turn_no=2,
+            ),
+        ],
+        input_seq=1,
+    )
+    wakeup = store.goal_wakeups.arm(trigger="finish", trigger_ref="job:job-2")
+    messages: list[dict[str, Any]] = []
+
+    async def a_message_lands_once(*args: Any, **kwargs: Any) -> None:
+        # Between the decision's read and the transaction that applies it.
+        if not messages:
+            store.input_seq += 1
+            messages.append(turn(id="job-3", state="queued", input_seq_at_create=2, turn_no=3))
+            store.turns.append(messages[0])
+
+    monkeypatch.setattr("cloud_agent.goals.controller.require_entitled_repo", a_message_lands_once)
+
+    assert await _consume(store) == "wait"
+
+    assert (store.goal["state"], store.goal["completion_basis"]) == ("active", None)
+    parked = store.wakeup(wakeup["id"])
+    assert (parked["state"], parked["waiting_job_id"]) == ("pending", "job-3")
+    assert parked["attempts"] == 0
+
+    # The person's turn ends, its finish releases the wait, and the goal goes on.
+    messages[0]["state"] = "succeeded"
+    parked["waiting_job_id"] = None
+    assert await _consume(store) == "queue_work_round"
+    assert len(store.queued_rounds()) == 1
 
 
 async def test_an_owner_wakeup_on_an_archived_conversation_pauses_and_says_so():

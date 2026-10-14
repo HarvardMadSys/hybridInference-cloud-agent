@@ -2320,16 +2320,30 @@ def test_a_later_caller_waits_for_the_send_already_running(
 
 
 def test_prompt_handoff_starts_delivery_without_waiting(startup_measurement, monkeypatch, tmp_path):
-    """A diagnostic send must not sit between prompt dispatch and stream reads."""
+    """A diagnostic send must not sit between prompt dispatch and stream reads.
+
+    Proved by the send rather than by a tight clock: the handoff never joins
+    it, not even for a bounded drain, and returns while it is still in flight.
+    The ceiling is a backstop, set where scheduling noise on a loaded CI runner
+    cannot reach it and the ten-second send still fails.
+    """
     import threading
     import time
 
     _sink_with(monkeypatch, tmp_path, [_frozen()])
     release = threading.Event()
+    joins: list[float | None] = []
+    sends: list[threading.Thread] = []
+
+    class _Send(threading.Thread):
+        def join(self, timeout: float | None = None) -> None:
+            joins.append(timeout)
+            super().join(timeout)
 
     def _slow_send(**_kwargs: Any) -> Any:
-        thread = threading.Thread(target=lambda: release.wait(timeout=10), daemon=True)
+        thread = _Send(target=lambda: release.wait(timeout=10), daemon=True)
         thread.start()
+        sends.append(thread)
         return thread
 
     monkeypatch.setattr(runner_mod, "_deliver_in_background", _slow_send)
@@ -2342,7 +2356,10 @@ def test_prompt_handoff_starts_delivery_without_waiting(startup_measurement, mon
             drain_s=runner_mod.DELIVERY_HANDOFF_DRAIN_S,
         )
         elapsed = time.perf_counter() - started
-        assert elapsed < 0.05
+        assert len(sends) == 1, "the handoff must start the send"
+        assert sends[0].is_alive(), "the handoff returned only after the send finished"
+        assert joins == [], f"the handoff waited on the send (join timeouts {joins})"
+        assert elapsed < 1.0
     finally:
         release.set()
 
@@ -2406,6 +2423,39 @@ def test_delivery_byte_budget_drops_before_starting_a_thread(startup_measurement
     assert starts == []
     assert runner_mod._DELIVERY_DROPPED_COUNT == 1
     assert runner_mod._DELIVERY_PENDING_BYTES == 0
+
+
+def test_a_full_delivery_set_drops_before_starting_a_thread(startup_measurement, monkeypatch):
+    """Delivery that cannot keep up is dropped and counted, never queued without bound.
+
+    The count bound was pinned only on a second copy of these limits that
+    nothing ran; this is the one the runner applies.
+    """
+    import threading
+
+    starts: list[str] = []
+    monkeypatch.setattr(runner_mod, "DELIVERY_QUEUE_MAX", 1)
+    monkeypatch.setattr(
+        runner_mod,
+        "_deliver_in_background",
+        lambda **_kwargs: starts.append("started"),
+    )
+    # One earlier send still in flight fills the set.
+    monkeypatch.setitem(
+        runner_mod._IN_FLIGHT_DELIVERIES, "msm_earlier", threading.Thread(target=lambda: None)
+    )
+
+    runner_mod._enqueue_delivery(
+        startup_measurement,
+        job=_claimed(),
+        base_url="http://control",
+        drain_s=0,
+    )
+
+    assert starts == []
+    assert runner_mod._DELIVERY_DROPPED_COUNT == 1
+    assert runner_mod._DELIVERY_PENDING_BYTES == 0
+    assert startup_measurement.measurement_id in runner_mod._DELIVERED_MEASUREMENT_IDS
 
 
 def test_delivery_client_startup_failure_releases_its_queue_bytes(startup_measurement, monkeypatch):

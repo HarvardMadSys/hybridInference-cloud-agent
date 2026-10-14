@@ -144,7 +144,7 @@ async def test_preactivation_imports_missing_fields_without_replacing_saved_valu
     repository = _SettingsRepository(revision=7, values={**legacy, **saved})
     monkeypatch.setenv("AGENT_SANDBOX_MANAGER_TOKEN", "stale-sandbox-manager-token")
     monkeypatch.setenv("AGENT_PUBLISH_BASE_BRANCH", "stale-branch")
-    monkeypatch.setenv("AGENT_CONTROL_TOKEN_SECRET", "newly-imported-control-token")
+    monkeypatch.setenv("AGENT_CONTROL_TOKEN_SECRET", "newly-imported-control-token-of-32-bytes")
 
     await _run_readiness(monkeypatch, repository, expected_token="saved-sandbox-manager-token")
 
@@ -156,4 +156,7 @@ async def test_preactivation_imports_missing_fields_without_replacing_saved_valu
         definition.storage_key in repository.values for definition in settings.MIGRATED_SETTINGS
     )
     assert settings.text_setting("publish_base_branch") == "saved-branch"
-    assert settings.setting_env("AGENT_CONTROL_TOKEN_SECRET") == "newly-imported-control-token"
+    assert (
+        settings.setting_env("AGENT_CONTROL_TOKEN_SECRET")
+        == "newly-imported-control-token-of-32-bytes"
+    )

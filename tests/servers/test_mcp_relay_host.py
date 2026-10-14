@@ -34,8 +34,10 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from tests.support.storage import AllCapabilities, OneFake
 
+from cloud_agent import memory_tool
 from cloud_agent.api import mcp_relay as agent_mcp_router
 from cloud_agent.api.deps import get_storage
+from cloud_agent.mcp import runtime as mcp_runtime
 from cloud_agent.mcp.host import ContentBlock, Session, ToolResult
 from cloud_agent.mcp.protocol import Handshake
 from cloud_agent.mcp.registry import mcp_cipher
@@ -335,7 +337,7 @@ class StubHost:
 def host(monkeypatch: pytest.MonkeyPatch) -> StubHost:
     """Replace the process-wide host and restore it afterwards."""
     stub = StubHost()
-    monkeypatch.setattr(agent_mcp_router, "_HOST_INSTANCE", stub)
+    monkeypatch.setattr(mcp_runtime, "_HOST_INSTANCE", stub)
     return stub
 
 
@@ -369,12 +371,10 @@ def _tool_names(response: Any) -> list[str]:
 def _catalogue(*connections: str) -> list[str]:
     """The names the merged catalogue advertises, in listing order.
 
-    Every tool is a *connection's* tool now. The platform used to merge two of
-    its own goal tools into this surface; the report protocol moved into the
-    turn's final message instead, so a catalogue is exactly the connections'
-    namespaced tools and nothing else.
+    The connections' namespaced tools, plus the platform's memory tools, which
+    every task is offered whatever connections it selected.
     """
-    return sorted(connections)
+    return sorted([*connections, *memory_tool.TOOL_NAMES])
 
 
 @pytest.fixture()
@@ -448,8 +448,9 @@ class TestTheMergedCatalogue:
 
         listing = await client.post(_HOST_URL, json=_rpc("tools/list"), headers=_auth())
         # Two connections, each advertising one tool under the same presented
-        # name: the catalogue deduplicates by name, so two is the whole surface.
-        assert len(set(_tool_names(listing))) == 2
+        # name: the catalogue deduplicates by name, so two is the whole surface
+        # besides the platform's memory tools.
+        assert len(set(_tool_names(listing)) - memory_tool.TOOL_NAMES) == 2
         name = next(
             item["name"] for item in _result(listing)["tools"] if item["description"] == "c on 7"
         )
@@ -834,7 +835,7 @@ def real_host(monkeypatch: pytest.MonkeyPatch) -> FakeUpstream:
     )
     # ``_host()`` caches its instance; None makes it build one under the patched
     # policy, and monkeypatch restores the global afterwards.
-    monkeypatch.setattr(agent_mcp_router, "_HOST_INSTANCE", None)
+    monkeypatch.setattr(mcp_runtime, "_HOST_INSTANCE", None)
     return upstream
 
 
@@ -1085,7 +1086,7 @@ async def test_inactive_connection_never_refreshes_or_delays_healthy_tools(
         store.connections[7]["deleted_at"] = "disconnected"
     refreshed = []
 
-    async def refresh(repository, *, row):
+    async def refresh(repository, *, row, policy):
         refreshed.append(row["id"])
         assert row["id"] == 8, "inactive connection must not enter refresh"
         return row

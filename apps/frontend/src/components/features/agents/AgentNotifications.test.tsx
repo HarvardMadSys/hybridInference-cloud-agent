@@ -58,7 +58,7 @@ function page(jobs: AgentJobApi[], next_cursor: string | null = null) {
   return {
     conversations: jobs.map((job) => ({
       job,
-      title: job.title || job.repo,
+      title: job.title || job.repo || '',
       archived: false,
       last_activity_at: null,
     })),
