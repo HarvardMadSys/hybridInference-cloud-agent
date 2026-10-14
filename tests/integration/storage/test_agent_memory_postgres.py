@@ -62,6 +62,19 @@ async def test_memories_the_owner_wrote_are_never_archived_to_make_room(store, p
     assert len(scope["memories"]) == ACTIVE_LIMIT and scope["archived"] == []
 
 
+async def test_an_owner_adding_an_agents_rule_makes_it_their_own(store, pool):
+    """The rule then counts as written by the owner, and is never archived for room."""
+    await _fill(pool, "agent")
+    added = await store.agent_memory.add_memory("alice", None, "rule 0")
+    assert added["id"] == "agent-0"
+    assert added["origin"] == "manual"
+    assert added["version"] == 1
+    await store.agent_memory.add_memory("alice", None, "Newest rule")
+    scope = await store.agent_memory.list_memories("alice", None)
+    assert "agent-0" not in [memory["id"] for memory in scope["archived"]]
+    assert [memory["id"] for memory in scope["archived"]] == ["agent-1"]
+
+
 async def test_owner_changes_are_versioned_scoped_and_owner_only(store, pool):
     memories = store.agent_memory
     added = await memories.add_memory("alice", None, "  Reply in Chinese ")

@@ -216,13 +216,28 @@ class PostgresAgentMemoryRepository:
         ).model_dump(mode="json")
 
     async def add_memory(self, user_id: str, repo: str | None, content: str) -> dict[str, Any]:
-        """Save a memory the owner wrote; an identical active memory is reused."""
+        """Save a memory the owner wrote; an identical active memory is reused.
+
+        Reusing an agent's memory makes it the owner's, as an edit does, so it
+        is never archived to make room.
+        """
         content = normalize_memory(content)
         async with self._pool.acquire() as conn, conn.transaction():
             await _lock(conn, user_id)
             active = await _active(conn, user_id, repo)
             for row in active:
                 if memory_key(row["content"]) == memory_key(content):
+                    if row["origin"] != "manual":
+                        row = await conn.fetchrow(
+                            f"""
+                            UPDATE agent_memories
+                            SET origin = 'manual', version = version + 1,
+                                updated_at = clock_timestamp()
+                            WHERE id = $1
+                            RETURNING {_COLUMNS}
+                            """,
+                            row["id"],
+                        )
                     return _view(row)
             if not await _make_room(conn, user_id, repo, len(active)):
                 raise AgentMemoryFull("This scope already holds its limit of saved memories.")
