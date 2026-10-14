@@ -13004,8 +13004,12 @@
         "type": "object"
       },
       "ProfileResponse": {
-        "description": "Combine Agent-owned display fields with a read-only account email.",
+        "description": "Combine Agent-owned display fields with a read-only account email.\n\n``companion_data_url`` is the account's fixed Pokémon companion, shown\nwherever no picture was uploaded. It depends on the account alone, unlike\nthe home page's, whose habitat follows recent work.",
         "properties": {
+          "companion_data_url": {
+            "title": "Companion Data Url",
+            "type": "string"
+          },
           "email": {
             "title": "Email",
             "type": "string"
@@ -13038,7 +13042,8 @@
           }
         },
         "required": [
-          "email"
+          "email",
+          "companion_data_url"
         ],
         "title": "ProfileResponse",
         "type": "object"

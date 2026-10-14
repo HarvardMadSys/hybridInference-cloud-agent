@@ -15,6 +15,7 @@ from cloud_agent.api import user_profile
 from cloud_agent.api.deps import get_gateway_client, get_storage
 from cloud_agent.app import create_app, create_mcp_app, install_admin_no_store
 from cloud_agent.gateway import GatewayError
+from cloud_agent.user_avatar import generate_user_avatar
 from cloud_agent.user_profile import MAX_PROFILE_REQUEST_BYTES, ProfileConflict, ProfileView
 
 PATH = "/v1/agent/profile"
@@ -73,6 +74,22 @@ async def test_owner_is_taken_from_session_and_email_is_read_only(app):
         image_data_url=None,
     )
     assert all(call.args == ("owner-1",) for call in app.state.gateway.user_email.await_args_list)
+
+
+async def test_every_answer_carries_the_accounts_fixed_companion(app):
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="https://agent.example"
+    ) as client:
+        read = await client.get(PATH, headers=headers())
+        saved = await client.patch(
+            PATH,
+            headers=headers(),
+            json={"first_name": "", "last_name": "", "expected_revision": 0},
+        )
+        other = await client.get(PATH, headers=headers("owner-2"))
+    fixed = generate_user_avatar("owner-1").data_url
+    assert read.json()["companion_data_url"] == saved.json()["companion_data_url"] == fixed
+    assert other.json()["companion_data_url"] == generate_user_avatar("owner-2").data_url != fixed
 
 
 async def test_image_is_sanitized_before_storage_and_null_removes_it(app):

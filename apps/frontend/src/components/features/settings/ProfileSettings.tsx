@@ -13,11 +13,7 @@ const ROW =
 const INPUT =
   'ui-focus-ring w-full min-w-0 rounded-lg border border-border bg-surface px-3 py-2 text-sm text-foreground disabled:opacity-50';
 
-export function ProfileSettings({
-  companion,
-}: {
-  companion?: { userId: string; dataUrl?: string } | null;
-}) {
+export function ProfileSettings() {
   const { state } = useAuth();
   const t = useT();
   return (
@@ -26,10 +22,7 @@ export function ProfileSettings({
         {t('settings.profile.title')}
       </h2>
       {state.user?.id ? (
-        <ProfileEditor
-          key={state.user.id}
-          companionDataUrl={companion?.userId === state.user.id ? companion.dataUrl : undefined}
-        />
+        <ProfileEditor key={state.user.id} />
       ) : (
         <p className="text-sm text-muted">{t('settings.profile.signIn')}</p>
       )}
@@ -37,7 +30,7 @@ export function ProfileSettings({
   );
 }
 
-function ProfileEditor({ companionDataUrl }: { companionDataUrl?: string }) {
+function ProfileEditor() {
   const t = useT();
   const [saved, setSaved] = useState<UserProfile | null>(null);
   const [firstName, setFirstName] = useState('');
@@ -200,7 +193,7 @@ function ProfileEditor({ companionDataUrl }: { companionDataUrl?: string }) {
         <span className="text-sm text-foreground">{t('settings.profile.image')}</span>
         <div className="flex min-w-0 flex-wrap items-center gap-3">
           <div className="flex h-14 w-14 shrink-0 items-center justify-center overflow-hidden rounded-full bg-surface-muted text-lg text-foreground">
-            <AvatarImage imageDataUrl={image} companionDataUrl={companionDataUrl} />
+            <AvatarImage imageDataUrl={image} companionDataUrl={saved?.companion_data_url} />
           </div>
           <input
             ref={input}

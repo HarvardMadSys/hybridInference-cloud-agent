@@ -42,6 +42,7 @@ const PROFILE: UserProfile = {
   last_name: 'Lovelace',
   image_data_url: null,
   revision: 1,
+  companion_data_url: 'data:image/svg+xml,<svg id="ada-companion"></svg>',
 };
 
 beforeEach(() => {
@@ -103,14 +104,21 @@ function submenu(name: string) {
 }
 
 describe('account menu', () => {
-  it('shows who is signed in, with an initial until a photo is uploaded', async () => {
+  it("shows who is signed in, with the account's fixed companion until a photo is uploaded", async () => {
     renderMenu();
     const trigger = await screen.findByRole('button', { name: 'Account menu: Ada Lovelace' });
     expect(trigger).toHaveTextContent('Ada Lovelace');
-    expect(trigger).toHaveTextContent('A');
-    expect(trigger.querySelector('img')).toBeNull();
+    expect(trigger.querySelector('img')).toHaveAttribute('src', PROFILE.companion_data_url);
     expect(trigger).toHaveAttribute('aria-haspopup', 'menu');
     expect(trigger).toHaveAttribute('aria-expanded', 'false');
+  });
+
+  it('shows a placeholder, not a stale picture, until the profile answers', () => {
+    vi.mocked(getUserProfile).mockReturnValue(new Promise(() => {}));
+    renderMenu();
+    const trigger = screen.getByRole('button', { name: /^Account menu/ });
+    expect(trigger.querySelector('img')).toBeNull();
+    expect(trigger).toHaveTextContent('·');
   });
 
   it('uses the email when no name is set, and the uploaded photo when there is one', async () => {

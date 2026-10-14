@@ -71,6 +71,8 @@ const mockedGetIntegrations = getAgentIntegrations as unknown as ReturnType<type
 const mockedDisconnect = disconnectAgentIntegration as unknown as ReturnType<typeof vi.fn>;
 const mockedListMcpConnections = listMcpConnections as unknown as ReturnType<typeof vi.fn>;
 
+const COMPANION = 'data:image/svg+xml;base64,Zml4ZWQ=';
+
 const insights: WorkInsights = {
   focus_areas: [],
   avatar: { data_url: 'data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=', style: 'illustrated' },
@@ -156,6 +158,7 @@ beforeEach(() => {
     last_name: '',
     image_data_url: null,
     revision: 0,
+    companion_data_url: COMPANION,
   });
   localStorage.clear();
   document.documentElement.lang = 'en';
@@ -244,21 +247,21 @@ describe('IntegrationsView', () => {
     expect(screen.queryByRole('link', { name: 'Documentation' })).not.toBeInTheDocument();
   });
 
-  it('shares the companion from insights with Profile, independent of memory', async () => {
+  it("shows the account's fixed companion in Profile, independent of memory and insights", async () => {
     mockedGetIntegrations.mockResolvedValue(integrations);
     render(<IntegrationsView />);
     const image = await within(screen.getByRole('region', { name: 'Profile' })).findByRole('img', {
       name: 'Your Pokémon companion avatar',
     });
-    expect(image).toHaveAttribute('src', insights.avatar.data_url);
+    expect(image).toHaveAttribute('src', COMPANION);
     fireEvent.click(screen.getByRole('tab', { name: 'Project memory' }));
     expect(screen.getByRole('tabpanel', { name: 'Project memory' })).toBeVisible();
     fireEvent.click(screen.getByRole('tab', { name: 'User memory' }));
     const section = screen.getByRole('tabpanel', { name: 'User memory' });
     fireEvent.click(await within(section).findByRole('switch', { name: 'Use memory' }));
     await waitFor(() => expect(setMemoryEnabled).toHaveBeenCalled());
-    expect(image).toHaveAttribute('src', insights.avatar.data_url);
-    expect(getInsights).toHaveBeenCalledTimes(1);
+    expect(image).toHaveAttribute('src', COMPANION);
+    expect(getInsights).not.toHaveBeenCalled();
   });
 
   it('keeps the uploaded photo over the companion', async () => {
@@ -269,6 +272,7 @@ describe('IntegrationsView', () => {
       last_name: '',
       image_data_url: photo,
       revision: 1,
+      companion_data_url: COMPANION,
     });
     mockedGetIntegrations.mockResolvedValue(integrations);
     render(<IntegrationsView />);

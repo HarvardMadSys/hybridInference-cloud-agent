@@ -18,8 +18,9 @@ const profile: UserProfile = {
   last_name: 'Yang',
   image_data_url: null,
   revision: 3,
+  companion_data_url: 'data:image/svg+xml,<svg id="alice-companion"></svg>',
 };
-const companion = { userId: 'alice', dataUrl: 'data:image/svg+xml,<svg id="companion"></svg>' };
+const companion = { dataUrl: profile.companion_data_url };
 
 beforeEach(() => {
   auth.user = { id: 'alice' };
@@ -36,13 +37,13 @@ afterEach(() => {
 });
 
 async function openProfile() {
-  const view = render(<ProfileSettings companion={companion} />);
+  const view = render(<ProfileSettings />);
   await screen.findByDisplayValue('Alice');
   return view;
 }
 
 describe('Profile settings', () => {
-  it('shows the same Pokémon companion as the homepage when no photo is saved', async () => {
+  it("shows the account's fixed Pokémon companion when no photo is saved", async () => {
     await openProfile();
     expect(screen.getByRole('img', { name: 'Your Pokémon companion avatar' })).toHaveAttribute(
       'src',
@@ -178,13 +179,17 @@ describe('Profile settings', () => {
       ...profile,
       email: 'bob@example.com',
       first_name: 'Bob',
+      companion_data_url: 'data:image/svg+xml,<svg id="bob-companion"></svg>',
     });
-    view.rerender(<ProfileSettings companion={companion} />);
+    view.rerender(<ProfileSettings />);
     await screen.findByDisplayValue('Bob');
     expect(signal?.aborted).toBe(true);
     await act(async () => resolveOld?.({ ...profile, first_name: 'Private draft' }));
     expect(screen.getByLabelText('First Name')).toHaveValue('Bob');
     expect(screen.queryByText('alice@example.com')).not.toBeInTheDocument();
-    expect(screen.queryByRole('img')).not.toBeInTheDocument();
+    expect(screen.getByRole('img', { name: 'Your Pokémon companion avatar' })).toHaveAttribute(
+      'src',
+      'data:image/svg+xml,<svg id="bob-companion"></svg>',
+    );
   });
 });

@@ -90,6 +90,7 @@ export function AccountMenu({ variant }: { variant: 'sidebar' | 'header' }) {
   const name = [profile?.first_name, profile?.last_name].filter(Boolean).join(' ').trim();
   const label = name || profile?.email || '';
   const imageDataUrl = profile?.image_data_url ?? undefined;
+  const companionDataUrl = profile?.companion_data_url || undefined;
   const docsLabel =
     branding.orgName || branding.appName
       ? t('nav.docsNamed', { name: branding.orgName || branding.appName })
@@ -223,10 +224,10 @@ export function AccountMenu({ variant }: { variant: 'sidebar' | 'header' }) {
       aria-hidden="true"
       className={`${size} flex shrink-0 items-center justify-center overflow-hidden rounded-full border border-border bg-surface text-[11px] font-semibold text-muted`}
     >
-      {/* The uploaded photo, else an initial. Not the generated companion:
-          reading it refreshes the owner's memory, too much for every page. */}
-      {imageDataUrl ? (
-        <AvatarImage imageDataUrl={imageDataUrl} />
+      {/* The uploaded photo, else the account's fixed companion, both from
+          the profile read; an initial until it answers. */}
+      {imageDataUrl || companionDataUrl ? (
+        <AvatarImage imageDataUrl={imageDataUrl} companionDataUrl={companionDataUrl} />
       ) : (
         (label.charAt(0) || '·').toUpperCase()
       )}

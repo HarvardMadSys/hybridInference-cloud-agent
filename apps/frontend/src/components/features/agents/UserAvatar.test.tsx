@@ -21,6 +21,7 @@ const profile: UserProfile = {
   last_name: '',
   image_data_url: null,
   revision: 1,
+  companion_data_url: 'data:image/svg+xml,<svg id="fixed"></svg>',
 };
 const photo = 'data:image/png;base64,cGhvdG8=';
 
