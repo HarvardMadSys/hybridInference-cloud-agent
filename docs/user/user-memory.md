@@ -116,6 +116,37 @@ draft and asks you to refresh, review the latest memory, and retry. If the entry
 has disappeared, your draft remains available to copy or cancel; it cannot be
 saved to a missing entry.
 
+## Durable memories
+
+Durable memories replace the 50-request view step by step; see the
+[memory redesign](../agents/specs/2026-10-13-memory-redesign.zh-CN.md). Each memory is
+stored on its own and kept until you change or delete it. In this release they
+are stored and manageable through the API below, but Settings and task prompts
+still use the memory described above, and agents cannot save them yet: a
+follow-up gives agents a memory tool, as Claude Code's automatic memory does.
+
+- **Scope.** A memory belongs to one repository, or to every project when its
+  `repo` is `null`. A scope whose memory is turned off is still listed with
+  `enabled: false`.
+- **Limits.** Each scope keeps 30 active memories of at most 240 characters.
+  When a scope is full, the least recently used memory an agent saved is
+  archived to make room. Memories you wrote or edited are never archived this
+  way; a scope full of them accepts no new memory. Archived memories can be
+  restored and are deleted after 90 days.
+- **Duplicates.** Adding a memory identical to an active one in the same scope,
+  ignoring case and final punctuation, returns the existing memory.
+
+`GET /v1/agent/memories` returns the memories for every project, and
+`?repo=owner/repository` those of one repository: `{repo, enabled, memories,
+archived}`. `POST` with `{content, repo}` adds a memory you wrote (`repo` is
+`null` for every project). `PATCH /v1/agent/memories/{id}` with `{content, repo,
+expected_version}` rewrites or moves it, `DELETE` with `{expected_version}`
+deletes it, and `POST /v1/agent/memories/{id}/restore` with
+`{expected_version}` restores an archived one. `DELETE /v1/agent/memories`
+clears one scope, archived memories included. A stale version returns `409`, as
+does adding to a scope full of memories you wrote; text with credentials or
+limited to the current task returns `422`.
+
 ## Deployment and storage
 
 Apply Alembic migrations through `0053_project_memory`, following
@@ -132,6 +163,11 @@ edits, source-backed overrides, disabled settings, and historical clear fences.
 Migrated single-entry corrections keep their original source job and scope;
 later requests with the same raw text do not inherit an earlier correction.
 Writes and refreshes serialize per account.
+
+Migration `0069_agent_memories` adds `agent_memories`, one row per durable
+memory. It starts empty; existing preferences are copied over when Settings and
+task prompts switch to durable memories.
+Every control-plane process purges expired archives hourly.
 
 The `agent_user_memory_edits` and `agent_project_memory_edits` tables store
 corrections and removal markers separately from automatic snapshots. Project

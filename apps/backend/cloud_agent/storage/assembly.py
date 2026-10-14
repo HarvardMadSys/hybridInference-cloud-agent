@@ -24,6 +24,7 @@ from cloud_agent.storage.admin_queries import AdminRunQueries
 from cloud_agent.storage.admin_sandbox_queries import AdminSandboxQueries
 from cloud_agent.storage.admin_usage_queries import AdminUsageQueries
 from cloud_agent.storage.repositories import (
+    PostgresAgentMemoryRepository,
     PostgresAttachmentRepository,
     PostgresAttemptCommands,
     PostgresAuditLogRepository,
@@ -62,6 +63,7 @@ if TYPE_CHECKING:
     import asyncpg
 
     from cloud_agent.ports import (
+        AgentMemoryRepository,
         AttachmentRepository,
         AttemptCommands,
         AuditLogQueries,
@@ -144,5 +146,6 @@ class Storage:
         self.snapshot: SnapshotRepository = PostgresSnapshotRepository(pool)
         self.source_control: SourceControlRepository = PostgresSourceControlRepository(pool)
         self.user_memory: UserMemoryRepository = PostgresUserMemoryRepository(pool)
+        self.agent_memory: AgentMemoryRepository = PostgresAgentMemoryRepository(pool)
         self.user_profile: UserProfileRepository = PostgresUserProfileRepository(pool)
         self.web_search: WebSearchRepository = PostgresWebSearchRepository(pool)

@@ -17,6 +17,7 @@ from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent.logging_utils import get_logger
+from cloud_agent.workers.agent_memory import maintain_agent_memories
 from cloud_agent.workers.attempts import reap_expired_attempts
 from cloud_agent.workers.background_wake import BackgroundWake
 from cloud_agent.workers.job_event_signal import JobEventSignal
@@ -91,6 +92,7 @@ _SHUTDOWN_TASK_ATTRS: tuple[str, ...] = (
     "ledger_task",
     "capacity_task",
     "user_memory_task",
+    "agent_memory_task",
     "queue_monitor_task",
     "publish_task",
     "pr_archive_task",
@@ -465,24 +467,28 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
                 prune_host_capacity_history(storage.host_capacity)
             )
             user_memories = asyncio.create_task(refresh_user_memories(storage.user_memory))
+            agent_memories = asyncio.create_task(maintain_agent_memories(storage.agent_memory))
             _BACKGROUND_TASKS.add(reaper)
             _BACKGROUND_TASKS.add(snapshot_coordinator)
             _BACKGROUND_TASKS.add(sandbox_deletions)
             _BACKGROUND_TASKS.add(ledger_collector)
             _BACKGROUND_TASKS.add(capacity_history)
             _BACKGROUND_TASKS.add(user_memories)
+            _BACKGROUND_TASKS.add(agent_memories)
             reaper.add_done_callback(_forget_background_task)
             snapshot_coordinator.add_done_callback(_forget_background_task)
             sandbox_deletions.add_done_callback(_forget_background_task)
             ledger_collector.add_done_callback(_forget_background_task)
             capacity_history.add_done_callback(_forget_background_task)
             user_memories.add_done_callback(_forget_background_task)
+            agent_memories.add_done_callback(_forget_background_task)
             app.state.reaper_task = reaper
             app.state.snapshot_task = snapshot_coordinator
             app.state.sandbox_deletion_task = sandbox_deletions
             app.state.ledger_task = ledger_collector
             app.state.capacity_task = capacity_history
             app.state.user_memory_task = user_memories
+            app.state.agent_memory_task = agent_memories
             # The profiling policy loop runs only here, in the one main process
             # that owns the reaper: file and terminal requests are rooted in this
             # process alone (the relay listener roots none, see below), so this is
@@ -542,6 +548,7 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
             app.state.ledger_task = None
             app.state.capacity_task = None
             app.state.user_memory_task = None
+            app.state.agent_memory_task = None
             app.state.queue_monitor_task = None
             app.state.publish_task = None
             app.state.pr_archive_task = None

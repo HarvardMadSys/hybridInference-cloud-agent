@@ -520,6 +520,7 @@ async def test_the_lifespan_hands_the_loops_the_provider_not_a_snapshot(
         # also stay idle instead of resolving the test-only database hostname.
         "cloud_agent.bootstrap.lifespan.listen",
         "cloud_agent.bootstrap.lifespan.coordinate_shared_snapshots",
+        "cloud_agent.bootstrap.lifespan.maintain_agent_memories",
         "cloud_agent.ledger.collect_usage_snapshots",
         "cloud_agent.capacity_history.prune_host_capacity_history",
         "cloud_agent.operational_health.monitor_queue",

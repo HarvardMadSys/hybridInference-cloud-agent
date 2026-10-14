@@ -166,6 +166,38 @@
         "title": "AddDeploymentProfile",
         "type": "object"
       },
+      "AddMemory": {
+        "additionalProperties": false,
+        "description": "A memory the owner writes; ``repo`` is null for every project.",
+        "properties": {
+          "content": {
+            "maxLength": 240,
+            "minLength": 1,
+            "title": "Content",
+            "type": "string"
+          },
+          "repo": {
+            "anyOf": [
+              {
+                "maxLength": 140,
+                "minLength": 1,
+                "pattern": "\\S",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo"
+          }
+        },
+        "required": [
+          "repo",
+          "content"
+        ],
+        "title": "AddMemory",
+        "type": "object"
+      },
       "AddServerRequest": {
         "additionalProperties": false,
         "description": "Acquire or attach a resource and deploy a configured Host profile.",
@@ -5254,6 +5286,148 @@
           "state"
         ],
         "title": "AgentJobResponse",
+        "type": "object"
+      },
+      "AgentMemoryScopeView": {
+        "description": "The memories of one scope: the user (``repo`` is null) or a repository.",
+        "properties": {
+          "archived": {
+            "items": {
+              "$ref": "#/components/schemas/AgentMemoryView"
+            },
+            "title": "Archived",
+            "type": "array"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "memories": {
+            "items": {
+              "$ref": "#/components/schemas/AgentMemoryView"
+            },
+            "title": "Memories",
+            "type": "array"
+          },
+          "repo": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo"
+          }
+        },
+        "required": [
+          "repo",
+          "enabled"
+        ],
+        "title": "AgentMemoryScopeView",
+        "type": "object"
+      },
+      "AgentMemoryView": {
+        "description": "One durable memory as its owner sees it.",
+        "properties": {
+          "archived_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Archived At"
+          },
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "last_used_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Used At"
+          },
+          "origin": {
+            "enum": [
+              "agent",
+              "manual"
+            ],
+            "title": "Origin",
+            "type": "string"
+          },
+          "repo": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo"
+          },
+          "source_job_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Source Job Ids",
+            "type": "array"
+          },
+          "status": {
+            "enum": [
+              "active",
+              "archived"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "repo",
+          "content",
+          "description",
+          "status",
+          "origin",
+          "version",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "AgentMemoryView",
         "type": "object"
       },
       "AgentOperationProfilingFragment": {
@@ -12555,6 +12729,22 @@
         "title": "MemoryEntryRevision",
         "type": "object"
       },
+      "MemoryVersion": {
+        "additionalProperties": false,
+        "description": "The version the owner examined before removing or restoring a memory.",
+        "properties": {
+          "expected_version": {
+            "minimum": 0.0,
+            "title": "Expected Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "expected_version"
+        ],
+        "title": "MemoryVersion",
+        "type": "object"
+      },
       "MessageRequestDetail": {
         "description": "A request matched by response identity inside one owner's execution.",
         "properties": {
@@ -16083,6 +16273,44 @@
           }
         },
         "title": "UpdateConnectorRequest",
+        "type": "object"
+      },
+      "UpdateMemory": {
+        "additionalProperties": false,
+        "description": "New text and scope for a memory, at the version the owner examined.",
+        "properties": {
+          "content": {
+            "maxLength": 240,
+            "minLength": 1,
+            "title": "Content",
+            "type": "string"
+          },
+          "expected_version": {
+            "minimum": 0.0,
+            "title": "Expected Version",
+            "type": "integer"
+          },
+          "repo": {
+            "anyOf": [
+              {
+                "maxLength": 140,
+                "minLength": 1,
+                "pattern": "\\S",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo"
+          }
+        },
+        "required": [
+          "repo",
+          "content",
+          "expected_version"
+        ],
+        "title": "UpdateMemory",
         "type": "object"
       },
       "UpdateMemoryEntry": {
@@ -30842,6 +31070,391 @@
         "summary": "Update Thread Binding",
         "tags": [
           "agent-mcp"
+        ]
+      }
+    },
+    "/v1/agent/memories": {
+      "delete": {
+        "description": "Delete every memory for every project, or for one repository.",
+        "operationId": "clear_memories_v1_agent_memories_delete",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "repo",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 140,
+                  "minLength": 1,
+                  "pattern": "\\S",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Repo"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Clear Memories",
+        "tags": [
+          "agent-memory"
+        ]
+      },
+      "get": {
+        "description": "Read the owner's memories for every project, or for one repository.",
+        "operationId": "list_memories_v1_agent_memories_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "repo",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 140,
+                  "minLength": 1,
+                  "pattern": "\\S",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Repo"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentMemoryScopeView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Memories",
+        "tags": [
+          "agent-memory"
+        ]
+      },
+      "post": {
+        "description": "Save a memory the owner wrote; it applies from the next task.",
+        "operationId": "add_memory_v1_agent_memories_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AddMemory"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentMemoryView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Add Memory",
+        "tags": [
+          "agent-memory"
+        ]
+      }
+    },
+    "/v1/agent/memories/{memory_id}": {
+      "delete": {
+        "description": "Delete one memory permanently.",
+        "operationId": "delete_memory_v1_agent_memories__memory_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "memory_id",
+            "required": true,
+            "schema": {
+              "title": "Memory Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MemoryVersion"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Memory",
+        "tags": [
+          "agent-memory"
+        ]
+      },
+      "patch": {
+        "description": "Rewrite or move a memory; the owner's edit makes it manual.",
+        "operationId": "update_memory_v1_agent_memories__memory_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "memory_id",
+            "required": true,
+            "schema": {
+              "title": "Memory Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateMemory"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentMemoryView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Memory",
+        "tags": [
+          "agent-memory"
+        ]
+      }
+    },
+    "/v1/agent/memories/{memory_id}/restore": {
+      "post": {
+        "description": "Make an archived memory active again.",
+        "operationId": "restore_memory_v1_agent_memories__memory_id__restore_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "memory_id",
+            "required": true,
+            "schema": {
+              "title": "Memory Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MemoryVersion"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentMemoryView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Restore Memory",
+        "tags": [
+          "agent-memory"
         ]
       }
     },

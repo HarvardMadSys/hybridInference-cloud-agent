@@ -159,6 +159,7 @@ def create_app() -> FastAPI:
         admin_settings,
         admin_steps,
         admin_usage,
+        agent_memory,
         compute_registration,
         environments,
         host_profiling,
@@ -225,6 +226,7 @@ def create_app() -> FastAPI:
     app.include_router(environments.router)
     app.include_router(user_memory.router)
     app.include_router(user_memory.project_router)
+    app.include_router(agent_memory.router)
     app.include_router(user_profile.router)
     app.include_router(uploads.router)
     app.include_router(mcp_connections.router)
@@ -267,6 +269,7 @@ def create_app() -> FastAPI:
             *ADMIN_READ_PREFIXES,
             "/v1/agent/user-memory",
             "/v1/agent/project-memory",
+            "/v1/agent/memories",
             "/v1/agent/profile",
         ),
     )
