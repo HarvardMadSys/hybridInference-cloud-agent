@@ -2,6 +2,7 @@
 
 import { useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import toast from 'react-hot-toast';
 import { useT } from '@/components/providers';
 import {
   listAllAgentThreadEvents,
@@ -10,6 +11,7 @@ import {
   unpinAgentJob,
 } from '@/lib/api/agents';
 import { onAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
+import { saveFile } from '@/lib/saveFile';
 import { toSessionLog } from './trajectory';
 import type { AgentJob } from './types';
 
@@ -36,6 +38,8 @@ export function ThreadActions({
   const dialog = useRef<HTMLFormElement>(null);
   const input = useRef<HTMLInputElement>(null);
   const [open, setOpen] = useState(false);
+  const openRef = useRef(open);
+  openRef.current = open;
   const [renaming, setRenaming] = useState(false);
   const [title, setTitle] = useState(job.title);
   const [pinned, setPinned] = useState(Boolean(job.pinnedAt));
@@ -144,18 +148,18 @@ export function ThreadActions({
     setError(null);
     try {
       const events = await listAllAgentThreadEvents(job.id, { signal: controller.signal });
-      const url = URL.createObjectURL(
+      saveFile(
         new Blob([toSessionLog(events)], { type: 'application/x-ndjson' }),
+        `session-log-${job.threadId ?? job.id}.ndjson`,
       );
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = `session-log-${job.threadId ?? job.id}.ndjson`;
-      link.click();
-      URL.revokeObjectURL(url);
-      close();
+      // Dismissed while the log was read: focus stays where the owner moved it.
+      if (openRef.current) close();
     } catch (cause) {
       if (controller.signal.aborted) return;
-      setError(cause instanceof Error ? cause.message : t('taskActions.downloadLogFailed'));
+      const reason = cause instanceof Error ? cause.message : t('taskActions.downloadLogFailed');
+      // The menu shows the reason while it is open; once dismissed, it would not.
+      if (openRef.current) setError(reason);
+      else toast.error(reason);
     } finally {
       download.current = null;
       if (!controller.signal.aborted) setDownloading(false);
