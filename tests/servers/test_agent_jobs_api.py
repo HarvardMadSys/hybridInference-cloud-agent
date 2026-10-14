@@ -9622,14 +9622,16 @@ async def test_claim_loads_current_default_servers_and_skips_unavailable_ones(
 async def test_claim_puts_durable_memories_with_their_ids_before_the_task(
     client, store, monkeypatch
 ):
-    use = AsyncMock(
+    read = AsyncMock(
         return_value={
             "repo": "owner/name",
             "project": [{"id": "m-project", "content": "Use pnpm, not npm."}],
             "user": [{"id": "m-user", "content": "Reply in Chinese."}],
         }
     )
-    monkeypatch.setattr(store, "use_memories", use, raising=False)
+    mark = AsyncMock()
+    monkeypatch.setattr(store, "task_memories", read, raising=False)
+    monkeypatch.setattr(store, "mark_memories_used", mark, raising=False)
     created = await client.post(
         "/v1/agent/jobs",
         json={"repo": "owner/name", "model": "glm-5.1", "task_prompt": "fix it"},
@@ -9638,7 +9640,8 @@ async def test_claim_puts_durable_memories_with_their_ids_before_the_task(
     claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
     assert claim.status_code == 200, claim.text
     prompt = claim.json()["task_prompt"]
-    use.assert_awaited_once_with(_OWNER, "owner/name")
+    read.assert_awaited_once_with(_OWNER, "owner/name")
+    mark.assert_awaited_once_with(_OWNER, ["m-project", "m-user"])
     assert '{"id": "m-project", "content": "Use pnpm, not npm."}' in prompt
     assert '{"id": "m-user", "content": "Reply in Chinese."}' in prompt
     assert "memory_update" in prompt
@@ -9647,7 +9650,7 @@ async def test_claim_puts_durable_memories_with_their_ids_before_the_task(
 
 async def test_unavailable_durable_memory_never_blocks_a_claim(client, store, monkeypatch):
     monkeypatch.setattr(
-        store, "use_memories", AsyncMock(side_effect=RuntimeError("down")), raising=False
+        store, "task_memories", AsyncMock(side_effect=RuntimeError("down")), raising=False
     )
     created = await client.post(
         "/v1/agent/jobs",

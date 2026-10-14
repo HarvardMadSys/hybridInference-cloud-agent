@@ -132,8 +132,13 @@ the memory described above; it switches to durable memories in a later release.
   you wrote yourself.
 - **Each task sees them.** When a task starts, the active memories of its
   repository and your user memories are added before the request, with the ids
-  the tools take, up to 12,000 characters, repository memories first. Nothing
-  is added when there are none. Their `last_used_at` is updated.
+  the tools take, up to 12,000 characters: repository memories first, and
+  within each scope the most recently written or edited first. Nothing is
+  added when there are none. Only the memories added get a new
+  `last_used_at`.
+- **Only while the task runs.** Every write checks, in its own transaction,
+  that the task's attempt is still the running one; a task that was stopped or
+  replaced cannot change memory, even with a request already under way.
 - **Scope.** A memory belongs to one repository, or to every project when its
   `repo` is `null`. An agent saves to its task's repository unless you say a
   rule applies to all projects; a chat without a repository saves user

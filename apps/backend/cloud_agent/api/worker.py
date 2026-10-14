@@ -28,7 +28,7 @@ from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
 
 from cloud_agent import memory_tool, web_search
-from cloud_agent.agent_memory import prompt_with_agent_memories
+from cloud_agent.agent_memory import fit_task_memories, prompt_with_agent_memories
 from cloud_agent.api._body_limits import (
     HostBodyLimitRoute,
     payload_too_large,
@@ -190,13 +190,17 @@ async def _refresh_claim_memory(
 async def _claim_agent_memories(
     repository: AgentMemoryRepository, user_id: str, repo: str | None
 ) -> dict[str, Any]:
-    """Read the task's durable memories; unavailable memory leaves the lists empty.
+    """Read the memories that fit the task's prompt and mark only those used.
 
-    The task can still reach the memory tools, so the prompt keeps naming them.
+    Unavailable memory leaves the lists empty and never blocks the claim.
     """
     try:
         async with asyncio.timeout(_USER_MEMORY_TIMEOUT_SECONDS):
-            return await repository.use_memories(user_id, repo)
+            kept = fit_task_memories(await repository.task_memories(user_id, repo))
+            await repository.mark_memories_used(
+                user_id, [memory["id"] for scope in ("project", "user") for memory in kept[scope]]
+            )
+            return kept
     except Exception:
         logger.warning("agent_claim_durable_memory_unavailable")
         return {"repo": repo, "project": [], "user": []}

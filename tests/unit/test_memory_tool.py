@@ -13,7 +13,11 @@ from cloud_agent.agent_memory import (
     AgentMemoryDisabled,
     AgentMemoryFull,
     AgentMemoryNotFound,
+    AgentMemoryTaskEnded,
+    MemoryTask,
 )
+
+TASK = MemoryTask(user_id="alice", job_id="job-1", attempt_id=4, lease_generation=2)
 
 
 def _memory(repo="owner/api", content="Use pnpm, not npm."):
@@ -46,11 +50,9 @@ async def test_save_uses_the_fenced_owner_and_task(scope, all_projects, repo, sh
     arguments = {"content": "Use pnpm, not npm."}
     if scope is not None:
         arguments["scope"] = scope
-    result = await memory_tool.call(
-        memory_tool.SAVE, arguments, user_id="alice", job_id="job-1", repository=repository
-    )
+    result = await memory_tool.call(memory_tool.SAVE, arguments, task=TASK, repository=repository)
     repository.save_agent_memory.assert_awaited_once_with(
-        "alice", "job-1", "Use pnpm, not npm.", all_projects=all_projects
+        TASK, "Use pnpm, not npm.", all_projects=all_projects
     )
     assert json.loads(_text(result)) == {
         "saved": {"id": "m1", "content": "Use pnpm, not npm.", "scope": shown}
@@ -65,15 +67,14 @@ async def test_update_and_delete_address_a_memory_by_id():
     updated = await memory_tool.call(
         memory_tool.UPDATE,
         {"id": "m1", "content": "Use yarn."},
-        user_id="alice",
-        job_id="job-1",
+        task=TASK,
         repository=repository,
     )
     deleted = await memory_tool.call(
-        memory_tool.DELETE, {"id": "m1"}, user_id="alice", job_id="job-1", repository=repository
+        memory_tool.DELETE, {"id": "m1"}, task=TASK, repository=repository
     )
-    repository.replace_agent_memory.assert_awaited_once_with("alice", "job-1", "m1", "Use yarn.")
-    repository.archive_agent_memory.assert_awaited_once_with("alice", "job-1", "m1")
+    repository.replace_agent_memory.assert_awaited_once_with(TASK, "m1", "Use yarn.")
+    repository.archive_agent_memory.assert_awaited_once_with(TASK, "m1")
     assert json.loads(_text(updated))["updated"]["content"] == "Use yarn."
     assert json.loads(_text(deleted))["deleted"]["id"] == "m1"
 
@@ -91,9 +92,7 @@ async def test_update_and_delete_address_a_memory_by_id():
 )
 async def test_invalid_arguments_change_nothing(name, arguments):
     repository = AsyncMock()
-    result = await memory_tool.call(
-        name, arguments, user_id="alice", job_id="job-1", repository=repository
-    )
+    result = await memory_tool.call(name, arguments, task=TASK, repository=repository)
     assert result["isError"] is True and "Nothing was changed" in _text(result)
     assert repository.mock_calls == []
 
@@ -101,6 +100,7 @@ async def test_invalid_arguments_change_nothing(name, arguments):
 @pytest.mark.parametrize(
     ("error", "words"),
     [
+        (AgentMemoryTaskEnded("x"), "no longer running"),
         (AgentMemoryNotFound("x"), "No active memory"),
         (AgentMemoryDisabled("x"), "turned memory off"),
         (AgentMemoryFull("x"), "full of memories the owner wrote"),
@@ -115,8 +115,7 @@ async def test_failures_are_tool_errors_with_fixed_text(error, words, caplog):
         result = await memory_tool.call(
             memory_tool.SAVE,
             {"content": "Remember my private detail"},
-            user_id="alice",
-            job_id="job-1",
+            task=TASK,
             repository=repository,
         )
     assert result["isError"] is True and words in _text(result)

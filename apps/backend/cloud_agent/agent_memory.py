@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from datetime import datetime  # noqa: TC003 - Pydantic resolves the view schema.
 from typing import Any, Literal
 
@@ -67,6 +68,20 @@ class AgentMemoryDisabled(ValueError):
     """The owner turned memory off for this scope."""
 
 
+class AgentMemoryTaskEnded(ValueError):
+    """The task's attempt is no longer the running one, so it may not write."""
+
+
+@dataclass(frozen=True)
+class MemoryTask:
+    """The running attempt an agent writes memory from, as its token names it."""
+
+    user_id: str
+    job_id: str
+    attempt_id: int
+    lease_generation: int
+
+
 def describe(content: str) -> str:
     """Summarize a memory in one line for lists and indexes."""
     if len(content) <= DESCRIPTION_LIMIT:
@@ -106,15 +121,12 @@ def _task_memories(memories: dict[str, Any], *, project: list[Any], user: list[A
     )
 
 
-def prompt_with_agent_memories(prompt: str, memories: dict[str, Any] | None) -> str:
-    """Prepend the task's durable memories, with ids the memory tools accept.
+def fit_task_memories(memories: dict[str, Any]) -> dict[str, Any]:
+    """Keep the memories that fit the task's prompt, in the order given.
 
-    Nothing is added when there are no memories, or when ``memories`` is
-    ``None`` because the task cannot reach the memory tools: the tools describe
-    themselves. Project memories are kept first when the total exceeds the limit.
+    Project memories are kept first; within a scope the caller orders them,
+    most recently written first, so a new rule is never the one left out.
     """
-    if memories is None or not (memories.get("project") or memories.get("user")):
-        return prompt
     kept: dict[str, list[dict[str, str]]] = {"project": [], "user": []}
     for scope in ("project", "user"):
         for memory in memories.get(scope) or []:
@@ -126,4 +138,24 @@ def prompt_with_agent_memories(prompt: str, memories: dict[str, Any] | None) -> 
             if len(_TASK_HEADER) + len(encoded) + len(_TASK_FOOTER) > TASK_CONTEXT_LIMIT:
                 break
             kept = candidate
-    return _TASK_HEADER + _task_memories(memories, **kept) + _TASK_FOOTER + prompt
+    return {"repo": memories.get("repo"), **kept}
+
+
+def prompt_with_agent_memories(prompt: str, memories: dict[str, Any] | None) -> str:
+    """Prepend the task's durable memories, with ids the memory tools accept.
+
+    Nothing is added when there are no memories, or when ``memories`` is
+    ``None`` because the task cannot reach the memory tools: the tools describe
+    themselves.
+    """
+    if memories is None:
+        return prompt
+    kept = fit_task_memories(memories)
+    if not (kept["project"] or kept["user"]):
+        return prompt
+    return (
+        _TASK_HEADER
+        + _task_memories(kept, project=kept["project"], user=kept["user"])
+        + _TASK_FOOTER
+        + prompt
+    )

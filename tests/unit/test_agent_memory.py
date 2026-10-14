@@ -9,6 +9,7 @@ import pytest
 from cloud_agent.agent_memory import (
     TASK_CONTEXT_LIMIT,
     describe,
+    fit_task_memories,
     memory_key,
     normalize_memory,
     prompt_with_agent_memories,
@@ -64,3 +65,13 @@ def test_project_memories_are_kept_first_within_the_limit():
     assert len(prompt) - len("fix it") <= TASK_CONTEXT_LIMIT
     assert len(data["project"]["memories"]) == 30
     assert 0 < len(data["user"]) < 30
+
+
+def test_fitting_keeps_the_order_given_and_reports_only_what_fits():
+    rule = "r" * 230
+    memories = _scope([rule] * 30, [f"newest {rule}"] + [rule] * 29)
+    kept = fit_task_memories(memories)
+    # The caller lists each scope newest first, so the newest user rule survives.
+    assert kept["user"][0]["id"] == "u0"
+    assert 0 < len(kept["user"]) < 30
+    assert prompt_with_agent_memories("x", memories) == prompt_with_agent_memories("x", kept)

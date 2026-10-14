@@ -9,8 +9,10 @@ import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from tests.servers.test_mcp_relay_host import (
+    _ATTEMPT,
     _HOST_URL,
     _JOB,
+    _LEASE,
     _OWNER,
     FakeStore,
     _auth,
@@ -21,6 +23,7 @@ from tests.servers.test_mcp_relay_host import (
 from tests.support.storage import OneFake
 
 from cloud_agent import memory_tool
+from cloud_agent.agent_memory import MemoryTask
 from cloud_agent.api import mcp_relay as agent_mcp_router
 from cloud_agent.api.deps import get_storage
 
@@ -33,9 +36,9 @@ class MemoryStore(FakeStore):
         self.saved: list[tuple[Any, ...]] = []
 
     async def save_agent_memory(
-        self, user_id: str, job_id: str, content: str, *, all_projects: bool
+        self, task: MemoryTask, content: str, *, all_projects: bool
     ) -> dict[str, Any]:
-        self.saved.append((user_id, job_id, content, all_projects))
+        self.saved.append((task, content, all_projects))
         return {"id": "m1", "repo": None if all_projects else "owner/api", "content": content}
 
 
@@ -74,7 +77,9 @@ async def test_a_save_acts_for_the_task_the_token_names(
         headers=_auth(),
     )
     result = _result(response)
-    assert memory_store.saved == [(_OWNER, _JOB, "Use pnpm, not npm.", False)]
+    # The attempt goes along, so the write re-checks it in its own transaction.
+    task = MemoryTask(user_id=_OWNER, job_id=_JOB, attempt_id=_ATTEMPT, lease_generation=_LEASE)
+    assert memory_store.saved == [(task, "Use pnpm, not npm.", False)]
     assert json.loads(result["content"][0]["text"])["saved"]["id"] == "m1"
 
 

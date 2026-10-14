@@ -15,6 +15,8 @@ from cloud_agent.agent_memory import (
     AgentMemoryDisabled,
     AgentMemoryFull,
     AgentMemoryNotFound,
+    AgentMemoryTaskEnded,
+    MemoryTask,
 )
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.user_memory import MEMORY_CONTENT_LIMIT
@@ -132,8 +134,7 @@ async def call(
     name: str,
     arguments: Any,
     *,
-    user_id: str,
-    job_id: str,
+    task: MemoryTask,
     repository: AgentMemoryRepository,
 ) -> dict[str, Any]:
     """Run one memory tool for the fenced task; failures are tool errors, not faults.
@@ -148,18 +149,20 @@ async def call(
             if scope not in ("repository", "all_projects"):
                 raise TypeError("scope")
             memory = await repository.save_agent_memory(
-                user_id, job_id, _string(values, "content"), all_projects=scope == "all_projects"
+                task, _string(values, "content"), all_projects=scope == "all_projects"
             )
             return _result("saved", memory)
         if name == UPDATE:
             memory = await repository.replace_agent_memory(
-                user_id, job_id, _string(values, "id"), _string(values, "content")
+                task, _string(values, "id"), _string(values, "content")
             )
             return _result("updated", memory)
-        memory = await repository.archive_agent_memory(user_id, job_id, _string(values, "id"))
+        memory = await repository.archive_agent_memory(task, _string(values, "id"))
         return _result("deleted", memory)
     except TypeError as exc:
         return _error(f"Nothing was changed: {exc} is missing or invalid.")
+    except AgentMemoryTaskEnded:
+        return _error("This task is no longer running. Nothing was changed.")
     except AgentMemoryNotFound:
         return _error("No active memory with that id is visible to this task.")
     except AgentMemoryDisabled:

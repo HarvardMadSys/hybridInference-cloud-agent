@@ -13,16 +13,20 @@ from cloud_agent.agent_memory import (
     AgentMemoryFull,
     AgentMemoryNotFound,
     AgentMemoryScopeView,
+    AgentMemoryTaskEnded,
     AgentMemoryView,
     describe,
     memory_key,
     normalize_memory,
 )
+from cloud_agent.storage._sql.hosts import LIVE_ATTEMPT_HOST
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
     import asyncpg
+
+    from cloud_agent.agent_memory import MemoryTask
 
 _COLUMNS = (
     "id, repo, content, description, status, origin, source_job_ids, version, "
@@ -125,17 +129,40 @@ async def _insert(
     )
 
 
-async def _task_repo(conn: Any, user_id: str, job_id: str) -> str | None:
-    """The repository of the owner's task, or ``None`` for a chat without one."""
+async def _live_task_repo(conn: Any, task: MemoryTask) -> str | None:
+    """The repository of a task whose attempt is still the running one.
+
+    Checked inside the write's transaction, with the job and attempt rows
+    share-locked, so a task stopped or superseded after its token was accepted
+    cannot write: a stop that commits first is seen here, and one that comes
+    later waits for this write. ``None`` is a chat without a repository.
+    """
     row = await conn.fetchrow(
-        "SELECT NULLIF(t.repo, '') AS repo FROM agent_jobs j "
-        "JOIN agent_threads t ON t.id = j.thread_id AND t.user_id = j.user_id "
-        "WHERE j.id = $1 AND j.user_id = $2 AND t.deleted_at IS NULL",
-        job_id,
-        user_id,
+        f"""
+        SELECT NULLIF(t.repo, '') AS repo
+        FROM agent_attempts a
+        JOIN agent_jobs j ON j.id = a.job_id
+        JOIN agent_threads t ON t.id = j.thread_id AND t.user_id = j.user_id
+        WHERE a.id = $3
+          AND a.lease_generation = $4
+          AND a.status = 'running'
+          AND a.lease_expires_at > clock_timestamp()
+          AND j.id = $2
+          AND j.user_id = $1
+          AND j.current_attempt_id = a.id
+          AND j.state = 'running'
+          AND NOT j.cancel_requested
+          AND t.deleted_at IS NULL
+          AND {LIVE_ATTEMPT_HOST}
+        FOR SHARE OF a, j
+        """,
+        task.user_id,
+        task.job_id,
+        task.attempt_id,
+        task.lease_generation,
     )
     if row is None:
-        raise AgentMemoryNotFound("Task not found.")
+        raise AgentMemoryTaskEnded("This task is no longer running.")
     return row["repo"]
 
 
@@ -299,14 +326,16 @@ class PostgresAgentMemoryRepository:
                 repo,
             )
 
-    async def use_memories(self, user_id: str, repo: str | None) -> dict[str, Any]:
-        """Return the active memories a task in ``repo`` follows, and mark them used.
+    async def task_memories(self, user_id: str, repo: str | None) -> dict[str, Any]:
+        """Return the active memories a task in ``repo`` follows.
 
         Project memories come only from that repository; a scope whose memory
-        is turned off contributes nothing.
+        is turned off contributes nothing. Within a scope the most recently
+        written or edited come first, so a prompt that cannot fit them all
+        leaves out the oldest.
         """
         scopes: dict[str, list[dict[str, Any]]] = {"project": [], "user": []}
-        async with self._pool.acquire() as conn, conn.transaction():
+        async with self._pool.acquire() as conn:
             for scope, scope_repo in (("project", repo), ("user", None)):
                 if scope == "project" and repo is None:
                     continue
@@ -315,25 +344,29 @@ class PostgresAgentMemoryRepository:
                 rows = await conn.fetch(
                     f"SELECT {_COLUMNS} FROM agent_memories "
                     "WHERE user_id = $1 AND repo IS NOT DISTINCT FROM $2 AND status = 'active' "
-                    "ORDER BY created_at, id",
+                    "ORDER BY updated_at DESC, created_at DESC, id",
                     user_id,
                     scope_repo,
                 )
                 scopes[scope] = [_view(row) for row in rows]
-            used = [memory["id"] for memories in scopes.values() for memory in memories]
-            if used:
-                await conn.execute(
-                    "UPDATE agent_memories SET last_used_at = clock_timestamp() "
-                    "WHERE user_id = $1 AND id = ANY($2::text[])",
-                    user_id,
-                    used,
-                )
         return {"repo": repo, **scopes}
 
+    async def mark_memories_used(self, user_id: str, memory_ids: list[str]) -> None:
+        """Record that these memories were given to a task."""
+        if not memory_ids:
+            return
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE agent_memories SET last_used_at = clock_timestamp() "
+                "WHERE user_id = $1 AND id = ANY($2::text[])",
+                user_id,
+                memory_ids,
+            )
+
     async def save_agent_memory(
-        self, user_id: str, job_id: str, content: str, *, all_projects: bool
+        self, task: MemoryTask, content: str, *, all_projects: bool
     ) -> dict[str, Any]:
-        """Save a memory an agent wrote during ``job_id``.
+        """Save a memory an agent wrote during ``task``.
 
         It belongs to the task's repository unless ``all_projects`` is set or
         the task has none. An identical active memory gains this task as a
@@ -341,8 +374,9 @@ class PostgresAgentMemoryRepository:
         """
         content = normalize_memory(content)
         async with self._pool.acquire() as conn, conn.transaction():
+            user_id, job_id = task.user_id, task.job_id
             await _lock(conn, user_id)
-            task_repo = await _task_repo(conn, user_id, job_id)
+            task_repo = await _live_task_repo(conn, task)
             repo = None if all_projects else task_repo
             if not await _enabled(conn, user_id, repo):
                 raise AgentMemoryDisabled("Memory is turned off for this scope.")
@@ -361,7 +395,7 @@ class PostgresAgentMemoryRepository:
         return _view(row)
 
     async def replace_agent_memory(
-        self, user_id: str, job_id: str, memory_id: str, content: str
+        self, task: MemoryTask, memory_id: str, content: str
     ) -> dict[str, Any]:
         """Replace a memory the task can see with new text, archiving the old one.
 
@@ -370,8 +404,9 @@ class PostgresAgentMemoryRepository:
         """
         content = normalize_memory(content)
         async with self._pool.acquire() as conn, conn.transaction():
+            user_id, job_id = task.user_id, task.job_id
             await _lock(conn, user_id)
-            old = await self._visible_memory(conn, user_id, job_id, memory_id)
+            old = await self._visible_memory(conn, task, memory_id)
             if memory_key(old["content"]) == memory_key(content):
                 return _view(old)
             active = await _active(conn, user_id, old["repo"])
@@ -392,21 +427,18 @@ class PostgresAgentMemoryRepository:
             await _archive(conn, memory_id, superseded_by=new["id"])
         return _view(new)
 
-    async def archive_agent_memory(
-        self, user_id: str, job_id: str, memory_id: str
-    ) -> dict[str, Any]:
+    async def archive_agent_memory(self, task: MemoryTask, memory_id: str) -> dict[str, Any]:
         """Archive a memory the task can see; the owner can restore it."""
         async with self._pool.acquire() as conn, conn.transaction():
-            await _lock(conn, user_id)
-            await self._visible_memory(conn, user_id, job_id, memory_id)
+            await _lock(conn, task.user_id)
+            await self._visible_memory(conn, task, memory_id)
             row = await _archive(conn, memory_id, superseded_by=None)
         return _view(row)
 
-    async def _visible_memory(
-        self, conn: Any, user_id: str, job_id: str, memory_id: str
-    ) -> asyncpg.Record:
+    async def _visible_memory(self, conn: Any, task: MemoryTask, memory_id: str) -> asyncpg.Record:
         """An active memory of the task's repository or the user, in a scope that is on."""
-        task_repo = await _task_repo(conn, user_id, job_id)
+        user_id = task.user_id
+        task_repo = await _live_task_repo(conn, task)
         row = await self._owned_memory(conn, user_id, memory_id)
         if row["status"] != "active" or row["repo"] not in (None, task_repo):
             raise AgentMemoryNotFound("Memory not found.")

@@ -46,6 +46,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from cloud_agent import memory_tool, web_search
+from cloud_agent.agent_memory import MemoryTask
 from cloud_agent.api.deps import get_mcp_decision_signal, get_storage
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp import protocol
@@ -1965,18 +1966,29 @@ async def _host_call(
     name = str(params.get("name") or "") if isinstance(params, dict) else ""
     arguments = params.get("arguments") if isinstance(params, dict) else None
     if name in memory_tool.TOOL_NAMES:
-        # The owner and task come from the fence, never from the arguments.
-        return _result_reply(
-            request_id,
-            await memory_tool.call(
+        # The owner and task come from the fence, never from the arguments. The
+        # attempt goes along so the write re-checks it in its own transaction:
+        # this request may have been accepted before the task was stopped.
+        attempt_id = _attempt_id_of(authorization)
+        lease_generation = _lease_of(authorization)
+        if attempt_id is None or lease_generation <= 0:
+            result: dict[str, Any] = {
+                "content": [{"type": "text", "text": "Memory authorization expired."}],
+                "isError": True,
+            }
+        else:
+            result = await memory_tool.call(
                 name,
                 arguments,
-                user_id=str(identity["user_id"]),
-                job_id=str(identity["job_id"]),
+                task=MemoryTask(
+                    user_id=str(identity["user_id"]),
+                    job_id=str(identity["job_id"]),
+                    attempt_id=attempt_id,
+                    lease_generation=lease_generation,
+                ),
                 repository=store.agent_memory,
-            ),
-            stateless=stateless,
-        )
+            )
+        return _result_reply(request_id, result, stateless=stateless)
     if name == web_search.TOOL_NAME and web_search.configured():
         return await _host_web_search(
             arguments,
