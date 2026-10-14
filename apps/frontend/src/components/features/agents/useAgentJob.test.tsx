@@ -774,7 +774,9 @@ describe('useAgentJob live turn rows', () => {
           jobs.filter((job) => job.thread_id === threadId).map((j) => j.id),
         );
         const rows = log.filter((row) => threadJobs.has(row.job_id));
-        return rows.filter((row) => row.id > (options?.after ?? 0));
+        return rows
+          .filter((row) => row.id > (options?.after ?? 0))
+          .sort((left, right) => left.id - right.id);
       });
       vi.mocked(streamAgentJob).mockImplementation(stayOpen);
     }
@@ -808,35 +810,64 @@ describe('useAgentJob live turn rows', () => {
       await waitFor(() => expect(result.current.job?.id).toBe(followUp.id));
       // The earlier turns stay on screen while the new activity is read.
       expect(result.current.events.map((row) => row.id)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
-      // The turn that was latest is read again in full; the ones before it
-      // had ended and are kept as they are.
-      expect(readCursors()).toEqual([0, 6]);
+      // The last two turns are read again in full; the ones before them are
+      // kept as they are.
+      expect(readCursors()).toEqual([0, 3]);
 
-      await act(async () => resolveEvents(log.filter((row) => row.id > 6)));
+      await act(async () => resolveEvents(log.filter((row) => row.id > 3)));
       expect(result.current.loading).toBe(false);
       expect(result.current.events.map((row) => row.id)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
       expect(result.current.job?.historyTurns?.map((row) => row.events.length)).toEqual([3, 3, 3]);
       expect(vi.mocked(streamAgentJob).mock.calls.at(-1)![1].lastEventId).toBe(10);
     });
 
-    it('reads its own turn again from that turn’s first event when it ends', async () => {
-      const turns = [turn('turn-1', 1), turn('turn-2', 2, 'running')];
+    it('reads a write to the ended turn that committed after the next turn began', async () => {
+      const turns = [turn('turn-1', 1), turn('turn-2', 2), turn('turn-3', 3)];
+      // Turn 2's snapshot event took id 5 and was still committing when turn
+      // 3 stored 6 and 7, so the first read could not see it.
+      const snapshot = stored(5, turns[1]);
       const log = [
         ...[1, 2].map((id) => stored(id, turns[0])),
         ...[3, 4].map((id) => stored(id, turns[1])),
+        ...[6, 7].map((id) => stored(id, turns[2])),
       ];
       serveLog(turns, log);
-      const { result } = renderHook(() => useAgentJob('turn-2'));
+      const { result, rerender } = renderHook(({ id }) => useAgentJob(id), {
+        initialProps: { id: 'turn-3' },
+      });
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      expect(result.current.events.map((row) => row.id)).toEqual([1, 2, 3, 4, 6, 7]);
+
+      log.push(snapshot);
+      const followUp = turn('turn-4', 4, 'running');
+      turns.push(followUp);
+      log.push(stored(8, followUp));
+      rerender({ id: followUp.id });
+      await waitFor(() => expect(result.current.job?.id).toBe(followUp.id));
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      expect(readCursors()).toEqual([0, 2]);
+      expect(result.current.events.map((row) => row.id)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    });
+
+    it('reads its own turn and the one before it again when it ends', async () => {
+      const turns = [turn('turn-1', 1), turn('turn-2', 2), turn('turn-3', 3, 'running')];
+      const log = [
+        ...[1, 2].map((id) => stored(id, turns[0])),
+        ...[3, 4].map((id) => stored(id, turns[1])),
+        ...[5, 6].map((id) => stored(id, turns[2])),
+      ];
+      serveLog(turns, log);
+      const { result } = renderHook(() => useAgentJob('turn-3'));
       await waitFor(() => expect(result.current.loading).toBe(false));
       const stream = vi.mocked(streamAgentJob).mock.calls[0][1];
 
-      log.push(stored(5, turns[1]));
-      turns[1] = { ...turns[1], state: 'succeeded' };
-      act(() => stream.onEvent(log[4]));
+      log.push(stored(7, turns[2]));
+      turns[2] = { ...turns[2], state: 'succeeded' };
+      act(() => stream.onEvent(log[6]));
       await act(async () => stream.onFinished?.({ state: 'succeeded', published_pr_url: null }));
       await waitFor(() => expect(readCursors()).toEqual([0, 2]));
       await waitFor(() => expect(result.current.loading).toBe(false));
-      expect(result.current.events.map((row) => row.id)).toEqual([1, 2, 3, 4, 5]);
+      expect(result.current.events.map((row) => row.id)).toEqual([1, 2, 3, 4, 5, 6, 7]);
     });
 
     it('reads another conversation from its start', async () => {

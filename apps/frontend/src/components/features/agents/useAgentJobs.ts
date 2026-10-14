@@ -181,23 +181,22 @@ function endsStreamingTurn(current: AgentJobApi | null, latest: AgentJobApi): bo
  * Where to read a conversation again when its earlier log is held.
  *
  * Stored events are never changed or removed, so a later read only has to
- * reach what was added. It starts at the latest held turn's first event
- * rather than after the newest held one: event ids are taken before their
- * writes commit, so a write still in flight during the earlier read could
- * land below an id that read already returned. Such writes belong to the
- * turn that was running, which is read again in full; the turns before it
- * had ended.
+ * reach what was added. It does not start after the newest held event: ids
+ * are taken before their writes commit, so a write still in flight during
+ * the earlier read could land below an id that read already returned. The
+ * running turn writes, and so do the snapshot and publication that follow
+ * the turn before it, which can still be committing when the next turn
+ * starts. The last two held turns are therefore read again in full. A write
+ * to an older turn takes an id from after they began, and is read either way.
  */
 function resumeAfter(held: readonly AgentThreadEventApi[]): number {
-  let turn = -Infinity;
-  let first = 0;
+  const turns = [...new Set(held.map((event) => event.turn_no))].sort((a, b) => b - a);
+  const from = turns[1] ?? turns[0];
+  let first = Infinity;
   for (const event of held) {
-    if (event.turn_no > turn || (event.turn_no === turn && event.id < first)) {
-      turn = event.turn_no;
-      first = event.id;
-    }
+    if (event.turn_no >= from && event.id < first) first = event.id;
   }
-  return Math.max(0, first - 1);
+  return Number.isFinite(first) ? first - 1 : 0;
 }
 
 export function useAgentJob(
