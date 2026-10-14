@@ -18,13 +18,13 @@ from dataclasses import replace
 from pathlib import PurePosixPath
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 from tests.unit.test_goal_controller import FakeGateway
 from tests.unit.test_runner_host_settings import _JOB, _run_new_chat
 
 from cloud_agent.goals.controller import _check_access
-from cloud_agent.user_memory import build_project_memory, build_user_memory
+from cloud_agent.api.worker import _claim_agent_memories
 from cloud_agent_host import runner as runner_mod
 from cloud_agent_host.runner import prepare_temporary_worktree
 from cloud_agent_shared.git.temporary_workspace import (
@@ -149,30 +149,19 @@ def test_the_first_turn_says_nothing_was_cloned(monkeypatch) -> None:
     assert "temporary" not in _checkout_event(repository.control)
 
 
-def _activity(repo: str | None) -> dict[str, Any]:
-    return {
-        "job_id": f"ajob_{repo or 'temporary'}",
-        "title": "Plot the survey results",
-        "content": "Always label the axes in charts.",
-        "repo": repo,
-        "runtime": "claude-code",
-        "model": "glm-5.1",
-        "created_at": "2026-10-14T00:00:00+00:00",
-    }
+async def test_a_temporary_workspace_feeds_only_user_memory() -> None:
+    """A claim reads the user scope with no repository and marks only its memories."""
+    user_memory = {"id": "user-rule", "content": "Always label the axes in charts."}
+    repository = SimpleNamespace(
+        task_memories=AsyncMock(return_value={"repo": None, "project": [], "user": [user_memory]}),
+        mark_memories_used=AsyncMock(),
+    )
 
+    memories = await _claim_agent_memories(repository, "owner", None)
 
-def test_a_temporary_workspace_feeds_only_user_memory() -> None:
-    """With no repository, what the owner says is about them, never about a project."""
-    user = build_user_memory([_activity(None)], None)
-    project = build_project_memory([_activity(None)], None, "owner/name")
-
-    kinds = {
-        (memory["kind"], memory["scope"], memory["source_repo"]) for memory in user["memories"]
-    }
-    assert ("preference", "user", None) in kinds
-    assert ("task", "user", None) in kinds
-    assert user["portrait"]["projects"] == []
-    assert project["memories"] == []
+    repository.task_memories.assert_awaited_once_with("owner", None)
+    repository.mark_memories_used.assert_awaited_once_with("owner", ["user-rule"])
+    assert memories == {"repo": None, "project": [], "user": [user_memory]}
 
 
 async def test_a_goal_in_a_temporary_workspace_checks_no_repository(monkeypatch) -> None:

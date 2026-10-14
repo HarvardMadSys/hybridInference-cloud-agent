@@ -72,7 +72,7 @@ that URL to another origin is refused while the token is kept. Reset the token,
 save the URL, then enter the token again.
 
 For the first deployment of this release, run `alembic upgrade head` through
-`0070_temporary_workspaces`. Existing hosts begin without a deployment drain
+`0071_temporary_workspaces`. Existing hosts begin without a deployment drain
 owner or release receipt, and 0051 backfills each one with a non-null fence
 epoch. 0066 builds an index on `agent_jobs` concurrently: on a long job history
 it takes a while without blocking the running API, and an interrupted run can
@@ -81,10 +81,12 @@ runs, a shared workspace that a failed snapshot left `dirty` publishes again:
 a snapshot already pending behind the failure is captured, otherwise the
 group's next settled turn is (see
 [Resume, Fork, and publication](#resume-fork-and-publication)). 0069 adds the
-empty durable-memory table. 0070 only drops `NOT NULL` from
-`agent_threads.repo` and `agent_environment_bindings.repo`, so conversations
-can start without a repository; its downgrade refuses while any such
-conversation exists. Rebuild the sandbox image for explicit plugin loading.
+durable-memory table; 0070 moves the memory switches and saved preferences
+onto it, leaving the retired memory tables unread until a later release drops
+them. 0071 drops `NOT NULL` from `agent_threads.repo` and
+`agent_environment_bindings.repo`, so conversations can start without a
+repository; its downgrade refuses while any such conversation exists.
+Rebuild the sandbox image for explicit plugin loading.
 Then start the main control-plane listener with its existing complete
 environment. It imports registered environment settings once,
 while the MCP-only listener waits for initialization and then reads the same
@@ -889,6 +891,15 @@ endpoint.
 An unresolved connection is logged and skipped in merged listings so other
 connections remain usable. Its per-connection route still refuses the broken
 connection explicitly.
+
+The merged host also serves the platform's own tools, which no connection
+provides. `web_search` is listed when a search provider is configured; the
+memory tools `memory_save`, `memory_update` and `memory_delete` are listed for
+every task. Both are named in the claim by non-secret markers
+(`:platform:web-search`, `:platform:memory`), so every MCP-capable runtime loads
+the merged endpoint even in a conversation with no connections. A memory tool
+writes for the owner and task the fenced token names, never for ones its
+arguments name, and only to that task's repository or the owner's user scope.
 
 ### End-to-end coverage
 

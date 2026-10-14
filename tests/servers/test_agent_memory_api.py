@@ -143,14 +143,14 @@ async def test_invalid_memories_are_rejected_without_echoing_them(app, body):
 
 
 @pytest.mark.parametrize(
-    ("error", "status"),
+    ("error", "status", "kind"),
     [
-        (AgentMemoryNotFound("secret text"), 404),
-        (AgentMemoryConflict("secret text"), 409),
-        (AgentMemoryFull("secret text"), 409),
+        (AgentMemoryNotFound("secret text"), 404, "memory_not_found"),
+        (AgentMemoryConflict("secret text"), 409, "memory_changed"),
+        (AgentMemoryFull("secret text"), 409, "memory_scope_full"),
     ],
 )
-async def test_repository_failures_use_fixed_answers(app, error, status):
+async def test_repository_failures_use_fixed_answers(app, error, status, kind):
     app.state.repository.update_memory.side_effect = error
     async with client(app) as http:
         response = await http.patch(
@@ -159,4 +159,29 @@ async def test_repository_failures_use_fixed_answers(app, error, status):
             headers=headers(),
         )
     assert response.status_code == status
+    assert response.json()["detail"]["error"]["type"] == kind
     assert "secret" not in response.text
+
+
+async def test_switches_and_project_lists_are_owner_scoped(app):
+    repository = app.state.repository
+    repository.set_memory_enabled.side_effect = lambda user_id, repo, enabled: {
+        "repo": repo,
+        "enabled": enabled,
+        "memories": [],
+        "archived": [],
+    }
+    repository.memory_projects.return_value = ["owner/api", "owner/web"]
+    async with client(app) as http:
+        paused = await http.put(
+            PATH + "/settings", json={"repo": "owner/api", "enabled": False}, headers=headers()
+        )
+        projects = await http.get(PATH + "/projects", headers=headers())
+        invalid = await http.put(PATH + "/settings", json={"enabled": "no"}, headers=headers())
+        anonymous = await http.put(PATH + "/settings", json={"repo": None, "enabled": True})
+    assert paused.status_code == 200 and paused.json()["enabled"] is False
+    assert paused.headers["cache-control"] == "no-store"
+    repository.set_memory_enabled.assert_awaited_once_with("owner-1", "owner/api", False)
+    assert projects.json() == {"projects": ["owner/api", "owner/web"]}
+    repository.memory_projects.assert_awaited_once_with("owner-1")
+    assert invalid.status_code == 422 and anonymous.status_code == 401

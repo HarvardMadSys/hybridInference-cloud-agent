@@ -187,6 +187,37 @@ async def test_the_claim_carries_no_repository_credential(
     assert asked == []
 
 
+async def test_a_temporary_claim_receives_only_its_owners_durable_memories(
+    store: FakeStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The worker reads user memory with no repository and injects its fenced tool ids."""
+    read = AsyncMock(
+        return_value={
+            "repo": None,
+            "project": [],
+            "user": [{"id": "user-rule", "content": "Always label chart axes."}],
+        }
+    )
+    mark = AsyncMock()
+    monkeypatch.setattr(store, "task_memories", read, raising=False)
+    monkeypatch.setattr(store, "mark_memories_used", mark, raising=False)
+    _no_repository_check(monkeypatch, "cloud_agent.api.worker")
+    app = _build_app(store)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        job = await _create_temporary(client)
+        claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
+
+    assert claim.status_code == 200, claim.text
+    owner = store.jobs[job["id"]]["user_id"]
+    read.assert_awaited_once_with(owner, None)
+    mark.assert_awaited_once_with(owner, ["user-rule"])
+    prompt = claim.json()["task_prompt"]
+    assert '"project": {"repo": null, "memories": []}' in prompt
+    assert '{"id": "user-rule", "content": "Always label chart axes."}' in prompt
+    assert "memory_update" in prompt
+    assert prompt.endswith("Current task:\nwrite a script")
+
+
 class _ArchiveStream:
     """What ``SandboxManagerClient.workspace_archive`` hands back, in memory."""
 

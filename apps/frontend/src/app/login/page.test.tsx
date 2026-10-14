@@ -36,6 +36,7 @@ const SITE_CONFIG: RuntimeSiteConfig = {
     orgUrl: '',
     statusUrl: '',
     docsUrl: '',
+    contactUrl: '',
     gatewayUrl: 'https://gateway.example.org',
   },
   features: { rag: false },

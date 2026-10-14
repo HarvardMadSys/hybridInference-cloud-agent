@@ -1,9 +1,8 @@
 'use client';
 
-import Link from 'next/link';
 import { useId } from 'react';
 import { useT } from '@/components/providers';
-import type { UserMemoryView } from '@/lib/api/userMemory';
+import type { WorkInsights } from '@/lib/api/insights';
 
 const WORK_AREAS = [
   ['backend', 'bg-[#5268A0]', 'M8 5L3 12L8 19M16 5L21 12L16 19M14 4L10 20'],
@@ -37,7 +36,7 @@ export function UserHomeInsights({
   error,
   onRetry,
 }: {
-  view: UserMemoryView | null;
+  view: WorkInsights | null;
   loading: boolean;
   error: boolean;
   onRetry: () => void;
@@ -47,17 +46,9 @@ export function UserHomeInsights({
 
   return (
     <section aria-labelledby={headingId} className="mt-8 border-t border-border pt-6">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <h2 id={headingId} className="text-sm font-semibold text-foreground">
-          {t('home.suggestions.title')}
-        </h2>
-        <Link
-          href="/integrations#settings-user-memory"
-          className="text-xs font-medium text-accent hover:underline"
-        >
-          {t('home.memorySettings')}
-        </Link>
-      </div>
+      <h2 id={headingId} className="text-sm font-semibold text-foreground">
+        {t('home.suggestions.title')}
+      </h2>
       <p className="mt-2 text-xs leading-relaxed text-muted">{t('home.suggestions.description')}</p>
       {loading ? (
         <p role="status" className="mt-3 text-sm text-muted">
@@ -93,9 +84,6 @@ export function UserHomeInsights({
       ) : (
         <p className="mt-3 text-sm leading-relaxed text-muted">{t('home.suggestions.empty')}</p>
       )}
-      {view && !view.enabled ? (
-        <p className="mt-3 text-xs leading-relaxed text-muted">{t('home.memoryPaused')}</p>
-      ) : null}
 
       <details className="mt-5 rounded-xl border border-border bg-surface">
         <summary className="cursor-pointer rounded-xl px-4 py-3 text-sm font-medium text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">

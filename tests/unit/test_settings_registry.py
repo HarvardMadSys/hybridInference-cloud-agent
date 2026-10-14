@@ -573,6 +573,7 @@ async def test_public_site_settings_expose_only_display_allowlist():
             **settings.initial_settings(),
             "site.app_name": "Configured app",
             "site.docs_url": "https://docs.example.com/agents/",
+            "site.contact_url": "mailto:support@example.com",
             "site.feature_rag": True,
         },
     )
@@ -590,10 +591,12 @@ async def test_public_site_settings_expose_only_display_allowlist():
         "orgUrl",
         "statusUrl",
         "docsUrl",
+        "contactUrl",
         "gatewayUrl",
     }
     assert view["branding"]["appName"] == "Configured app"
     assert view["branding"]["docsUrl"] == "https://docs.example.com/agents/"
+    assert view["branding"]["contactUrl"] == "mailto:support@example.com"
     assert view["features"] == {"rag": True}
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=create_mcp_app()), base_url="http://relay"
@@ -605,6 +608,36 @@ async def test_public_site_settings_expose_only_display_allowlist():
 def test_documentation_link_must_be_an_http_url(value):
     with pytest.raises(ValueError):
         settings.encode_changes({"site.docs_url": value})
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "https://example.com/support",
+        "mailto:support@example.com",
+        "MAILTO:Help.Desk+agents@sub.example.org",
+    ],
+)
+def test_contact_link_is_a_page_or_one_mail_address(value):
+    assert settings.encode_changes({"site.contact_url": value})
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "javascript:alert(1)",
+        "support@example.com",
+        "mailto:",
+        "mailto:support",
+        "mailto:support@example.com?subject=Hi",
+        "mailto:a@example.com,b@example.com",
+        "mailto:support@example.com\nBcc:x@example.com",
+        "tel:+15555550100",
+    ],
+)
+def test_contact_link_refuses_anything_else(value):
+    with pytest.raises(ValueError):
+        settings.encode_changes({"site.contact_url": value})
 
 
 def test_documentation_link_is_imported_from_the_environment(monkeypatch):

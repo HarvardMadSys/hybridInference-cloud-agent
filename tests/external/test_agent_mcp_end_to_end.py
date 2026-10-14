@@ -50,6 +50,7 @@ import pytest
 import uvicorn
 from tests.support.migrations import apply_migrations
 
+from cloud_agent import memory_tool
 from cloud_agent.mcp.registry import mcp_cipher
 from cloud_agent.settings import initialize_settings
 from cloud_agent.storage.assembly import Storage
@@ -67,6 +68,8 @@ _UPSTREAM_SECRET = "upstream-secret-token"
 _MCP_TOKEN_SECRET = "e2e-signing-secret-32-bytes-long"
 _ENCRYPTION_KEY = "e2e-encryption-key-at-least-32-bytes"
 _MODEL_TOOL_CALL = f"session__{_ALIAS}__{_TOOL}"
+#: The platform's memory tools, as the bridge presents them to the model.
+_MEMORY_TOOL_CALLS = [f"session__{name}" for name in sorted(memory_tool.TOOL_NAMES)]
 
 
 def _pinned_pi_version() -> str:
@@ -129,9 +132,17 @@ class _Recorder:
     different interface as a request with an empty body.
     """
 
-    def __init__(self, *, tool_name: str = _TOOL) -> None:
-        """Start with empty transcripts."""
+    def __init__(
+        self,
+        *,
+        tool_name: str = _TOOL,
+        model_call: str = _MODEL_TOOL_CALL,
+        model_arguments: dict[str, Any] | None = None,
+    ) -> None:
+        """Start with empty transcripts; the model will ask for ``model_call``."""
         self.tool_name = tool_name
+        self.model_call = model_call
+        self.model_arguments = model_arguments if model_arguments is not None else {"number": 7}
         self.mcp_calls: list[dict[str, Any]] = []
         self.model_requests: list[dict[str, Any]] = []
         self.tool_results: list[str] = []
@@ -267,8 +278,8 @@ class _Recorder:
                             "id": "call_1",
                             "type": "function",
                             "function": {
-                                "name": _MODEL_TOOL_CALL,
-                                "arguments": json.dumps({"number": 7}),
+                                "name": self.model_call,
+                                "arguments": json.dumps(self.model_arguments),
                             },
                         }
                     ],
@@ -403,8 +414,8 @@ async def test_a_tool_call_travels_the_whole_chain(pi_install: pathlib.Path) -> 
         await pool.close()
 
     # The model was offered exactly the merged catalogue, under the bridge's
-    # own namespace, and nothing else.
-    assert result["advertised"] == [_MODEL_TOOL_CALL], result
+    # own namespace: the connection's tool and the platform's memory tools.
+    assert result["advertised"] == sorted([_MODEL_TOOL_CALL, *_MEMORY_TOOL_CALLS]), result
     # The call reached the user's server as its own tool, with the model's
     # arguments, carrying the connection's credential rather than the sandbox's.
     methods = [call["method"] for call in upstream.mcp_calls]
@@ -414,6 +425,82 @@ async def test_a_tool_call_travels_the_whole_chain(pi_install: pathlib.Path) -> 
     assert call["params"] == {"name": _TOOL, "arguments": {"number": 7}}
     # And the answer came back to the model as the tool result.
     assert _TOOL_TEXT in " ".join(upstream.tool_results), upstream.tool_results
+
+
+async def test_an_agent_saves_a_memory_through_the_whole_chain(pi_install: pathlib.Path) -> None:
+    """A real CLI calls memory_save; the row lands for the task the token names."""
+    db = _db_config()
+    try:
+        pool = await asyncpg.create_pool(**db, min_size=1, max_size=4)
+    except Exception as exc:
+        pytest.skip(f"PostgreSQL not available: {exc}")
+        return  # unreachable
+    os.environ.update(
+        {
+            "AGENT_DATABASE_URL": (
+                f"postgresql://{db['user']}:{db['password']}@{db['host']}:{db['port']}/{db['database']}"
+            ),
+            "AGENT_CONTROL_TOKEN_SECRET": _MCP_TOKEN_SECRET,
+            "AGENT_SETTINGS_ENCRYPTION_KEY": "e2e-admin-settings-secret-32-bytes-long",
+            "AGENT_SOURCE_CONTROL_ENCRYPTION_KEY": _ENCRYPTION_KEY,
+            "AGENT_MCP_ALLOW_PRIVATE_TARGETS": "1",
+            "AGENT_MCP_ALLOW_PLAIN_HTTP": "1",
+        }
+    )
+    upstream = _Recorder(
+        model_call=f"session__{memory_tool.SAVE}",
+        # The CLI validates against the closed schema, so an extra owner field
+        # never leaves it; the relay tests cover arguments that do.
+        model_arguments={"content": "Use pnpm, not npm."},
+    )
+    upstream_port, model_port = upstream.start()
+    relay_port = _free_port()
+    servers: list[uvicorn.Server] = []
+    try:
+        apply_migrations(db)
+        await initialize_settings(Storage(pool).settings)
+        token = await _seed(pool, upstream_url=f"http://127.0.0.1:{upstream_port}/mcp")
+
+        from cloud_agent.app import create_mcp_app
+
+        servers.append(await _serve(create_mcp_app(), relay_port))
+        result = await asyncio.to_thread(
+            _run_pi,
+            pi_install,
+            upstream,
+            model_port=model_port,
+            relay_port=relay_port,
+            token=token,
+        )
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT m.user_id, m.repo, m.content, m.origin, m.source_job_ids, j.id AS job_id "
+                "FROM agent_memories m JOIN agent_jobs j ON j.id = m.source_job_ids[1]"
+            )
+    finally:
+        for server in servers:
+            server.should_exit = True
+        upstream.stop()
+        await asyncio.sleep(0.2)
+        async with pool.acquire() as conn:
+            await conn.execute("DELETE FROM agent_memories")
+            await conn.execute("DELETE FROM agent_mcp_connections")
+        await pool.close()
+
+    assert upstream.mcp_calls == [] or all(
+        call["method"] != "tools/call" for call in upstream.mcp_calls
+    ), "the memory tool must not reach a user's server"
+    assert len(rows) == 1, (rows, upstream.tool_results, result["requests"])
+    [row] = rows
+    assert (row["user_id"], row["repo"], row["content"], row["origin"]) == (
+        _OWNER,
+        "example-org/example-repo",
+        "Use pnpm, not npm.",
+        "agent",
+    )
+    assert list(row["source_job_ids"]) == [row["job_id"]]
+    saved = json.loads(" ".join(upstream.tool_results).split("\n")[0])
+    assert saved["saved"]["content"] == "Use pnpm, not npm.", result
 
 
 async def _seed(

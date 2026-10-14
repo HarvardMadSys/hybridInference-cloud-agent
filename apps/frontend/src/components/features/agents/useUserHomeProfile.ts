@@ -1,12 +1,12 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { getUserMemory, type UserMemoryView } from '@/lib/api/userMemory';
+import { getInsights, type WorkInsights } from '@/lib/api/insights';
 
 export function useUserHomeProfile(userId?: string) {
   const [snapshot, setSnapshot] = useState<{
     userId: string;
-    view: UserMemoryView | null;
+    view: WorkInsights | null;
     error: boolean;
   } | null>(null);
   const [attempt, setAttempt] = useState(0);
@@ -15,7 +15,7 @@ export function useUserHomeProfile(userId?: string) {
     if (!userId) return;
     const controller = new AbortController();
     setSnapshot({ userId, view: null, error: false });
-    void getUserMemory(controller.signal)
+    void getInsights(controller.signal)
       .then((view) => {
         if (!controller.signal.aborted) setSnapshot({ userId, view, error: false });
       })

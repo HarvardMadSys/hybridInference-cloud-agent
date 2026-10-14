@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import { onProfileSaved } from '@/lib/api/profileEvents';
 import { getUserProfile, type UserProfile } from '@/lib/api/userProfile';
 
 export function useUserProfile(userId?: string) {
@@ -20,7 +21,16 @@ export function useUserProfile(userId?: string) {
       .catch(() => {
         if (!controller.signal.aborted) setSnapshot({ userId, profile: null });
       });
-    return () => controller.abort();
+    // Another view saving the profile in this tab: take its answer rather
+    // than showing the old name until the next page load.
+    const stop = onProfileSaved((profile) => {
+      controller.abort();
+      setSnapshot({ userId, profile });
+    });
+    return () => {
+      controller.abort();
+      stop();
+    };
   }, [userId]);
 
   const current = snapshot?.userId === userId ? snapshot : null;

@@ -9,6 +9,7 @@ const saved = {
     orgUrl: 'https://example.com/about',
     statusUrl: '',
     docsUrl: 'https://docs.example.com/agents/',
+    contactUrl: 'https://example.com/support',
     gatewayUrl: 'https://gateway.example.com/dashboard',
   },
   features: { rag: true },
@@ -16,10 +17,32 @@ const saved = {
 
 describe('saved public site settings', () => {
   it('reads a control plane that predates the documentation link as having none', () => {
-    const { docsUrl: _omitted, ...olderBranding } = saved.branding;
+    const { docsUrl: _omitted, contactUrl: _alsoOmitted, ...olderBranding } = saved.branding;
     const site = parseSavedSiteConfig({ ...saved, branding: olderBranding });
     expect(site.branding.appName).toBe('Admin configured app');
     expect(site.branding.docsUrl).toBe('');
+    expect(site.branding.contactUrl).toBe('');
+  });
+
+  it('reads a contact link that is a page or one mail address', () => {
+    for (const contactUrl of ['https://example.com/support', 'mailto:help@example.com']) {
+      const site = parseSavedSiteConfig({ ...saved, branding: { ...saved.branding, contactUrl } });
+      expect(site.branding.contactUrl).toBe(contactUrl);
+    }
+  });
+
+  it('rejects a contact link that could prefill a message or run script', () => {
+    for (const contactUrl of [
+      'javascript:alert(1)',
+      'help@example.com',
+      'mailto:help@example.com?subject=Hi',
+      'mailto:a@example.com,b@example.com',
+      42,
+    ]) {
+      expect(
+        parseSavedPublicAppearance({ ...saved, branding: { ...saved.branding, contactUrl } }),
+      ).toBeNull();
+    }
   });
 
   it('rejects a documentation link that is not an http(s) URL', () => {

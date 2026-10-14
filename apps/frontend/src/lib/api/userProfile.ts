@@ -1,5 +1,6 @@
 import { config } from '@/config/env';
 import { fetchWithAuth, jsonOrThrow } from './client';
+import { announceProfileSaved } from './profileEvents';
 
 const PROFILE = '/v1/agent/profile';
 
@@ -29,7 +30,7 @@ export async function saveUserProfile(
   update: UserProfileUpdate,
   signal?: AbortSignal,
 ): Promise<UserProfile> {
-  return jsonOrThrow<UserProfile>(
+  const saved = await jsonOrThrow<UserProfile>(
     await fetchWithAuth(config.apiBase, PROFILE, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
@@ -37,4 +38,6 @@ export async function saveUserProfile(
       signal,
     }),
   );
+  announceProfileSaved(saved);
+  return saved;
 }

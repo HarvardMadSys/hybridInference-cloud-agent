@@ -3,7 +3,7 @@
 A conversation whose ``agent_threads.repo`` is null starts from the fixed empty
 commit, binds only its owner's global variables, never opens a workspace
 snapshot (so nothing is ever published), and is the one project the lists can
-select by its absence of a repository. Migration ``0070`` allows the null and
+select by its absence of a repository. Migration ``0071`` allows the null and
 refuses to go back while such a conversation exists.
 """
 
@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import pytest
 from tests.integration.storage.test_agent_job_store import (
+    _claim,
     _create_job,
     _reserve_shared_chat,
     pool as pool,
@@ -20,6 +21,7 @@ from tests.integration.storage.test_schema_upgrade import _db_config
 from tests.support.db import reset_agent_tables
 from tests.support.migrations import apply_migrations, downgrade_to
 
+from cloud_agent.agent_memory import MemoryTask
 from cloud_agent.storage.repositories.environments import EnvironmentNotFound
 from cloud_agent_shared.git.temporary_workspace import TEMPORARY_WORKSPACE_BASE_SHA
 
@@ -59,6 +61,34 @@ async def test_a_temporary_workspace_is_stored_without_a_repository(store, pool)
     assert thread["repo"] is None
     assert thread["environment_binding_id"] is not None
     assert binding_repo is None
+
+
+async def test_a_temporary_workspace_reads_and_writes_only_user_memory(store):
+    """Without a repository, a live task cannot read or create project memories."""
+    user = await store.agent_memory.add_memory("alice", None, "Reply in Chinese.")
+    project = await store.agent_memory.add_memory("alice", _REPO, "Use pnpm.")
+    await store.agent_memory.add_memory("bob", None, "Use tabs.")
+    job = await _temporary(store, user_id="alice")
+    claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
+    assert claim is not None and claim["id"] == job["id"]
+    task = MemoryTask(
+        user_id="alice",
+        job_id=job["id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+    )
+
+    saved = await store.agent_memory.save_agent_memory(
+        task, "Always label chart axes.", all_projects=False
+    )
+    assert saved["repo"] is None
+    assert saved["source_job_ids"] == [job["id"]]
+    memories = await store.agent_memory.task_memories("alice", None)
+    assert memories["repo"] is None
+    assert memories["project"] == []
+    assert {memory["id"] for memory in memories["user"]} == {user["id"], saved["id"]}
+    repository_memories = await store.agent_memory.list_memories("alice", _REPO)
+    assert [memory["id"] for memory in repository_memories["memories"]] == [project["id"]]
 
 
 async def test_a_temporary_workspace_cannot_bind_a_repository_environment(store, pool):
@@ -162,16 +192,16 @@ async def test_a_title_search_still_finds_a_temporary_workspace(store):
 
 
 async def test_the_migration_refuses_to_go_back_while_a_temporary_workspace_exists(store, pool):
-    """0070's downgrade would have to delete owners' conversations, so it refuses."""
+    """0071's downgrade would have to delete owners' conversations, so it refuses."""
     config = _db_config()
     await _temporary(store)
     try:
         with pytest.raises(Exception, match="Delete temporary workspace conversations"):
-            downgrade_to(config, "0069_agent_memories")
+            downgrade_to(config, "0070_memory_cutover")
 
         async with pool.acquire() as conn:
             await reset_agent_tables(conn)
-        downgrade_to(config, "0069_agent_memories")
+        downgrade_to(config, "0070_memory_cutover")
         async with pool.acquire() as conn:
             nullable = {
                 row["table_name"]: row["is_nullable"]

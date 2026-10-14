@@ -1,7 +1,7 @@
 """Let a conversation start without a repository.
 
-Revision ID: 0070_temporary_workspaces
-Revises: 0069_agent_memories
+Revision ID: 0071_temporary_workspaces
+Revises: 0070_memory_cutover
 
 A temporary workspace is a conversation whose sandbox starts from an empty
 directory instead of a clone, and whose turns are never published. A null
@@ -19,8 +19,8 @@ schema detail: delete them first.
 
 from alembic import op
 
-revision = "0070_temporary_workspaces"
-down_revision = "0069_agent_memories"
+revision = "0071_temporary_workspaces"
+down_revision = "0070_memory_cutover"
 branch_labels = None
 depends_on = None
 

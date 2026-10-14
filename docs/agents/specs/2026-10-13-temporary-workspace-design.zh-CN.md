@@ -152,7 +152,7 @@ flowchart LR
 
 | 层 | 改动 |
 | --- | --- |
-| 数据库 | 迁移 `0070_temporary_workspaces`（接在 `0069_agent_memories` 后面）：`agent_threads.repo`、`agent_environment_bindings.repo` 去掉 `NOT NULL`。只要还有临时工作区对话，降级就报错拒绝，不会悄悄删数据。`base_sha` 照常记录：临时工作区记的是那个空提交，Git 面板用它算 diff |
+| 数据库 | 迁移 `0071_temporary_workspaces`（接在 `0070_memory_cutover` 后面）：`agent_threads.repo`、`agent_environment_bindings.repo` 去掉 `NOT NULL`。只要还有临时工作区对话，降级就报错拒绝，不会悄悄删数据。`base_sha` 照常记录：临时工作区记的是那个空提交，Git 面板用它算 diff |
 | API 与 schema | `AgentJobCreate.repo` 改为必填可空；repo 为空时请求里不能带 `base_ref`、`base_sha` 或 `environment_id`，三者都指向某个仓库里的东西。返回结构里的 repo（`AgentJobResponse`、`AgentProject`、管理后台的几个模型等）改成可空 |
 | 准入 | repo 为空时跳过仓库权限、分支解析和 commit 校验，不签发 clone token；`agent.use`、模型、runtime 校验照旧。后续消息（[`follow_ups.py:167`](../../../apps/backend/cloud_agent/application/follow_ups.py#L167)）和 goal（[`goals/controller.py:587`](../../../apps/backend/cloud_agent/goals/controller.py#L587)）里的权限复查同样跳过 |
 | Runner | `_SourcePrefetch` 遇到空 repo 时 `git init` 并做一个空提交，打包导入 `/workspace`，不切输出分支。base 丢失需要补回时，同样重建这个提交，不克隆。首轮的 `checked_out` 事件带 `temporary: true`，界面显示"Empty workspace ready"，不说"Repository ready"，新手说明也不提克隆。`GH_TOKEN` 现在本来就只在有 token 时注入（[`resident_transport.py:772`](../../../apps/backend/cloud_agent_host/resident_transport.py#L772)），不用改 |
@@ -162,7 +162,7 @@ flowchart LR
 | 工作区 API | 文件、Git、终端接口里的 `_require_workspace_entitlement`（[`api/workspace.py:138`](../../../apps/backend/cloud_agent/api/workspace.py#L138)），对空 repo 只保留"是不是本人"的检查 |
 | 下载（新增） | 控制面新接口 `GET /v1/agent/jobs/{job_id}/workspace/archive`，转给所属主机 Sandbox Manager 的 `GET /workspaces/{id}/archive`。主机先把 `/workspace` 经 Docker 的归档接口导出，压缩到自己磁盘上的临时文件，完整之后才带 `Content-Length` 返回；符号链接按链接本身打包。上限是主机设置 `workspace_download_max_mib`（环境变量 `AGENT_WORKSPACE_DOWNLOAD_MAX_MIB`，默认 1024，可设 1–16384，按压缩前计算），超过返回 413，还没有沙箱返回 409。仓库对话也能用 |
 | Environment | 只用平台基础环境加个人全局变量；仓库环境按仓库保存，这里不提供 |
-| 记忆 | 项目记忆按仓库存，临时工作区不读不写，只用用户级记忆。现在组装记忆时，repo 为空已经只取用户级记忆（[`user_memory.py`](../../../apps/backend/cloud_agent/user_memory.py)）；尚未合并的 [#614](https://github.com/HarvardMadSys/hybridInference-cloud-agent/pull/614) 也是这样处理。已补测试：repo 为空的活动只产生用户级记忆，不会写项目记忆 |
+| 记忆 | 持久记忆按用户和仓库分作用域。临时工作区只读取用户级记忆；agent 保存记忆时，无仓库任务落到用户作用域，不会写入任何仓库的项目记忆（[`agent_memory.py`](../../../apps/backend/cloud_agent/storage/repositories/agent_memory.py)）。已补 claim 和真实数据库测试，确认读取和写入都保持这个边界 |
 | 侧边栏与查询 | 项目列表把空 repo 归成一个「从空白开始」分组。现有查询的仓库筛选写成 `($n IS NULL OR t.repo = $n)`，传空表示不筛选，所以另加参数 `temporary=true`（`/jobs`、`/conversations`、`/sessions`），条件是 `repo IS NULL`；和 `repo` 同时传返回 422。前端内部用保留键 `:temporary` 表示这个分组（仓库名总带斜杠、不以冒号开头，不会撞名），发请求前换回 `temporary=true` 或 `repo: null` |
 | 管理后台 | 对话、运行记录、沙箱页面把空 repo 显示为 `Start from scratch` |
 | 前端 | 输入框、仓库选择器、第一次使用的确认、结果卡片、标题标签、侧边栏和归档页分组（见第 4 节）；新手引导不变 |
@@ -197,7 +197,7 @@ agent 现在就能做，平台不用为此写代码：
 原计划拆成三个 PR（后端、下载、前端），实现时合成一个：三部分互相依赖，分开合并时中间状态没法单独验收。本文也放在这个 PR 里。不加功能开关，按正常发布流程上线。
 
 1. **一个 PR**：迁移、schema、准入、runner 空提交、收尾不排快照、工作区 API 权限分支、管理后台显示、整个工作区下载、前端全部入口、维护中的文档（运维手册、`docs/user` 里的两篇说明）。
-2. **迁移编号**：[#614](https://github.com/HarvardMadSys/hybridInference-cloud-agent/pull/614) 先合并、占了 0069（`0069_agent_memories`），本 PR 的迁移因此是 `0070_temporary_workspaces`，`down_revision` 接在它后面。
+2. **迁移编号**：[#643](https://github.com/HarvardMadSys/hybridInference-cloud-agent/pull/643) 的 `0070_memory_cutover` 已合并；本 PR 使用 `0071_temporary_workspaces`，`down_revision` 顺接 `0070_memory_cutover`，保持一个迁移 head。
 3. **上线**：先在 staging 跑完下面的验收清单，再上生产；同时在 FreeInference 发行版的用户文档里补上临时工作区的说明，包括怎么用 GitHub MCP 把结果放到 GitHub。
 
 **测试与检查**

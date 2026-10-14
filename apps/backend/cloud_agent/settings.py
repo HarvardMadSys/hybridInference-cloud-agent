@@ -40,6 +40,13 @@ class SettingTooShort(ValueError):
     """A value shorter than its setting's minimum length; otherwise acceptable."""
 
 
+_CONTACT_MAILTO = re.compile(
+    r"mailto:[A-Za-z0-9.!#$%&'*+/=^_`{|}~-]+"
+    r"@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)+",
+    re.IGNORECASE,
+)
+
+
 @dataclass(frozen=True)
 class Setting:
     """An admin-editable value and its public validation rules."""
@@ -123,7 +130,17 @@ class Setting:
                     and bool(re.fullmatch(r"[a-zA-Z0-9_./-]+", value))
                     and all(part and part not in {".", ".."} for part in value.split("/"))
                 )
-            if valid and self.url and value:
+            if (
+                valid
+                and value
+                and self.key == "site.contact_url"
+                and value[:7].lower() == "mailto:"
+            ):
+                # A support address is as likely as a support page. One plain
+                # address only: header fields would let the link prefill a
+                # message the user did not write.
+                valid = bool(_CONTACT_MAILTO.fullmatch(value))
+            elif valid and self.url and value:
                 try:
                     if any(
                         char.isspace() or ord(char) < 32 or 127 <= ord(char) <= 159
@@ -511,8 +528,20 @@ SETTINGS: tuple[Setting, ...] = (
         env="AGENT_WEB_DOCS_URL",
         url=True,
         description=(
-            "User documentation for this deployment, linked from the sidebar and My Settings. "
-            "Empty hides the link."
+            "User documentation for this deployment, linked from the account menu's Help and "
+            "My Settings. Empty hides the link."
+        ),
+    ),
+    Setting(
+        "site.contact_url",
+        "Contact URL",
+        "Appearance",
+        "",
+        env="AGENT_WEB_CONTACT_URL",
+        url=True,
+        description=(
+            "Where users reach the operators: a support page, or mailto: and one address. "
+            "Linked as Contact us from the account menu's Help. Empty hides the link."
         ),
     ),
     Setting(

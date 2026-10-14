@@ -173,8 +173,8 @@ def create_app() -> FastAPI:
         skills,
         uploads,
         usage,
-        user_memory,
         user_profile,
+        work_insights,
     )
 
     app = FastAPI(
@@ -225,8 +225,7 @@ def create_app() -> FastAPI:
         app.add_exception_handler(failure, environment_failure)
 
     app.include_router(environments.router)
-    app.include_router(user_memory.router)
-    app.include_router(user_memory.project_router)
+    app.include_router(work_insights.router)
     app.include_router(agent_memory.router)
     app.include_router(user_profile.router)
     app.include_router(uploads.router)
@@ -268,9 +267,8 @@ def create_app() -> FastAPI:
         app,
         prefixes=(
             *ADMIN_READ_PREFIXES,
-            "/v1/agent/user-memory",
-            "/v1/agent/project-memory",
             "/v1/agent/memories",
+            "/v1/agent/insights",
             "/v1/agent/profile",
         ),
     )

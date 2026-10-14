@@ -13,6 +13,9 @@ const mocks = vi.hoisted(() => ({
   unpinAgentJob: vi.fn(),
 }));
 
+// The account menu loads the profile and has its own tests.
+vi.mock('./AccountMenu', () => ({ AccountMenu: () => <div data-testid="account-menu" /> }));
+
 vi.mock('next/navigation', () => ({
   usePathname: () => '/',
   useSearchParams: () => new URLSearchParams(),
@@ -40,8 +43,6 @@ vi.mock('@/lib/api/agents', () => ({
   unpinAgentJob: mocks.unpinAgentJob,
 }));
 
-import { SiteConfigProvider } from '@/components/providers/SiteConfigProvider';
-import { NEUTRAL_SITE_CONFIG } from '@/config/site';
 import { AgentsSidebar, SIDEBAR_WIDTH_STORAGE_KEY } from './AgentsSidebar';
 
 function apiJob(overrides: Partial<AgentJobApi> = {}): AgentJobApi {
@@ -139,23 +140,17 @@ describe('AgentsSidebar layout', () => {
     expect(screen.queryByRole('link', { name: 'New task' })).not.toBeInTheDocument();
   });
 
-  it("links the deployment's documentation in a new tab, and only when it has some", async () => {
-    const docsUrl = 'https://docs.example.com/agents/';
-    const { unmount } = render(
-      <SiteConfigProvider
-        config={{ ...NEUTRAL_SITE_CONFIG, branding: { ...NEUTRAL_SITE_CONFIG.branding, docsUrl } }}
-      >
-        <AgentsSidebar />
-      </SiteConfigProvider>,
-    );
-    const link = await screen.findByRole('link', { name: 'Documentation' });
-    expect(link).toHaveAttribute('href', docsUrl);
-    expect(link).toHaveAttribute('target', '_blank');
-    expect(link).toHaveAttribute('rel', 'noopener noreferrer');
-    unmount();
-
+  it('ends with the account menu instead of separate settings and documentation links', async () => {
     render(<AgentsSidebar />);
     await waitFor(() => expect(screen.getByText('No jobs yet.')).toBeInTheDocument());
+
+    const sidebar = document.getElementById('agents-sidebar')!;
+    const archived = within(sidebar).getByRole('link', { name: 'Archived' });
+    const account = within(sidebar).getByTestId('account-menu');
+    expect(
+      archived.compareDocumentPosition(account) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(screen.queryByRole('link', { name: 'My Settings' })).not.toBeInTheDocument();
     expect(screen.queryByRole('link', { name: 'Documentation' })).not.toBeInTheDocument();
   });
 });

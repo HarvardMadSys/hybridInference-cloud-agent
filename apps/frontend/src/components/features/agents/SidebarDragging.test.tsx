@@ -4,6 +4,9 @@ import { cleanup, createEvent, fireEvent, render, screen } from '@testing-librar
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AgentJobApi } from '@/lib/api/agents';
 const api = vi.hoisted(() => ({ list: vi.fn(), projects: vi.fn() }));
+// The account menu loads the profile and has its own tests.
+vi.mock('./AccountMenu', () => ({ AccountMenu: () => <div data-testid="account-menu" /> }));
+
 vi.mock('next/navigation', () => ({
   usePathname: () => '/',
   useSearchParams: () => new URLSearchParams(),
