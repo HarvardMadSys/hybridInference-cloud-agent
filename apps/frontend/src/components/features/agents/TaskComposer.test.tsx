@@ -421,9 +421,7 @@ describe('TaskComposer source-control onboarding', () => {
         expect.objectContaining({ repo: null, environment_id: null, global_revision: 3 }),
       ),
     );
-    expect(vi.mocked(createAgentJob).mock.calls[0][0]).not.toHaveProperty(
-      'environment_overrides',
-    );
+    expect(vi.mocked(createAgentJob).mock.calls[0][0]).not.toHaveProperty('environment_overrides');
     expect(getGlobalEnvironment).toHaveBeenCalledOnce();
     expect(listEnvironments).not.toHaveBeenCalled();
   });
@@ -462,9 +460,7 @@ describe('TaskComposer source-control onboarding', () => {
     vi.mocked(listEnvironments).mockRejectedValueOnce(new Error('Environment unavailable'));
     render(<TaskComposer />);
     await chooseRepository();
-    expect(
-      await screen.findByText(/Environments could not be loaded/),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(/Environments could not be loaded/)).toBeInTheDocument();
     expect(await repositoryButton()).toBeEnabled();
     fireEvent.change(screen.getByRole('textbox', { name: 'What should the agent do?' }), {
       target: { value: 'Fix tests' },

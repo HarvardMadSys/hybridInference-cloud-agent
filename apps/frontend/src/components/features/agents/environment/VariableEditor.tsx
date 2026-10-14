@@ -116,7 +116,7 @@ export function VariableEditor({
             return (
               <div key={index} className="space-y-2 p-2">
                 <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1.3fr)_7rem_auto]">
-                  {/* A saved variable keeps its name; renaming is removing it and adding another. */}
+                  {/* A saved variable keeps its name: renaming is removing and adding. */}
                   {value.original_name ? (
                     <code className="flex min-h-8 min-w-0 items-center truncate px-1 text-sm text-foreground">
                       {value.name}
