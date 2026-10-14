@@ -101,9 +101,48 @@ def test_the_head_branch_is_read(args: str, head: str) -> None:
     assert pr_target.parse_command(f"gh pr create {args} --base dev", "/s") == ("/s", head, None)
 
 
+@pytest.mark.parametrize("args", ["-Htopic", "-H=topic", "--title -Hotfix -H topic"])
+def test_an_attached_or_later_head_branch_is_read(args: str) -> None:
+    assert pr_target.parse_command(f"gh pr create {args}", "/s") == ("/s", "topic", None)
+
+
 @pytest.mark.parametrize("args", ["--repo Owner/other", "-R Owner/other", "--repo=Owner/other"])
 def test_the_repository_is_read(args: str) -> None:
     assert pr_target.parse_command(f"gh pr create {args}", "/s") == ("/s", None, "Owner/other")
+
+
+def test_an_option_value_is_not_read_as_an_option() -> None:
+    command = "gh pr create --title --repo --body -RA/b --fill"
+    assert pr_target.parse_command(command, "/s") == ("/s", None, None)
+
+
+def test_options_continued_onto_later_lines_are_read() -> None:
+    command = "gh pr create \\\n  --head topic \\\n  --repo Owner/other \\\n  --fill"
+    assert pr_target.parse_command(command, "/s") == ("/s", "topic", "Owner/other")
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "gh pr create --fill\ngh pr merge --auto -R Owner/other --head topic",
+        "gh pr create --body-file - <<EOF\nsee gh issue list -R Owner/other\nEOF",
+        "gh pr create --fill;(gh pr view -R Owner/other)",
+        "gh pr create --fill&&\ngh pr view -R Owner/other",
+    ],
+)
+def test_a_later_commands_options_are_not_read(command: str) -> None:
+    """A newline or joined punctuation ends `gh pr create` as `;` does."""
+    assert pr_target.parse_command(command, "/s") == ("/s", None, None)
+
+
+def test_a_cd_inside_a_subshell_ends_with_it() -> None:
+    command = "(cd /elsewhere && git status) && gh pr create --fill"
+    assert pr_target.parse_command(command, "/s") == ("/s", None, None)
+    assert pr_target.parse_command("(cd /a; cd b) ; cd c && gh pr create", "/s") == (
+        "/s/c",
+        None,
+        None,
+    )
 
 
 def test_a_pull_request_from_another_repositorys_checkout_is_not_gated(
@@ -137,6 +176,20 @@ def test_a_pull_request_naming_this_repository_is_still_gated(project: Path) -> 
         "tool_input": {"command": "gh pr create --repo owner/PROJECT --head feature"},
     }
     assert Path(pr_target.target(event)).resolve() == (project.parent / "feature").resolve()
+
+
+def test_a_forks_pull_request_into_its_upstream_is_still_gated(project: Path) -> None:
+    """Origin may be a fork; the upstream it tracks is this repository too."""
+    _git(project, "remote", "set-url", "origin", "https://github.com/someone/project.git")
+    _git(project, "remote", "add", "upstream", "https://github.com/Owner/project")
+    for tool_input in (
+        {"command": "gh pr create --repo Owner/project --fill"},
+        {"owner": "Owner", "repo": "project"},
+    ):
+        event = {"tool_name": "mcp__github__create_pull_request", "cwd": str(project)}
+        if "command" in tool_input:
+            event["tool_name"] = "Bash"
+        assert pr_target.target({**event, "tool_input": tool_input}) == str(project)
 
 
 def test_an_mcp_pull_request_for_another_repository_is_not_gated(project: Path) -> None:
