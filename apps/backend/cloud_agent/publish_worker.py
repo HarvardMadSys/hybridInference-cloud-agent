@@ -54,6 +54,7 @@ from cloud_agent.environments import EnvironmentEncryptionError
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.pr_titles import generate_pr_title, is_generic_pr_summary
 from cloud_agent.publisher import (
+    PatchRejected,
     PublishError,
     TransientPublishError,
     fetch_base_bundle,
@@ -626,6 +627,9 @@ def _is_retryable_publication_failure(exc: BaseException) -> bool:
     """
     if isinstance(exc, (TransientPublishError, EnvironmentEncryptionError)):
         return True
+    if isinstance(exc, PatchRejected):
+        # Its detail quotes the patch's own paths, not a status or a disconnect.
+        return False
     status = _http_status(exc)
     if _retryable_github_status(status):
         return True

@@ -74,6 +74,15 @@ class PublishError(Exception):
     """Raised when publication fails; the message is safe to store as detail."""
 
 
+class PatchRejected(PublishError):
+    """The patch itself was refused: by the gate, or by a check of what it staged.
+
+    Never retried, whatever its text says: the detail names the patch's own
+    paths, and a path such as ``x(503)`` or ``timed out.md`` must not read as an
+    HTTP status or a disconnect.
+    """
+
+
 class TransientPublishError(PublishError):
     """An external publication failure that is safe to retry durably.
 
@@ -312,7 +321,7 @@ def _blob_size(repo: Path, sha: str) -> int:
     """Check an immutable object's size before capturing any of its contents."""
     size = int(_run_git(["cat-file", "-s", sha], cwd=repo).strip())
     if size > MAX_BLOB_BYTES:
-        raise PublishError(
+        raise PatchRejected(
             f"patch rejected after apply: blob exceeds the {MAX_BLOB_BYTES} byte limit"
         )
     return size
@@ -344,7 +353,7 @@ def _validate_staged_blobs(
     """Reject new credentials in staged text or binary files before committing."""
     sizes = [_blob_size(repo, blob.sha) for blob in blobs]
     if sum(sizes) > MAX_CHANGED_BLOB_BYTES:
-        raise PublishError(
+        raise PatchRejected(
             f"patch rejected after apply: blobs exceed the {MAX_CHANGED_BLOB_BYTES} total byte limit"
         )
     for blob, size in zip(blobs, sizes, strict=True):
@@ -362,7 +371,7 @@ def _validate_staged_blobs(
                     else b""
                 )
                 if content.count(token) > old_content.count(token):
-                    raise PublishError(f"patch rejected: Secret {name} in {blob.path!r}")
+                    raise PatchRejected(f"patch rejected: Secret {name} in {blob.path!r}")
         # Most files need no baseline read. A match requires checking the same
         # path's original object; deletion has no new blob and is never scanned.
         if not scan_blob_secrets(content):
@@ -374,7 +383,7 @@ def _validate_staged_blobs(
         )
         secrets = scan_blob_secrets(content, baseline)
         if secrets:
-            raise PublishError(
+            raise PatchRejected(
                 "patch rejected after apply: credential-shaped content in "
                 f"{blob.path!r}: {', '.join(secrets)}"
             )
@@ -419,7 +428,7 @@ def publish_patch(
 
     gate = validate_patch(patch)
     if not _gate_permits(gate, allow_workflow_changes=allow_workflow_changes):
-        raise PublishError(f"patch rejected: {gate.reason}")
+        raise PatchRejected(f"patch rejected: {gate.reason}")
 
     branch = branch_name_for(branch_id or job_id)
     workdir = Path(tempfile.mkdtemp(prefix=f"agent-publish-{job_id}-"))
@@ -476,7 +485,7 @@ def publish_patch(
         staged = _staged_change_set(repo)
         post = validate_change_set(staged.paths, staged.symlinks, staged.gitlinks)
         if not _gate_permits(post, allow_workflow_changes=allow_workflow_changes):
-            raise PublishError(f"patch rejected after apply: {post.reason}")
+            raise PatchRejected(f"patch rejected after apply: {post.reason}")
         _validate_staged_blobs(
             repo, staged.blobs, **({"known_secrets": known_secrets} if known_secrets else {})
         )

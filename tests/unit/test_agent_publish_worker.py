@@ -159,6 +159,22 @@ def _patch_pr(monkeypatch, url: str = "https://github.com/o/n/pull/7"):
     return captured
 
 
+@pytest.mark.parametrize(
+    "detail",
+    [
+        "patch rejected: patch introduces symlinks: docs/x(503)",
+        "patch rejected after apply: credential-shaped content in 'connection reset.md'",
+    ],
+)
+def test_a_rejected_patch_is_never_retried_whatever_its_paths_say(detail):
+    """A path quoted in the detail must not read as an HTTP status or a disconnect."""
+    from cloud_agent.publisher import PatchRejected
+
+    assert not publish_worker._is_retryable_publication_failure(PatchRejected(detail))
+    # The same text from the provider or git is still classified by what it says.
+    assert publish_worker._is_retryable_publication_failure(PublishError(detail))
+
+
 async def test_empty_queue_is_a_no_op():
     """Nothing pending means nothing happens."""
     store = FakeStore(None)
