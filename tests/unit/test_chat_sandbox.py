@@ -2801,7 +2801,7 @@ def test_a_peer_that_vanished_mid_reconcile_is_simply_absent(monkeypatch):
     manager = ChatSandboxManager(ContainerBackend(image="img", sandbox_network=network))
 
     monkeypatch.setattr(
-        manager,
+        manager._network_lifecycle,
         "_inspect_network",
         lambda name: {"Name": name, "Containers": {"gw": {}, "gone": {}}},
     )

@@ -64,6 +64,7 @@ database stamped with the chain that predates it.
 | `apps/backend/cloud_agent_host/runner.py` | Claims, executes one turn, heartbeats, drains on SIGTERM |
 | `apps/backend/cloud_agent_host/claimed_job.py`, `control_plane_client.py` | Claim payloads, lease errors, and attempt-scoped worker HTTP calls |
 | `apps/backend/cloud_agent_host/chat_sandbox.py`, `sandbox.py` | Retained group lifecycle and the Docker/Kata boundary |
+| `apps/backend/cloud_agent_host/chat_sandbox_network.py` | Per-group bridge and relay lifecycle, guest network proof, and exact network release |
 | `apps/backend/cloud_agent_host/chat_sandbox_models.py` | Retained-container specs, inspection/status values, and identity vocabulary |
 | `apps/backend/cloud_agent_shared/egress.py`, `apps/backend/cloud_agent_host/network_guard.py` | The one sandbox network: its configuration and host rules, and the helper that installs and verifies them |
 | `apps/backend/cloud_agent_host/runtimes/`, `cloud_agent_shared/runtime_catalog.py`, `shared_protocol.py` | The five Agent CLI adapters, shared discovery facts, and version pins |

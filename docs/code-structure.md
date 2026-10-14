@@ -102,8 +102,13 @@ deadlines, and event replay. The runner explicitly re-exports their existing
 public names and keeps client construction at its orchestration boundary.
 
 `chat_sandbox_models.py` holds retained-container specs, inspection/status
-values, ownership labels, and identity bounds. `chat_sandbox.py` manages
-retained groups and their members; `sandbox.py` owns the container/process
+values, ownership labels, and identity bounds. Group bridges, relay membership,
+Kata guest route synchronization, and network proof/release live in the composed
+`chat_sandbox_network.py` component. It consumes a narrow container protocol;
+exact container identity, bounded exec, and fail-stop operations stay with the
+manager. Existing manager network entry points delegate to that owner. Network
+snapshots remain scoped to one operation, and operational log names are stable.
+`chat_sandbox.py` manages retained groups and their members; `sandbox.py` owns the container/process
 boundary. The Sandbox Manager and session supervisor coordinate native
 sessions and workspace operations. Public sandbox model imports through
 `chat_sandbox` continue to work.
