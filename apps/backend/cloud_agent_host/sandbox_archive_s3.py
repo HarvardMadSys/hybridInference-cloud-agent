@@ -55,8 +55,12 @@ S3_READ_TIMEOUT_S: Final = 30
 S3_TOTAL_MAX_ATTEMPTS: Final = 2
 S3_INITIAL_CONFLICT_MAX_ATTEMPTS: Final = 3
 
-ArchivePhase = Literal["initial", "final"]
+ArchivePhase = Literal["initial", "final", "checkpoint"]
 _ARCHIVE_PHASES: Final = frozenset(("initial", "final"))
+# Phases written exactly once: a retry may only find byte-identical content.
+_IMMUTABLE_PHASES: Final = frozenset(("initial", "checkpoint"))
+_CHECKPOINT_ID_RE: Final = re.compile(r"[0-9a-f]{32}")
+CHECKPOINT_FORMAT: Final = "oci-layer-archive-v1"
 _ACCOUNT_ID_RE: Final = re.compile(r"[0-9]{12}")
 _ACCESS_KEY_ID_RE: Final = re.compile(r"[A-Z0-9]{20}")
 _SECRET_ACCESS_KEY_RE: Final = re.compile(r"[A-Za-z0-9/+=]{40}")
@@ -128,6 +132,9 @@ class SandboxArchiveS3Config:
     multipart_threshold_bytes: int = DEFAULT_MULTIPART_THRESHOLD_BYTES
     multipart_part_bytes: int = DEFAULT_MULTIPART_PART_BYTES
     revision: int = 0
+    # Not an S3 setting: carried so ``as_policy`` reproduces the exact policy
+    # a revision pinned, and marker comparisons keep matching it.
+    checkpoints_enabled: bool = True
 
     def __post_init__(self) -> None:
         """Reject unsafe direct construction as strictly as database policy parsing."""
@@ -253,6 +260,7 @@ class SandboxArchiveS3Config:
             multipart_threshold_bytes=policy.multipart_threshold_bytes,
             multipart_part_bytes=policy.multipart_part_bytes,
             revision=policy.revision,
+            checkpoints_enabled=policy.checkpoints_enabled,
         )
 
     def as_policy(self) -> SandboxArchivePolicy:
@@ -268,6 +276,7 @@ class SandboxArchiveS3Config:
             multipart_threshold_bytes=self.multipart_threshold_bytes,
             multipart_part_bytes=self.multipart_part_bytes,
             revision=self.revision,
+            checkpoints_enabled=self.checkpoints_enabled,
         )
 
 
@@ -346,6 +355,94 @@ class SandboxArchiveS3Uploader:
         sandbox_hash = _identity_hash("sandbox id", sandbox_id)
         _validate_generation(generation)
         _validate_upload_size(size, maximum=self.config.max_archive_bytes)
+        key = self._object_key(
+            namespace_hash=namespace_hash,
+            sandbox_hash=sandbox_hash,
+            generation=generation,
+            phase=checked_phase,
+        )
+        return self._upload_object(
+            key=key,
+            phase=checked_phase,
+            body=body,
+            size=size,
+            sha256=sha256,
+            deadline=deadline,
+        )
+
+    def upload_checkpoint(
+        self,
+        *,
+        sandbox_id: str,
+        generation: int,
+        checkpoint_id: str,
+        body: BinaryIO,
+        size: int,
+        sha256: str,
+        deadline: float | None = None,
+    ) -> SandboxArchiveReceipt:
+        """Write one immutable checkpoint, treating an identical retry as success.
+
+        A checkpoint key names a fresh random id, so an existing object can only
+        be this capture's own earlier write whose response was lost. Its bytes
+        must match exactly; the receipt then comes from that object's metadata.
+        """
+        _validate_deadline(deadline)
+        self._check_deadline(deadline)
+        _validate_upload_size(size, maximum=self.config.max_archive_bytes)
+        digest = _validate_sha256(sha256)
+        key = checkpoint_object_key(
+            sandbox_id=sandbox_id,
+            generation=generation,
+            checkpoint_id=checkpoint_id,
+        )
+        try:
+            return self._upload_object(
+                key=key,
+                phase="checkpoint",
+                body=body,
+                size=size,
+                sha256=digest,
+                deadline=deadline,
+            )
+        except SandboxArchiveAlreadyExists:
+            self._check_deadline(deadline)
+            existing = self._get_client().head_object(
+                Bucket=self.config.bucket,
+                Key=key,
+                **self._owner_arguments(),
+            )
+            self._check_deadline(deadline)
+            if not self._matching_initial_head(
+                existing, size=size, digest=digest, phase="checkpoint"
+            ):
+                raise SandboxArchiveUploadError(
+                    "existing sandbox checkpoint does not match this retry"
+                ) from None
+            return SandboxArchiveReceipt(
+                phase="checkpoint",
+                bucket=self.config.bucket,
+                key=key,
+                size=size,
+                sha256=digest,
+                etag=_required_response_string(existing, "ETag"),
+                version_id=_required_version_id(existing),
+                s3_checksum_sha256=_optional_response_string(existing, "ChecksumSHA256"),
+                multipart=False,
+            )
+
+    def _upload_object(
+        self,
+        *,
+        key: str,
+        phase: ArchivePhase,
+        body: BinaryIO,
+        size: int,
+        sha256: str | None,
+        deadline: float | None,
+    ) -> SandboxArchiveReceipt:
+        """Upload one validated object, retrying only bounded write conflicts."""
+        checked_phase = phase
         try:
             body_start = body.tell()
         except (AttributeError, OSError) as exc:
@@ -364,13 +461,7 @@ class SandboxArchiveS3Uploader:
                 f"archive would require more than {MAX_MULTIPART_PARTS} multipart chunks"
             )
         self._require_bucket_versioning(deadline)
-        key = self._object_key(
-            namespace_hash=namespace_hash,
-            sandbox_hash=sandbox_hash,
-            generation=generation,
-            phase=checked_phase,
-        )
-        attempts = S3_INITIAL_CONFLICT_MAX_ATTEMPTS if checked_phase == "initial" else 1
+        attempts = S3_INITIAL_CONFLICT_MAX_ATTEMPTS if checked_phase in _IMMUTABLE_PHASES else 1
         for attempt in range(1, attempts + 1):
             try:
                 if size <= self.config.multipart_threshold_bytes:
@@ -518,13 +609,14 @@ class SandboxArchiveS3Uploader:
         size: int,
         digest: str,
     ) -> dict[str, Any]:
+        content_type, archive_format = _object_format(phase)
         return {
             "Bucket": self.config.bucket,
             "Key": key,
-            "ContentType": "application/gzip",
+            "ContentType": content_type,
             "Metadata": {
                 "archive-phase": phase,
-                "archive-format": "tar-gzip-v1",
+                "archive-format": archive_format,
                 "archive-size-bytes": str(size),
                 "archive-sha256": digest,
             },
@@ -719,7 +811,7 @@ class SandboxArchiveS3Uploader:
         deadline: float | None,
     ) -> None:
         """Turn a 412 into idempotent success only for byte-identical state."""
-        if phase != "initial" or not _is_precondition_failure(exc):
+        if phase not in _IMMUTABLE_PHASES or not _is_precondition_failure(exc):
             return
         self._check_deadline(deadline)
         existing = self._get_client().head_object(
@@ -728,9 +820,9 @@ class SandboxArchiveS3Uploader:
             **self._owner_arguments(),
         )
         self._check_deadline(deadline)
-        if not self._matching_initial_head(existing, size=size, digest=digest):
+        if not self._matching_initial_head(existing, size=size, digest=digest, phase=phase):
             raise SandboxArchiveUploadError(
-                "existing initial sandbox archive does not match this retry"
+                f"existing {phase} sandbox archive does not match this retry"
             ) from exc
         raise SandboxArchiveAlreadyExists(bucket=self.config.bucket, key=key) from exc
 
@@ -740,20 +832,22 @@ class SandboxArchiveS3Uploader:
         *,
         size: int,
         digest: str,
+        phase: ArchivePhase = "initial",
     ) -> bool:
         metadata = existing.get("Metadata")
         try:
             _required_version_id(existing)
         except SandboxArchiveUploadError:
             return False
+        content_type, archive_format = _object_format(phase)
         return (
             isinstance(metadata, dict)
-            and metadata.get("archive-phase") == "initial"
-            and metadata.get("archive-format") == "tar-gzip-v1"
+            and metadata.get("archive-phase") == phase
+            and metadata.get("archive-format") == archive_format
             and metadata.get("archive-size-bytes") == str(size)
             and metadata.get("archive-sha256") == digest
             and existing.get("ContentLength") == size
-            and existing.get("ContentType") == "application/gzip"
+            and existing.get("ContentType") == content_type
             and (
                 existing.get("ServerSideEncryption") == "aws:kms"
                 and existing.get("SSEKMSKeyId") == self.config.kms_key_arn
@@ -896,7 +990,27 @@ def _digest_and_rewind(
 
 
 def _initial_write_condition(phase: ArchivePhase) -> dict[str, str]:
-    return {"IfNoneMatch": "*"} if phase == "initial" else {}
+    return {"IfNoneMatch": "*"} if phase in _IMMUTABLE_PHASES else {}
+
+
+def _object_format(phase: ArchivePhase) -> tuple[str, str]:
+    """Return the content type and format tag a phase's objects carry."""
+    if phase == "checkpoint":
+        return "application/x-tar", CHECKPOINT_FORMAT
+    return "application/gzip", "tar-gzip-v1"
+
+
+def checkpoint_object_key(*, sandbox_id: str, generation: int, checkpoint_id: str) -> str:
+    """Return the per-sandbox checkpoint key; any host may later restore it.
+
+    Unlike lifecycle archives, the key omits the host namespace: a checkpoint
+    belongs to the sandbox, not to the machine that captured it.
+    """
+    sandbox_hash = _identity_hash("sandbox id", sandbox_id)
+    _validate_generation(generation)
+    if not isinstance(checkpoint_id, str) or _CHECKPOINT_ID_RE.fullmatch(checkpoint_id) is None:
+        raise SandboxArchiveUploadError("sandbox checkpoint id must be 32 lowercase hex digits")
+    return f"{SANDBOX_ARCHIVE_PREFIX}/v2/{sandbox_hash}/g{generation}/{checkpoint_id}.oci.tar"
 
 
 def _is_precondition_failure(exc: Exception) -> bool:

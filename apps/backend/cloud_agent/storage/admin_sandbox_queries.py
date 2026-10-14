@@ -8,6 +8,7 @@ from cloud_agent.admin_observability import encode_cursor
 from cloud_agent.admin_sandboxes import (
     SANDBOX_TRAJECTORY_MEMBER_LIMIT,
     AdminSandbox,
+    AdminSandboxCheckpoint,
     AdminSandboxDetail,
     AdminSandboxList,
     AdminSandboxMember,
@@ -189,6 +190,7 @@ class AdminSandboxQueries:
                 """,
                 sandbox_id,
             )
+            latest_checkpoint = await _latest_checkpoint(conn, sandbox_id)
         item = dict(row)
         item["resource_usage"] = resource_usage_view(
             load_json(item.pop("resource_snapshot")),
@@ -200,6 +202,7 @@ class AdminSandboxQueries:
             sandbox=AdminSandbox.model_validate(item),
             members=[AdminSandboxMember.model_validate(dict(member)) for member in member_rows],
             observed_at=observed_at,
+            latest_checkpoint=latest_checkpoint,
         )
 
     async def trajectory(
@@ -291,6 +294,7 @@ class AdminSandboxQueries:
                 cursor.before_id if cursor else None,
                 limit + 1,
             )
+            latest_checkpoint = await _latest_checkpoint(conn, sandbox_id)
         item = dict(row)
         item["resource_usage"] = resource_usage_view(
             load_json(item.pop("resource_snapshot")),
@@ -321,4 +325,27 @@ class AdminSandboxQueries:
             events=events,
             observed_at=observed_at,
             next_cursor=next_cursor,
+            latest_checkpoint=latest_checkpoint,
         )
+
+
+async def _latest_checkpoint(
+    conn: asyncpg.Connection, sandbox_id: str
+) -> AdminSandboxCheckpoint | None:
+    """Return the newest checkpoint a host reported for the sandbox, if any."""
+    row = await conn.fetchrow(
+        """
+        SELECT id, generation, host, size_bytes, new_layer_bytes, state,
+               captured_at, recorded_at, durations_ms
+        FROM agent_sandbox_checkpoints
+        WHERE sandbox_id = $1
+        ORDER BY captured_at DESC, recorded_at DESC
+        LIMIT 1
+        """,
+        sandbox_id,
+    )
+    if row is None:
+        return None
+    checkpoint = dict(row)
+    checkpoint["durations_ms"] = load_json(checkpoint["durations_ms"]) or {}
+    return AdminSandboxCheckpoint.model_validate(checkpoint)

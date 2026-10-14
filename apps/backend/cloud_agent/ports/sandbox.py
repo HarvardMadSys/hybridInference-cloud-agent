@@ -330,6 +330,16 @@ class SandboxRepository(Protocol):
         """Reconcile one authenticated shared-group Docker observation."""
         ...
 
+    async def record_sandbox_checkpoint(
+        self,
+        *,
+        host: str,
+        thread_id: str,
+        checkpoint: dict[str, Any],
+    ) -> bool:
+        """Record one host-reported checkpoint receipt for its current group."""
+        ...
+
     async def due_thread_sandbox_stop(
         self,
         *,

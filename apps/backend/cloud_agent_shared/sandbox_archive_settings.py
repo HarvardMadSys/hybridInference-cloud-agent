@@ -5,6 +5,13 @@ The runner relays it over the authenticated sandbox-manager channel. SandboxMana
 authenticate with their workload identity, or with an AWS access key saved by
 an administrator. The secret stays out of ``as_dict``: that form is written
 into sandbox markers, and long-lived credentials never enter the sandbox.
+
+Enabled archives also capture a restorable checkpoint at each clean stop: the
+container's changes over its image, kept beside the archives. That is the
+default; ``checkpoints_enabled=False`` opts out. Only the opt-out ever appears
+on the wire, and only a host that advertises
+:data:`SANDBOX_CHECKPOINT_CAPABILITY` receives it: older managers reject unknown
+policy keys, and a policy without the key means the default.
 """
 
 from __future__ import annotations
@@ -32,6 +39,7 @@ MAX_SINGLE_UPLOAD_BYTES: Final = 64 * MIB
 MAX_MULTIPART_PARTS: Final = 10_000
 
 SANDBOX_ARCHIVE_CAPABILITY: Final = "sandbox-archive-settings-v1"
+SANDBOX_CHECKPOINT_CAPABILITY: Final = "sandbox-checkpoints-v1"
 
 _ACCOUNT_ID_RE: Final = re.compile(r"[0-9]{12}")
 _ACCESS_KEY_ID_RE: Final = re.compile(r"[A-Z0-9]{20}")
@@ -72,10 +80,17 @@ class SandboxArchivePolicy:
     multipart_threshold_bytes: int = DEFAULT_MULTIPART_THRESHOLD_BYTES
     multipart_part_bytes: int = DEFAULT_MULTIPART_PART_BYTES
     revision: int = 0
+    # On by default; checkpoints ride on archives, so disabled archives
+    # always mean no checkpoints.
+    checkpoints_enabled: bool = True
 
     def __post_init__(self) -> None:
         if not isinstance(self.enabled, bool):
             raise SandboxArchivePolicyError("enabled must be a boolean")
+        if not isinstance(self.checkpoints_enabled, bool):
+            raise SandboxArchivePolicyError("checkpoints_enabled must be a boolean")
+        if not self.enabled:
+            object.__setattr__(self, "checkpoints_enabled", False)
         if not isinstance(self.access_key_auth, bool):
             raise SandboxArchivePolicyError("access_key_auth must be a boolean")
         if (self.aws_access_key_id or self.aws_secret_access_key) and not self.access_key_auth:
@@ -165,6 +180,11 @@ class SandboxArchivePolicy:
             raise SandboxArchivePolicyError("revision must be a non-negative integer")
 
     @property
+    def checkpoints_opted_out(self) -> bool:
+        """Whether enabled archives explicitly skip checkpoints."""
+        return self.enabled and not self.checkpoints_enabled
+
+    @property
     def uses_access_key(self) -> bool:
         """Whether uploads authenticate with a saved access key."""
         return self.access_key_auth
@@ -206,6 +226,7 @@ class SandboxArchivePolicy:
             "multipart_threshold_bytes",
             "multipart_part_bytes",
             "revision",
+            "checkpoints_enabled",
             # A response timestamp is metadata, not sandbox manager configuration.
             "updated_at",
             # Admin responses name this flag. Hosts ignore it.
@@ -232,6 +253,7 @@ class SandboxArchivePolicy:
             ),
             multipart_part_bytes=raw.get("multipart_part_bytes", DEFAULT_MULTIPART_PART_BYTES),
             revision=raw.get("revision", 0),
+            checkpoints_enabled=raw.get("checkpoints_enabled", True),
         )
 
     def as_dict(self) -> dict[str, bool | int | str]:
@@ -251,6 +273,9 @@ class SandboxArchivePolicy:
             "multipart_part_bytes": self.multipart_part_bytes,
             "revision": self.revision,
             **({"access_key_auth": True} if self.access_key_auth else {}),
+            # Only the opt-out is written. The default stays byte-identical
+            # to policies and markers that predate checkpoints.
+            **({"checkpoints_enabled": False} if self.checkpoints_opted_out else {}),
         }
 
     def as_sandbox_manager_dict(self) -> dict[str, bool | int | str]:
@@ -286,6 +311,7 @@ __all__ = [
     "SANDBOX_ARCHIVE_CAPABILITY",
     "SANDBOX_ARCHIVE_PREFIX",
     "SANDBOX_ARCHIVE_S3_URI",
+    "SANDBOX_CHECKPOINT_CAPABILITY",
     "SandboxArchivePolicy",
     "SandboxArchivePolicyError",
 ]

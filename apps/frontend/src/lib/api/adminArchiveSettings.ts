@@ -21,6 +21,11 @@ export interface SandboxArchiveSettings {
   multipart_part_bytes: number;
   revision: number;
   updated_at: string | null;
+  /**
+   * Clean stops also store a restorable checkpoint. On by default with
+   * archives; absent from older APIs.
+   */
+  checkpoints_enabled?: boolean;
 }
 
 /**
@@ -39,6 +44,7 @@ export interface SandboxArchiveSettingsUpdate {
   multipart_threshold_bytes: number;
   multipart_part_bytes: number;
   revision: number;
+  checkpoints_enabled: boolean;
 }
 
 export async function getSandboxArchiveSettings(

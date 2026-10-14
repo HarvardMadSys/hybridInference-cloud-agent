@@ -2020,9 +2020,83 @@
         "title": "AdminSandboxArchiveRequest",
         "type": "object"
       },
+      "AdminSandboxCheckpoint": {
+        "description": "The latest restorable checkpoint a host reported for this sandbox.",
+        "properties": {
+          "captured_at": {
+            "format": "date-time",
+            "title": "Captured At",
+            "type": "string"
+          },
+          "durations_ms": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Durations Ms",
+            "type": "object"
+          },
+          "generation": {
+            "title": "Generation",
+            "type": "integer"
+          },
+          "host": {
+            "title": "Host",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "new_layer_bytes": {
+            "title": "New Layer Bytes",
+            "type": "integer"
+          },
+          "recorded_at": {
+            "format": "date-time",
+            "title": "Recorded At",
+            "type": "string"
+          },
+          "size_bytes": {
+            "title": "Size Bytes",
+            "type": "integer"
+          },
+          "state": {
+            "enum": [
+              "reported",
+              "verified",
+              "superseded",
+              "deleted"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "generation",
+          "host",
+          "size_bytes",
+          "new_layer_bytes",
+          "state",
+          "captured_at",
+          "recorded_at"
+        ],
+        "title": "AdminSandboxCheckpoint",
+        "type": "object"
+      },
       "AdminSandboxDetail": {
         "description": "A consistent sandbox inspection with at most 128 current members.",
         "properties": {
+          "latest_checkpoint": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AdminSandboxCheckpoint"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "members": {
             "items": {
               "$ref": "#/components/schemas/AdminSandboxMember"
@@ -2499,6 +2573,16 @@
             },
             "title": "Events",
             "type": "array"
+          },
+          "latest_checkpoint": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AdminSandboxCheckpoint"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "member_history_count": {
             "minimum": 0.0,
@@ -11379,6 +11463,12 @@
             "title": "Aws Secret Access Key",
             "type": "string"
           },
+          "checkpoints_enabled": {
+            "default": false,
+            "description": "Whether clean stops also store a restorable checkpoint (the container's changes over its image). On by default whenever archives are enabled; always off while they are disabled.",
+            "title": "Checkpoints Enabled",
+            "type": "boolean"
+          },
           "enabled": {
             "default": false,
             "title": "Enabled",
@@ -13276,6 +13366,16 @@
             "description": "Whether this exact supervisor generation currently has a turn, terminal, or bounded workspace operation open. Null means the sandbox manager could not prove activity state after reconstruction.",
             "title": "Activity Active"
           },
+          "checkpoint": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SandboxCheckpointBeat"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "container_id": {
             "maxLength": 128,
             "minLength": 12,
@@ -13636,6 +13736,12 @@
             "title": "Aws Secret Access Key Configured",
             "type": "boolean"
           },
+          "checkpoints_enabled": {
+            "default": false,
+            "description": "Whether clean stops also store a restorable checkpoint (the container's changes over its image). On by default whenever archives are enabled; always off while they are disabled.",
+            "title": "Checkpoints Enabled",
+            "type": "boolean"
+          },
           "enabled": {
             "default": false,
             "title": "Enabled",
@@ -13697,6 +13803,191 @@
           }
         },
         "title": "SandboxArchiveSettingsResponse",
+        "type": "object"
+      },
+      "SandboxCheckpointBeat": {
+        "description": "The latest restorable checkpoint a host stored for one retained group.",
+        "properties": {
+          "base_image": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Base Image",
+            "type": "string"
+          },
+          "checkpoint_id": {
+            "pattern": "^[0-9a-f]{32}$",
+            "title": "Checkpoint Id",
+            "type": "string"
+          },
+          "container_id": {
+            "maxLength": 128,
+            "minLength": 12,
+            "title": "Container Id",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "durations_ms": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "maxProperties": 16,
+            "title": "Durations Ms",
+            "type": "object"
+          },
+          "format_version": {
+            "const": 1,
+            "default": 1,
+            "title": "Format Version",
+            "type": "integer"
+          },
+          "generation": {
+            "minimum": 1.0,
+            "title": "Generation",
+            "type": "integer"
+          },
+          "layer_count": {
+            "maximum": 1024.0,
+            "minimum": 1.0,
+            "title": "Layer Count",
+            "type": "integer"
+          },
+          "members": {
+            "items": {
+              "$ref": "#/components/schemas/SandboxCheckpointMember"
+            },
+            "maxItems": 128,
+            "title": "Members",
+            "type": "array"
+          },
+          "new_layer_bytes": {
+            "minimum": 0.0,
+            "title": "New Layer Bytes",
+            "type": "integer"
+          },
+          "object_key": {
+            "maxLength": 256,
+            "pattern": "^cloud-agent/sandbox/v2/[0-9a-f]{64}/g[0-9]+/[0-9a-f]{32}\\.oci\\.tar$",
+            "title": "Object Key",
+            "type": "string"
+          },
+          "runtime_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Runtime Id",
+            "type": "string"
+          },
+          "runtime_version": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Runtime Version"
+          },
+          "sandbox_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Sandbox Id",
+            "type": "string"
+          },
+          "sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Sha256",
+            "type": "string"
+          },
+          "size_bytes": {
+            "minimum": 1.0,
+            "title": "Size Bytes",
+            "type": "integer"
+          },
+          "version_id": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version Id"
+          }
+        },
+        "required": [
+          "checkpoint_id",
+          "sandbox_id",
+          "generation",
+          "container_id",
+          "base_image",
+          "runtime_id",
+          "object_key",
+          "sha256",
+          "size_bytes",
+          "new_layer_bytes",
+          "layer_count",
+          "created_at"
+        ],
+        "title": "SandboxCheckpointBeat",
+        "type": "object"
+      },
+      "SandboxCheckpointMember": {
+        "description": "One chat's native-session position inside a checkpoint.",
+        "properties": {
+          "context_status": {
+            "anyOf": [
+              {
+                "maxLength": 32,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Status"
+          },
+          "last_settled_job_id": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Settled Job Id"
+          },
+          "native_session_id": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Native Session Id"
+          },
+          "thread_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Thread Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "thread_id"
+        ],
+        "title": "SandboxCheckpointMember",
         "type": "object"
       },
       "SandboxPlugin": {
@@ -14268,6 +14559,12 @@
             "maxLength": 256,
             "title": "Aws Secret Access Key",
             "type": "string"
+          },
+          "checkpoints_enabled": {
+            "default": true,
+            "description": "Clear to skip checkpoints while archives stay enabled.",
+            "title": "Checkpoints Enabled",
+            "type": "boolean"
           },
           "enabled": {
             "title": "Enabled",

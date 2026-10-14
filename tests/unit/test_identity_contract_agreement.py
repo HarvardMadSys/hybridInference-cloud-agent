@@ -17,7 +17,7 @@ gateway actually changed.
 
 Verified against real code on both sides on 2026-08-04 — a token minted by the
 gateway's `mint_identity_token`, verified here over an HTTP JWKS fetch,
-including both directions of a key rotation. See `docs/smoke.md`.
+including both directions of a key rotation. See `docs/developer/smoke.md`.
 """
 
 from __future__ import annotations

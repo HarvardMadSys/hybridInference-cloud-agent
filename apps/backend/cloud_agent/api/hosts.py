@@ -49,6 +49,7 @@ from cloud_agent.schemas import (
 )
 from cloud_agent.tokens import InvalidHostToken, mint_host_token, parse_host_token
 from cloud_agent_shared.host_settings import merge_admin_values, reported_values
+from cloud_agent_shared.sandbox_archive_settings import SANDBOX_CHECKPOINT_CAPABILITY
 
 if TYPE_CHECKING:
     from cloud_agent.ports import (
@@ -372,6 +373,26 @@ async def heartbeat_host(
             members=[member.model_dump() for member in retained.members],
             **diagnostics,
         )
+        if retained.checkpoint is not None:
+            # Repeated on every beat until the group is gone; recording is
+            # idempotent and fenced to this host's current generation. A
+            # bookkeeping failure must not cost the host its liveness beat.
+            try:
+                await job_store.sandbox.record_sandbox_checkpoint(
+                    host=updated["host"],
+                    thread_id=retained.thread_id,
+                    checkpoint=retained.checkpoint.model_dump(mode="json"),
+                )
+            except Exception:
+                logger.warning(
+                    "sandbox checkpoint receipt could not be recorded",
+                    extra={
+                        "event": "sandbox_checkpoint_record_failed",
+                        "host": updated["host"],
+                        "sandbox_id": retained.sandbox_id,
+                    },
+                    exc_info=True,
+                )
         for member in retained.members:
             if member.residency_generation <= 0:
                 continue
@@ -440,8 +461,9 @@ async def heartbeat_host(
             await job_store.host_pool.host_settings(),
             updated.get("settings_desired"),
         ),
-        sandbox_archive_settings=HostSandboxArchiveSettings.model_validate(
-            await job_store.host_pool.sandbox_archive_settings()
+        sandbox_archive_settings=_host_archive_settings(
+            await job_store.host_pool.sandbox_archive_settings(),
+            updated.get("capabilities") or body.capabilities or [],
         ),
         residencies_lost=lost,
         retained_sandboxes_stop=retained_stops,
@@ -475,6 +497,22 @@ async def _renew_residency_grants(grants: Any, grant_ids: list[str]) -> None:
             await grants.renew(grant_id)
 
     await asyncio.gather(*(renew(grant_id) for grant_id in grant_ids))
+
+
+def _host_archive_settings(
+    values: dict[str, Any],
+    capabilities: list[str],
+) -> HostSandboxArchiveSettings:
+    """Return the policy one host can apply.
+
+    A host whose sandbox manager predates checkpoints rejects the unknown key,
+    so an opt-out is reduced to the default (which serializes to nothing) for
+    it. It receives the same revision and keeps archiving without checkpoints.
+    """
+    settings = HostSandboxArchiveSettings.model_validate(values)
+    if SANDBOX_CHECKPOINT_CAPABILITY not in capabilities:
+        settings = settings.model_copy(update={"checkpoints_enabled": settings.enabled})
+    return settings
 
 
 async def _probed_sandbox_manager_error(

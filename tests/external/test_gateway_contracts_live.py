@@ -5,7 +5,7 @@ the tests under `tests/unit/` pin this service's *consumer* half against them.
 What neither can check is the producer: a document that has drifted from the
 router it transcribes agrees perfectly with a client that drifted with it, and
 both suites stay green. `tests/unit/test_lookup_contract_agreement.py` says so in
-its own closing section, and `docs/smoke.md` records the manual runs that closed
+its own closing section, and `docs/developer/smoke.md` records the manual runs that closed
 the gap by hand.
 
 This file makes those runs repeatable, over HTTP, against a deployment.

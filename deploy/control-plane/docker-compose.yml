@@ -19,7 +19,7 @@
 # Start it with:
 #   docker compose -f deploy/control-plane/docker-compose.yml up -d
 # after filling in an env file; see ENVIRONMENT.md for every variable and
-# `docs/smoke.md` for a first run.
+# `docs/developer/smoke.md` for a first run.
 
 services:
   # Runs to completion before the API is allowed to start. Alembic owns the

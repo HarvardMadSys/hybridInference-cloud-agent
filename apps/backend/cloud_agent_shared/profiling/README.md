@@ -54,5 +54,5 @@ uv run pytest -q tests/unit/test_agent_operation_profiling.py \
 ```
 
 Field definitions and operation boundaries remain in
-`docs/specs/2026-09-14-sandbox-startup-measurement-design.zh-CN.md` and
-`docs/specs/2026-09-14-platform-operation-measurement-inventory.zh-CN.md`.
+`docs/agents/specs/2026-09-14-sandbox-startup-measurement-design.zh-CN.md` and
+`docs/agents/specs/2026-09-14-platform-operation-measurement-inventory.zh-CN.md`.

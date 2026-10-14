@@ -19,7 +19,7 @@ HybridInference. Report gateway issues there.
 
 ## What a deployment must not assume
 
-`AGENTS.md` and `docs/operations.md` describe the threat model for this service.
+`AGENTS.md` and `docs/developer/operations.md` describe the threat model for this service.
 Two deployment requirements bear repeating:
 
 - The plain Docker runner profile isolates trusted repositories from each

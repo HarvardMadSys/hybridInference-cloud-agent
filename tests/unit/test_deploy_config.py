@@ -744,12 +744,12 @@ def test_the_tunnel_key_is_allowed_the_one_thing_it_exists_to_do(compose: dict):
     it is not a tight rule — it is a *broken* one, and the tunnel simply never
     comes up, which reads as a network problem rather than a typo in a doc.
     """
-    # Whichever of these the branch has. `docs/operations.md` arrives later in
+    # Whichever of these the branch has. `docs/developer/operations.md` arrives later in
     # the migration; a test that assumed the whole stack was present would fail
     # on the very branch that owns the script.
     candidates = [
         REPO_ROOT / "deploy/host/sandbox_host.sh",
-        REPO_ROOT / "docs/operations.md",
+        REPO_ROOT / "docs/developer/operations.md",
         _SSHD_REFERENCE,
     ]
     checked = 0
@@ -769,7 +769,7 @@ def test_the_tunnel_key_is_allowed_the_one_thing_it_exists_to_do(compose: dict):
 #: Where a documented authorized_keys line for a tunnel key can appear.
 _KEY_LINE_DOCS = (
     REPO_ROOT / "deploy/host/sandbox_host.sh",
-    REPO_ROOT / "docs/operations.md",
+    REPO_ROOT / "docs/developer/operations.md",
     _SSHD_REFERENCE,
 )
 _KEY_OPTIONS = re.compile(r'command=""(?:,[a-z-]+(?:="[^"]*")?)*')
@@ -894,7 +894,10 @@ def test_the_reference_sshd_policy_is_what_automatic_setup_writes(compose: dict)
     assert key_listens == {reverse[control]}, (
         "the control key line and its account must name the same single listener"
     )
-    assert "deploy/host/sshd-tunnels.conf.example" in (REPO_ROOT / "docs/operations.md").read_text()
+    assert (
+        "deploy/host/sshd-tunnels.conf.example"
+        in (REPO_ROOT / "docs/developer/operations.md").read_text()
+    )
 
 
 def test_no_shipped_doc_or_config_offers_gateway_ports_yes():
@@ -922,7 +925,7 @@ def test_no_shipped_doc_or_config_offers_gateway_ports_yes():
     ]
     assert not offenders, f"`GatewayPorts yes` is offered at {offenders}"
 
-    operations = (REPO_ROOT / "docs/operations.md").read_text()
+    operations = (REPO_ROOT / "docs/developer/operations.md").read_text()
     assert "`GatewayPorts clientspecified`" in operations
     assert "GatewayPorts clientspecified" in _SSHD_REFERENCE.read_text()
     # The bind address alone does not keep the LAN out (weak host model).

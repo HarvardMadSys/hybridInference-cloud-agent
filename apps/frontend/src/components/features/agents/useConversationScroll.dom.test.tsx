@@ -8,7 +8,7 @@
 // hook makes — where a jump lands, which turn the reader is on, whether new
 // output follows or holds — without pretending the arithmetic was measured in a
 // browser. Real geometry still needs a real browser; see
-// `docs/conversation-navigation.md`.
+// `docs/user/conversation-navigation.md`.
 
 import '@testing-library/jest-dom/vitest';
 

@@ -41,6 +41,10 @@ if TYPE_CHECKING:
         RetainedChatBackend,
     )
     from cloud_agent_host.sandbox_archive_bundle import ArchivePhase
+    from cloud_agent_host.sandbox_checkpoints import (
+        SandboxCheckpointCapture,
+        SandboxCheckpointReceipt,
+    )
     from cloud_agent_host.shared_session_supervisor import SharedMemberManifest
 
 logger = logging.getLogger(__name__)
@@ -240,6 +244,7 @@ class SandboxArchiveService:
         sleep: Callable[[float], None] = time.sleep,
         operation_timeout_s: float = DEFAULT_ARCHIVE_OPERATION_TIMEOUT_S,
         clock: Callable[[], float] = time.monotonic,
+        checkpoint_capture: SandboxCheckpointCapture | None = None,
     ) -> None:
         if not namespace:
             raise ValueError("sandbox archive namespace must not be empty")
@@ -305,10 +310,13 @@ class SandboxArchiveService:
         self._accepting = False
         self._closing = False
         self._closed = False
+        self._checkpoint_capture = checkpoint_capture
         self._phase_counts = {
             "initial": {"pending": 0, "uploaded": 0, "failed": 0},
             "final": {"pending": 0, "uploaded": 0, "failed": 0},
         }
+        if checkpoint_capture is not None:
+            self._phase_counts["checkpoint"] = {"pending": 0, "uploaded": 0, "failed": 0}
 
     def start(self) -> None:
         """Allow archive captures before the sandbox manager accepts requests."""
@@ -353,14 +361,14 @@ class SandboxArchiveService:
                 "phases": phases,
             }
 
-    def _admit_capture(self, phase: ArchivePhase) -> None:
+    def _admit_capture(self, phase: str) -> None:
         """Count an operation before it can wait for scarce capture capacity."""
         with self._lock:
             if not self._accepting or self._closed:
                 raise SandboxError("sandbox archive service is not running")
             self._phase_counts[phase]["pending"] += 1
 
-    def _finish_capture(self, phase: ArchivePhase, *, uploaded: bool | None) -> None:
+    def _finish_capture(self, phase: str, *, uploaded: bool | None) -> None:
         with self._lock:
             counts = self._phase_counts[phase]
             counts["pending"] -= 1
@@ -625,6 +633,48 @@ class SandboxArchiveService:
             if acquired:
                 self._capture_slots.release()
             self._finish_capture("final", uploaded=uploaded)
+
+    def capture_checkpoint(
+        self,
+        spec: ChatSandboxSpec,
+        inspection: ChatSandboxInspection,
+        members: tuple[SharedMemberManifest, ...],
+    ) -> SandboxCheckpointReceipt:
+        """Upload a restorable checkpoint of an exact cleanly stopped container.
+
+        It shares the final archive's capture slot, so scratch space stays
+        within the same budget, and its operation deadline.
+        """
+        capture = self._checkpoint_capture
+        if capture is None:
+            raise SandboxError("sandbox checkpoints are not configured on this sandbox manager")
+        deadline = self._new_deadline()
+        self._admit_capture("checkpoint")
+        acquired = False
+        uploaded = False
+        try:
+            self._acquire_capture_slot(deadline)
+            acquired = True
+            exact = self._exact_inspection(
+                spec,
+                expected_container_id=inspection.container_id,
+                running=False,
+                deadline=deadline,
+            )
+            receipt = capture.capture(
+                spec,
+                exact,
+                members,
+                upload=self._uploader.upload_checkpoint,
+                max_bytes=self._config.max_archive_bytes,
+                deadline=deadline,
+            )
+            uploaded = True
+            return receipt
+        finally:
+            if acquired:
+                self._capture_slots.release()
+            self._finish_capture("checkpoint", uploaded=uploaded)
 
     def _require_accepting(self) -> None:
         with self._lock:

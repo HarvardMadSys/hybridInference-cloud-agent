@@ -149,7 +149,10 @@ from cloud_agent_shared.host_settings import (
     RUNNER_SETTING_KEYS,
     reported_values,
 )
-from cloud_agent_shared.sandbox_archive_settings import SANDBOX_ARCHIVE_CAPABILITY
+from cloud_agent_shared.sandbox_archive_settings import (
+    SANDBOX_ARCHIVE_CAPABILITY,
+    SANDBOX_CHECKPOINT_CAPABILITY,
+)
 from cloud_agent_shared.sandbox_resources import parse_sandbox_resource_sample
 from cloud_agent_shared.secret_redaction import SecretRedactor
 from cloud_agent_shared.shared_protocol import (
@@ -1100,6 +1103,9 @@ def _shared_live_host_capabilities(
         # over its authenticated sandbox manager channel. A claim also attests the
         # exact revision that sandbox manager confirmed.
         SANDBOX_ARCHIVE_CAPABILITY,
+        # The same-deployment sandbox manager understands the policy's
+        # checkpoint switch and reports checkpoint receipts.
+        SANDBOX_CHECKPOINT_CAPABILITY,
     ]
     deployment_sha = (os.environ.get("AGENT_DEPLOYMENT_SHA") or "").strip()
     ready_file = _shared_live_ready_file()
@@ -1262,6 +1268,9 @@ def _retained_sandbox_heartbeat_rows() -> list[dict[str, Any]] | None:
                     else resource_usage.model_dump(),
                     "shared_live": True,
                     "members": members,
+                    "checkpoint": (
+                        row.get("checkpoint") if isinstance(row.get("checkpoint"), dict) else None
+                    ),
                 }
             )
         return observations

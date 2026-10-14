@@ -1,4 +1,4 @@
-.PHONY: help setup-dev format lint typecheck test test-db test-all check ci ci-backend ci-database ci-frontend clean
+.PHONY: help setup-dev format lint typecheck test test-db test-all check docs ci ci-backend ci-database ci-frontend clean
 
 .DEFAULT_GOAL := help
 
@@ -55,6 +55,13 @@ test-all:  ## Run all tests except external (includes db-dependent)
 
 check: format lint typecheck test  ## Format, lint, type-check, and test — the gate every task must pass
 
+# Warnings are errors, and --keep-going reports every one instead of stopping
+# at the first. CI's Docs Build job runs this target, so a build that is clean
+# here is clean there.
+docs:  ## Build the developer documentation into docs/build/html
+	$(UV_RUN) sphinx-build -b html -W --keep-going docs/developer docs/build/html
+	@echo "$(GREEN)OK Docs built: docs/build/html/index.html$(RESET)"
+
 ci:  ## Run all local CI tiers (check-only; needs uv, Python 3.12, Node 22, and Docker)
 	./scripts/ci-local.sh
 
@@ -68,5 +75,5 @@ ci-frontend:  ## Run local frontend CI (lint, format check, types, tests, and bu
 	./scripts/ci-local.sh frontend
 
 clean:  ## Remove caches and build artifacts
-	rm -rf .pytest_cache .ruff_cache .mypy_cache .coverage coverage.xml htmlcov build dist *.egg-info apps/backend/*.egg-info
+	rm -rf .pytest_cache .ruff_cache .mypy_cache .coverage coverage.xml htmlcov build dist *.egg-info apps/backend/*.egg-info docs/build
 	find . -type d \( -name .venv -o -name venv -o -name node_modules \) -prune -o -type d -name __pycache__ -exec rm -rf {} +

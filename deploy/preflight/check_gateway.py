@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Ask a gateway whether it is ready to be cut over to.
 
-Four things have to be true before section 3 of `docs/smoke.md` can start, and
+Four things have to be true before section 3 of `docs/developer/smoke.md` can start, and
 each of them currently fails in a way that reads as something else:
 
 * **No identity key.** `/v1/identity/jwks` answers 404. A 404 from a route that
@@ -326,7 +326,7 @@ def main(argv: list[str] | None = None) -> int:
         for name in skipped:
             print(f"  - {name}")
         return 3
-    print("ready for section 3 of docs/smoke.md")
+    print("ready for section 3 of docs/developer/smoke.md")
     # **Said out loud, because a green run reads as "everything is set".**
     # `IDENTITY_ISSUER` and `IDENTITY_ALLOWED_REDIRECTS` cannot be checked from
     # outside: the consent page is served by the frontend, and the endpoint
@@ -342,7 +342,7 @@ def main(argv: list[str] | None = None) -> int:
     print(
         "\nnot checked: IDENTITY_ISSUER and IDENTITY_ALLOWED_REDIRECTS —\n"
         "  not observable without a signed-in session. Section 3 of\n"
-        "  docs/smoke.md exercises them by signing in for real."
+        "  docs/developer/smoke.md exercises them by signing in for real."
     )
     return 0
 
