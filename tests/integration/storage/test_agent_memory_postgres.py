@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 from tests.integration.storage.test_agent_job_store import (
+    _create_job,
     pool as pool,
     store as store,
 )
@@ -13,6 +14,7 @@ from tests.support.migrations import apply_migrations, downgrade_to
 from cloud_agent.agent_memory import (
     ACTIVE_LIMIT,
     AgentMemoryConflict,
+    AgentMemoryDisabled,
     AgentMemoryFull,
     AgentMemoryNotFound,
 )
@@ -147,3 +149,117 @@ async def test_migration_round_trip(store, pool):
                 )
     finally:
         apply_migrations(config)
+
+
+async def _job(store, *, user_id="alice", repo="owner/api"):
+    return await _create_job(store, user_id=user_id, repo=repo)
+
+
+async def test_agents_save_to_the_tasks_repository_or_every_project(store, pool):
+    memories = store.agent_memory
+    job = await _job(store)
+    saved = await memories.save_agent_memory("alice", job["id"], "Use pnpm.", all_projects=False)
+    assert (saved["repo"], saved["origin"], saved["source_job_ids"]) == (
+        "owner/api",
+        "agent",
+        [job["id"]],
+    )
+    everywhere = await memories.save_agent_memory(
+        "alice", job["id"], "Reply in Chinese.", all_projects=True
+    )
+    assert everywhere["repo"] is None
+
+    again = await _job(store)
+    repeated = await memories.save_agent_memory(
+        "alice", again["id"], "use PNPM", all_projects=False
+    )
+    assert repeated["id"] == saved["id"]
+    assert repeated["source_job_ids"] == [job["id"], again["id"]]
+
+    await store.user_memory.set_project_enabled("alice", "owner/api", False)
+    with pytest.raises(AgentMemoryDisabled):
+        await memories.save_agent_memory("alice", job["id"], "Use tabs.", all_projects=False)
+    with pytest.raises(AgentMemoryNotFound):
+        await memories.save_agent_memory("bob", job["id"], "Use tabs.", all_projects=True)
+    with pytest.raises(ValueError):
+        await memories.save_agent_memory("alice", job["id"], "token=secretvalue", all_projects=True)
+
+
+async def test_an_agent_replaces_any_visible_memory_and_the_owner_can_undo_it(store, pool):
+    memories = store.agent_memory
+    job = await _job(store)
+    written = await memories.add_memory("alice", "owner/api", "Use npm.")
+    replaced = await memories.replace_agent_memory("alice", job["id"], written["id"], "Use pnpm.")
+    assert (replaced["repo"], replaced["origin"], replaced["content"]) == (
+        "owner/api",
+        "agent",
+        "Use pnpm.",
+    )
+    scope = await memories.list_memories("alice", "owner/api")
+    assert [m["id"] for m in scope["memories"]] == [replaced["id"]]
+    [old] = scope["archived"]
+    assert old["id"] == written["id"]
+    async with pool.acquire() as conn:
+        assert (
+            await conn.fetchval(
+                "SELECT superseded_by FROM agent_memories WHERE id = $1", written["id"]
+            )
+            == replaced["id"]
+        )
+    # The owner undoes the change by restoring the archived text.
+    restored = await memories.restore_memory(
+        "alice", written["id"], expected_version=old["version"]
+    )
+    assert restored["status"] == "active"
+
+    unchanged = await memories.replace_agent_memory("alice", job["id"], replaced["id"], "use pnpm")
+    assert unchanged["id"] == replaced["id"]
+
+    archived = await memories.archive_agent_memory("alice", job["id"], replaced["id"])
+    assert archived["status"] == "archived"
+    with pytest.raises(AgentMemoryNotFound):
+        await memories.archive_agent_memory("alice", job["id"], replaced["id"])
+
+
+async def test_an_agent_cannot_touch_another_repository_or_owner(store, pool):
+    memories = store.agent_memory
+    job = await _job(store)
+    other_repo = await memories.add_memory("alice", "owner/other", "Use tabs.")
+    bobs = await memories.add_memory("bob", None, "Use spaces.")
+    for memory_id in (other_repo["id"], bobs["id"], "missing"):
+        with pytest.raises(AgentMemoryNotFound):
+            await memories.replace_agent_memory("alice", job["id"], memory_id, "Use yarn.")
+        with pytest.raises(AgentMemoryNotFound):
+            await memories.archive_agent_memory("alice", job["id"], memory_id)
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_threads SET deleted_at = NOW() WHERE id = $1", job["thread_id"]
+        )
+    with pytest.raises(AgentMemoryNotFound):
+        await memories.save_agent_memory("alice", job["id"], "Use pnpm.", all_projects=True)
+
+
+async def test_a_task_uses_its_repository_and_user_memories_and_marks_them(store, pool):
+    memories = store.agent_memory
+    project = await memories.add_memory("alice", "owner/api", "Use pnpm.")
+    user = await memories.add_memory("alice", None, "Reply in Chinese.")
+    await memories.add_memory("alice", "owner/other", "Use tabs.")
+    gone = await memories.add_memory("alice", None, "Old rule.")
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_memories SET status = 'archived', archived_at = NOW() WHERE id = $1",
+            gone["id"],
+        )
+    used = await memories.use_memories("alice", "owner/api")
+    assert used["repo"] == "owner/api"
+    assert [m["id"] for m in used["project"]] == [project["id"]]
+    assert [m["id"] for m in used["user"]] == [user["id"]]
+    async with pool.acquire() as conn:
+        marked = await conn.fetchval(
+            "SELECT count(*) FROM agent_memories WHERE last_used_at IS NOT NULL"
+        )
+    assert marked == 2
+
+    assert (await memories.use_memories("alice", None))["project"] == []
+    await store.user_memory.set_enabled("alice", False)
+    assert (await memories.use_memories("alice", "owner/api"))["user"] == []

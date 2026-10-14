@@ -45,7 +45,7 @@ import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from cloud_agent import web_search
+from cloud_agent import memory_tool, web_search
 from cloud_agent.api.deps import get_mcp_decision_signal, get_storage
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp import protocol
@@ -105,6 +105,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
     from cloud_agent.ports import (
+        AgentMemoryRepository,
         CredentialQueries,
         McpConnectionRepository,
         WebSearchRepository,
@@ -122,6 +123,7 @@ class _McpRelayStorage(Protocol):
     this list rather than a call that happens to type-check.
     """
 
+    agent_memory: AgentMemoryRepository
     credential_queries: CredentialQueries
     mcp: McpConnectionRepository
     web_search: WebSearchRepository
@@ -1569,7 +1571,10 @@ async def _host_document(
             ]
             if web_search.configured():
                 tools.append(web_search.TOOL_DEFINITION)
-                tools.sort(key=lambda tool: str(tool["name"]))
+            # Platform tools, served here rather than by a connection. Memory is
+            # offered to every task; a scope turned off refuses writes itself.
+            tools.extend(memory_tool.TOOL_DEFINITIONS)
+            tools.sort(key=lambda tool: str(tool["name"]))
             replies.append(
                 _result_reply(
                     request_id,
@@ -1959,6 +1964,19 @@ async def _host_call(
     params = payload.get("params")
     name = str(params.get("name") or "") if isinstance(params, dict) else ""
     arguments = params.get("arguments") if isinstance(params, dict) else None
+    if name in memory_tool.TOOL_NAMES:
+        # The owner and task come from the fence, never from the arguments.
+        return _result_reply(
+            request_id,
+            await memory_tool.call(
+                name,
+                arguments,
+                user_id=str(identity["user_id"]),
+                job_id=str(identity["job_id"]),
+                repository=store.agent_memory,
+            ),
+            stateless=stateless,
+        )
     if name == web_search.TOOL_NAME and web_search.configured():
         return await _host_web_search(
             arguments,

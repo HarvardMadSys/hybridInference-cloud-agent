@@ -854,6 +854,15 @@ An unresolved connection is logged and skipped in merged listings so other
 connections remain usable. Its per-connection route still refuses the broken
 connection explicitly.
 
+The merged host also serves the platform's own tools, which no connection
+provides. `web_search` is listed when a search provider is configured; the
+memory tools `memory_save`, `memory_update` and `memory_delete` are listed for
+every task. Both are named in the claim by non-secret markers
+(`:platform:web-search`, `:platform:memory`), so every MCP-capable runtime loads
+the merged endpoint even in a conversation with no connections. A memory tool
+writes for the owner and task the fenced token names, never for ones its
+arguments name, and only to that task's repository or the owner's user scope.
+
 ### End-to-end coverage
 
 `tests/external/test_agent_mcp_end_to_end.py` crosses a real listener, migrated

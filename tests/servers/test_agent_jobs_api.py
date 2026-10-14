@@ -7619,7 +7619,8 @@ async def test_the_claim_hands_the_runner_the_job_s_bindings(
     # Aliases, not summaries: the runtime builds the relay URL's path segment
     # from each name, so a dict here would either fail the schema or address a
     # server that does not exist.
-    assert body["mcp_bindings"] == ["deepwiki", "github"]
+    # The platform's memory tools ride the same endpoint, after the connections.
+    assert body["mcp_bindings"] == ["deepwiki", "github", worker.memory_tool.RUNTIME_SERVER_ID]
     assert "mcp.example.com" not in json.dumps(body)
     assert "wiki.example.com" not in json.dumps(body)
 
@@ -7686,7 +7687,10 @@ async def test_web_search_provider_enables_mcp_without_exposing_keys(
 
     body = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
 
-    assert body["mcp_bindings"] == [worker.web_search.RUNTIME_SERVER_ID]
+    assert body["mcp_bindings"] == [
+        worker.web_search.RUNTIME_SERVER_ID,
+        worker.memory_tool.RUNTIME_SERVER_ID,
+    ]
     assert body["mcp_token"]
     assert all(
         secret not in json.dumps(body) for secret in (serper_key, brave_key, parallel_key) if secret
@@ -9608,5 +9612,48 @@ async def test_claim_loads_current_default_servers_and_skips_unavailable_ones(
             "/v1/agent/worker/claim", json={"worker_id": "w-1", "lease_ttl_seconds": 60}
         )
     assert claimed.status_code == 200, claimed.text
-    assert claimed.json()["mcp_bindings"] == [f"mcp{working['id']}"]
+    assert claimed.json()["mcp_bindings"] == [
+        f"mcp{working['id']}",
+        worker.memory_tool.RUNTIME_SERVER_ID,
+    ]
     assert claimed.json()["mcp_token"]
+
+
+async def test_claim_puts_durable_memories_with_their_ids_before_the_task(
+    client, store, monkeypatch
+):
+    use = AsyncMock(
+        return_value={
+            "repo": "owner/name",
+            "project": [{"id": "m-project", "content": "Use pnpm, not npm."}],
+            "user": [{"id": "m-user", "content": "Reply in Chinese."}],
+        }
+    )
+    monkeypatch.setattr(store, "use_memories", use, raising=False)
+    created = await client.post(
+        "/v1/agent/jobs",
+        json={"repo": "owner/name", "model": "glm-5.1", "task_prompt": "fix it"},
+    )
+    assert created.status_code == 201, created.text
+    claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
+    assert claim.status_code == 200, claim.text
+    prompt = claim.json()["task_prompt"]
+    use.assert_awaited_once_with(_OWNER, "owner/name")
+    assert '{"id": "m-project", "content": "Use pnpm, not npm."}' in prompt
+    assert '{"id": "m-user", "content": "Reply in Chinese."}' in prompt
+    assert "memory_update" in prompt
+    assert prompt.endswith("Current task:\nfix it")
+
+
+async def test_unavailable_durable_memory_never_blocks_a_claim(client, store, monkeypatch):
+    monkeypatch.setattr(
+        store, "use_memories", AsyncMock(side_effect=RuntimeError("down")), raising=False
+    )
+    created = await client.post(
+        "/v1/agent/jobs",
+        json={"repo": "owner/name", "model": "glm-5.1", "task_prompt": "fix it"},
+    )
+    assert created.status_code == 201, created.text
+    claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
+    assert claim.status_code == 200, claim.text
+    assert claim.json()["task_prompt"] == "fix it"

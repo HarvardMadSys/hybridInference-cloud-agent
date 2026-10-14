@@ -27,7 +27,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
 
-from cloud_agent import web_search
+from cloud_agent import memory_tool, web_search
+from cloud_agent.agent_memory import prompt_with_agent_memories
 from cloud_agent.api._body_limits import (
     HostBodyLimitRoute,
     payload_too_large,
@@ -137,6 +138,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
 
     from cloud_agent.ports import (
+        AgentMemoryRepository,
         AttachmentRepository,
         AttemptCommands,
         ConversationCommands,
@@ -183,6 +185,21 @@ async def _refresh_claim_memory(
             else "agent_claim_project_memory_unavailable"
         )
         return None
+
+
+async def _claim_agent_memories(
+    repository: AgentMemoryRepository, user_id: str, repo: str | None
+) -> dict[str, Any]:
+    """Read the task's durable memories; unavailable memory leaves the lists empty.
+
+    The task can still reach the memory tools, so the prompt keeps naming them.
+    """
+    try:
+        async with asyncio.timeout(_USER_MEMORY_TIMEOUT_SECONDS):
+            return await repository.use_memories(user_id, repo)
+    except Exception:
+        logger.warning("agent_claim_durable_memory_unavailable")
+        return {"repo": repo, "project": [], "user": []}
 
 
 class _BoundedTurnResourcesRoute(HostBodyLimitRoute):
@@ -253,6 +270,7 @@ class _WorkerStorage(Protocol):
     the owner's next waiting message, checked like any message.
     """
 
+    agent_memory: AgentMemoryRepository
     attachments: AttachmentRepository
     attempt_commands: AttemptCommands
     conversation_commands: ConversationCommands
@@ -1110,6 +1128,8 @@ async def _hand_over_claim(
             # A non-secret marker makes the runtime load the merged MCP endpoint
             # even when this conversation selected no user-owned connections.
             mcp_aliases.append(web_search.RUNTIME_SERVER_ID)
+        # The memory tools are served on the same endpoint, to every task.
+        mcp_aliases.append(memory_tool.RUNTIME_SERVER_ID)
     # Counted for the whole conversation, not this turn: a rebuilt sandbox has
     # to restore every upload the chat ever carried, and a host that reads zero
     # here skips the fetch entirely — which is every turn that attached nothing.
@@ -1119,6 +1139,12 @@ async def _hand_over_claim(
     memory, project_memory = await asyncio.gather(
         _refresh_claim_memory(job_store.user_memory, claim["user_id"]),
         _refresh_claim_memory(job_store.user_memory, claim["user_id"], repo=claim["repo"]),
+    )
+    # Durable memories are only offered where the memory tools can be reached.
+    durable_memories = (
+        await _claim_agent_memories(job_store.agent_memory, claim["user_id"], claim["repo"] or None)
+        if claim["runtime"] in runtimes_supporting_mcp()
+        else None
     )
     response = WorkerClaimResponse(
         thread_attachment_count=thread_attachment_count,
@@ -1138,11 +1164,14 @@ async def _hand_over_claim(
         # set the objective is the first one that should be working toward it.
         task_prompt=prompt_with_goal(
             prompt_with_skills(
-                prompt_with_user_memory(
-                    prompt_with_attachments(claim["task_prompt"], claim.get("attachments")),
-                    memory,
-                    repo=claim["repo"],
-                    project_view=project_memory,
+                prompt_with_agent_memories(
+                    prompt_with_user_memory(
+                        prompt_with_attachments(claim["task_prompt"], claim.get("attachments")),
+                        memory,
+                        repo=claim["repo"],
+                        project_view=project_memory,
+                    ),
+                    durable_memories,
                 ),
                 claim.get("skills"),
             ),

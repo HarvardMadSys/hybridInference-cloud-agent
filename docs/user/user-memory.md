@@ -120,14 +120,26 @@ saved to a missing entry.
 
 Durable memories replace the 50-request view step by step; see the
 [memory redesign](../agents/specs/2026-10-13-memory-redesign.zh-CN.md). Each memory is
-stored on its own and kept until you change or delete it. In this release they
-are stored and manageable through the API below, but Settings and task prompts
-still use the memory described above, and agents cannot save them yet: a
-follow-up gives agents a memory tool, as Claude Code's automatic memory does.
+stored on its own and kept until you change or delete it. Settings still shows
+the memory described above; it switches to durable memories in a later release.
 
+- **Agents keep them, as Claude Code does.** Every task can call three tools on
+  the platform's MCP endpoint: `memory_save`, `memory_update` and
+  `memory_delete`. The agent decides when: you ask it to remember something,
+  you correct how it works, or a memory turns out to be wrong. It writes each
+  memory as one English sentence. No extra model call is made. Updating or
+  deleting archives the old memory, which you can restore, including memories
+  you wrote yourself.
+- **Each task sees them.** When a task starts, the active memories of its
+  repository and your user memories are added before the request, with the ids
+  the tools take, up to 12,000 characters, repository memories first. Nothing
+  is added when there are none. Their `last_used_at` is updated.
 - **Scope.** A memory belongs to one repository, or to every project when its
-  `repo` is `null`. A scope whose memory is turned off is still listed with
-  `enabled: false`.
+  `repo` is `null`. An agent saves to its task's repository unless you say a
+  rule applies to all projects; a chat without a repository saves user
+  memories. An agent can only see and change memories of its task's repository
+  and your user memories. A scope whose memory is turned off is neither shown
+  to tasks nor written by agents, and is listed with `enabled: false`.
 - **Limits.** Each scope keeps 30 active memories of at most 240 characters.
   When a scope is full, the least recently used memory an agent saved is
   archived to make room. Memories you wrote or edited are never archived this
