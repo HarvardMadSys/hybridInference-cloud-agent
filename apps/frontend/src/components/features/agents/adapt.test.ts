@@ -13,6 +13,7 @@ import {
   lifecyclePhaseLabel,
   ownerFailureMessage,
   siteMisconfiguredReason,
+  subagentDisplayEvents,
   toDiffFileDetails,
   toDiffFiles,
   toDisplayEvent,
@@ -1559,5 +1560,64 @@ describe('lifecycle noise', () => {
       .map((e) => (e.kind === 'lifecycle' ? lifecyclePhaseLabel(e.text).text : ''));
 
     expect(texts).toEqual(['Repository ready']);
+  });
+});
+
+describe('subagentDisplayEvents', () => {
+  const stored = (
+    id: number,
+    event_type: string,
+    payload: Record<string, unknown>,
+  ): AgentJobEventApi => ({ id, attempt_id: 1, seq: id, event_type, payload, created_at: null });
+
+  it('reads one subagent’s records as its own conversation', () => {
+    const events = [
+      stored(1, 'tool_use', { id: 'delegate', name: 'Agent', input: { prompt: 'Review' } }),
+      stored(2, 'thinking', { text: 'Looking at the tests', parent_tool_use_id: 'delegate' }),
+      stored(3, 'tool_use', {
+        id: 'child-read',
+        name: 'Read',
+        input: { file_path: 'a.ts' },
+        parent_tool_use_id: 'delegate',
+      }),
+      stored(4, 'tool_result', {
+        tool_use_id: 'child-read',
+        content: 'file body',
+        parent_tool_use_id: 'delegate',
+      }),
+      stored(5, 'message', { text: 'Tests pass', parent_tool_use_id: 'delegate' }),
+      stored(6, 'lifecycle', { phase: 'result', parent_tool_use_id: 'delegate' }),
+      stored(7, 'message', { text: 'Another agent', parent_tool_use_id: 'other' }),
+      stored(8, 'message', { text: 'The main reply' }),
+    ];
+    const rows = subagentDisplayEvents(events, { callId: 'delegate', threads: [] });
+    expect(rows.map((row) => row.kind)).toEqual(['thinking', 'tool_use', 'message']);
+    expect(rows[1]).toMatchObject({ tool: 'Read', output: ['file body'], resultState: 'received' });
+    expect(rows[1]).not.toHaveProperty('parentToolUseId');
+    expect(rows[2]).toMatchObject({ kind: 'message', text: 'Tests pass' });
+  });
+
+  it('keeps a Codex thread apart from its siblings started by the same call', () => {
+    const owned = (thread: string) => ({
+      agent_thread_id: thread,
+      parent_tool_use_id: 'call-spawn',
+    });
+    const events = [
+      stored(1, 'message', { text: 'From the thread', ...owned('thread-1') }),
+      stored(2, 'message', { text: 'From a sibling', ...owned('thread-2') }),
+      // Recorded after a restart forgot which call started the thread.
+      stored(3, 'message', { text: 'Thread only', agent_thread_id: 'thread-1' }),
+    ];
+    expect(
+      subagentDisplayEvents(events, { callId: 'call-spawn', threads: ['thread-1'] }).map(
+        (row) => row.kind === 'message' && row.text,
+      ),
+    ).toEqual(['From the thread', 'Thread only']);
+    // Before the spawn returns its threads, the call is the only owner known.
+    expect(
+      subagentDisplayEvents(events, { callId: 'call-spawn', threads: [] }).map(
+        (row) => row.kind === 'message' && row.text,
+      ),
+    ).toEqual(['From the thread', 'From a sibling']);
   });
 });

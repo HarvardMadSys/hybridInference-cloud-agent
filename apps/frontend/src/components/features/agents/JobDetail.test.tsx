@@ -3734,7 +3734,7 @@ describe('JobDetail', () => {
     });
 
     it.each(['native', 'duplicate'] as const)(
-      'opens %s subagent call details from chat without constructing a trajectory during overview rendering',
+      'opens a %s subagent’s own conversation without constructing a trajectory',
       async (kind) => {
         renderingWork.trajectory.mockClear();
         const currentAttemptNo = kind === 'native' ? 2 : 1;
@@ -3809,69 +3809,118 @@ describe('JobDetail', () => {
         }));
         const attempts: AgentJob['attempts'] = [{ no: currentAttemptNo, status: 'live' }];
         if (kind === 'native') attempts.unshift({ no: 1, status: 'superseded' });
+        // The subagent threads' own records: the live attempt's worker, and
+        // the superseded attempt's, which must not leak into the live one.
+        const owned: AgentThreadEventApi[] = [
+          {
+            id: 690,
+            job_id: 'ajob_1',
+            turn_no: 1,
+            attempt_id: 1,
+            seq: 3,
+            event_type: 'message',
+            created_at: null,
+            payload: { text: 'Superseded worker note', agent_thread_id: 'superseded-worker' },
+          },
+          {
+            id: 702,
+            job_id: 'ajob_1',
+            turn_no: 1,
+            attempt_id: 2,
+            seq: 3,
+            event_type: 'tool_use',
+            created_at: null,
+            payload: {
+              id: 'worker-read',
+              name: 'Read',
+              input: { file_path: 'src/worker-target.ts' },
+              agent_thread_id: 'worker-one',
+            },
+          },
+        ];
         render(
           <JobDetail
             job={makeJob({ currentAttemptNo, attempts, events: displayEvents })}
-            events={stored}
+            events={[...stored, ...(kind === 'native' ? owned : [])]}
           />,
         );
-        const actions = screen.getAllByRole('button', { name: 'View subagent execution' });
+        const actions = screen.getAllByRole('button', { name: /^Switch subagent: / });
         expect(renderingWork.trajectory).not.toHaveBeenCalled();
         fireEvent.click(actions.at(-1)!);
-        const inspector = screen.getByRole('region', { name: 'Step details' });
-        await within(inspector).findByRole('button', { name: 'Close details' });
-        expect(renderingWork.trajectory).toHaveBeenCalledTimes(1);
+        const view = screen.getByRole('region', { name: /^Subagent: / });
+        expect(renderingWork.trajectory).not.toHaveBeenCalled();
+        expect(screen.queryByRole('textbox', { name: 'Add a follow-up' })).not.toBeInTheDocument();
         if (kind === 'native') {
-          expect(inspector).toHaveTextContent('worker-one');
-          expect(inspector).toHaveTextContent('spawn_agent');
-          expect(inspector).toHaveTextContent('Review complete');
-          expect(inspector).not.toHaveTextContent('superseded-worker');
-          expect(inspector).not.toHaveTextContent('pairing below is not verified');
+          expect(view).toHaveTextContent('src/worker-target.ts');
+          // Codex records a finished agent's answer as its state's message.
+          expect(view).toHaveTextContent('Review complete');
+          expect(view).not.toHaveTextContent('Superseded worker note');
         } else {
-          expect(inspector).toHaveTextContent('This call id was stored more than once');
-          expect(inspector).toHaveTextContent('pairing below is not verified');
+          expect(view).toHaveAccessibleName('Subagent: Second review');
         }
       },
     );
 
-    it('moves focus into subagent execution details and restores it to the toggle', async () => {
+    it('shows a subagent’s conversation in place of the chat and returns to it', () => {
+      const record = (id: number, event_type: string, payload: Record<string, unknown>) => ({
+        id,
+        job_id: 'ajob_1',
+        turn_no: 1,
+        attempt_id: 1,
+        seq: id,
+        event_type,
+        payload,
+        created_at: '2026-10-10T12:00:00.000Z',
+      });
       render(
         <JobDetail
           job={makeJob({ events: activityEvents() })}
           events={
             [
-              {
-                id: 12,
-                job_id: 'ajob_1',
-                turn_no: 1,
-                attempt_id: 1,
-                seq: 1,
-                event_type: 'tool_use',
-                payload: {
-                  id: 'spawn-review-1',
-                  name: 'spawn_agent',
-                  input: { task_name: 'Review window interactions' },
-                },
-                created_at: '2026-10-10T12:00:00.000Z',
-              },
+              record(12, 'tool_use', {
+                id: 'spawn-review-1',
+                name: 'spawn_agent',
+                input: { task_name: 'Review window interactions' },
+              }),
+              record(13, 'message', {
+                text: 'Focus returns to the toggle.',
+                agent_thread_id: 'agent-ui-review-1',
+              }),
+              record(14, 'message', { text: 'The main agent’s own reply' }),
             ] as never
           }
         />,
       );
 
-      const viewExecution = screen.getByRole('button', { name: 'View subagent execution' });
-      viewExecution.focus();
-      fireEvent.click(viewExecution);
+      const panel = screen.getByRole('region', { name: 'Tasks and subagents' });
+      const card = within(panel)
+        .getByRole('region', { name: 'Subagents overview' })
+        .querySelector('li')!;
+      // Reading the card's instructions does not switch away from the chat.
+      fireEvent.click(within(card).getByText('Prompt'));
+      expect(screen.queryByRole('region', { name: /^Subagent: / })).not.toBeInTheDocument();
 
-      const closeDetails = screen.getByRole('button', { name: 'Close details' });
-      expect(screen.getByRole('region', { name: 'Step details' })).toBeVisible();
-      expect(closeDetails).toHaveFocus();
+      // Like a session row, the whole card switches to the subagent.
+      fireEvent.click(within(card).getByText('Review window interactions'));
+      const view = screen.getByRole('region', { name: 'Subagent: Review window interactions' });
+      expect(screen.getByRole('button', { name: '← Back to conversation' })).toHaveFocus();
+      expect(view).toHaveTextContent('Check focus restoration and floating layout.');
+      expect(view).toHaveTextContent('Focus returns to the toggle.');
+      expect(view).not.toHaveTextContent('The main agent’s own reply');
+      expect(card).toHaveAttribute('aria-current', 'true');
+      expect(card).toHaveTextContent('Current');
+      expect(within(card).queryByRole('button', { name: /^Switch subagent: / })).toBeNull();
+      expect(screen.queryByRole('textbox', { name: 'Add a follow-up' })).not.toBeInTheDocument();
 
-      fireEvent.keyDown(closeDetails, { key: 'Escape' });
-      expect(screen.queryByRole('region', { name: 'Step details' })).not.toBeInTheDocument();
-      await waitFor(() =>
-        expect(screen.getByRole('button', { name: 'Hide tasks and subagents' })).toHaveFocus(),
-      );
+      fireEvent.click(screen.getByRole('button', { name: '← Back to conversation' }));
+      expect(screen.queryByRole('region', { name: /^Subagent: / })).not.toBeInTheDocument();
+      expect(screen.getByRole('textbox', { name: 'Add a follow-up' })).toBeInTheDocument();
+
+      // The subagent view is part of Chat; another tab returns Chat to the conversation.
+      fireEvent.click(within(panel).getByRole('button', { name: /^Switch subagent: / }));
+      fireEvent.click(screen.getByRole('button', { name: 'trajectory' }));
+      fireEvent.click(screen.getByRole('button', { name: 'chat' }));
+      expect(screen.queryByRole('region', { name: /^Subagent: / })).not.toBeInTheDocument();
     });
   });
 
@@ -3975,7 +4024,7 @@ describe('JobDetail', () => {
     });
     const events = [...historicalEvents, source];
     const { rerender } = render(<JobDetail job={job} events={events} threadJobs={threadJobs} />);
-    await screen.findByRole('button', { name: 'View subagent execution' });
+    await screen.findByRole('button', { name: /^Switch subagent: / });
     expect(renderingWork.trajectory).not.toHaveBeenCalled();
     expect(renderingWork.history).toHaveBeenCalledTimes(1);
     expect(renderingWork.current).toHaveBeenCalledTimes(1);
@@ -3988,12 +4037,15 @@ describe('JobDetail', () => {
     expect(renderingWork.history).toHaveBeenCalledTimes(1);
     expect(renderingWork.current).toHaveBeenCalledTimes(1);
 
-    fireEvent.click(screen.getByRole('button', { name: 'View subagent execution' }));
+    // A subagent's conversation reads its own records, not the diagnostic projection.
+    fireEvent.click(screen.getByRole('button', { name: /^Switch subagent: / }));
+    expect(screen.getByRole('region', { name: 'Subagent: Review scaling' })).toBeInTheDocument();
+    expect(renderingWork.trajectory).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: '← Back to conversation' }));
+
+    fireEvent.click(screen.getByRole('button', { name: 'trajectory' }));
+    await screen.findByText('spawn_agent');
     expect(renderingWork.trajectory).toHaveBeenCalledTimes(1);
-    expect(screen.getByRole('region', { name: 'Step details' })).toBeInTheDocument();
-    await screen.findByRole('button', { name: 'Close details' });
-    expect(renderingWork.trajectory).toHaveBeenCalledTimes(1);
-    fireEvent.click(screen.getByRole('button', { name: 'Close details' }));
     fireEvent.click(screen.getByRole('button', { name: 'chat' }));
 
     const reply: AgentThreadEventApi = {

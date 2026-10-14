@@ -21,10 +21,12 @@ import { APIError } from '@/lib/utils/errors';
 import type { AgentJobApi, AgentJobEventApi, AgentThreadEventApi } from '@/lib/api/agents';
 import type { SelectedSkillApi } from '@/lib/api/skills';
 import { ActivityWindow } from './ActivityWindow';
+import { subagentDisplayEvents } from './adapt';
 import { composerOverrides } from './ConversationComposer';
 import { FloatingActivityWindow } from './FloatingActivityWindow';
 import { LedgerUsage, useLedgerUsage } from './LedgerUsage';
 import { notDeliveredText } from './PendingMessageQueue';
+import { SubagentConversation } from './SubagentConversation';
 import { BackToBottom, TurnRail } from './TurnNavigator';
 import { buildActivityOverview, hasActivityOverview } from './activityOverview';
 import { useAttachments } from './attachments/useAttachments';
@@ -37,9 +39,8 @@ import { hasLiveWork } from './goal/liveWork';
 import { GOAL_COMMAND_PREFIX, useGoalCommand } from './goal/useGoalCommand';
 import { useThreadComposerMcp } from './mcp/useThreadComposerMcp';
 import { createRecordedOutputsSelector } from './recordedTurnOutputs';
-import { toolStepKey } from './trajectorySteps';
 import { useTranscriptPresentation } from './transcriptPresentation';
-import type { AgentEvent, AgentJob } from './types';
+import type { AgentJob } from './types';
 import { useComposerDraft } from './useComposerDraft';
 import { usePendingMessages } from './usePendingMessages';
 import { watchPullRequestPrompt, watchPullRequestRequestId } from './watchPullRequest';
@@ -84,6 +85,8 @@ export function JobDetail({
   const {
     tab,
     setTab,
+    subagentKey,
+    setSubagentKey,
     workspaceOpen,
     setWorkspaceOpen,
     workspaceTabs,
@@ -96,7 +99,6 @@ export function JobDetail({
     setFocusJobId,
     trajectoryQuery,
     setTrajectoryQuery,
-    trajectoryContext,
     trajectorySteps,
     layoutContainerRef,
     openWorkspaceFile,
@@ -437,35 +439,32 @@ export function JobDetail({
     setFocusJobId,
     setInspector,
   ]);
-  const activitySources = useMemo(() => {
-    const wanted = new Set(
-      activityOverview.subagents.map((agent) => agent.sourceEvent.sourceEventId),
+  // The open subagent belongs to the selected turn and attempt; choosing
+  // another one returns to the Chat it replaced.
+  const openSubagent =
+    subagentKey === null
+      ? undefined
+      : activityOverview.subagents.find((agent) => agent.key === subagentKey);
+  useEffect(() => {
+    if (subagentKey !== null && !openSubagent) setSubagentKey(null);
+  }, [openSubagent, setSubagentKey, subagentKey]);
+  const subagentEvents = useMemo(() => {
+    if (!openSubagent) return [];
+    const { sourceEvent, activity } = openSubagent;
+    const source = events.find((event) => event.id === sourceEvent.sourceEventId);
+    // Codex threads outlive a turn; read only the attempt that started this one.
+    const attemptEvents = events.filter(
+      (event) =>
+        (!('job_id' in event) || event.job_id === job.id) &&
+        (!source || event.attempt_id === source.attempt_id),
     );
-    const sources = new Map<number, AgentJobEventApi | AgentThreadEventApi>();
-    if (!wanted.size) return sources;
-    for (const source of events) {
-      if (wanted.has(source.id)) sources.set(source.id, source);
-    }
-    return sources;
-  }, [activityOverview, events]);
-  const activityStepKey = useCallback(
-    (event: Extract<AgentEvent, { kind: 'tool_use' }>) => {
-      const source =
-        event.sourceEventId === undefined ? undefined : activitySources.get(event.sourceEventId);
-      if (!source) return undefined;
-      const sourceJobId =
-        'job_id' in source
-          ? source.job_id
-          : trajectoryContext.inputs?.length === 1
-            ? trajectoryContext.inputs[0].jobId
-            : undefined;
-      if (sourceJobId !== job.id) return undefined;
-      // The adapted tool row already identifies its source call. Computing its
-      // stable key does not need the full diagnostic projection during render.
-      return toolStepKey({ ...source, job_id: sourceJobId }, event.id);
-    },
-    [activitySources, job.id, trajectoryContext],
-  );
+    return subagentDisplayEvents(
+      attemptEvents,
+      { callId: sourceEvent.id, threads: activity.targets },
+      threadJobs.find((turn) => turn.id === job.id),
+    );
+  }, [events, job.id, openSubagent, threadJobs]);
+  const showingSubagent = tab === 'chat' && openSubagent !== undefined;
   useEffect(() => {
     if (!activityVisible) return;
     const onKeyDown = (event: KeyboardEvent) => {
@@ -580,6 +579,7 @@ export function JobDetail({
 
   const showRail =
     tab === 'chat' &&
+    !showingSubagent &&
     !activityVisible &&
     navigationEntries.length > 1 &&
     scroll.viewport.width >= RAIL_MIN_COLUMN_WIDTH &&
@@ -658,6 +658,15 @@ export function JobDetail({
                     focusJobId={focusJobId}
                   />
                 </div>
+              ) : openSubagent ? (
+                <SubagentConversation
+                  agent={openSubagent}
+                  events={subagentEvents}
+                  jobId={job.id}
+                  presentation={presentation}
+                  onBack={() => setSubagentKey(null)}
+                  onInspectEvent={events.length > 0 ? panels.inspectTranscriptEvent : undefined}
+                />
               ) : (
                 <JobTranscript
                   panels={panels}
@@ -712,6 +721,7 @@ export function JobDetail({
                 steerNow={steerNow}
                 insertGoalCommand={insertGoalCommand}
                 onReload={onReload}
+                hidden={showingSubagent}
               />
             </div>
           </div>
@@ -725,10 +735,10 @@ export function JobDetail({
                 turnNo={currentTurn.displayNo}
                 attemptNo={attemptNo}
                 onClose={closeActivity}
-                stepKeyForEvent={activityStepKey}
-                onSelectStep={(stepKey) => {
-                  setTab('trajectory');
-                  selectStep(stepKey);
+                openSubagentKey={showingSubagent ? subagentKey : null}
+                onOpenSubagent={(key) => {
+                  setTab('chat');
+                  setSubagentKey(key);
                 }}
               />
             )}
@@ -753,7 +763,7 @@ export function JobDetail({
             </div>
           ) : null}
 
-          {tab === 'chat' ? (
+          {tab === 'chat' && !showingSubagent ? (
             <div
               className="pointer-events-none absolute left-0 z-0 w-full max-w-full"
               style={{

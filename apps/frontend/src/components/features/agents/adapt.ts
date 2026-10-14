@@ -800,6 +800,33 @@ function displayEvents(events: AgentJobEventApi[], job?: AgentJobApi): AgentEven
   return rows;
 }
 
+/**
+ * One subagent's own transcript, read as if that subagent were the
+ * conversation: the records its owner fields assign to the delegating call
+ * (`callId`) or, for Codex, to one of the threads that call started. Its turn
+ * milestones and usage stay runtime bookkeeping rather than rows.
+ */
+export function subagentDisplayEvents(
+  events: AgentJobEventApi[],
+  owner: { callId?: string; threads: readonly string[] },
+  job?: AgentJobApi,
+): AgentEvent[] {
+  const threads = new Set(owner.threads);
+  const own = events.flatMap((event) => {
+    const payload = event.payload ?? {};
+    const parent = asText(payload, 'parent_tool_use_id');
+    const thread = asText(payload, 'agent_thread_id');
+    // One call may start several threads, and each thread's records name that
+    // call. Once the threads are known, a record belongs to its own thread.
+    const mine =
+      thread && threads.size ? threads.has(thread) : Boolean(parent) && parent === owner.callId;
+    if (!mine) return [];
+    const { parent_tool_use_id: _parent, agent_thread_id: _thread, ...rest } = payload;
+    return [{ ...event, payload: rest }];
+  });
+  return displayEvents(own, job).filter((row) => row.kind !== 'lifecycle' && row.kind !== 'usage');
+}
+
 /** Rename the host's rollup into the UI's shape, keeping every null a null. */
 export function toTurnResources(api: AttemptResourcesApi): TurnResources {
   const toolCallsTruncated = api.tool_calls_truncated === true;
