@@ -218,6 +218,31 @@ describe('TeamsSettingsView', () => {
     expect(await screen.findByRole('button', { name: 'Remove admin role' })).toBeVisible();
   });
 
+  it('re-reads the team list when a demoted admin opens the team', async () => {
+    const forbidden = new APIError('forbidden', 'Owner or admin only.', 403);
+    vi.mocked(listTeams)
+      .mockResolvedValueOnce([{ ...owned, role: 'admin', owner_user_id: 'bob' }])
+      .mockResolvedValue([{ ...owned, role: 'member', owner_user_id: 'bob' }]);
+    vi.mocked(listJoinRequests).mockRejectedValue(forbidden);
+    vi.mocked(listInvitations).mockRejectedValue(forbidden);
+    view();
+    expect(await screen.findByRole('button', { name: 'Leave team' })).toBeVisible();
+    expect(screen.queryByText('Teams could not be loaded.')).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: 'Create invitation link' }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('drops a team the viewer was removed from instead of a dead-end error', async () => {
+    vi.mocked(listTeams)
+      .mockResolvedValueOnce([{ ...owned, role: 'member', owner_user_id: 'carol' }])
+      .mockResolvedValue([]);
+    vi.mocked(listMembers).mockRejectedValue(new APIError('not_found', 'No such team.', 404));
+    view();
+    expect(await screen.findByText(/not in any team yet/)).toBeVisible();
+    expect(screen.queryByText('Teams could not be loaded.')).not.toBeInTheDocument();
+  });
+
   it('refreshes the team revision after a conflict so a retry can succeed', async () => {
     vi.mocked(renameTeam)
       .mockImplementationOnce(async () => {

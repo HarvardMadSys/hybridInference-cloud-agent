@@ -23,6 +23,7 @@ import {
   type TeamMember,
   type TeamPerson,
 } from '@/lib/api/teams';
+import { APIError } from '@/lib/utils/errors';
 import { DANGER, GHOST, INPUT, SECONDARY, formatTeamTime, teamErrorMessage } from './teamUi';
 
 type Confirming =
@@ -60,11 +61,20 @@ export function TeamDetails({ team, onChanged }: { team: Team; onChanged: () => 
         setRequests(nextRequests);
         setInvitations(nextInvitations);
       })
-      .catch(() => {
-        if (!controller.signal.aborted) setLoadFailed(true);
+      .catch((cause) => {
+        if (controller.signal.aborted) return;
+        setLoadFailed(true);
+        // The role or membership this card was opened with is out of date:
+        // re-read the list, since a retry here would ask again as that role.
+        if (
+          cause instanceof APIError &&
+          (cause.code === 'forbidden' || cause.code === 'not_found')
+        ) {
+          onChanged();
+        }
       });
     return () => controller.abort();
-  }, [team.id, manager, reload]);
+  }, [team.id, manager, reload, onChanged]);
 
   /** Run one change, then re-read this team and, when asked, the team list. */
   const run = useCallback(
