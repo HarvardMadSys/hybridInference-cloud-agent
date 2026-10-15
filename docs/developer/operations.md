@@ -2187,7 +2187,19 @@ runners never emit `replay`; the API accepts it only so an attempt admitted by
 the previous generation can finish during a parallel rollout, and historical
 rows remain readable in the UI.
 
-After a shared turn settles, its snapshot and draft-PR fields may still change
+A settled turn publishes nothing. The platform publishes a workspace only when
+its owner asks (`POST /v1/agent/threads/{thread_id}/publish`, the conversation's
+Create PR / Update PR button): the request advances the group's epoch and opens
+a snapshot holding every turn settled since the last one, and capture, the
+secret scan, the push, the draft PR and the base import follow as before. A
+request while a turn runs in the workspace is refused (`turn_running`); one
+while a publication is on its way returns that publication. Until the owner
+asks, a settled workspace holds nothing back: it stops when idle and its chat
+can be deleted. Its unpublished turns live in the retained sandbox, and in its
+checkpoint once it stops cleanly. See the
+[design](../agents/specs/2026-10-15-manual-publication-design.zh-CN.md).
+
+After a publication request, the snapshot and draft-PR fields change
 asynchronously. The detail view and recent-task list poll only while that
 publication state is pending/capturing/captured/publishing, and stop at
 published/failed; other terminal jobs do not acquire a background
@@ -2195,8 +2207,8 @@ polling loop.
 
 A snapshot whose patch the publisher refuses, whose capture the host refuses,
 or whose five publication retries run out stays `failed` with its reason, and
-its group is marked `dirty`. It is not retried. The group's next snapshot,
-captured when a later turn settles, supersedes it: every snapshot is the whole
+its group is marked `dirty`. It is not retried. The owner's next request opens
+the group's next snapshot, which supersedes it: every snapshot is the whole
 diff from the last published commit, so it carries the failed changes too, and
 is refused in turn if it still holds what was refused. Snapshots still publish
 in epoch order; only a failed one stops holding the later ones back. If the

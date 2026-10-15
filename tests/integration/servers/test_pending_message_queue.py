@@ -899,21 +899,26 @@ async def test_a_resend_finds_the_message_while_it_waits_and_its_turn_after(api:
     assert (await api.queue(thread_id))["messages"] == []
 
 
+async def _request_publication(api: Api, thread_id: str) -> int:
+    """Ask for the workspace's publication, as its owner's button does."""
+    requested = await api.store.snapshot.request_snapshot_publication(
+        thread_id=thread_id, user_id=_OWNER
+    )
+    assert requested.get("requested") is True, requested
+    return int(requested["snapshot_id"])
+
+
 async def _publish_workspace(api: Api, thread_id: str) -> None:
-    """Complete the latest snapshot without a publisher in this queue-only tier."""
+    """Publish the workspace without a capture or publisher in this queue-only tier."""
+    snapshot_id = await _request_publication(api, thread_id)
     async with api.pool.acquire() as conn:
-        snapshot_id = await conn.fetchval(
+        published = await conn.fetchval(
             "UPDATE agent_sandbox_snapshots SET state = 'published', "
-            "published_commit_sha = $2, published_at = NOW() WHERE id = ("
-            "SELECT snapshot.id FROM agent_sandbox_snapshots snapshot "
-            "JOIN agent_thread_sandbox_memberships membership "
-            "ON membership.sandbox_id = snapshot.sandbox_id "
-            "WHERE membership.thread_id = $1 "
-            "ORDER BY snapshot.workspace_epoch DESC, snapshot.id DESC LIMIT 1) RETURNING id",
-            thread_id,
+            "published_commit_sha = $2, published_at = NOW() WHERE id = $1 RETURNING id",
+            snapshot_id,
             "b" * 40,
         )
-    assert snapshot_id is not None
+    assert published is not None
 
 
 async def test_two_tabs_guarded_submit_creates_one_turn_under_the_thread_lock(api: Api):
@@ -1187,6 +1192,7 @@ async def test_guarded_submit_waits_for_the_current_workspace_publication(api: A
     job = await api.create()
     thread_id = job["thread_id"]
     await api.run(job)
+    await _request_publication(api, thread_id)
     async with api.pool.acquire() as conn:
         await conn.execute("UPDATE agent_sandbox_snapshots SET state = $1", state)
 
@@ -1217,12 +1223,13 @@ async def test_guarded_submit_refuses_a_newer_unpublished_workspace_after_an_old
     ordinary = (await api.send(thread_id, "new changes to publish")).json()["job"]
     await api.run(ordinary)
     async with api.pool.acquire() as conn:
+        # The new turn opened no snapshot: only its owner publishes it.
         assert [
             row["state"]
             for row in await conn.fetch(
                 "SELECT state FROM agent_sandbox_snapshots ORDER BY workspace_epoch"
             )
-        ] == ["published", "pending"]
+        ] == ["published"]
 
     refused = await api.send(
         thread_id,
@@ -1232,7 +1239,7 @@ async def test_guarded_submit_refuses_a_newer_unpublished_workspace_after_an_old
     )
 
     assert refused.status_code == 409, refused.text
-    assert refused.json()["detail"]["error"]["type"] == "conversation_changed"
+    assert refused.json()["detail"]["error"]["type"] == "unpublished_changes"
     assert len(await api.turns(thread_id)) == 2
     assert (await api.queue(thread_id))["messages"] == []
 
@@ -1638,6 +1645,7 @@ async def test_guarded_submit_does_not_hold_an_included_job_while_waiting_for_pu
     job = await api.create()
     thread_id = job["thread_id"]
     await api.run(job)
+    await _request_publication(api, thread_id)
     group = await api.store.sandbox.thread_sandbox(thread_id=thread_id)
     assert group is not None
     watch = None
@@ -2208,3 +2216,71 @@ async def test_deleting_the_conversation_removes_its_waiting_messages_and_their_
             )
             == 0
         )
+
+
+async def test_the_owner_publishes_a_finished_workspace_over_http(api: Api):
+    """A finished turn waits for its owner; a repeated request returns the same snapshot."""
+    job = await api.create()
+    thread_id = job["thread_id"]
+    await api.run(job)
+    waiting = (await api.client.get(f"/v1/agent/jobs/{job['id']}")).json()
+    assert waiting["workspace_publication_state"] is None
+    assert waiting["workspace_unpublished_changes"] is True
+    assert waiting["workspace_pr_url"] is None
+
+    opened = await api.client.post(f"/v1/agent/threads/{thread_id}/publish")
+
+    assert opened.status_code == 202, opened.text
+    body = opened.json()
+    assert body["thread_id"] == thread_id
+    assert body["state"] == "pending" and body["requested"] is True
+    again = await api.client.post(f"/v1/agent/threads/{thread_id}/publish")
+    assert again.status_code == 202, again.text
+    assert again.json() == {**body, "requested": False}
+    requested = (await api.client.get(f"/v1/agent/jobs/{job['id']}")).json()
+    assert requested["workspace_publication_state"] == "pending"
+    assert requested["workspace_unpublished_changes"] is False
+
+
+async def test_a_publication_takes_the_workspaces_own_turns_and_not_a_forks_copies(api: Api):
+    """A Fork copies its source's turns; the copies ran nowhere and publish nothing."""
+    job = await api.create()
+    await api.run(job)
+    child = await api.fork(job)
+    child_view = await api.store.sandbox.thread_sandbox(thread_id=child["thread_id"])
+    assert child_view is not None
+    # The workspace both chats share holds the source's unpublished turn.
+    assert child_view["workspace_unpublished_changes"] is True
+
+    opened = await api.client.post(f"/v1/agent/threads/{child['thread_id']}/publish")
+
+    assert opened.status_code == 202, opened.text
+    async with api.pool.acquire() as conn:
+        included = await conn.fetchval(
+            "SELECT array_agg(job_id) FROM agent_snapshot_jobs WHERE snapshot_id = $1",
+            opened.json()["snapshot_id"],
+        )
+    assert included == [job["id"]]
+    child_view = await api.store.sandbox.thread_sandbox(thread_id=child["thread_id"])
+    assert child_view is not None and child_view["workspace_unpublished_changes"] is False
+
+
+async def test_a_publication_request_says_why_it_was_refused(api: Api):
+    missing = await api.client.post("/v1/agent/threads/no-such-thread/publish")
+    assert missing.status_code == 404, missing.text
+    assert missing.json()["detail"]["error"]["type"] == "not_found"
+
+    job = await api.create()
+    thread_id = job["thread_id"]
+    unstarted = await api.client.post(f"/v1/agent/threads/{thread_id}/publish")
+    assert unstarted.status_code == 409, unstarted.text
+    assert unstarted.json()["detail"]["error"]["type"] == "nothing_to_publish"
+
+    turn = await api.start(job)
+    running = await api.client.post(f"/v1/agent/threads/{thread_id}/publish")
+    assert running.status_code == 409, running.text
+    assert running.json()["detail"]["error"]["type"] == "turn_running"
+
+    await api.finish(turn)
+    finished = await api.client.post(f"/v1/agent/threads/{thread_id}/publish")
+    assert finished.status_code == 202, finished.text

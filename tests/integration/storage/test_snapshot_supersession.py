@@ -1,13 +1,14 @@
-"""A failed workspace snapshot is superseded by the next one, on real Postgres.
+"""A failed workspace snapshot is superseded by the owner's next request, on real Postgres.
 
 Every capture is the whole diff from the group's published base, and a failure
-never advances that base, so the snapshot a later turn produces carries the
-failed one's changes, or their reversal. A failure therefore must not hold the
-group back for good: the failed snapshot keeps its reason, the group leaves
-``dirty`` when a later turn settles or a later snapshot is captured, and that
-snapshot is captured and published as usual. Epochs still publish in order: a
-snapshot that may yet publish holds every later one back, and one that failed
-is never claimed again.
+never advances that base, so the snapshot the owner's next publication request
+opens carries the failed one's changes, or their reversal. A failure therefore
+must not hold the group back for good: the failed snapshot keeps its reason,
+the group stays ``dirty`` until its owner asks again, and that request's
+snapshot is captured and published as usual -- whether or not a turn settled in
+between. A turn boundary publishes nothing. Epochs still publish in order: a
+snapshot that may yet publish holds every later one back, and one that failed is
+never claimed again.
 """
 
 from __future__ import annotations
@@ -32,6 +33,22 @@ _REJECTED_PATCH = (
     "diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml\nnew file mode 100644\n"
 )
 _FIXED_PATCH = "diff --git a/answer.txt b/answer.txt\nnew file mode 100644\n"
+
+
+async def _request(store, job: dict) -> dict:
+    """The owner's publication request, as the conversation's button sends it."""
+    return await store.snapshot.request_snapshot_publication(
+        thread_id=job["thread_id"], user_id=job["user_id"]
+    )
+
+
+async def _included(pool, snapshot_id: int) -> list[str]:
+    async with pool.acquire() as conn:
+        return await conn.fetchval(
+            "SELECT array_agg(job_id ORDER BY created_at) FROM agent_snapshot_jobs "
+            "WHERE snapshot_id = $1",
+            snapshot_id,
+        )
 
 
 async def _first_turn(store) -> tuple[dict, dict]:
@@ -212,9 +229,10 @@ async def _fail(store, pool, mode: str, capture: dict) -> None:
 
 
 @pytest.mark.parametrize("mode", ["publish_rejected", "retries_exhausted", "capture_refused"])
-async def test_the_next_settled_turn_supersedes_a_failed_snapshot(store, pool, mode):
-    """A failure dirties the group; the next turn is captured and published anyway."""
+async def test_the_owners_next_request_supersedes_a_failed_snapshot(store, pool, mode):
+    """A failure dirties the group; the next request is captured and published anyway."""
     first, sandbox = await _first_turn(store)
+    assert (await _request(store, first))["requested"] is True
     failed = await store.snapshot.claim_due_sandbox_snapshot()
     assert failed is not None
     await _fail(store, pool, mode, failed)
@@ -222,19 +240,26 @@ async def test_the_next_settled_turn_supersedes_a_failed_snapshot(store, pool, m
     failure = await _snapshot(pool, failed["snapshot_id"])
     assert failure["state"] == "failed" and failure["last_error"]
     assert await _group_state(pool, sandbox["sandbox_id"]) == "dirty"
-    assert await store.snapshot.claim_due_sandbox_snapshot() is None, "nothing settled since"
+    assert await store.snapshot.claim_due_sandbox_snapshot() is None, "nothing requested since"
     assert await store.snapshot.claim_for_publish() is None
 
-    # The owner fixes the workspace in a later turn of the same chat.
+    # The owner fixes the workspace in a later turn of the same chat. Settling
+    # it publishes nothing: the group stays dirty until the owner asks.
     second = await _next_turn(store, parent=first, sandbox=sandbox, prompt="drop the workflow")
+    assert await _group_state(pool, sandbox["sandbox_id"]) == "dirty"
+    assert await store.snapshot.claim_due_sandbox_snapshot() is None
+    requested = await _request(store, second)
+    assert requested["requested"] is True
     assert await _group_state(pool, sandbox["sandbox_id"]) == "pending"
 
     superseding = await store.snapshot.claim_due_sandbox_snapshot()
     assert superseding is not None
+    assert superseding["snapshot_id"] == requested["snapshot_id"]
     assert superseding["anchor_job_id"] == second["id"]
     assert superseding["workspace_epoch"] > failed["workspace_epoch"]
     # Cut from the base the failure never advanced, so it carries that work too.
     assert superseding["base_sha"] == failed["base_sha"]
+    assert await _included(pool, superseding["snapshot_id"]) == [second["id"]]
     assert await _record(store, superseding, _FIXED_PATCH) == "captured"
     publication = await store.snapshot.claim_for_publish()
     assert publication is not None and publication["snapshot_id"] == superseding["snapshot_id"]
@@ -247,12 +272,72 @@ async def test_the_next_settled_turn_supersedes_a_failed_snapshot(store, pool, m
     assert await _group_state(pool, sandbox["sandbox_id"]) == "quiescent"
     # The failure stays on record, with its own turn and its own reason.
     assert await _snapshot(pool, failed["snapshot_id"]) == failure
-    async with pool.acquire() as conn:
-        assert await conn.fetchval(
-            "SELECT array_agg(job_id) FROM agent_snapshot_jobs WHERE snapshot_id = $1",
-            failed["snapshot_id"],
-        ) == [first["id"]]
+    assert await _included(pool, failed["snapshot_id"]) == [first["id"]]
     assert await store.snapshot.claim_for_publish() is None, "a failed snapshot is never retried"
+
+
+async def test_a_retry_without_a_new_turn_opens_a_fresh_epoch(store, pool):
+    """Asking again after a failure, with nothing settled since, captures the workspace anew.
+
+    The owner may have fixed the file from the terminal. The new snapshot takes
+    the newest settled turn again, at a new epoch; the failed one stays failed.
+    """
+    first, _sandbox = await _first_turn(store)
+    assert (await _request(store, first))["requested"] is True
+    failed = await store.snapshot.claim_due_sandbox_snapshot()
+    assert failed is not None
+    await _fail(store, pool, "publish_rejected", failed)
+
+    retried = await _request(store, first)
+    assert retried["requested"] is True
+    assert retried["snapshot_id"] != failed["snapshot_id"]
+    capture = await store.snapshot.claim_due_sandbox_snapshot()
+    assert capture is not None and capture["snapshot_id"] == retried["snapshot_id"]
+    assert capture["anchor_job_id"] == first["id"]
+    assert capture["workspace_epoch"] > failed["workspace_epoch"]
+    assert capture["base_sha"] == failed["base_sha"]
+    assert await _record(store, capture, _FIXED_PATCH) == "captured"
+    publication = await store.snapshot.claim_for_publish()
+    assert publication is not None and publication["snapshot_id"] == capture["snapshot_id"]
+    await _publish(store, publication, commit_sha="a" * 40)
+
+    assert (await _snapshot(pool, failed["snapshot_id"]))["state"] == "failed"
+    assert (await _snapshot(pool, capture["snapshot_id"]))["state"] == "published"
+    assert await _included(pool, capture["snapshot_id"]) == [first["id"]]
+
+
+async def test_a_retry_builds_on_the_commit_its_failed_attempt_pushed(store, pool):
+    """A push recorded before a failed pull request reaches the retry's claim.
+
+    Reopening the failed snapshot would recapture it and lose that record; a
+    fresh epoch carries it as one of the platform's own pushes instead.
+    """
+    first, _sandbox = await _first_turn(store)
+    assert (await _request(store, first))["requested"] is True
+    capture = await store.snapshot.claim_due_sandbox_snapshot()
+    assert capture is not None
+    assert await _record(store, capture, _FIXED_PATCH) == "captured"
+    publication = await store.snapshot.claim_for_publish()
+    assert publication is not None
+    pushed = "9" * 40
+    assert await store.snapshot.record_snapshot_push(
+        snapshot_id=capture["snapshot_id"],
+        expected_publish_attempt_count=publication["publish_attempt_count"],
+        commit_sha=pushed,
+    )
+    await store.snapshot.fail_snapshot_publish(
+        snapshot_id=capture["snapshot_id"],
+        expected_publish_attempt_count=publication["publish_attempt_count"],
+        detail="GitHub rejected the draft PR (422): the head branch is invalid or unavailable",
+    )
+
+    assert (await _request(store, first))["requested"] is True
+    retry_capture = await store.snapshot.claim_due_sandbox_snapshot()
+    assert retry_capture is not None
+    assert await _record(store, retry_capture, _FIXED_PATCH) == "captured"
+    retry = await store.snapshot.claim_for_publish()
+    assert retry is not None and retry["snapshot_id"] == retry_capture["snapshot_id"]
+    assert retry["own_pushes"] == [pushed]
 
 
 async def test_a_later_snapshot_still_carrying_the_change_fails_and_is_superseded_too(store, pool):
@@ -263,6 +348,7 @@ async def test_a_later_snapshot_still_carrying_the_change_fails_and_is_supersede
     for prompt in (None, "rename the variable"):
         if prompt is not None:
             parent = await _next_turn(store, parent=parent, sandbox=sandbox, prompt=prompt)
+        assert (await _request(store, parent))["requested"] is True
         capture = await store.snapshot.claim_due_sandbox_snapshot()
         assert capture is not None and capture["anchor_job_id"] == parent["id"]
         await _fail(store, pool, "publish_rejected", capture)
@@ -270,6 +356,7 @@ async def test_a_later_snapshot_still_carrying_the_change_fails_and_is_supersede
         rejected.append(capture)
 
     third = await _next_turn(store, parent=parent, sandbox=sandbox, prompt="drop the workflow")
+    assert (await _request(store, third))["requested"] is True
     superseding = await store.snapshot.claim_due_sandbox_snapshot()
     assert superseding is not None and superseding["anchor_job_id"] == third["id"]
     assert await _record(store, superseding, _FIXED_PATCH) == "captured"
@@ -282,32 +369,38 @@ async def test_a_later_snapshot_still_carrying_the_change_fails_and_is_supersede
     assert (await _snapshot(pool, superseding["snapshot_id"]))["state"] == "published"
 
 
-async def test_a_turn_that_settled_before_the_failure_is_captured_next(store, pool):
-    """A pending later epoch is captured as soon as the earlier one fails.
+async def test_a_turn_that_settled_during_a_publication_waits_for_the_owner(store, pool):
+    """A turn settled while an earlier snapshot was publishing is published on request.
 
-    The later turn settled while the earlier snapshot was being published, so
-    no further turn is coming to return the group from ``dirty`` to
-    ``pending``; the capture of that later epoch does it.
+    While the earlier snapshot is on its way, a request returns it instead of
+    opening a second one. Once it fails, nothing is captured until the owner
+    asks again; that request takes the turn that settled meanwhile.
     """
     first, sandbox = await _first_turn(store)
+    assert (await _request(store, first))["requested"] is True
     earlier = await store.snapshot.claim_due_sandbox_snapshot()
     assert earlier is not None
     assert await _record(store, earlier, _REJECTED_PATCH) == "captured"
     second = await _next_turn(store, parent=first, sandbox=sandbox, prompt="drop the workflow")
-    assert await _group_state(pool, sandbox["sandbox_id"]) == "pending"
+    assert await _group_state(pool, sandbox["sandbox_id"]) == "quiescent"
+    in_flight = await _request(store, second)
+    assert in_flight == {
+        "snapshot_id": earlier["snapshot_id"],
+        "state": "captured",
+        "requested": False,
+    }
 
     publication = await store.snapshot.claim_for_publish()
     assert publication is not None and publication["snapshot_id"] == earlier["snapshot_id"]
-    assert await store.snapshot.claim_due_sandbox_snapshot() is None, (
-        "an earlier snapshot still on its way holds the later one back"
-    )
     await store.snapshot.fail_snapshot_publish(
         snapshot_id=earlier["snapshot_id"],
         expected_publish_attempt_count=publication["publish_attempt_count"],
         detail="patch rejected: .github/workflows/ci.yml changes workflows",
     )
     assert await _group_state(pool, sandbox["sandbox_id"]) == "dirty"
+    assert await store.snapshot.claim_due_sandbox_snapshot() is None
 
+    assert (await _request(store, second))["requested"] is True
     later = await store.snapshot.claim_due_sandbox_snapshot()
     assert later is not None and later["anchor_job_id"] == second["id"]
     assert later["workspace_epoch"] > earlier["workspace_epoch"]
@@ -324,6 +417,7 @@ async def test_a_turn_that_settled_before_the_failure_is_captured_next(store, po
 async def test_an_older_epoch_never_publishes_after_a_newer_one(store, pool):
     """In flight, an earlier epoch holds the later one back; failed, it stays failed."""
     first, sandbox = await _first_turn(store)
+    assert (await _request(store, first))["requested"] is True
     earlier = await store.snapshot.claim_due_sandbox_snapshot()
     assert earlier is not None
     assert await _record(store, earlier, _REJECTED_PATCH) == "captured"
@@ -337,6 +431,7 @@ async def test_an_older_epoch_never_publishes_after_a_newer_one(store, pool):
         expected_publish_attempt_count=publication["publish_attempt_count"],
         detail="GitHub refused the PR lookup (503)",
     )
+    assert (await _request(store, second))["requested"] is False
     async with pool.acquire() as conn:
         await conn.execute(
             "UPDATE agent_sandbox_snapshots SET retry_at = NOW() WHERE id = $1",
@@ -351,6 +446,7 @@ async def test_an_older_epoch_never_publishes_after_a_newer_one(store, pool):
         detail="patch rejected: .github/workflows/ci.yml changes workflows",
     )
 
+    assert (await _request(store, second))["requested"] is True
     later = await store.snapshot.claim_due_sandbox_snapshot()
     assert later is not None and later["anchor_job_id"] == second["id"]
     assert await _record(store, later, _FIXED_PATCH) == "captured"

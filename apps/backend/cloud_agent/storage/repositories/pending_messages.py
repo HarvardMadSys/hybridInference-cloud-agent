@@ -291,7 +291,19 @@ class PostgresPendingMessageRepository:
                              FROM agent_sandbox_snapshots snapshot
                              WHERE snapshot.sandbox_id = $1
                              ORDER BY snapshot.workspace_epoch DESC, snapshot.id DESC
-                             LIMIT 1) AS workspace_publication_state
+                             LIMIT 1) AS workspace_publication_state,
+                            -- A turn settled since the newest snapshot: the
+                            -- published pull request is behind the workspace.
+                            -- A Fork's copies of its source's turns do not count.
+                            EXISTS (SELECT 1 FROM agent_thread_sandbox_memberships member
+                                    JOIN agent_jobs settled
+                                      ON settled.id = member.last_settled_job_id
+                                    WHERE member.sandbox_id = $1
+                                      AND settled.fork_source_job_id IS NULL
+                                      AND NOT EXISTS (
+                                          SELECT 1 FROM agent_snapshot_jobs held
+                                          WHERE held.job_id = member.last_settled_job_id
+                                      )) AS has_unpublished_turn
                         """,
                         group["id"],
                     )
@@ -303,6 +315,8 @@ class PostgresPendingMessageRepository:
                         or current["workspace_publication_state"] != "published"
                     ):
                         return {"error": "conversation_changed"}
+                    if current["has_unpublished_turn"]:
+                        return {"error": "unpublished_changes"}
                     # Every group member is idle, this thread is fenced and the
                     # newest snapshot is published, so no publication of this
                     # group holds the parent: the helper can lock it under the

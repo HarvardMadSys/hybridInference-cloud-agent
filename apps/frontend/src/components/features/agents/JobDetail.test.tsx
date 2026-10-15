@@ -40,6 +40,7 @@ import {
   restoreAgentJob,
   renameAgentJob,
   pinAgentJob,
+  publishAgentThread,
   unpinAgentJob,
   streamAgentTerminal,
   writeAgentTerminalInput,
@@ -68,6 +69,7 @@ import {
 } from '@/lib/api/pendingMessages';
 
 import { APIError } from '@/lib/utils/errors';
+import { TEMPORARY_WORKSPACE } from '@/lib/temporaryWorkspace';
 import { useKeyboardShortcuts } from '@/components/features/settings/keyboardShortcutPreferences';
 import { DEFAULT_KEYBOARD_SHORTCUTS } from '@/lib/keyboardShortcuts';
 import { listThreadQuestions } from '@/lib/api/questions';
@@ -209,6 +211,7 @@ vi.mock('@/lib/api/agents', () => ({
   restoreAgentJob: vi.fn(),
   renameAgentJob: vi.fn(),
   pinAgentJob: vi.fn(),
+  publishAgentThread: vi.fn(),
   unpinAgentJob: vi.fn(),
   pauseAgentGoal: vi.fn(),
   setAgentGoal: vi.fn(),
@@ -3134,7 +3137,7 @@ describe('JobDetail', () => {
     inApp(makeJob({ state: 'done', prUrl }));
 
     expect(await screen.findByText('Your first draft PR is ready')).toBeInTheDocument();
-    expect(screen.getByText(/Reply below and the same PR is updated/)).toBeInTheDocument();
+    expect(screen.getByText(/Reply below, then Update PR/)).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Open draft PR' })).toHaveAttribute('href', prUrl);
     // Its milestones say what they mean, this once.
     expect(screen.getByRole('button', { name: 'Review' })).toBeInTheDocument();
@@ -3213,7 +3216,7 @@ describe('JobDetail', () => {
 
   it.each([
     ['publishing', 'Publishing changes…'],
-    ['failed', 'Could not publish changes'],
+    ['failed', 'Could not publish changes. Try again.'],
   ] as const)('preserves a %s publication status without a diff', (state, message) => {
     render(
       <JobDetail
@@ -3230,6 +3233,105 @@ describe('JobDetail', () => {
     expect(
       within(workspace).queryByRole('button', { name: 'View changes' }),
     ).not.toBeInTheDocument();
+  });
+
+  it('offers Create PR on a finished turn and publishes only when its owner asks', async () => {
+    vi.mocked(publishAgentThread).mockResolvedValue({
+      thread_id: 'thread_publish',
+      snapshot_id: 1,
+      state: 'pending',
+      requested: true,
+    });
+    const onReload = vi.fn();
+    render(
+      <JobDetail
+        job={makeJob({
+          state: 'done',
+          threadId: 'thread_publish',
+          workspaceUnpublishedChanges: true,
+        })}
+        userId="user-1"
+        onReload={onReload}
+      />,
+    );
+    const workspace = screen.getByRole('region', { name: 'Task progress' });
+    expect(within(workspace).getByText('Changes not in the PR yet.')).toBeVisible();
+    expect(
+      within(workspace).queryByRole('link', { name: 'Open draft PR' }),
+    ).not.toBeInTheDocument();
+    expect(publishAgentThread).not.toHaveBeenCalled();
+
+    fireEvent.click(within(workspace).getByRole('button', { name: 'Create PR' }));
+
+    await waitFor(() => expect(publishAgentThread).toHaveBeenCalledWith('thread_publish'));
+    await waitFor(() => expect(onReload).toHaveBeenCalledOnce());
+  });
+
+  it('updates the workspace’s existing PR from a later turn', () => {
+    const prUrl = 'https://github.com/owner/repository/pull/9';
+    render(
+      <JobDetail
+        job={makeJob({ state: 'done', workspacePrUrl: prUrl, workspaceUnpublishedChanges: true })}
+        userId="user-1"
+      />,
+    );
+    const workspace = screen.getByRole('region', { name: 'Task progress' });
+    expect(within(workspace).getByRole('button', { name: 'Update PR' })).toBeEnabled();
+    expect(within(workspace).getByRole('link', { name: 'Open draft PR' })).toHaveAttribute(
+      'href',
+      prUrl,
+    );
+    // The PR is behind the workspace, so watching it would watch old changes.
+    expect(within(workspace).getByRole('button', { name: 'Watch PR and merge' })).toBeDisabled();
+  });
+
+  it('shows a publication on its way instead of asking for another', () => {
+    render(
+      <JobDetail
+        job={makeJob({ state: 'done', workspacePublicationState: 'capturing' })}
+        userId="user-1"
+      />,
+    );
+    const workspace = screen.getByRole('region', { name: 'Task progress' });
+    expect(within(workspace).getByRole('button', { name: 'Create PR' })).toBeDisabled();
+    expect(within(workspace).getByText('Publishing changes…')).toBeVisible();
+  });
+
+  it('says when a publication found nothing to publish', () => {
+    render(
+      <JobDetail
+        job={makeJob({
+          state: 'done',
+          workspacePublicationState: 'published',
+          workspacePublicationUnchanged: true,
+        })}
+        userId="user-1"
+      />,
+    );
+    const workspace = screen.getByRole('region', { name: 'Task progress' });
+    expect(within(workspace).getByText('No changes to publish.')).toBeVisible();
+  });
+
+  it('shows why a publication request was refused', async () => {
+    vi.mocked(publishAgentThread).mockRejectedValue(
+      new APIError('workspace_busy', 'The workspace is busy. Try again in a moment.', 409),
+    );
+    render(<JobDetail job={makeJob({ state: 'done' })} userId="user-1" />);
+    const workspace = screen.getByRole('region', { name: 'Task progress' });
+
+    fireEvent.click(within(workspace).getByRole('button', { name: 'Create PR' }));
+
+    expect(await screen.findByText('The workspace is busy. Try again in a moment.')).toBeVisible();
+    expect(within(workspace).getByRole('button', { name: 'Create PR' })).toBeEnabled();
+  });
+
+  it('offers no publication for a running turn or a temporary workspace', () => {
+    const { rerender } = render(<JobDetail job={makeJob({ state: 'running' })} userId="user-1" />);
+    expect(screen.queryByRole('button', { name: 'Create PR' })).not.toBeInTheDocument();
+    rerender(
+      <JobDetail job={makeJob({ state: 'done', repo: TEMPORARY_WORKSPACE })} userId="user-1" />,
+    );
+    expect(screen.queryByRole('button', { name: 'Create PR' })).not.toBeInTheDocument();
   });
 
   it('requires a new chat only when context loss is confirmed', () => {

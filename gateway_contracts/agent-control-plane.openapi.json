@@ -5302,6 +5302,18 @@
             ],
             "title": "Workspace Epoch"
           },
+          "workspace_pr_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The pull request the workspace was last published to. Present once the owner has published; POST /threads/{thread_id}/publish updates it.",
+            "title": "Workspace Pr Url"
+          },
           "workspace_publication_state": {
             "anyOf": [
               {
@@ -5321,9 +5333,21 @@
             ],
             "title": "Workspace Publication State"
           },
+          "workspace_publication_unchanged": {
+            "default": false,
+            "description": "Whether the workspace's newest publication found nothing to publish, so it opened no pull request.",
+            "title": "Workspace Publication Unchanged",
+            "type": "boolean"
+          },
           "workspace_shared": {
             "default": false,
             "title": "Workspace Shared",
+            "type": "boolean"
+          },
+          "workspace_unpublished_changes": {
+            "default": false,
+            "description": "Whether the workspace holds turns its owner has not published, or its last publication failed. The platform publishes only on POST /threads/{thread_id}/publish.",
+            "title": "Workspace Unpublished Changes",
             "type": "boolean"
           }
         },
@@ -7202,6 +7226,42 @@
           "pinned"
         ],
         "title": "AgentThreadPinResponse",
+        "type": "object"
+      },
+      "AgentThreadPublicationResponse": {
+        "description": "The workspace snapshot an owner's publication request opened or found.",
+        "properties": {
+          "requested": {
+            "description": "True when this request opened the snapshot; false when a publication of the workspace was already on its way and is returned instead.",
+            "title": "Requested",
+            "type": "boolean"
+          },
+          "snapshot_id": {
+            "title": "Snapshot Id",
+            "type": "integer"
+          },
+          "state": {
+            "enum": [
+              "pending",
+              "capturing",
+              "captured",
+              "publishing"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "thread_id": {
+            "title": "Thread Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "thread_id",
+          "snapshot_id",
+          "state",
+          "requested"
+        ],
+        "title": "AgentThreadPublicationResponse",
         "type": "object"
       },
       "AgentThreadQuestionsResponse": {
@@ -34158,7 +34218,7 @@
         "summary": "Get Thread Queue"
       },
       "post": {
-        "description": "Send a message: the next turn now if nothing is running, otherwise queued.\n\nEvery message goes through here. It is checked against the conversation's\nnewest turn — the same checks a follow-up always passed — and put at the end\nof the thread's queue; the queue is then settled, which on an idle\nconversation makes it the next turn before this returns (``job``). With a\nturn running it waits (``pending``) and is sent, in order, when that turn\nends. Sending on an idle conversation whose queue was paused is the owner\ncontinuing: older waiting messages go first.\n\nAn ``Idempotency-Key`` names this one submission. A resend answers with what\nthe first send made — the turn if it has become one, the waiting message if\nnot — and the same key under different content is a 409\n``idempotency_conflict``.\n\n``require_idle`` binds a fresh action to ``expected_latest_job_id`` and\nrefuses it with ``conversation_changed`` if any chat sharing the workspace\nhas a live turn or waiting message, a Fork is active, or the workspace is\nunpublished at the locked write. An accepted idle-only action creates its\nturn in that same transaction without entering the pending queue.",
+        "description": "Send a message: the next turn now if nothing is running, otherwise queued.\n\nEvery message goes through here. It is checked against the conversation's\nnewest turn — the same checks a follow-up always passed — and put at the end\nof the thread's queue; the queue is then settled, which on an idle\nconversation makes it the next turn before this returns (``job``). With a\nturn running it waits (``pending``) and is sent, in order, when that turn\nends. Sending on an idle conversation whose queue was paused is the owner\ncontinuing: older waiting messages go first.\n\nAn ``Idempotency-Key`` names this one submission. A resend answers with what\nthe first send made — the turn if it has become one, the waiting message if\nnot — and the same key under different content is a 409\n``idempotency_conflict``.\n\n``require_idle`` binds a fresh action to ``expected_latest_job_id`` and\nrefuses it with ``conversation_changed`` if any chat sharing the workspace\nhas a live turn or waiting message, a Fork is active, or a publication is\nunfinished at the locked write, and with ``unpublished_changes`` if a turn\nsettled since the workspace was last published. An accepted idle-only\naction creates its turn in that same transaction without entering the\npending queue.",
         "operationId": "submit_thread_message_v1_agent_threads__thread_id__messages_post",
         "parameters": [
           {
@@ -34460,6 +34520,62 @@
           }
         },
         "summary": "Send Pending Message Now"
+      }
+    },
+    "/v1/agent/threads/{thread_id}/publish": {
+      "post": {
+        "description": "Push the conversation's workspace to its branch and open or update its draft PR.\n\nThe platform never publishes on its own: a finished turn stays in the\nworkspace until its owner asks. This opens the workspace's next snapshot\nand returns at once; capture, the secret scan, the push and the draft PR\nfollow as the job's ``workspace_publication_state``. Every conversation\nsharing the workspace is published together, to its origin's branch. A\npublication already on its way is returned instead of a second one.",
+        "operationId": "publish_agent_thread_v1_agent_threads__thread_id__publish_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "thread_id",
+            "required": true,
+            "schema": {
+              "title": "Thread Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentThreadPublicationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Publish Agent Thread"
       }
     },
     "/v1/agent/threads/{thread_id}/questions": {

@@ -313,8 +313,18 @@ export const en = {
   'watchPr.start':
     'Ask the agent to watch tests and reviews, then merge. Requires source-control tools with merge access.',
   'watchPr.unavailable':
-    'This chat must be able to continue and its latest changes must finish publishing before starting a PR watch.',
+    'This chat must be able to continue, and its latest changes must be in the PR, before starting a PR watch.',
   'watchPr.sendFailed': 'Could not start watching this PR.',
+  'publish.create': 'Create PR',
+  'publish.update': 'Update PR',
+  'publish.createHint': 'Push this workspace to an agent/… branch and open a draft PR.',
+  'publish.updateHint': 'Push the workspace’s latest changes to its draft PR.',
+  'publish.unavailable': 'Available once the running turn finishes.',
+  'publish.inProgress': 'Publishing changes…',
+  'publish.failed': 'Could not publish changes. Try again.',
+  'publish.unchanged': 'No changes to publish.',
+  'publish.unpublished': 'Changes not in the PR yet.',
+  'publish.sendFailed': 'Could not publish this workspace.',
   'sideChat.new': 'New Side Chat',
   'sideChat.close': 'Close {name}',
   'sideChat.region': 'Side chat',
@@ -1096,7 +1106,7 @@ export const en = {
   'firstRun.publishing': 'Pushing the changes to an agent/… branch and opening a draft PR.',
   'firstRun.doneTitle': 'Your first draft PR is ready',
   'firstRun.doneBody':
-    'Review it on GitHub; merging is up to you. Want changes? Reply below and the same PR is updated.',
+    'Review it on GitHub; merging is up to you. Want changes? Reply below, then Update PR.',
 
   // ── Pending message queue ───────────────────────────────────────────────
   'queue.region': 'Queued messages',

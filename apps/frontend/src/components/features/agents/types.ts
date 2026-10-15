@@ -390,6 +390,12 @@ export interface AgentJob {
     | 'publishing'
     | 'published'
     | 'failed';
+  /** The newest publication found nothing to publish and opened no PR. */
+  workspacePublicationUnchanged?: boolean;
+  /** The pull request the conversation's workspace was last published to. */
+  workspacePrUrl?: string;
+  /** The workspace holds turns not yet published, or its last publication failed. */
+  workspaceUnpublishedChanges?: boolean;
   workspaceEpoch?: number;
   /** Wall time of the turn's newest attempt (legacy/default view). */
   durationMs?: number;

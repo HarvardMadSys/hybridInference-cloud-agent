@@ -6,8 +6,8 @@ agent. Read this first.
 ## 1. What this is
 
 Cloud Agent runs coding agents (Claude Code, Codex, pi, OpenCode, Kilo) in
-sandboxed containers against a user's repository and publishes results as pull
-requests.
+sandboxed containers against a user's repository and, when the owner asks,
+publishes results as pull requests.
 
 The extraction from the HybridInference monorepo
 (`HarvardMadSys/hybridInference`) is complete: production cut over on

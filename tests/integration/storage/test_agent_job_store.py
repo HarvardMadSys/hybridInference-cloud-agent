@@ -182,6 +182,19 @@ async def test_bounded_event_stays_bounded_in_postgres_and_marks_the_assistant_m
     assert content.endswith("[Content truncated: event payload exceeded 256 KiB.]")
 
 
+async def _request_publication(store: Storage, job: dict) -> int:
+    """Ask for the workspace's publication, as its owner's button does.
+
+    A turn boundary publishes nothing, so a test of capture or publication
+    starts the way the product does: the owner asks once the turn is over.
+    """
+    requested = await store.snapshot.request_snapshot_publication(
+        thread_id=job["thread_id"], user_id=job["user_id"]
+    )
+    assert requested.get("requested") is True, requested
+    return int(requested["snapshot_id"])
+
+
 async def _settled(pool, store: Storage, job_id: str) -> None:
     """Stand in for the runner's settlement: a success carries its native ordinal.
 
@@ -659,7 +672,9 @@ async def test_shared_workspace_snapshot_publishes_without_rewriting_turn_state(
         base_sha=job["base_sha"],
     )
     assert settled is not None
-    assert settled["workspace_publication_state"] == "pending"
+    # The turn boundary publishes nothing; the owner has something to publish.
+    assert settled["workspace_publication_state"] is None
+    assert settled["workspace_unpublished_changes"] is True
     assert await store.attempt_commands.transition(
         job_id=job["id"],
         attempt_id=claim["attempt_id"],
@@ -667,6 +682,11 @@ async def test_shared_workspace_snapshot_publishes_without_rewriting_turn_state(
         from_states=("running",),
         to_state="succeeded",
     )
+    await _request_publication(store, job)
+    requested = await store.sandbox.thread_sandbox(thread_id=job["thread_id"])
+    assert requested is not None
+    assert requested["workspace_publication_state"] == "pending"
+    assert requested["workspace_unpublished_changes"] is False
 
     capture = await store.snapshot.claim_due_sandbox_snapshot()
     assert capture is not None
@@ -727,6 +747,9 @@ async def test_shared_workspace_snapshot_publishes_without_rewriting_turn_state(
     final_sandbox = await store.sandbox.thread_sandbox(thread_id=job["thread_id"])
     assert final_sandbox is not None
     assert final_sandbox["workspace_publication_state"] == "published"
+    assert final_sandbox["workspace_pr_url"] == "https://example.test/pull/1"
+    assert final_sandbox["workspace_publication_unchanged"] is False
+    assert final_sandbox["workspace_unpublished_changes"] is False
     async with pool.acquire() as conn:
         group = await conn.fetchrow(
             "SELECT published_base_sha, snapshot_state FROM agent_sandboxes WHERE id = $1",
@@ -799,6 +822,7 @@ async def test_snapshot_publication_uses_latest_current_attempt_replies_from_inc
     parent_summary = "Fixed retry handling. " + "Result details. " * 400
     await settle(parent, parent_claim, sandbox, ["Investigating retry behavior.", parent_summary])
     if publish_parent:
+        await _request_publication(store, parent)
         prior_capture = await store.snapshot.claim_due_sandbox_snapshot()
         assert prior_capture is not None
         prior_patch = "diff --git a/retry.py b/retry.py\n"
@@ -851,6 +875,8 @@ async def test_snapshot_publication_uses_latest_current_attempt_replies_from_inc
     assert child_sandbox is not None
     child_summary = "Documented the retry behavior."
     await settle(child, child_claim, child_sandbox, ["Reading the docs.", child_summary])
+    # One request publishes every turn settled since the last publication.
+    await _request_publication(store, child)
 
     capture = await store.snapshot.claim_due_sandbox_snapshot()
     assert capture is not None
@@ -992,6 +1018,8 @@ async def test_idle_stopped_shared_workspace_snapshot_remains_claimable(
             "UPDATE agent_sandboxes SET state = 'stopped', idle_deadline = NULL WHERE id = $1",
             sandbox["sandbox_id"],
         )
+    # The owner publishes after the container went idle.
+    await _request_publication(store, job)
 
     capture = await store.snapshot.claim_due_sandbox_snapshot()
 
@@ -1025,6 +1053,8 @@ async def test_idle_stopped_shared_workspace_snapshot_remains_claimable(
     assert durable is not None
     assert durable["state"] == "running"
     assert durable["workspace_publication_state"] == "published"
+    assert durable["workspace_publication_unchanged"] is True
+    assert durable["workspace_pr_url"] is None
     assert durable["idle_deadline"] is not None
 
 
@@ -1065,6 +1095,7 @@ async def test_stale_shared_snapshot_receipt_cannot_mutate_a_replacement_contain
         from_states=("running",),
         to_state="succeeded",
     )
+    await _request_publication(store, job)
     capture = await store.snapshot.claim_due_sandbox_snapshot()
     assert capture is not None
 
@@ -1171,6 +1202,7 @@ async def test_shared_snapshot_failure_rearms_the_group_idle_deadline(
         from_states=("running",),
         to_state="succeeded",
     )
+    await _request_publication(store, job)
     capture = await store.snapshot.claim_due_sandbox_snapshot()
     assert capture is not None
 
@@ -1326,6 +1358,7 @@ async def test_reaped_fork_does_not_poison_the_surviving_member_manifest(
         assert observed is not None
         expected_members = {job["thread_id"]}
     else:
+        await _request_publication(store, job)
         observed = await store.snapshot.claim_due_sandbox_snapshot()
         assert observed is not None
         if next_action in {"publish", "base_import"}:
@@ -4904,6 +4937,8 @@ async def test_expired_shared_finalization_preserves_context_and_snapshot_progre
     assert durable["admitted_job_id"] is None
     assert durable["idle_deadline"] is not None
     assert (await store.conversation_queries.get_job(child["id"]))["state"] == "queued"
+    # The owner can still publish the settled turn; the queued one does not wait.
+    await _request_publication(store, job)
     capture = await store.snapshot.claim_due_sandbox_snapshot()
     assert capture is not None
     assert capture["anchor_job_id"] == job["id"]
@@ -6821,6 +6856,7 @@ async def test_deleting_an_idle_shared_session_keeps_workspace_sibling_and_billi
         from_states=("running",),
         to_state="succeeded",
     )
+    await _request_publication(store, source)
     await store.conversation_commands.set_thread_archived(
         job_id=source["id"], user_id="user-1", archived=True
     )

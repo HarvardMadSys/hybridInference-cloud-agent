@@ -28,6 +28,7 @@ import {
   listAgentConversations,
   listAgentTerminals,
   pauseAgentGoal,
+  publishAgentThread,
   pinAgentJob,
   renameAgentJob,
   resizeAgentTerminal,
@@ -1165,6 +1166,17 @@ describe('agents api', () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ goal: { objective: 'ship it', max_rounds: 3 }, revision: 4 }),
       },
+    );
+  });
+
+  it('publishes a conversation’s workspace only on its owner’s request', async () => {
+    const opened = { thread_id: 'thread-1', snapshot_id: 4, state: 'pending', requested: true };
+    fetchWithAuth.mockResolvedValue(jsonResponse(opened));
+    await expect(publishAgentThread('thread/1')).resolves.toEqual(opened);
+    expect(fetchWithAuth).toHaveBeenLastCalledWith(
+      expect.any(String),
+      '/v1/agent/threads/thread%2F1/publish',
+      { method: 'POST' },
     );
   });
 

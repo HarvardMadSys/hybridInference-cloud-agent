@@ -1,7 +1,8 @@
 """The publish step: immutable group snapshot → branch → draft PR.
 
 This is the last hop of the chain and the one that produces the visible
-product outcome. It runs **in the gateway**, never in the sandbox, for one
+product outcome. It runs only for a snapshot the workspace's owner asked for
+(``request_snapshot_publication``): a turn boundary publishes nothing. It runs **in the gateway**, never in the sandbox, for one
 reason: it is the only component that holds a GitHub credential. The agent
 hands over a patch and nothing else, which is what lets the sandbox stay
 credential-free.
@@ -24,10 +25,10 @@ Order of operations is load-bearing:
 
 A rejected patch fails the snapshot and marks its group dirty without
 rewriting successful Agent turns. It is not retried: a retry loop would either
-spam the repository or bury the rejection. The group's next settled turn is
-captured and published in its place. Every capture is the whole diff from the
-published base, so that one carries the rejected changes too, and is refused
-again if it still holds them.
+spam the repository or bury the rejection. The owner's next publication
+request captures the workspace again in its place. Every capture is the whole
+diff from the published base, so that one carries the rejected changes too, and
+is refused again if it still holds them.
 
 A transient credential, git, or PR failure does not. The branch name and the
 PR lookup are idempotent, so the snapshot returns to ``captured`` until its

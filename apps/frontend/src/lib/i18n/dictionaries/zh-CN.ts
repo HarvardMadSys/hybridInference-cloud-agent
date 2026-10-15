@@ -293,8 +293,18 @@ export const zhCN: Record<TranslationKey, string> = {
   'review.fixHint': '让此审查 Agent 在共享工作区中修复发现的问题',
   'watchPr.action': '关注 PR 并合并',
   'watchPr.start': '让 Agent 关注测试和审查，通过后合并。需要具有合并权限的代码托管工具。',
-  'watchPr.unavailable': '此会话必须能够继续，且最新改动已完成发布，才能开始关注 PR。',
+  'watchPr.unavailable': '此会话必须能够继续，且最新改动已经推到 PR 上，才能开始关注 PR。',
   'watchPr.sendFailed': '无法开始关注此 PR。',
+  'publish.create': '创建 PR',
+  'publish.update': '更新 PR',
+  'publish.createHint': '把这个工作区推到 agent/… 分支，开一个草稿 PR。',
+  'publish.updateHint': '把工作区最新的改动推到它的草稿 PR。',
+  'publish.unavailable': '当前轮次结束后才能推送。',
+  'publish.inProgress': '正在推送改动…',
+  'publish.failed': '推送失败，请重试。',
+  'publish.unchanged': '没有需要推送的改动。',
+  'publish.unpublished': '有改动还没推到 PR。',
+  'publish.sendFailed': '无法推送这个工作区。',
   'sideChat.new': '新建侧聊',
   'sideChat.close': '关闭{name}',
   'sideChat.region': '侧聊',
@@ -1023,7 +1033,7 @@ export const zhCN: Record<TranslationKey, string> = {
   'firstRun.publishing': '把改动推到 agent/… 分支，开一个草稿 PR。',
   'firstRun.doneTitle': '第一个 draft PR 开好了',
   'firstRun.doneBody':
-    '在 GitHub 上审阅，合不合并由你决定。想再改，直接在下面回复，会更新同一个 PR。',
+    '在 GitHub 上审阅，合不合并由你决定。想再改，在下面回复，然后点「更新 PR」。',
 
   // ── Pending message queue ───────────────────────────────────────────────
   'queue.region': '待发送消息',
