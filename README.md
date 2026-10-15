@@ -4,6 +4,8 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![Python 3.12 | 3.13](https://img.shields.io/badge/python-3.12%20%7C%203.13-blue.svg)
 
+[Join Slack](https://join.slack.com/t/hybridinference/shared_invite/zt-4a6csrbu8-JgrTHo_CgcK6G0FnejGwfw)
+
 Self-hosted coding agents that work on your repositories in isolated, retained
 sandboxes.
 
