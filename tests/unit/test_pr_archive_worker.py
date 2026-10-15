@@ -232,6 +232,15 @@ async def test_missing_access_blocks_only_after_configured_failures(status):
     assert repository.rescheduled[0]["terminal"] is True
 
 
+async def test_a_check_skipped_for_access_is_tried_again_after_six_hours():
+    repository = _Repository([{**_CLAIM, "failures": 9}])
+    await _poll(repository, lambda request: httpx.Response(404))
+    assert repository.rescheduled[0]["terminal"] is True
+    assert repository.rescheduled[0]["delay_s"] == 6 * 3600
+    # Ten failures to skip it, then 56 more tries: about two weeks.
+    assert repository.claim_calls[0]["access_recovery_failures"] == 10 + 56
+
+
 @pytest.mark.parametrize("status", [429, 403, 503])
 async def test_provider_retry_after_is_honored_even_above_local_cap(status):
     repository = _Repository([{**_CLAIM, "failures": 100}])

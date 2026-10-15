@@ -123,7 +123,12 @@ consume a completed receipt; checks can resume after configuration is repaired.
 
 Invalid mappings or mismatched API identities block the affected association.
 Repeated access or invalid-response errors also become terminal skipped rows
-after the configured threshold. Logs record safe reason codes, without provider
+after the configured threshold. A row skipped because GitHub denied access
+(401, 403 or 404) is checked again every six hours, 56 times, about two weeks:
+a repaired installation resumes archiving without operator SQL, and a PR or
+repository that is gone stops costing requests. GitHub answers 404 for both,
+so the two cannot be told apart sooner. Other skipped rows stay skipped until
+an operator retries them. Logs record safe reason codes, without provider
 response bodies, credentials or session content. Failure of one check does not
 discard other sessions' obligations.
 

@@ -44,7 +44,11 @@ class PostgresPrArchiveRepository:
         self._pool = pool
 
     async def claim_pr_archive_checks(
-        self, *, limit: int = 50, lease_seconds: float = 120.0
+        self,
+        *,
+        limit: int = 50,
+        lease_seconds: float = 120.0,
+        access_recovery_failures: int = 0,
     ) -> list[dict[str, Any]]:
         """Claim due checks for live sessions whose latest turn was published.
 
@@ -53,9 +57,10 @@ class PostgresPrArchiveRepository:
         job_id, user_id, repo, pr_url,
         claim_token and failures. Expired claims can be claimed again, and a
         completed session/PR pair is never reseeded after a manual restore.
-        A skipped check whose last error was a recoverable access failure
-        is reclaimed so the worker can revalidate authorization and the
-        still-current publication after an installation is repaired.
+        A check skipped because GitHub denied access is claimed again once
+        due while its failures stay below ``access_recovery_failures``, so a
+        repaired installation resumes it and one that never recovers stops.
+        0 never claims a skipped check.
         """
         if limit < 1:
             return []
@@ -104,7 +109,8 @@ class PostgresPrArchiveRepository:
                 ) j ON TRUE
                 WHERE (checks.state = 'pending'
                    OR (checks.state = 'skipped'
-                       AND checks.last_error = 'github_access_denied'))
+                       AND checks.last_error = 'github_access_denied'
+                       AND checks.failures < $2))
                   AND checks.next_check_at <= NOW()
                   AND (checks.lease_expires_at IS NULL
                        OR checks.lease_expires_at <= clock_timestamp())
@@ -119,6 +125,7 @@ class PostgresPrArchiveRepository:
                 FOR UPDATE OF checks SKIP LOCKED
                 """,
                 limit,
+                access_recovery_failures,
             )
             for row in rows:
                 token = secrets.token_urlsafe(24)

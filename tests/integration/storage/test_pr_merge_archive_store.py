@@ -124,6 +124,30 @@ async def _release(store, check, **overrides):
     return await store.pr_archive.reschedule_pr_archive_check(**params)
 
 
+# What the worker passes with the default settings: a check is skipped after
+# ten failures, then tried again 56 times.
+ACCESS_RECOVERY_FAILURES = 10 + 56
+
+
+async def _skip_for_access(pool, store, *, error_code="github_access_denied"):
+    """Fail the only check until it is skipped; return its last claim."""
+    check = (await store.pr_archive.claim_pr_archive_checks())[0]
+    for attempt in range(10):
+        await _release(store, check, error_code=error_code, terminal=attempt == 9)
+        async with pool.acquire() as conn:
+            await conn.execute("UPDATE agent_pr_archive_checks SET next_check_at = NOW()")
+        if attempt < 9:
+            check = (await store.pr_archive.claim_pr_archive_checks())[0]
+    return check
+
+
+async def _recover(store):
+    """Claim as the worker does, skipped access failures included."""
+    return await store.pr_archive.claim_pr_archive_checks(
+        access_recovery_failures=ACCESS_RECOVERY_FAILURES
+    )
+
+
 async def test_merge_archives_only_associated_sessions_and_records_durable_receipt(pool, store):
     first = await _published_job(pool, store)
     second = await _published_job(pool, store)
@@ -300,20 +324,7 @@ async def test_access_recovery_resumes_a_terminal_skipped_check(pool, store):
     publication, PR identity, merge state and archival fencing as usual.
     """
     await _published_job(pool, store)
-    first = (await store.pr_archive.claim_pr_archive_checks())[0]
-    for attempt in range(10):
-        await _release(
-            store,
-            first,
-            delay_s=0,
-            error_code="github_access_denied",
-            terminal=attempt == 9,
-        )
-        async with pool.acquire() as conn:
-            await conn.execute("UPDATE agent_pr_archive_checks SET next_check_at = NOW()")
-        if attempt == 9:
-            break
-        first = (await store.pr_archive.claim_pr_archive_checks())[0]
+    await _skip_for_access(pool, store)
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT state, failures, completed_at FROM agent_pr_archive_checks"
@@ -323,7 +334,7 @@ async def test_access_recovery_resumes_a_terminal_skipped_check(pool, store):
 
     # Simulate the repaired installation: the next poll must reclaim and then
     # verify the still-current published PR before archiving it.
-    recovered = (await store.pr_archive.claim_pr_archive_checks())[0]
+    recovered = (await _recover(store))[0]
     assert await _finish(store, recovered) is not None
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -332,6 +343,32 @@ async def test_access_recovery_resumes_a_terminal_skipped_check(pool, store):
         assert row["state"] == "archived"
         assert row["completed_at"] is not None
         assert await conn.fetchval("SELECT archived_at FROM agent_threads") is not None
+
+
+async def test_access_recovery_stops_once_its_attempts_are_spent(pool, store):
+    """A PR or repository that is gone keeps answering 404: stop asking."""
+    await _published_job(pool, store)
+    await _skip_for_access(pool, store)
+    # Only a caller that asks for recovery gets the skipped check.
+    assert await store.pr_archive.claim_pr_archive_checks() == []
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_pr_archive_checks SET failures = $1", ACCESS_RECOVERY_FAILURES - 1
+        )
+    last = (await _recover(store))[0]
+    await _release(store, last, error_code="github_access_denied", terminal=True)
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE agent_pr_archive_checks SET next_check_at = NOW()")
+        row = await conn.fetchrow("SELECT state, failures FROM agent_pr_archive_checks")
+    assert dict(row) == {"state": "skipped", "failures": ACCESS_RECOVERY_FAILURES}
+    assert await _recover(store) == []
+
+
+async def test_only_an_access_failure_is_recovered(pool, store):
+    """A mismatched PR identity is final; a repaired installation cannot fix it."""
+    await _published_job(pool, store)
+    await _skip_for_access(pool, store, error_code="pr_identity_mismatch")
+    assert await _recover(store) == []
 
 
 async def test_merge_goal_pause_and_receipt_roll_back_if_event_write_fails(
@@ -539,23 +576,9 @@ async def test_github_poll_archives_real_session_and_restore_is_not_reprocessed(
 async def test_concurrent_recovery_workers_claim_exactly_once(pool, store):
     """Two workers racing a recovered access-denied check get one live claim."""
     await _published_job(pool, store)
-    first = (await store.pr_archive.claim_pr_archive_checks())[0]
-    for attempt in range(10):
-        await _release(
-            store, first, delay_s=0, error_code="github_access_denied", terminal=attempt == 9
-        )
-        async with pool.acquire() as conn:
-            await conn.execute("UPDATE agent_pr_archive_checks SET next_check_at = NOW()")
-        if attempt == 9:
-            break
-        first = (await store.pr_archive.claim_pr_archive_checks())[0]
+    first = await _skip_for_access(pool, store)
 
-    import asyncio
-
-    results = await asyncio.gather(
-        store.pr_archive.claim_pr_archive_checks(),
-        store.pr_archive.claim_pr_archive_checks(),
-    )
+    results = await asyncio.gather(_recover(store), _recover(store))
     claimed = [check for batch in results for check in batch]
     assert len(claimed) == 1
     assert claimed[0]["claim_token"] != first["claim_token"]
@@ -564,18 +587,9 @@ async def test_concurrent_recovery_workers_claim_exactly_once(pool, store):
 async def test_stale_lease_after_recovery_cannot_archive_or_reschedule(pool, store):
     """A stale claim token after lease expiry cannot mutate the recovered row."""
     await _published_job(pool, store)
-    first = (await store.pr_archive.claim_pr_archive_checks())[0]
-    for attempt in range(10):
-        await _release(
-            store, first, delay_s=0, error_code="github_access_denied", terminal=attempt == 9
-        )
-        async with pool.acquire() as conn:
-            await conn.execute("UPDATE agent_pr_archive_checks SET next_check_at = NOW()")
-        if attempt == 9:
-            break
-        first = (await store.pr_archive.claim_pr_archive_checks())[0]
+    await _skip_for_access(pool, store)
 
-    recovered = (await store.pr_archive.claim_pr_archive_checks())[0]
+    recovered = (await _recover(store))[0]
     async with pool.acquire() as conn:
         await conn.execute(
             "UPDATE agent_pr_archive_checks SET lease_expires_at = NOW() - interval '1 second' "
@@ -590,18 +604,9 @@ async def test_stale_lease_after_recovery_cannot_archive_or_reschedule(pool, sto
 async def test_new_turn_after_recovery_blocks_archival(pool, store):
     """A newer unpublished turn prevents a recovered merged PR from archiving."""
     job = await _published_job(pool, store, retain=True)
-    first = (await store.pr_archive.claim_pr_archive_checks())[0]
-    for attempt in range(10):
-        await _release(
-            store, first, delay_s=0, error_code="github_access_denied", terminal=attempt == 9
-        )
-        async with pool.acquire() as conn:
-            await conn.execute("UPDATE agent_pr_archive_checks SET next_check_at = NOW()")
-        if attempt == 9:
-            break
-        first = (await store.pr_archive.claim_pr_archive_checks())[0]
+    await _skip_for_access(pool, store)
 
-    recovered = (await store.pr_archive.claim_pr_archive_checks())[0]
+    recovered = (await _recover(store))[0]
     newer = await store.conversation_commands.create_follow_up(
         parent_job_id=job["id"], user_id=job["user_id"], prompt="Start the next change"
     )

@@ -12,7 +12,11 @@ class PrArchiveRepository(Protocol):
     """Claim merge checks and commit their fenced archival receipts."""
 
     async def claim_pr_archive_checks(
-        self, *, limit: int = 50, lease_seconds: float = 120.0
+        self,
+        *,
+        limit: int = 50,
+        lease_seconds: float = 120.0,
+        access_recovery_failures: int = 0,
     ) -> list[dict[str, Any]]:
         """Claim due checks for live sessions whose latest turn was published.
 
@@ -21,6 +25,9 @@ class PrArchiveRepository(Protocol):
         job_id, user_id, repo, pr_url,
         claim_token and failures. Expired claims can be claimed again, and a
         completed session/PR pair is never reseeded after a manual restore.
+        A check skipped because GitHub denied access is claimed again once
+        due while its failures stay below ``access_recovery_failures``; 0
+        never claims a skipped check.
         """
         ...
 
