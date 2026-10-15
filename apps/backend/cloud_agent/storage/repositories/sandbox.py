@@ -327,7 +327,14 @@ class PostgresSandboxRepository:
     async def claim_due_admin_sandbox_deletion(
         self, *, ttl_seconds: float
     ) -> dict[str, Any] | None:
-        """Lease one pending or archive-verified deletion without duplicate workers."""
+        """Lease one pending or archive-verified deletion without duplicate workers.
+
+        Requests are served in the order they became due, not the order they
+        were made. A failed attempt is due again a minute later; ordered by
+        request time, two older requests that each take that long to fail
+        would always be due ahead of a newer one, which would then wait
+        forever without an attempt or an error of its own.
+        """
         if ttl_seconds <= 0:
             raise ValueError("deletion claim TTL must be positive")
         async with self._pool.acquire() as conn, conn.transaction():
@@ -341,7 +348,7 @@ class PostgresSandboxRepository:
                       AND last_activity_at = deletion_last_activity_at
                       AND (deletion_retry_at IS NULL OR deletion_retry_at <= NOW())
                       AND (deletion_claim_expires_at IS NULL OR deletion_claim_expires_at <= clock_timestamp())
-                    ORDER BY deletion_requested_at, id
+                    ORDER BY deletion_retry_at, deletion_requested_at, id
                     FOR UPDATE SKIP LOCKED LIMIT 1
                 )
                 UPDATE agent_sandboxes g

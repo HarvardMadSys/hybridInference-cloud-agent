@@ -669,6 +669,11 @@ Chat history and the lifecycle audit remain. There is no S3 object to restore
 from. An archive deletion that is already pending or verified is left unchanged;
 wait for it to finish or fail before choosing this action.
 
+One deletion worker handles requests one at a time, in the order they became
+due. A failed attempt shows its error and is retried a minute later, behind any
+request already waiting. Requests whose hosts keep timing out therefore delay a
+newer request by one attempt each at most, instead of holding it back forever.
+
 **Sandboxes of deleted chats are removed automatically.** When an owner
 permanently deletes the last chat in a sandbox, the deletion worker asks the
 owning host to stop it, then queues its deletion through the same two paths:
