@@ -272,6 +272,31 @@ async def test_a_group_state_lists_every_members_usable_servers_at_a_new_revisio
     assert all(member["servers"] == [] for member in emptied["members"])
 
 
+async def test_a_deleted_chat_no_longer_opens_its_servers_to_the_group(store, pool):
+    gpu = await _server(store)
+    origin = await _chat(store, ssh_server_ids=[gpu["id"]])
+    fork = await _chat(store)
+    await _group(pool, [(origin, 0), (fork, 1)])
+    # The owner deletes the chat that had gpu on; a failed Fork's placeholder
+    # is tombstoned the same way. Neither runs again, and neither can be
+    # switched off any more: the bindings routes no longer find the chat.
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_threads SET deleted_at = NOW() WHERE id = $1", origin["thread_id"]
+        )
+    assert (
+        await store.ssh_servers.list_thread_ssh_bindings(
+            user_id="alice", thread_id=origin["thread_id"]
+        )
+        is None
+    )
+
+    state = await store.ssh_servers.ssh_group_state(thread_id=fork["thread_id"])
+
+    assert state is not None, "the group is still told, so the host closes what was open"
+    assert all(member["servers"] == [] for member in state["members"])
+
+
 async def test_a_change_reaches_the_running_groups_of_its_chats_and_servers(store, pool):
     gpu = await _server(store)
     origin = await _chat(store, ssh_server_ids=[gpu["id"]])

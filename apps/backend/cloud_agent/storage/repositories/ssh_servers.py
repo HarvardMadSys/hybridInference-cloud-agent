@@ -386,6 +386,7 @@ class PostgresSshServerRepository:
             rows = await conn.fetch(
                 f"""
                 SELECT b.thread_id AS binding_thread_id, b.enabled AS binding_enabled,
+                       t.deleted_at AS thread_deleted_at,
                        {", ".join(f"s.{column.strip()}" for column in _COLUMNS.split(","))}
                 FROM agent_ssh_thread_bindings b
                 JOIN agent_threads t ON t.id = b.thread_id
@@ -399,8 +400,12 @@ class PostgresSshServerRepository:
             return None
         servers: dict[str, list[dict[str, Any]]] = {member: [] for member in slots}
         for row in rows:
+            # A deleted chat, or a failed Fork's placeholder tombstoned like
+            # one, keeps its membership and bindings but never runs again, and
+            # its owner can no longer switch them off: it opens nothing.
             if (
                 row["binding_enabled"]
+                and row["thread_deleted_at"] is None
                 and row["status"] == "ready"
                 and row["archived_at"] is None
                 and row["private_key_ciphertext"] is not None
