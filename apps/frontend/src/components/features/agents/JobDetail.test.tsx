@@ -7,6 +7,7 @@ import {
   createEvent,
   fireEvent,
   render,
+  renderHook,
   screen,
   waitFor,
   within,
@@ -67,6 +68,8 @@ import {
 } from '@/lib/api/pendingMessages';
 
 import { APIError } from '@/lib/utils/errors';
+import { useKeyboardShortcuts } from '@/components/features/settings/keyboardShortcutPreferences';
+import { DEFAULT_KEYBOARD_SHORTCUTS } from '@/lib/keyboardShortcuts';
 import { listThreadQuestions } from '@/lib/api/questions';
 import { rewritePrompt } from '@/lib/api/promptRewrite';
 
@@ -4566,6 +4569,31 @@ describe('JobDetail', () => {
 
     openWorkspace();
     expect(screen.getByRole('tab', { name: 'Terminal' })).toHaveAttribute('aria-selected', 'true');
+  });
+
+  it('updates the workspace shortcut and hint live and can disable the chord', () => {
+    const userId = 'workspace-shortcuts-user';
+    const settings = renderHook(() => useKeyboardShortcuts(userId));
+    render(<JobDetail userId={userId} job={makeJob()} />);
+    act(() =>
+      settings.result.current[1]({
+        ...DEFAULT_KEYBOARD_SHORTCUTS,
+        workspace: { key: 'e', shift: true },
+      }),
+    );
+    const toggle = screen.getByRole('button', { name: 'Open workspace' });
+    expect(toggle).toHaveAttribute('aria-keyshortcuts', 'Meta+Shift+E Control+Shift+E');
+    expect(toggle).toHaveAttribute('title', 'Open workspace (⌘ / Ctrl + Shift + E)');
+    expect(fireEvent.keyDown(window, { key: 'j', ctrlKey: true })).toBe(true);
+    fireEvent.keyDown(window, { key: 'E', ctrlKey: true, shiftKey: true });
+    expect(screen.getByRole('region', { name: 'Job workspace' })).toBeInTheDocument();
+    fireEvent.keyDown(window, { key: 'E', metaKey: true, shiftKey: true });
+    act(() => settings.result.current[1]({ ...DEFAULT_KEYBOARD_SHORTCUTS, workspace: null }));
+    expect(toggle).not.toHaveAttribute('aria-keyshortcuts');
+    expect(fireEvent.keyDown(window, { key: 'E', ctrlKey: true, shiftKey: true })).toBe(true);
+    expect(screen.queryByRole('region', { name: 'Job workspace' })).not.toBeInTheDocument();
+    fireEvent.click(toggle);
+    expect(screen.getByRole('region', { name: 'Job workspace' })).toBeInTheDocument();
   });
 
   it.each([

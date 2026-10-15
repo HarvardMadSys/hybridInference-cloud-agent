@@ -481,7 +481,35 @@ export const en = {
 
   // ── Settings ────────────────────────────────────────────────────────────
   'settings.title': 'My Settings',
-  'settings.description': 'Manage your profile, connections, skills, memory, and notifications.',
+  'settings.description':
+    'Manage your profile, connections, skills, memory, notifications, and keyboard shortcuts.',
+  'settings.shortcuts.title': 'Keyboard shortcuts',
+  'settings.shortcuts.description':
+    'Customize navigation shortcuts. Changes apply immediately and are saved for your account in this browser.',
+  'settings.shortcuts.recordingHelp':
+    'Click a shortcut and press Command or Ctrl with a letter, optionally with Shift. Press Esc to cancel.',
+  'settings.shortcuts.search': 'Search chats',
+  'settings.shortcuts.searchHelp': 'Focus search while the task list is expanded.',
+  'settings.shortcuts.sidebar': 'Toggle task list',
+  'settings.shortcuts.sidebarHelp': 'Expand or collapse the sidebar.',
+  'settings.shortcuts.workspace': 'Toggle workspace',
+  'settings.shortcuts.workspaceHelp': 'Open or close the workspace in a chat.',
+  'settings.shortcuts.change': 'Change shortcut for {action}',
+  'settings.shortcuts.record': 'New shortcut for {action}',
+  'settings.shortcuts.pressKeys': 'Press your shortcut…',
+  'settings.shortcuts.disabled': 'Disabled',
+  'settings.shortcuts.disable': 'Disable',
+  'settings.shortcuts.disableAction': 'Disable shortcut for {action}',
+  'settings.shortcuts.reset': 'Reset to defaults',
+  'settings.shortcuts.invalid': 'Use Command or Ctrl with a letter, optionally with Shift.',
+  'settings.shortcuts.reserved':
+    'This combination is reserved for editing or browser controls. Choose another.',
+  'settings.shortcuts.conflict': 'Already used by “{action}”. Choose another shortcut.',
+  'settings.shortcuts.builtIn': 'Built-in chat shortcuts',
+  'settings.shortcuts.send': 'Send or queue a message',
+  'settings.shortcuts.newline': 'New line',
+  'settings.shortcuts.sendNow': 'Send now (steer a running turn when available)',
+  'settings.shortcuts.stop': 'Stop a run (outside inputs; panels and menus close first)',
   'settings.profile.title': 'Profile',
   'settings.profile.email': 'Email',
   'settings.profile.image': 'Profile Image',

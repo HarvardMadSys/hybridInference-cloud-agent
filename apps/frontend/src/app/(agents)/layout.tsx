@@ -16,6 +16,13 @@ import { DeploymentFooter } from '@/components/DeploymentFooter';
 import { McpApprovalsProvider } from '@/components/features/agents/mcp/McpApprovalsProvider';
 import { McpApprovalsLink } from '@/components/features/agents/mcp/McpApprovalsView';
 import { AccountMenu } from '@/components/features/agents/AccountMenu';
+import { useKeyboardShortcuts } from '@/components/features/settings/keyboardShortcutPreferences';
+import {
+  matchesShortcut,
+  shortcutAriaLabel,
+  shortcutLabel,
+  type ShortcutBinding,
+} from '@/lib/keyboardShortcuts';
 
 import { SIDEBAR_COLLAPSED_STORAGE_KEY } from './sidebarStorage';
 
@@ -152,9 +159,11 @@ function AgentsHeader({
 function SidebarToggleButton({
   sidebarCollapsed,
   onToggleSidebar,
+  shortcut,
 }: {
   sidebarCollapsed: boolean;
   onToggleSidebar: () => void;
+  shortcut: ShortcutBinding | null;
 }) {
   const t = useT();
   return (
@@ -165,8 +174,8 @@ function SidebarToggleButton({
       aria-label={sidebarCollapsed ? t('nav.expandTaskList') : t('nav.collapseTaskList')}
       aria-expanded={!sidebarCollapsed}
       aria-controls="agents-sidebar"
-      aria-keyshortcuts="Meta+B Control+B"
-      title={sidebarCollapsed ? t('nav.expandTaskList') : t('nav.collapseTaskList')}
+      aria-keyshortcuts={shortcutAriaLabel(shortcut)}
+      title={`${sidebarCollapsed ? t('nav.expandTaskList') : t('nav.collapseTaskList')}${shortcut ? ` (${shortcutLabel(shortcut)})` : ''}`}
       className="ui-focus-ring inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted transition-colors hover:bg-surface-hover hover:text-foreground [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11"
     >
       <svg
@@ -260,6 +269,7 @@ function AgentsShell({
 
 export default function AgentsLayout({ children }: { children: React.ReactNode }) {
   const { state } = useAuth();
+  const [shortcuts] = useKeyboardShortcuts(state.user?.id);
   const pathname = usePathname();
   const t = useT();
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -346,15 +356,7 @@ export default function AgentsLayout({ children }: { children: React.ReactNode }
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
-      const hasOnePrimaryModifier = event.metaKey !== event.ctrlKey;
-      if (
-        event.key.toLowerCase() !== 'b' ||
-        !hasOnePrimaryModifier ||
-        event.altKey ||
-        event.shiftKey
-      ) {
-        return;
-      }
+      if (!matchesShortcut(event, shortcuts.sidebar)) return;
 
       event.preventDefault();
       if (!event.repeat) {
@@ -364,7 +366,7 @@ export default function AgentsLayout({ children }: { children: React.ReactNode }
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [toggleSidebar]);
+  }, [toggleSidebar, shortcuts.sidebar]);
 
   return (
     <ProtectedRoute>
@@ -388,6 +390,7 @@ export default function AgentsLayout({ children }: { children: React.ReactNode }
             sidebarToggle={
               mobile || sidebarCollapsed ? (
                 <SidebarToggleButton
+                  shortcut={shortcuts.sidebar}
                   sidebarCollapsed={mobile ? !mobileSidebarOpen : sidebarCollapsed}
                   onToggleSidebar={toggleSidebar}
                 />
@@ -398,7 +401,11 @@ export default function AgentsLayout({ children }: { children: React.ReactNode }
             sidebarCollapsed={mobile ? !mobileSidebarOpen : sidebarCollapsed}
             sidebarToggle={
               !mobile && !sidebarCollapsed ? (
-                <SidebarToggleButton sidebarCollapsed={false} onToggleSidebar={toggleSidebar} />
+                <SidebarToggleButton
+                  shortcut={shortcuts.sidebar}
+                  sidebarCollapsed={false}
+                  onToggleSidebar={toggleSidebar}
+                />
               ) : undefined
             }
             mobileSidebarOpen={mobileSidebarOpen}

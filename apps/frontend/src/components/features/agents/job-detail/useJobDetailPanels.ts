@@ -13,6 +13,8 @@ import { buildTrajectorySteps, turnContextFromJobs } from '../trajectorySteps';
 import type { AgentEvent, AgentJob } from '../types';
 import { useResizablePane } from '../useResizablePane';
 import { useWorkspaceTabs, type WorkspaceTab } from '../useWorkspaceTabs';
+import { useKeyboardShortcuts } from '@/components/features/settings/keyboardShortcutPreferences';
+import { matchesShortcut } from '@/lib/keyboardShortcuts';
 
 export const WORKSPACE_WIDTH_STORAGE_KEY = 'agents.workspace.width';
 const WORKSPACE_DEFAULT_WIDTH = 560;
@@ -49,6 +51,7 @@ export function useJobDetailPanels({
   events: (AgentJobEventApi | AgentThreadEventApi)[];
   threadJobs: AgentJobApi[];
 }) {
+  const [shortcuts] = useKeyboardShortcuts(userId);
   const workspaceScope = JSON.stringify([userId, job.threadId ?? job.id]);
   const [tab, setTab] = useState<'chat' | 'trajectory'>('chat');
   // The subagent being read, if any. Chat shows its own conversation and the
@@ -342,15 +345,7 @@ export function useJobDetailPanels({
     const onKeyDown = (event: KeyboardEvent) => {
       const target = event.target instanceof Element ? event.target : null;
       if (target?.closest('[role="dialog"]')) return;
-      const hasOnePrimaryModifier = event.metaKey !== event.ctrlKey;
-      if (
-        event.key.toLowerCase() !== 'j' ||
-        !hasOnePrimaryModifier ||
-        event.altKey ||
-        event.shiftKey
-      ) {
-        return;
-      }
+      if (!matchesShortcut(event, shortcuts.workspace)) return;
       event.preventDefault();
       event.stopPropagation();
       if (!event.repeat) toggleWorkspace();
@@ -358,9 +353,10 @@ export function useJobDetailPanels({
     // Capture before terminal/editor handlers consume the chord or send Ctrl+J to the shell.
     window.addEventListener('keydown', onKeyDown, true);
     return () => window.removeEventListener('keydown', onKeyDown, true);
-  }, [toggleWorkspace]);
+  }, [toggleWorkspace, shortcuts.workspace]);
 
   return {
+    workspaceShortcut: shortcuts.workspace,
     workspaceScope,
     tab,
     setTab,

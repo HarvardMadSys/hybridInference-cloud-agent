@@ -12,6 +12,7 @@ import {
 } from '../transcriptPresentation';
 import type { AgentJob } from '../types';
 import type { JobDetailPanels } from './useJobDetailPanels';
+import { shortcutAriaLabel, shortcutLabel } from '@/lib/keyboardShortcuts';
 
 export function JobDetailHeader({
   panels,
@@ -49,7 +50,7 @@ export function JobDetailHeader({
   const t = useT();
   const isArchived = Boolean(job.archivedAt);
   const isActive = job.state === 'running' || job.state === 'queued';
-  const { tab, setTab, openWorkspace, workspaceOpen, toggleWorkspace } = panels;
+  const { tab, setTab, openWorkspace, workspaceOpen, toggleWorkspace, workspaceShortcut } = panels;
   return (
     <header className="agent-conversation-header relative z-20 shrink-0 border-b border-border bg-surface px-3 sm:px-4">
       {isArchived ? (
@@ -173,8 +174,8 @@ export function JobDetailHeader({
               aria-label={workspaceOpen ? 'Close workspace' : 'Open workspace'}
               aria-expanded={workspaceOpen}
               aria-controls="job-workspace-pane"
-              aria-keyshortcuts="Meta+J Control+J"
-              title={`${workspaceOpen ? 'Close workspace' : 'Open workspace'} (⌘J / Ctrl+J)`}
+              aria-keyshortcuts={shortcutAriaLabel(workspaceShortcut)}
+              title={`${workspaceOpen ? 'Close workspace' : 'Open workspace'}${workspaceShortcut ? ` (${shortcutLabel(workspaceShortcut)})` : ''}`}
               className={`ui-focus-ring inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border transition-colors [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11 ${
                 workspaceOpen
                   ? 'border-gray-900 dark:border-gray-100 bg-gray-900 dark:bg-gray-100 text-white dark:text-gray-900 hover:bg-gray-800 dark:hover:bg-white'

@@ -1,7 +1,18 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
 import { useState } from 'react';
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  renderHook,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react';
+import { useKeyboardShortcuts } from '@/components/features/settings/keyboardShortcutPreferences';
+import { DEFAULT_KEYBOARD_SHORTCUTS } from '@/lib/keyboardShortcuts';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AgentConversationApi, AgentJobApi, AgentSessionListOptions } from '@/lib/api/agents';
 import { announceAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
@@ -95,6 +106,30 @@ function conversation(id: string, repo = 'owner/repo'): AgentConversationApi {
   };
 }
 const base = [conversation('a'), conversation('b')];
+
+it('uses the customized search shortcut and retains click access when disabled', async () => {
+  const settings = renderHook(() => useKeyboardShortcuts(api.user));
+  render(<AgentsSidebar />);
+  act(() =>
+    settings.result.current[1]({
+      ...DEFAULT_KEYBOARD_SHORTCUTS,
+      search: { key: 'g', shift: true },
+    }),
+  );
+  const search = screen.getByRole('button', { name: 'Search tasks' });
+  expect(search).toHaveAttribute('aria-keyshortcuts', 'Meta+Shift+G Control+Shift+G');
+  fireEvent.keyDown(document, { key: 'k', ctrlKey: true });
+  expect(screen.queryByRole('textbox', { name: 'Search tasks' })).not.toBeInTheDocument();
+  fireEvent.keyDown(document, { key: 'G', ctrlKey: true, shiftKey: true });
+  await waitFor(() => expect(screen.getByRole('textbox', { name: 'Search tasks' })).toHaveFocus());
+  fireEvent.keyDown(screen.getByRole('textbox', { name: 'Search tasks' }), { key: 'Escape' });
+  act(() => settings.result.current[1]({ ...DEFAULT_KEYBOARD_SHORTCUTS, search: null }));
+  expect(search).not.toHaveAttribute('aria-keyshortcuts');
+  fireEvent.keyDown(document, { key: 'G', ctrlKey: true, shiftKey: true });
+  expect(screen.queryByRole('textbox', { name: 'Search tasks' })).not.toBeInTheDocument();
+  fireEvent.click(search);
+  expect(screen.getByRole('textbox', { name: 'Search tasks' })).toBeInTheDocument();
+});
 function DetailRequestReader() {
   const { job } = useAgentJob(api.pathname.slice(1));
   return (

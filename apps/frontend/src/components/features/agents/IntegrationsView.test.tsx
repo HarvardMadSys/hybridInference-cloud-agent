@@ -328,7 +328,10 @@ describe('IntegrationsView', () => {
     expect(within(section).getByRole('switch', { name: '启用记忆' })).toBeChecked();
     expect(within(section).queryByRole('heading', { name: '建议' })).not.toBeInTheDocument();
     expect(screen.getByRole('tab', { name: '项目记忆' })).toBeInTheDocument();
-    expect(screen.getByText('管理你的个人资料、连接、技能、记忆和通知。')).toBeInTheDocument();
+    expect(
+      screen.getByText('管理你的个人资料、连接、技能、记忆、通知和键盘快捷键。'),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: '键盘快捷键' })).toBeInTheDocument();
   });
 
   it('marks providers that need operator configuration', async () => {

@@ -7,6 +7,7 @@ import { BookIcon } from '@/components/features/settings/icons';
 import { GettingStartedSettings } from '@/components/features/settings/GettingStartedSettings';
 import { ProfileSettings } from '@/components/features/settings/ProfileSettings';
 import { NotificationSettings } from '@/components/features/settings/NotificationSettings';
+import { KeyboardShortcutsSettings } from '@/components/features/settings/KeyboardShortcutsSettings';
 import { MemorySettings } from '@/components/features/settings/MemorySettings';
 import {
   disconnectAgentIntegration,
@@ -455,6 +456,7 @@ export function IntegrationsView({
       <SkillsSection />
       <MemorySettings />
       <NotificationSettings />
+      <KeyboardShortcutsSettings />
       <GettingStartedSettings />
     </section>
   );

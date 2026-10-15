@@ -3,6 +3,8 @@ import Link from 'next/link';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useAuth, useT } from '@/components/providers';
+import { useKeyboardShortcuts } from '@/components/features/settings/keyboardShortcutPreferences';
+import { matchesShortcut, shortcutAriaLabel, shortcutLabel } from '@/lib/keyboardShortcuts';
 import { AccountMenu } from './AccountMenu';
 import { archiveAgentJob, deleteAgentSessions, pinAgentJob, unpinAgentJob } from '@/lib/api/agents';
 import { APIError } from '@/lib/utils/errors';
@@ -50,6 +52,7 @@ export function AgentsSidebar({
   const t = useT();
   const { state } = useAuth();
   const userId = state.user?.id;
+  const [shortcuts] = useKeyboardShortcuts(userId);
   const reads = useAgentReads();
   const [preferences, updatePreferences] = useSidebarPreferences(userId);
   const { isUnread, markRead } = useConversationReadState(userId);
@@ -293,8 +296,9 @@ export function AgentsSidebar({
   }, []);
   useEffect(() => {
     const keydown = (event: KeyboardEvent) => {
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k' && !collapsed) {
+      if (matchesShortcut(event, shortcuts.search) && !collapsed) {
         event.preventDefault();
+        if (event.repeat) return;
         // Search must not pull focus out of a modal, including dialogs that
         // render through a portal outside the sidebar.
         if (
@@ -310,7 +314,7 @@ export function AgentsSidebar({
     };
     document.addEventListener('keydown', keydown);
     return () => document.removeEventListener('keydown', keydown);
-  }, [collapsed]);
+  }, [collapsed, shortcuts.search]);
   const registerRows = useCallback(
     (sourceRows: SidebarConversation[], loadedRefresh: number | null) => {
       const rows = reconcileSidebarPins(sourceRows, pinUpdates, loadedRefresh);
@@ -713,7 +717,8 @@ export function AgentsSidebar({
                 ref={searchButton}
                 type="button"
                 aria-label={t('sidebar.search')}
-                title={`${t('sidebar.search')} (⌘K / Ctrl K)`}
+                title={`${t('sidebar.search')}${shortcuts.search ? ` (${shortcutLabel(shortcuts.search)})` : ''}`}
+                aria-keyshortcuts={shortcutAriaLabel(shortcuts.search)}
                 aria-expanded={searchOpen}
                 className="ui-focus-ring flex h-8 w-8 items-center justify-center rounded-lg text-muted transition-colors hover:bg-surface-hover hover:text-foreground [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11"
                 onClick={() => {
