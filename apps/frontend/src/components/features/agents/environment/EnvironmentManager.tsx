@@ -11,9 +11,10 @@ import {
   rebuildEnvironmentSnapshot,
   setEnvironmentDefault,
 } from '@/lib/api/environments';
-import type { EnvironmentConfig } from '@/lib/api/environments';
-import { EnvironmentDialog } from './EnvironmentDialog';
-import { Badge, SnapshotBadge, TestBadge } from './EnvironmentStatus';
+import type { EnvironmentConfig, EnvironmentTeam } from '@/lib/api/environments';
+import { listTeams } from '@/lib/api/teams';
+import { EnvironmentDialog, OwnerSelect } from './EnvironmentDialog';
+import { Badge, SnapshotBadge, TeamBadge, TestBadge } from './EnvironmentStatus';
 
 export function emptyEnvironment(repo: string | null): EnvironmentConfig {
   return {
@@ -134,10 +135,20 @@ function RowMenu({
   );
 }
 
+/** The teams whose environments you may add and change: those you own or administer. */
+export async function editableTeams(): Promise<EnvironmentTeam[]> {
+  const teams = await listTeams();
+  return teams
+    .filter((team) => team.role === 'owner' || team.role === 'admin')
+    .map(({ id, name }) => ({ id, name }));
+}
+
 /**
  * The Environments card in My Settings: personal global variables, then each
- * repository's environments. Editing happens in `EnvironmentDialog`; copying
- * and removing are confirmed in place under their row.
+ * repository's environments, your own and your teams'. Editing happens in
+ * `EnvironmentDialog`; copying and removing are confirmed in place under their
+ * row. A team's environment is changed only by its owner and admins; other
+ * members can view, test, copy and choose it.
  */
 export function EnvironmentManager() {
   const t = useT();
@@ -150,6 +161,8 @@ export function EnvironmentManager() {
   const [copying, setCopying] = useState<EnvironmentConfig | null>(null);
   const [copyName, setCopyName] = useState('');
   const [copyRepo, setCopyRepo] = useState('');
+  const [copyTeam, setCopyTeam] = useState('');
+  const [teams, setTeams] = useState<EnvironmentTeam[]>([]);
   const copyRequest = useRef<{ fingerprint: string; key: string } | null>(null);
   const [removing, setRemoving] = useState<string | null>(null);
   const [snapshotsEnabled, setSnapshotsEnabled] = useState(false);
@@ -176,6 +189,12 @@ export function EnvironmentManager() {
     void getAgentConfig()
       .then((config) => {
         if (active) setRepos(config.repos);
+      })
+      .catch(() => {});
+    // Without teams, everything here is simply your own.
+    void editableTeams()
+      .then((result) => {
+        if (active) setTeams(result);
       })
       .catch(() => {});
     return () => {
@@ -256,175 +275,194 @@ export function EnvironmentManager() {
             {repo}
           </h3>
           <ul className="divide-y divide-border rounded-lg border border-border">
-            {environments.map((item) => (
-              <li key={item.id}>
-                <div className="flex flex-wrap items-center gap-x-3 gap-y-2 px-3 py-2.5">
-                  <button
-                    type="button"
-                    className="group min-w-0 flex-1 text-left"
-                    aria-label={t('environment.editItem', { name: item.name })}
-                    onClick={() => setEditing(item)}
-                  >
-                    <span className="flex flex-wrap items-center gap-2">
-                      <span className="truncate text-sm font-medium text-foreground group-hover:text-accent">
-                        {item.name}
+            {environments.map((item) => {
+              const editable = item.can_edit !== false;
+              const menu: { action: RowAction; label: string }[] = [
+                { action: 'copy', label: t('environment.copy') },
+              ];
+              if (!item.is_default)
+                menu.push({ action: 'default', label: t('environment.makeDefault') });
+              // A team's snapshots and the environment itself are every
+              // member's, so only its owner and admins change them.
+              if (editable && snapshotsEnabled && item.setup_script)
+                menu.push({ action: 'rebuild', label: t('environment.snapshot.rebuild') });
+              if (editable && snapshotsEnabled && item.snapshot?.state === 'ready')
+                menu.push({ action: 'discard', label: t('environment.snapshot.delete') });
+              if (editable) menu.push({ action: 'remove', label: t('environment.remove') });
+              return (
+                <li key={item.id}>
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-2 px-3 py-2.5">
+                    <button
+                      type="button"
+                      className="group min-w-0 flex-1 text-left"
+                      aria-label={t(editable ? 'environment.editItem' : 'environment.viewItem', {
+                        name: item.name,
+                      })}
+                      onClick={() => setEditing(item)}
+                    >
+                      <span className="flex flex-wrap items-center gap-2">
+                        <span className="truncate text-sm font-medium text-foreground group-hover:text-accent">
+                          {item.name}
+                        </span>
+                        {item.team ? <TeamBadge name={item.team.name} /> : null}
+                        {item.is_default ? (
+                          <Badge tone="neutral" dot={false}>
+                            {t('environment.default')}
+                          </Badge>
+                        ) : null}
+                        <TestBadge environment={item} globalRevision={globals.revision} />
+                        {snapshotsEnabled && item.setup_script ? (
+                          <SnapshotBadge snapshot={item.snapshot} />
+                        ) : null}
                       </span>
-                      {item.is_default ? (
-                        <Badge tone="neutral" dot={false}>
-                          {t('environment.default')}
-                        </Badge>
-                      ) : null}
-                      <TestBadge environment={item} globalRevision={globals.revision} />
-                      {snapshotsEnabled && item.setup_script ? (
-                        <SnapshotBadge snapshot={item.snapshot} />
-                      ) : null}
-                    </span>
-                    <span className="mt-0.5 block text-xs text-muted">
-                      {t('environment.variableCount', { count: item.variables.length })} ·{' '}
-                      {t('environment.versionLabel', { revision: item.revision })}
-                    </span>
-                  </button>
-                  <button
-                    type="button"
-                    className="ui-button ui-button-secondary"
-                    onClick={() => setEditing(item)}
-                  >
-                    {t('environment.edit')}
-                  </button>
-                  <RowMenu
-                    name={item.name}
-                    actions={[
-                      { action: 'copy', label: t('environment.copy') },
-                      ...(item.is_default
-                        ? []
-                        : [{ action: 'default' as const, label: t('environment.makeDefault') }]),
-                      ...(snapshotsEnabled && item.setup_script
-                        ? [{ action: 'rebuild' as const, label: t('environment.snapshot.rebuild') }]
-                        : []),
-                      ...(snapshotsEnabled && item.snapshot?.state === 'ready'
-                        ? [{ action: 'discard' as const, label: t('environment.snapshot.delete') }]
-                        : []),
-                      { action: 'remove', label: t('environment.remove') },
-                    ]}
-                    onAction={(action) => {
-                      setRemoving(null);
-                      setCopying(null);
-                      if (action === 'copy') {
-                        copyRequest.current = null;
-                        setCopying(item);
-                        setCopyName(t('environment.copyName', { name: item.name }));
-                        setCopyRepo(item.repo ?? '');
-                      } else if (action === 'default') {
-                        void perform(() =>
-                          setEnvironmentDefault(item.repo!, item.id, item.default_revision ?? 0),
-                        );
-                      } else if (action === 'rebuild') {
-                        void perform(() => rebuildEnvironmentSnapshot(item.id!));
-                      } else if (action === 'discard') {
-                        void perform(() => deleteEnvironmentSnapshot(item.id!));
-                      } else {
-                        setRemoving(item.id);
-                      }
-                    }}
-                  />
-                </div>
-                {removing === item.id ? (
-                  <div className="flex flex-wrap items-center gap-2 border-t border-border bg-surface-muted/50 px-3 py-2.5">
-                    <p className="mr-auto text-sm">
-                      {t('environment.removeConfirm', { name: item.name })}
-                    </p>
-                    <button
-                      type="button"
-                      className="ui-button ui-button-ghost"
-                      onClick={() => setRemoving(null)}
-                    >
-                      {t('environment.cancel')}
+                      <span className="mt-0.5 block text-xs text-muted">
+                        {t('environment.variableCount', { count: item.variables.length })} ·{' '}
+                        {t('environment.versionLabel', { revision: item.revision })}
+                      </span>
                     </button>
                     <button
                       type="button"
-                      className="ui-button bg-status-error text-white hover:bg-status-error/90"
-                      disabled={busy}
-                      onClick={() =>
-                        void perform(async () => {
-                          await deleteEnvironment(item.id!, item.revision);
-                          setRemoving(null);
-                        })
-                      }
+                      className="ui-button ui-button-secondary"
+                      onClick={() => setEditing(item)}
                     >
-                      {t('environment.remove')}
+                      {t(editable ? 'environment.edit' : 'environment.view')}
                     </button>
+                    <RowMenu
+                      name={item.name}
+                      actions={menu}
+                      onAction={(action) => {
+                        setRemoving(null);
+                        setCopying(null);
+                        if (action === 'copy') {
+                          copyRequest.current = null;
+                          setCopying(item);
+                          setCopyName(t('environment.copyName', { name: item.name }));
+                          setCopyRepo(item.repo ?? '');
+                          setCopyTeam('');
+                        } else if (action === 'default') {
+                          void perform(() =>
+                            setEnvironmentDefault(item.repo!, item.id, item.default_revision ?? 0),
+                          );
+                        } else if (action === 'rebuild') {
+                          void perform(() => rebuildEnvironmentSnapshot(item.id!));
+                        } else if (action === 'discard') {
+                          void perform(() => deleteEnvironmentSnapshot(item.id!));
+                        } else {
+                          setRemoving(item.id);
+                        }
+                      }}
+                    />
                   </div>
-                ) : null}
-                {copying?.id === item.id ? (
-                  <div className="space-y-2 border-t border-border bg-surface-muted/50 px-3 py-3">
-                    <div className="grid gap-2 sm:grid-cols-2">
-                      <label className="space-y-1 text-sm">
-                        <span className="text-muted">{t('environment.name')}</span>
-                        <input
-                          className="ui-input w-full"
-                          value={copyName}
-                          onChange={(e) => setCopyName(e.target.value)}
-                        />
-                      </label>
-                      <label className="space-y-1 text-sm">
-                        <span className="text-muted">{t('environment.repository')}</span>
-                        <select
-                          className="ui-input w-full"
-                          value={copyRepo}
-                          onChange={(e) => setCopyRepo(e.target.value)}
-                        >
-                          {[...new Set([copyRepo, ...repos])].map((r) => (
-                            <option key={r} value={r}>
-                              {r}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-                    </div>
-                    <p className="text-xs text-muted">{t('environment.copySecrets')}</p>
-                    <div className="flex justify-end gap-2">
+                  {removing === item.id ? (
+                    <div className="flex flex-wrap items-center gap-2 border-t border-border bg-surface-muted/50 px-3 py-2.5">
+                      <p className="mr-auto text-sm">
+                        {t('environment.removeConfirm', { name: item.name })}
+                      </p>
                       <button
                         type="button"
                         className="ui-button ui-button-ghost"
-                        onClick={() => setCopying(null)}
+                        onClick={() => setRemoving(null)}
                       >
                         {t('environment.cancel')}
                       </button>
                       <button
                         type="button"
-                        className="ui-button ui-button-primary"
-                        disabled={busy || !copyName.trim()}
+                        className="ui-button bg-status-error text-white hover:bg-status-error/90"
+                        disabled={busy}
                         onClick={() =>
                           void perform(async () => {
-                            // One key per distinct request, so a retry after
-                            // a lost response cannot make a second copy.
-                            const fingerprint = JSON.stringify([
-                              copying.id,
-                              copying.revision,
-                              copyRepo,
-                              copyName.trim(),
-                            ]);
-                            if (copyRequest.current?.fingerprint !== fingerprint)
-                              copyRequest.current = { fingerprint, key: crypto.randomUUID() };
-                            const copy = await copyEnvironment(
-                              copying.id!,
-                              copying.revision,
-                              copyRepo,
-                              copyName,
-                              copyRequest.current.key,
-                            );
-                            setCopying(null);
-                            setEditing(copy);
+                            await deleteEnvironment(item.id!, item.revision);
+                            setRemoving(null);
                           })
                         }
                       >
-                        {t('environment.copy')}
+                        {t('environment.remove')}
                       </button>
                     </div>
-                  </div>
-                ) : null}
-              </li>
-            ))}
+                  ) : null}
+                  {copying?.id === item.id ? (
+                    <div className="space-y-2 border-t border-border bg-surface-muted/50 px-3 py-3">
+                      <div
+                        className={`grid gap-2 ${teams.length ? 'sm:grid-cols-3' : 'sm:grid-cols-2'}`}
+                      >
+                        <label className="space-y-1 text-sm">
+                          <span className="text-muted">{t('environment.name')}</span>
+                          <input
+                            className="ui-input w-full"
+                            value={copyName}
+                            onChange={(e) => setCopyName(e.target.value)}
+                          />
+                        </label>
+                        <label className="space-y-1 text-sm">
+                          <span className="text-muted">{t('environment.repository')}</span>
+                          <select
+                            className="ui-input w-full"
+                            value={copyRepo}
+                            onChange={(e) => setCopyRepo(e.target.value)}
+                          >
+                            {[...new Set([copyRepo, ...repos])].map((r) => (
+                              <option key={r} value={r}>
+                                {r}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        {teams.length ? (
+                          <OwnerSelect
+                            label={t('environment.copyTo')}
+                            teams={teams}
+                            value={copyTeam}
+                            onChange={setCopyTeam}
+                          />
+                        ) : null}
+                      </div>
+                      <p className="text-xs text-muted">{t('environment.copySecrets')}</p>
+                      <div className="flex justify-end gap-2">
+                        <button
+                          type="button"
+                          className="ui-button ui-button-ghost"
+                          onClick={() => setCopying(null)}
+                        >
+                          {t('environment.cancel')}
+                        </button>
+                        <button
+                          type="button"
+                          className="ui-button ui-button-primary"
+                          disabled={busy || !copyName.trim()}
+                          onClick={() =>
+                            void perform(async () => {
+                              // One key per distinct request, so a retry after
+                              // a lost response cannot make a second copy.
+                              const fingerprint = JSON.stringify([
+                                copying.id,
+                                copying.revision,
+                                copyRepo,
+                                copyName.trim(),
+                                copyTeam,
+                              ]);
+                              if (copyRequest.current?.fingerprint !== fingerprint)
+                                copyRequest.current = { fingerprint, key: crypto.randomUUID() };
+                              const copy = await copyEnvironment(
+                                copying.id!,
+                                copying.revision,
+                                copyRepo,
+                                copyName,
+                                copyRequest.current.key,
+                                copyTeam || null,
+                              );
+                              setCopying(null);
+                              setEditing(copy);
+                            })
+                          }
+                        >
+                          {t('environment.copy')}
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
+                </li>
+              );
+            })}
           </ul>
         </div>
       ))}
@@ -438,6 +476,7 @@ export function EnvironmentManager() {
           initial={editing}
           globals={globals}
           repos={repos}
+          teams={teams}
           snapshotsEnabled={snapshotsEnabled}
           onSaved={(next) => {
             if (next.repo === null) setGlobals(next);

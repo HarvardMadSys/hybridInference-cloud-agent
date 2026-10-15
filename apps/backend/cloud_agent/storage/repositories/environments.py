@@ -13,10 +13,12 @@ from typing import TYPE_CHECKING, Any
 import asyncpg
 
 from cloud_agent.environments import (
+    EnvironmentAccessRevoked,
     EnvironmentBusy,
     EnvironmentCipher,
     EnvironmentConflict,
     EnvironmentEncryptionError,
+    EnvironmentForbidden,
     EnvironmentNotFound,
 )
 from cloud_agent.execution_profiles import default_execution_profile, shared_sandbox_claim_attested
@@ -68,6 +70,40 @@ def setup_fingerprint(setup_script: str | None, variables: list[EnvironmentVaria
     return _cipher().mac(material)
 
 
+#: The environments an account may use: its own, and those of every active team
+#: it is an active member of, with its role there. Prefix of a query whose
+#: first parameter is the account.
+_ACCESSIBLE_ENVIRONMENTS = """
+WITH accessible AS (
+    SELECT e.*, NULL::text AS team_name, NULL::text AS team_role,
+           NULL::bigint AS team_access_generation
+    FROM agent_environments e
+    WHERE e.team_id IS NULL AND e.user_id = $1
+    UNION ALL
+    SELECT e.*, t.name AS team_name,
+           CASE WHEN t.owner_user_id = $1 THEN 'owner' ELSE m.role END AS team_role,
+           m.access_generation AS team_access_generation
+    FROM agent_environments e
+    JOIN agent_teams t ON t.id = e.team_id AND t.state = 'active'
+    JOIN agent_team_members m ON m.team_id = t.id AND m.user_id = $1 AND m.state = 'active'
+)
+"""
+
+
+def runtime_only(variables: list[EnvironmentVariable]) -> list[EnvironmentVariable]:
+    """A member's personal globals, as a team environment uses them: at run time only.
+
+    Installation is the team's alone, so it is the same for every member and
+    their snapshots can be shared; a member's own values still reach the
+    agent and the commands it runs. The team's definition of a name wins.
+    """
+    return [v.model_copy(update={"phase": "runtime"}) for v in variables if v.phase != "setup"]
+
+
+#: Who may change a team's environments; every other active member may use them.
+_TEAM_EDITORS = frozenset({"owner", "admin"})
+
+
 def optional_setup_fingerprint(
     setup_script: str | None, variables: list[EnvironmentVariable]
 ) -> str | None:
@@ -99,6 +135,27 @@ async def lock_environment_snapshots(conn: Any, user_id: str) -> None:
         "SELECT pg_advisory_xact_lock(hashtextextended('agent-environment-snapshots:' || $1, 0))",
         user_id,
     )
+
+
+async def lock_team_environment_snapshots(conn: Any, environment_id: str) -> list[str]:
+    """Take the snapshot lock of every member with a snapshot of a team environment.
+
+    A team environment's snapshots belong to whichever members built them, so
+    a write over several of them takes each of those owners' locks, in one
+    order, before any of the rows. Returns the owners; a snapshot queued by
+    anyone else afterwards is not the write's to touch.
+    """
+    owners = [
+        row["user_id"]
+        for row in await conn.fetch(
+            "SELECT DISTINCT user_id FROM agent_environment_snapshots "
+            "WHERE environment_id=$1 ORDER BY user_id",
+            environment_id,
+        )
+    ]
+    for owner in owners:
+        await lock_environment_snapshots(conn, owner)
+    return owners
 
 
 async def retire_changed_snapshots(
@@ -185,19 +242,78 @@ class PostgresEnvironmentRepository:
         )
 
     @staticmethod
-    async def _environment_row(
-        conn: Any, user_id: str, environment_id: str, *, archived: bool = False
-    ) -> dict[str, Any]:
+    async def _team_access(conn: Any, user_id: str, team_id: str) -> tuple[str, int] | None:
+        """The account's role in an active team and its access generation, or ``None``."""
         row = await conn.fetchrow(
-            "SELECT * FROM agent_environments WHERE id=$1 AND user_id=$2 "
-            "AND ($3 OR archived_at IS NULL)",
-            environment_id,
+            "SELECT t.owner_user_id, m.role, m.access_generation FROM agent_teams t "
+            "JOIN agent_team_members m ON m.team_id = t.id AND m.user_id = $2 "
+            "AND m.state = 'active' WHERE t.id = $1 AND t.state = 'active'",
+            team_id,
             user_id,
+        )
+        if row is None:
+            return None
+        role = "owner" if row["owner_user_id"] == user_id else row["role"]
+        return role, int(row["access_generation"])
+
+    @classmethod
+    async def _environment_row(
+        cls,
+        conn: Any,
+        user_id: str,
+        environment_id: str,
+        *,
+        archived: bool = False,
+        edit: bool = False,
+    ) -> dict[str, Any]:
+        """An environment the account may use, or with ``edit`` may change.
+
+        A personal environment is its owner's alone. A team's is used by every
+        active member and changed only by the team's owner and admins; anyone
+        else is told it does not exist. An edit locks the row, so two admins
+        saving at once take turns rather than both claiming one revision.
+        """
+        row = await conn.fetchrow(
+            "SELECT e.*, t.name AS team_name FROM agent_environments e "
+            "LEFT JOIN agent_teams t ON t.id = e.team_id "
+            "WHERE e.id=$1 AND ($2 OR e.archived_at IS NULL)"
+            + (" FOR UPDATE OF e" if edit else ""),
+            environment_id,
             archived,
         )
         if row is None:
             raise EnvironmentNotFound("Environment not found")
-        return dict(row)
+        found = dict(row)
+        if found["team_id"] is None:
+            if found["user_id"] != user_id:
+                raise EnvironmentNotFound("Environment not found")
+            return {**found, "team_role": None, "team_access_generation": None}
+        access = await cls._team_access(conn, user_id, found["team_id"])
+        if access is None:
+            raise EnvironmentNotFound("Environment not found")
+        role, generation = access
+        if edit and role not in _TEAM_EDITORS:
+            raise EnvironmentForbidden(
+                "Only the team's owner and admins can change its environments"
+            )
+        return {**found, "team_role": role, "team_access_generation": generation}
+
+    @staticmethod
+    async def _team_environment_audit(
+        conn: Any, row: Mapping[str, Any], actor: str, action: str, **details: Any
+    ) -> None:
+        """Record a change to a team's environment in that team's audit log."""
+        if row.get("team_id") is None:
+            return
+        await conn.execute(
+            "INSERT INTO agent_team_audit_events (team_id, actor_user_id, action, target_id, details) "
+            "VALUES ($1, $2, $3, $4, $5::jsonb)",
+            row["team_id"],
+            actor,
+            action,
+            row["id"],
+            json.dumps({"name": row.get("name"), "repo": row.get("repo"), **details}),
+        )
 
     @staticmethod
     async def _environment_version(
@@ -253,13 +369,14 @@ class PostgresEnvironmentRepository:
 
         The values are the global and environment variables merged, as a
         binding merges them; an environment whose configuration no longer
-        merges binds no task and is left out.
+        merges binds no task and is left out. A team environment installs with
+        the team's values alone (:func:`runtime_only`), whoever ``user_id`` is.
         """
         rows = await conn.fetch(
-            "SELECT e.id,v.id AS version_id,v.document FROM agent_environments e "
+            "SELECT e.id,e.team_id,v.id AS version_id,v.document FROM agent_environments e "
             "JOIN agent_environment_versions v ON v.environment_id=e.id AND v.revision=e.revision "
-            "WHERE e.user_id=$1 AND e.id=ANY($2::text[]) AND e.repo IS NOT NULL "
-            "AND e.archived_at IS NULL",
+            "WHERE (e.user_id=$1 OR e.team_id IS NOT NULL) AND e.id=ANY($2::text[]) "
+            "AND e.repo IS NOT NULL AND e.archived_at IS NULL",
             user_id,
             environment_ids,
         )
@@ -277,7 +394,8 @@ class PostgresEnvironmentRepository:
         for row in rows:
             try:
                 merged = merge_variables(
-                    global_values, decode(await stored(conn, row["version_id"]))
+                    [] if row["team_id"] else global_values,
+                    decode(await stored(conn, row["version_id"])),
                 )
             except ValueError:
                 continue
@@ -310,10 +428,14 @@ class PostgresEnvironmentRepository:
             conn, version["id"] if version else None
         )
         document = _json(version["document"]) if version else EnvironmentScripts().model_dump()
+        team_id = row.get("team_id")
         return {
             "id": row["id"],
             "repo": row["repo"],
             "name": row["name"],
+            "team": {"id": team_id, "name": row.get("team_name") or ""} if team_id else None,
+            # A personal environment is its owner's; a team's, its owner's and admins'.
+            "can_edit": team_id is None or row.get("team_role") in _TEAM_EDITORS,
             "revision": int(version["revision"] if version else 0),
             **document,
             "archived": row["archived_at"] is not None,
@@ -334,13 +456,20 @@ class PostgresEnvironmentRepository:
     async def list_environments(
         self, user_id: str, repo: str | None = None
     ) -> builtins.list[dict[str, Any]]:
-        """List owned active configurations and only exact-version test facts."""
+        """List the account's own active configurations, then its teams', with test facts.
+
+        A team's environments appear while the account is an active member of
+        that active team. Defaults are the account's own, whichever kind they name.
+        """
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT e.*, d.environment_id=e.id AS is_default, COALESCE(d.revision,0) AS default_revision "
-                "FROM agent_environments e LEFT JOIN agent_repository_environment_defaults d "
-                "ON d.user_id=e.user_id AND d.repo=e.repo WHERE e.user_id=$1 AND e.repo IS NOT NULL "
-                "AND e.archived_at IS NULL AND ($2::text IS NULL OR e.repo=$2) ORDER BY e.repo,e.name",
+                _ACCESSIBLE_ENVIRONMENTS + "SELECT e.*, d.environment_id=e.id AS is_default, "
+                "COALESCE(d.revision,0) AS default_revision "
+                "FROM accessible e LEFT JOIN agent_repository_environment_defaults d "
+                "ON d.user_id=$1 AND d.repo=e.repo "
+                "WHERE e.repo IS NOT NULL AND e.archived_at IS NULL "
+                "AND ($2::text IS NULL OR e.repo=$2) "
+                "ORDER BY e.repo, e.team_id IS NOT NULL, e.team_name, e.name, e.id",
                 user_id,
                 repo,
             )
@@ -379,14 +508,17 @@ class PostgresEnvironmentRepository:
                 user_id,
             )
             rows = await conn.fetch(
-                "SELECT e.id,v.id AS version_id,v.document FROM agent_environments e "
+                _ACCESSIBLE_ENVIRONMENTS
+                + "SELECT e.id,e.team_id,v.id AS version_id,v.document FROM accessible e "
                 "JOIN agent_environment_versions v ON v.environment_id=e.id AND v.revision=e.revision "
-                "WHERE e.user_id=$1 AND e.id=ANY($2::text[])",
+                "WHERE e.id=ANY($2::text[])",
                 user_id,
                 environment_ids,
             )
             for row in rows:
-                key = (row["version_id"], global_id)
+                # A team's installation does not depend on the member's globals.
+                scope = None if row["team_id"] else global_id
+                key = (row["version_id"], scope)
                 if key not in self._fingerprints:
                     setup = _json(row["document"]).get("setup_script") or ""
                     try:
@@ -395,7 +527,7 @@ class PostgresEnvironmentRepository:
                                 setup,
                                 merge_variables(
                                     self._environment_decode(
-                                        await self._environment_stored_variables(conn, global_id)
+                                        await self._environment_stored_variables(conn, scope)
                                     ),
                                     self._environment_decode(
                                         await self._environment_stored_variables(
@@ -447,15 +579,21 @@ class PostgresEnvironmentRepository:
         repo: str | None,
         environment_id: str,
         candidate: builtins.list[EnvironmentVariable],
+        *,
+        team: bool = False,
     ) -> None:
         if len(candidate) > MAX_VARIABLES:
             raise EnvironmentInputError("An environment accepts at most 100 variables")
-        if repo is None:
+        if team:
+            # Each member's globals join it only when a task binds it, so the
+            # combined limits are checked there, for that member.
+            merge_variables(candidate)
+        elif repo is None:
             merge_variables(candidate)
             rows = await conn.fetch(
                 "SELECT e.name,v.id FROM agent_environments e JOIN agent_environment_versions v "
                 "ON v.environment_id=e.id AND v.revision=e.revision WHERE e.user_id=$1 "
-                "AND e.repo IS NOT NULL AND e.archived_at IS NULL",
+                "AND e.team_id IS NULL AND e.repo IS NOT NULL AND e.archived_at IS NULL",
                 user_id,
             )
             for row in rows:
@@ -517,10 +655,15 @@ class PostgresEnvironmentRepository:
             revision,
         )
         # This revision may install something other than its snapshots hold;
-        # global variables feed every environment of their owner.
-        await retire_changed_snapshots(
-            conn, row["user_id"], None if row["repo"] is None else [row["id"]]
-        )
+        # global variables feed every environment of their owner, and a team
+        # environment's snapshots are every member's.
+        if row.get("team_id"):
+            for owner in await lock_team_environment_snapshots(conn, row["id"]):
+                await retire_changed_snapshots(conn, owner, [row["id"]])
+        else:
+            await retire_changed_snapshots(
+                conn, row["user_id"], None if row["repo"] is None else [row["id"]]
+            )
         row = {**row, "revision": revision}
         return await self._environment_public(conn, row)
 
@@ -535,8 +678,15 @@ class PostgresEnvironmentRepository:
         document: dict[str, Any],
         edits: builtins.list[dict[str, Any]],
         expected_global_revision: int | None = None,
+        team_id: str | None = None,
     ) -> dict[str, Any]:
-        """Publish one atomic validated revision, never storing raw values."""
+        """Publish one atomic validated revision, never storing raw values.
+
+        ``team_id`` creates the environment for that team, which only its owner
+        and admins may do; it is ignored when saving an existing environment,
+        whose owner never changes. A team's environment is edited by its owner
+        and admins, and each change is recorded in the team's audit log.
+        """
         scripts = EnvironmentScripts.model_validate(document).model_dump(mode="json")
         name = name.strip()
         if not 1 <= len(name) <= 80:
@@ -568,24 +718,50 @@ class PostgresEnvironmentRepository:
                         user_id,
                     )
                     environment_id = existing["id"] if existing else None
+                created = not environment_id
                 if environment_id:
-                    row = await self._environment_row(conn, user_id, environment_id)
+                    row = await self._environment_row(conn, user_id, environment_id, edit=True)
                     if row["repo"] != repo:
                         raise EnvironmentInputError("Environment repository cannot be changed")
                 else:
                     if revision != 0:
                         raise EnvironmentConflict("Environment changed", current_revision=0)
-                    row = dict(
-                        await conn.fetchrow(
-                            "INSERT INTO agent_environments(id,user_id,repo,name,normalized_name) "
-                            "VALUES($1,$2,$3,$4,$5) RETURNING *",
-                            _id(),
-                            user_id,
-                            repo,
-                            name,
-                            name.casefold(),
-                        )
-                    )
+                    team: dict[str, Any] = {"team_role": None, "team_access_generation": None}
+                    if team_id is not None:
+                        if repo is None:
+                            raise EnvironmentInputError(
+                                "A team environment belongs to one repository"
+                            )
+                        access = await self._team_access(conn, user_id, team_id)
+                        if access is None:
+                            raise EnvironmentNotFound("Team not found")
+                        if access[0] not in _TEAM_EDITORS:
+                            raise EnvironmentForbidden(
+                                "Only the team's owner and admins can add its environments"
+                            )
+                        team = {
+                            "team_role": access[0],
+                            "team_access_generation": access[1],
+                            "team_name": await conn.fetchval(
+                                "SELECT name FROM agent_teams WHERE id=$1", team_id
+                            ),
+                        }
+                    row = {
+                        **dict(
+                            await conn.fetchrow(
+                                "INSERT INTO agent_environments"
+                                "(id,user_id,repo,name,normalized_name,team_id) "
+                                "VALUES($1,$2,$3,$4,$5,$6) RETURNING *",
+                                _id(),
+                                user_id,
+                                repo,
+                                name,
+                                name.casefold(),
+                                team_id,
+                            )
+                        ),
+                        **team,
+                    }
                 if row["revision"] != revision:
                     raise EnvironmentConflict(
                         "Environment changed; refresh before saving",
@@ -628,7 +804,12 @@ class PostgresEnvironmentRepository:
                         }
                     )
                 await self._environment_check_merged(
-                    conn, user_id, repo, row["id"], self._environment_decode(list(values.values()))
+                    conn,
+                    user_id,
+                    repo,
+                    row["id"],
+                    self._environment_decode(list(values.values())),
+                    team=row["team_id"] is not None,
                 )
                 await conn.execute(
                     "UPDATE agent_environments SET name=$2,normalized_name=$3 WHERE id=$1",
@@ -636,7 +817,16 @@ class PostgresEnvironmentRepository:
                     name,
                     name.casefold(),
                 )
-                if repo is not None:
+                await self._team_environment_audit(
+                    conn,
+                    {**row, "name": name},
+                    user_id,
+                    "environment_created" if created else "environment_updated",
+                    revision=revision + 1,
+                )
+                # A personal environment's first save becomes its repository's
+                # default; a team's never changes its members' own choices.
+                if repo is not None and row["team_id"] is None:
                     await conn.execute(
                         "INSERT INTO agent_repository_environment_defaults(user_id,repo,environment_id) "
                         "VALUES($1,$2,$3) ON CONFLICT(user_id,repo) DO NOTHING",
@@ -651,10 +841,14 @@ class PostgresEnvironmentRepository:
             raise EnvironmentConflict("An environment already uses this name") from None
 
     async def archive_environment(self, user_id: str, environment_id: str, revision: int) -> None:
-        """Retain history and bindings while removing future default selection."""
+        """Retain history and bindings while removing future default selection.
+
+        Every account's default that named it is cleared, a team's members'
+        included: none of them can select it any more.
+        """
         async with self._pool.acquire() as conn, conn.transaction():
             await self._environment_lock(conn, user_id)
-            row = await self._environment_row(conn, user_id, environment_id)
+            row = await self._environment_row(conn, user_id, environment_id, edit=True)
             if row["revision"] != revision or row["repo"] is None:
                 raise EnvironmentConflict(
                     "Environment changed or cannot be archived", current_revision=row["revision"]
@@ -664,10 +858,10 @@ class PostgresEnvironmentRepository:
                 environment_id,
             )
             await conn.execute(
-                "UPDATE agent_repository_environment_defaults SET environment_id=NULL,revision=revision+1 WHERE user_id=$1 AND environment_id=$2",
-                user_id,
+                "UPDATE agent_repository_environment_defaults SET environment_id=NULL,revision=revision+1 WHERE environment_id=$1",
                 environment_id,
             )
+            await self._team_environment_audit(conn, row, user_id, "environment_archived")
 
     async def set_environment_default(
         self, user_id: str, repo: str, environment_id: str | None, revision: int
@@ -676,6 +870,7 @@ class PostgresEnvironmentRepository:
         async with self._pool.acquire() as conn, conn.transaction():
             await self._environment_lock(conn, user_id)
             if environment_id is not None:
+                # Any environment the account may use, its teams' included.
                 env = await self._environment_row(conn, user_id, environment_id)
                 if env["repo"] != repo:
                     raise EnvironmentNotFound("Environment not found for this repository")
@@ -729,8 +924,14 @@ class PostgresEnvironmentRepository:
         name: str,
         revision: int,
         idempotency_key: str | None = None,
+        team_id: str | None = None,
     ) -> dict[str, Any]:
-        """Duplicate encrypted configuration without sharing future revisions."""
+        """Duplicate encrypted configuration without sharing future revisions.
+
+        The source is any environment the account may use. The copy is the
+        account's own, or with ``team_id`` that team's, which only its owner
+        and admins may add to.
+        """
         async with self._pool.acquire() as conn, conn.transaction():
             await self._environment_lock(conn, user_id)
             name = name.strip()
@@ -740,7 +941,9 @@ class PostgresEnvironmentRepository:
                 __import__("hashlib")
                 .sha256(
                     json.dumps(
-                        [environment_id, revision, repo, name], separators=(",", ":")
+                        [environment_id, revision, repo, name]
+                        + ([team_id] if team_id is not None else []),
+                        separators=(",", ":"),
                     ).encode()
                 )
                 .hexdigest()
@@ -756,8 +959,26 @@ class PostgresEnvironmentRepository:
                         raise EnvironmentConflict("Idempotency key already used for another copy")
                     if existing["archived_at"] is not None:
                         raise EnvironmentConflict("Previous copy has been archived")
-                    return await self._environment_public(conn, existing)
+                    return await self._environment_public(
+                        conn, await self._environment_row(conn, user_id, existing["id"])
+                    )
             source = await self._environment_row(conn, user_id, environment_id)
+            target: dict[str, Any] = {"team_role": None, "team_access_generation": None}
+            if team_id is not None:
+                access = await self._team_access(conn, user_id, team_id)
+                if access is None:
+                    raise EnvironmentNotFound("Team not found")
+                if access[0] not in _TEAM_EDITORS:
+                    raise EnvironmentForbidden(
+                        "Only the team's owner and admins can add its environments"
+                    )
+                target = {
+                    "team_role": access[0],
+                    "team_access_generation": access[1],
+                    "team_name": await conn.fetchval(
+                        "SELECT name FROM agent_teams WHERE id=$1", team_id
+                    ),
+                }
             if source["revision"] != revision:
                 raise EnvironmentConflict(
                     "Source environment changed", current_revision=source["revision"]
@@ -765,20 +986,32 @@ class PostgresEnvironmentRepository:
             version = await self._environment_version(conn, environment_id, revision)
             assert version is not None
             values = await self._environment_stored_variables(conn, version["id"])
-            row = dict(
-                await conn.fetchrow(
-                    "INSERT INTO agent_environments(id,user_id,repo,name,normalized_name,copy_request_key,copy_request_fingerprint) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING *",
-                    _id(),
-                    user_id,
-                    repo,
-                    name,
-                    name.casefold(),
-                    idempotency_key,
-                    fingerprint if idempotency_key else None,
-                )
-            )
+            row = {
+                **dict(
+                    await conn.fetchrow(
+                        "INSERT INTO agent_environments(id,user_id,repo,name,normalized_name,copy_request_key,copy_request_fingerprint,team_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *",
+                        _id(),
+                        user_id,
+                        repo,
+                        name,
+                        name.casefold(),
+                        idempotency_key,
+                        fingerprint if idempotency_key else None,
+                        team_id,
+                    )
+                ),
+                **target,
+            }
             await self._environment_check_merged(
-                conn, user_id, repo, row["id"], self._environment_decode(values)
+                conn,
+                user_id,
+                repo,
+                row["id"],
+                self._environment_decode(values),
+                team=team_id is not None,
+            )
+            await self._team_environment_audit(
+                conn, row, user_id, "environment_created", copied_from=environment_id
             )
             return await self._environment_publish(
                 conn, row, _json(version["document"]), values, [{"operation": "copy"}]
@@ -790,7 +1023,7 @@ class PostgresEnvironmentRepository:
         """Publish a historical snapshot as a new revision, preserving CAS."""
         async with self._pool.acquire() as conn, conn.transaction():
             await self._environment_lock(conn, user_id)
-            row = await self._environment_row(conn, user_id, environment_id)
+            row = await self._environment_row(conn, user_id, environment_id, edit=True)
             if row["revision"] != revision:
                 raise EnvironmentConflict("Environment changed", current_revision=row["revision"])
             source = await self._environment_version(conn, environment_id, source_revision)
@@ -798,7 +1031,15 @@ class PostgresEnvironmentRepository:
                 raise EnvironmentNotFound("Version not found")
             values = await self._environment_stored_variables(conn, source["id"])
             await self._environment_check_merged(
-                conn, user_id, row["repo"], environment_id, self._environment_decode(values)
+                conn,
+                user_id,
+                row["repo"],
+                environment_id,
+                self._environment_decode(values),
+                team=row["team_id"] is not None,
+            )
+            await self._team_environment_audit(
+                conn, row, user_id, "environment_updated", restored_revision=source_revision
             )
             return await self._environment_publish(
                 conn,
@@ -815,6 +1056,10 @@ class PostgresEnvironmentRepository:
 
         A null ``repo`` is a temporary workspace. Environments belong to one
         repository, so it binds only the owner's global variables.
+
+        A team's environment binds the member's globals for run time only
+        (:func:`runtime_only`) and records the team and the member's access
+        generation, which every later turn is checked against.
         """
         await self._environment_lock(conn, user_id)
         environment_id = selection.get("environment_id")
@@ -827,6 +1072,19 @@ class PostgresEnvironmentRepository:
                 user_id,
                 repo,
             )
+            if environment_id is not None:
+                try:
+                    await self._environment_row(conn, user_id, environment_id)
+                except EnvironmentNotFound:
+                    # A team default from a team the account has since left:
+                    # it can no longer select it, as if the team had archived it.
+                    await conn.execute(
+                        "UPDATE agent_repository_environment_defaults "
+                        "SET environment_id=NULL,revision=revision+1 WHERE user_id=$1 AND repo=$2",
+                        user_id,
+                        repo,
+                    )
+                    environment_id = None
         env = await self._environment_row(conn, user_id, environment_id) if environment_id else None
         if env and env["repo"] != repo:
             raise EnvironmentNotFound("Environment not found for this repository")
@@ -845,12 +1103,14 @@ class PostgresEnvironmentRepository:
             if global_row
             else None
         )
+        team_id = env["team_id"] if env else None
+        personal = self._environment_decode(
+            await self._environment_stored_variables(
+                conn, global_version["id"] if global_version else None
+            )
+        )
         merged = merge_variables(
-            self._environment_decode(
-                await self._environment_stored_variables(
-                    conn, global_version["id"] if global_version else None
-                )
-            ),
+            runtime_only(personal) if team_id else personal,
             self._environment_decode(
                 await self._environment_stored_variables(conn, version["id"] if version else None)
             ),
@@ -865,7 +1125,7 @@ class PostgresEnvironmentRepository:
         required = bool(merged or setup or document.get("start_script") or document.get("actions"))
         binding_id = _id()
         await conn.execute(
-            "INSERT INTO agent_environment_bindings(id,user_id,repo,environment_version_id,global_version_id,setup_override,has_setup_override,required,setup_fingerprint) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+            "INSERT INTO agent_environment_bindings(id,user_id,repo,environment_version_id,global_version_id,setup_override,has_setup_override,required,setup_fingerprint,team_id,team_access_generation) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
             binding_id,
             user_id,
             repo,
@@ -876,13 +1136,39 @@ class PostgresEnvironmentRepository:
             required,
             # Only a saved environment's installation can be snapshotted.
             optional_setup_fingerprint(setup, merged) if version else None,
+            team_id,
+            env["team_access_generation"] if env and team_id else None,
         )
         return binding_id, setup
 
+    @classmethod
+    async def _require_team_binding_access(cls, conn: Any, binding: Mapping[str, Any]) -> None:
+        """Refuse a team binding whose owner left, or left and rejoined, that team."""
+        if binding["team_id"] is None:
+            return
+        access = await cls._team_access(conn, binding["user_id"], binding["team_id"])
+        if access is None or access[1] != binding["team_access_generation"]:
+            raise EnvironmentAccessRevoked(
+                "This chat uses an environment of a team you are no longer a member of"
+            )
+
     async def get_environment_binding(
-        self, user_id: str, binding_id: str, *, include_secrets: bool = True
+        self,
+        user_id: str,
+        binding_id: str,
+        *,
+        include_secrets: bool = True,
+        for_masking: bool = False,
     ) -> BoundEnvironment:
-        """Decrypt the exact immutable binding after proving ownership."""
+        """Decrypt the exact immutable binding after proving ownership.
+
+        Values bound from a team's environment are handed out only while the
+        owner is still the member who bound them: every path that gives them
+        to a container (a turn, a terminal, an action, a Fork, preparation, a
+        test) reads them here. ``for_masking`` reads them anyway, for the
+        redaction and publication scanning that must keep finding them after
+        the owner leaves; such a caller never passes them on.
+        """
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 "SELECT * FROM agent_environment_bindings WHERE id=$1 AND user_id=$2",
@@ -891,6 +1177,8 @@ class PostgresEnvironmentRepository:
             )
             if row is None:
                 raise EnvironmentNotFound("Binding not found")
+            if include_secrets and not for_masking:
+                await self._require_team_binding_access(conn, row)
             version = (
                 await conn.fetchrow(
                     "SELECT * FROM agent_environment_versions WHERE id=$1",
@@ -906,11 +1194,12 @@ class PostgresEnvironmentRepository:
                 if row["global_version_id"]
                 else None
             )
+            personal = self._environment_decode(
+                await self._environment_stored_variables(conn, row["global_version_id"]),
+                include_secrets=include_secrets,
+            )
             values = merge_variables(
-                self._environment_decode(
-                    await self._environment_stored_variables(conn, row["global_version_id"]),
-                    include_secrets=include_secrets,
-                ),
+                runtime_only(personal) if row["team_id"] else personal,
                 self._environment_decode(
                     await self._environment_stored_variables(conn, row["environment_version_id"]),
                     include_secrets=include_secrets,
@@ -964,6 +1253,7 @@ class PostgresEnvironmentRepository:
                 raise EnvironmentConflict(
                     "Runtime variables changed", current_revision=binding["runtime_revision"]
                 )
+            await self._require_team_binding_access(conn, binding)
             env = (
                 await conn.fetchrow(
                     "SELECT e.* FROM agent_environments e JOIN agent_environment_versions v ON v.environment_id=e.id WHERE v.id=$1",
@@ -985,12 +1275,13 @@ class PostgresEnvironmentRepository:
                 if global_row
                 else None
             )
+            personal = self._environment_decode(
+                await self._environment_stored_variables(
+                    conn, globals_latest["id"] if globals_latest else None
+                )
+            )
             merged = merge_variables(
-                self._environment_decode(
-                    await self._environment_stored_variables(
-                        conn, globals_latest["id"] if globals_latest else None
-                    )
-                ),
+                runtime_only(personal) if binding["team_id"] else personal,
                 self._environment_decode(
                     await self._environment_stored_variables(conn, latest["id"] if latest else None)
                 ),
@@ -1077,6 +1368,7 @@ class PostgresEnvironmentRepository:
             )
             if row is None:
                 raise EnvironmentNotFound("Binding not found")
+            await self._require_team_binding_access(conn, row)
             skip = row["skip_start_job_id"] == job_id
             if row["skip_start_after_job_id"] and row["skip_start_after_job_id"] != job_id:
                 matches = await conn.fetchval(
@@ -1113,7 +1405,7 @@ class PostgresEnvironmentRepository:
         if cached is not None and cached[0] > time.monotonic():
             self._redactors.move_to_end(key)
             return cached[1]
-        bound = await self.get_environment_binding(user_id, binding_id)
+        bound = await self.get_environment_binding(user_id, binding_id, for_masking=True)
         redactor = SecretRedactor(bound.secrets())
         self._redactors[key] = (time.monotonic() + 60, redactor)
         self._redactors.move_to_end(key)
@@ -1135,7 +1427,9 @@ class PostgresEnvironmentRepository:
                 job_id,
             )
         return (
-            await self.get_environment_binding(row["user_id"], row["environment_binding_id"])
+            await self.get_environment_binding(
+                row["user_id"], row["environment_binding_id"], for_masking=True
+            )
             if row and row["environment_binding_id"]
             else None
         )
@@ -1171,10 +1465,15 @@ class PostgresEnvironmentRepository:
         )
         current = None
         if bound.environment_id:
+            # Read by the binding, which is the owner's: a team environment
+            # stays named here after its owner leaves the team.
             async with self._pool.acquire() as conn:
-                current = await self._environment_row(
-                    conn, user_id, bound.environment_id, archived=True
+                found = await conn.fetchrow(
+                    "SELECT e.*, t.name AS team_name FROM agent_environments e "
+                    "LEFT JOIN agent_teams t ON t.id = e.team_id WHERE e.id = $1",
+                    bound.environment_id,
                 )
+                current = dict(found) if found else None
         async with self._pool.acquire() as conn:
             global_revision = (
                 await conn.fetchval(
@@ -1188,6 +1487,11 @@ class PostgresEnvironmentRepository:
             "legacy": False,
             "required": bound.required,
             "environment_name": current["name"] if current else None,
+            "team": (
+                {"id": current["team_id"], "name": current["team_name"] or ""}
+                if current and current["team_id"]
+                else None
+            ),
             "environment_archived": bool(current and current["archived_at"] is not None),
             "has_new_version": bool(
                 current and current["archived_at"] is None and current["revision"] != bound.revision

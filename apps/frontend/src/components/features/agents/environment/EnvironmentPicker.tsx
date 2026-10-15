@@ -8,7 +8,7 @@ import { getGlobalEnvironment, listEnvironments } from '@/lib/api/environments';
 import type { EnvironmentConfig, EnvironmentVariable } from '@/lib/api/environments';
 import { EnvironmentDialog } from './EnvironmentDialog';
 import { emptyEnvironment } from './EnvironmentManager';
-import { Badge, TestBadge } from './EnvironmentStatus';
+import { Badge, TeamBadge, TestBadge } from './EnvironmentStatus';
 
 export interface EnvironmentSelection {
   environment_id: string | null;
@@ -16,7 +16,11 @@ export interface EnvironmentSelection {
   global_revision: number;
 }
 
-/** What the task will run with, after an environment's variables replace global ones. */
+/**
+ * What the task will run with, after an environment's variables replace global
+ * ones. A team environment's installation is the team's alone, so your
+ * install-only globals do not reach it.
+ */
 function EffectiveConfiguration({
   globals,
   environment,
@@ -26,7 +30,9 @@ function EffectiveConfiguration({
 }) {
   const t = useT();
   const effective = new Map<string, EnvironmentVariable & { from: string }>(
-    globals.variables.map((v) => [v.name, { ...v, from: t('environment.sourceGlobal') }]),
+    globals.variables
+      .filter((v) => !environment?.team || v.phase !== 'setup')
+      .map((v) => [v.name, { ...v, from: t('environment.sourceGlobal') }]),
   );
   environment?.variables.forEach((v) => effective.set(v.name, { ...v, from: environment.name }));
   const scripts = (
@@ -269,6 +275,7 @@ export function EnvironmentPicker({
                   item.id!,
                   item.name,
                   <span className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-muted">
+                    {item.team ? <TeamBadge name={item.team.name} /> : null}
                     {item.is_default ? (
                       <Badge tone="neutral" dot={false}>
                         {t('environment.default')}
@@ -330,7 +337,9 @@ export function EnvironmentPicker({
                   className="ui-button ui-button-ghost"
                   onClick={() => globals && setEditing({ config: env, globals })}
                 >
-                  {t('environment.editItem', { name: env.name })}
+                  {t(env.can_edit === false ? 'environment.viewItem' : 'environment.editItem', {
+                    name: env.name,
+                  })}
                 </button>
               ) : null}
             </>

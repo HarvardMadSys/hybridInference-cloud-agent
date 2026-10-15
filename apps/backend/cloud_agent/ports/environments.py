@@ -38,6 +38,7 @@ class EnvironmentRepository(Protocol):
         document: dict[str, Any],
         edits: builtins.list[dict[str, Any]],
         expected_global_revision: int | None = None,
+        team_id: str | None = None,
     ) -> dict[str, Any]:
         """Publish an immutable version under an owner-wide transaction lock."""
         ...
@@ -67,6 +68,7 @@ class EnvironmentRepository(Protocol):
         name: str,
         revision: int,
         idempotency_key: str | None = None,
+        team_id: str | None = None,
     ) -> dict[str, Any]:
         """Copy a current owned configuration to an independent identity."""
         ...

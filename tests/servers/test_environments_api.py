@@ -443,3 +443,40 @@ async def test_workspace_get_only_reads_and_redacts_without_persistence(monkeypa
     assert result["steps"] == [{"output": "masked"}]
     repository.record_environment_preparation.assert_not_awaited()
     repository.get_environment_binding.assert_not_awaited()
+
+
+async def test_a_team_environment_is_created_for_its_team_and_refusals_say_why(monkeypatch):
+    from cloud_agent.environments import EnvironmentForbidden
+
+    repository = SimpleNamespace(
+        save_environment=AsyncMock(
+            side_effect=[
+                {"id": "env", "team": {"id": "ateam_1", "name": "Platform"}},
+                EnvironmentForbidden(
+                    "Only the team's owner and admins can change its environments"
+                ),
+                {"id": "env", "team": {"id": "ateam_1", "name": "Platform"}},
+            ]
+        )
+    )
+    app = FastAPI()
+    app.include_router(environments.router)
+    app.dependency_overrides[get_storage] = lambda: SimpleNamespace(environments=repository)
+    app.dependency_overrides[require_agent_owner] = lambda: {"user_id": "alice"}
+    monkeypatch.setattr(environments, "_entitled", AsyncMock())
+    body = {"name": "Shared", "repo": "org/app", "revision": 0, "team_id": "ateam_1"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as http:
+        created = await http.post("/v1/agent/environments", json=body)
+        refused = await http.patch("/v1/agent/environments/env", json={**body, "revision": 1})
+        saved = await http.patch("/v1/agent/environments/env", json={**body, "revision": 1})
+
+    assert created.status_code == 201
+    assert repository.save_environment.await_args_list[0].kwargs["team_id"] == "ateam_1"
+    assert refused.status_code == 403
+    assert refused.json() == {
+        "detail": "Only the team's owner and admins can change its environments"
+    }
+    assert refused.headers["cache-control"] == "no-store"
+    # Saving an existing environment never moves it to another owner.
+    assert saved.status_code == 200
+    assert repository.save_environment.await_args_list[2].kwargs["team_id"] is None

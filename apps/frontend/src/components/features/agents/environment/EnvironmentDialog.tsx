@@ -16,7 +16,12 @@ import {
   suggestEnvironmentScript,
   testEnvironment,
 } from '@/lib/api/environments';
-import type { EnvironmentConfig, EnvironmentRun, VariableEdit } from '@/lib/api/environments';
+import type {
+  EnvironmentConfig,
+  EnvironmentRun,
+  EnvironmentTeam,
+  VariableEdit,
+} from '@/lib/api/environments';
 import type { TranslationKey } from '@/lib/i18n/translate';
 import { ACTIVE_STATES, EnvironmentSteps, StateBadge } from './EnvironmentStatus';
 import { RemoveIcon, VariableEditor, variableEdits } from './VariableEditor';
@@ -62,15 +67,47 @@ function ArrowIcon({ up }: { up: boolean }) {
   );
 }
 
+/** Whose a new environment or copy is: yours, or a team's you own or administer. */
+export function OwnerSelect({
+  label,
+  teams,
+  value,
+  onChange,
+}: {
+  label: string;
+  teams: EnvironmentTeam[];
+  /** A team's id, or empty for your own. */
+  value: string;
+  onChange: (teamId: string) => void;
+}) {
+  const t = useT();
+  return (
+    <label className="space-y-1 text-sm">
+      <span className="text-muted">{label}</span>
+      <select className="ui-input w-full" value={value} onChange={(e) => onChange(e.target.value)}>
+        <option value="">{t('environment.ownerSelf')}</option>
+        {teams.map((team) => (
+          <option key={team.id} value={team.id}>
+            {t('environment.ownerTeam', { team: team.name })}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
 /**
  * Edit one environment, or the owner's global variables when `initial.repo`
  * is null. A new environment whose repository is still to be chosen has an
- * empty `repo` and is given `repos` to choose from.
+ * empty `repo` and is given `repos` to choose from, and is created for one of
+ * `teams` when one is chosen. A team environment you may not change opens
+ * read-only: it can still be tested, and its history read.
  */
 export function EnvironmentDialog({
   initial,
   globals,
   repos = [],
+  teams = [],
   snapshotsEnabled = false,
   onSaved,
   onClose,
@@ -78,6 +115,8 @@ export function EnvironmentDialog({
   initial: EnvironmentConfig;
   globals: EnvironmentConfig;
   repos?: string[];
+  /** Teams a new environment may be created for: those you own or administer. */
+  teams?: EnvironmentTeam[];
   /** Whether a passing test also saves the installation for new tasks. */
   snapshotsEnabled?: boolean;
   onSaved: (value: EnvironmentConfig) => void;
@@ -112,6 +151,8 @@ export function EnvironmentDialog({
       : null,
   );
   const isNew = !value.id;
+  const team = global ? null : (value.team ?? null);
+  const readOnly = !global && value.can_edit === false;
   const tabs: Tab[] = global
     ? ['variables', ...(value.id ? (['history'] as const) : [])]
     : ['variables', 'scripts', 'actions', 'test', ...(value.id ? (['history'] as const) : [])];
@@ -247,8 +288,16 @@ export function EnvironmentDialog({
             setDirty(true);
             setSaved(false);
           }}
-          inherited={global ? [] : globals.variables}
+          // A team environment uses each member's own globals only at run
+          // time, so yours are not shown as part of it.
+          inherited={global || team ? [] : globals.variables}
         />
+        {team ? (
+          <div className="space-y-1 rounded-lg border border-status-warning/40 bg-status-warning/5 px-3 py-2 text-xs leading-5">
+            <p className="text-foreground">{t('environment.teamSecrets', { team: team.name })}</p>
+            <p className="text-muted">{t('environment.teamGlobals')}</p>
+          </div>
+        ) : null}
         <div className="rounded-lg border border-border">
           <button
             type="button"
@@ -750,6 +799,7 @@ export function EnvironmentDialog({
                   className="ui-input w-full"
                   placeholder={t('environment.namePlaceholder')}
                   value={value.name}
+                  disabled={readOnly}
                   maxLength={80}
                   onChange={(e) => change({ ...value, name: e.target.value })}
                 />
@@ -771,8 +821,30 @@ export function EnvironmentDialog({
                   </select>
                 </label>
               ) : null}
+              {isNew && teams.length ? (
+                <OwnerSelect
+                  label={t('environment.owner')}
+                  teams={teams}
+                  value={value.team?.id ?? ''}
+                  onChange={(id) =>
+                    change({ ...value, team: teams.find((item) => item.id === id) ?? null })
+                  }
+                />
+              ) : null}
             </div>
           )}
+          {team ? (
+            <p className="rounded-lg bg-surface-muted px-3 py-2 text-xs leading-5 text-muted">
+              {t(
+                readOnly
+                  ? 'environment.teamReadOnly'
+                  : isNew
+                    ? 'environment.teamNew'
+                    : 'environment.teamShared',
+                { team: team.name },
+              )}
+            </p>
+          ) : null}
           {tabs.length > 1 ? (
             <div
               role="tablist"
@@ -823,7 +895,10 @@ export function EnvironmentDialog({
           aria-labelledby={tabs.length > 1 ? `${titleId}-tab-${tab}` : undefined}
           className="min-h-0 flex-1 overflow-y-auto px-6 pb-5 pt-2"
         >
-          {tabPanels[tab]()}
+          {/* Read-only disables every control but a test's own. */}
+          <fieldset disabled={readOnly && tab !== 'test'} className="m-0 min-w-0 border-0 p-0">
+            {tabPanels[tab]()}
+          </fieldset>
         </div>
         <div className="flex shrink-0 flex-wrap items-center gap-2 border-t border-border px-6 py-3">
           {confirmingClose ? (
@@ -863,14 +938,16 @@ export function EnvironmentDialog({
                   {t(dirty || isNew ? 'environment.saveAndTest' : 'environment.runTest')}
                 </button>
               )}
-              <button
-                type="button"
-                disabled={busy || (!dirty && !isNew)}
-                className="ui-button ui-button-primary"
-                onClick={() => void perform(save)}
-              >
-                {t('environment.save')}
-              </button>
+              {readOnly ? null : (
+                <button
+                  type="button"
+                  disabled={busy || (!dirty && !isNew)}
+                  className="ui-button ui-button-primary"
+                  onClick={() => void perform(save)}
+                >
+                  {t('environment.save')}
+                </button>
+              )}
             </>
           )}
         </div>

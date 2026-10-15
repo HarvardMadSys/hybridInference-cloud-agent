@@ -33,7 +33,7 @@ Useful entry points:
 - [Public egress and accepted inference-grant replay risk](agents/specs/2026-09-23-agent-public-egress-design.zh-CN.md)
 - [Compute resource lifecycle](agents/specs/2026-10-04-compute-resource-lifecycle-design.zh-CN.md)
 - [CloudLab node rotation](agents/specs/2026-10-10-cloudlab-node-rotation-design.zh-CN.md)
-- [Teams and shared workspaces](agents/specs/2026-10-15-team-shared-workspace-design.zh-CN.md)
+- [Teams and team environments](agents/specs/2026-10-15-team-shared-workspace-design.zh-CN.md)
 - [Per-user MCP conformance audit](agents/reviews/2026-09-11-per-user-mcp-v1-conformance.md)
 
 When a change affects behavior, configuration, or commands, update the

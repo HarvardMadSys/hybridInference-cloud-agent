@@ -17,6 +17,23 @@ class EnvironmentConflict(Exception):
         self.current_revision = current_revision
 
 
+class EnvironmentForbidden(Exception):
+    """The caller may use this environment but not change it.
+
+    A team's environments are changed by the team's owner and admins; every
+    other active member may only select them.
+    """
+
+
+class EnvironmentAccessRevoked(Exception):
+    """A chat uses a team environment its owner may no longer use.
+
+    The owner left or was removed from that team, rejoined it since the chat
+    bound the environment, or the team was deleted. The binding carries the
+    team's Secrets, so no further turn runs on it.
+    """
+
+
 class EnvironmentBusy(Exception):
     """The owner already has a nonterminal environment test."""
 

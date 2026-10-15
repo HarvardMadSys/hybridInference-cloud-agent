@@ -33,6 +33,23 @@ export const en = {
   'environment.edit': 'Edit',
   'environment.editItem': 'Edit {name}',
   'environment.manageItem': 'More actions for {name}',
+  'environment.view': 'View',
+  'environment.viewItem': 'View {name}',
+  'environment.teamBadge': 'Team · {team}',
+  'environment.owner': 'Owner',
+  'environment.ownerSelf': 'Only you',
+  'environment.ownerTeam': 'Team {team}',
+  'environment.copyTo': 'Copy to',
+  'environment.teamReadOnly':
+    'Shared by the team {team}. Only its owner and admins can change it; you can use it, test it, or copy it to make your own.',
+  'environment.teamShared':
+    "Shared with everyone in {team}. Changes apply to the members' new tasks.",
+  'environment.teamNew':
+    'Everyone in {team} can choose it for their tasks. Only the owner and admins can change it.',
+  'environment.teamSecrets':
+    "Everyone in {team} can use this environment's Secrets in their tasks, and the agent and commands in those tasks can read their values.",
+  'environment.teamGlobals':
+    "Each member's personal global variables apply only while their task runs, not during install; this environment's own values win.",
   'environment.copy': 'Copy',
   'environment.copyName': '{name} copy',
   'environment.copySecrets':
@@ -216,6 +233,7 @@ export const en = {
   'environment.runtimeHint':
     'Takes the latest saved variable values from the next turn. Installed dependencies and scripts stay as they are; running services keep their current values.',
   'environment.editSaved': 'Edit saved environment',
+  'environment.openTeamSaved': 'Open team environment',
   'environment.createForRepository': 'Create an environment for this repository',
   'attach.workspace': 'Workspace',
 

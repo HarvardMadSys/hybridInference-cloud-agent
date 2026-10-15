@@ -18,6 +18,7 @@ from cloud_agent.sandbox_archive_credentials import load_stored_archive_policy
 from cloud_agent.storage._sql.rows import load_json
 from cloud_agent.storage.repositories.environments import (
     lock_environment_snapshots,
+    lock_team_environment_snapshots,
     retire_changed_snapshots,
 )
 from cloud_agent_shared.environment_snapshots import (
@@ -62,6 +63,15 @@ _SUMMARY_STATES = ("queued", "building", "ready", "failed")
 #: script may have written runtime values into. Such a snapshot is retired.
 _SAVED_BY_TEST = (
     "EXISTS (SELECT 1 FROM agent_environment_runs r WHERE r.id = s.run_id AND r.purpose = 'test')"
+)
+#: A snapshot a job (user ``$2``, binding ``$3``) may report on: its own, or
+#: any member's snapshot of the team environment its binding names, as
+#: :meth:`PostgresEnvironmentSnapshotRepository.snapshot_for_claim` serves.
+_JOB_MAY_USE = (
+    "(user_id = $2 OR environment_id = ("
+    "SELECT v.environment_id FROM agent_environment_bindings b "
+    "JOIN agent_environment_versions v ON v.id = b.environment_version_id "
+    "WHERE b.id = $3 AND b.team_id IS NOT NULL))"
 )
 #: After a failed build, tasks stop queueing new ones for this long; the owner
 #: can still ask for one. A setup that fails would otherwise rerun in the
@@ -129,7 +139,10 @@ class PostgresEnvironmentSnapshotRepository:
                 JOIN agent_environment_snapshots s
                   ON s.environment_id = v.environment_id
                  AND s.setup_fingerprint = b.setup_fingerprint
-                 AND s.user_id = b.user_id
+                 -- A personal environment's snapshot is its owner's alone. A
+                 -- team's installation does not depend on who runs it, and its
+                 -- members trust each other with it, so any member's serves.
+                 AND (s.user_id = b.user_id OR b.team_id IS NOT NULL)
                 -- Only a prebuild's container is an installation alone; see
                 -- capture_target.
                 JOIN agent_environment_runs r ON r.id = s.run_id AND r.purpose = 'prebuild'
@@ -281,7 +294,8 @@ class PostgresEnvironmentSnapshotRepository:
         handed, and only while its run may still report at all: the run row is
         locked with the snapshot, so a cancel or an expired lease cannot slip
         between this check and the snapshot becoming ready. The owner's
-        snapshot lock comes first, as for a deletion of the same snapshots.
+        snapshot lock comes first, as for a deletion of the same snapshots;
+        for a team environment, every owner's of its snapshots.
         """
         snapshot_id = str(receipt.get("snapshot_id") or "")
         lockfiles = receipt.get("lockfiles")
@@ -294,12 +308,18 @@ class PostgresEnvironmentSnapshotRepository:
         ):
             return False
         async with self._pool.acquire() as conn, conn.transaction():
-            owner = await conn.fetchval(
-                "SELECT user_id FROM agent_environment_snapshots WHERE id=$1", snapshot_id
+            built = await conn.fetchrow(
+                "SELECT s.user_id, s.environment_id, e.team_id FROM agent_environment_snapshots s "
+                "JOIN agent_environments e ON e.id = s.environment_id WHERE s.id=$1",
+                snapshot_id,
             )
-            if owner is None:
+            if built is None:
                 return False
-            await lock_environment_snapshots(conn, owner)
+            # The builds it supersedes may be other members' of a team environment.
+            if built["team_id"]:
+                await lock_team_environment_snapshots(conn, built["environment_id"])
+            else:
+                await lock_environment_snapshots(conn, built["user_id"])
             row = await conn.fetchrow(
                 "SELECT s.* FROM agent_environment_snapshots s JOIN agent_environment_runs r ON r.id = s.run_id "
                 "WHERE s.id=$1 AND r.id=$2 AND r.host=$3 AND r.lease_generation=$4 AND s.state='building' "
@@ -410,18 +430,20 @@ class PostgresEnvironmentSnapshotRepository:
             if outcome == "used":
                 await conn.execute(
                     "UPDATE agent_environment_snapshots SET last_used_at=NOW(), use_count=use_count+1 "
-                    "WHERE id=$1 AND user_id=$2 AND state IN ('ready','superseded')",
+                    f"WHERE id=$1 AND {_JOB_MAY_USE} AND state IN ('ready','superseded')",
                     snapshot_id,
                     job["user_id"],
+                    job["environment_binding_id"],
                 )
                 return True
             if outcome == "invalid":
                 await conn.execute(
                     "UPDATE agent_environment_snapshots SET state='deleting', "
                     "detail='The stored snapshot did not match its record', updated_at=NOW() "
-                    "WHERE id=$1 AND user_id=$2 AND state IN ('ready','superseded')",
+                    f"WHERE id=$1 AND {_JOB_MAY_USE} AND state IN ('ready','superseded')",
                     snapshot_id,
                     job["user_id"],
+                    job["environment_binding_id"],
                 )
         if outcome in {"absent", "lockfiles_changed", "image_changed"} and job["repo"] and base_sha:
             await self.queue_prebuild(
@@ -439,7 +461,9 @@ class PostgresEnvironmentSnapshotRepository:
 
         Each environment is matched with its own fingerprint: a copy installs
         what the original did, so one environment's earlier snapshot can carry
-        another's current fingerprint.
+        another's current fingerprint. A team environment's is whichever
+        member's built it; a personal one's, the owner's own. ``fingerprints``
+        names only environments the caller may use.
         """
         wanted = {env: fp for env, fp in fingerprints.items() if fp}
         result: dict[str, dict[str, Any] | None] = dict.fromkeys(fingerprints)
@@ -448,14 +472,15 @@ class PostgresEnvironmentSnapshotRepository:
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                SELECT DISTINCT ON (environment_id) environment_id, id, state, created_at,
-                       ready_at, last_used_at, size_bytes, detail
-                FROM agent_environment_snapshots
-                WHERE user_id = $1
-                  AND (environment_id, setup_fingerprint) IN (
+                SELECT DISTINCT ON (s.environment_id) s.environment_id, s.id, s.state,
+                       s.created_at, s.ready_at, s.last_used_at, s.size_bytes, s.detail
+                FROM agent_environment_snapshots s
+                JOIN agent_environments e ON e.id = s.environment_id
+                WHERE (s.user_id = $1 OR e.team_id IS NOT NULL)
+                  AND (s.environment_id, s.setup_fingerprint) IN (
                       SELECT * FROM unnest($2::text[], $3::text[]))
-                  AND state = ANY($4::text[])
-                ORDER BY environment_id, created_at DESC
+                  AND s.state = ANY($4::text[])
+                ORDER BY s.environment_id, s.created_at DESC
                 """,
                 user_id,
                 list(wanted),
@@ -476,33 +501,39 @@ class PostgresEnvironmentSnapshotRepository:
             }
         return result
 
-    async def discard(self, user_id: str, environment_id: str) -> int:
+    async def discard(self, user_id: str, environment_id: str, *, team: bool = False) -> int:
         """Delete an environment's snapshots, and cancel the prebuilds of pending ones.
 
         A prebuild is cancelled the way an owner cancels a test: a queued one
         is never claimed, and a running one's host is refused at its next
-        report and stops. The owner's snapshot lock comes first: the
-        statement below locks the snapshots in whatever order it scans them,
-        and a receipt holding one of them may be waiting for another.
+        report and stops. ``team`` deletes every member's snapshots of a team
+        environment; the caller has checked that ``user_id`` may change it.
+        The snapshot locks of their owners come first: the statement below
+        locks the snapshots in whatever order it scans them, and a receipt
+        holding one of them may be waiting for another.
         """
         async with self._pool.acquire() as conn, conn.transaction():
-            await lock_environment_snapshots(conn, user_id)
+            if team:
+                owners = await lock_team_environment_snapshots(conn, environment_id)
+            else:
+                await lock_environment_snapshots(conn, user_id)
+                owners = [user_id]
             rows = await conn.fetch(
                 "UPDATE agent_environment_snapshots SET state=CASE WHEN object_key IS NULL THEN 'deleted' ELSE 'deleting' END, "
                 "detail='Deleted by the owner', updated_at=NOW(), "
                 "deleted_at=CASE WHEN object_key IS NULL THEN NOW() ELSE NULL END "
-                "WHERE user_id=$1 AND environment_id=$2 AND state IN ('queued','building','ready','superseded','failed') "
+                "WHERE user_id=ANY($1::text[]) AND environment_id=$2 AND state IN ('queued','building','ready','superseded','failed') "
                 "RETURNING run_id",
-                user_id,
+                owners,
                 environment_id,
             )
             await conn.execute(
                 "UPDATE agent_environment_runs SET cancel_requested=TRUE, cleanup_complete=(host IS NULL), "
                 "state='cancelled', detail='The installation snapshot was deleted', "
                 "finished_at=NOW(), updated_at=NOW() "
-                "WHERE id=ANY($1::text[]) AND user_id=$2 AND purpose='prebuild' AND state IN ('queued','running')",
+                "WHERE id=ANY($1::text[]) AND user_id=ANY($2::text[]) AND purpose='prebuild' AND state IN ('queued','running')",
                 [row["run_id"] for row in rows if row["run_id"]],
-                user_id,
+                owners,
             )
         return len(rows)
 

@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { saveEnvironment, saveGlobalVariables, startEnvironmentAction } from './environments';
+import {
+  copyEnvironment,
+  saveEnvironment,
+  saveGlobalVariables,
+  startEnvironmentAction,
+} from './environments';
 import { variableEdits } from '@/components/features/agents/environment/VariableEditor';
 import * as client from './client';
 
@@ -93,6 +98,43 @@ describe('environment credentials and commands', () => {
     expect(JSON.parse(fetch.mock.lastCall?.[2]?.body as string).variables).toEqual([
       { name: 'TOKEN', secret: true, phase: 'both', operation: 'remove' },
     ]);
+  });
+  it('names the team only when creating or copying into it, never when saving one', async () => {
+    const fetch = vi
+      .spyOn(client, 'fetchWithAuth')
+      .mockImplementation(
+        async () => new Response('{}', { headers: { 'Content-Type': 'application/json' } }),
+      );
+    const team = { id: 'team-1', name: 'Platform' };
+    const draft = {
+      id: null,
+      repo: 'org/repo',
+      name: 'Shared',
+      revision: 0,
+      setup_script: '',
+      start_script: '',
+      verify_script: '',
+      actions: [],
+      variables: [],
+      team,
+    };
+    await saveEnvironment(draft);
+    expect(fetch.mock.lastCall?.[1]).toBe('/v1/agent/environments');
+    expect(JSON.parse(fetch.mock.lastCall?.[2]?.body as string).team_id).toBe('team-1');
+    await saveEnvironment({ ...draft, id: 'env-1', revision: 1 });
+    expect(JSON.parse(fetch.mock.lastCall?.[2]?.body as string)).not.toHaveProperty('team_id');
+    await saveEnvironment({ ...draft, team: null });
+    expect(JSON.parse(fetch.mock.lastCall?.[2]?.body as string)).not.toHaveProperty('team_id');
+
+    await copyEnvironment('env-1', 1, 'org/repo', 'Copy', 'key', 'team-1');
+    expect(JSON.parse(fetch.mock.lastCall?.[2]?.body as string)).toEqual({
+      revision: 1,
+      repo: 'org/repo',
+      name: 'Copy',
+      team_id: 'team-1',
+    });
+    await copyEnvironment('env-1', 1, 'org/repo', 'Copy', 'key');
+    expect(JSON.parse(fetch.mock.lastCall?.[2]?.body as string)).not.toHaveProperty('team_id');
   });
   it('requests saved actions by identity and binding without sending command text', async () => {
     const fetch = vi

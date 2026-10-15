@@ -729,6 +729,40 @@ async def test_environment_claim_requires_both_actual_runner_and_broker(monkeypa
         assert store.failed == []
 
 
+async def test_a_team_environment_its_owner_lost_fails_the_turn_before_any_credential(
+    monkeypatch,
+):
+    """Leaving the team ends the chat's use of its Secrets; no host change helps."""
+    from unittest.mock import AsyncMock
+
+    from cloud_agent.environments import EnvironmentAccessRevoked
+
+    store, grants = _ClaimStore(), _Grants()
+    original_claim = store.claim_job
+
+    async def bound_claim(**kwargs):
+        result = await original_claim(**kwargs)
+        return {**result, "environment_binding_id": "team-binding"}
+
+    monkeypatch.setattr(store, "claim_job", bound_claim)
+    store.environment_for_claim = AsyncMock(
+        side_effect=EnvironmentAccessRevoked(
+            "This chat uses an environment of a team you are no longer a member of"
+        )
+    )
+    body = {"worker_id": "w1", "attestation": {"runner_capabilities": ["environment-v1"]}}
+    async with AsyncClient(
+        transport=ASGITransport(app=_app(store, grants)), base_url="http://test"
+    ) as client:
+        response = await client.post("/v1/agent/worker/claim", json=body)
+
+    assert response.status_code == 403, response.text
+    assert response.json()["detail"]["error"]["type"] == "team_environment_revoked"
+    assert store.failed == [_JOB]
+    assert store.released == []
+    assert grants.calls == []
+
+
 @pytest.mark.parametrize("snapshot_capable", [False, True])
 async def test_snapshot_fields_and_a_snapshot_go_only_to_a_runner_that_reads_them(
     monkeypatch, snapshot_capable

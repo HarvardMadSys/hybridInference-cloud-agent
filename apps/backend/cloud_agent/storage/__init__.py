@@ -35,6 +35,9 @@ than one snapshot, or a snapshot and its run, takes the snapshot lock first
 (``lock_environment_snapshots``): a statement over several snapshots locks them
 in whatever order its plan scans them. Publishing a configuration holds the
 environment lock when it retires the snapshots of installations it changed.
+A team environment's snapshots belong to whichever members built them: a write
+over several of them takes every one of those owners' snapshot locks, ordered
+by account (``lock_team_environment_snapshots``), before any of the rows.
 
 Known exceptions, each safe for the reason given. The idle-only submit locks
 its newest job after the group, and only once the group's newest snapshot reads

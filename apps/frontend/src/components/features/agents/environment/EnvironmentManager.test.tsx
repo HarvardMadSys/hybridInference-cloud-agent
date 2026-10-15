@@ -12,6 +12,7 @@ import {
   setEnvironmentDefault,
 } from '@/lib/api/environments';
 import type { EnvironmentConfig } from '@/lib/api/environments';
+import { listTeams } from '@/lib/api/teams';
 import { EnvironmentManager } from './EnvironmentManager';
 vi.mock('@/components/providers', () => ({ useT: () => (key: string) => key }));
 vi.mock('@/lib/api/agents', () => ({ getAgentConfig: vi.fn() }));
@@ -23,9 +24,21 @@ vi.mock('@/lib/api/environments', () => ({
   rebuildEnvironmentSnapshot: vi.fn(),
   setEnvironmentDefault: vi.fn(),
 }));
-vi.mock('./EnvironmentDialog', () => ({
-  EnvironmentDialog: ({ initial }: { initial: { name: string; repo: string | null } }) => (
-    <div role="dialog" aria-label={`editing ${initial.repo === null ? 'globals' : initial.name}`} />
+vi.mock('@/lib/api/teams', () => ({ listTeams: vi.fn() }));
+vi.mock('./EnvironmentDialog', async (actual) => ({
+  OwnerSelect: (await actual<typeof import('./EnvironmentDialog')>()).OwnerSelect,
+  EnvironmentDialog: ({
+    initial,
+    teams,
+  }: {
+    initial: { name: string; repo: string | null };
+    teams?: { name: string }[];
+  }) => (
+    <div
+      role="dialog"
+      aria-label={`editing ${initial.repo === null ? 'globals' : initial.name}`}
+      data-teams={(teams ?? []).map((team) => team.name).join(',')}
+    />
   ),
 }));
 
@@ -45,6 +58,7 @@ function environment(fields: Partial<EnvironmentConfig>): EnvironmentConfig {
 }
 
 beforeEach(() => {
+  vi.mocked(listTeams).mockResolvedValue([]);
   vi.mocked(getAgentConfig).mockResolvedValue({ repos: ['org/api', 'org/web'] } as never);
   vi.mocked(listEnvironments).mockResolvedValue({
     globals: environment({ id: 'global', repo: null, name: 'Global', revision: 2 }),
@@ -156,4 +170,93 @@ it('says nothing about snapshots where the deployment keeps none', async () => {
   render(<EnvironmentManager />);
   await screen.findByText('org/web');
   expect(screen.queryByText(/environment.snapshot/)).toBeNull();
+});
+
+const team = (id: string, name: string, role: 'owner' | 'admin' | 'member') => ({
+  id,
+  name,
+  role,
+  owner_user_id: 'alice',
+  revision: 1,
+  member_count: 3,
+  created_at: '2026-10-15T00:00:00Z',
+});
+
+it("lets a member view, copy and choose a team's environment but not change it", async () => {
+  vi.mocked(listEnvironments).mockResolvedValue({
+    globals: environment({ id: 'global', repo: null, name: 'Global', revision: 2 }),
+    snapshots_enabled: true,
+    environments: [
+      environment({
+        id: 'shared',
+        name: 'Shared',
+        team: { id: 'team-1', name: 'Platform' },
+        can_edit: false,
+        setup_script: 'npm ci',
+        snapshot: { id: 's', state: 'ready', created_at: '2026-10-15T00:00:00Z' },
+      }),
+    ],
+  });
+  vi.mocked(listTeams).mockResolvedValue([team('team-1', 'Platform', 'member')]);
+  render(<EnvironmentManager />);
+  const web = (await screen.findByText('org/web')).parentElement!;
+  expect(within(web).getByText('environment.teamBadge')).toBeInTheDocument();
+  expect(within(web).getByRole('button', { name: 'environment.viewItem' })).toBeInTheDocument();
+  expect(within(web).getByRole('button', { name: 'environment.view' })).toBeInTheDocument();
+  expect(within(web).queryByRole('button', { name: 'environment.edit' })).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: 'environment.manageItem' }));
+  expect(screen.getAllByRole('menuitem').map((item) => item.textContent)).toEqual([
+    'environment.copy',
+    'environment.makeDefault',
+  ]);
+  // A member who administers no team copies only to themselves.
+  fireEvent.click(screen.getByRole('menuitem', { name: 'environment.copy' }));
+  expect(screen.queryByLabelText('environment.copyTo')).toBeNull();
+});
+
+it('copies into a team you administer, and offers only those teams', async () => {
+  vi.mocked(listTeams).mockResolvedValue([
+    team('team-1', 'Platform', 'admin'),
+    team('team-2', 'Research', 'member'),
+    team('team-3', 'Infra', 'owner'),
+  ]);
+  vi.mocked(copyEnvironment).mockResolvedValue(environment({ id: 'copy', name: 'Copied' }));
+  render(<EnvironmentManager />);
+  await screen.findByText('org/web');
+  fireEvent.click(screen.getAllByRole('button', { name: 'environment.manageItem' })[0]);
+  fireEvent.click(screen.getByRole('menuitem', { name: 'environment.copy' }));
+  const target = await screen.findByLabelText('environment.copyTo');
+  expect(
+    within(target)
+      .getAllByRole('option')
+      .map((option) => option.getAttribute('value')),
+  ).toEqual(['', 'team-1', 'team-3']);
+  fireEvent.change(target, { target: { value: 'team-3' } });
+  fireEvent.click(screen.getByRole('button', { name: 'environment.copy' }));
+  await screen.findByRole('dialog', { name: 'editing Copied' });
+  expect(vi.mocked(copyEnvironment).mock.calls[0][5]).toBe('team-3');
+});
+
+it('lets a new environment be created for a team you administer', async () => {
+  vi.mocked(listTeams).mockResolvedValue([
+    team('team-1', 'Platform', 'admin'),
+    team('team-2', 'Research', 'member'),
+  ]);
+  render(<EnvironmentManager />);
+  await screen.findByText('org/web');
+  await waitFor(() => expect(listTeams).toHaveBeenCalled());
+  fireEvent.click(screen.getByRole('button', { name: /environment.new/ }));
+  await waitFor(() =>
+    expect(screen.getByRole('dialog', { name: 'editing' })).toHaveAttribute(
+      'data-teams',
+      'Platform',
+    ),
+  );
+});
+
+it('still lists environments when teams cannot be read', async () => {
+  vi.mocked(listTeams).mockRejectedValue(new Error('teams unavailable'));
+  render(<EnvironmentManager />);
+  expect(await screen.findByText('org/web')).toBeInTheDocument();
+  expect(screen.queryByRole('alert')).toBeNull();
 });

@@ -192,3 +192,79 @@ it('saves an update script for workspaces that start from a snapshot', async () 
     }),
   );
 });
+
+const platform = { id: 'team-1', name: 'Platform' };
+
+it('opens a team environment you may not change read-only, and still tests it', async () => {
+  vi.mocked(testEnvironment).mockResolvedValue({
+    id: 'run',
+    state: 'running',
+    steps: [],
+    base_sha: 'abcdef0123456789',
+  });
+  open({
+    ...config,
+    team: platform,
+    can_edit: false,
+    variables: [{ name: 'REGION', secret: false, phase: 'both', value: 'east' }],
+  });
+  expect(screen.getByText('environment.teamReadOnly')).toBeInTheDocument();
+  expect(screen.getByText('environment.teamSecrets')).toBeInTheDocument();
+  expect(screen.getByPlaceholderText('environment.namePlaceholder')).toBeDisabled();
+  expect(screen.getByDisplayValue('east')).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'environment.removeVariable' })).toBeDisabled();
+  expect(screen.getByRole('button', { name: /environment.addVariable/ })).toBeDisabled();
+  expect(screen.queryByRole('button', { name: 'environment.save' })).toBeNull();
+  fireEvent.click(screen.getByRole('tab', { name: 'environment.tab.scripts' }));
+  expect(screen.getByLabelText('environment.installScript')).toBeDisabled();
+  fireEvent.click(screen.getByRole('button', { name: 'environment.runTest' }));
+  await waitFor(() => expect(testEnvironment).toHaveBeenCalledWith('env', 1, 0));
+  expect(saveEnvironment).not.toHaveBeenCalled();
+  expect(screen.getByRole('button', { name: 'environment.cancelTest' })).toBeEnabled();
+});
+
+it('creates an environment for a team you administer when you choose it', async () => {
+  vi.mocked(saveEnvironment).mockResolvedValue({
+    ...config,
+    id: 'created',
+    team: platform,
+    can_edit: true,
+  });
+  render(
+    <EnvironmentDialog
+      initial={{ ...config, id: null, name: '', revision: 0 }}
+      globals={{
+        ...globals,
+        variables: [{ name: 'MINE', secret: false, phase: 'both', value: '1' }],
+      }}
+      teams={[platform]}
+      onSaved={vi.fn()}
+      onClose={vi.fn()}
+    />,
+  );
+  // Your own globals are shown as part of your own environment only.
+  expect(screen.getByText('MINE')).toBeInTheDocument();
+  const owner = screen.getByLabelText('environment.owner');
+  expect(
+    within(owner)
+      .getAllByRole('option')
+      .map((o) => o.textContent),
+  ).toEqual(['environment.ownerSelf', 'environment.ownerTeam']);
+  fireEvent.change(owner, { target: { value: 'team-1' } });
+  expect(screen.getByText('environment.teamNew')).toBeInTheDocument();
+  expect(screen.getByText('environment.teamSecrets')).toBeInTheDocument();
+  expect(screen.queryByText('MINE')).toBeNull();
+  fireEvent.change(screen.getByPlaceholderText('environment.namePlaceholder'), {
+    target: { value: 'Shared' },
+  });
+  fireEvent.click(screen.getByRole('button', { name: 'environment.save' }));
+  await waitFor(() =>
+    expect(vi.mocked(saveEnvironment).mock.calls[0][0]).toMatchObject({
+      name: 'Shared',
+      team: platform,
+    }),
+  );
+  // Once created, its owner is fixed.
+  expect(screen.queryByLabelText('environment.owner')).toBeNull();
+  expect(screen.getByText('environment.teamShared')).toBeInTheDocument();
+});

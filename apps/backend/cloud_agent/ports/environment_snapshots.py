@@ -64,8 +64,11 @@ class EnvironmentSnapshotRepository(Protocol):
         """The latest snapshot of each environment's current installation."""
         ...
 
-    async def discard(self, user_id: str, environment_id: str) -> int:
-        """Delete an environment's snapshots and cancel their pending prebuilds."""
+    async def discard(self, user_id: str, environment_id: str, *, team: bool = False) -> int:
+        """Delete an environment's snapshots and cancel their pending prebuilds.
+
+        ``team`` deletes every member's snapshots of a team environment.
+        """
         ...
 
     async def maintain(self) -> None:

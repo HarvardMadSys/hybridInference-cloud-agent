@@ -59,7 +59,7 @@ from cloud_agent.attachments.models import AttachmentLeaseLost, AttachmentView
 from cloud_agent.attachments.selection import prompt_with_attachments
 from cloud_agent.domain.execution import FAILED, QUEUED, RUNNING, TERMINAL_STATES
 from cloud_agent.entitlement import RepoAccessUnavailable, RepoNotAllowed, require_entitled_repo
-from cloud_agent.environments import EnvironmentEncryptionError
+from cloud_agent.environments import EnvironmentAccessRevoked, EnvironmentEncryptionError
 from cloud_agent.execution_profiles import ExecutionProfile
 from cloud_agent.gateway import GatewayError
 from cloud_agent.github_app import AppNotInstalled
@@ -1032,6 +1032,23 @@ async def _hand_over_claim(
             raise HTTPException(
                 503, "Waiting for environment-capable host or available encryption"
             ) from None
+        except EnvironmentAccessRevoked as exc:
+            # The chat carries a team's Secrets its owner may no longer use. No
+            # host change makes it runnable again, so it fails rather than waits.
+            await job_store.attempt_commands.transition(
+                **fence,
+                from_states=(RUNNING,),
+                to_state=FAILED,
+                detail=str(exc),
+            )
+            logger.warning(
+                "agent_job_team_environment_revoked",
+                extra={"event": "agent_job_team_environment_revoked", "job_id": claim["id"]},
+            )
+            raise HTTPException(
+                status_code=403,
+                detail={"error": {"type": "team_environment_revoked", "message": str(exc)}},
+            ) from exc
         if (
             environment is not None
             and environment.setup_script

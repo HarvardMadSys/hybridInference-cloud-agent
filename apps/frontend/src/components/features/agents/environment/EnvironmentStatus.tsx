@@ -68,6 +68,19 @@ export function Badge({
   );
 }
 
+/** Marks a team's shared environment, naming the team. */
+export function TeamBadge({ name }: { name: string }) {
+  const t = useT();
+  const label = t('environment.teamBadge', { team: name });
+  return (
+    <Badge tone="neutral" dot={false}>
+      <span className="max-w-[14rem] truncate" title={label}>
+        {label}
+      </span>
+    </Badge>
+  );
+}
+
 /** A server state as a coloured label; an unrecognised state is shown as sent. */
 export function StateBadge({ state }: { state: string }) {
   const t = useT();

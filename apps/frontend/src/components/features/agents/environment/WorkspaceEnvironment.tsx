@@ -28,6 +28,7 @@ import {
   Badge,
   EnvironmentSteps,
   StateBadge,
+  TeamBadge,
   usePhaseLabel,
 } from './EnvironmentStatus';
 
@@ -202,10 +203,13 @@ export function WorkspaceEnvironment({
       : source === 'override'
         ? t('environment.sourceTask')
         : (bound.environment_name ?? '');
+  // Whether you may change a team's environment is known once it is opened.
   const editLabel: TranslationKey = temporary
     ? 'environment.editGlobals'
     : bound.environment_id && !bound.environment_archived
-      ? 'environment.editSaved'
+      ? bound.team
+        ? 'environment.openTeamSaved'
+        : 'environment.editSaved'
       : 'environment.createForRepository';
   return (
     <section className="space-y-5 p-4" aria-label={t('environment.workspaceTitle')}>
@@ -214,8 +218,9 @@ export function WorkspaceEnvironment({
           <div className="min-w-0">
             <h2 className="truncate text-sm font-semibold text-foreground">{name}</h2>
             {bound.environment_id ? (
-              <p className="mt-0.5 text-xs text-muted">
+              <p className="mt-0.5 flex flex-wrap items-center gap-1.5 text-xs text-muted">
                 {t('environment.versionLabel', { revision: bound.revision ?? 0 })}
+                {bound.team ? <TeamBadge name={bound.team.name} /> : null}
               </p>
             ) : null}
           </div>

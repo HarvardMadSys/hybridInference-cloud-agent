@@ -147,3 +147,32 @@ it('clears a failed read of the environment once a later read succeeds', async (
     vi.useRealTimers();
   }
 });
+
+it('names the team whose environment the workspace uses, and opens it to view', async () => {
+  vi.mocked(getWorkspaceEnvironment).mockResolvedValue({
+    ...binding,
+    team: { id: 'team-1', name: 'Platform' },
+  });
+  vi.mocked(listEnvironments).mockResolvedValue({
+    globals: { ...binding, id: 'global', repo: null, name: 'Global', revision: 0 } as never,
+    environments: [
+      {
+        id: 'env',
+        repo: 'org/repo',
+        name: 'Development',
+        revision: 2,
+        variables: [],
+        setup_script: '',
+        start_script: '',
+        verify_script: '',
+        actions: [],
+        team: { id: 'team-1', name: 'Platform' },
+        can_edit: false,
+      },
+    ],
+  });
+  render(<WorkspaceEnvironment jobId="job" repo="org/repo" onTerminal={() => {}} />);
+  expect(await screen.findByText('environment.teamBadge')).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'environment.openTeamSaved' }));
+  expect(await screen.findByRole('dialog', { name: 'editing Development' })).toBeInTheDocument();
+});

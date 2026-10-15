@@ -67,7 +67,8 @@ async def test_a_rebuild_freezes_the_current_configuration_and_replaces_old_snap
     monkeypatch,
 ):
     environments_repo = SimpleNamespace(
-        bind_current_environment=AsyncMock(return_value=("binding", "org/repo"))
+        get_environment=AsyncMock(return_value={"id": "env", "team": None, "can_edit": True}),
+        bind_current_environment=AsyncMock(return_value=("binding", "org/repo")),
     )
     snapshots = _snapshots()
     store = SimpleNamespace(environments=environments_repo, environment_snapshots=snapshots)
@@ -80,7 +81,7 @@ async def test_a_rebuild_freezes_the_current_configuration_and_replaces_old_snap
         snapshots.enabled.return_value = False
         refused = await http.post("/v1/agent/environments/env/snapshot", json={})
     assert response.status_code == 202, response.text
-    snapshots.discard.assert_awaited_once_with("alice", "env")
+    snapshots.discard.assert_awaited_once_with("alice", "env", team=False)
     snapshots.queue_prebuild.assert_awaited_once_with(
         user_id="alice", binding_id="binding", repo="org/repo", base_sha="c" * 40, requested=True
     )
@@ -91,7 +92,9 @@ async def test_an_owner_deletes_only_their_own_environments_snapshots():
     from cloud_agent.environments import EnvironmentNotFound
 
     environments_repo = SimpleNamespace(
-        get_environment=AsyncMock(side_effect=[{"id": "env"}, EnvironmentNotFound("missing")])
+        get_environment=AsyncMock(
+            side_effect=[{"id": "env", "team": None}, EnvironmentNotFound("missing")]
+        )
     )
     snapshots = _snapshots()
     store = SimpleNamespace(environments=environments_repo, environment_snapshots=snapshots)
@@ -100,7 +103,35 @@ async def test_an_owner_deletes_only_their_own_environments_snapshots():
         missing = await http.delete("/v1/agent/environments/other/snapshot")
     assert deleted.status_code == 204
     assert missing.status_code == 404
-    snapshots.discard.assert_awaited_once_with("alice", "env")
+    snapshots.discard.assert_awaited_once_with("alice", "env", team=False)
+
+
+@pytest.mark.parametrize("can_edit", [True, False])
+async def test_a_team_environments_snapshots_are_its_editors_to_throw_away(monkeypatch, can_edit):
+    """Every member's snapshot of a team environment goes, so only an editor may decide."""
+    team = {"id": "env", "team": {"id": "ateam_1", "name": "Platform"}, "can_edit": can_edit}
+    environments_repo = SimpleNamespace(
+        get_environment=AsyncMock(return_value=team),
+        bind_current_environment=AsyncMock(return_value=("binding", "org/repo")),
+    )
+    snapshots = _snapshots()
+    store = SimpleNamespace(environments=environments_repo, environment_snapshots=snapshots)
+    monkeypatch.setattr(environments, "_entitled", AsyncMock())
+    monkeypatch.setattr(
+        "cloud_agent.environment_source.resolve_test_commit", AsyncMock(return_value="c" * 40)
+    )
+    async with AsyncClient(transport=ASGITransport(app=_app(store)), base_url="http://t") as http:
+        deleted = await http.delete("/v1/agent/environments/env/snapshot")
+        rebuilt = await http.post("/v1/agent/environments/env/snapshot", json={})
+
+    if can_edit:
+        assert (deleted.status_code, rebuilt.status_code) == (204, 202)
+        assert snapshots.discard.await_args_list[0].kwargs == {"team": True}
+    else:
+        assert (deleted.status_code, rebuilt.status_code) == (403, 403)
+        assert "owner and admins" in deleted.json()["detail"]
+        snapshots.discard.assert_not_awaited()
+        environments_repo.bind_current_environment.assert_not_awaited()
 
 
 def _claimed(monkeypatch, run, snapshots):

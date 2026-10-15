@@ -227,13 +227,28 @@ requirement, and rules 4 and 5 remain permanent service boundaries.
   keeps Secrets write-only, filters setup/runtime phases, masks known values in
   durable output and scans trusted snapshot/publication additions, including
   binary content. These controls do not prevent deliberate exfiltration or direct
-  Git pushes. Same-owner Fork inherits the binding; no cross-owner sharing is
-  introduced. Reserved platform/host variable names and the existing fixed
+  Git pushes. Same-owner Fork inherits the binding; the only cross-owner
+  sharing is a team's environment, below. Reserved platform/host variable names and the existing fixed
   network and member credential boundaries still apply. An owner's
   `OPENAI_*`/`ANTHROPIC_*` credentials never enter an agent CLI's own
   environment, which keeps the platform grant; a member-private `BASH_ENV`
   script gives them to the commands the CLI runs. See the
   [environment design](docs/agents/specs/2026-10-12-repository-environment-design.zh-CN.md).
+- **Team environments (2026-10-15).** A team's owner and admins may save an
+  environment for the team, and every active member may run their own tasks,
+  in their own sandboxes, with it. Its Secrets are therefore readable by every
+  member who runs it: the write-only editor hides them on screen, not between
+  members, and the dialog says so. A member's personal globals join it only at
+  run time, so its installation is the same for everyone. Its installation
+  snapshots serve the whole team, and a member's task or test can queue a
+  build from a commit that member checked out, so a member can shape what the
+  others' sandboxes start from. Members of a team are one trust domain for its
+  environments, as for a repository they can all push to. A binding records
+  the member's access generation, and every read that hands its values to a
+  container (each turn's claim, terminals, actions, Fork, preparation, tests)
+  refuses once the member has left or the team is deleted; a value already
+  read cannot be taken back, so rotate it. See the
+  [team design](docs/agents/specs/2026-10-15-team-shared-workspace-design.zh-CN.md).
 - **Owner SSH servers (2026-10-15).** An owner may register their own SSH
   servers and enable them per chat. The platform generates one Ed25519 key per
   server, stores it encrypted, and writes it only into the enabled chat

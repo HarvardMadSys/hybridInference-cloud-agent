@@ -84,12 +84,15 @@ that URL to another origin is refused while the token is kept. Clear the token,
 save the URL, then enter the token again.
 
 For the first deployment of this release, run `alembic upgrade head` through
-`0081_snapshot_pushed_commit`. 0079 and 0080 only add tables and change no
+`0082_team_environments`. 0079 and 0080 only add tables and change no
 existing row. 0081 adds `agent_sandbox_snapshots.pushed_commit_sha` and copies
 into it the commit of every snapshot that was never published. It leaves
 `published_commit_sha` as it was, so the API it replaces keeps working until
-then, and no notice fires. Existing hosts begin without a deployment drain
-owner or release receipt, and 0051 backfills each one with a non-null fence
+then, and no notice fires. 0082 adds nullable team columns to environments and
+their bindings, and lets a repository default name any environment; it changes
+no existing row, and refuses to downgrade while a team environment exists.
+Existing hosts begin without a deployment drain owner or release receipt, and
+0051 backfills each one with a non-null fence
 epoch. 0066 builds an index on `agent_jobs` concurrently: on a long job history
 it takes a while without blocking the running API, and an interrupted run can
 simply be repeated. 0067 only replaces a trigger function. Once this release
@@ -2170,6 +2173,13 @@ stored like a checkpoint. Design: [install snapshots](../agents/specs/2026-10-15
   from a checkpoint) counts its installation as done when the marker's
   fingerprint matches, so a restore no longer reruns the install script. A
   snapshot's container then runs the environment's optional update script.
+- **Team environments.** A team environment's snapshot serves every active
+  member, whoever's task or test queued it, and every member's use keeps it
+  alive. It counts toward the 20 GiB of the member who queued it. Only the
+  team's owner and admins can delete or rebuild it. Their change to its install
+  script or install-time values retires every member's snapshot of it; a
+  member's own global variables never do, since a team environment installs
+  without them.
 
 #### Launch failures and queue order
 
@@ -4081,3 +4091,42 @@ credential HOME directories remain private. Explicit runtime refresh retains
 installation inputs and applies from the next turn; already-running services keep
 their old values. Startup recovery is an explicit allowance for one subsequent
 human turn, never a permanent success receipt.
+
+### Team environments
+
+A team's owner and admins can create environments for the team: in Settings →
+Environments, **New environment** or **Copy** offers the teams they own or
+administer. Every active member sees them there and in the new-task picker,
+marked with the team's name, and can view, test, copy and choose them. Only
+the owner and admins can edit, restore, remove, rebuild or delete snapshots;
+anyone else gets 403. Creating, editing and removing a team environment is
+recorded in the team's audit log. Design:
+[Teams](../agents/specs/2026-10-15-team-shared-workspace-design.zh-CN.md) §6.
+
+- **Each member's own container.** A team environment is shared configuration,
+  not a shared workspace. A member's task runs in that member's own container
+  with the team's variables and scripts, the member's inference grant and
+  connections, and the member's personal global variables at run time only
+  (install-only ones are left out; the team's definition of a name wins). The
+  installation is therefore the same for every member, which is what lets the
+  team share snapshots.
+- **Secrets are shared.** Every member who can run a task with a team
+  environment can read its Secrets from inside that task; the dialog says so.
+  Treat them as known to the whole team, and rotate one after a member who
+  should not keep it leaves.
+- **Leaving.** A binding records the team and the member's access generation.
+  When a member leaves, is removed, or the team is deleted, each of their
+  conversations on a team environment fails its next turn at claim with
+  `team_environment_revoked` (403, logged as
+  `agent_job_team_environment_revoked`); a turn already running finishes.
+  Terminals, actions, Fork, preparation and runtime refresh on such a
+  conversation return 409; masking and publication scanning still read its
+  values.
+  Rejoining does not revive old conversations: the generation has moved on.
+  A member's repository default naming a team environment they can no longer
+  use is cleared when they next start a task.
+- **Removal.** Removing a team environment clears every member's default that
+  names it. Conversations already bound keep their fixed configuration, as
+  with a personal environment.
+- **Rollback.** Downgrading below `0082_team_environments` is refused while any
+  team environment exists, archived ones included.

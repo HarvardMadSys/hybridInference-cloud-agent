@@ -32,6 +32,21 @@ export const zhCN: Record<TranslationKey, string> = {
   'environment.edit': '编辑',
   'environment.editItem': '编辑「{name}」',
   'environment.manageItem': '「{name}」的更多操作',
+  'environment.view': '查看',
+  'environment.viewItem': '查看「{name}」',
+  'environment.teamBadge': '团队 · {team}',
+  'environment.owner': '归属',
+  'environment.ownerSelf': '仅自己',
+  'environment.ownerTeam': '团队「{team}」',
+  'environment.copyTo': '复制到',
+  'environment.teamReadOnly':
+    '由团队「{team}」共享。只有团队 Owner 和管理员可以修改；你可以使用、测试它，或复制一份自己的。',
+  'environment.teamShared': '与「{team}」的所有成员共享。修改会用于成员之后新建的任务。',
+  'environment.teamNew': '「{team}」的所有成员都能在任务中选择它；只有 Owner 和管理员可以修改。',
+  'environment.teamSecrets':
+    '「{team}」的所有成员都能在自己的任务中使用这个环境的 Secret，任务里的 Agent 和命令能读取它们的值。',
+  'environment.teamGlobals':
+    '每位成员的个人全局变量只在任务运行时生效，安装阶段不使用；同名时以这个环境的值为准。',
   'environment.copy': '复制',
   'environment.copyName': '{name} 副本',
   'environment.copySecrets': '副本包含脚本、快捷操作和 Secret，作为独立的环境保存。',
@@ -205,6 +220,7 @@ export const zhCN: Record<TranslationKey, string> = {
   'environment.runtimeHint':
     '从下一轮开始使用最新保存的变量值。已安装的依赖和脚本保持不变，正在运行的服务仍使用旧值。',
   'environment.editSaved': '编辑已保存的环境',
+  'environment.openTeamSaved': '打开团队环境',
   'environment.createForRepository': '为这个仓库新建环境',
   'attach.workspace': '工作区',
 

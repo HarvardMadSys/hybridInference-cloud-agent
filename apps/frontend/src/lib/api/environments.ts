@@ -74,6 +74,11 @@ export interface EnvironmentRun {
   host?: string | null;
   image_digest?: string;
 }
+/** The team that owns a shared environment. */
+export interface EnvironmentTeam {
+  id: string;
+  name: string;
+}
 export interface EnvironmentConfig {
   id: string | null;
   name: string;
@@ -92,11 +97,20 @@ export interface EnvironmentConfig {
   latest_test?: { id: string; state: string; revision: number; global_revision: number } | null;
   /** When this version was saved; present on version history entries. */
   created_at?: string;
+  /**
+   * The team whose environment this is; null or absent for your own. A new
+   * one is created for this team, which only its owner and admins may do.
+   */
+  team?: EnvironmentTeam | null;
+  /** False for a team environment you may use but only its owner and admins may change. */
+  can_edit?: boolean;
 }
 export interface EnvironmentBinding {
   binding_id: string | null;
   environment_id?: string | null;
   environment_name?: string | null;
+  /** The team whose shared environment the conversation uses. */
+  team?: EnvironmentTeam | null;
   revision?: number;
   global_revision?: number;
   legacy: boolean;
@@ -158,6 +172,7 @@ export const saveEnvironment = (
     update_script,
     actions,
     variables,
+    team,
   } = value;
   return call<EnvironmentConfig>(
     id ? `environments/${id}` : 'environments',
@@ -172,6 +187,8 @@ export const saveEnvironment = (
       update_script: update_script ?? '',
       actions,
       variables: variableEditPayload(variables),
+      // An environment's owner is chosen when it is created and never changes.
+      ...(!id && team ? { team_id: team.id } : {}),
     },
   );
 };
@@ -197,7 +214,15 @@ export const copyEnvironment = (
   repo: string,
   name: string,
   key: string,
-) => call<EnvironmentConfig>(`environments/${id}/copy`, 'POST', { revision, repo, name }, key);
+  /** Copies into this team, as its owner or an admin; omitted copies to yourself. */
+  teamId?: string | null,
+) =>
+  call<EnvironmentConfig>(
+    `environments/${id}/copy`,
+    'POST',
+    { revision, repo, name, ...(teamId ? { team_id: teamId } : {}) },
+    key,
+  );
 export const getEnvironmentHistory = (id: string, global = false, before?: number) =>
   call<{ versions: EnvironmentConfig[] }>(
     `${global ? 'environment-globals' : `environments/${id}`}/versions${before ? `?before=${before}` : ''}`,

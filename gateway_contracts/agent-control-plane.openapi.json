@@ -9276,6 +9276,19 @@
             "minimum": 0.0,
             "title": "Revision",
             "type": "integer"
+          },
+          "team_id": {
+            "anyOf": [
+              {
+                "maxLength": 80,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Team Id"
           }
         },
         "required": [
@@ -15563,6 +15576,19 @@
             "title": "Start Script",
             "type": "string"
           },
+          "team_id": {
+            "anyOf": [
+              {
+                "maxLength": 80,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Team Id"
+          },
           "update_script": {
             "default": "",
             "maxLength": 8000,
@@ -17139,7 +17165,10 @@
               "member_left",
               "member_removed",
               "member_role_changed",
-              "ownership_transferred"
+              "ownership_transferred",
+              "environment_created",
+              "environment_updated",
+              "environment_archived"
             ],
             "title": "Action",
             "type": "string"
@@ -28146,7 +28175,7 @@
     },
     "/v1/agent/environments/{environment_id}": {
       "delete": {
-        "description": "Archive an environment and clear a matching default.",
+        "description": "Archive an environment and clear every default that names it.",
         "operationId": "delete_environment_v1_agent_environments__environment_id__delete",
         "parameters": [
           {
@@ -28336,7 +28365,7 @@
     },
     "/v1/agent/environments/{environment_id}/copy": {
       "post": {
-        "description": "Copy scripts and encrypted variables within one owner.",
+        "description": "Copy scripts and encrypted variables to yourself or, as an editor, to a team.",
         "operationId": "copy_environment_v1_agent_environments__environment_id__copy_post",
         "parameters": [
           {

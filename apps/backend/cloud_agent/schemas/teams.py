@@ -220,6 +220,9 @@ class TeamAuditEventResponse(BaseModel):
         "member_removed",
         "member_role_changed",
         "ownership_transferred",
+        "environment_created",
+        "environment_updated",
+        "environment_archived",
     ]
     target_user_id: str | None
     target_id: str | None

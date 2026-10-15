@@ -136,3 +136,33 @@ it('leaves loading on failure and recovers through retry without silently droppi
   );
   expect(screen.queryByRole('alert')).not.toBeInTheDocument();
 });
+it("marks a team's environment, and runs your install-only globals without it", async () => {
+  vi.mocked(listEnvironments).mockResolvedValue({
+    globals: {
+      ...globals,
+      variables: [
+        { name: 'INSTALL_TOKEN', secret: true, phase: 'setup', value: null },
+        { name: 'MY_KEY', secret: true, phase: 'both', value: null },
+      ],
+    },
+    environments: [
+      {
+        ...globals,
+        id: 'shared',
+        repo: 'org/repo',
+        name: 'Shared',
+        revision: 1,
+        is_default: true,
+        team: { id: 'team-1', name: 'Platform' },
+        can_edit: false,
+      },
+    ],
+  });
+  render(<EnvironmentPicker repo="org/repo" open onClose={vi.fn()} onChange={vi.fn()} />);
+  const option = await screen.findByRole('radio', { name: /Shared/ });
+  expect(option.closest('label')).toHaveTextContent('environment.teamBadge');
+  expect(screen.getByRole('button', { name: 'environment.viewItem' })).toBeInTheDocument();
+  fireEvent.click(screen.getByText('environment.details'));
+  expect(screen.getByText('MY_KEY')).toBeInTheDocument();
+  expect(screen.queryByText('INSTALL_TOKEN')).toBeNull();
+});

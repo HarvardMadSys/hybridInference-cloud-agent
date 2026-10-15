@@ -23,9 +23,11 @@ from cloud_agent.api.deps import (
 from cloud_agent.api.worker import verify_claiming_host
 from cloud_agent.entitlement import RepoNotAllowed, require_entitled_repo
 from cloud_agent.environments import (
+    EnvironmentAccessRevoked,
     EnvironmentBusy,
     EnvironmentConflict,
     EnvironmentEncryptionError,
+    EnvironmentForbidden,
     EnvironmentNotFound,
 )
 from cloud_agent.sandbox_manager_client import SandboxManagerError
@@ -77,6 +79,10 @@ class CredentialSafeRoute(APIRoute):
                 response = JSONResponse(
                     status_code=404, content={"detail": "Environment or run not found."}
                 )
+            except EnvironmentForbidden as exc:
+                response = JSONResponse(status_code=403, content={"detail": str(exc)})
+            except EnvironmentAccessRevoked as exc:
+                response = JSONResponse(status_code=409, content={"detail": str(exc)})
             except SandboxManagerError as exc:
                 response = JSONResponse(
                     status_code=exc.status_code, content={"detail": exc.message}
@@ -135,6 +141,9 @@ class SaveEnvironment(EnvironmentScripts):
     repo: str | None = Field(None, pattern=REPO_PATTERN, max_length=140)
     revision: int = Field(ge=0)
     variables: list[VariableEdit] = Field(default_factory=list, max_length=200, repr=False)
+    #: Creates the environment for this team, as its owner or an admin.
+    #: An existing environment's owner never changes; saving one ignores it.
+    team_id: str | None = Field(None, min_length=1, max_length=80)
 
 
 class GlobalInput(RevisionInput):
@@ -148,6 +157,8 @@ class CopyInput(RevisionInput):
 
     repo: str = Field(pattern=REPO_PATTERN, max_length=140)
     name: str = Field(min_length=1, max_length=80)
+    #: Copies into this team, as its owner or an admin; omitted copies to yourself.
+    team_id: str | None = Field(None, min_length=1, max_length=80)
 
 
 class RestoreInput(RevisionInput):
@@ -294,6 +305,7 @@ async def _save(
             include={"setup_script", "start_script", "verify_script", "update_script", "actions"},
         ),
         edits=[v.model_dump() for v in body.variables],
+        team_id=body.team_id if environment_id is None else None,
     )
 
 
@@ -327,12 +339,27 @@ async def delete_environment(
     user: dict[str, Any] = Depends(require_agent_owner),
     store: Any = Depends(get_storage),
 ) -> Response:
-    """Archive an environment and clear a matching default."""
+    """Archive an environment and clear every default that names it."""
     store = require_store(store)
+    team = await _team_environment(store, user["user_id"], environment_id)
     await store.environments.archive_environment(user["user_id"], environment_id, revision)
     if (snapshots := _snapshots(store)) is not None:
-        await snapshots.discard(user["user_id"], environment_id)
+        await snapshots.discard(user["user_id"], environment_id, team=team)
     return Response(status_code=204)
+
+
+async def _team_environment(store: Any, user_id: str, environment_id: str) -> bool:
+    """Whether ``environment_id`` is a team's; for one, refuse anyone who may not change it.
+
+    A team environment's snapshots are every member's, so deleting or
+    rebuilding them is the team's owner's or an admin's decision.
+    """
+    environment = await store.environments.get_environment(user_id, environment_id)
+    if environment.get("team") is None:
+        return False
+    if not environment.get("can_edit"):
+        raise EnvironmentForbidden("Only the team's owner and admins can change its environments")
+    return True
 
 
 class RebuildInput(BaseModel):
@@ -355,6 +382,7 @@ async def rebuild_snapshot(
     snapshots = _snapshots(store)
     if snapshots is None or not await snapshots.enabled():
         raise HTTPException(409, "Snapshots need automatic sandbox snapshots to be enabled")
+    team = await _team_environment(store, user["user_id"], environment_id)
     binding_id, repo = await store.environments.bind_current_environment(
         user["user_id"], environment_id
     )
@@ -362,7 +390,7 @@ async def rebuild_snapshot(
     from cloud_agent.environment_source import resolve_test_commit
 
     sha = await resolve_test_commit(repo, body.ref, credentials)
-    await snapshots.discard(user["user_id"], environment_id)
+    await snapshots.discard(user["user_id"], environment_id, team=team)
     snapshot_id = await snapshots.queue_prebuild(
         user_id=user["user_id"], binding_id=binding_id, repo=repo, base_sha=sha, requested=True
     )
@@ -379,9 +407,9 @@ async def delete_snapshot(
 ) -> Response:
     """Delete an environment's installation snapshots; new tasks install in full."""
     store = require_store(store)
-    await store.environments.get_environment(user["user_id"], environment_id)
+    team = await _team_environment(store, user["user_id"], environment_id)
     if (snapshots := _snapshots(store)) is not None:
-        await snapshots.discard(user["user_id"], environment_id)
+        await snapshots.discard(user["user_id"], environment_id, team=team)
     return Response(status_code=204)
 
 
@@ -449,7 +477,7 @@ async def copy_environment(
     store: Any = Depends(get_storage),
     credentials: Any = Depends(get_agent_app_credentials),
 ) -> dict[str, Any]:
-    """Copy scripts and encrypted variables within one owner."""
+    """Copy scripts and encrypted variables to yourself or, as an editor, to a team."""
     store = require_store(store)
     await _entitled(store, user["user_id"], body.repo, credentials)
     return await store.environments.copy_environment(
@@ -459,6 +487,7 @@ async def copy_environment(
         name=body.name,
         revision=body.revision,
         idempotency_key=idempotency_key,
+        team_id=body.team_id,
     )
 
 

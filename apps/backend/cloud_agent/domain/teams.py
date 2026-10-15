@@ -1,8 +1,9 @@
 """Team membership vocabulary, limits and refusals, independent of storage and HTTP.
 
-A team is a set of accounts with exactly one owner. Membership is the only
-thing it grants in this step: no thread, sandbox or environment belongs to a
-team yet. See ``docs/agents/specs/2026-10-15-team-shared-workspace-design.zh-CN.md``.
+A team is a set of accounts with exactly one owner. Besides membership, a
+team owns environments its members share (see
+``storage/repositories/environments.py``); threads and sandboxes stay each
+member's own. See ``docs/agents/specs/2026-10-15-team-shared-workspace-design.zh-CN.md``.
 
 Every refusal here carries a stable ``code`` the API returns as the error type,
 so a client can tell "the team changed under you" from "you are not the owner"

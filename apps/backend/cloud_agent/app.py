@@ -204,15 +204,19 @@ def create_app() -> FastAPI:
     from fastapi.responses import JSONResponse
 
     from cloud_agent.environments import (
+        EnvironmentAccessRevoked,
         EnvironmentBusy,
         EnvironmentConflict,
         EnvironmentEncryptionError,
+        EnvironmentForbidden,
         EnvironmentNotFound,
     )
 
     async def environment_failure(request: Request, exc: Exception) -> JSONResponse:
         if isinstance(exc, EnvironmentNotFound):
             code, detail = 404, "Environment not found"
+        elif isinstance(exc, EnvironmentForbidden):
+            code, detail = 403, str(exc)
         elif isinstance(exc, EnvironmentEncryptionError):
             code, detail = 503, "Environment encryption is unavailable"
         else:
@@ -226,6 +230,8 @@ def create_app() -> FastAPI:
         EnvironmentConflict,
         EnvironmentBusy,
         EnvironmentEncryptionError,
+        EnvironmentForbidden,
+        EnvironmentAccessRevoked,
     ):
         app.add_exception_handler(failure, environment_failure)
 
