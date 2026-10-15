@@ -834,15 +834,19 @@ class PostgresSnapshotRepository:
                        j.thread_id, j.parent_job_id, j.user_id, t.repo,
                        j.task_prompt, j.metadata, j.model,
                        prior.published_pr_url AS parent_pr_url,
-       COALESCE((
-                           SELECT jsonb_agg(
-                               pushed.pushed_commit_sha ORDER BY pushed.workspace_epoch
-                           )
+                       -- The release before 0081 recorded its pushes in
+                       -- published_commit_sha, and keeps doing so until it is
+                       -- replaced, after the migration ran: read both.
+                       COALESCE((
+                           SELECT jsonb_agg(DISTINCT own.sha)
                            FROM agent_sandbox_snapshots pushed
+                           CROSS JOIN LATERAL (
+                               VALUES (pushed.pushed_commit_sha), (pushed.published_commit_sha)
+                           ) AS own (sha)
                            WHERE pushed.sandbox_id = s.sandbox_id
                              AND pushed.base_sha = s.base_sha
                              AND pushed.state <> 'published'
-                             AND pushed.pushed_commit_sha IS NOT NULL
+                             AND own.sha IS NOT NULL
                        ), '[]'::jsonb) AS own_pushes
                 FROM agent_sandbox_snapshots s
                 JOIN agent_sandboxes g ON g.id = s.sandbox_id

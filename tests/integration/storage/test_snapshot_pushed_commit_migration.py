@@ -3,8 +3,10 @@
 Migration ``0081``. The publisher records the commit it is about to push so
 that the group's next publication from the same base builds on it. That record
 used to share ``published_commit_sha`` with the published commit. The upgrade
-moves an unpublished snapshot's commit into ``pushed_commit_sha`` and leaves a
-published one where it is; the downgrade moves it back.
+copies an unpublished snapshot's commit into ``pushed_commit_sha``; the
+downgrade copies it back. ``deploy.sh`` migrates before it replaces the API, so
+the release still running keeps recording in the old column meanwhile, and the
+next claim reads both.
 """
 
 from __future__ import annotations
@@ -26,8 +28,8 @@ pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 _BEFORE = "0080_user_ssh_servers"
 
 
-async def test_an_unpublished_push_moves_to_its_own_column_and_back(store, pool):
-    """Down, the push is where the previous release reads it; up, it is apart again."""
+async def test_an_unpublished_push_is_copied_to_its_own_column_and_back(store, pool):
+    """Down, the push is where the previous release reads it; up, the new column has it too."""
     job, capture, _patch = await _capture_settled_workspace(store, "migrated")
     failed = await store.snapshot.claim_for_publish()
     assert failed is not None
@@ -70,8 +72,9 @@ async def test_an_unpublished_push_moves_to_its_own_column_and_back(store, pool)
             later["snapshot_id"]: published,
         }
         apply_migrations(config)
+        # Left in place for the release that is still running until replaced.
         assert await published_commits() == {
-            failed["snapshot_id"]: None,
+            failed["snapshot_id"]: pushed,
             later["snapshot_id"]: published,
         }
         assert (
@@ -83,3 +86,33 @@ async def test_an_unpublished_push_moves_to_its_own_column_and_back(store, pool)
         )
     finally:
         apply_migrations(config)
+
+
+async def test_a_push_the_replaced_release_records_after_the_migration_still_counts(store, pool):
+    """Between the migration and the API's replacement, the old publisher writes the old column."""
+    job, capture, _patch = await _capture_settled_workspace(store, "rolling")
+    claimed = await store.snapshot.claim_for_publish()
+    assert claimed is not None
+    old_release_push = "e" * 40
+    async with pool.acquire() as conn:
+        # What the previous release's record_snapshot_push writes.
+        await conn.execute(
+            """
+            UPDATE agent_sandbox_snapshots SET published_commit_sha = $2
+            WHERE id = $1 AND state = 'publishing'
+            """,
+            claimed["snapshot_id"],
+            old_release_push,
+        )
+    await store.snapshot.fail_snapshot_publish(
+        snapshot_id=claimed["snapshot_id"],
+        expected_publish_attempt_count=claimed["publish_attempt_count"],
+        detail="GitHub refused the draft PR (422)",
+    )
+    await _insert_later_snapshot(
+        pool, job=job, capture=capture, patch="diff --git a/later.txt b/later.txt\n"
+    )
+
+    later = await store.snapshot.claim_for_publish()
+
+    assert later is not None and later["own_pushes"] == [old_release_push]
