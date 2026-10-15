@@ -52,9 +52,6 @@ USER_ID = "user-chain"
 ATTEMPT_ID = 7
 RUN_ID = "chain-run-1"
 SANDBOX_ID = "asbx_chain"
-#: Frozen: a helper that re-derived it per call would state a different
-#: experiment every time, and the repository compares the instant.
-EXPIRES_AT = (datetime.now(UTC) + timedelta(minutes=30)).replace(microsecond=0)
 
 
 def _db_config() -> dict[str, object]:
@@ -122,8 +119,20 @@ class _ChainStorage:
         self.execution_queries = _Identity()
 
 
+@pytest.fixture
+def expires_at() -> datetime:
+    """When this test's experiment ends, frozen when the test starts.
+
+    Frozen: a helper that re-derived it per call would state a different
+    experiment every time, and the repository compares the instant. Taken when
+    the module was imported instead, it had already passed by the time a serial
+    run reached these tests more than thirty minutes later.
+    """
+    return (datetime.now(UTC) + timedelta(minutes=30)).replace(microsecond=0)
+
+
 @pytest_asyncio.fixture
-async def chain(monkeypatch, tmp_path):
+async def chain(monkeypatch, tmp_path, expires_at):
     """A real app over a real database, and a credential for one attempt."""
     config = _db_config()
     try:
@@ -158,7 +167,7 @@ async def chain(monkeypatch, tmp_path):
             {
                 "run_id": RUN_ID,
                 "operations": ["attempt.startup"],
-                "expires_at": EXPIRES_AT.isoformat(),
+                "expires_at": expires_at.isoformat(),
                 "max_operations": 10,
                 "target": {"job_id": JOB_ID},
             }
@@ -224,13 +233,13 @@ def _token(attempt_id: int = ATTEMPT_ID, generation: int = 3) -> str:
     )
 
 
-def _manifest() -> dict[str, Any]:
+def _manifest(expires_at: datetime) -> dict[str, Any]:
     """The experiment manifest a producer sends with its record."""
     return {
         "run_id": RUN_ID,
         "operations": ["attempt.startup"],
         "target": {"job_id": JOB_ID},
-        "expires_at": EXPIRES_AT.isoformat(),
+        "expires_at": expires_at.isoformat(),
         "config_version": 1,
         "admission_instances": [],
     }
@@ -264,7 +273,7 @@ class _HttpControl(ControlPlane):
         super().__init__(base_url, token)
 
 
-async def test_a_real_record_travels_from_the_collector_to_the_admin_page(chain):
+async def test_a_real_record_travels_from_the_collector_to_the_admin_page(chain, expires_at):
     """Collect, deliver over HTTP, store in Postgres, read back as an admin."""
     pool, base_url, sink = chain
 
@@ -329,10 +338,10 @@ async def test_a_real_record_travels_from_the_collector_to_the_admin_page(chain)
     # asyncpg hands the raw JSONB back as text.
     stored = json.loads(row["record"]) if isinstance(row["record"], str) else row["record"]
     assert stored["measurement_id"] == measurement.measurement_id
-    assert stored["run_expires_at"] == EXPIRES_AT.isoformat()
+    assert stored["run_expires_at"] == expires_at.isoformat()
     assert run is not None
     assert run["operations"] == ["attempt.startup"]
-    assert run["expires_at"] == EXPIRES_AT
+    assert run["expires_at"] == expires_at
 
     # 4. An administrator reads it back through the real route.
     async with httpx.AsyncClient(base_url=base_url) as client:
@@ -353,7 +362,7 @@ async def test_a_real_record_travels_from_the_collector_to_the_admin_page(chain)
     # through -- the reader's view of the record is the one being asserted.
     assert isinstance(detail_body["record"], dict)
     assert detail_body["record"]["milestones"][0]["name"] == "supervisor_acquire"
-    assert detail_body["record"]["run_expires_at"] == EXPIRES_AT.isoformat()
+    assert detail_body["record"]["run_expires_at"] == expires_at.isoformat()
     assert detail_body["coverage_scope"] == "host_startup"
     assert detail_body["collection_complete"] is True
     assert detail_body["end_to_end_complete"] is False
@@ -366,7 +375,7 @@ async def test_a_real_record_travels_from_the_collector_to_the_admin_page(chain)
     assert [item["run_id"] for item in catalogue.json()["runs"]] == [RUN_ID]
 
 
-async def test_delivering_the_same_record_twice_stores_one(chain):
+async def test_delivering_the_same_record_twice_stores_one(chain, expires_at):
     """The endpoint is idempotent for a retry, and says so."""
     pool, base_url, sink = chain
     measurement = operation_profiling.start_operation(
@@ -376,7 +385,10 @@ async def test_delivering_the_same_record_twice_stores_one(chain):
     assert operation_profiling.bind(measurement, job_id=JOB_ID)
     operation_profiling.finish(measurement, outcome="dispatched")
     operation_profiling.flush_sink()
-    body = {"record": json.loads(sink.read_text().splitlines()[0]), "run": _manifest()}
+    body = {
+        "record": json.loads(sink.read_text().splitlines()[0]),
+        "run": _manifest(expires_at),
+    }
 
     first = await asyncio.to_thread(_send_once, base_url, body)
     second = await asyncio.to_thread(_send_once, base_url, body)
@@ -496,7 +508,7 @@ async def test_real_database_congestion_is_bounded_off_the_request_path(chain):
     assert counts.dropped_full == 1
 
 
-async def test_a_token_that_names_no_attempt_is_refused_before_any_write(chain):
+async def test_a_token_that_names_no_attempt_is_refused_before_any_write(chain, expires_at):
     """The attempt lookup runs on the real path, against the real schema."""
     pool, base_url, _sink = chain
     # The credential names an attempt this job never ran, which is the one
@@ -505,7 +517,7 @@ async def test_a_token_that_names_no_attempt_is_refused_before_any_write(chain):
         _send_once,
         base_url,
         {
-            "run": _manifest(),
+            "run": _manifest(expires_at),
             "record": {
                 "schema_version": 3,
                 "measurement_id": "msm_no_attempt",
