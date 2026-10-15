@@ -64,9 +64,7 @@ def test_mcp_connector_invariant_revision_follows_trajectory_merge() -> None:
     assert (
         script.get_revision("0073_sandbox_restore").down_revision == "0072_drop_old_memory_tables"
     )
-    assert (
-        script.get_revision("0074_host_removal_pending").down_revision == "0073_sandbox_restore"
-    )
+    assert script.get_revision("0074_host_removal_pending").down_revision == "0073_sandbox_restore"
     assert script.get_revision(_HEAD).down_revision == "0074_host_removal_pending"
 
 
