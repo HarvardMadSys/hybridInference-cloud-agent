@@ -12,7 +12,7 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState } f
 import { clearSideChatDrafts } from '@/components/features/agents/sideChatStorage';
 import { clearAccountResources } from '@/components/features/profile/accountResource';
 import { AUTH_EXPIRED_EVENT } from '@/lib/api/client';
-import { SESSION_SWITCHED_EVENT, announceSession, listenForSession } from '@/lib/auth/sessionSync';
+import { announceSession, listenForSession } from '@/lib/auth/sessionSync';
 import { APIError } from '@/lib/utils/errors';
 import {
   endSession,
@@ -37,6 +37,15 @@ interface AuthContextValue {
   state: AuthState;
   logout: () => Promise<void>;
   refreshUser: () => Promise<void>;
+  /**
+   * True once this tab finds its session now belongs to a different account
+   * than the one it was showing — another tab switched the browser's Agents
+   * session — until `acknowledgeSessionSwitch` says the tab has dealt with it.
+   * State rather than an event: the switch passes through the loading state,
+   * which unmounts the pages that would hear an event.
+   */
+  sessionSwitched: boolean;
+  acknowledgeSessionSwitch: () => void;
 }
 
 export function hasAgentPermission(
@@ -69,6 +78,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     loading: true,
     user: null,
   });
+  const [sessionSwitched, setSessionSwitched] = useState(false);
+  const acknowledgeSessionSwitch = useCallback(() => setSessionSwitched(false), []);
 
   const refreshUser = useCallback(async () => {
     setState((previous) => ({ ...previous, loading: true, error: null }));
@@ -84,9 +95,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       if (previous !== me.id) {
         clearAccountResources();
         announceSession(me.id);
-        if (previous !== undefined) {
-          window.dispatchEvent(new CustomEvent(SESSION_SWITCHED_EVENT, { detail: me.id }));
-        }
+        if (previous !== undefined) setSessionSwitched(true);
       }
       accountId.current = me.id;
       setState({
@@ -177,7 +186,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     announceSession(null);
   }, [state.user?.id]);
 
-  const value: AuthContextValue = { state, logout, refreshUser };
+  const value: AuthContextValue = {
+    state,
+    logout,
+    refreshUser,
+    sessionSwitched,
+    acknowledgeSessionSwitch,
+  };
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }

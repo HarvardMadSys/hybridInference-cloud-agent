@@ -14,13 +14,6 @@
 
 const CHANNEL = 'cloud-agent:session';
 
-/**
- * Dispatched on `window` when this tab finds its session now belongs to a
- * different account than the one it was showing — another tab switched the
- * browser's Agents session. `detail` is the new account id.
- */
-export const SESSION_SWITCHED_EVENT = 'cloud-agent:session-switched';
-
 /** The account the browser's Agents session belongs to now, or null when signed out. */
 export interface SessionSyncMessage {
   userId: string | null;

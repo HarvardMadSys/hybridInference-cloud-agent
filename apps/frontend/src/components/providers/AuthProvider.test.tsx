@@ -10,7 +10,6 @@ vi.mock('@/lib/api/session', () => ({ getSessionUser: vi.fn(), endSession: vi.fn
 import { sideChatKeys } from '@/components/features/agents/sideChatStorage';
 import { endSession, getSessionUser } from '@/lib/api/session';
 import { APIError } from '@/lib/utils/errors';
-import { SESSION_SWITCHED_EVENT } from '@/lib/auth/sessionSync';
 import { AuthProvider, hasAgentPermission, useAuth } from './AuthProvider';
 
 const getMe = vi.mocked(getSessionUser);
@@ -225,18 +224,29 @@ describe('AuthProvider and the browser’s other Agents tabs', () => {
     await waitFor(() => expect(current().user?.id).toBe(id));
   }
 
-  it('follows another tab that switched the session, and says it did', async () => {
-    const switched = vi.fn();
-    window.addEventListener(SESSION_SWITCHED_EVENT, switched);
-    await renderAs('first');
+  it('follows another tab that switched the session, and keeps that it did', async () => {
+    let auth: ReturnType<typeof useAuth> | undefined;
+    function Switched() {
+      auth = useAuth();
+      return null;
+    }
+    getMe.mockResolvedValue({ id: 'first', agent_access: access });
+    render(
+      <AuthProvider>
+        <Consumer />
+        <Switched />
+      </AuthProvider>,
+    );
+    await waitFor(() => expect(current().user?.id).toBe('first'));
+    expect(auth?.sessionSwitched).toBe(false);
     getMe.mockResolvedValue({ id: 'second', agent_access: access });
 
     announceFromAnotherTab('second');
 
     await waitFor(() => expect(current().user?.id).toBe('second'));
-    expect(switched).toHaveBeenCalledTimes(1);
-    expect((switched.mock.calls[0][0] as CustomEvent).detail).toBe('second');
-    window.removeEventListener(SESSION_SWITCHED_EVENT, switched);
+    expect(auth?.sessionSwitched).toBe(true);
+    act(() => auth?.acknowledgeSessionSwitch());
+    expect(auth?.sessionSwitched).toBe(false);
   });
 
   it('signs this tab out when another one signed the session out', async () => {
