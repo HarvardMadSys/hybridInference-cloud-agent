@@ -56,11 +56,20 @@ The application API uses `GET /admin/agent/settings` and
 `PUT /admin/agent/settings`. Send a partial body such as
 `{"settings": {"max_attempts": 3}}`; omitted keys keep their current values.
 Writes use the existing administrator guard and appear in the Audit log.
-Credential fields show only whether a value is configured. To change one, enter
-and save a replacement. **Reset** restores the built-in default. If a required
-field is missing or an optional integration is only partly configured, the
-**Administrator setup required** prompt links to the fields that still need
-attention.
+Application settings are read-only until you choose **Edit** on a group.
+Change the fields, select **Review changes**, check the current and proposed
+values, then choose **Apply changes**. The group is saved in one partial request;
+**Cancel** discards its drafts. Switching categories or refreshing settings
+preserves unsaved edits.
+
+Credential fields show only whether a value is configured. Choose
+**Replace secret** (or **Set secret**) in edit mode to enter a new value; the
+review keeps it hidden. An empty replacement leaves the saved credential unchanged. In edit
+mode, each field's **More actions** menu offers **Restore default…** or
+**Clear secret…**, with a separate confirmation. An empty default clears that setting.
+If a required field is missing or an optional integration is only partly
+configured, the **Administrator setup required** prompt links to the fields
+that still need attention.
 
 Admin Settings is operator access, and `agent.admin` should be granted only to
 people trusted to operate the deployment. It edits the session and host
@@ -68,7 +77,7 @@ signing keys and the Gateway public-key URL, so an administrator can sign in as
 any user, and the GitHub API URL that the App's, the publication token's and
 users' own GitHub credentials are sent to. Saved credentials stay write-only,
 and the Gateway dispatch token is bound to the Gateway API URL's origin: moving
-that URL to another origin is refused while the token is kept. Reset the token,
+that URL to another origin is refused while the token is kept. Clear the token,
 save the URL, then enter the token again.
 
 For the first deployment of this release, run `alembic upgrade head` through
@@ -139,9 +148,9 @@ refuses does not stop the listeners: each logs
 once per settings revision, and uses the built-in default in its place. The
 exception is a signing key, encryption key or service token shorter than a
 newly required minimum, which stays in use until it is replaced. The editor
-shows the value in effect; save a valid value or **Reset** to clear the
-warning. Undecryptable or unencrypted stored credentials still stop the
-listener.
+shows the value in effect; save a valid value or confirm **Restore default**
+to clear the warning. Undecryptable or unencrypted stored credentials still
+stop the listener.
 
 Automatic session archiving after a verified GitHub PR merge is enabled by
 default. Configure it under **Publication**; see
