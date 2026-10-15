@@ -36,6 +36,7 @@ const TAB_LABELS: Record<Tab, TranslationKey> = {
 };
 const SCRIPTS = [
   ['setup_script', 'environment.installScript', 'environment.installHelp'],
+  ['update_script', 'environment.updateScript', 'environment.updateHelp'],
   ['start_script', 'environment.startScript', 'environment.startHelp'],
   ['verify_script', 'environment.verifyScript', 'environment.verifyHelp'],
 ] as const;
@@ -70,12 +71,15 @@ export function EnvironmentDialog({
   initial,
   globals,
   repos = [],
+  snapshotsEnabled = false,
   onSaved,
   onClose,
 }: {
   initial: EnvironmentConfig;
   globals: EnvironmentConfig;
   repos?: string[];
+  /** Whether a passing test also saves the installation for new tasks. */
+  snapshotsEnabled?: boolean;
   onSaved: (value: EnvironmentConfig) => void;
   onClose: () => void;
 }) {
@@ -414,7 +418,7 @@ export function EnvironmentDialog({
             <textarea
               id={`${titleId}-${key}`}
               className="ui-input min-h-24 w-full font-mono text-xs"
-              value={value[key]}
+              value={value[key] ?? ''}
               maxLength={8000}
               spellCheck={false}
               onChange={(e) => change({ ...value, [key]: e.target.value })}
@@ -570,6 +574,9 @@ export function EnvironmentDialog({
             ) : null}
             {run.detail ? <p className="text-sm text-status-error">{run.detail}</p> : null}
             <EnvironmentSteps steps={run.steps} />
+            {snapshotsEnabled && run.state === 'succeeded' && value.setup_script ? (
+              <p className="text-xs text-muted">{t('environment.snapshot.savedByTest')}</p>
+            ) : null}
           </div>
         ) : (
           <p className="rounded-lg border border-dashed border-border px-4 py-6 text-center text-sm text-muted">

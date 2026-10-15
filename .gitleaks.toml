@@ -45,10 +45,3 @@ regexTarget = "line"
 regexes = [
   '''^\s*key: 'conversation-1',$''',
 ]
-
-[[allowlists]]
-description = "Known fake invitation token in the original token hand-off test (history)."
-regexTarget = "secret"
-regexes = [
-  '''^abcDEF0123456789_-abcDEF0123456789_-abcDEF0$''',
-]

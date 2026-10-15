@@ -47,6 +47,7 @@ from cloud_agent_host.chat_sandbox_models import (
     CHAT_CONTAINER_PREFIX as CHAT_CONTAINER_PREFIX,
     CHAT_CPU_LIMIT_LABEL as CHAT_CPU_LIMIT_LABEL,
     CHAT_DISK_LIMIT_LABEL as CHAT_DISK_LIMIT_LABEL,
+    CHAT_ENVIRONMENT_SNAPSHOT_LABEL as CHAT_ENVIRONMENT_SNAPSHOT_LABEL,
     CHAT_GENERATION_LABEL as CHAT_GENERATION_LABEL,
     CHAT_IMAGE_DIGEST_LABEL as CHAT_IMAGE_DIGEST_LABEL,
     CHAT_MEMORY_LIMIT_LABEL as CHAT_MEMORY_LIMIT_LABEL,
@@ -65,6 +66,7 @@ from cloud_agent_host.chat_sandbox_models import (
     CHAT_SHARED_LABEL as CHAT_SHARED_LABEL,
     CHAT_STOP_TIMEOUT_LABEL as CHAT_STOP_TIMEOUT_LABEL,
     CHAT_THREAD_LABEL as CHAT_THREAD_LABEL,
+    ENVIRONMENT_TEST_LABEL as ENVIRONMENT_TEST_LABEL,
     MEMBER_UID_BASE as MEMBER_UID_BASE,
     MEMBER_UID_LIMIT as MEMBER_UID_LIMIT,
     ArchiveExportTooLarge as ArchiveExportTooLarge,
@@ -118,6 +120,7 @@ from cloud_agent_shared.environment import (
     DOCKER_CLIENT_PREFIXES as _DOCKER_CLIENT_ENV_PREFIXES,
     PROXY_ENV,
 )
+from cloud_agent_shared.environment_snapshots import SETUP_MARKER_NAME, snapshot_image_reference
 from cloud_agent_shared.operation_profiling import StageObserver, substage
 
 if TYPE_CHECKING:
@@ -181,6 +184,7 @@ FINAL_ARCHIVE_MARKER_NAME = "final-archive-v1.json"
 # S3 VersionId field bounds. Keep the sandbox-manager-private record tightly bounded,
 # but leave enough room for every schema-valid marker.
 FINAL_ARCHIVE_MARKER_MAX_BYTES = 8192
+SETUP_MARKER_MAX_BYTES = 1024
 
 # Runs only through an exact-container, guest-root ``docker exec``.  Keeping
 # the filesystem checks in one source-controlled program makes read, publish,
@@ -853,17 +857,25 @@ class ChatSandboxManager:
         *,
         image: str | None = None,
         checkpoint_id: str | None = None,
+        environment_snapshot: tuple[str, str] | None = None,
     ) -> builtins.list[str]:
         """Compose a no-secret, no-chat-volume ``docker create`` command.
 
         ``checkpoint_id`` recreates a moved group: the image is that
         checkpoint's local image and nothing else, and the container records
-        which checkpoint it came from.
+        which checkpoint it came from. ``environment_snapshot`` (owner hash,
+        snapshot id) creates a new group from an installation snapshot, the
+        same way.
         """
         self._validate_extra_args()
+        if checkpoint_id is not None and environment_snapshot is not None:
+            raise SandboxError("a chat sandbox comes from a checkpoint or a snapshot, not both")
         if checkpoint_id is not None:
             if image != checkpoint_image_reference(spec.sandbox_id, checkpoint_id):
                 raise SandboxError("chat sandbox restore image does not match its checkpoint")
+        elif environment_snapshot is not None:
+            if image != snapshot_image_reference(*environment_snapshot):
+                raise SandboxError("chat sandbox image does not match its environment snapshot")
         elif (
             image is not None
             and spec.sandbox_image_digest is not None
@@ -883,6 +895,9 @@ class ChatSandboxManager:
         }
         if checkpoint_id is not None:
             labels[CHAT_CHECKPOINT_LABEL] = checkpoint_id
+        if environment_snapshot is not None:
+            labels[CHAT_ENVIRONMENT_SNAPSHOT_LABEL] = ":".join(environment_snapshot)
+            labels[ENVIRONMENT_TEST_LABEL] = ""
         for key, value in sorted(labels.items()):
             argv += ["--label", f"{key}={value}"]
         argv += [
@@ -976,6 +991,7 @@ class ChatSandboxManager:
         *,
         image: str | None = None,
         checkpoint_id: str | None = None,
+        environment_snapshot: tuple[str, str] | None = None,
         facts: SandboxActionFacts | None = None,
         observer: StageObserver | None = None,
     ) -> ChatSandboxInspection:
@@ -998,7 +1014,12 @@ class ChatSandboxManager:
             # `docker start`, and that is what classifies the path.
             self._verify_identity(existing, spec)
             return existing
-        command = self.build_create_command(spec, image=image, checkpoint_id=checkpoint_id)
+        command = self.build_create_command(
+            spec,
+            image=image,
+            checkpoint_id=checkpoint_id,
+            environment_snapshot=environment_snapshot,
+        )
         with substage(observer, "container_create"):
             created = self._run(command, timeout=120)
         if created.returncode != 0:
@@ -1209,9 +1230,9 @@ class ChatSandboxManager:
     def remove_environment_test(self, spec: ChatSandboxSpec, *, container_id: str) -> None:
         """Remove only the exact independently labelled ephemeral test container."""
         inspection = self._require_exact(spec, container_id)
-        if inspection.labels.get("hybridinference.environment-test") != spec.labels.get(
-            "hybridinference.environment-test"
-        ) or not spec.labels.get("hybridinference.environment-test"):
+        if inspection.labels.get(ENVIRONMENT_TEST_LABEL) != spec.labels.get(
+            ENVIRONMENT_TEST_LABEL
+        ) or not spec.labels.get(ENVIRONMENT_TEST_LABEL):
             raise SandboxError("Container is not an environment test")
         if inspection.running:
             self.stop(spec, expected_container_id=container_id)
@@ -1358,7 +1379,7 @@ class ChatSandboxManager:
             item = self.inspect(container_id, verify_mounts=False)
             if item is not None and self._belongs_to_namespace(item):
                 self._verify_mounts(item)
-                if not item.labels.get("hybridinference.environment-test"):
+                if not item.labels.get(ENVIRONMENT_TEST_LABEL):
                     found.append(item)
         return found
 
@@ -3607,6 +3628,79 @@ finally:
             replace_existing=False,
         )
 
+    def read_environment_setup_marker(
+        self,
+        spec: ChatSandboxSpec,
+        *,
+        expected_container_id: str,
+    ) -> bytes | None:
+        """Read the root-only "installation done" marker, which travels with the layer.
+
+        It sits beside the archive markers, so the sandbox user can neither
+        write nor forge it, and a checkpoint or snapshot carries it along.
+        """
+        script = (
+            _INITIAL_ARCHIVE_MARKER_PREAMBLE
+            + r"""
+descriptor = checked_root()
+try:
+    payload = read_checked(descriptor)
+    if payload is None:
+        raise SystemExit(44)
+    sys.stdout.buffer.write(payload)
+finally:
+    os.close(descriptor)
+"""
+        )
+        result = self.exec_capture(
+            spec,
+            [
+                "python3",
+                "-c",
+                script,
+                INITIAL_ARCHIVE_MARKER_ROOT,
+                SETUP_MARKER_NAME,
+                str(SETUP_MARKER_MAX_BYTES),
+                "0",
+                "0",
+            ],
+            workdir="/",
+            timeout_s=20,
+            user_uid=0,
+            user_gid=0,
+            expected_container_id=expected_container_id,
+        )
+        if result.returncode == 44:
+            return None
+        if result.returncode != 0:
+            raise SandboxError(
+                "environment setup marker cannot be trusted: "
+                + result.stderr.decode("utf-8", "replace")[-300:]
+            )
+        payload = result.stdout
+        if not 0 < len(payload) <= SETUP_MARKER_MAX_BYTES:
+            raise SandboxError("environment setup marker has an invalid size")
+        return payload
+
+    def write_environment_setup_marker(
+        self,
+        spec: ChatSandboxSpec,
+        payload: bytes,
+        *,
+        expected_container_id: str,
+    ) -> None:
+        """Record, root-only, which installation this container's layer holds."""
+        if not isinstance(payload, bytes) or not 0 < len(payload) <= SETUP_MARKER_MAX_BYTES:
+            raise ValueError("environment setup marker payload has an invalid size")
+        self._write_archive_marker(
+            spec,
+            payload,
+            marker_name=SETUP_MARKER_NAME,
+            marker_max_bytes=SETUP_MARKER_MAX_BYTES,
+            expected_container_id=expected_container_id,
+            replace_existing=True,
+        )
+
     def write_final_archive_marker(
         self,
         spec: ChatSandboxSpec,
@@ -4031,8 +4125,12 @@ finally:
                 + result.stderr.decode("utf-8", "replace")[-300:]
             )
 
-    def reset_unsettled_state(self, spec: ChatSandboxSpec) -> None:
+    def reset_unsettled_state(self, spec: ChatSandboxSpec, *, keep_workspace: bool = False) -> None:
         """Clear a never-settled first-turn import before an idempotent retry.
+
+        ``keep_workspace`` leaves ``/workspace`` alone for a group created
+        from an installation snapshot: it holds that installation, without
+        the repository, which the import that follows adds or replaces.
 
         This is deliberately unavailable as a generic path-taking primitive:
         only the two Docker-layer roots owned by this exact, label-verified
@@ -4053,7 +4151,7 @@ finally:
             'find "$collection" -mindepth 1 -maxdepth 1 ! -uid "$(id -u)" -printf "%U\\n"; '
             "done | sort -u); "
             'if test -n "$owners"; then printf "%s\\n" "$owners"; exit 75; fi; '
-            f"for root in {CHAT_WORKDIR} {CHAT_STATE_DIR}; do "
+            f"for root in {CHAT_STATE_DIR if keep_workspace else f'{CHAT_WORKDIR} {CHAT_STATE_DIR}'}; do "
             'find "$root" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +; '
             "done"
         )
@@ -4379,12 +4477,20 @@ finally:
         # immutable one; the checkpoint label says which, and only that image
         # is accepted for it.
         checkpoint_id = inspection.labels.get(CHAT_CHECKPOINT_LABEL)
+        snapshot = inspection.labels.get(CHAT_ENVIRONMENT_SNAPSHOT_LABEL)
+        snapshot_image = None
+        if snapshot and not checkpoint_id:
+            owner, _, snapshot_id = snapshot.partition(":")
+            try:
+                snapshot_image = snapshot_image_reference(owner, snapshot_id)
+            except ValueError:
+                mismatched[CHAT_ENVIRONMENT_SNAPSHOT_LABEL] = (snapshot, "")
         expected_image = (
             checkpoint_image_reference(spec.sandbox_id, checkpoint_id)
             if checkpoint_id
-            else spec.sandbox_image_digest
+            else snapshot_image or spec.sandbox_image_digest
         )
-        if (checkpoint_id or spec.sandbox_image_digest is not None) and (
+        if (checkpoint_id or snapshot_image or spec.sandbox_image_digest is not None) and (
             inspection.image != expected_image
         ):
             mismatched["container-image"] = (inspection.image, expected_image or "")

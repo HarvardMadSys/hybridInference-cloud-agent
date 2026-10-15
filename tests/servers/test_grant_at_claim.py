@@ -727,3 +727,94 @@ async def test_environment_claim_requires_both_actual_runner_and_broker(monkeypa
         assert store.retry_delays == [30]
         assert grants.calls == []
         assert store.failed == []
+
+
+@pytest.mark.parametrize("snapshot_capable", [False, True])
+async def test_snapshot_fields_and_a_snapshot_go_only_to_a_runner_that_reads_them(
+    monkeypatch, snapshot_capable
+):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from cloud_agent_shared.environment import BoundEnvironment
+
+    image = "ghcr.io/harvardmadsys/cloud-agent-sandbox@sha256:" + "a" * 64
+    store, grants = _ClaimStore(), _Grants()
+    original_claim = store.claim_job
+
+    async def bound_claim(**kwargs):
+        result = await original_claim(**kwargs)
+        return {**result, "environment_binding_id": "frozen-binding"}
+
+    monkeypatch.setattr(store, "claim_job", bound_claim)
+    store.environment_for_claim = AsyncMock(
+        return_value=BoundEnvironment(
+            binding_id="frozen-binding",
+            setup_script="npm ci",
+            update_script="npm run generate",
+            setup_fingerprint="f" * 64,
+        )
+    )
+    snapshot = {"snapshot_id": "5" * 32}
+    store.environment_snapshots = SimpleNamespace(
+        snapshot_for_claim=AsyncMock(return_value=snapshot)
+    )
+    broker = SimpleNamespace(require_environment_capability=AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        "cloud_agent.sandbox_manager_routing.sandbox_manager_for_job",
+        AsyncMock(return_value=broker),
+    )
+    capabilities = ["environment-v1"] + (["environment-snapshot-v1"] if snapshot_capable else [])
+    body = {
+        "worker_id": "w1",
+        "attestation": {"runner_capabilities": capabilities, "sandbox_image_digest": image},
+    }
+    async with AsyncClient(
+        transport=ASGITransport(app=_app(store, grants)), base_url="http://test"
+    ) as client:
+        response = await client.post("/v1/agent/worker/claim", json=body)
+    assert response.status_code == 200, response.text
+    environment = response.json()["environment"]
+    if snapshot_capable:
+        assert environment["update_script"] == "npm run generate"
+        assert environment["setup_fingerprint"] == "f" * 64
+        assert response.json()["environment_snapshot"] == snapshot
+        store.environment_snapshots.snapshot_for_claim.assert_awaited_once_with(
+            user_id="user-owner", binding_id="frozen-binding", base_image=image
+        )
+    else:
+        # A runner a release behind would refuse both fields.
+        assert "update_script" not in environment and "setup_fingerprint" not in environment
+        assert response.json()["environment_snapshot"] is None
+        store.environment_snapshots.snapshot_for_claim.assert_not_awaited()
+
+
+async def test_a_runner_reports_what_its_new_workspace_did_with_a_snapshot(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from cloud_agent.tokens import SCOPE_FULL, mint_worker_token
+
+    store, grants = _ClaimStore(), _Grants()
+    store.environment_snapshots = SimpleNamespace(record_use=AsyncMock(return_value=True))
+    token = mint_worker_token(
+        job_id=_JOB, attempt_id=_ATTEMPT, lease_generation=_GENERATION, scope=SCOPE_FULL
+    )
+    async with AsyncClient(
+        transport=ASGITransport(app=_app(store, grants)), base_url="http://test"
+    ) as client:
+        response = await client.post(
+            f"/v1/agent/worker/jobs/{_JOB}/environment-snapshot",
+            json={"snapshot_id": None, "outcome": "absent", "base_sha": "b" * 40},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        refused = await client.post(
+            f"/v1/agent/worker/jobs/{_JOB}/environment-snapshot",
+            json={"snapshot_id": None, "outcome": "something", "base_sha": None},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert response.status_code == 204, response.text
+    store.environment_snapshots.record_use.assert_awaited_once_with(
+        job_id=_JOB, snapshot_id=None, outcome="absent", base_sha="b" * 40
+    )
+    assert refused.status_code == 422

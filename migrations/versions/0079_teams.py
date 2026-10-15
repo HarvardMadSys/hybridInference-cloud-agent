@@ -24,14 +24,14 @@ the invitation is created; the table keeps its SHA-256. One account can claim
 an invitation, which creates that account's join request; an owner or admin's decision
 is recorded on the request.
 
-Revision ID: 0078_teams
-Revises: 0077_sandbox_usage_days
+Revision ID: 0079_teams
+Revises: 0078_environment_snapshots
 """
 
 from alembic import op
 
-revision = "0078_teams"
-down_revision = "0077_sandbox_usage_days"
+revision = "0079_teams"
+down_revision = "0078_environment_snapshots"
 branch_labels = None
 depends_on = None
 

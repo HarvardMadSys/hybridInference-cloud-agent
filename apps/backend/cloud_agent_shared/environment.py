@@ -5,12 +5,16 @@ from __future__ import annotations
 import io
 import re
 from pathlib import PurePosixPath
-from typing import Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from dotenv.parser import parse_stream
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from cloud_agent_shared.environment_snapshots import ENVIRONMENT_SNAPSHOT_CAPABILITY
 from cloud_agent_shared.secret_redaction import MIN_SECRET_CHARS
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 ENVIRONMENT_CAPABILITY = "environment-v1"
 MAX_VARIABLES = 100
@@ -191,6 +195,10 @@ class EnvironmentScripts(BaseModel):
     setup_script: str = Field(default="", max_length=MAX_SCRIPT_CHARS)
     start_script: str = Field(default="", max_length=MAX_SCRIPT_CHARS)
     verify_script: str = Field(default="", max_length=MAX_SCRIPT_CHARS)
+    #: Runs instead of the setup script when a workspace starts from an
+    #: installation snapshot, for steps that follow the source (code generation,
+    #: migrations). Never run otherwise.
+    update_script: str = Field(default="", max_length=MAX_SCRIPT_CHARS)
     actions: list[EnvironmentAction] = Field(default_factory=list, max_length=20)
 
     @model_validator(mode="after")
@@ -198,7 +206,8 @@ class EnvironmentScripts(BaseModel):
         """Refuse duplicate operation identities and invalid shell text."""
         if len({a.id for a in self.actions}) != len(self.actions):
             raise EnvironmentInputError("Duplicate action id")
-        if any("\0" in v for v in (self.setup_script, self.start_script, self.verify_script)):
+        scripts = (self.setup_script, self.start_script, self.verify_script, self.update_script)
+        if any("\0" in v for v in scripts):
             raise EnvironmentInputError("Scripts cannot contain NUL")
         return self
 
@@ -218,6 +227,10 @@ class BoundEnvironment(EnvironmentScripts):
     )
     previous_secrets: dict[str, str] = Field(default_factory=dict, repr=False, max_length=512)
     skip_start: bool = False
+    #: The control plane's HMAC of the setup script and setup-time variables.
+    #: Equal fingerprints install the same thing, so a container marked done
+    #: for one needs no installation for the other. Empty means unknown.
+    setup_fingerprint: str = Field(default="", pattern=r"^(|[0-9a-f]{64})$")
 
     @model_validator(mode="after")
     def bound_variables(self) -> BoundEnvironment:
@@ -264,6 +277,21 @@ class BoundEnvironment(EnvironmentScripts):
             or self.start_script
             or self.actions
         )
+
+
+#: Binding fields a host older than :data:`ENVIRONMENT_SNAPSHOT_CAPABILITY`
+#: would refuse as unknown; they only matter to a host that builds or starts
+#: from snapshots.
+SNAPSHOT_BINDING_FIELDS = frozenset({"update_script", "setup_fingerprint"})
+
+
+def environment_payload(
+    environment: BoundEnvironment, capabilities: Iterable[str]
+) -> dict[str, Any]:
+    """The binding as JSON for one host, with snapshot fields only if it reads them."""
+    if ENVIRONMENT_SNAPSHOT_CAPABILITY in capabilities:
+        return environment.model_dump(mode="json")
+    return environment.model_dump(mode="json", exclude=set(SNAPSHOT_BINDING_FIELDS))
 
 
 def validate_effective(variables: list[EnvironmentVariable]) -> None:

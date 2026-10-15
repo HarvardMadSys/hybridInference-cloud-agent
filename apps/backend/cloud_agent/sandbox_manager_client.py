@@ -12,6 +12,7 @@ from urllib.parse import quote
 import httpx
 
 from cloud_agent.mcp.http_body import IDENTITY_ENCODING_HEADERS, iter_response_bytes
+from cloud_agent_shared.environment import ENVIRONMENT_CAPABILITY, environment_payload
 from cloud_agent_shared.operation_profiling import (
     MAX_CONTEXT_CHARS,
     PROFILING_CONTEXT_HEADER,
@@ -283,31 +284,37 @@ class SandboxManagerClient:
             invalid="The shared chat supervisor returned invalid data.",
         )
 
-    async def require_environment_capability(self) -> None:
-        """Require the capability from the actual authenticated broker replica."""
+    async def require_environment_capability(self) -> list[str]:
+        """Require the capability from the actual authenticated broker replica.
+
+        Returns everything the replica declares, so a binding can be sent
+        with only the fields it reads.
+        """
         try:
             async with self._http(5) as client:
                 response = await client.get(
                     f"{self._base_url}/health", headers=self._headers, timeout=5
                 )
                 response.raise_for_status()
-                if "environment-v1" not in response.json().get("capabilities", []):
-                    raise SandboxManagerError(
-                        503, "Sandbox manager must be upgraded for environment configuration"
-                    )
-        except (httpx.HTTPError, ValueError, AttributeError):
+                capabilities = [str(c) for c in response.json().get("capabilities", [])]
+        except (httpx.HTTPError, ValueError, AttributeError, TypeError):
             raise SandboxManagerError(
                 503, "Sandbox manager environment capability is unavailable"
             ) from None
+        if ENVIRONMENT_CAPABILITY not in capabilities:
+            raise SandboxManagerError(
+                503, "Sandbox manager must be upgraded for environment configuration"
+            )
+        return capabilities
 
     async def prepare_environment(self, workspace_id: str, environment: Any) -> dict[str, Any]:
         """Require actual broker support before sending value-bearing configuration."""
-        await self.require_environment_capability()
+        capabilities = await self.require_environment_capability()
         return await self._request(
             "POST",
             workspace_id,
             "environment/prepare",
-            json={"environment": environment.model_dump(mode="json")},
+            json={"environment": environment_payload(environment, capabilities)},
             timeout=1050,
         )
 
@@ -442,8 +449,10 @@ class SandboxManagerClient:
                 "command": command,
                 "cwd": cwd,
                 "timeout_seconds": timeout_seconds,
+                # A terminal needs no snapshot fields, which an older
+                # broker would refuse.
                 **(
-                    {"environment": environment.model_dump(mode="json")}
+                    {"environment": environment_payload(environment, ())}
                     if environment is not None
                     else {}
                 ),
@@ -474,8 +483,10 @@ class SandboxManagerClient:
             json={
                 "rows": rows,
                 "cols": cols,
+                # A terminal needs no snapshot fields, which an older
+                # broker would refuse.
                 **(
-                    {"environment": environment.model_dump(mode="json")}
+                    {"environment": environment_payload(environment, ())}
                     if environment is not None
                     else {}
                 ),

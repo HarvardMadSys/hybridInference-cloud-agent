@@ -16,6 +16,7 @@ from cloud_agent.environments import (
     EnvironmentBusy,
     EnvironmentCipher,
     EnvironmentConflict,
+    EnvironmentEncryptionError,
     EnvironmentNotFound,
 )
 from cloud_agent.execution_profiles import default_execution_profile, shared_sandbox_claim_attested
@@ -48,6 +49,41 @@ def _cipher() -> EnvironmentCipher:
     return EnvironmentCipher()
 
 
+def setup_fingerprint(setup_script: str | None, variables: list[EnvironmentVariable]) -> str:
+    """HMAC of what an installation depends on: the script and setup-time values.
+
+    Equal fingerprints install the same thing, so an installation snapshot made
+    for one serves the other. Keyed, so a fingerprint written into a container
+    tells its code nothing about the values.
+    """
+    material = json.dumps(
+        {
+            "v": 1,
+            "setup_script": setup_script or "",
+            "variables": sorted([v.name, v.value] for v in variables if v.phase != "runtime"),
+        },
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return _cipher().mac(material)
+
+
+def optional_setup_fingerprint(
+    setup_script: str | None, variables: list[EnvironmentVariable]
+) -> str | None:
+    """The fingerprint, or ``None`` without setup or without the deployment's key.
+
+    Snapshots need the key; tasks do not, so a deployment without it simply
+    never snapshots.
+    """
+    if not setup_script:
+        return None
+    try:
+        return setup_fingerprint(setup_script, variables)
+    except EnvironmentEncryptionError:
+        return None
+
+
 class PostgresEnvironmentRepository:
     """Serialize configuration changes and bindings per owner over one pool."""
 
@@ -58,6 +94,8 @@ class PostgresEnvironmentRepository:
         self._redactors: OrderedDict[tuple[str, str, str], tuple[float, SecretRedactor]] = (
             OrderedDict()
         )
+        # Versions are immutable, so a pair's fingerprint never changes.
+        self._fingerprints: OrderedDict[tuple[str, str | None], str | None] = OrderedDict()
 
     @staticmethod
     async def _environment_lock(conn: Any, user_id: str) -> None:
@@ -196,7 +234,7 @@ class PostgresEnvironmentRepository:
                     "JOIN agent_environment_bindings b ON b.id=r.binding_id "
                     "JOIN agent_environment_versions v ON v.id=b.environment_version_id "
                     "LEFT JOIN agent_environment_versions g ON g.id=b.global_version_id "
-                    "WHERE r.user_id=$1 AND v.environment_id=$2 ORDER BY r.created_at DESC LIMIT 1",
+                    "WHERE r.user_id=$1 AND v.environment_id=$2 AND r.purpose='test' ORDER BY r.created_at DESC LIMIT 1",
                     user_id,
                     row["id"],
                 )
@@ -209,6 +247,53 @@ class PostgresEnvironmentRepository:
                     }
                 )
             return result
+
+    async def current_setup_fingerprints(
+        self, user_id: str, environment_ids: builtins.list[str]
+    ) -> dict[str, str | None]:
+        """What a task started now would install, per environment; ``None`` without setup."""
+        result: dict[str, str | None] = {}
+        async with self._pool.acquire() as conn:
+            global_id = await conn.fetchval(
+                "SELECT v.id FROM agent_environments e JOIN agent_environment_versions v "
+                "ON v.environment_id=e.id AND v.revision=e.revision WHERE e.user_id=$1 AND e.repo IS NULL",
+                user_id,
+            )
+            rows = await conn.fetch(
+                "SELECT e.id,v.id AS version_id,v.document FROM agent_environments e "
+                "JOIN agent_environment_versions v ON v.environment_id=e.id AND v.revision=e.revision "
+                "WHERE e.user_id=$1 AND e.id=ANY($2::text[])",
+                user_id,
+                environment_ids,
+            )
+            for row in rows:
+                key = (row["version_id"], global_id)
+                if key not in self._fingerprints:
+                    setup = _json(row["document"]).get("setup_script") or ""
+                    try:
+                        self._fingerprints[key] = (
+                            optional_setup_fingerprint(
+                                setup,
+                                merge_variables(
+                                    self._environment_decode(
+                                        await self._environment_stored_variables(conn, global_id)
+                                    ),
+                                    self._environment_decode(
+                                        await self._environment_stored_variables(
+                                            conn, row["version_id"]
+                                        )
+                                    ),
+                                ),
+                            )
+                            if setup
+                            else None
+                        )
+                    except EnvironmentEncryptionError:
+                        self._fingerprints[key] = None
+                    while len(self._fingerprints) > 512:
+                        self._fingerprints.popitem(last=False)
+                result[row["id"]] = self._fingerprints[key]
+        return result
 
     async def get_environment(self, user_id: str, environment_id: str) -> dict[str, Any]:
         """Read the current owned configuration with write-only secrets."""
@@ -656,7 +741,7 @@ class PostgresEnvironmentRepository:
         required = bool(merged or setup or document.get("start_script") or document.get("actions"))
         binding_id = _id()
         await conn.execute(
-            "INSERT INTO agent_environment_bindings(id,user_id,repo,environment_version_id,global_version_id,setup_override,has_setup_override,required) VALUES($1,$2,$3,$4,$5,$6,$7,$8)",
+            "INSERT INTO agent_environment_bindings(id,user_id,repo,environment_version_id,global_version_id,setup_override,has_setup_override,required,setup_fingerprint) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)",
             binding_id,
             user_id,
             repo,
@@ -665,6 +750,8 @@ class PostgresEnvironmentRepository:
             selection.get("setup_override"),
             has_override,
             required,
+            # Only a saved environment's installation can be snapshotted.
+            optional_setup_fingerprint(setup, merged) if version else None,
         )
         return binding_id, setup
 
@@ -723,6 +810,7 @@ class PostgresEnvironmentRepository:
                 )
                 if row["runtime_variables"] is not None
                 else None,
+                setup_fingerprint=row["setup_fingerprint"] or "",
                 previous_secrets={
                     f"{v.name}@history{index}": v.value
                     for index, v in enumerate(
@@ -1069,7 +1157,7 @@ class PostgresEnvironmentRepository:
                             )
                         return self._environment_run_view(old)
                 if await conn.fetchval(
-                    "SELECT EXISTS(SELECT 1 FROM agent_environment_runs WHERE user_id=$1 AND state IN ('queued','running'))",
+                    "SELECT EXISTS(SELECT 1 FROM agent_environment_runs WHERE user_id=$1 AND purpose='test' AND state IN ('queued','running'))",
                     user_id,
                 ):
                     raise EnvironmentBusy("An environment test is already queued or running")
@@ -1096,6 +1184,20 @@ class PostgresEnvironmentRepository:
             for k, v in dict(row).items()
             if k not in {"fingerprint", "idempotency_key"}
         }
+
+    async def bind_current_environment(self, user_id: str, environment_id: str) -> tuple[str, str]:
+        """Freeze an environment's current configuration, as a task would, for a rebuild."""
+        async with self._pool.acquire() as conn, conn.transaction():
+            env = await self._environment_row(conn, user_id, environment_id)
+            if env["repo"] is None:
+                raise EnvironmentNotFound("Global variables have no installation")
+            binding_id, _ = await self._bind_environment(
+                conn,
+                user_id,
+                env["repo"],
+                {"environment_id": environment_id, "environment_id_provided": True},
+            )
+            return binding_id, env["repo"]
 
     async def get_environment_run(self, user_id: str, run_id: str) -> dict[str, Any]:
         """Read owned test state and masked output."""
@@ -1156,9 +1258,14 @@ class PostgresEnvironmentRepository:
                 )
 
     async def claim_environment_run(
-        self, host: str, credential_hash: str, attestation: dict[str, Any]
+        self,
+        host: str,
+        credential_hash: str,
+        attestation: dict[str, Any],
+        *,
+        snapshot_capable: bool = False,
     ) -> dict[str, Any] | None:
-        """Lease a test while respecting the same registered host slot capacity."""
+        """Lease a test, or a prebuild to a snapshot-capable host, within slot capacity."""
         if not shared_sandbox_claim_attested(
             attestation, expected_deployment_sha=os.environ.get("AGENT_DEPLOYMENT_SHA")
         ):
@@ -1208,8 +1315,10 @@ class PostgresEnvironmentRepository:
             ):
                 return None
             row = await conn.fetchrow(
-                "SELECT * FROM agent_environment_runs WHERE state='queued' AND (execution_profile='trusted-v1' OR $1) ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1",
+                "SELECT * FROM agent_environment_runs WHERE state='queued' AND (execution_profile='trusted-v1' OR $1) "
+                "AND (purpose='test' OR $2) ORDER BY purpose='prebuild', created_at FOR UPDATE SKIP LOCKED LIMIT 1",
                 kata,
+                snapshot_capable,
             )
             if row is None:
                 return None

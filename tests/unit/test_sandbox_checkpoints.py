@@ -28,6 +28,7 @@ from cloud_agent_host.sandbox_checkpoints import (
     _image_names,
     export_checkpoint_archive,
     export_from_content_store,
+    prepare_restore_archive,
     read_base_layers,
 )
 
@@ -156,6 +157,62 @@ def test_export_resolves_a_nested_index() -> None:
     )
 
     assert archive.new_layers == (_digest(NEW),)
+
+
+def _restorable(exported: bytes) -> None:
+    """The export passes the checks a restoring host applies before loading."""
+    prepare_restore_archive(
+        io.BytesIO(exported),
+        io.BytesIO(),
+        reference="freeinference-checkpoint/test:" + "0" * 32,
+        base_layers=frozenset(_digest(layer) for layer in BASE),
+        max_bytes=10**7,
+    )
+
+
+@pytest.mark.parametrize("nested_index", [False, True])
+def test_export_leaves_out_blobs_its_image_does_not_use(nested_index: bool) -> None:
+    """A classic image store's `docker save` adds metadata blobs no manifest names."""
+    image = _Image([*BASE, NEW], nested_index=nested_index)
+    unused = b'{"legacy": "layer metadata"}'
+    documents = [image.manifest(), image.config(), *BASE, NEW, unused]
+    if nested_index:
+        documents.append(
+            json.dumps(
+                {
+                    "schemaVersion": 2,
+                    "mediaType": _INDEX,
+                    "manifests": [_descriptor(image.manifest(), _MANIFEST)],
+                }
+            ).encode()
+        )
+    output = io.BytesIO()
+
+    archive = export_checkpoint_archive(
+        image.stream(blobs=documents),
+        output,
+        base_layers=frozenset(_digest(layer) for layer in BASE),
+        max_bytes=10**6,
+    )
+
+    blobs = {name for name in _names(output.getvalue()) if name.startswith("blobs/sha256/")}
+    assert blobs == {
+        f"blobs/sha256/{_digest(body)}" for body in (image.manifest(), image.config(), NEW)
+    }
+    assert archive.new_layers == (_digest(NEW),)
+    _restorable(output.getvalue())
+
+
+def test_export_refuses_a_large_blob_its_image_does_not_use() -> None:
+    image = _Image([*BASE, NEW])
+    stray = b"x" * (2 * 1024 * 1024)
+    with pytest.raises(SandboxCheckpointError, match="does not use"):
+        export_checkpoint_archive(
+            image.stream(blobs=[image.manifest(), image.config(), *BASE, NEW, stray]),
+            io.BytesIO(),
+            base_layers=frozenset(_digest(layer) for layer in BASE),
+            max_bytes=10**7,
+        )
 
 
 def test_export_refuses_a_blob_that_does_not_match_its_digest() -> None:

@@ -450,10 +450,10 @@ async def test_team_migration_round_trips(store, pool):
     config = _db_config()
     try:
         for _ in range(2):
-            downgrade_to(config, "0077_sandbox_usage_days")
+            downgrade_to(config, "0078_environment_snapshots")
             async with pool.acquire() as conn:
                 assert await conn.fetchval("SELECT to_regclass('agent_teams')") is None
-            apply_migrations(config, "0078_teams")
+            apply_migrations(config, "0079_teams")
             team = await new_team(store)
             assert team.member_count == 1
     finally:

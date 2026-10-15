@@ -74,7 +74,7 @@ across restarts. The inventory below records built-in defaults and the
 environment names used for an initial import. Once a setting is registered, the
 service no longer reads it continuously from `.env`.
 
-Run `alembic upgrade head` (through `0078_teams`) before
+Run `alembic upgrade head` (through `0079_teams`) before
 starting this release. The updated worker claim query requires
 `agent_jobs.claim_retry_at`, and chat plugin selections require
 `agent_threads.plugins`; existing queued jobs remain immediately eligible and

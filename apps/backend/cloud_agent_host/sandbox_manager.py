@@ -48,7 +48,9 @@ from cloud_agent_host.chat_sandbox import (
     RetainedChatLost,
     SandboxRestoreFailed,
 )
+from cloud_agent_host.chat_sandbox_models import ENVIRONMENT_TEST_LABEL
 from cloud_agent_host.drivers import DriverError
+from cloud_agent_host.environment_tests import environment_run_spec
 from cloud_agent_host.guest_observer import (
     GuestObservation,
     add_process_counts,
@@ -314,6 +316,10 @@ from cloud_agent_host.environment_preparation import EnvironmentPreparation
 from cloud_agent_host.environment_process import tool_environment
 from cloud_agent_host.environment_snapshot import check_snapshot_secrets
 from cloud_agent_shared.environment import ENVIRONMENT_CAPABILITY, BoundEnvironment
+from cloud_agent_shared.environment_snapshots import (
+    ENVIRONMENT_SNAPSHOT_CAPABILITY,
+    EnvironmentSnapshotRef,
+)
 from cloud_agent_shared.secret_redaction import SecretRedactor
 
 
@@ -538,6 +544,9 @@ class SharedSandboxAcquireRequest(SharedSandboxIdentityRequest):
     owner: str = Field(..., min_length=1, max_length=256)
     activation_generation: int = Field(..., ge=1)
     has_settled_context: bool = False
+    #: An installation snapshot a new group may start from; ignored for a
+    #: group that already has a container here.
+    environment_snapshot: EnvironmentSnapshotRef | None = None
     #: The measurement selection the caller is profiling this path under.
     #: Deliberately unvalidated: a sandbox manager sees one call at a time and cannot
     #: know which attempt it belongs to, so the caller states the selection and
@@ -546,6 +555,35 @@ class SharedSandboxAcquireRequest(SharedSandboxIdentityRequest):
     #: setting reject a sandbox request with 422 before the supervisor ever saw
     #: it, and measurement configuration must never fail the business call.
     profiling: Any = None
+
+
+class EnvironmentSnapshotCaptureRequest(BaseModel):
+    """Save one stopped environment run's container as an installation snapshot."""
+
+    model_config = ConfigDict(extra="forbid")
+    run_id: str = Field(..., min_length=1, max_length=128)
+    lease_generation: int = Field(..., ge=1)
+    container_id: str = Field(..., min_length=1, max_length=256)
+    sandbox_image_digest: str | None = Field(None, max_length=512)
+    owner: str = Field(..., pattern=r"^[0-9a-f]{64}$")
+    snapshot_id: str = Field(..., pattern=r"^[0-9a-f]{32}$")
+
+
+class EnvironmentSnapshotDeletion(BaseModel):
+    """One snapshot the control plane retired: its object, if stored, and local image."""
+
+    model_config = ConfigDict(extra="forbid")
+    snapshot_id: str = Field(..., pattern=r"^[0-9a-f]{32}$")
+    owner: str = Field(..., pattern=r"^[0-9a-f]{64}$")
+    object_key: str | None = Field(None, max_length=1024)
+    version_id: str | None = Field(None, max_length=1024)
+
+
+class EnvironmentSnapshotDeleteRequest(BaseModel):
+    """Snapshots to delete from the bucket and from this host's images."""
+
+    model_config = ConfigDict(extra="forbid")
+    snapshots: list[EnvironmentSnapshotDeletion] = Field(..., max_length=100)
 
 
 class SharedResidentLaunchConfig(BaseModel):
@@ -2130,6 +2168,10 @@ def create_app(
                 # A moved group is recreated from its checkpoint with the
                 # same archive policy and credentials that captured it.
                 shared_supervisor.checkpoint_restore_hook = archive_controller.restore_checkpoint
+            if hasattr(shared_supervisor, "environment_snapshot_hook"):
+                shared_supervisor.environment_snapshot_hook = (
+                    archive_controller.load_environment_snapshot
+                )
         configure_archive_hook(final_archive_hook)
     start_seq_for = getattr(shared_supervisor, "start_seq_for", None)
     if checkpoint_capture is not None and callable(start_seq_for):
@@ -2452,7 +2494,14 @@ def create_app(
     def health(_: None = Depends(authenticate)) -> dict[str, Any]:
         return {
             "ok": True,
-            "capabilities": [ENVIRONMENT_CAPABILITY],
+            "capabilities": [
+                ENVIRONMENT_CAPABILITY,
+                *(
+                    [ENVIRONMENT_SNAPSHOT_CAPABILITY]
+                    if getattr(archive_controller, "snapshots_available", False)
+                    else []
+                ),
+            ],
             "sandbox_archives": (
                 {
                     **archive_service.status(),
@@ -2677,10 +2726,88 @@ def create_app(
                 profiling=body.profiling,
                 start_seq=body.start_seq,
                 restore=None if body.restore is None else body.restore.restore(),
+                **(
+                    {"environment_snapshot": body.environment_snapshot}
+                    if body.environment_snapshot is not None
+                    else {}
+                ),
             )
         except (SandboxError, ValueError) as exc:
             raise supervisor_error(exc) from exc
         return asdict(lease)
+
+    @app.post("/environment-snapshots/capture")
+    async def capture_installation_snapshot(
+        body: EnvironmentSnapshotCaptureRequest,
+        _: None = Depends(authenticate),
+    ) -> dict[str, Any]:
+        """Commit and upload a stopped environment run's container, and nothing else.
+
+        Only a container labelled as that exact run qualifies, so a runner
+        cannot have a chat's workspace uploaded as someone's snapshot.
+        """
+        if archive_controller is None or retained_manager is None:
+            raise HTTPException(status_code=409, detail="snapshots are not configured here")
+        spec = environment_run_spec(body.run_id, body.lease_generation, body.sandbox_image_digest)
+        inspection = retained_manager.inspect(spec.container_name)
+        if (
+            inspection is None
+            or inspection.container_id != body.container_id
+            or inspection.labels.get(ENVIRONMENT_TEST_LABEL) != body.run_id
+        ):
+            raise HTTPException(status_code=404, detail="environment run container not found")
+        try:
+            return await endpoint_calls.run(
+                archive_controller.capture_environment_snapshot,
+                spec,
+                inspection,
+                owner=body.owner,
+                snapshot_id=body.snapshot_id,
+            )
+        except (SandboxError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)[:300]) from exc
+
+    @app.post("/environment-snapshots/delete")
+    async def delete_environment_snapshots(
+        body: EnvironmentSnapshotDeleteRequest,
+        _: None = Depends(authenticate),
+    ) -> dict[str, Any]:
+        """Drop retired snapshots' local images, and delete the stored objects named."""
+        if archive_controller is None:
+            return {"deleted": []}
+        deleted: list[str] = []
+
+        def run() -> None:
+            for item in body.snapshots:
+                with contextlib.suppress(Exception):
+                    archive_controller.remove_environment_snapshot_image(
+                        item.owner, item.snapshot_id
+                    )
+                if item.object_key is None:
+                    continue
+                try:
+                    archive_controller.delete_environment_snapshot(
+                        owner=item.owner,
+                        snapshot_id=item.snapshot_id,
+                        key=item.object_key,
+                        version_id=item.version_id,
+                    )
+                except Exception as exc:
+                    # Without the delete permission the bucket's lifecycle
+                    # rule removes the object later.
+                    logger.warning(
+                        "environment snapshot object was not deleted",
+                        extra={
+                            "event": "environment_snapshot_delete_failed",
+                            "snapshot_id": item.snapshot_id,
+                            "error_type": type(exc).__name__,
+                        },
+                    )
+                    continue
+                deleted.append(item.snapshot_id)
+
+        await endpoint_calls.run(run)
+        return {"deleted": deleted}
 
     @app.post("/shared-sandboxes/{thread_id}/register")
     async def register_shared_chat_sandbox(

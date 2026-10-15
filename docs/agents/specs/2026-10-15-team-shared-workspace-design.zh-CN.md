@@ -210,7 +210,7 @@ Owner 不能直接退出或被普通成员移除。转让、退出、移除及 T
 
 ## 8 数据模型
 
-### 8.1 Team 核心表（第一步，迁移 `0078_teams`）
+### 8.1 Team 核心表（第一步，迁移 `0079_teams`）
 
 | 表 | 关键字段与约束 |
 | --- | --- |
@@ -363,7 +363,7 @@ Team ID 是不透明稳定标识（`ateam_` 前缀），名称可以修改且不
 - [沙箱安全模型](2026-09-01-agent-sandbox-security-model.zh.md) 第 11 节：shared sandbox 的成员 UID 隔离与当前的“同一用户/security domain”假设。
 - [环境配置设计](2026-10-12-repository-environment-design.zh-CN.md)与[现有环境迁移](../../../migrations/versions/0065_environments.py)：个人配置、不可变版本、冻结 binding 和 Secret 语义。
 - [数据库 baseline](../../../migrations/versions/0001_schema_baseline.py)与[原生 Fork 存储](../../../apps/backend/cloud_agent/storage/repositories/session_fork.py)：现有同 owner 外键和 Fork 条件。
-- [Team 迁移](../../../migrations/versions/0078_teams.py)与[Team 存储](../../../apps/backend/cloud_agent/storage/repositories/teams.py)：第一步的表、约束和锁顺序。
+- [Team 迁移](../../../migrations/versions/0079_teams.py)与[Team 存储](../../../apps/backend/cloud_agent/storage/repositories/teams.py)：第一步的表、约束和锁顺序。
 - [Owner 鉴权](../../../apps/backend/cloud_agent/api/_owner_auth.py)、[仓库 entitlement](../../../apps/backend/cloud_agent/entitlement.py)与[身份 namespace](../../../apps/backend/cloud_agent/identity_namespace.py)：身份、当前准入与资源权限的分工。
 - [Gateway lookup 契约](../../../gateway_contracts/internal-lookups.openapi.yaml)：账户资料、`agent.use` 与邮箱显示契约。
 - [变更推送](../../../migrations/versions/0031_owner_change_notify.py)：当前按单个用户推送的通知格式。

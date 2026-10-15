@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Protocol
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.settings import number_setting
 from cloud_agent.workers.background_wake import SNAPSHOT
+from cloud_agent_shared.environment import environment_payload
 from cloud_agent_shared.host_settings import HOST_SETTINGS_BY_KEY
 
 if TYPE_CHECKING:
@@ -80,7 +81,8 @@ async def _capture_due_shared_snapshot(store: _SnapshotCapture) -> bool:
             else None
         )
         if environment is not None and environment.required:
-            snapshot = {**snapshot, "environment": environment.model_dump(mode="json")}
+            # The scan needs no snapshot fields; an older broker would refuse them.
+            snapshot = {**snapshot, "environment": environment_payload(environment, ())}
         receipt = await sandbox_manager.capture_shared_snapshot(snapshot)
         expected = {
             "snapshot_id": int(snapshot["snapshot_id"]),
