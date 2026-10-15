@@ -20,6 +20,9 @@ beforeEach(() => {
   access = { allowed: true, permissions: ['agent.use', 'agent.admin'] };
   role = 'internal';
   userId = undefined;
+  pathname = '/';
+  sessionStorage.clear();
+  window.history.replaceState(null, '', '/');
   vi.mocked(listMcpInvocations).mockReset().mockResolvedValue({ invocations: [] });
   router.replace.mockReset();
   logout.mockReset();
@@ -36,6 +39,7 @@ vi.mock('@/lib/api/mcp', async (original) => ({
 vi.mock('next/navigation', () => ({
   useRouter: () => router,
   usePathname: () => pathname,
+  useSearchParams: () => new URLSearchParams(window.location.search),
 }));
 
 vi.mock('@/components/features/auth/ProtectedRoute', () => ({
@@ -97,11 +101,23 @@ vi.mock('@/components/features/agents/AgentsSidebar', () => ({
   AgentsSidebar: ({
     collapsed,
     headerAction,
+    settingsNavigation,
   }: {
     collapsed?: boolean;
     headerAction?: React.ReactNode;
+    settingsNavigation?: { backHref: string };
   }) =>
-    collapsed ? null : (
+    collapsed ? null : settingsNavigation ? (
+      <aside id="agents-sidebar" data-testid="settings-sidebar-stub">
+        <Link href={settingsNavigation.backHref} onClick={(event) => event.preventDefault()}>
+          Back to chats
+        </Link>
+        {headerAction}
+        <Link href="/settings/plugins" onClick={(event) => event.preventDefault()}>
+          Plugins &amp; MCPs
+        </Link>
+      </aside>
+    ) : (
       <aside id="agents-sidebar" data-testid="sidebar-stub">
         tasks
         {headerAction}
@@ -249,6 +265,20 @@ describe('AgentsLayout mobile task list', () => {
       changeListeners.forEach((listener) => listener());
     });
   }
+
+  it('opens settings navigation on mobile and closes it after a section is selected', async () => {
+    pathname = '/settings/my-settings';
+    renderLayout();
+    expect(screen.queryByTestId('settings-sidebar-stub')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Expand settings navigation' }));
+    expect(screen.getByTestId('settings-sidebar-stub')).toBeVisible();
+    expect(screen.getByRole('main', { hidden: true })).not.toBeVisible();
+    await waitFor(() => expect(screen.getByRole('link', { name: 'Back to chats' })).toHaveFocus());
+    fireEvent.click(screen.getByRole('link', { name: 'Plugins & MCPs' }));
+    expect(screen.queryByTestId('settings-sidebar-stub')).not.toBeInTheDocument();
+    expect(screen.getByRole('main')).toBeVisible();
+    expect(localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY)).toBeNull();
+  });
 
   it('keeps the account menu in the header only while the mobile task list is closed', () => {
     renderLayout();
@@ -574,7 +604,7 @@ describe('AgentsLayout product navigation', () => {
     },
   );
 
-  it.each(['/archived', '/integrations'])(
+  it.each(['/archived'])(
     'keeps the workspace sidebar on %s and only changes the main content',
     (route) => {
       pathname = route;
@@ -589,6 +619,81 @@ describe('AgentsLayout product navigation', () => {
       expect(screen.getByTestId('sidebar-stub')).toBeInTheDocument();
     },
   );
+
+  it.each([
+    '/integrations',
+    '/settings/my-settings',
+    '/settings/plugins',
+    '/settings/integrations',
+    '/settings/environments',
+  ])('replaces the task sidebar with collapsible settings navigation on %s', (route) => {
+    pathname = route;
+    renderLayout();
+    expect(screen.queryByTestId('sidebar-stub')).not.toBeInTheDocument();
+    expect(screen.getByTestId('settings-sidebar-stub')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Agents' })).not.toHaveAttribute('aria-current');
+    fireEvent.click(screen.getByRole('button', { name: 'Collapse settings navigation' }));
+    expect(screen.queryByTestId('settings-sidebar-stub')).not.toBeInTheDocument();
+    fireEvent.keyDown(window, { key: 'b', metaKey: true });
+    expect(screen.getByTestId('settings-sidebar-stub')).toBeInTheDocument();
+  });
+
+  it('remembers a repository query changed on the new-chat route', () => {
+    userId = 'alice';
+    const view = render(
+      <AgentsLayout>
+        <p>chat</p>
+      </AgentsLayout>,
+    );
+    window.history.replaceState(null, '', '/?repo=owner%2Frepo');
+    view.rerender(
+      <AgentsLayout>
+        <p>repository chat</p>
+      </AgentsLayout>,
+    );
+    pathname = '/settings/my-settings';
+    window.history.replaceState(null, '', pathname);
+    view.rerender(
+      <AgentsLayout>
+        <p>settings</p>
+      </AgentsLayout>,
+    );
+    expect(screen.getByRole('link', { name: 'Back to chats' })).toHaveAttribute(
+      'href',
+      '/?repo=owner%2Frepo',
+    );
+  });
+
+  it('returns to the last chat across settings sections and isolates the destination by account', () => {
+    userId = 'alice';
+    pathname = '/job-1';
+    const view = render(
+      <AgentsLayout>
+        <p>chat</p>
+      </AgentsLayout>,
+    );
+    pathname = '/settings/my-settings';
+    view.rerender(
+      <AgentsLayout>
+        <p>settings</p>
+      </AgentsLayout>,
+    );
+    expect(screen.getByRole('link', { name: 'Back to chats' })).toHaveAttribute('href', '/job-1');
+    pathname = '/settings/plugins';
+    view.rerender(
+      <AgentsLayout>
+        <p>plugins</p>
+      </AgentsLayout>,
+    );
+    expect(screen.getByRole('link', { name: 'Back to chats' })).toHaveAttribute('href', '/job-1');
+    userId = 'bob';
+    view.rerender(
+      <AgentsLayout>
+        <p>plugins</p>
+      </AgentsLayout>,
+    );
+    expect(screen.getByRole('link', { name: 'Back to chats' })).toHaveAttribute('href', '/');
+  });
 });
 
 describe('AgentsLayout permissions', () => {

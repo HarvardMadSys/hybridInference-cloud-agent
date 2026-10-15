@@ -211,6 +211,104 @@ describe('sidebar navigation interactions', () => {
     expect(api.thread).not.toHaveBeenCalled();
   });
 
+  it('shows four settings destinations without loading or polling chat lists', async () => {
+    api.pathname = '/settings/plugins';
+    vi.useFakeTimers();
+    await act(async () => render(<AgentsSidebar settingsNavigation={{ backHref: '/a' }} />));
+    const navigation = screen.getByRole('navigation', { name: 'Settings' });
+    expect(within(navigation).getAllByRole('link')).toHaveLength(4);
+    expect(within(navigation).getByRole('link', { name: 'My Settings' })).toHaveAttribute(
+      'href',
+      '/settings/my-settings',
+    );
+    expect(within(navigation).getByRole('link', { name: 'Plugins & MCPs' })).toHaveAttribute(
+      'aria-current',
+      'page',
+    );
+    expect(within(navigation).getByRole('link', { name: 'Integrations' })).toHaveAttribute(
+      'href',
+      '/settings/integrations',
+    );
+    expect(within(navigation).getByRole('link', { name: 'Environments' })).toHaveAttribute(
+      'href',
+      '/settings/environments',
+    );
+    expect(screen.getByRole('link', { name: 'Back to chats' })).toHaveAttribute('href', '/a');
+    expect(screen.getByTestId('account-menu')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Search tasks' })).not.toBeInTheDocument();
+    await act(async () => {
+      receiveThreadChange({ id: 'thread-a', revision: 1, title: 'Changed' });
+      announceAgentSessionsChanged({ threadIds: ['thread-a'], title: 'Changed' });
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    expect(api.list).not.toHaveBeenCalled();
+    expect(api.projects).not.toHaveBeenCalled();
+    expect(api.get).not.toHaveBeenCalled();
+    expect(api.thread).not.toHaveBeenCalled();
+    expect(fireEvent.keyDown(document, { key: 'k', metaKey: true })).toBe(true);
+  });
+
+  it('restores the loaded chat list and its scroll position after settings', async () => {
+    localStorage.setItem(
+      sidebarPreferencesKey('alice'),
+      JSON.stringify({ ...DEFAULT_PREFERENCES, group: 'flat' }),
+    );
+    const view = render(<AgentsSidebar />);
+    await screen.findByRole('link', { name: 'Task a · owner/repo' });
+    const scroller = screen.getByRole('complementary').querySelector('.overflow-y-auto')!;
+    scroller.scrollTop = 160;
+    fireEvent.scroll(scroller);
+    api.pathname = '/settings/environments';
+    view.rerender(<AgentsSidebar settingsNavigation={{ backHref: '/' }} />);
+    expect(screen.queryByText('Task a')).not.toBeInTheDocument();
+    api.list.mockClear();
+    api.projects.mockClear();
+    await act(async () => announceAgentSessionsChanged({ threadIds: [], title: 'Changed' }));
+    expect(api.list).not.toHaveBeenCalled();
+    expect(api.projects).not.toHaveBeenCalled();
+    api.pathname = '/';
+    view.rerender(<AgentsSidebar />);
+    expect(screen.getByRole('link', { name: 'Task a · owner/repo' })).toBeInTheDocument();
+    expect(screen.getByRole('complementary').querySelector('.overflow-y-auto')!.scrollTop).toBe(
+      160,
+    );
+  });
+
+  it('retains expanded project pages and scroll position across settings', async () => {
+    const conversations = Array.from({ length: 65 }, (_, i) => conversation(String(i)));
+    api.list.mockImplementation(async ({ pinned, cursor }) => ({
+      conversations: pinned ? [] : cursor ? conversations.slice(50) : conversations.slice(0, 50),
+      next_cursor: pinned || cursor ? null : 'page-2',
+    }));
+    const view = render(<AgentsSidebar />);
+    await screen.findByRole('link', { name: 'Task 14' });
+    for (let page = 0; page < 3; page++) {
+      await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Show more' })));
+    }
+    await screen.findByRole('link', { name: 'Task 59' });
+    const scroller = screen.getByRole('complementary').querySelector('.overflow-y-auto')!;
+    scroller.scrollTop = 1250;
+    fireEvent.scroll(scroller);
+
+    api.pathname = '/settings/my-settings';
+    view.rerender(<AgentsSidebar settingsNavigation={{ backHref: '/' }} />);
+    expect(screen.queryByText('Task 59')).not.toBeInTheDocument();
+    api.list.mockClear();
+    api.projects.mockClear();
+    await act(async () => announceAgentSessionsChanged({ threadIds: [], title: 'Changed' }));
+    expect(api.list).not.toHaveBeenCalled();
+    expect(api.projects).not.toHaveBeenCalled();
+
+    // The old pages must be available immediately, before a refresh can finish.
+    api.list.mockImplementation(() => new Promise(() => {}));
+    api.pathname = '/';
+    view.rerender(<AgentsSidebar />);
+    expect(screen.getByRole('link', { name: 'Task 59' })).toBeInTheDocument();
+    expect(screen.getByRole('complementary').querySelector('.overflow-y-auto')!.scrollTop).toBe(
+      1250,
+    );
+  });
+
   it('keeps a late previous-owner response out of the sidebar and detail', async () => {
     api.pathname = '/a';
     let resolveOldJob!: (job: AgentJobApi) => void;

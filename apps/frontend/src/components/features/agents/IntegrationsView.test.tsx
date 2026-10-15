@@ -16,6 +16,9 @@ import { LOCALE_STORAGE_KEY } from '@/lib/i18n/locales';
 import { SiteConfigProvider } from '@/components/providers/SiteConfigProvider';
 import { NEUTRAL_SITE_CONFIG } from '@/config/site';
 import { IntegrationsView } from './IntegrationsView';
+import { MySettingsView } from '../settings/MySettingsView';
+import { PluginsSettingsView } from '../settings/PluginsSettingsView';
+import { EnvironmentsSettingsView } from '../settings/EnvironmentsSettingsView';
 import type { AgentIntegrationProviderApi, AgentIntegrationsApi } from '@/lib/api/agents';
 
 vi.mock('@/components/features/agents/environment/EnvironmentManager', () => ({
@@ -187,31 +190,30 @@ describe('IntegrationsView', () => {
   it('shows environment management even while the capability request is unavailable', async () => {
     vi.mocked(getAgentConfig).mockRejectedValue(new Error('Config unavailable'));
     mockedGetIntegrations.mockResolvedValue(integrations);
-    render(<IntegrationsView />);
+    render(<EnvironmentsSettingsView />);
     expect(screen.getByTestId('environment-manager')).toBeInTheDocument();
-    await screen.findByRole('heading', { level: 1, name: 'My Settings' });
+    await screen.findByRole('heading', { level: 1, name: 'Environments' });
   });
-  it('shows connected accounts and a same-window connect link', async () => {
+  it('shows connected source-control accounts independently of other settings', async () => {
     mockedGetIntegrations.mockResolvedValue(integrations);
-
     render(<IntegrationsView connectedProvider="github" />);
-
-    expect(screen.getByRole('heading', { level: 1, name: 'My Settings' })).toBeInTheDocument();
-    expect(screen.getByRole('region', { name: 'Profile' })).toBeInTheDocument();
-    expect(screen.queryByText('Integrations & MCP')).not.toBeInTheDocument();
-    expect(screen.getByRole('heading', { level: 2, name: 'MCP servers' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 1, name: 'Integrations' })).toBeInTheDocument();
     expect(
       await screen.findByText('Connected as HarvardMadSys · 2 repositories'),
     ).toBeInTheDocument();
     expect(screen.getByRole('status')).toHaveTextContent('GitHub connected.');
-    // GitLab is behind "Coming soon", so its connect_url is deliberately not
-    // offered even though the API still returns one.
     expect(screen.queryByRole('link', { name: /Connect/ })).not.toBeInTheDocument();
-    // One: GitLab's. The MCP section is a real list now, not a "Coming soon"
-    // placeholder, so it contributes a button instead.
     expect(screen.getAllByText('Coming soon')).toHaveLength(1);
-    expect(screen.getByRole('button', { name: 'Add with JSON' })).toBeInTheDocument();
-    expect(await screen.findByRole('button', { name: 'Add server' })).toBeInTheDocument();
+    expect(getUserProfile).not.toHaveBeenCalled();
+    expect(getMemories).not.toHaveBeenCalled();
+    expect(listSkills).not.toHaveBeenCalled();
+    expect(listMcpConnections).not.toHaveBeenCalled();
+  });
+  it('keeps profile, notifications, and memory in My Settings', async () => {
+    render(<MySettingsView />);
+    expect(screen.getByRole('heading', { level: 1, name: 'My Settings' })).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Profile' })).toBeInTheDocument();
+    expect(screen.queryByText('Integrations & MCP')).not.toBeInTheDocument();
     expect(screen.getByRole('region', { name: 'Notifications' })).toBeInTheDocument();
     expect(screen.getByRole('checkbox', { name: 'Agent questions' })).toBeInTheDocument();
     expect(screen.getByRole('checkbox', { name: 'Turn completions' })).toBeInTheDocument();
@@ -223,6 +225,21 @@ describe('IntegrationsView', () => {
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     expect(screen.queryByRole('combobox', { name: 'Theme' })).not.toBeInTheDocument();
     expect(screen.queryByRole('combobox', { name: 'Display language' })).not.toBeInTheDocument();
+    expect(mockedGetIntegrations).not.toHaveBeenCalled();
+    expect(listSkills).not.toHaveBeenCalled();
+    expect(listMcpConnections).not.toHaveBeenCalled();
+    await waitFor(() => expect(getUserProfile).toHaveBeenCalled());
+  });
+  it('groups skills with MCP servers and loads only their data', async () => {
+    render(<PluginsSettingsView />);
+    expect(screen.getByRole('heading', { level: 1, name: 'Plugins & MCPs' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 2, name: 'MCP servers' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Add with JSON' })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'Add server' })).toBeInTheDocument();
+    expect(listSkills).toHaveBeenCalled();
+    expect(mockedGetIntegrations).not.toHaveBeenCalled();
+    expect(getUserProfile).not.toHaveBeenCalled();
+    expect(getMemories).not.toHaveBeenCalled();
   });
 
   it("links the deployment's documentation from the heading, and only when it has some", async () => {
@@ -249,7 +266,7 @@ describe('IntegrationsView', () => {
 
   it("shows the account's fixed companion in Profile, independent of memory and insights", async () => {
     mockedGetIntegrations.mockResolvedValue(integrations);
-    render(<IntegrationsView />);
+    render(<MySettingsView />);
     const image = await within(screen.getByRole('region', { name: 'Profile' })).findByRole('img', {
       name: 'Your Pokémon companion avatar',
     });
@@ -275,7 +292,7 @@ describe('IntegrationsView', () => {
       companion_data_url: COMPANION,
     });
     mockedGetIntegrations.mockResolvedValue(integrations);
-    render(<IntegrationsView />);
+    render(<MySettingsView />);
     const profileSection = screen.getByRole('region', { name: 'Profile' });
     const image = await within(profileSection).findByRole('img', { name: 'Your profile image' });
     expect(image).toHaveAttribute('src', photo);
@@ -286,7 +303,7 @@ describe('IntegrationsView', () => {
 
   it('manages memories on the Setting page while suggestions live on the homepage', async () => {
     mockedGetIntegrations.mockResolvedValue(integrations);
-    render(<IntegrationsView />);
+    render(<MySettingsView />);
 
     const section = screen.getByRole('tabpanel', { name: 'User memory' });
     expect(await within(section).findByText(memory.memories[0].content)).toBeInTheDocument();
@@ -315,7 +332,7 @@ describe('IntegrationsView', () => {
     localStorage.setItem(LOCALE_STORAGE_KEY, 'zh-CN');
     render(
       <LocaleProvider>
-        <IntegrationsView />
+        <MySettingsView />
       </LocaleProvider>,
     );
 
@@ -328,7 +345,7 @@ describe('IntegrationsView', () => {
     expect(within(section).getByRole('switch', { name: '启用记忆' })).toBeChecked();
     expect(within(section).queryByRole('heading', { name: '建议' })).not.toBeInTheDocument();
     expect(screen.getByRole('tab', { name: '项目记忆' })).toBeInTheDocument();
-    expect(screen.getByText('管理你的个人资料、连接、技能、记忆和通知。')).toBeInTheDocument();
+    expect(screen.getByText('管理你的个人资料、通知和记忆。')).toBeInTheDocument();
   });
 
   it('marks providers that need operator configuration', async () => {

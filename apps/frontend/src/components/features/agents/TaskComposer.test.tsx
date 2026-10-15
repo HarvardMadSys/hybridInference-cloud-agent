@@ -2011,7 +2011,7 @@ describe('TaskComposer source-control onboarding', () => {
     expect(dialog).toHaveTextContent('Nothing matches “nobody”.');
     expect(
       within(dialog).getByRole('link', { name: 'Configure repository access' }),
-    ).toHaveAttribute('href', '/integrations');
+    ).toHaveAttribute('href', '/settings/integrations');
     expect(within(dialog).getByRole('link', { name: 'Create new repository' })).toHaveAttribute(
       'href',
       'https://github.com/new',

@@ -480,6 +480,26 @@ export const en = {
     'The habitat and badges are worked out from your latest requests each time you open the page. Nothing is stored, and memory settings do not affect them; your companion, pose and expression never change.',
 
   // ── Settings ────────────────────────────────────────────────────────────
+  'settings.navigation': 'Settings',
+  'settings.resizeNavigation': 'Resize settings navigation',
+  'settings.backToChats': 'Back to chats',
+  'settings.collapseNavigation': 'Collapse settings navigation',
+  'settings.expandNavigation': 'Expand settings navigation',
+  'settings.personalDescription': 'Manage your profile, notifications, and memory.',
+  'settings.plugins': 'Plugins & MCPs',
+  'settings.pluginsDescription':
+    'Connect MCP servers and manage the skills available to your agents.',
+  'settings.integrations': 'Integrations',
+  'settings.integrationsDescription':
+    'Connect your source control accounts and manage repository access.',
+  'settings.environments': 'Environments',
+  'settings.environmentsDescription':
+    'Manage repository environments, setup scripts, and personal variables.',
+  'settings.helpDescription':
+    'Connect a repository, prepare its environment, and start your first chat.',
+  'settings.helpConnect': '1. Connect your GitHub account and choose repositories',
+  'settings.helpEnvironment': '2. Set up a repository environment (optional)',
+  'settings.helpChat': '3. Start a chat',
   'settings.title': 'My Settings',
   'settings.description': 'Manage your profile, connections, skills, memory, and notifications.',
   'settings.profile.title': 'Profile',

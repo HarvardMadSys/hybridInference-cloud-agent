@@ -54,7 +54,7 @@ function ConnectedInner() {
     // Opened again after it already worked — Back from GitHub, a refresh.
     // Sending the spent code again would only be refused; carry on instead.
     if (callbackAlreadyUsed(state)) {
-      router.replace(takeReturnPath() ?? `/integrations?connected=${provider}`);
+      router.replace(takeReturnPath() ?? `/settings/integrations?connected=${provider}`);
       return;
     }
 
@@ -83,7 +83,7 @@ function ConnectedInner() {
         await connectGitLab(authCode, authState);
         markCallbackUsed(authState);
       }
-      router.replace(`/integrations?connected=${provider}`);
+      router.replace(`/settings/integrations?connected=${provider}`);
     }
 
     void completeConnection(code, state).catch((cause: unknown) =>
@@ -99,7 +99,7 @@ function ConnectedInner() {
         </h1>
         <p className="max-w-md text-center text-sm text-gray-500 dark:text-gray-400">{error}</p>
         <Link
-          href="/integrations"
+          href="/settings/integrations"
           className="text-sm font-medium text-crimson dark:text-crimson-light hover:underline"
         >
           Back to integrations
@@ -132,7 +132,9 @@ function ConnectedInner() {
           </a>
           <button
             type="button"
-            onClick={() => router.replace(takeReturnPath() ?? '/integrations?connected=github')}
+            onClick={() =>
+              router.replace(takeReturnPath() ?? '/settings/integrations?connected=github')
+            }
             className="rounded-lg px-4 py-2 text-sm font-medium text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-white/10"
           >
             Not now

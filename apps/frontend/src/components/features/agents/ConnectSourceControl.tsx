@@ -68,7 +68,7 @@ export function ConnectSourceControl({
           {arrow}
         </button>
       ) : (
-        <Link href="/integrations" className={actionClass}>
+        <Link href="/settings/integrations" className={actionClass}>
           {actionLabel}
           {arrow}
         </Link>

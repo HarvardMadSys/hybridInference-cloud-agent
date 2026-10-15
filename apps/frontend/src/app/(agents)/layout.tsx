@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { usePathname } from 'next/navigation';
+import { usePathname, useSearchParams } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
 import { ProtectedRoute } from '@/components/features/auth/ProtectedRoute';
 import { AgentsSidebar } from '@/components/features/agents/AgentsSidebar';
@@ -16,6 +16,7 @@ import { DeploymentFooter } from '@/components/DeploymentFooter';
 import { McpApprovalsProvider } from '@/components/features/agents/mcp/McpApprovalsProvider';
 import { McpApprovalsLink } from '@/components/features/agents/mcp/McpApprovalsView';
 import { AccountMenu } from '@/components/features/agents/AccountMenu';
+import { isChatPath, isSettingsPath } from '@/components/features/settings/navigation';
 
 import { SIDEBAR_COLLAPSED_STORAGE_KEY } from './sidebarStorage';
 
@@ -48,7 +49,8 @@ function AgentsHeader({
   // app, and an `/admin/*` page added later without a nav entry of its own
   // lights neither item instead of wrongly lighting `Agents`.
   const onAdmin = pathname.startsWith('/admin/');
-  const onTasks = !pathname.startsWith('/admin') && pathname !== '/approvals';
+  const onTasks =
+    !pathname.startsWith('/admin') && pathname !== '/approvals' && !isSettingsPath(pathname);
 
   return (
     <header className="grid shrink-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-2 gap-y-1 border-b border-border bg-surface px-3 py-1.5 sm:px-4 md:grid-cols-[minmax(0,auto)_minmax(0,1fr)_auto]">
@@ -152,21 +154,30 @@ function AgentsHeader({
 function SidebarToggleButton({
   sidebarCollapsed,
   onToggleSidebar,
+  settings = false,
 }: {
   sidebarCollapsed: boolean;
   onToggleSidebar: () => void;
+  settings?: boolean;
 }) {
   const t = useT();
+  const label = settings
+    ? sidebarCollapsed
+      ? t('settings.expandNavigation')
+      : t('settings.collapseNavigation')
+    : sidebarCollapsed
+      ? t('nav.expandTaskList')
+      : t('nav.collapseTaskList');
   return (
     <button
       id="agents-sidebar-toggle"
       type="button"
       onClick={onToggleSidebar}
-      aria-label={sidebarCollapsed ? t('nav.expandTaskList') : t('nav.collapseTaskList')}
+      aria-label={label}
       aria-expanded={!sidebarCollapsed}
       aria-controls="agents-sidebar"
       aria-keyshortcuts="Meta+B Control+B"
-      title={sidebarCollapsed ? t('nav.expandTaskList') : t('nav.collapseTaskList')}
+      title={label}
       className="ui-focus-ring inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted transition-colors hover:bg-surface-hover hover:text-foreground [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11"
     >
       <svg
@@ -196,12 +207,14 @@ function AgentsShell({
   sidebarToggle,
   mobileSidebarOpen,
   onSidebarNavigate,
+  settingsNavigation,
 }: {
   children: React.ReactNode;
   sidebarCollapsed: boolean;
   sidebarToggle?: React.ReactNode;
   mobileSidebarOpen: boolean;
   onSidebarNavigate: () => void;
+  settingsNavigation?: { backHref: string };
 }) {
   const { state } = useAuth();
   const { branding } = useSiteConfig();
@@ -242,7 +255,11 @@ function AgentsShell({
                 onSidebarNavigate();
             }}
           >
-            <AgentsSidebar collapsed={sidebarCollapsed} headerAction={sidebarToggle} />
+            <AgentsSidebar
+              collapsed={sidebarCollapsed}
+              headerAction={sidebarToggle}
+              settingsNavigation={settingsNavigation}
+            />
           </div>
           <main
             id="agents-workspace"
@@ -261,7 +278,34 @@ function AgentsShell({
 export default function AgentsLayout({ children }: { children: React.ReactNode }) {
   const { state } = useAuth();
   const pathname = usePathname();
+  const search = useSearchParams().toString();
+  const onSettings = isSettingsPath(pathname ?? '');
   const t = useT();
+  const [chatReturn, setChatReturn] = useState<{ userId?: string; href: string }>({ href: '/' });
+  useEffect(() => {
+    const userId = state.user?.id;
+    const key = userId ? `agents.settings.return:${encodeURIComponent(userId)}` : null;
+    let href = '/';
+    try {
+      if (pathname && isChatPath(pathname)) {
+        href = pathname + window.location.search + window.location.hash;
+        if (key) window.sessionStorage.setItem(key, href);
+      } else if (key) {
+        const stored = window.sessionStorage.getItem(key);
+        if (stored && isChatPath(stored.split(/[?#]/)[0])) href = stored;
+      }
+    } catch {
+      // Settings still works without browser storage.
+      if (pathname && isChatPath(pathname)) href = pathname;
+      else {
+        setChatReturn((previous) =>
+          previous.userId === userId ? previous : { userId, href: '/' },
+        );
+        return;
+      }
+    }
+    setChatReturn({ userId, href });
+  }, [pathname, search, state.user?.id]);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobile, setMobile] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
@@ -388,6 +432,7 @@ export default function AgentsLayout({ children }: { children: React.ReactNode }
             sidebarToggle={
               mobile || sidebarCollapsed ? (
                 <SidebarToggleButton
+                  settings={onSettings}
                   sidebarCollapsed={mobile ? !mobileSidebarOpen : sidebarCollapsed}
                   onToggleSidebar={toggleSidebar}
                 />
@@ -395,10 +440,19 @@ export default function AgentsLayout({ children }: { children: React.ReactNode }
             }
           />
           <AgentsShell
+            settingsNavigation={
+              onSettings
+                ? { backHref: chatReturn.userId === state.user?.id ? chatReturn.href : '/' }
+                : undefined
+            }
             sidebarCollapsed={mobile ? !mobileSidebarOpen : sidebarCollapsed}
             sidebarToggle={
               !mobile && !sidebarCollapsed ? (
-                <SidebarToggleButton sidebarCollapsed={false} onToggleSidebar={toggleSidebar} />
+                <SidebarToggleButton
+                  settings={onSettings}
+                  sidebarCollapsed={false}
+                  onToggleSidebar={toggleSidebar}
+                />
               ) : undefined
             }
             mobileSidebarOpen={mobileSidebarOpen}

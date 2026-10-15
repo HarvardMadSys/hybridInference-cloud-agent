@@ -210,7 +210,7 @@ export function AddWorkspace({
             </div>
             {config && (
               <Link
-                href="/integrations"
+                href="/settings/integrations"
                 onClick={close}
                 className="mt-1 block border-t border-gray-100 px-2.5 py-2 text-crimson-dark dark:border-white/10 dark:text-rose-300"
               >

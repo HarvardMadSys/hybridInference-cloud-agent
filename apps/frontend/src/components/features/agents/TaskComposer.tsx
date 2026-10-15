@@ -482,7 +482,7 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
         leaveFor(url);
         return;
       }
-      router.push('/integrations');
+      router.push('/settings/integrations');
     } catch (cause: unknown) {
       setError(cause instanceof Error ? cause.message : t('composer.loadConfigFailed'));
     }

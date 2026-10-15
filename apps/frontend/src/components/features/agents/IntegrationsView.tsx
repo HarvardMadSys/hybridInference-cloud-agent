@@ -2,21 +2,13 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useT } from '@/components/providers';
-import { useSiteConfig } from '@/components/providers/SiteConfigProvider';
-import { BookIcon } from '@/components/features/settings/icons';
-import { GettingStartedSettings } from '@/components/features/settings/GettingStartedSettings';
-import { ProfileSettings } from '@/components/features/settings/ProfileSettings';
-import { NotificationSettings } from '@/components/features/settings/NotificationSettings';
-import { MemorySettings } from '@/components/features/settings/MemorySettings';
+import { SettingsPage } from '@/components/features/settings/SettingsPage';
 import {
   disconnectAgentIntegration,
   disconnectGitHubAccount,
   getAgentIntegrations,
 } from '@/lib/api/agents';
 import type { AgentIntegrationProvider, AgentIntegrationProviderApi } from '@/lib/api/agents';
-import { EnvironmentManager } from './environment/EnvironmentManager';
-import { SkillsSection } from './skills/SkillsSection';
-import { McpConnectionsSection, type McpAuthorizationResult } from './mcp/McpConnectionsSection';
 import { SOURCE_CONTROL_RECHECK_MS } from './sourceControlRecovery';
 
 const PROVIDERS: AgentIntegrationProvider[] = ['github', 'gitlab'];
@@ -230,13 +222,10 @@ function ProviderActions({
 
 export function IntegrationsView({
   connectedProvider,
-  mcpAuthorization,
 }: {
   connectedProvider?: AgentIntegrationProvider | null;
-  mcpAuthorization?: McpAuthorizationResult;
 }) {
   const t = useT();
-  const { docsUrl } = useSiteConfig().branding;
   const [providers, setProviders] = useState<AgentIntegrationProviderApi[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -338,25 +327,10 @@ export function IntegrationsView({
   const providersByName = new Map(providers.map((provider) => [provider.provider, provider]));
 
   return (
-    <section className="mx-auto w-full max-w-5xl px-4 py-4 sm:px-5 lg:px-6">
-      <header className="border-b border-border pb-3">
-        <h1 className="text-lg font-semibold tracking-tight text-foreground">
-          {t('settings.title')}
-        </h1>
-        <p className="mt-1 max-w-xl text-sm leading-5 text-muted">{t('settings.description')}</p>
-        {docsUrl ? (
-          <a
-            href={docsUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="ui-focus-ring mt-2 inline-flex items-center gap-1.5 rounded text-sm font-medium text-accent hover:underline"
-          >
-            <BookIcon className="h-4 w-4" />
-            {t('nav.docs')}
-          </a>
-        ) : null}
-      </header>
-
+    <SettingsPage
+      title={t('settings.integrations')}
+      description={t('settings.integrationsDescription')}
+    >
       {notice ? (
         <div
           className="mt-6 rounded-xl border border-emerald-200 dark:border-emerald-500/25 bg-emerald-50 dark:bg-emerald-500/10 px-4 py-3 text-sm text-emerald-800 dark:text-emerald-300"
@@ -380,8 +354,6 @@ export function IntegrationsView({
           </button>
         </div>
       ) : null}
-
-      <ProfileSettings />
 
       <section
         aria-labelledby="source-control-heading"
@@ -447,15 +419,6 @@ export function IntegrationsView({
           })}
         </div>
       </section>
-
-      <div className="ui-card mt-4 bg-surface p-3 sm:p-4">
-        <McpConnectionsSection authorizationResult={mcpAuthorization} />
-      </div>
-      <EnvironmentManager />
-      <SkillsSection />
-      <MemorySettings />
-      <NotificationSettings />
-      <GettingStartedSettings />
-    </section>
+    </SettingsPage>
   );
 }

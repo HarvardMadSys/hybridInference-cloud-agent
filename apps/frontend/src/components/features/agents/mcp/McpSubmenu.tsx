@@ -125,7 +125,7 @@ export function McpSubmenu({
 
       <div className="border-t border-gray-100 p-1.5 dark:border-white/5">
         <Link
-          href="/integrations"
+          href="/settings/plugins"
           className="flex items-center gap-2 rounded-lg px-2 py-1.5 text-[13px] text-gray-700 hover:bg-gray-50 dark:text-gray-200 dark:hover:bg-white/5"
         >
           <svg

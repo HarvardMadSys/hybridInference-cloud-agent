@@ -428,7 +428,7 @@ export function RepositoryPicker({
                   {configure}
                 </button>
               ) : (
-                <Link href="/integrations" className={CONFIGURE_CLASS}>
+                <Link href="/settings/integrations" className={CONFIGURE_CLASS}>
                   {configure}
                 </Link>
               )}

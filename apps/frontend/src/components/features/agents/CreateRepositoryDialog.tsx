@@ -183,7 +183,7 @@ export function CreateRepositoryDialog({
             ) : null}
             <div className="mt-5 flex flex-wrap items-center gap-2">
               <Link
-                href="/integrations"
+                href="/settings/integrations"
                 target="_blank"
                 rel="noopener noreferrer"
                 className={BUTTON}

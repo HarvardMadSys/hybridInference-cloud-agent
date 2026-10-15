@@ -3,6 +3,8 @@ import Link from 'next/link';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useAuth, useT } from '@/components/providers';
+import { SettingsSidebar } from '@/components/features/settings/SettingsSidebar';
+import { useSidebarScroll } from './useSidebarScroll';
 import { AccountMenu } from './AccountMenu';
 import { archiveAgentJob, deleteAgentSessions, pinAgentJob, unpinAgentJob } from '@/lib/api/agents';
 import { APIError } from '@/lib/utils/errors';
@@ -40,16 +42,24 @@ export const SIDEBAR_WIDTH_STORAGE_KEY = 'agents.sidebar.width';
 export function AgentsSidebar({
   collapsed = false,
   headerAction,
+  settingsNavigation,
 }: {
   collapsed?: boolean;
   headerAction?: React.ReactNode;
+  settingsNavigation?: { backHref: string };
 }) {
-  const pathname = usePathname() ?? '';
-  const params = useSearchParams();
+  const route = usePathname() ?? '';
+  const routeParams = useSearchParams();
+  const active = !settingsNavigation;
+  const lastLocation = useRef({ pathname: route, search: routeParams.toString() });
+  if (active) lastLocation.current = { pathname: route, search: routeParams.toString() };
+  const { pathname, search: queryString } = lastLocation.current;
+  const params = new URLSearchParams(queryString);
   const router = useRouter();
   const t = useT();
   const { state } = useAuth();
   const userId = state.user?.id;
+  const scrollRef = useSidebarScroll(active && !collapsed, userId);
   const reads = useAgentReads();
   const [preferences, updatePreferences] = useSidebarPreferences(userId);
   const { isUnread, markRead } = useConversationReadState(userId);
@@ -77,17 +87,17 @@ export function AgentsSidebar({
     loading: projectsLoading,
     error: projectsError,
     reload: reloadProjects,
-  } = useAgentProjects();
+  } = useAgentProjects(false, active);
   const backgroundRefreshPending = useRef(false);
   const refreshInBackground = useCallback(() => {
-    if (document.visibilityState === 'hidden') {
+    if (!active || document.visibilityState === 'hidden') {
       backgroundRefreshPending.current = true;
       return;
     }
     backgroundRefreshPending.current = false;
     reload();
     reloadProjects();
-  }, [reload, reloadProjects]);
+  }, [active, reload, reloadProjects]);
 
   useEffect(() => {
     const onVisible = () => {
@@ -123,9 +133,14 @@ export function AgentsSidebar({
     userId,
     refresh,
     pinned: false,
-    enabled: !searching && preferences.group === 'flat',
+    enabled: active && !searching && preferences.group === 'flat',
   });
-  const pinnedList = useConversationList({ userId, refresh, pinned: true, enabled: !searching });
+  const pinnedList = useConversationList({
+    userId,
+    refresh,
+    pinned: true,
+    enabled: active && !searching,
+  });
   const [pinnedShown, setPinnedShown] = useState(15);
   const searchInput = useRef<HTMLInputElement>(null);
   const searchButton = useRef<HTMLButtonElement>(null);
@@ -153,7 +168,7 @@ export function AgentsSidebar({
     q: debounced,
     repo: scope === 'current' ? (activeRepo ?? undefined) : undefined,
     includeArchived,
-    enabled: searching && debounced === query.trim(),
+    enabled: active && searching && debounced === query.trim(),
     userId,
     refresh,
   });
@@ -214,9 +229,23 @@ export function AgentsSidebar({
     let cancelled = false;
     const detailRefresh = refreshRef.current;
     const generation = sessionGeneration.current;
+    if (!active) return;
     setSelected(null);
     const id = /^\/([^/]+)$/.exec(pathname)?.[1];
-    if (!id || ['archived', 'integrations', 'approvals', 'admin', 'login'].includes(id)) return;
+    if (
+      !id ||
+      [
+        'archived',
+        'integrations',
+        'settings',
+        'connected',
+        'approvals',
+        'admin',
+        'login',
+        'setup',
+      ].includes(id)
+    )
+      return;
     Promise.all([reads.getAgentJob(id), reads.getAgentJobThread(id)])
       .then(([job, thread]) => {
         if (cancelled || generation !== sessionGeneration.current) return;
@@ -241,18 +270,19 @@ export function AgentsSidebar({
     return () => {
       cancelled = true;
     };
-  }, [pathname, userId, updatePreferences, knownRows, sessionRefresh, reads]);
+  }, [active, pathname, userId, updatePreferences, knownRows, sessionRefresh, reads]);
   const mountPath = useRef(pathname);
   useEffect(() => {
-    if (mountPath.current === pathname) return;
+    if (!active || mountPath.current === pathname) return;
     mountPath.current = pathname;
     reload();
     reloadProjects();
-  }, [pathname, reload, reloadProjects]);
+  }, [active, pathname, reload, reloadProjects]);
   // The owner's change stream says when a conversation or turn changed; the
   // clock below is the backstop for when it is not flowing.
   const activityRefresh = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
+    if (!active) return;
     const unsubscribe = onAgentRecordsChanged((change) => {
       // Tool approvals, usage, queues and publication hints belong to detail
       // panes. Only changed records or a stream gap can affect these lists.
@@ -275,14 +305,14 @@ export function AgentsSidebar({
       if (activityRefresh.current) clearTimeout(activityRefresh.current);
       activityRefresh.current = null;
     };
-  }, [pushedRecords, refreshInBackground]);
+  }, [active, pushedRecords, refreshInBackground]);
   const pushLive = useAgentPushLive();
   const hasActiveProjects = projects.some((project) => project.active_count > 0);
   useEffect(() => {
-    if (!hasActiveProjects) return;
+    if (!active || !hasActiveProjects) return;
     const timer = setInterval(refreshInBackground, pushLive ? PUSH_FALLBACK_POLL_MS : 10000);
     return () => clearInterval(timer);
-  }, [hasActiveProjects, pushLive, refreshInBackground]);
+  }, [active, hasActiveProjects, pushLive, refreshInBackground]);
   const closeSearch = useCallback(() => {
     setSearchOpen(false);
     setQuery('');
@@ -292,6 +322,7 @@ export function AgentsSidebar({
     searchButton.current?.focus();
   }, []);
   useEffect(() => {
+    if (!active) return;
     const keydown = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k' && !collapsed) {
         event.preventDefault();
@@ -310,7 +341,7 @@ export function AgentsSidebar({
     };
     document.addEventListener('keydown', keydown);
     return () => document.removeEventListener('keydown', keydown);
-  }, [collapsed]);
+  }, [active, collapsed]);
   const registerRows = useCallback(
     (sourceRows: SidebarConversation[], loadedRefresh: number | null) => {
       const rows = reconcileSidebarPins(sourceRows, pinUpdates, loadedRefresh);
@@ -638,12 +669,21 @@ export function AgentsSidebar({
   if (collapsed) return null;
   return (
     <>
+      {settingsNavigation && (
+        <SettingsSidebar
+          collapsed={collapsed}
+          headerAction={headerAction}
+          pane={pane}
+          backHref={settingsNavigation.backHref}
+        />
+      )}
       <aside
-        id="agents-sidebar"
+        id={active ? 'agents-sidebar' : undefined}
+        hidden={!active}
         style={{ width: pane.width }}
-        className="ui-enter flex min-h-0 shrink-0 flex-col border-r border-border/70 bg-surface-muted"
+        className={`${active ? 'ui-enter flex' : 'hidden'} min-h-0 shrink-0 flex-col border-r border-border/70 bg-surface-muted`}
       >
-        <div className="min-h-0 flex-1 overflow-y-auto px-2 py-2">
+        <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto px-2 py-2">
           <div className="flex items-center gap-1.5">
             <Link
               href="/"
@@ -670,7 +710,7 @@ export function AgentsSidebar({
               </svg>
               {t('sidebar.newTask')}
             </Link>
-            {headerAction}
+            {active && headerAction}
           </div>
 
           {!searching && (pinnedRows.length > 0 || pinnedList.error) && (
@@ -682,7 +722,7 @@ export function AgentsSidebar({
                 {t('sidebar.pinned')}
               </h2>
               <div className="space-y-1">
-                {visiblePinned.map((row) => (
+                {(active ? visiblePinned : []).map((row) => (
                   <TaskRow
                     key={row.key}
                     row={row}
@@ -837,7 +877,8 @@ export function AgentsSidebar({
                 else if (event.key === 'ArrowUp') searchInput.current?.focus();
               }}
             >
-              {debounced === query.trim() &&
+              {active &&
+                debounced === query.trim() &&
                 visible(reconcileSidebarPins(search.rows, pinUpdates, search.loadedRefresh)).map(
                   (row) => (
                     <TaskRow key={row.key} row={row} flat search query={debounced} {...actions} />
@@ -855,7 +896,7 @@ export function AgentsSidebar({
             </div>
           ) : preferences.group === 'flat' ? (
             <div className="space-y-1">
-              {flatRows.map((row) => (
+              {(active ? flatRows : []).map((row) => (
                 <TaskRow
                   key={row.key}
                   row={row}
@@ -892,6 +933,7 @@ export function AgentsSidebar({
                     }))
                   }
                   initial={[]}
+                  enabled={active}
                   selected={current?.job.repo === folder.repo ? current : undefined}
                   userId={userId}
                   refresh={refresh}
@@ -925,7 +967,7 @@ export function AgentsSidebar({
           </span>
         </div>
 
-        <GettingStarted />
+        {active && <GettingStarted />}
 
         <div className="shrink-0 space-y-0.5 border-t border-border/70 px-2 py-2">
           <Link
@@ -955,12 +997,12 @@ export function AgentsSidebar({
           </Link>
 
           <div className="mt-1 border-t border-border/70 pt-1.5">
-            <AccountMenu variant="sidebar" />
+            {active && <AccountMenu variant="sidebar" />}
           </div>
         </div>
       </aside>
-      <PaneResizer pane={pane} label={t('sidebar.resize')} controls="agents-sidebar" />
-      {pendingDelete ? (
+      {active && <PaneResizer pane={pane} label={t('sidebar.resize')} controls="agents-sidebar" />}
+      {active && pendingDelete ? (
         <ArchiveDeleteDialog
           count={1}
           skipped={0}
