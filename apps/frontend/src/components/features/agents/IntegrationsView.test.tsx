@@ -244,7 +244,7 @@ describe('IntegrationsView', () => {
     expect(getMemories).not.toHaveBeenCalled();
   });
 
-  it("links the deployment's documentation from the heading, and only when it has some", async () => {
+  it('keeps documentation out of the page heading even when configured', async () => {
     mockedGetIntegrations.mockResolvedValue(integrations);
     const docsUrl = 'https://docs.example.com/agents/';
     const { unmount } = render(
@@ -254,10 +254,7 @@ describe('IntegrationsView', () => {
         <IntegrationsView />
       </SiteConfigProvider>,
     );
-    const link = screen.getByRole('link', { name: 'Documentation' });
-    expect(link).toHaveAttribute('href', docsUrl);
-    expect(link).toHaveAttribute('target', '_blank');
-    expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+    expect(screen.queryByRole('link', { name: 'Documentation' })).not.toBeInTheDocument();
     await screen.findByText('Connected as HarvardMadSys · 2 repositories');
     unmount();
 
