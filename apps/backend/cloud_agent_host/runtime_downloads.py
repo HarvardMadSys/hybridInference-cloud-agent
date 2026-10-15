@@ -404,8 +404,11 @@ class RuntimeDownloads:
             self._docker_run(["rm", "-f", fetch])
 
         self._set(target, DOWNLOADING, _PROGRESS_SCRIPTS)
-        scripts = self._container(fetched_image, "none", _SCRIPTS, prefix, definition.binary)
+        scripts: str | None = None
         try:
+            # Inside the try: a container Docker refuses to create, as on a
+            # full disk, must not strand the fetched tree below.
+            scripts = self._container(fetched_image, "none", _SCRIPTS, prefix, definition.binary)
             ran = self._attach(scripts, SCRIPTS_TIMEOUT_S)
             if ran.returncode != 0:
                 raise _StepError(f"{name} did not install: {_tail(ran.stdout + ran.stderr)}")
@@ -420,7 +423,8 @@ class RuntimeDownloads:
                 )
             self._keep_tree(scripts, prefix, candidate, target)
         finally:
-            self._docker_run(["rm", "-f", scripts])
+            if scripts is not None:
+                self._docker_run(["rm", "-f", scripts])
             # Unreferenced once the tree is copied out; removing it frees the
             # fetch's layer, which held every file a second time.
             self._docker_run(["rmi", fetched_image])

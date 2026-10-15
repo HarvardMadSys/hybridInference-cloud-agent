@@ -49,6 +49,10 @@ class FakeDocker:
         self.scripts_output = "2.1.300 (Claude Code)\n"
         self.scripts_stderr = ""
         self.scripts_exit = 0
+        #: Refuse to create a container from a committed image, as a full disk does.
+        self.refuse_committed_create = False
+        #: Every image ``commit`` made, tagged or not, in order.
+        self.committed: list[str] = []
         self.containers: dict[str, list[str]] = {}
         self.leftover_containers: list[str] = []
 
@@ -66,6 +70,8 @@ class FakeDocker:
                 refs = [ref for ref in self.images if ref.startswith(args[2] + ":")]
             return self._done("\n".join(refs))
         if verb == "create":
+            if self.refuse_committed_create and any(arg in self.committed for arg in args):
+                return self._done("", 1, "Error response from daemon: no space left on device")
             container = f"c{len(self.containers)}"
             self.containers[container] = args
             return self._done(container)
@@ -77,6 +83,7 @@ class FakeDocker:
         if verb == "commit":
             ref = args[-1] if ":" in args[-1] else None
             image = "sha256:" + f"{len(self.calls):064x}"
+            self.committed.append(image)
             if ref:
                 self.images[ref] = image
             return self._done(image)
@@ -229,6 +236,26 @@ def test_a_failed_fetch_is_reported_and_not_retried_until_asked_again(docker):
     # The admin pressing Try again sends a new nonce.
     downloads.apply([_target(nonce="f" * 32)])
     assert downloads._next(BASE) is not None
+
+
+def test_a_scripts_step_docker_refuses_still_removes_the_fetched_tree(docker):
+    """The fetch is committed as an untagged image holding the whole tree again.
+
+    Nothing but this download ever removes it, so a scripts container Docker
+    will not create, as on a full disk, must not strand it, nor one more for
+    every Try again.
+    """
+    docker.refuse_committed_create = True
+    downloads = _downloads()
+    downloads.apply([_target()])
+
+    _run_once(downloads)
+
+    report = _reported(downloads)
+    assert report["state"] == "failed"
+    assert report["error"].startswith("could not create an install container:")
+    (fetched,) = docker.committed
+    assert ["rmi", fetched] in docker.calls
 
 
 def test_a_binary_reporting_another_version_is_not_kept(docker):
