@@ -77,6 +77,7 @@ def app(monkeypatch):
     application = FastAPI()
     application.include_router(teams.router)
     repository = AsyncMock()
+    repository.get_team.return_value = TEAM
     gateway = AsyncMock()
     admitted = {"alice", "bob", "carol"}
     gateway.agent_access.side_effect = lambda user_id: {
@@ -298,14 +299,15 @@ async def test_roster_shows_names_and_survives_an_email_lookup_failure(app):
     assert bob["avatar_data_url"] == generate_user_avatar("bob").data_url
 
 
-async def test_audit_pages_with_a_cursor(app):
+@pytest.mark.parametrize("action", ["team_renamed", "member_role_changed"])
+async def test_audit_pages_with_a_cursor(app, action):
     from cloud_agent.domain.teams import AuditRecord
 
     events = [
         AuditRecord(
             id=n,
             actor_user_id="alice",
-            action="team_renamed",
+            action=action,
             target_user_id=None,
             target_id=None,
             created_at=NOW,
@@ -314,7 +316,9 @@ async def test_audit_pages_with_a_cursor(app):
     ]
     app.state.repository.list_audit_events.return_value = events
     response = await call(app, "GET", "/v1/agent/teams/ateam_1/audit-events?limit=2")
+    assert response.status_code == 200
     assert [e["id"] for e in response.json()["events"]] == [9, 8]
+    assert all(e["action"] == action for e in response.json()["events"])
     assert response.json()["next_before"] == 8
     app.state.repository.list_audit_events.assert_awaited_once_with(
         "alice", "ateam_1", before=None, limit=3
@@ -328,3 +332,42 @@ async def test_delete_takes_the_read_revision(app):
         "alice", "ateam_1", expected_revision=3
     )
     assert (await call(app, "DELETE", "/v1/agent/teams/ateam_1")).status_code == 422
+
+
+async def test_role_change_uses_session_actor_and_requires_revision(app):
+    app.state.repository.set_member_role.return_value = TEAM
+    path = "/v1/agent/teams/ateam_1/members/bob/role"
+    response = await call(app, "PATCH", path, json={"role": "admin", "expected_revision": 3})
+    assert response.status_code == 200
+    assert response.headers["Cache-Control"] == "no-store"
+    app.state.repository.set_member_role.assert_awaited_once_with(
+        "alice", "ateam_1", "bob", role="admin", expected_revision=3
+    )
+    for body in (
+        {"role": "owner", "expected_revision": 3},
+        {"role": "admin"},
+        {"role": "admin", "expected_revision": True},
+    ):
+        assert (await call(app, "PATCH", path, json=body)).status_code == 422
+    app.state.repository.set_member_role.side_effect = TeamForbidden("Owner only")
+    denied = await call(app, "PATCH", path, json={"role": "member", "expected_revision": 3})
+    assert denied.status_code == 403
+    assert denied.json()["error"]["type"] == "forbidden"
+
+
+async def test_admin_cannot_use_transfer_to_probe_a_members_gateway_access(app):
+    app.state.repository.get_team.return_value = TeamRecord(**{**TEAM.__dict__, "role": "admin"})
+    response = await call(
+        app,
+        "POST",
+        "/v1/agent/teams/ateam_1/transfer-ownership",
+        user="bob",
+        json={"user_id": "carol", "expected_revision": 3},
+    )
+    assert response.status_code == 403
+    app.state.repository.list_members.assert_not_called()
+    app.state.repository.transfer_ownership.assert_not_called()
+    assert all(
+        call.kwargs.get("user_id") != "carol"
+        for call in app.state.gateway.agent_access.call_args_list
+    )

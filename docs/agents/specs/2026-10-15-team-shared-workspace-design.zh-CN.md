@@ -66,22 +66,28 @@ flowchart TD
 
 ## 3 角色与权限
 
-第一版只有 Owner 和 Member。每个 Team 恰好一名 Owner，其余活跃成员均为 Member。平台管理员沿用独立的管理面和审计，Team Owner 不获得平台管理权限。
+第一版支持 Owner、Admin（管理员）和 Member。每个 Team 恰好一名 Owner；Owner 可以任免管理员，管理员负责日常成员管理。平台管理员沿用独立的管理面和审计，团队角色不获得平台管理权限。
 
-| 操作 | Owner | Member |
-| --- | --- | --- |
-| 查看团队资料和成员名单 | 可以 | 可以 |
-| 查看有仓库权限的共享文件和团队 Chat | 可以 | 可以 |
-| 创建工作区，在其中创建自己的 Chat 和终端 | 可以 | 可以 |
-| 向自己的 Chat 发消息、取消自己的执行 | 可以 | 可以 |
-| 向别人的 Chat 发消息或续跑其 goal | 不可以 | 不可以 |
-| 批准个人 MCP 调用，管理个人连接 | 仅本人 | 仅本人 |
-| 修改团队环境配置和共享变量 | 可以 | 不可以 |
-| 执行已保存的团队快捷操作 | 可以，以本人身份执行 | 可以，以本人身份执行 |
-| 邀请、批准加入、移除成员 | 可以 | 不可以 |
-| 停止其他成员的执行、停止整个工作区 | 可以，记录管理操作 | 不可以 |
-| 永久删除团队资源，归档或删除 Team | 可以 | 不可以 |
-| 退出 Team | 先转让所有权或删除 Team | 可以 |
+| 操作 | Owner | Admin | Member |
+| --- | --- | --- | --- |
+| 查看团队资料和成员名单 | 可以 | 可以 | 可以 |
+| 修改团队名称 | 可以 | 可以 | 不可以 |
+| 创建和撤销邀请、批准或拒绝加入 | 可以 | 可以 | 不可以 |
+| 移除普通成员 | 可以 | 可以 | 不可以 |
+| 任免或移除管理员、转让所有权 | 可以 | 不可以 | 不可以 |
+| 查看有仓库权限的共享文件和团队 Chat | 可以 | 可以 | 可以 |
+| 创建工作区，在其中创建自己的 Chat 和终端 | 可以 | 可以 | 可以 |
+| 向自己的 Chat 发消息、取消自己的执行 | 可以 | 可以 | 可以 |
+| 向别人的 Chat 发消息或续跑其 goal | 不可以 | 不可以 | 不可以 |
+| 批准个人 MCP 调用，管理个人连接 | 仅本人 | 仅本人 | 仅本人 |
+| 修改团队环境配置和共享变量 | 可以 | 不可以 | 不可以 |
+| 执行已保存的团队快捷操作 | 可以，以本人身份执行 | 可以，以本人身份执行 | 可以，以本人身份执行 |
+| 停止其他成员的执行、停止整个工作区 | 可以，记录管理操作 | 不可以 | 不可以 |
+| 永久删除团队资源，归档或删除 Team | 可以 | 不可以 | 不可以 |
+| 查看管理审计 | 可以 | 不可以 | 不可以 |
+| 退出 Team | 先转让所有权或删除 Team | 可以 | 可以 |
+
+成员记录保存 `admin/member`，Owner 始终从 `owner_user_id` 推导。角色调整带团队 revision 并写入审计；所有管理写入在团队行锁内重新检查当前角色。管理员降级、退出或被移除时，其创建的未完成邀请和申请一并关闭。重新加入默认为 Member，所有权转让后的原 Owner 也成为 Member。
 
 表中的内容访问、运行和发布操作都还须满足 Gateway `agent.use`、仓库 entitlement 和资源状态要求。Owner 可以管理资源生命周期，但不能借管理角色读取自己无权访问的仓库内容，也不能代替其他人批准个人 MCP 操作。
 
@@ -93,9 +99,9 @@ flowchart TD
 
 ### 邀请方式
 
-第一版使用“一次性邀请链接加 Owner 批准”，不依赖全站用户目录或邮件发送服务。现有 Gateway 只提供用于显示的账户 email，没有可用的已验证邮箱邀请契约，不能把可编辑名称或未经验证的邮箱当作加入凭据。
+第一版使用“一次性邀请链接加 Owner 或管理员批准”，不依赖全站用户目录或邮件发送服务。现有 Gateway 只提供用于显示的账户 email，没有可用的已验证邮箱邀请契约，不能把可编辑名称或未经验证的邮箱当作加入凭据。
 
-Owner 创建邀请后，服务端用 `secrets.token_urlsafe(32)` 生成 256 位随机 token（43 个字符），数据库只保存其 SHA-256。邀请 24 小时有效，只允许一个账户领取。原始 token 仅在创建响应中返回一次；需要再次分享时生成新邀请。邀请页面只显示团队名称、邀请人及申请状态，不返回团队资源。
+Owner 或管理员创建邀请后，服务端用 `secrets.token_urlsafe(32)` 生成 256 位随机 token（43 个字符），数据库只保存其 SHA-256。邀请 24 小时有效，只允许一个账户领取。原始 token 仅在创建响应中返回一次；需要再次分享时生成新邀请。邀请页面只显示团队名称、邀请人及申请状态，不返回团队资源。
 
 创建响应丢失时，同一幂等键只能恢复邀请元数据，不能从哈希恢复链接（响应里 `token` 为 `null`）。客户端提示撤销这条邀请后重新生成，避免悄悄创建多个有效链接。Member 的 membership 仅在批准时建立；pending 申请不属于活跃成员。
 
@@ -105,8 +111,8 @@ Owner 创建邀请后，服务端用 `secrets.token_urlsafe(32)` 生成 256 位�
 
 1. B 登录，服务端验证身份和 `agent.use`，B 在加入页明确点击“申请加入”后才领取邀请。持有链接本身不会产生团队访问权。
 2. 事务按“团队行 → 邀请行”的顺序加锁，检查有效期、未撤销状态、团队仍为 active，写入绑定 B 的 join request。
-3. Owner 查看申请人的显示资料（个人资料中的名字，否则是 Gateway 账户 email）和稳定账户标识，批准或拒绝。显示名只用于展示，权限永远绑定 `user_id`。
-4. 批准前向 Gateway 确认申请人当前的 `agent.use`；批准事务再检查 Owner 身份、团队状态、申请有效性和成员容量，然后激活 membership、消费邀请并写入审计。
+3. Owner 或管理员查看申请人的显示资料（个人资料中的名字，否则是 Gateway 账户 email）和稳定账户标识，批准或拒绝。显示名只用于展示，权限永远绑定 `user_id`。
+4. 批准前向 Gateway 确认申请人当前的 `agent.use`；批准事务再检查操作者的 Owner 或管理员身份、团队状态、申请有效性和成员容量，然后激活 membership、消费邀请并写入审计。
 
 同一申请人的重复领取返回同一申请；另一账户不能抢占已领取的邀请。同一用户在一个 Team 只能有一个待处理申请（部分唯一索引保证）；随链接过期的旧申请在下一次领取时被标记为 `expired`，不再占用这个名额。重复批准返回已完成结果，不增加第二条 membership。撤销、拒绝或过期都不能再次使用原 token。
 
@@ -121,7 +127,7 @@ Owner 创建邀请后，服务端用 `secrets.token_urlsafe(32)` 生成 256 位�
 | 一个账户同时拥有的 Team | 20 |
 | 一个 Team 的活跃成员（含 Owner） | 50，在批准时检查 |
 | 一个 Team 同时未使用且未过期的邀请 | 20 |
-| 单次列表返回的邀请或申请 | 50 |
+| 单次列表返回的历史邀请或申请 | 50；邀请额外保留全部仍可操作的记录，避免有效邀请被历史记录挤出 |
 
 成员上限与工作区容量是两回事：一个 sandbox group 的常驻名额默认是 8（`resident_slot_capacity`，范围 2–128），决定一个工作区里能同时运行多少个 Chat 进程。第二步需要在工作区页面说明名额已满时的行为。
 
@@ -129,7 +135,7 @@ Owner 创建邀请后，服务端用 `secrets.token_urlsafe(32)` 生成 256 位�
 
 ### 退出和移除
 
-Member 主动退出和 Owner 移除 Member 使用同一套撤权流程。控制面事务先把 membership 标记为 `left` 或 `removed`，递增 `access_generation`，同时写入审计。事务提交后，新的读取和管理请求立即被拒绝。第一步到此为止：团队还没有任何运行资源，不需要后台清理。
+Admin 或 Member 主动退出、Owner 移除非 Owner 成员、管理员移除普通成员使用同一套撤权流程。控制面事务先把 membership 标记为 `left` 或 `removed`，递增 `access_generation`，同时写入审计。事务提交后，新的读取和管理请求立即被拒绝。第一步到此为止：团队还没有任何运行资源，不需要后台清理。
 
 第二步引入团队运行资源后，同一事务还要写入持久化清理任务，后台流程处理该成员在本 Team 中的所有工作区：
 
@@ -209,14 +215,14 @@ Owner 不能直接退出或被普通成员移除。转让、退出、移除及 T
 | 表 | 关键字段与约束 |
 | --- | --- |
 | `agent_teams` | `id, name, owner_user_id, state (active/deleted), revision, created_by_user_id, create_request_key, created_at, updated_at, deleted_at`；名称 1–80 字符且无首尾空白；`(created_by_user_id, create_request_key)` 唯一 |
-| `agent_team_members` | 主键 `(team_id, user_id)`；`state=active/left/removed, access_generation, joined_at, departed_at`；离队保留记录；`departed_at` 为空当且仅当 active |
+| `agent_team_members` | 主键 `(team_id, user_id)`；`role=admin/member, state=active/left/removed, access_generation, joined_at, departed_at`；离队保留记录；`departed_at` 为空当且仅当 active |
 | `agent_team_invitations` | `id, team_id, created_by_user_id, request_key, token_hash, state (open/claimed/revoked), expires_at, revoked_at`；`token_hash` 唯一且为 32 字节；`(team_id, created_by_user_id, request_key)` 唯一 |
 | `agent_team_join_requests` | `id, team_id, invitation_id, user_id, state (pending/approved/declined/cancelled/expired), decided_by_user_id, decided_at`；`invitation_id` 唯一；`(team_id, invitation_id)` 复合外键指向同一 Team 的邀请；`(team_id, user_id) WHERE state='pending'` 部分唯一 |
 | `agent_team_audit_events` | `id, team_id, actor_user_id, action, target_user_id, target_id, details, created_at`；`action` 为固定词表；不存邀请 token、token 哈希、Secret 或工具原始输出 |
 
 邀请的“过期”不单独存储，由 `expires_at` 在读取时推导；申请的 `expired` 在下一次领取时补记。
 
-**唯一 Owner 由数据库保证。** `agent_teams` 有一个生成列 `owner_membership_state`：团队未删除时为 `'active'`，已删除时为 NULL。延迟复合外键 `(id, owner_user_id, owner_membership_state) → agent_team_members (team_id, user_id, state)` 在提交时检查。于是创建团队、转让、成员退出无论以什么顺序写入，只要提交时 Owner 不是该团队的活跃成员，整个事务就失败；团队删除后 NULL 使该行免于检查，Owner 才可以离开。Member 的角色由其是否等于 `owner_user_id` 推导，不另存 `role`。
+**唯一 Owner 由数据库保证。** `agent_teams` 有一个生成列 `owner_membership_state`：团队未删除时为 `'active'`，已删除时为 NULL。延迟复合外键 `(id, owner_user_id, owner_membership_state) → agent_team_members (team_id, user_id, state)` 在提交时检查。于是创建团队、转让、成员退出无论以什么顺序写入，只要提交时 Owner 不是该团队的活跃成员，整个事务就失败；团队删除后 NULL 使该行免于检查，Owner 才可以离开。成员 `role` 只保存 `admin/member`，默认 `member`；是否为 Owner 仍由 `owner_user_id` 唯一决定。
 
 **锁顺序。** 每个写操作先锁 Team 行，再锁邀请、申请和 membership。领取只知道 token，所以先无锁读出邀请所属 Team，锁住 Team，再锁邀请并复查。只读列表复查成员资格但不加锁。
 
@@ -252,19 +258,20 @@ Team ID 是不透明稳定标识（`ateam_` 前缀），名称可以修改且不
 | --- | --- |
 | `POST /teams` | 创建 Team 与 Owner membership；同一 `request_key` 返回同一个 Team |
 | `GET /teams` | 只列出本人活跃加入的 Team |
-| `GET/PATCH /teams/{team_id}` | 读取资料；Owner 带 revision 更新名称 |
+| `GET/PATCH /teams/{team_id}` | 读取资料；Owner 或管理员带 revision 更新名称 |
 | `DELETE /teams/{team_id}?expected_revision=` | Owner 删除 Team，撤销未完成的邀请和申请 |
 | `GET /teams/{team_id}/members` | 活跃成员名册，Owner 在前 |
-| `POST /teams/{team_id}/leave` | Member 退出 |
-| `DELETE /teams/{team_id}/members/{user_id}` | Owner 移除成员 |
+| `POST /teams/{team_id}/leave` | Admin 或 Member 退出 |
+| `DELETE /teams/{team_id}/members/{user_id}` | Owner 移除非 Owner 成员，管理员只能移除普通成员 |
+| `PATCH /teams/{team_id}/members/{user_id}/role` | Owner 带 revision 任免管理员 |
 | `POST /teams/{team_id}/transfer-ownership` | 转给有准入资格的活跃 Member，带 revision |
-| `POST /teams/{team_id}/invitations` | Owner 创建单次邀请；仅这一次响应带 token |
-| `GET /teams/{team_id}/invitations` | Owner 查看最近的邀请及其状态 |
+| `POST /teams/{team_id}/invitations` | Owner 或管理员创建单次邀请；仅这一次响应带 token |
+| `GET /teams/{team_id}/invitations` | Owner 或管理员查看全部可操作邀请及最近历史 |
 | `DELETE /teams/{team_id}/invitations/{id}` | 撤销邀请及其尚未批准的申请 |
 | `POST /team-invitations/claim` | 登录用户以 token 领取，生成申请 |
 | `GET /team-join-requests` | 本人查询自己近 30 天的申请状态 |
-| `GET /teams/{team_id}/join-requests` | Owner 查看待处理且未过期的申请 |
-| `POST /teams/{team_id}/join-requests/{id}/decision` | Owner 批准或拒绝；批准前确认申请人当前准入 |
+| `GET /teams/{team_id}/join-requests` | Owner 或管理员查看待处理且未过期的申请 |
+| `POST /teams/{team_id}/join-requests/{id}/decision` | Owner 或管理员批准或拒绝；批准前确认申请人当前准入 |
 | `GET /teams/{team_id}/audit-events` | Owner 分页查看管理审计 |
 
 随第二步加入的接口：
@@ -313,7 +320,7 @@ Team ID 是不透明稳定标识（`ateam_` 前缀），名称可以修改且不
 
 分步交付：
 
-1. **第一步（已实现）**：Team 创建、改名、删除；一次性邀请链接、领取、批准/拒绝、撤销；退出、移除、转让；Owner 审计；设置里的团队页和加入页。只有成员关系，不触碰 thread、sandbox、环境或 host。迁移只新增表，回滚即删表，不影响任何已有数据。
+1. **第一步（已实现）**：Team 创建、改名、删除；一次性邀请链接、领取、批准/拒绝、撤销；管理员任免、退出、移除、转让；Owner 审计；设置里的团队页和加入页。只有成员关系，不触碰 thread、sandbox、环境或 host。迁移只新增表，回滚即删表，不影响任何已有数据。
 2. **第二步**：配置和共享工作区接入上述权限链，交付完整的双用户协作流程。包括第 8.2 节的 scope 约束、在已有 group 中新建空白 Chat 的 host 能力、撤权清理任务与 worker、host 撤权机制、归档/恢复、团队变更推送、安全模型与 accepted risk 的更新，以及 Owner 失去准入时的管理面恢复操作。第二步上线必须连同凭证隔离、清理、旧 API 防绕过和数据库约束一起验收。
 3. **第三步**：presence、活动提示和发布体验。
 

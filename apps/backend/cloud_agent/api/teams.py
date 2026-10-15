@@ -48,6 +48,7 @@ from cloud_agent.schemas import (
     OwnJoinRequestListResponse,
     OwnJoinRequestResponse,
     RenameTeamRequest,
+    SetTeamMemberRoleRequest,
     TeamAuditEventListResponse,
     TeamAuditEventResponse,
     TeamListResponse,
@@ -177,7 +178,7 @@ async def rename_team(
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _TeamStorage | None = Depends(get_storage),
 ) -> TeamResponse:
-    """Rename the team at the revision the owner read."""
+    """Rename as an owner or admin at the revision the caller read."""
     team = await _teams(store).rename_team(
         user["user_id"], team_id, name=body.name, expected_revision=body.expected_revision
     )
@@ -231,9 +232,28 @@ async def remove_member(
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _TeamStorage | None = Depends(get_storage),
 ) -> Response:
-    """Remove another member; owner only."""
+    """Remove a non-owner; admins may only remove ordinary members."""
     await _teams(store).remove_member(user["user_id"], team_id, member_user_id)
     return Response(status_code=204)
+
+
+@router.patch("/teams/{team_id}/members/{member_user_id}/role", response_model=TeamResponse)
+async def set_member_role(
+    team_id: str,
+    member_user_id: str,
+    body: SetTeamMemberRoleRequest,
+    user: dict[str, Any] = Depends(require_agent_owner),
+    store: _TeamStorage | None = Depends(get_storage),
+) -> TeamResponse:
+    """Grant or revoke admin; only the team owner may change roles."""
+    team = await _teams(store).set_member_role(
+        user["user_id"],
+        team_id,
+        member_user_id,
+        role=body.role,
+        expected_revision=body.expected_revision,
+    )
+    return _team(team)
 
 
 @router.post("/teams/{team_id}/transfer-ownership", response_model=TeamResponse)
@@ -280,7 +300,7 @@ async def list_invitations(
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _TeamStorage | None = Depends(get_storage),
 ) -> InvitationListResponse:
-    """List the team's newest invitations; owner only."""
+    """List actionable invitations and recent history; owner or admin."""
     invitations = await _teams(store).list_invitations(user["user_id"], team_id)
     return InvitationListResponse(
         invitations=[flows.invitation_response(invitation) for invitation in invitations]
@@ -306,7 +326,7 @@ async def claim_invitation(
     store: _TeamStorage | None = Depends(get_storage),
     gateway: GatewayClient = Depends(get_gateway_client),
 ) -> OwnJoinRequestResponse:
-    """Ask to join with a link; the owner still has to approve.
+    """Ask to join with a link; the owner or an admin still has to approve.
 
     Holding the link grants nothing by itself. Claiming makes it this
     account's: another account presenting it afterwards is refused.
@@ -339,7 +359,7 @@ async def list_join_requests(
     store: _TeamStorage | None = Depends(get_storage),
     gateway: GatewayClient = Depends(get_gateway_client),
 ) -> JoinRequestListResponse:
-    """Requests waiting for the owner's decision; owner only."""
+    """List pending requests for an owner or admin to decide."""
     requests = await _teams(store).list_join_requests(user["user_id"], team_id)
     return JoinRequestListResponse(requests=await flows.applicant_responses(gateway, requests))
 

@@ -26,7 +26,7 @@ import hashlib
 import secrets
 from typing import TYPE_CHECKING
 
-from cloud_agent.domain.teams import INVITATION_TTL, TeamConflict, TeamNotFound
+from cloud_agent.domain.teams import INVITATION_TTL, TeamConflict, TeamForbidden, TeamNotFound
 from cloud_agent.gateway import GatewayError
 from cloud_agent.owner_access import owner_may_use_agent
 from cloud_agent.schemas import (
@@ -225,6 +225,9 @@ async def transfer_ownership(
     already in the team; an owner cannot use this to learn another account's
     standing. The store checks owner, revision and membership again as it commits.
     """
+    team = await teams.get_team(actor, team_id)
+    if team.role != "owner":
+        raise TeamForbidden("Only the team owner can do this.")
     if user_id != actor:
         members = await teams.list_members(actor, team_id)
         if not any(member.user_id == user_id for member in members):

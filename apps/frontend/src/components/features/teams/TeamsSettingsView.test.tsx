@@ -13,6 +13,8 @@ import {
   listMembers,
   listOwnJoinRequests,
   listTeams,
+  renameTeam,
+  setTeamMemberRole,
   type Team,
   type TeamMember,
 } from '@/lib/api/teams';
@@ -36,6 +38,8 @@ vi.mock('@/lib/api/teams', async (original) => ({
   createInvitation: vi.fn(),
   decideJoinRequest: vi.fn(),
   leaveTeam: vi.fn(),
+  renameTeam: vi.fn(),
+  setTeamMemberRole: vi.fn(),
 }));
 
 const owned: Team = {
@@ -168,5 +172,70 @@ describe('TeamsSettingsView', () => {
     const [first, second] = vi.mocked(createTeam).mock.calls;
     expect(first[0]).toBe('Platform');
     expect(second[1]).toBe(first[1]);
+  });
+
+  it('gives admins daily management but no ownership or role controls', async () => {
+    vi.mocked(listTeams).mockResolvedValue([{ ...owned, role: 'admin', owner_user_id: 'bob' }]);
+    vi.mocked(listMembers).mockResolvedValue([
+      { ...alice, user_id: 'bob', display_name: 'Bob', role: 'owner', you: false },
+      { ...alice, role: 'admin' },
+      { ...alice, user_id: 'carol', display_name: 'Carol', role: 'admin', you: false },
+      { ...alice, user_id: 'dave', display_name: 'Dave', role: 'member', you: false },
+    ]);
+    view();
+    expect(await screen.findByRole('button', { name: 'Create invitation link' })).toBeVisible();
+    expect(screen.getByLabelText('Team name')).toBeVisible();
+    expect(screen.getByRole('region', { name: 'Join requests' })).toBeVisible();
+    expect(screen.getAllByRole('button', { name: 'Remove' })).toHaveLength(1);
+    expect(screen.queryByRole('button', { name: 'Make owner' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Make admin' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Remove admin role' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Delete team' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Leave team' })).toBeVisible();
+  });
+
+  it('lets the owner explicitly confirm an admin promotion and refreshes roles', async () => {
+    const bob = {
+      ...alice,
+      user_id: 'bob',
+      display_name: 'Bob',
+      role: 'member' as const,
+      you: false,
+    };
+    vi.mocked(listMembers).mockResolvedValue([alice, bob]);
+    vi.mocked(setTeamMemberRole).mockImplementation(async () => {
+      vi.mocked(listMembers).mockResolvedValue([alice, { ...bob, role: 'admin' }]);
+      return { ...owned, revision: 2 };
+    });
+    view();
+    fireEvent.click(await screen.findByRole('button', { name: 'Make admin' }));
+    expect(setTeamMemberRole).not.toHaveBeenCalled();
+    const confirmation = await screen.findByRole('group', { name: 'Make Bob an admin?' });
+    fireEvent.click(within(confirmation).getByRole('button', { name: 'Make admin' }));
+    await waitFor(() =>
+      expect(setTeamMemberRole).toHaveBeenCalledExactlyOnceWith(owned, 'bob', 'admin'),
+    );
+    expect(await screen.findByRole('button', { name: 'Remove admin role' })).toBeVisible();
+  });
+
+  it('refreshes the team revision after a conflict so a retry can succeed', async () => {
+    vi.mocked(renameTeam)
+      .mockImplementationOnce(async () => {
+        vi.mocked(listTeams).mockResolvedValue([{ ...owned, revision: 2 }]);
+        throw new APIError('revision_conflict', 'Stale', 409);
+      })
+      .mockResolvedValue({ ...owned, name: 'Infra', revision: 3 });
+    view();
+    fireEvent.change(await screen.findByLabelText('Team name'), { target: { value: 'Infra' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save name' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(/changed in the meantime/);
+    await waitFor(() => expect(listTeams).toHaveBeenCalledTimes(2));
+    fireEvent.click(screen.getByRole('button', { name: 'Save name' }));
+    await waitFor(() =>
+      expect(renameTeam).toHaveBeenLastCalledWith(
+        expect.objectContaining({ revision: 2 }),
+        'Infra',
+      ),
+    );
   });
 });

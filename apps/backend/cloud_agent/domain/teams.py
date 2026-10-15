@@ -34,7 +34,8 @@ LISTING_LIMIT = 50
 #: Audit entries one page returns.
 AUDIT_PAGE_LIMIT = 100
 
-TeamRole = Literal["owner", "member"]
+TeamRole = Literal["owner", "admin", "member"]
+MemberRole = Literal["admin", "member"]
 MembershipState = Literal["active", "left", "removed"]
 InvitationStatus = Literal["open", "claimed", "revoked", "expired"]
 JoinRequestState = Literal["pending", "approved", "declined", "cancelled", "expired"]

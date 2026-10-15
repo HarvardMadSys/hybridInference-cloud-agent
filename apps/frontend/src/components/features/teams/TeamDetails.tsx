@@ -15,6 +15,7 @@ import {
   removeMember,
   renameTeam,
   revokeInvitation,
+  setTeamMemberRole,
   transferOwnership,
   type Team,
   type TeamInvitation,
@@ -25,13 +26,14 @@ import {
 import { DANGER, GHOST, INPUT, SECONDARY, formatTeamTime, teamErrorMessage } from './teamUi';
 
 type Confirming =
-  | { kind: 'remove' | 'transfer'; userId: string }
+  | { kind: 'remove' | 'transfer' | 'promote' | 'demote'; userId: string }
   | { kind: 'leave' | 'delete' }
   | null;
 
 export function TeamDetails({ team, onChanged }: { team: Team; onChanged: () => void }) {
   const t = useT();
   const owner = team.role === 'owner';
+  const manager = owner || team.role === 'admin';
   const [members, setMembers] = useState<TeamMember[] | null>(null);
   const [requests, setRequests] = useState<TeamJoinRequest[]>([]);
   const [invitations, setInvitations] = useState<TeamInvitation[]>([]);
@@ -49,8 +51,8 @@ export function TeamDetails({ team, onChanged }: { team: Team; onChanged: () => 
     setLoadFailed(false);
     void Promise.all([
       listMembers(team.id, controller.signal),
-      owner ? listJoinRequests(team.id, controller.signal) : Promise.resolve([]),
-      owner ? listInvitations(team.id, controller.signal) : Promise.resolve([]),
+      manager ? listJoinRequests(team.id, controller.signal) : Promise.resolve([]),
+      manager ? listInvitations(team.id, controller.signal) : Promise.resolve([]),
     ])
       .then(([nextMembers, nextRequests, nextInvitations]) => {
         if (controller.signal.aborted) return;
@@ -62,7 +64,7 @@ export function TeamDetails({ team, onChanged }: { team: Team; onChanged: () => 
         if (!controller.signal.aborted) setLoadFailed(true);
       });
     return () => controller.abort();
-  }, [team.id, owner, reload]);
+  }, [team.id, manager, reload]);
 
   /** Run one change, then re-read this team and, when asked, the team list. */
   const run = useCallback(
@@ -80,6 +82,8 @@ export function TeamDetails({ team, onChanged }: { team: Team; onChanged: () => 
         setError(teamErrorMessage(t, cause));
         // A refusal can mean the page is stale; show what is true now.
         setReload((value) => value + 1);
+        onChanged();
+        setConfirming(null);
         return false;
       } finally {
         setBusy(false);
@@ -117,7 +121,7 @@ export function TeamDetails({ team, onChanged }: { team: Team; onChanged: () => 
         </p>
       ) : null}
 
-      {owner ? (
+      {manager ? (
         <RenameTeam
           team={team}
           busy={busy}
@@ -135,18 +139,41 @@ export function TeamDetails({ team, onChanged }: { team: Team; onChanged: () => 
               <div className="flex flex-wrap items-center gap-3">
                 <Person person={member} />
                 <span className="rounded-full bg-surface-muted px-2 py-0.5 text-xs text-muted">
-                  {t(member.role === 'owner' ? 'teams.role.owner' : 'teams.role.member')}
+                  {t(`teams.role.${member.role}`)}
                 </span>
-                {owner && member.role !== 'owner' ? (
-                  <div className="ml-auto flex gap-2">
-                    <button
-                      type="button"
-                      className={GHOST}
-                      disabled={busy}
-                      onClick={() => setConfirming({ kind: 'transfer', userId: member.user_id })}
-                    >
-                      {t('teams.members.makeOwner')}
-                    </button>
+                {member.role !== 'owner' && (owner || (manager && member.role === 'member')) ? (
+                  <div className="ml-auto flex flex-wrap gap-1">
+                    {owner ? (
+                      <>
+                        <button
+                          type="button"
+                          className={GHOST}
+                          disabled={busy}
+                          onClick={() =>
+                            setConfirming({
+                              kind: member.role === 'admin' ? 'demote' : 'promote',
+                              userId: member.user_id,
+                            })
+                          }
+                        >
+                          {t(
+                            member.role === 'admin'
+                              ? 'teams.members.revokeAdmin'
+                              : 'teams.members.makeAdmin',
+                          )}
+                        </button>
+                        <button
+                          type="button"
+                          className={GHOST}
+                          disabled={busy}
+                          onClick={() =>
+                            setConfirming({ kind: 'transfer', userId: member.user_id })
+                          }
+                        >
+                          {t('teams.members.makeOwner')}
+                        </button>
+                      </>
+                    ) : null}
                     <button
                       type="button"
                       className={GHOST}
@@ -160,30 +187,26 @@ export function TeamDetails({ team, onChanged }: { team: Team; onChanged: () => 
               </div>
               {confirming && 'userId' in confirming && confirming.userId === member.user_id ? (
                 <Confirm
-                  title={t(
-                    confirming.kind === 'transfer'
-                      ? 'teams.members.confirmTransfer'
-                      : 'teams.members.confirmRemove',
-                    { name: nameOf(member) },
-                  )}
-                  description={t(
-                    confirming.kind === 'transfer'
-                      ? 'teams.members.confirmTransferHelp'
-                      : 'teams.members.confirmRemoveHelp',
-                  )}
-                  confirmLabel={t(
-                    confirming.kind === 'transfer'
-                      ? 'teams.members.makeOwner'
-                      : 'teams.members.remove',
-                  )}
+                  title={t(MEMBER_ACTIONS[confirming.kind].title, { name: nameOf(member) })}
+                  description={t(MEMBER_ACTIONS[confirming.kind].help)}
+                  confirmLabel={t(MEMBER_ACTIONS[confirming.kind].label)}
                   busy={busy}
                   onCancel={() => setConfirming(null)}
                   onConfirm={() =>
                     run(
-                      () =>
-                        confirming.kind === 'transfer'
-                          ? transferOwnership(team, member.user_id)
-                          : removeMember(team.id, member.user_id),
+                      () => {
+                        if (confirming.kind === 'transfer') {
+                          return transferOwnership(team, member.user_id);
+                        }
+                        if (confirming.kind === 'remove') {
+                          return removeMember(team.id, member.user_id);
+                        }
+                        return setTeamMemberRole(
+                          team,
+                          member.user_id,
+                          confirming.kind === 'promote' ? 'admin' : 'member',
+                        );
+                      },
                       { teamChanged: true },
                     )
                   }
@@ -194,7 +217,7 @@ export function TeamDetails({ team, onChanged }: { team: Team; onChanged: () => 
         </ul>
       </section>
 
-      {owner ? (
+      {manager ? (
         <section aria-labelledby={`requests-${team.id}`}>
           <h3 id={`requests-${team.id}`} className="text-sm font-medium text-foreground">
             {t('teams.requests.title')}
@@ -235,7 +258,7 @@ export function TeamDetails({ team, onChanged }: { team: Team; onChanged: () => 
         </section>
       ) : null}
 
-      {owner ? (
+      {manager ? (
         <section aria-labelledby={`invitations-${team.id}`}>
           <div className="flex flex-wrap items-center gap-3">
             <h3 id={`invitations-${team.id}`} className="text-sm font-medium text-foreground">
@@ -309,6 +332,29 @@ export function TeamDetails({ team, onChanged }: { team: Team; onChanged: () => 
     </div>
   );
 }
+
+const MEMBER_ACTIONS = {
+  transfer: {
+    title: 'teams.members.confirmTransfer',
+    help: 'teams.members.confirmTransferHelp',
+    label: 'teams.members.makeOwner',
+  },
+  remove: {
+    title: 'teams.members.confirmRemove',
+    help: 'teams.members.confirmRemoveHelp',
+    label: 'teams.members.remove',
+  },
+  promote: {
+    title: 'teams.members.confirmAdmin',
+    help: 'teams.members.adminHelp',
+    label: 'teams.members.makeAdmin',
+  },
+  demote: {
+    title: 'teams.members.confirmRevokeAdmin',
+    help: 'teams.members.revokeAdminHelp',
+    label: 'teams.members.revokeAdmin',
+  },
+} as const;
 
 function nameOf(person: TeamPerson): string {
   return person.display_name || person.email || person.user_id;

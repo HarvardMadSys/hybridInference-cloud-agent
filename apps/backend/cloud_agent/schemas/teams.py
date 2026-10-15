@@ -19,6 +19,7 @@ from cloud_agent.domain.teams import (
     MAX_TEAM_NAME_CHARS,
     InvitationStatus,
     JoinRequestState,
+    MemberRole,
     TeamRole,
 )
 
@@ -61,7 +62,7 @@ class CreateTeamRequest(_NamedTeam):
 
 
 class RenameTeamRequest(_NamedTeam):
-    """Rename at the revision the owner read."""
+    """Rename at the revision the owner or admin read."""
 
     expected_revision: int = Field(ge=1)
 
@@ -85,8 +86,15 @@ class ClaimInvitationRequest(_Request):
     token: str = Field(pattern=INVITATION_TOKEN_PATTERN)
 
 
+class SetTeamMemberRoleRequest(_Request):
+    """An owner may grant or revoke admin at the team's read revision."""
+
+    role: MemberRole
+    expected_revision: int = Field(ge=1)
+
+
 class DecideJoinRequest(_Request):
-    """The owner's decision on one join request."""
+    """An owner or admin's decision on one join request."""
 
     approve: bool
 
@@ -162,7 +170,7 @@ class InvitationListResponse(BaseModel):
 
 
 class JoinRequestResponse(TeamPerson):
-    """A join request as the owner reviews it."""
+    """A join request as an owner or admin reviews it."""
 
     id: str
     state: JoinRequestState
@@ -171,7 +179,7 @@ class JoinRequestResponse(TeamPerson):
 
 
 class JoinRequestListResponse(BaseModel):
-    """Requests waiting for the owner."""
+    """Requests waiting for an owner or admin."""
 
     requests: list[JoinRequestResponse]
 
@@ -210,6 +218,7 @@ class TeamAuditEventResponse(BaseModel):
         "join_declined",
         "member_left",
         "member_removed",
+        "member_role_changed",
         "ownership_transferred",
     ]
     target_user_id: str | None

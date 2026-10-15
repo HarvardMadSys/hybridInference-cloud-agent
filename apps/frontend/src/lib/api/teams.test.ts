@@ -6,6 +6,7 @@ import {
   invitationLink,
   removeMember,
   renameTeam,
+  setTeamMemberRole,
   transferOwnership,
   type Team,
 } from './teams';
@@ -46,6 +47,13 @@ describe('team API client', () => {
     await transferOwnership(team, 'bob');
     expect(JSON.parse(String(lastCall().init.body))).toEqual({
       user_id: 'bob',
+      expected_revision: 4,
+    });
+    await setTeamMemberRole(team, 'bob/admin', 'admin');
+    expect(lastCall().path).toBe('/v1/agent/teams/ateam_1/members/bob%2Fadmin/role');
+    expect(lastCall().init.method).toBe('PATCH');
+    expect(JSON.parse(String(lastCall().init.body))).toEqual({
+      role: 'admin',
       expected_revision: 4,
     });
     vi.mocked(fetchWithAuth).mockResolvedValue(new Response(null, { status: 204 }));

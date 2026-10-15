@@ -3,7 +3,7 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LocaleProvider } from '@/components/providers/LocaleProvider';
-import { claimInvitation, type OwnJoinRequest } from '@/lib/api/teams';
+import { claimInvitation, listOwnJoinRequests, type OwnJoinRequest } from '@/lib/api/teams';
 import { readInvitationToken, stashInvitationToken } from '@/lib/teamInvitation';
 import { APIError } from '@/lib/utils/errors';
 import { JoinTeamView } from './JoinTeamView';
@@ -21,6 +21,9 @@ vi.mock('@/components/providers/AuthProvider', () => ({
 vi.mock('@/lib/api/teams', () => ({
   claimInvitation: vi.fn(),
   listOwnJoinRequests: vi.fn(),
+}));
+vi.mock('@/components/providers/SiteConfigProvider', () => ({
+  useSiteConfig: () => ({ branding: { appName: 'Cloud Agent' } }),
 }));
 
 const TOKEN = 'T'.repeat(43);
@@ -46,6 +49,7 @@ describe('JoinTeamView', () => {
   beforeEach(() => {
     auth.signedIn = true;
     vi.mocked(claimInvitation).mockReset();
+    vi.mocked(listOwnJoinRequests).mockReset();
     window.history.replaceState(null, '', `/teams/join#token=${TOKEN}`);
   });
   afterEach(() => {
@@ -67,10 +71,16 @@ describe('JoinTeamView', () => {
     vi.mocked(claimInvitation).mockResolvedValue(pending);
     view();
     fireEvent.click(await screen.findByRole('button', { name: 'Ask to join' }));
-    expect(await screen.findByText(/You asked to join Platform, invited by Alice/)).toBeVisible();
+    expect(await screen.findByRole('heading', { name: 'Request sent' })).toBeVisible();
+    expect(screen.getByRole('heading', { name: 'Platform' })).toBeVisible();
+    expect(screen.getByText('Invited by Alice')).toBeVisible();
     expect(claimInvitation).toHaveBeenCalledExactlyOnceWith(TOKEN);
     expect(readInvitationToken()).toBeNull();
-    expect(screen.getByRole('button', { name: 'Check again' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Refresh status' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Go to Teams' })).toHaveAttribute(
+      'href',
+      '/settings/teams',
+    );
   });
 
   it('resumes from tab storage after the sign-in round trip', async () => {
@@ -106,5 +116,22 @@ describe('JoinTeamView', () => {
     window.history.replaceState(null, '', '/teams/join');
     view();
     expect(await screen.findByText(/needs an invitation link/)).toBeVisible();
+  });
+
+  it.each([
+    ['approved', 'Welcome to the team'],
+    ['declined', 'Request not approved'],
+    ['cancelled', 'Invitation withdrawn'],
+    ['expired', 'Invitation expired'],
+  ] as const)('refreshes a pending request into the %s state', async (state, heading) => {
+    vi.mocked(claimInvitation).mockResolvedValue(pending);
+    vi.mocked(listOwnJoinRequests).mockResolvedValue([{ ...pending, state }]);
+    view();
+    fireEvent.click(await screen.findByRole('button', { name: 'Ask to join' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Refresh status' }));
+    expect(await screen.findByRole('heading', { name: heading })).toBeVisible();
+    expect(screen.getByRole('heading', { name: 'Platform' })).toBeVisible();
+    expect(screen.queryByRole('button', { name: 'Refresh status' })).not.toBeInTheDocument();
+    expect(screen.queryByText('Awaiting approval')).not.toBeInTheDocument();
   });
 });

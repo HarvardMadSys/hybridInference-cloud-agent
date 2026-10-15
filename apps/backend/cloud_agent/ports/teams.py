@@ -3,7 +3,7 @@
 Every operation takes the acting account and decides inside its own
 transaction whether that account may act: a caller who is not an active member
 of an active team gets :class:`~cloud_agent.domain.teams.TeamNotFound`, and a
-member asking for an owner-only change gets
+member whose role does not allow the requested change gets
 :class:`~cloud_agent.domain.teams.TeamForbidden`. Gateway admission and any
 other outside check happen before the call; the store re-reads membership
 where it commits, so a decision made a moment earlier cannot outlive it.
@@ -21,6 +21,7 @@ if TYPE_CHECKING:
         AuditRecord,
         InvitationRecord,
         MemberRecord,
+        MemberRole,
         OwnJoinRequestRecord,
         TeamRecord,
     )
@@ -44,7 +45,7 @@ class TeamRepository(Protocol):
     async def rename_team(
         self, actor: str, team_id: str, *, name: str, expected_revision: int
     ) -> TeamRecord:
-        """Rename at the revision the owner read."""
+        """Rename at the revision the owner or admin read."""
         ...
 
     async def delete_team(self, actor: str, team_id: str, *, expected_revision: int) -> None:
@@ -60,7 +61,13 @@ class TeamRepository(Protocol):
         ...
 
     async def remove_member(self, actor: str, team_id: str, user_id: str) -> None:
-        """End another member's membership; owner only."""
+        """Owners remove non-owners; admins may only remove ordinary members."""
+        ...
+
+    async def set_member_role(
+        self, actor: str, team_id: str, user_id: str, *, role: MemberRole, expected_revision: int
+    ) -> TeamRecord:
+        """Grant or revoke admin as the owner; ownership uses its own transfer flow."""
         ...
 
     async def transfer_ownership(
@@ -86,7 +93,7 @@ class TeamRepository(Protocol):
         ...
 
     async def list_invitations(self, actor: str, team_id: str) -> list[InvitationRecord]:
-        """Return the team's newest invitations; owner only."""
+        """Return all actionable invitations and recent history; owner or admin."""
         ...
 
     async def revoke_invitation(self, actor: str, team_id: str, invitation_id: str) -> None:
@@ -102,11 +109,11 @@ class TeamRepository(Protocol):
         ...
 
     async def list_join_requests(self, actor: str, team_id: str) -> list[ApplicantRecord]:
-        """Return the team's pending, unexpired requests; owner only."""
+        """Return the team's pending, unexpired requests; owner or admin."""
         ...
 
     async def get_join_request(self, actor: str, team_id: str, request_id: str) -> ApplicantRecord:
-        """Return one of the team's requests; owner only."""
+        """Return one of the team's requests; owner or admin."""
         ...
 
     async def decide_join_request(

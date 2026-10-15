@@ -3,7 +3,7 @@ import { fetchWithAuth, jsonOrThrow } from './client';
 
 const TEAMS = '/v1/agent/teams';
 
-export type TeamRole = 'owner' | 'member';
+export type TeamRole = 'owner' | 'admin' | 'member';
 export type InvitationStatus = 'open' | 'claimed' | 'revoked' | 'expired';
 export type JoinRequestState = 'pending' | 'approved' | 'declined' | 'cancelled' | 'expired';
 
@@ -151,6 +151,21 @@ export async function transferOwnership(
     await send(
       team(current.id, '/transfer-ownership'),
       json('POST', { user_id: userId, expected_revision: current.revision }),
+      signal,
+    ),
+  );
+}
+
+export async function setTeamMemberRole(
+  current: Team,
+  userId: string,
+  role: Exclude<TeamRole, 'owner'>,
+  signal?: AbortSignal,
+): Promise<Team> {
+  return jsonOrThrow<Team>(
+    await send(
+      team(current.id, `/members/${encodeURIComponent(userId)}/role`),
+      json('PATCH', { role, expected_revision: current.revision }),
       signal,
     ),
   );

@@ -119,7 +119,7 @@ function Teams() {
                     {team.name}
                   </span>
                   <span className="rounded-full bg-surface-muted px-2 py-0.5 text-xs text-muted">
-                    {t(team.role === 'owner' ? 'teams.role.owner' : 'teams.role.member')}
+                    {t(`teams.role.${team.role}`)}
                   </span>
                   <span className="text-xs text-muted">
                     {t('teams.memberCount', { count: team.member_count })}

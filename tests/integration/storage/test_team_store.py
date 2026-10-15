@@ -458,3 +458,168 @@ async def test_team_migration_round_trips(store, pool):
             assert team.member_count == 1
     finally:
         apply_migrations(config)
+
+
+async def make_admin(store, team_id, user):
+    current = await store.teams.get_team("alice", team_id)
+    return await store.teams.set_member_role(
+        "alice", team_id, user, role="admin", expected_revision=current.revision
+    )
+
+
+async def test_admin_manages_daily_work_but_cannot_manage_roles_or_ownership(store):
+    team = await new_team(store)
+    for user in ("bob", "carol", "dave"):
+        await join(store, team.id, user)
+    await make_admin(store, team.id, "bob")
+    current = await make_admin(store, team.id, "carol")
+    assert (await store.teams.get_team("bob", team.id)).role == "admin"
+    assert (await store.teams.list_teams("bob"))[0].role == "admin"
+    roster = await store.teams.list_members("bob", team.id)
+    assert [member.role for member in roster] == ["owner", "admin", "admin", "member"]
+    renamed = await store.teams.rename_team(
+        "bob", team.id, name="Infra", expected_revision=current.revision
+    )
+    invitation = await invite(store, team.id, owner="bob", label="admin-invite")
+    assert invitation.created_by_user_id == "bob"
+    request = await store.teams.claim_invitation("eva", token_hash=token_hash("admin-invite"))
+    assert [r.id for r in await store.teams.list_join_requests("bob", team.id)] == [request.id]
+    assert (await store.teams.get_join_request("bob", team.id, request.id)).user_id == "eva"
+    await store.teams.decide_join_request("bob", team.id, request.id, approve=True)
+    await store.teams.remove_member("bob", team.id, "dave")
+    for target in ("alice", "bob", "carol"):
+        with pytest.raises(TeamForbidden):
+            await store.teams.remove_member("bob", team.id, target)
+    for role in ("member", "admin"):
+        with pytest.raises(TeamForbidden):
+            await store.teams.set_member_role(
+                "bob", team.id, "eva", role=role, expected_revision=renamed.revision
+            )
+    with pytest.raises(TeamForbidden):
+        await store.teams.delete_team("bob", team.id, expected_revision=renamed.revision)
+    with pytest.raises(TeamForbidden):
+        await store.teams.transfer_ownership(
+            "bob", team.id, user_id="eva", expected_revision=renamed.revision
+        )
+    with pytest.raises(TeamForbidden):
+        await store.teams.list_audit_events("bob", team.id, before=None, limit=10)
+    another = await invite(store, team.id, owner="alice", label="owner-invite")
+    await store.teams.revoke_invitation("bob", team.id, another.id)
+    assert any(
+        i.id == another.id and i.status == "revoked"
+        for i in await store.teams.list_invitations("bob", team.id)
+    )
+
+
+async def test_demoting_admin_closes_their_links_and_immediately_removes_management_access(store):
+    team = await new_team(store)
+    await join(store, team.id, "bob")
+    promoted = await make_admin(store, team.id, "bob")
+    await invite(store, team.id, owner="bob", label="admin-pending")
+    await invite(store, team.id, owner="bob", label="admin-open")
+    request = await store.teams.claim_invitation("carol", token_hash=token_hash("admin-pending"))
+    demoted = await store.teams.set_member_role(
+        "alice", team.id, "bob", role="member", expected_revision=promoted.revision
+    )
+    assert demoted.revision == promoted.revision + 1
+    assert (await store.teams.get_team("bob", team.id)).role == "member"
+    with pytest.raises(InvitationUnavailable):
+        await store.teams.claim_invitation("dave", token_hash=token_hash("admin-open"))
+    assert (await store.teams.list_own_join_requests("carol"))[0].state == "cancelled"
+    with pytest.raises(TeamForbidden):
+        await store.teams.decide_join_request("bob", team.id, request.id, approve=True)
+    with pytest.raises(TeamForbidden):
+        await invite(store, team.id, owner="bob", label="revoked-admin")
+    with pytest.raises(TeamForbidden):
+        await store.teams.rename_team(
+            "bob", team.id, name="Denied", expected_revision=demoted.revision
+        )
+    audit = await store.teams.list_audit_events("alice", team.id, before=None, limit=20)
+    assert sum(e.action == "member_role_changed" and e.target_user_id == "bob" for e in audit) == 2
+
+
+async def test_role_changes_are_owner_only_revision_checked_and_cannot_replace_ownership(store):
+    team = await new_team(store)
+    await join(store, team.id, "bob")
+    with pytest.raises(TeamConflict):
+        await store.teams.set_member_role(
+            "alice", team.id, "alice", role="admin", expected_revision=team.revision
+        )
+    with pytest.raises(TeamNotFound):
+        await store.teams.set_member_role(
+            "alice", team.id, "outsider", role="admin", expected_revision=team.revision
+        )
+    with pytest.raises(TeamForbidden):
+        await store.teams.set_member_role(
+            "bob", team.id, "bob", role="admin", expected_revision=team.revision
+        )
+    promoted = await make_admin(store, team.id, "bob")
+    with pytest.raises(TeamConflict):
+        await store.teams.set_member_role(
+            "alice", team.id, "bob", role="member", expected_revision=team.revision
+        )
+    same = await store.teams.set_member_role(
+        "alice", team.id, "bob", role="admin", expected_revision=promoted.revision
+    )
+    assert same.revision == promoted.revision
+    moved = await store.teams.transfer_ownership(
+        "alice", team.id, user_id="bob", expected_revision=same.revision
+    )
+    assert moved.role == "member"
+    assert (await store.teams.get_team("bob", team.id)).role == "owner"
+    moved_back = await store.teams.transfer_ownership(
+        "bob", team.id, user_id="alice", expected_revision=moved.revision
+    )
+    assert moved_back.role == "member"
+
+
+@pytest.mark.parametrize("departure", ["leave", "remove"])
+async def test_departed_admin_rejoins_as_an_ordinary_member(store, pool, departure):
+    team = await new_team(store)
+    await join(store, team.id, "bob")
+    await make_admin(store, team.id, "bob")
+    await invite(store, team.id, owner="bob", label="old-admin-link")
+    if departure == "leave":
+        await store.teams.leave_team("bob", team.id)
+    else:
+        await store.teams.remove_member("alice", team.id, "bob")
+    with pytest.raises(InvitationUnavailable):
+        await store.teams.claim_invitation("carol", token_hash=token_hash("old-admin-link"))
+    await join(store, team.id, "bob", label="rejoin")
+    assert (await store.teams.get_team("bob", team.id)).role == "member"
+    assert (await generation(pool, team.id, "bob"))["access_generation"] == 3
+
+
+async def test_demotion_racing_approval_cannot_authorize_a_later_admin_write(store):
+    team = await new_team(store)
+    await join(store, team.id, "bob")
+    promoted = await make_admin(store, team.id, "bob")
+    await invite(store, team.id, owner="alice", label="race-approval")
+    request = await store.teams.claim_invitation("carol", token_hash=token_hash("race-approval"))
+    results = await asyncio.gather(
+        store.teams.set_member_role(
+            "alice", team.id, "bob", role="member", expected_revision=promoted.revision
+        ),
+        store.teams.decide_join_request("bob", team.id, request.id, approve=True),
+        return_exceptions=True,
+    )
+    assert not isinstance(results[0], Exception)
+    assert not isinstance(results[1], Exception) or isinstance(results[1], TeamForbidden)
+    with pytest.raises(TeamForbidden):
+        await store.teams.decide_join_request("bob", team.id, request.id, approve=True)
+
+
+async def test_active_links_and_pending_requests_remain_visible_after_fifty_closed_links(store):
+    team = await new_team(store)
+    active = await invite(store, team.id, label="keep-open")
+    pending = await invite(store, team.id, label="keep-pending")
+    await store.teams.claim_invitation("bob", token_hash=token_hash("keep-pending"))
+    for i in range(50):
+        closed = await invite(store, team.id, label=f"closed-{i}")
+        await store.teams.revoke_invitation("alice", team.id, closed.id)
+    listed = {i.id: i for i in await store.teams.list_invitations("alice", team.id)}
+    assert listed[active.id].status == "open"
+    assert listed[pending.id].request_state == "pending"
+    await store.teams.revoke_invitation("alice", team.id, active.id)
+    with pytest.raises(InvitationUnavailable):
+        await store.teams.claim_invitation("carol", token_hash=token_hash("keep-open"))

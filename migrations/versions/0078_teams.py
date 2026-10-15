@@ -21,7 +21,7 @@ go backwards and never restart at 1 for a returning member.
 
 **Invitations store only a hash.** The 32-byte link token is returned once when
 the invitation is created; the table keeps its SHA-256. One account can claim
-an invitation, which creates that account's join request; the owner's decision
+an invitation, which creates that account's join request; an owner or admin's decision
 is recorded on the request.
 
 Revision ID: 0078_teams
@@ -46,6 +46,7 @@ _AUDIT_ACTIONS = (
     "join_declined",
     "member_left",
     "member_removed",
+    "member_role_changed",
     "ownership_transferred",
 )
 
@@ -82,6 +83,7 @@ def upgrade() -> None:
         CREATE TABLE agent_team_members (
             team_id TEXT NOT NULL REFERENCES agent_teams (id),
             user_id TEXT NOT NULL,
+            role TEXT NOT NULL DEFAULT 'member' CHECK (role IN ('admin', 'member')),
             state TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active', 'left', 'removed')),
             access_generation BIGINT NOT NULL DEFAULT 1 CHECK (access_generation > 0),
             joined_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),

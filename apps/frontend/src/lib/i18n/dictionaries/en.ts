@@ -1155,10 +1155,10 @@ export const en = {
   // ── Teams ───────────────────────────────────────────────────────────────
   'teams.title': 'Teams',
   'teams.description':
-    'Group the people you work with. Invite someone with a single-use link; the team owner approves every request.',
+    'Invite the people you work with. An owner or admin reviews each request to join.',
   'teams.signIn': 'Sign in to see your teams.',
   'teams.pendingTitle': 'Waiting for approval',
-  'teams.pendingItem': '{team} — the owner can approve until {expires}',
+  'teams.pendingItem': '{team} — awaiting approval until {expires}',
   'teams.loadFailed': 'Teams could not be loaded.',
   'teams.retry': 'Retry',
   'teams.loading': 'Loading…',
@@ -1166,6 +1166,7 @@ export const en = {
     'You are not in any team yet. Create one, or open an invitation link someone sent you.',
   'teams.listLabel': 'Your teams',
   'teams.role.owner': 'Owner',
+  'teams.role.admin': 'Admin',
   'teams.role.member': 'Member',
   'teams.memberCount': '{count} members',
   'teams.cancel': 'Cancel',
@@ -1178,6 +1179,14 @@ export const en = {
   'teams.members.title': 'Members',
   'teams.members.you': '(you)',
   'teams.members.makeOwner': 'Make owner',
+  'teams.members.makeAdmin': 'Make admin',
+  'teams.members.revokeAdmin': 'Remove admin role',
+  'teams.members.confirmAdmin': 'Make {name} an admin?',
+  'teams.members.adminHelp':
+    'Admins can rename the team, manage invitations, review requests and remove ordinary members. Only the owner can change roles, transfer ownership or delete the team.',
+  'teams.members.confirmRevokeAdmin': 'Remove admin role from {name}?',
+  'teams.members.revokeAdminHelp':
+    'They remain a member. Their open invitation links and pending requests will be closed.',
   'teams.members.remove': 'Remove',
   'teams.members.confirmTransfer': 'Make {name} the owner?',
   'teams.members.confirmTransferHelp':
@@ -1223,12 +1232,12 @@ export const en = {
   'teams.error.alreadyMember': 'You are already a member of this team.',
   'teams.error.alreadyOwner': 'You already own this team.',
   'teams.error.applicantNotAdmitted': 'This account cannot use Agent right now, so it cannot join.',
-  'teams.error.forbidden': 'Only the team owner can do this.',
+  'teams.error.forbidden': 'Your team role does not allow this action.',
   'teams.error.invitationClosed': 'This invitation has already been used.',
   'teams.error.invitationLimit':
     'This team has too many open invitation links. Revoke one before creating another.',
   'teams.error.invitationUnavailable':
-    'This invitation link is no longer valid. Ask the team owner for a new one.',
+    'This invitation link is no longer valid. Ask an owner or admin for a new one.',
   'teams.error.notFound': 'This team or member no longer exists, or you are no longer in it.',
   'teams.error.ownerCannotLeave': 'Make another member the owner, or delete the team, first.',
   'teams.error.ownerNotAdmitted':
@@ -1236,15 +1245,26 @@ export const en = {
   'teams.error.requestClosed': 'This request was already decided or withdrawn.',
   'teams.error.requestExpired': 'This request expired with its link. Send a new invitation.',
   'teams.error.requestPending':
-    'You already asked to join this team. Wait for the owner to decide.',
+    'You already asked to join this team. Wait for an owner or admin to review it.',
   'teams.error.revisionConflict': 'This team changed in the meantime. Check it and try again.',
   'teams.error.teamFull': 'This team has reached its member limit.',
   'teams.error.teamLimit': 'You already own the maximum number of teams.',
   'teams.error.unavailable': 'Account access cannot be confirmed right now. Try again shortly.',
   'teams.error.generic': 'Something went wrong. Try again.',
   'teams.join.title': 'Join a team',
+  'teams.join.eyebrow': 'TEAM INVITATION',
+  'teams.join.heading.pending': 'Request sent',
+  'teams.join.heading.approved': 'Welcome to the team',
+  'teams.join.heading.declined': 'Request not approved',
+  'teams.join.heading.cancelled': 'Invitation withdrawn',
+  'teams.join.heading.expired': 'Invitation expired',
+  'teams.join.invitedBy': 'Invited by {inviter}',
+  'teams.join.pendingBadge': 'Awaiting approval',
+  'teams.join.expires': 'Valid until {expires}',
+  'teams.join.closeHint': 'You can close this page. Your request stays active.',
+  'teams.join.checking': 'Checking…',
   'teams.join.explain':
-    'You were sent an invitation to a team. Asking to join does not give you access yet: the team owner approves each request.',
+    'Send a request to join. An owner or admin will review it before you become a member.',
   'teams.join.request': 'Ask to join',
   'teams.join.requesting': 'Sending…',
   'teams.join.signInFirst': 'Sign in first. You will come back here to finish.',
@@ -1252,15 +1272,18 @@ export const en = {
   'teams.join.noLink':
     'This page needs an invitation link. Open the full link you were sent, in this browser tab.',
   'teams.join.noAccess': 'Your account cannot use Agent yet, so it cannot join a team.',
-  'teams.join.requested': 'You asked to join {team}, invited by {inviter}.',
-  'teams.join.theOwner': 'the team owner',
+  'teams.join.theOwner': 'a team manager',
   'teams.join.state.pending':
-    'Waiting for the owner to approve, until {expires}. You can close this page; the team appears under Settings → Teams once approved.',
-  'teams.join.state.approved': 'Approved. You are now a member.',
-  'teams.join.state.declined': 'The owner declined this request.',
-  'teams.join.state.cancelled': 'This request was withdrawn. Ask the owner for a new link.',
-  'teams.join.state.expired': 'This request expired before the owner decided. Ask for a new link.',
-  'teams.join.checkAgain': 'Check again',
+    'An owner or admin will review your request. Once approved, this team will appear in your team list.',
+  'teams.join.state.approved':
+    'Your request was approved. You can now find this team in your team list.',
+  'teams.join.state.declined':
+    'Your request was declined. Contact the person who invited you if you think this was a mistake.',
+  'teams.join.state.cancelled':
+    'This invitation is no longer active. Ask an owner or admin for a new link.',
+  'teams.join.state.expired':
+    'This invitation expired before your request was approved. Ask for a new link to try again.',
+  'teams.join.checkAgain': 'Refresh status',
   'teams.join.openTeams': 'Go to Teams',
   // ── Shared ──────────────────────────────────────────────────────────────
   'common.loading': 'Loading…',

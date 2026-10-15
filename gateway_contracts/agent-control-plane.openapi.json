@@ -9962,7 +9962,7 @@
       },
       "DecideJoinRequest": {
         "additionalProperties": false,
-        "description": "The owner's decision on one join request.",
+        "description": "An owner or admin's decision on one join request.",
         "properties": {
           "approve": {
             "title": "Approve",
@@ -12717,7 +12717,7 @@
         "type": "object"
       },
       "JoinRequestListResponse": {
-        "description": "Requests waiting for the owner.",
+        "description": "Requests waiting for an owner or admin.",
         "properties": {
           "requests": {
             "items": {
@@ -12734,7 +12734,7 @@
         "type": "object"
       },
       "JoinRequestResponse": {
-        "description": "A join request as the owner reviews it.",
+        "description": "A join request as an owner or admin reviews it.",
         "properties": {
           "avatar_data_url": {
             "title": "Avatar Data Url",
@@ -14235,7 +14235,7 @@
       },
       "RenameTeamRequest": {
         "additionalProperties": false,
-        "description": "Rename at the revision the owner read.",
+        "description": "Rename at the revision the owner or admin read.",
         "properties": {
           "expected_revision": {
             "minimum": 1.0,
@@ -16015,6 +16015,31 @@
         "title": "SetSandboxArchiveSettingsRequest",
         "type": "object"
       },
+      "SetTeamMemberRoleRequest": {
+        "additionalProperties": false,
+        "description": "An owner may grant or revoke admin at the team's read revision.",
+        "properties": {
+          "expected_revision": {
+            "minimum": 1.0,
+            "title": "Expected Revision",
+            "type": "integer"
+          },
+          "role": {
+            "enum": [
+              "admin",
+              "member"
+            ],
+            "title": "Role",
+            "type": "string"
+          }
+        },
+        "required": [
+          "role",
+          "expected_revision"
+        ],
+        "title": "SetTeamMemberRoleRequest",
+        "type": "object"
+      },
       "SetupMachine": {
         "additionalProperties": false,
         "description": "A stable infrastructure machine reached through an existing verified key.",
@@ -16635,6 +16660,7 @@
               "join_declined",
               "member_left",
               "member_removed",
+              "member_role_changed",
               "ownership_transferred"
             ],
             "title": "Action",
@@ -16751,6 +16777,7 @@
           "role": {
             "enum": [
               "owner",
+              "admin",
               "member"
             ],
             "title": "Role",
@@ -16808,6 +16835,7 @@
           "role": {
             "enum": [
               "owner",
+              "admin",
               "member"
             ],
             "title": "Role",
@@ -34460,7 +34488,7 @@
     },
     "/v1/agent/team-invitations/claim": {
       "post": {
-        "description": "Ask to join with a link; the owner still has to approve.\n\nHolding the link grants nothing by itself. Claiming makes it this\naccount's: another account presenting it afterwards is refused.",
+        "description": "Ask to join with a link; the owner or an admin still has to approve.\n\nHolding the link grants nothing by itself. Claiming makes it this\naccount's: another account presenting it afterwards is refused.",
         "operationId": "claim_invitation_v1_agent_team_invitations_claim_post",
         "parameters": [
           {
@@ -34795,7 +34823,7 @@
         ]
       },
       "patch": {
-        "description": "Rename the team at the revision the owner read.",
+        "description": "Rename as an owner or admin at the revision the caller read.",
         "operationId": "rename_team_v1_agent_teams__team_id__patch",
         "parameters": [
           {
@@ -34952,7 +34980,7 @@
     },
     "/v1/agent/teams/{team_id}/invitations": {
       "get": {
-        "description": "List the team's newest invitations; owner only.",
+        "description": "List actionable invitations and recent history; owner or admin.",
         "operationId": "list_invitations_v1_agent_teams__team_id__invitations_get",
         "parameters": [
           {
@@ -35139,7 +35167,7 @@
     },
     "/v1/agent/teams/{team_id}/join-requests": {
       "get": {
-        "description": "Requests waiting for the owner's decision; owner only.",
+        "description": "List pending requests for an owner or admin to decide.",
         "operationId": "list_join_requests_v1_agent_teams__team_id__join_requests_get",
         "parameters": [
           {
@@ -35387,7 +35415,7 @@
     },
     "/v1/agent/teams/{team_id}/members/{member_user_id}": {
       "delete": {
-        "description": "Remove another member; owner only.",
+        "description": "Remove a non-owner; admins may only remove ordinary members.",
         "operationId": "remove_member_v1_agent_teams__team_id__members__member_user_id__delete",
         "parameters": [
           {
@@ -35441,6 +35469,84 @@
           }
         },
         "summary": "Remove Member",
+        "tags": [
+          "teams"
+        ]
+      }
+    },
+    "/v1/agent/teams/{team_id}/members/{member_user_id}/role": {
+      "patch": {
+        "description": "Grant or revoke admin; only the team owner may change roles.",
+        "operationId": "set_member_role_v1_agent_teams__team_id__members__member_user_id__role_patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "title": "Team Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "member_user_id",
+            "required": true,
+            "schema": {
+              "title": "Member User Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetTeamMemberRoleRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TeamResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set Member Role",
         "tags": [
           "teams"
         ]

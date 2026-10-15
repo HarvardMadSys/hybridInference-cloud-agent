@@ -8,7 +8,7 @@ and revocations of one team therefore run one at a time, and two of them can
 never wait on each other in opposite orders.
 
 **The caller's membership is read where the write commits.** Each operation
-re-checks that the actor is an active member (and, where needed, the owner)
+re-checks that the actor is an active member with the required role
 inside the transaction holding the team lock, so a membership that ended a
 moment earlier cannot authorize anything.
 """
@@ -31,6 +31,7 @@ from cloud_agent.domain.teams import (
     InvitationRecord,
     InvitationUnavailable,
     MemberRecord,
+    MemberRole,
     OwnJoinRequestRecord,
     TeamConflict,
     TeamForbidden,
@@ -42,7 +43,7 @@ if TYPE_CHECKING:
     from datetime import timedelta
 
 _TEAM_VIEW = """
-    SELECT t.id, t.name, t.owner_user_id, t.revision, t.created_at,
+    SELECT t.id, t.name, t.owner_user_id, t.revision, t.created_at, m.role AS member_role,
            (SELECT count(*) FROM agent_team_members AS active
              WHERE active.team_id = t.id AND active.state = 'active') AS member_count
       FROM agent_teams AS t
@@ -96,7 +97,7 @@ def _team(row: asyncpg.Record, actor: str) -> TeamRecord:
         revision=row["revision"],
         member_count=row["member_count"],
         created_at=row["created_at"],
-        role="owner" if row["owner_user_id"] == actor else "member",
+        role="owner" if row["owner_user_id"] == actor else row["member_role"],
     )
 
 
@@ -158,9 +159,10 @@ class PostgresTeamRepository:
         team_id: str,
         *,
         owner: bool = False,
+        manager: bool = False,
         lock: bool = True,
     ) -> asyncpg.Record:
-        """Lock an active team the actor belongs to; optionally require ownership.
+        """Lock an active team and optionally require owner or management rights.
 
         Reads pass ``lock=False``: they check the same membership without
         queueing behind the team's writers.
@@ -170,16 +172,18 @@ class PostgresTeamRepository:
             "WHERE id = $1 AND state = 'active'" + (" FOR UPDATE" if lock else ""),
             team_id,
         )
-        member = team is not None and await conn.fetchval(
-            "SELECT TRUE FROM agent_team_members "
+        member_role = team is not None and await conn.fetchval(
+            "SELECT role FROM agent_team_members "
             "WHERE team_id = $1 AND user_id = $2 AND state = 'active'",
             team_id,
             actor,
         )
-        if team is None or not member:
+        if team is None or not member_role:
             raise TeamNotFound(_NOT_FOUND)
         if owner and team["owner_user_id"] != actor:
             raise TeamForbidden(_OWNER_ONLY)
+        if manager and team["owner_user_id"] != actor and member_role != "admin":
+            raise TeamForbidden("Only a team owner or admin can do this.")
         return team
 
     async def _team_view(self, conn: asyncpg.Connection, actor: str, team_id: str) -> TeamRecord:
@@ -212,7 +216,9 @@ class PostgresTeamRepository:
         )
 
     @staticmethod
-    async def _close_pending(conn: asyncpg.Connection, team_id: str, actor: str) -> None:
+    async def _close_pending(
+        conn: asyncpg.Connection, team_id: str, actor: str, *, inviter: str | None = None
+    ) -> None:
         """Cancel undecided requests and revoke every invitation that could still be used."""
         await conn.execute(
             """
@@ -220,15 +226,21 @@ class PostgresTeamRepository:
                 UPDATE agent_team_join_requests
                    SET state = 'cancelled', decided_at = NOW(), decided_by_user_id = $2
                  WHERE team_id = $1 AND state = 'pending'
+                   AND invitation_id IN (
+                       SELECT id FROM agent_team_invitations
+                        WHERE team_id = $1 AND ($3::text IS NULL OR created_by_user_id = $3)
+                   )
              RETURNING invitation_id
             )
             UPDATE agent_team_invitations
                SET state = 'revoked', revoked_at = NOW()
              WHERE team_id = $1
+               AND ($3::text IS NULL OR created_by_user_id = $3)
                AND (state = 'open' OR id IN (SELECT invitation_id FROM cancelled))
             """,
             team_id,
             actor,
+            inviter,
         )
 
     async def _applicant_view(
@@ -298,9 +310,9 @@ class PostgresTeamRepository:
     async def rename_team(
         self, actor: str, team_id: str, *, name: str, expected_revision: int
     ) -> TeamRecord:
-        """Rename at the read revision; the same name changes nothing."""
+        """Rename as an owner or admin; the same name changes nothing."""
         async with self._pool.acquire() as conn, conn.transaction():
-            team = await self._lock_team(conn, actor, team_id, owner=True)
+            team = await self._lock_team(conn, actor, team_id, manager=True)
             if team["revision"] != expected_revision:
                 raise _revision_conflict()
             if team["name"] != name:
@@ -335,12 +347,12 @@ class PostgresTeamRepository:
             team = await self._team_view(conn, actor, team_id)
             rows = await conn.fetch(
                 """
-                SELECT m.user_id, m.joined_at, COALESCE(p.first_name, '') AS first_name,
+                SELECT m.user_id, m.role, m.joined_at, COALESCE(p.first_name, '') AS first_name,
                        COALESCE(p.last_name, '') AS last_name
                   FROM agent_team_members AS m
                   LEFT JOIN agent_user_profiles AS p ON p.user_id = m.user_id
                  WHERE m.team_id = $1 AND m.state = 'active'
-                 ORDER BY (m.user_id = $2) DESC, m.joined_at, m.user_id
+                 ORDER BY (m.user_id = $2) DESC, (m.role = 'admin') DESC, m.joined_at, m.user_id
                 """,
                 team_id,
                 team.owner_user_id,
@@ -351,7 +363,7 @@ class PostgresTeamRepository:
                 first_name=row["first_name"],
                 last_name=row["last_name"],
                 joined_at=row["joined_at"],
-                role="owner" if row["user_id"] == team.owner_user_id else "member",
+                role="owner" if row["user_id"] == team.owner_user_id else row["role"],
             )
             for row in rows
         ]
@@ -379,20 +391,78 @@ class PostgresTeamRepository:
                     code="owner_cannot_leave",
                 )
             await self._depart(conn, team_id, actor, "left")
+            await self._close_pending(conn, team_id, actor, inviter=actor)
             await self._audit(conn, team_id, actor, "member_left", target_user_id=actor)
 
     async def remove_member(self, actor: str, team_id: str, user_id: str) -> None:
-        """Remove another member as the owner."""
+        """Remove a non-owner; an admin may only remove ordinary members."""
         async with self._pool.acquire() as conn, conn.transaction():
-            await self._lock_team(conn, actor, team_id, owner=True)
-            if user_id == actor:
+            team = await self._lock_team(conn, actor, team_id, manager=True)
+            if user_id == team["owner_user_id"]:
+                if user_id != actor:
+                    raise TeamForbidden(_OWNER_ONLY)
                 raise TeamConflict(
                     "Transfer ownership or delete the team before leaving.",
                     code="owner_cannot_leave",
                 )
+            target_role = await conn.fetchval(
+                "SELECT role FROM agent_team_members "
+                "WHERE team_id = $1 AND user_id = $2 AND state = 'active'",
+                team_id,
+                user_id,
+            )
+            if target_role is None:
+                raise TeamNotFound("No such member.")
+            if team["owner_user_id"] != actor and target_role != "member":
+                raise TeamForbidden("Admins may only remove ordinary members.")
             if not await self._depart(conn, team_id, user_id, "removed"):
                 raise TeamNotFound("No such member.")
+            await self._close_pending(conn, team_id, actor, inviter=user_id)
             await self._audit(conn, team_id, actor, "member_removed", target_user_id=user_id)
+
+    async def set_member_role(
+        self, actor: str, team_id: str, user_id: str, *, role: MemberRole, expected_revision: int
+    ) -> TeamRecord:
+        """Grant or revoke admin, checking owner and target under the team lock."""
+        async with self._pool.acquire() as conn, conn.transaction():
+            team = await self._lock_team(conn, actor, team_id, owner=True)
+            if team["revision"] != expected_revision:
+                raise _revision_conflict()
+            if user_id == team["owner_user_id"]:
+                raise TeamConflict(
+                    "Use ownership transfer to change the owner.", code="already_owner"
+                )
+            previous = await conn.fetchval(
+                "SELECT role FROM agent_team_members "
+                "WHERE team_id = $1 AND user_id = $2 AND state = 'active'",
+                team_id,
+                user_id,
+            )
+            if previous is None:
+                raise TeamNotFound("No such member.")
+            if previous != role:
+                await conn.execute(
+                    "UPDATE agent_team_members SET role = $3, updated_at = NOW() "
+                    "WHERE team_id = $1 AND user_id = $2",
+                    team_id,
+                    user_id,
+                    role,
+                )
+                await conn.execute(
+                    "UPDATE agent_teams SET revision = revision + 1, updated_at = NOW() WHERE id = $1",
+                    team_id,
+                )
+                if role == "member":
+                    await self._close_pending(conn, team_id, actor, inviter=user_id)
+                await self._audit(
+                    conn,
+                    team_id,
+                    actor,
+                    "member_role_changed",
+                    target_user_id=user_id,
+                    details={"from": previous, "to": role},
+                )
+            return await self._team_view(conn, actor, team_id)
 
     async def transfer_ownership(
         self, actor: str, team_id: str, *, user_id: str, expected_revision: int
@@ -412,6 +482,13 @@ class PostgresTeamRepository:
             )
             if not target:
                 raise TeamNotFound("No such member.")
+            await conn.execute(
+                "UPDATE agent_team_members SET role = 'member', updated_at = NOW() "
+                "WHERE team_id = $1 AND user_id IN ($2, $3)",
+                team_id,
+                actor,
+                user_id,
+            )
             await conn.execute(
                 "UPDATE agent_teams SET owner_user_id = $2, revision = revision + 1, "
                 "updated_at = NOW() WHERE id = $1",
@@ -437,7 +514,7 @@ class PostgresTeamRepository:
     ) -> tuple[InvitationRecord, bool]:
         """Store an invitation's hash, or return the one this request key made."""
         async with self._pool.acquire() as conn, conn.transaction():
-            await self._lock_team(conn, actor, team_id, owner=True)
+            await self._lock_team(conn, actor, team_id, manager=True)
             existing = await conn.fetchrow(
                 _INVITATION_VIEW
                 + " WHERE i.team_id = $1 AND i.created_by_user_id = $2 AND i.request_key = $3",
@@ -475,12 +552,17 @@ class PostgresTeamRepository:
             return _invitation(row), True
 
     async def list_invitations(self, actor: str, team_id: str) -> list[InvitationRecord]:
-        """Newest first, bounded; older links age out of the owner's view."""
+        """Keep every actionable link visible alongside bounded recent history."""
         async with self._pool.acquire() as conn, conn.transaction():
-            await self._lock_team(conn, actor, team_id, owner=True, lock=False)
+            await self._lock_team(conn, actor, team_id, manager=True, lock=False)
             rows = await conn.fetch(
                 _INVITATION_VIEW
-                + " WHERE i.team_id = $1 ORDER BY i.created_at DESC, i.id LIMIT $2",
+                + """ WHERE i.team_id = $1 AND (
+                    (i.expires_at > NOW() AND (i.state = 'open' OR
+                        (i.state = 'claimed' AND r.state = 'pending')))
+                    OR i.id IN (SELECT id FROM agent_team_invitations WHERE team_id = $1
+                                ORDER BY created_at DESC, id LIMIT $2)
+                ) ORDER BY i.created_at DESC, i.id""",
                 team_id,
                 LISTING_LIMIT,
             )
@@ -489,7 +571,7 @@ class PostgresTeamRepository:
     async def revoke_invitation(self, actor: str, team_id: str, invitation_id: str) -> None:
         """Revoke; a pending request made with the link is cancelled with it."""
         async with self._pool.acquire() as conn, conn.transaction():
-            await self._lock_team(conn, actor, team_id, owner=True)
+            await self._lock_team(conn, actor, team_id, manager=True)
             state = await conn.fetchval(
                 "SELECT state FROM agent_team_invitations WHERE team_id = $1 AND id = $2 FOR UPDATE",
                 team_id,
@@ -581,7 +663,7 @@ class PostgresTeamRepository:
                     )
             except asyncpg.UniqueViolationError:
                 raise TeamConflict(
-                    "You already asked to join this team. Wait for the owner to decide.",
+                    "You already asked to join this team. Wait for an owner or admin to decide.",
                     code="request_pending",
                 ) from None
             await conn.execute(
@@ -606,9 +688,9 @@ class PostgresTeamRepository:
         return [_own_request(row) for row in rows]
 
     async def list_join_requests(self, actor: str, team_id: str) -> list[ApplicantRecord]:
-        """Requests still waiting for the owner, oldest first."""
+        """Requests still waiting for an owner or admin, oldest first."""
         async with self._pool.acquire() as conn, conn.transaction():
-            await self._lock_team(conn, actor, team_id, owner=True, lock=False)
+            await self._lock_team(conn, actor, team_id, manager=True, lock=False)
             rows = await conn.fetch(
                 _APPLICANT_VIEW
                 + " WHERE r.team_id = $1 AND r.state = 'pending' AND i.expires_at > NOW()"
@@ -619,9 +701,9 @@ class PostgresTeamRepository:
         return [_applicant(row) for row in rows]
 
     async def get_join_request(self, actor: str, team_id: str, request_id: str) -> ApplicantRecord:
-        """Read one request of the owner's team."""
+        """Read one request as an owner or admin."""
         async with self._pool.acquire() as conn, conn.transaction():
-            await self._lock_team(conn, actor, team_id, owner=True, lock=False)
+            await self._lock_team(conn, actor, team_id, manager=True, lock=False)
             return await self._applicant_view(conn, team_id, request_id)
 
     async def decide_join_request(
@@ -629,7 +711,7 @@ class PostgresTeamRepository:
     ) -> ApplicantRecord:
         """Approve into membership or decline, within the link's lifetime."""
         async with self._pool.acquire() as conn, conn.transaction():
-            await self._lock_team(conn, actor, team_id, owner=True)
+            await self._lock_team(conn, actor, team_id, manager=True)
             request = await conn.fetchrow(
                 "SELECT r.user_id, r.state, i.expires_at <= NOW() AS expired "
                 "FROM agent_team_join_requests AS r "
@@ -668,7 +750,7 @@ class PostgresTeamRepository:
                     """
                     INSERT INTO agent_team_members (team_id, user_id) VALUES ($1, $2)
                     ON CONFLICT (team_id, user_id) DO UPDATE
-                       SET state = 'active', departed_at = NULL, joined_at = NOW(),
+                       SET state = 'active', role = 'member', departed_at = NULL, joined_at = NOW(),
                            access_generation = agent_team_members.access_generation + 1,
                            updated_at = NOW()
                      WHERE agent_team_members.state <> 'active'
