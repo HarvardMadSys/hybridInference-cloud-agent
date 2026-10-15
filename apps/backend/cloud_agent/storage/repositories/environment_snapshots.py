@@ -420,7 +420,12 @@ class PostgresEnvironmentSnapshotRepository:
     async def summaries(
         self, user_id: str, fingerprints: Mapping[str, str | None]
     ) -> dict[str, dict[str, Any] | None]:
-        """The latest snapshot of each environment's current installation."""
+        """The latest snapshot of each environment's current installation.
+
+        Each environment is matched with its own fingerprint: a copy installs
+        what the original did, so one environment's earlier snapshot can carry
+        another's current fingerprint.
+        """
         wanted = {env: fp for env, fp in fingerprints.items() if fp}
         result: dict[str, dict[str, Any] | None] = dict.fromkeys(fingerprints)
         if not wanted:
@@ -431,13 +436,15 @@ class PostgresEnvironmentSnapshotRepository:
                 SELECT DISTINCT ON (environment_id) environment_id, id, state, created_at,
                        ready_at, last_used_at, size_bytes, detail
                 FROM agent_environment_snapshots
-                WHERE user_id = $1 AND environment_id = ANY($2::text[])
-                  AND setup_fingerprint = ANY($3::text[]) AND state = ANY($4::text[])
+                WHERE user_id = $1
+                  AND (environment_id, setup_fingerprint) IN (
+                      SELECT * FROM unnest($2::text[], $3::text[]))
+                  AND state = ANY($4::text[])
                 ORDER BY environment_id, created_at DESC
                 """,
                 user_id,
                 list(wanted),
-                list(set(wanted.values())),
+                list(wanted.values()),
                 list(_SUMMARY_STATES),
             )
         for row in rows:

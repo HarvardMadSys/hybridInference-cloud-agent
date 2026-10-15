@@ -225,6 +225,28 @@ async def test_a_changed_installation_is_never_matched(store, pool, monkeypatch)
     )["snapshot_id"] == snapshot_id
 
 
+async def test_a_summary_shows_only_a_snapshot_of_that_environments_installation(
+    store, pool, monkeypatch
+):
+    _snapshot_id, _, _run = await _ready_snapshot(store, pool, monkeypatch)
+    env = (await store.environments.list_environments("alice"))[0]
+    # A copy installs exactly what the original did, so it has the same fingerprint.
+    copy = await store.environments.copy_environment(
+        "alice", env["id"], repo="org/other", name="Copy", revision=env["revision"]
+    )
+    changed = await _save(
+        store, environment_id=env["id"], revision=env["revision"], script="npm ci --force"
+    )
+    current = await store.environments.current_setup_fingerprints(
+        "alice", [changed["id"], copy["id"]]
+    )
+    assert current[changed["id"]] != current[copy["id"]]
+    summaries = await store.environment_snapshots.summaries("alice", current)
+    # The original's snapshot is of the installation the copy has now, not of
+    # its own: new tasks of the original install in full.
+    assert summaries == {changed["id"]: None, copy["id"]: None}
+
+
 async def test_use_keeps_a_snapshot_and_shortfalls_queue_a_build(store, pool, monkeypatch):
     snapshot_id, binding, _run = await _ready_snapshot(store, pool, monkeypatch)
     snapshots = store.environment_snapshots
