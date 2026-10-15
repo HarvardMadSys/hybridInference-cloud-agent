@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import json as json_module
+import math
 import re
 import time
 from contextlib import asynccontextmanager
@@ -91,13 +92,48 @@ def is_ref_name(ref: str) -> bool:
     return not any(part.startswith(".") or part.endswith(".lock") for part in ref.split("/"))
 
 
+def rate_limit_wait(response: httpx.Response) -> float | None:
+    """Seconds GitHub asks a rate-limited caller to wait; ``None`` if it did not refuse for that.
+
+    GitHub answers both its primary and its secondary limit with 403 or 429.
+    ``Retry-After``, or an exhausted ``X-RateLimit-Remaining`` with its reset
+    time, says how long. A refusal that says so only in its message waits
+    ``0.0``, which leaves the delay to the caller.
+    """
+    if response.status_code not in (403, 429):
+        return None
+    if retry_after := response.headers.get("retry-after", "").strip():
+        try:
+            seconds = float(retry_after)
+        except ValueError:
+            return 0.0
+        return max(seconds, 0.0) if math.isfinite(seconds) else 0.0
+    if response.headers.get("x-ratelimit-remaining") == "0":
+        try:
+            reset = float(response.headers.get("x-ratelimit-reset", ""))
+        except ValueError:
+            return 0.0
+        return max(reset - time.time(), 0.0) if math.isfinite(reset) else 0.0
+    if response.status_code == 429:
+        return 0.0
+    try:
+        payload = response.json()
+    except ValueError:
+        return None
+    message = payload.get("message") if isinstance(payload, dict) else None
+    return 0.0 if isinstance(message, str) and "rate limit" in message.lower() else None
+
+
 class GitHubAppError(Exception):
     """Raised when App credentials cannot be obtained."""
 
-    def __init__(self, message: str, *, status: int | None = None) -> None:
-        """Record the HTTP status when the failure came from GitHub."""
+    def __init__(
+        self, message: str, *, status: int | None = None, retry_after_s: float | None = None
+    ) -> None:
+        """Record the HTTP status, and any rate-limit wait, when the failure came from GitHub."""
         super().__init__(message)
         self.status = status
+        self.retry_after_s = retry_after_s
 
 
 class UserAuthorizationRevoked(GitHubAppError):
@@ -394,6 +430,7 @@ class GitHubAppCredentials:
             raise GitHubAppError(
                 f"GitHub {method} {path} failed ({response.status_code}): {response.text[:200]}",
                 status=response.status_code,
+                retry_after_s=rate_limit_wait(response),
             )
         return response.json()
 

@@ -18,7 +18,7 @@ import httpx
 import pytest
 from tests.support.storage import AllCapabilities
 
-from cloud_agent import publish_worker
+from cloud_agent import github_app, publish_worker
 from cloud_agent.entitlement import RepoAccessUnavailable
 from cloud_agent.github_app import AppNotInstalled, GitHubAppError
 from cloud_agent.publish_worker import (
@@ -79,6 +79,9 @@ class FakeStore(AllCapabilities):
         self.import_failed: tuple[int, str] | None = None
         self.import_completed: tuple[int, str] | None = None
         self.pushes: list[tuple[int, int, str]] = []
+        self.push_record: bool | Exception = True
+        self.deferred_delay_s: float | None = None
+        self.import_failed_delay_s: float | None = None
         self._record_ok = record_ok
 
     async def claim_for_publish(self):
@@ -100,8 +103,11 @@ class FakeStore(AllCapabilities):
     async def record_snapshot_push(
         self, *, snapshot_id: int, expected_publish_attempt_count: int, commit_sha: str
     ) -> bool:
-        self.pushes.append((snapshot_id, expected_publish_attempt_count, commit_sha))
-        return True
+        if isinstance(self.push_record, Exception):
+            raise self.push_record
+        if self.push_record:
+            self.pushes.append((snapshot_id, expected_publish_attempt_count, commit_sha))
+        return self.push_record
 
     async def record_snapshot_publish(
         self,
@@ -122,10 +128,16 @@ class FakeStore(AllCapabilities):
         self.snapshot_failed = (snapshot_id, detail)
 
     async def defer_snapshot_publish(
-        self, *, snapshot_id: int, expected_publish_attempt_count: int, detail: str
+        self,
+        *,
+        snapshot_id: int,
+        expected_publish_attempt_count: int,
+        detail: str,
+        delay_s: float | None = None,
     ) -> bool:
         self.deferred_expected_attempt = expected_publish_attempt_count
         self.snapshot_deferred = (snapshot_id, detail)
+        self.deferred_delay_s = delay_s
         return True
 
     async def pending_snapshot_base_import(self) -> dict[str, Any] | None:
@@ -135,8 +147,11 @@ class FakeStore(AllCapabilities):
         # pending" instead of as a fake that had drifted from its port.
         return None
 
-    async def record_snapshot_base_import_failure(self, *, snapshot_id: int, detail: str) -> None:
+    async def record_snapshot_base_import_failure(
+        self, *, snapshot_id: int, detail: str, delay_s: float | None = None
+    ) -> None:
         self.import_failed = (snapshot_id, detail)
+        self.import_failed_delay_s = delay_s
 
     async def complete_snapshot_base_import(self, *, snapshot_id: int, commit_sha: str) -> bool:
         self.import_completed = (snapshot_id, commit_sha)
@@ -190,23 +205,89 @@ async def test_empty_queue_is_a_no_op():
 
 
 @pytest.mark.parametrize(
-    ("headers", "body"),
+    ("status", "headers", "body", "wait"),
     [
-        ({"retry-after": "60"}, {"message": "Forbidden"}),
-        ({"x-ratelimit-remaining": "0"}, {"message": "Forbidden"}),
-        ({}, {"message": "You have exceeded a secondary rate limit."}),
+        (403, {"retry-after": "60"}, {"message": "Forbidden"}, 60.0),
+        (429, {"retry-after": "7"}, {}, 7.0),
+        (403, {"x-ratelimit-remaining": "0", "x-ratelimit-reset": "1000600"}, {}, 600.0),
+        (403, {"x-ratelimit-remaining": "0"}, {"message": "Forbidden"}, 0.0),
+        (403, {}, {"message": "You have exceeded a secondary rate limit."}, 0.0),
+        (429, {}, {}, 0.0),
     ],
 )
-async def test_a_rate_limited_403_from_github_is_retried(headers, body):
+async def test_a_rate_limited_refusal_from_github_waits_as_long_as_it_asks(
+    monkeypatch, status, headers, body, wait
+):
     """GitHub answers its rate limits with 403 as well as 429; waiting lifts them."""
-    limited = httpx.Response(403, headers=headers, json=body)
-    assert isinstance(
-        publish_worker._github_api_error("the draft PR", limited), TransientPublishError
+    monkeypatch.setattr(github_app.time, "time", lambda: 1_000_000.0)
+    error = publish_worker._github_api_error(
+        "the draft PR", httpx.Response(status, headers=headers, json=body)
     )
+    assert isinstance(error, TransientPublishError)
+    assert error.retry_after_s == wait
     forbidden = httpx.Response(403, json={"message": "Resource not accessible by integration"})
     assert not isinstance(
         publish_worker._github_api_error("the draft PR", forbidden), TransientPublishError
     )
+    outage = publish_worker._github_api_error("the draft PR", httpx.Response(503))
+    assert isinstance(outage, TransientPublishError) and outage.retry_after_s is None
+
+
+async def test_a_rate_limited_pull_request_step_is_retried_after_githubs_wait(monkeypatch):
+    """The deferral carries the wait; storage, not a fixed interval, decides when."""
+    store = FakeStore(dict(_JOB))
+    _patch_publish(
+        monkeypatch, PublishResult(branch="agent/ajob_1", commit_sha="s", changed_files=["x"])
+    )
+    limited = TransientPublishError("GitHub refused the PR lookup (403)", retry_after_s=1800.0)
+    monkeypatch.setattr(publish_worker, "ensure_draft_pull_request", AsyncMock(side_effect=limited))
+
+    assert await publish_one(store, credential=GitHubCredential("t")) is None
+
+    assert store.snapshot_deferred == (9, "GitHub refused the PR lookup (403)")
+    assert store.deferred_delay_s == 1800.0
+    assert store.snapshot_failed is None
+
+
+async def test_a_rate_limited_credential_mint_is_retried_after_githubs_wait(monkeypatch):
+    """A 403 from the token mint is permanent unless GitHub says it is its rate limit."""
+    store = FakeStore(dict(_JOB))
+    limited = GitHubAppError("GitHub POST mint failed (403)", status=403, retry_after_s=90.0)
+
+    class App:
+        async def token_for(self, repo: str, **kwargs: Any) -> str:
+            raise limited
+
+    monkeypatch.setattr(publish_worker, "publish_patch", Mock())
+    assert await publish_one(store, app_credentials=App()) is None
+
+    assert store.snapshot_deferred is not None and store.snapshot_failed is None
+    assert store.deferred_delay_s == 90.0
+    assert not publish_worker._is_retryable_publication_failure(
+        GitHubAppError("GitHub POST mint failed (403)", status=403)
+    )
+
+
+async def test_the_app_names_githubs_rate_limit_wait_on_its_errors(monkeypatch):
+    """The token mint goes through the App's request helper, which keeps the wait."""
+    monkeypatch.setattr(github_app.time, "time", lambda: 1_000_000.0)
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            403,
+            headers={"x-ratelimit-remaining": "0", "x-ratelimit-reset": "1000120"},
+            json={"message": "API rate limit exceeded"},
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        credentials = github_app.GitHubAppCredentials(
+            github_app.AppConfig(app_id="1", private_key="k", api_base="https://api.test"),
+            client=client,
+        )
+        with pytest.raises(GitHubAppError) as raised:
+            await credentials._request("POST", "/app/installations/1/access_tokens", token="jwt")
+    assert raised.value.status == 403
+    assert raised.value.retry_after_s == 120.0
 
 
 async def test_a_push_stays_recorded_when_its_pull_request_step_fails(monkeypatch):
@@ -216,6 +297,7 @@ async def test_a_push_stays_recorded_when_its_pull_request_step_fails(monkeypatc
 
     def publish(**kwargs):
         seen.update(kwargs)
+        kwargs["before_push"]("pushed")
         return PublishResult(branch="agent/athr_1", commit_sha="pushed", changed_files=["x"])
 
     async def refuse(**_kwargs):
@@ -229,6 +311,37 @@ async def test_a_push_stays_recorded_when_its_pull_request_step_fails(monkeypatc
     assert seen["own_pushes"] == ("c0ffee",)
     assert store.pushes == [(9, 0, "pushed")]
     assert store.snapshot_failed is not None and store.snapshot_recorded is None
+
+
+@pytest.mark.parametrize(
+    ("record", "reason"),
+    [
+        (OSError("database unavailable"), "could not record the commit before pushing it"),
+        (False, "the publication claim was lost before the push"),
+    ],
+)
+async def test_a_commit_that_cannot_be_recorded_is_not_pushed(monkeypatch, record, reason):
+    """An unrecorded push would read as somebody else's to the next publication."""
+    store = FakeStore(dict(_JOB))
+    store.push_record = record
+    pushed: list[str] = []
+
+    def publish(**kwargs):
+        kwargs["before_push"]("c0ffee")
+        pushed.append("c0ffee")
+        return PublishResult(branch="agent/athr_1", commit_sha="c0ffee", changed_files=["x"])
+
+    pull_request = AsyncMock()
+    monkeypatch.setattr(publish_worker, "publish_patch", publish)
+    monkeypatch.setattr(publish_worker, "ensure_draft_pull_request", pull_request)
+
+    assert await publish_one(store, credential=GitHubCredential("t")) is None
+
+    assert pushed == [] and store.pushes == []
+    pull_request.assert_not_awaited()
+    # Retried under the same fence: a lost claim's deferral is refused by storage.
+    assert store.snapshot_deferred is not None and store.snapshot_failed is None
+    assert reason in store.snapshot_deferred[1]
 
 
 async def test_successful_publish_records_the_pr(monkeypatch):

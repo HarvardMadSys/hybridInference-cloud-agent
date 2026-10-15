@@ -113,7 +113,12 @@ class SnapshotRepository(Protocol):
         ...
 
     async def defer_snapshot_publish(
-        self, *, snapshot_id: int, expected_publish_attempt_count: int, detail: str
+        self,
+        *,
+        snapshot_id: int,
+        expected_publish_attempt_count: int,
+        detail: str,
+        delay_s: float | None = None,
     ) -> bool:
         """Spend one durable retry after a transient publication failure.
 
@@ -123,18 +128,20 @@ class SnapshotRepository(Protocol):
         still be retried. Exhaustion fails it and dirties its group, and the
         group's next capture supersedes it. The expected attempt count fences a
         publisher whose stalled claim was already reclaimed. Returns ``False``
-        unless this exact claim is still ``publishing``.
+        unless this exact claim is still ``publishing``. The retry waits the
+        usual interval, or ``delay_s`` when GitHub asked to wait out a rate
+        limit, up to an hour.
         """
         ...
 
     async def record_snapshot_push(
         self, *, snapshot_id: int, expected_publish_attempt_count: int, commit_sha: str
     ) -> bool:
-        """Remember the commit this claim pushed, before its pull request exists.
+        """Remember the commit this claim is about to push, before the push.
 
         A later publication cut from the same base receives it in ``own_pushes``
         and may build on it. Returns ``False`` unless this exact claim is still
-        ``publishing``.
+        ``publishing``; the publisher then does not push.
         """
         ...
 
@@ -172,10 +179,14 @@ class SnapshotRepository(Protocol):
         """Acknowledge that the exact published commit resolves in Docker."""
         ...
 
-    async def record_snapshot_base_import_failure(self, *, snapshot_id: int, detail: str) -> None:
+    async def record_snapshot_base_import_failure(
+        self, *, snapshot_id: int, detail: str, delay_s: float | None = None
+    ) -> None:
         """Keep an idempotent import retry visible without losing the commit.
 
-        The import is not retried before the snapshot's ``retry_at``.
+        The import is not retried before the snapshot's ``retry_at``: the usual
+        interval, or longer when GitHub asked to wait out a rate limit
+        (``delay_s``).
         """
         ...
 

@@ -52,6 +52,7 @@ import httpx
 
 from cloud_agent.entitlement import RepoAccessUnavailable, RepoNotAllowed, require_entitled_repo
 from cloud_agent.environments import EnvironmentEncryptionError
+from cloud_agent.github_app import rate_limit_wait
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.pr_titles import generate_pr_title, is_generic_pr_summary
 from cloud_agent.publisher import (
@@ -116,6 +117,10 @@ _PUBLISH_SCOPE = {"contents": "write", "pull_requests": "write"}
 #: calls: a token with minutes left could expire after the branch was pushed,
 #: and the PR call then fails with a 401, which is not retried.
 _PUBLISH_TOKEN_MIN_TTL_S = 1800.0
+#: How long the git thread waits for its commit to be recorded before the push.
+#: A plain fenced update; a pool that cannot serve it in this time is an outage,
+#: and the publication is retried rather than pushed unrecorded.
+_PUSH_RECORD_TIMEOUT_S = 30.0
 
 _HTTP_STATUS_IN_DETAIL = re.compile(r"\((\d{3})\)|returned error:\s*(\d{3})\b")
 _GIT_DISCONNECT = re.compile(
@@ -143,32 +148,25 @@ def _retryable_github_status(status: int | None) -> bool:
     return status is not None and (status in {408, 429} or 500 <= status < 600)
 
 
-def _rate_limited(response: httpx.Response) -> bool:
-    """Whether GitHub refused for its rate limit, which it may answer with a 403.
-
-    Both the primary and the secondary limit come back as 403 or 429; the
-    headers, or else the message, say which, and that waiting will lift it.
-    """
-    if response.status_code not in (403, 429):
-        return False
-    if response.headers.get("retry-after") or response.headers.get("x-ratelimit-remaining") == "0":
-        return True
-    try:
-        payload = response.json()
-    except ValueError:
-        return False
-    message = payload.get("message") if isinstance(payload, dict) else None
-    return isinstance(message, str) and "rate limit" in message.lower()
-
-
 def _github_api_error(operation: str, response: httpx.Response) -> PublishError:
-    """Classify an API refusal without retaining an untrusted response body."""
-    error = (
-        TransientPublishError
-        if _retryable_github_status(response.status_code) or _rate_limited(response)
-        else PublishError
-    )
-    return error(f"GitHub refused {operation} ({response.status_code})")
+    """Classify an API refusal without retaining an untrusted response body.
+
+    A rate limit, which GitHub may answer with a 403, is retried after the wait
+    it names.
+    """
+    detail = f"GitHub refused {operation} ({response.status_code})"
+    wait = rate_limit_wait(response)
+    if wait is not None:
+        return TransientPublishError(detail, retry_after_s=wait)
+    if _retryable_github_status(response.status_code):
+        return TransientPublishError(detail)
+    return PublishError(detail)
+
+
+def _provider_wait(exc: BaseException) -> float | None:
+    """How long GitHub asked to wait before a retry, when it refused for a rate limit."""
+    wait = getattr(exc, "retry_after_s", None)
+    return wait if isinstance(wait, (int, float)) else None
 
 
 def _pr_base_branch(job: dict[str, Any], fallback: str) -> str:
@@ -586,6 +584,7 @@ async def _retry_base_import(
         await store.snapshot.record_snapshot_base_import_failure(
             snapshot_id=int(snapshot["snapshot_id"]),
             detail=f"published base import retry failed: {exc}",
+            delay_s=_provider_wait(exc),
         )
         return False
 
@@ -652,6 +651,9 @@ def _is_retryable_publication_failure(exc: BaseException) -> bool:
     if isinstance(exc, PatchRejected):
         # Its detail quotes the patch's own paths, not a status or a disconnect.
         return False
+    if _provider_wait(exc) is not None:
+        # A rate limit, whatever its status: waiting lifts it.
+        return True
     status = _http_status(exc)
     if _retryable_github_status(status):
         return True
@@ -832,7 +834,7 @@ async def _publish_claimed_owned(
             detail=detail,
         )
 
-    async def retry(detail: str) -> None:
+    async def retry(detail: str, *, delay_s: float | None = None) -> None:
         """Let storage atomically defer or exhaust this exact claim."""
         logger.warning(
             "agent_job_publish_retrying",
@@ -846,6 +848,7 @@ async def _publish_claimed_owned(
             snapshot_id=int(job["snapshot_id"]),
             expected_publish_attempt_count=expected_publish_attempt_count,
             detail=detail,
+            delay_s=delay_s,
         )
 
     # Re-checked here, before any credential is minted. Publishing happens well
@@ -890,7 +893,7 @@ async def _publish_claimed_owned(
         except Exception as exc:
             detail = f"could not obtain a GitHub credential: {exc}"
             if _is_retryable_publication_failure(exc):
-                await retry(detail)
+                await retry(detail, delay_s=_provider_wait(exc))
             else:
                 await fail(detail)
             return None
@@ -909,9 +912,32 @@ async def _publish_claimed_owned(
             if getattr(store, "environments", None)
             else None
         )
+        loop = asyncio.get_running_loop()
+
+        def record_push(commit_sha: str) -> None:
+            # On the git thread, just before the push. An unrecorded commit on
+            # the branch is somebody else's to the next publication, so a push
+            # this claim could not record does not happen.
+            try:
+                recorded = asyncio.run_coroutine_threadsafe(
+                    store.snapshot.record_snapshot_push(
+                        snapshot_id=int(job["snapshot_id"]),
+                        expected_publish_attempt_count=expected_publish_attempt_count,
+                        commit_sha=commit_sha,
+                    ),
+                    loop,
+                ).result(timeout=_PUSH_RECORD_TIMEOUT_S)
+            except Exception as exc:
+                raise TransientPublishError(
+                    f"could not record the commit before pushing it: {exc!r}"
+                ) from exc
+            if not recorded:
+                raise TransientPublishError("the publication claim was lost before the push")
+
         result = await asyncio.to_thread(
             publish_patch,
             own_pushes=tuple(job.get("own_pushes") or ()),
+            before_push=record_push,
             job_id=job_id,
             branch_id=job.get("branch_id") or job.get("thread_id") or job_id,
             patch=job["patch"],
@@ -923,21 +949,6 @@ async def _publish_claimed_owned(
             auth_env=credential.git_auth_env(),
             **({"known_secrets": environment.secrets()} if environment else {}),
         )
-        # The push is done and the pull request step below can still fail.
-        # Recorded first, the commit is this base's own push to the next
-        # publication, which builds on it instead of finding the branch moved.
-        try:
-            await store.snapshot.record_snapshot_push(
-                snapshot_id=int(job["snapshot_id"]),
-                expected_publish_attempt_count=expected_publish_attempt_count,
-                commit_sha=result.commit_sha,
-            )
-        except Exception:
-            logger.warning(
-                "agent_snapshot_push_not_recorded",
-                extra={"event": "agent_snapshot_push_not_recorded", "job_id": job_id},
-                exc_info=True,
-            )
         title = await generate_pr_title(job, result.changed_files, grants=grants)
         pr_url = await ensure_draft_pull_request(
             repo=job["repo"],
@@ -954,7 +965,7 @@ async def _publish_claimed_owned(
 
             detail = SecretRedactor(environment.secrets()).text(detail)
         if _is_retryable_publication_failure(exc):
-            await retry(detail)
+            await retry(detail, delay_s=_provider_wait(exc))
             return None
         if isinstance(exc, PublishError):
             logger.warning(

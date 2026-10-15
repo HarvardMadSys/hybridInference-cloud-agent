@@ -41,7 +41,7 @@ from cloud_agent_shared.git.source_archive import build_base_bundle
 from cloud_agent_shared.secret_redaction import secret_patterns
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Callable, Iterable
 
 logger = get_logger(__name__)
 
@@ -96,6 +96,11 @@ class TransientPublishError(PublishError):
     work. Gate, patch, and branch-divergence failures remain ``PublishError``
     and require a person rather than a retry loop.
     """
+
+    def __init__(self, message: str, *, retry_after_s: float | None = None) -> None:
+        """Keep how long the provider asked to wait, when it refused for a rate limit."""
+        super().__init__(message)
+        self.retry_after_s = retry_after_s
 
 
 @dataclass
@@ -225,34 +230,36 @@ def _reuse_pushed_commit(
     *,
     branch: str,
     tip: str,
-    base_sha: str,
+    base: str,
     local_sha: str,
-    own_pushes: Iterable[str] = (),
+    own_pushes: frozenset[str] = frozenset(),
     auth_env: dict[str, str] | None = None,
 ) -> str:
-    """Return the commit the branch names for this patch; otherwise the branch moved.
+    """Return the commit to push over the branch's tip; otherwise the branch moved.
 
     A retry builds a second commit for the same tree, because the timestamps
     differ. The branch already points at the first object. Reusing it keeps
     the push idempotent.
 
-    ``own_pushes`` are this group's earlier commits on this base that were
-    pushed but never published, because the pull request step failed after
-    the push. This patch, cut from the same base, carries their changes, so a
-    tip that is one of them is built on rather than refused: the branch
-    fast-forwards to this patch's tree. Either way every commit between the tip
-    and the base must be one of those recorded pushes, with a single parent.
-    Anything else on the branch is still a refusal, and nothing is force-pushed.
+    ``own_pushes`` (lowercase full ids) are this group's earlier commits on this
+    base that were pushed but never published, because a later step failed.
+    This patch, cut from the same base, carries their changes, so a tip that is
+    one of them is built on rather than refused: the branch fast-forwards to
+    this patch's tree. Either way every commit between the tip and ``base``, the
+    full id of the commit the patch was cut from, must be one of those recorded
+    pushes, with a single parent. Anything else on the branch is still a
+    refusal, and nothing is force-pushed.
+
+    The returned commit is checked out; the caller pushes it.
     """
     if tip.lower() == local_sha.lower():
         return local_sha
-    own = {sha.lower() for sha in own_pushes}
     _run_git(
         [
             "fetch",
             "--quiet",
             "--depth",
-            str(len(own) + 2),
+            str(len(own_pushes) + 2),
             "origin",
             "--end-of-options",
             f"refs/heads/{branch}",
@@ -261,47 +268,40 @@ def _reuse_pushed_commit(
         env_extra=auth_env,
         remote=True,
     )
-    fetched = _run_git(["rev-parse", "FETCH_HEAD"], cwd=repo).strip()
-    if not fetched.lower().startswith(tip.lower()) and not tip.lower().startswith(fetched.lower()):
-        raise _branch_moved(branch, fetched, base_sha)
-    base = _run_git(["rev-parse", "--verify", f"{base_sha}^{{commit}}"], cwd=repo).strip().lower()
-    # Publisher commits have exactly one parent. A matching tree and first
-    # parent must never disguise a merge that also carries human ancestry.
+    fetched = _run_git(["rev-parse", "FETCH_HEAD"], cwd=repo).strip().lower()
+    if not fetched.startswith(tip.lower()) and not tip.lower().startswith(fetched):
+        raise _branch_moved(branch, fetched, base)
+    # Everything the tip adds to the base, each commit with its parents, in one
+    # listing. The shallow fetch's last commit lists with none. Publisher
+    # commits have exactly one parent: a matching tree and first parent must
+    # never disguise a merge that also carries human ancestry.
+    parents: dict[str, list[str]] = {}
+    for line in _run_git(["rev-list", "--parents", fetched, f"^{base}"], cwd=repo).splitlines():
+        commit, *listed = line.lower().split()
+        parents[commit] = listed
     current = fetched
-    for _ in range(len(own) + 1):
-        ancestry = _run_git(["rev-list", "--parents", "-n", "1", current], cwd=repo).split()
-        if len(ancestry) != 2:
-            raise _branch_moved(branch, tip, base_sha)
-        parent = ancestry[1].lower()
-        if parent == base:
+    while True:
+        ancestry = parents.pop(current, None)
+        if ancestry is None or len(ancestry) != 1:
+            raise _branch_moved(branch, tip, base)
+        if ancestry[0] == base:
             break
-        if parent not in own:
-            raise _branch_moved(branch, tip, base_sha)
-        current = parent
-    else:
-        raise _branch_moved(branch, tip, base_sha)
-    tip_tree = _run_git(["rev-parse", "FETCH_HEAD^{tree}"], cwd=repo).strip()
+        if ancestry[0] not in own_pushes:
+            raise _branch_moved(branch, tip, base)
+        current = ancestry[0]
+    tip_tree = _run_git(["rev-parse", f"{fetched}^{{tree}}"], cwd=repo).strip()
     local_tree = _run_git(["rev-parse", f"{local_sha}^{{tree}}"], cwd=repo).strip()
     if tip_tree.lower() == local_tree.lower():
         result = fetched
-    elif fetched.lower() in own:
+    elif fetched in own_pushes:
         message = _run_git(["log", "-1", "--format=%B", local_sha], cwd=repo).strip()
         result = _run_git(
             ["commit-tree", local_tree, "-p", fetched, "-m", message], cwd=repo
         ).strip()
     else:
-        raise _branch_moved(branch, tip, base_sha)
-    # Ordinary receive-pack is the final compare-and-set fence: it changes
-    # nothing, or fast-forwards, while the branch still names ``fetched``, and
-    # fails transiently if somebody advanced it while we reconciled.
-    _run_git(
-        ["push", "--quiet", "origin", f"{result}:refs/heads/{branch}"],
-        cwd=repo,
-        env_extra=auth_env,
-        remote=True,
-    )
+        raise _branch_moved(branch, tip, base)
     # The retained bundle names HEAD, so the recorded commit has to be the one
-    # the branch actually points at, not the retry's duplicate object.
+    # the branch will point at, not the retry's duplicate object.
     _run_git(["checkout", "--quiet", "--detach", result], cwd=repo)
     return result
 
@@ -445,6 +445,7 @@ def publish_patch(
     auth_env: dict[str, str] | None = None,
     known_secrets: dict[str, str] | None = None,
     own_pushes: Iterable[str] = (),
+    before_push: Callable[[str], None] | None = None,
 ) -> PublishResult:
     """Validate and publish one run's patch on its stable thread branch.
 
@@ -462,6 +463,8 @@ def publish_patch(
     ``known_secrets`` adds the values of the job's environment secrets to that
     scan. ``own_pushes`` are this group's commits on ``base_sha`` that were
     pushed but never published (see :func:`_reuse_pushed_commit`).
+    ``before_push`` receives the commit about to be pushed, after every local
+    step has succeeded; whatever it raises stops the push.
 
     Raises :class:`PublishError` with a reviewer-readable message on any gate
     violation or git failure.
@@ -476,6 +479,7 @@ def publish_patch(
         raise PatchRejected(f"patch rejected: {gate.reason}")
 
     branch = branch_name_for(branch_id or job_id)
+    own = frozenset(sha.lower() for sha in own_pushes)
     workdir = Path(tempfile.mkdtemp(prefix=f"agent-publish-{job_id}-"))
     try:
         repo = workdir / "repo"
@@ -512,8 +516,13 @@ def publish_patch(
         except PublishError as exc:
             # The branch is not this base, and the patch does not apply onto
             # it. That is the moved-branch refusal. A timeout is not: the
-            # caller retries those.
-            if displaced is not None and "timed out" not in str(exc).lower():
+            # caller retries those. Nor is the group's own earlier push: the
+            # patch carries it, so its failure to apply is the patch's own.
+            if (
+                displaced is not None
+                and displaced.lower() not in own
+                and "timed out" not in str(exc).lower()
+            ):
                 raise _branch_moved(branch, displaced, base_sha) from None
             raise
 
@@ -537,40 +546,42 @@ def publish_patch(
         gate = post
         _run_git(["commit", "--quiet", "--no-verify", "-m", commit_message], cwd=repo)
         commit_sha = _run_git(["rev-parse", "HEAD"], cwd=repo).strip()
+        # The workspace holds the base, which is not the published commit's
+        # parent when that commit is built on unpublished pushes of its own.
+        base = _run_git(["rev-parse", "--verify", f"{base_sha}^{{commit}}"], cwd=repo)
+        base = base.strip().lower()
         if displaced is not None:
             commit_sha = _reuse_pushed_commit(
                 repo,
                 branch=branch,
                 tip=displaced,
-                base_sha=base_sha,
+                base=base,
                 local_sha=commit_sha,
-                own_pushes=own_pushes,
+                own_pushes=own,
                 auth_env=auth_env,
             )
-        # The workspace holds the base, which is not the published commit's
-        # parent when that commit is built on unpublished pushes of its own.
         base_bundle = (
-            build_base_bundle(
-                str(repo),
-                commit=commit_sha,
-                prerequisite=_run_git(
-                    ["rev-parse", "--verify", f"{base_sha}^{{commit}}"], cwd=repo
-                ).strip(),
-            )
+            build_base_bundle(str(repo), commit=commit_sha, prerequisite=base)
             if include_base_bundle
             else None
         )
-
+        # Every local step has succeeded. The caller records the commit before
+        # it is pushed, so a push that lands while this process loses track of
+        # it (a timeout after the remote accepted it, a crash, a later step
+        # that fails) is still the group's own to the next publication.
+        if before_push is not None:
+            before_push(commit_sha)
         # Pinned refspec: this process can only ever write the one branch, and
-        # never force-updates it. A retry whose commit is already the tip does
-        # not push again.
-        if displaced is None:
-            _run_git(
-                ["push", "--quiet", "origin", f"refs/heads/{branch}:refs/heads/{branch}"],
-                cwd=repo,
-                env_extra=auth_env,
-                remote=True,
-            )
+        # never force-updates it. Ordinary receive-pack is also the final
+        # compare-and-set fence: it creates the branch, fast-forwards it, or
+        # changes nothing when it already names this commit, and fails
+        # transiently if somebody advanced it while we reconciled.
+        _run_git(
+            ["push", "--quiet", "origin", f"{commit_sha}:refs/heads/{branch}"],
+            cwd=repo,
+            env_extra=auth_env,
+            remote=True,
+        )
         logger.info(
             "agent_job_published",
             extra={
@@ -591,10 +602,11 @@ def publish_patch(
 
 
 def _head_parent(repo: Path) -> str:
-    """The commit a published one was made on: the base its workspace holds.
+    """The published commit's parent.
 
-    The snapshot's patch was diffed against this commit inside the workspace,
-    so a base bundle needs to carry only what the published commit adds to it.
+    That is the base the workspace holds only when the commit is the first push
+    on it. A commit built on unpublished pushes of its own has one of those as
+    its parent instead; :func:`fetch_base_bundle` then deepens to the base.
     """
     return _run_git(["rev-parse", "--verify", "HEAD^1"], cwd=repo).strip()
 
@@ -608,9 +620,9 @@ def fetch_base_bundle(
 ) -> bytes:
     """Fetch one published commit and return its bounded credential-free bundle.
 
-    Two commits deep, so the parent is at hand to leave out of the bundle. The
-    credential travels as in :func:`publish_patch`: in ``auth_env``, never in
-    ``clone_url``.
+    Two commits deep, so the parent is at hand to leave out of the bundle when
+    it is the base the workspace holds. The credential travels as in
+    :func:`publish_patch`: in ``auth_env``, never in ``clone_url``.
 
     ``base_sha`` is the commit the workspace holds. A commit built on
     unpublished pushes of its own (see :func:`_reuse_pushed_commit`) is not its

@@ -710,3 +710,38 @@ async def test_a_push_recorded_before_its_failed_pull_request_reaches_the_next_c
         )
     assert group["published_base_sha"] != pushed
     assert group["snapshot_state"] == "dirty"
+    async with pool.acquire() as conn:
+        failed = await conn.fetchrow(
+            "SELECT pushed_commit_sha, published_commit_sha FROM agent_sandbox_snapshots "
+            "WHERE id = $1",
+            capture["snapshot_id"],
+        )
+    # Kept apart from the published commit, which only publication sets.
+    assert dict(failed) == {"pushed_commit_sha": pushed, "published_commit_sha": None}
+
+
+@pytest.mark.parametrize(
+    ("delay_s", "waits"),
+    [(None, 30.0), (5.0, 30.0), (600.0, 600.0), (86_400.0, 3600.0)],
+)
+async def test_a_rate_limited_publication_waits_as_long_as_github_asks(store, pool, delay_s, waits):
+    """At least the usual interval, as long as GitHub asked, and never past the hour."""
+    _job, capture, _patch = await _capture_settled_workspace(store, f"wait-{delay_s}")
+    claimed = await store.snapshot.claim_for_publish()
+    assert claimed is not None and claimed["snapshot_id"] == capture["snapshot_id"]
+
+    assert await store.snapshot.defer_snapshot_publish(
+        snapshot_id=capture["snapshot_id"],
+        expected_publish_attempt_count=claimed["publish_attempt_count"],
+        detail="GitHub refused the PR lookup (403)",
+        delay_s=delay_s,
+    )
+
+    async with pool.acquire() as conn:
+        wait = await conn.fetchval(
+            "SELECT EXTRACT(EPOCH FROM retry_at - clock_timestamp()) "
+            "FROM agent_sandbox_snapshots WHERE id = $1",
+            capture["snapshot_id"],
+        )
+    assert waits - 5 < float(wait) <= waits
+    assert await store.snapshot.claim_for_publish() is None

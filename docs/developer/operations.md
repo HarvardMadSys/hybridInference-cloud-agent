@@ -81,8 +81,10 @@ that URL to another origin is refused while the token is kept. Clear the token,
 save the URL, then enter the token again.
 
 For the first deployment of this release, run `alembic upgrade head` through
-`0080_user_ssh_servers`. 0079 and 0080 only add tables and change no existing
-row. Existing hosts begin without a deployment drain
+`0081_snapshot_pushed_commit`. 0079 and 0080 only add tables and change no
+existing row. 0081 adds `agent_sandbox_snapshots.pushed_commit_sha` and moves
+into it the commit of every snapshot that was never published; published
+snapshots are unchanged, and no notice fires. Existing hosts begin without a deployment drain
 owner or release receipt, and 0051 backfills each one with a non-null fence
 epoch. 0066 builds an index on `agent_jobs` concurrently: on a long job history
 it takes a while without blocking the running API, and an interrupted run can
@@ -2289,13 +2291,16 @@ diff from the last published commit, so it carries the failed changes too, and
 is refused in turn if it still holds what was refused. Snapshots still publish
 in epoch order; only a failed one stops holding the later ones back. If the
 failed attempt had already pushed its commit to the `agent/<thread>` branch
-(the draft-PR step failed after the push), that commit is recorded as the
-group's own before the PR step, and the later snapshot builds on it: the branch
-fast-forwards to the later snapshot's tree and the draft PR is opened then. Any
-other commit on the branch, and a push the publisher crashed before recording,
-is still refused as a moved branch until that branch is deleted; the platform
-never force-pushes. A GitHub 403 that reports a rate limit is retried like a
-429.
+(the draft-PR step failed after the push, or the push landed after it timed
+out), that commit is the group's own: the publisher records it as the
+snapshot's `pushed_commit_sha` before pushing it, and does not push a commit it
+could not record. The later snapshot builds on it: the branch fast-forwards to
+the later snapshot's tree and the draft PR is opened then. Any other commit on
+the branch is still refused as a moved branch until that branch is deleted;
+the platform never force-pushes. A GitHub rate limit, answered with a 403 or a
+429, is retried after the wait GitHub names (`Retry-After`, or the reset time
+of an exhausted limit), up to an hour, and so is a published base's import
+whose credential hit one.
 
 Disk-pressure admission and alerting and a non-mutating pre-prompt context
 fingerprint remain deferred. Local functional checks do not establish production

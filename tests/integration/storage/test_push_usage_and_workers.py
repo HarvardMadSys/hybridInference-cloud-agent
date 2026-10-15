@@ -588,6 +588,13 @@ async def test_a_failed_base_import_waits_out_its_retry(store, pool):
     due = await store.snapshot.next_base_import_retry_due()
     assert due is not None
     assert 13 < (due - await pool.fetchval("SELECT clock_timestamp()")).total_seconds() <= 15
+    # A credential that hit GitHub's rate limit waits as long as GitHub asked.
+    await store.snapshot.record_snapshot_base_import_failure(
+        snapshot_id=capture["snapshot_id"], detail="GitHub's rate limit", delay_s=600.0
+    )
+    due = await store.snapshot.next_base_import_retry_due()
+    assert due is not None
+    assert 595 < (due - await pool.fetchval("SELECT clock_timestamp()")).total_seconds() <= 600
 
     await _retry_now(pool, capture["snapshot_id"])
     assert await store.snapshot.pending_snapshot_base_import() is not None

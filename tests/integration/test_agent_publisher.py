@@ -582,7 +582,7 @@ def test_a_retry_that_adopts_its_pushed_commit_still_authenticates_by_environmen
     ]
     assert remote and all(carried for _, carried in remote)
     assert all(secret not in " ".join(args) for args, _ in commands)
-    reconciled = {args[1] for args, _ in remote if any(a.startswith("refs/heads/") for a in args)}
+    reconciled = {args[1] for args, _ in remote if any("refs/heads/" in a for a in args)}
     assert reconciled == {"ls-remote", "fetch", "push"}
 
 
@@ -1251,6 +1251,204 @@ def test_only_the_groups_own_pushes_are_built_on(origin, tmp_path):
     assert _git(["rev-parse", "refs/heads/agent/athr_own"], cwd=Path(clone_url)).strip() == (
         human_tip
     )
+
+
+_PATCH_APP_README_AND_NOTES = _PATCH_APP_AND_README + (
+    "diff --git a/NOTES.md b/NOTES.md\nnew file mode 100644\n"
+    "--- /dev/null\n+++ b/NOTES.md\n@@ -0,0 +1 @@\n+turn three\n"
+)
+
+
+def _tip(clone_url: str, branch: str) -> str:
+    return _git(["rev-parse", f"refs/heads/{branch}"], cwd=Path(clone_url)).strip()
+
+
+def test_the_commit_is_handed_over_before_it_is_pushed(origin):
+    """The caller records the commit while the branch does not yet name it."""
+    clone_url, base_sha = origin
+    seen: list[tuple[str, list[str]]] = []
+
+    def before_push(commit_sha: str) -> None:
+        seen.append((commit_sha, _branches(clone_url)))
+
+    first = publish_patch(
+        job_id="ajob_record",
+        branch_id="athr_record",
+        patch=_PATCH_APP,
+        clone_url=clone_url,
+        base_sha=base_sha,
+        commit_message="agent: turn 1",
+        before_push=before_push,
+    )
+    assert seen == [(first.commit_sha, ["main"])]
+
+    second = publish_patch(
+        job_id="ajob_record_next",
+        branch_id="athr_record",
+        patch=_PATCH_APP_AND_README,
+        clone_url=clone_url,
+        base_sha=base_sha,
+        commit_message="agent: turn 2",
+        own_pushes=[first.commit_sha],
+        before_push=lambda commit_sha: seen.append(
+            (commit_sha, [_tip(clone_url, "agent/athr_record")])
+        ),
+    )
+    assert seen[1] == (second.commit_sha, [first.commit_sha])
+    assert _tip(clone_url, "agent/athr_record") == second.commit_sha
+
+
+@pytest.mark.parametrize("failing", ["bundle", "record"])
+def test_nothing_is_pushed_when_the_bundle_or_the_record_fails(origin, monkeypatch, failing):
+    """A commit built on an own push is pushed last, so a failure leaves no unrecorded one.
+
+    The next publication from the same base then still finds only its own push.
+    """
+    from cloud_agent import publisher as publisher_module
+
+    clone_url, base_sha = origin
+    first = publish_patch(
+        job_id="ajob_fail_late",
+        branch_id="athr_fail_late",
+        patch=_PATCH_APP,
+        clone_url=clone_url,
+        base_sha=base_sha,
+        commit_message="agent: turn 1",
+    )
+    recorded: list[str] = []
+
+    def record(commit_sha: str) -> None:
+        if failing == "record":
+            raise TransientPublishError("could not record the commit before pushing it")
+        recorded.append(commit_sha)
+
+    with monkeypatch.context() as patched:
+        if failing == "bundle":
+
+            def oversized(*_args, **_kwargs):
+                raise publisher_module.PublishError("retained base bundle exceeds its limit")
+
+            patched.setattr(publisher_module, "build_base_bundle", oversized)
+        with pytest.raises(PublishError):
+            publish_patch(
+                job_id="ajob_fail_late_next",
+                branch_id="athr_fail_late",
+                patch=_PATCH_APP_AND_README,
+                clone_url=clone_url,
+                base_sha=base_sha,
+                commit_message="agent: turn 2",
+                include_base_bundle=True,
+                own_pushes=[first.commit_sha],
+                before_push=record,
+            )
+
+    assert recorded == []
+    assert _tip(clone_url, "agent/athr_fail_late") == first.commit_sha
+    later = publish_patch(
+        job_id="ajob_fail_late_later",
+        branch_id="athr_fail_late",
+        patch=_PATCH_APP_README_AND_NOTES,
+        clone_url=clone_url,
+        base_sha=base_sha,
+        commit_message="agent: turn 3",
+        own_pushes=[first.commit_sha],
+    )
+    assert _tip(clone_url, "agent/athr_fail_late") == later.commit_sha
+
+
+def test_each_failed_pull_request_step_is_built_on_in_turn(origin):
+    """Two recorded pushes in a row: the third commit goes on top of both.
+
+    Leaving the first of them out of the record makes it a commit nobody
+    recorded, under one that is, and the branch reads as moved.
+    """
+    clone_url, base_sha = origin
+    branch = "agent/athr_chain_own"
+    commits: list[str] = []
+    for turn, patch in enumerate((_PATCH_APP, _PATCH_APP_AND_README), start=1):
+        commits.append(
+            publish_patch(
+                job_id=f"ajob_chain_{turn}",
+                branch_id="athr_chain_own",
+                patch=patch,
+                clone_url=clone_url,
+                base_sha=base_sha,
+                commit_message=f"agent: turn {turn}",
+                own_pushes=commits,
+            ).commit_sha
+        )
+    with pytest.raises(PublishError, match="has moved"):
+        publish_patch(
+            job_id="ajob_chain_3",
+            branch_id="athr_chain_own",
+            patch=_PATCH_APP_README_AND_NOTES,
+            clone_url=clone_url,
+            base_sha=base_sha,
+            commit_message="agent: turn 3",
+            own_pushes=commits[1:],
+        )
+    assert _tip(clone_url, branch) == commits[1]
+
+    third = publish_patch(
+        job_id="ajob_chain_3",
+        branch_id="athr_chain_own",
+        patch=_PATCH_APP_README_AND_NOTES,
+        clone_url=clone_url,
+        base_sha=base_sha,
+        commit_message="agent: turn 3",
+        own_pushes=commits,
+    )
+    bare = Path(clone_url)
+    assert _git(
+        ["rev-list", "--first-parent", third.commit_sha, f"^{base_sha}"], cwd=bare
+    ).split() == [
+        third.commit_sha,
+        commits[1],
+        commits[0],
+    ]
+
+
+def test_a_patch_that_does_not_apply_over_an_own_push_reports_its_own_failure(origin):
+    """Only somebody else's commit makes an apply failure read as a moved branch."""
+    clone_url, base_sha = origin
+    first = publish_patch(
+        job_id="ajob_apply",
+        branch_id="athr_apply",
+        patch=_PATCH_APP,
+        clone_url=clone_url,
+        base_sha=base_sha,
+        commit_message="agent: turn 1",
+    )
+    broken = (
+        "diff --git a/missing.py b/missing.py\n"
+        "--- a/missing.py\n"
+        "+++ b/missing.py\n"
+        "@@ -1,3 +1,3 @@\n"
+        " context that does not exist\n"
+        "-old\n"
+        "+new\n"
+    )
+    with pytest.raises(PublishError) as own:
+        publish_patch(
+            job_id="ajob_apply_next",
+            branch_id="athr_apply",
+            patch=broken,
+            clone_url=clone_url,
+            base_sha=base_sha,
+            commit_message="agent: turn 2",
+            own_pushes=[first.commit_sha.upper()],
+        )
+    assert "git apply failed" in str(own.value)
+    with pytest.raises(PublishError, match="has moved"):
+        publish_patch(
+            job_id="ajob_apply_next",
+            branch_id="athr_apply",
+            patch=broken,
+            clone_url=clone_url,
+            base_sha=base_sha,
+            commit_message="agent: turn 2",
+        )
+    assert _tip(clone_url, "agent/athr_apply") == first.commit_sha
 
 
 def test_an_import_retry_reaches_the_base_under_any_number_of_own_pushes(origin, tmp_path):
