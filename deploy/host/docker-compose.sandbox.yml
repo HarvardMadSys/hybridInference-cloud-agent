@@ -298,6 +298,11 @@ services:
       # the control plane reads the host from the credential rather than from
       # the request body. The token may then be removed from configuration.
       AGENT_ENROLL_TOKEN: ${AGENT_ENROLL_TOKEN:-}
+      # Agent updates from the admin Settings page: the registry this host
+      # downloads from (empty is the public npm registry) and the Docker
+      # network the download step uses (empty is the default bridge).
+      AGENT_RUNTIME_REGISTRY_URL: ${AGENT_RUNTIME_REGISTRY_URL:-}
+      AGENT_RUNTIME_DOWNLOAD_NETWORK: ${AGENT_RUNTIME_DOWNLOAD_NETWORK:-}
       # Where that credential is kept. **On the persisted volume below**, not
       # in the container's own filesystem: a credential that dies with the
       # container spends a fresh enrollment token on every restart, and

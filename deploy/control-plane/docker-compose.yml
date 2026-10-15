@@ -62,6 +62,9 @@ services:
       AGENT_PGADMIN_BOOTSTRAP_DIR: ${AGENT_PGADMIN_BOOTSTRAP_DIR:-}
       AGENT_PGADMIN_BOOTSTRAP_URL: ${AGENT_PGADMIN_BOOTSTRAP_URL:-}
       AGENT_PGADMIN_BOOTSTRAP_PUBLIC_URL: ${AGENT_PGADMIN_BOOTSTRAP_PUBLIC_URL:-}
+      # Where the admin Settings page looks up each agent's latest release.
+      # Empty means the public npm registry; hosts download from the same one.
+      AGENT_RUNTIME_REGISTRY_URL: ${AGENT_RUNTIME_REGISTRY_URL:-}
       # --- Database ---------------------------------------------------------
       # A database this service owns outright. Sharing the gateway's would
       # reintroduce exactly the coupling the split removes.

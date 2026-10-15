@@ -3032,3 +3032,106 @@ async def test_physical_server_grouping_preserves_deployment_identity_and_labels
         await hosts.authenticate_host(host="gpu-box", credential_hash=hash_secret("gpu-box-kata"))
         is None
     )
+
+
+# ── agent updates from the admin Settings page ───────────────────────────
+
+
+async def _offering(hosts: PostgresHostPoolRepository, host: str, menu: list[str], **report):
+    await hosts.record_host_heartbeat(
+        host=host,
+        runtime_versions={"claude-code": "2.1.220"},
+        runtime_versions_available={"claude-code": menu},
+        runtime_downloads=report or None,
+    )
+
+
+async def test_an_update_waits_for_every_online_host_then_switches_new_chats(
+    store, hosts: PostgresHostPoolRepository
+):
+    """The last host to hold the version is the one whose beat switches."""
+    await _enrol(store, "runner-a", hosts=hosts)
+    await _enrol(store, "runner-b", hosts=hosts)
+    # A draining host is not given new chats, so it is not waited for.
+    await _enrol(store, "runner-c", hosts=hosts)
+    await hosts.set_host_status(host="runner-c", status=HOST_DRAINING)
+
+    target = await hosts.request_runtime_upgrade(
+        runtime="claude-code", version="2.1.300", requested_by="admin@test"
+    )
+    assert target["previous_version"] is None
+    assert target["before"].endswith("Z")
+    assert await hosts.runtime_download_targets() == [
+        {
+            "runtime": "claude-code",
+            "version": "2.1.300",
+            "before": target["before"],
+            "nonce": target["nonce"],
+        }
+    ]
+
+    await _offering(hosts, "runner-a", ["2.1.220", "2.1.300"])
+    await _offering(hosts, "runner-b", ["2.1.220"])
+    assert await hosts.activate_ready_runtime_upgrades() == []
+    _, _, selected, _ = await hosts.runner_pool()
+    assert selected == {}
+
+    await _offering(hosts, "runner-b", ["2.1.220", "2.1.300"])
+    assert await hosts.activate_ready_runtime_upgrades() == ["claude-code"]
+    assert await hosts.activate_ready_runtime_upgrades() == []
+    _, _, selected, _ = await hosts.runner_pool()
+    assert selected == {"claude-code": "2.1.300"}
+
+    upgrades, selection, rows = await hosts.runtime_upgrade_snapshot()
+    assert upgrades["claude-code"]["activated_at"]
+    assert selection == {"claude-code": "2.1.300"}
+    assert [row["host"] for row in rows] == ["runner-a", "runner-b", "runner-c"]
+    # Done targets stay on the wire: a host joining later still downloads them.
+    assert [t["version"] for t in await hosts.runtime_download_targets()] == ["2.1.300"]
+
+
+async def test_with_no_host_online_nothing_switches(store, hosts: PostgresHostPoolRepository):
+    await hosts.request_runtime_upgrade(
+        runtime="claude-code", version="2.1.300", requested_by="admin@test"
+    )
+    assert await hosts.activate_ready_runtime_upgrades() == []
+
+
+async def test_a_heartbeat_stores_its_download_reports(store, hosts: PostgresHostPoolRepository):
+    await _enrol(store, "runner-a", hosts=hosts)
+    report = {
+        "version": "2.1.300",
+        "nonce": "n" * 32,
+        "state": "downloading",
+        "progress": 55,
+        "error": None,
+    }
+
+    await _offering(hosts, "runner-a", ["2.1.220"], **{"claude-code": report})
+    await hosts.record_host_heartbeat(host="runner-a")  # reports nothing: keeps it
+
+    _, _, rows = await hosts.runtime_upgrade_snapshot()
+    assert rows[0]["runtime_downloads"] == {"claude-code": report}
+
+
+async def test_retrying_keeps_the_rollback_and_a_hand_picked_version_withdraws_the_update(
+    store, hosts: PostgresHostPoolRepository
+):
+    await _menu_host(store, "runner-a", hosts=hosts)  # offers 2.1.220 and 2.1.235
+    assert await hosts.set_runtime_version(runtime="claude-code", version="2.1.235")
+
+    first = await hosts.request_runtime_upgrade(
+        runtime="claude-code", version="2.1.300", requested_by="admin@test"
+    )
+    retried = await hosts.request_runtime_upgrade(
+        runtime="claude-code", version="2.1.300", requested_by="admin@test"
+    )
+    # A retry is a new request, and still rolls back to what chats used before.
+    assert retried["nonce"] != first["nonce"]
+    assert retried["previous_version"] == "2.1.235"
+
+    assert await hosts.set_runtime_version(runtime="claude-code", version="2.1.220")
+    assert await hosts.runtime_download_targets() == []
+    upgrades, selection, _ = await hosts.runtime_upgrade_snapshot()
+    assert upgrades == {}
+    assert selection == {"claude-code": "2.1.220"}

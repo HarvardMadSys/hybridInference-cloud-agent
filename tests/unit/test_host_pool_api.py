@@ -66,6 +66,8 @@ class FakeHostPoolStore(AllCapabilities):
         self.tokens: dict[str, dict[str, Any]] = {}
         self.active_host: str | None = None
         self.runtime_versions: dict[str, str] = {}
+        #: Agent updates by runtime, as ``agent_runner_policy.runtime_upgrades``.
+        self.runtime_upgrades: dict[str, dict[str, Any]] = {}
         self.global_settings: dict[str, Any] = {}
         self.archive_settings: dict[str, Any] = {
             "enabled": False,
@@ -210,10 +212,13 @@ class FakeHostPoolStore(AllCapabilities):
         settings_local: dict[str, Any] | None = None,
         sandbox_archive_settings_applied_revision: int | None = None,
         sandbox_archive_settings_revision_reported: bool = False,
+        runtime_downloads: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         row = self.rows.get(host)
         if row is None:
             return None
+        if runtime_downloads is not None:
+            row["runtime_downloads"] = dict(runtime_downloads)
         if row["status"] in (HOST_ENROLLING, HOST_OFFLINE):
             row["status"] = HOST_ONLINE
             row["drain_fence_epoch"] = uuid4()
@@ -404,6 +409,29 @@ class FakeHostPoolStore(AllCapabilities):
 
     async def host_settings(self) -> dict[str, Any]:
         return dict(self.global_settings)
+
+    async def runtime_download_targets(self) -> list[dict[str, str]]:
+        return [
+            {key: target[key] for key in ("version", "before", "nonce")} | {"runtime": runtime}
+            for runtime, target in sorted(self.runtime_upgrades.items())
+        ]
+
+    async def activate_ready_runtime_upgrades(self) -> list[str]:
+        # The store's decision: every online, enrolled host offers the version.
+        menus = [
+            row.get("runtime_versions_available") or {}
+            for row in self.rows.values()
+            if row["status"] == HOST_ONLINE and row.get("enrolled", True)
+        ]
+        switched = []
+        for runtime, target in self.runtime_upgrades.items():
+            if target.get("activated_at") or not menus:
+                continue
+            if all(target["version"] in (menu.get(runtime) or []) for menu in menus):
+                self.runtime_versions[runtime] = target["version"]
+                target["activated_at"] = datetime.now(UTC).isoformat()
+                switched.append(runtime)
+        return switched
 
     async def sandbox_archive_settings(self) -> dict[str, Any]:
         return dict(self.archive_settings)
@@ -1056,6 +1084,95 @@ async def test_a_heartbeat_carries_the_version_stamp_to_the_admin_page(client):
     assert shown["sandbox_runtime"] == ""
     assert shown["sandbox_image_digest"] == "sha256:abc123"
     assert shown["runtime_versions"] == {"claude-code": "1.2.3"}
+
+
+_TARGET = {
+    "version": "2.1.300",
+    "before": "2026-10-15T00:00:00Z",
+    "nonce": "4f1c0d2e9b8a4c6d8e0f1a2b3c4d5e6f",
+    "previous_version": None,
+    "activated_at": None,
+}
+
+
+async def test_a_heartbeat_answer_tells_the_host_which_agent_versions_to_hold(client):
+    """Every target rides every answer, done ones too: a new host still needs them."""
+    async_client, store = client
+    credential = await _enroll(async_client, store)
+    store.runtime_upgrades["claude-code"] = dict(_TARGET)
+    store.runtime_upgrades["codex"] = {**_TARGET, "version": "0.162.1", "activated_at": "x"}
+
+    answer = (
+        await async_client.post(
+            "/v1/agent/host/heartbeat", json={}, headers={"Authorization": f"Bearer {credential}"}
+        )
+    ).json()
+
+    assert answer["runtime_downloads"] == [
+        {
+            "runtime": "claude-code",
+            "version": "2.1.300",
+            "before": _TARGET["before"],
+            "nonce": _TARGET["nonce"],
+        },
+        {
+            "runtime": "codex",
+            "version": "0.162.1",
+            "before": _TARGET["before"],
+            "nonce": _TARGET["nonce"],
+        },
+    ]
+
+
+async def test_a_heartbeat_keeps_only_download_reports_it_can_read(client):
+    """A report from another release costs the host that entry, never the beat."""
+    async_client, store = client
+    credential = await _enroll(async_client, store)
+    report = {
+        "version": "2.1.300",
+        "nonce": _TARGET["nonce"],
+        "state": "downloading",
+        "progress": 40,
+    }
+
+    response = await async_client.post(
+        "/v1/agent/host/heartbeat",
+        json={
+            "runtime_downloads": {
+                "claude-code": report,
+                # Kilo is never downloaded, and a state nobody defined is unreadable.
+                "kilo": report,
+                "codex": {**report, "state": "teleporting"},
+            }
+        },
+        headers={"Authorization": f"Bearer {credential}"},
+    )
+
+    assert response.status_code == 200
+    assert store.rows["runner-a"]["runtime_downloads"] == {"claude-code": {**report, "error": None}}
+
+
+async def test_the_last_host_to_hold_a_version_switches_new_chats_to_it(client):
+    """The beat that makes every online host ready is the one that switches."""
+    async_client, store = client
+    credential = await _enroll(async_client, store)
+    store.runtime_upgrades["claude-code"] = dict(_TARGET)
+    auth = {"Authorization": f"Bearer {credential}"}
+
+    await async_client.post(
+        "/v1/agent/host/heartbeat",
+        json={"runtime_versions_available": {"claude-code": ["2.1.220"]}},
+        headers=auth,
+    )
+    assert store.runtime_versions == {}
+
+    await async_client.post(
+        "/v1/agent/host/heartbeat",
+        json={"runtime_versions_available": {"claude-code": ["2.1.220", "2.1.300"]}},
+        headers=auth,
+    )
+    assert store.runtime_versions == {"claude-code": "2.1.300"}
+    assert store.runtime_upgrades["claude-code"]["activated_at"]
 
 
 async def test_physical_server_metadata_round_trips_without_changing_identity(client):

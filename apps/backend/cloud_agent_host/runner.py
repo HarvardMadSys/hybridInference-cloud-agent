@@ -113,6 +113,11 @@ from cloud_agent_host.measurement_delivery import (
 from cloud_agent_host.profiling_policy import ProfilingPolicySync
 from cloud_agent_host.resident_transport import ResidentLaunch
 from cloud_agent_host.resources import shared_member_resource_rollup
+from cloud_agent_host.runtime_downloads import (
+    ENV_RUNTIME_DOWNLOAD_NETWORK,
+    ENV_RUNTIME_REGISTRY_URL,
+    RuntimeDownloads,
+)
 from cloud_agent_host.runtime_qualification import VERDICT_KEY, HostQualification, adopt_verdict
 from cloud_agent_host.runtime_settings import RuntimeSettings, SandboxArchiveRuntimeSettings
 from cloud_agent_host.runtimes import (
@@ -1044,10 +1049,10 @@ def runtime_version_unavailable(job: ClaimedJob, backend: SandboxBackend) -> str
     left is drift — a host rebuilt with a shorter menu, claiming in the window
     before its heartbeat says so.
 
-    Checked against the image's own labels rather than by probing inside the
-    container. ``install-runtimes.sh`` installs and labels from the same
-    argument and fails the build when a version does not install, so a version
-    the labels offer is a version the image holds.
+    Checked against the version stamp rather than by probing inside the
+    container: the image's labels, which ``install-runtimes.sh`` writes from
+    the same argument it installs, plus the versions this host downloaded since
+    an admin updated the agent, each kept only after its check passed.
     """
     version = job.runtime_version
     if not version:
@@ -1060,10 +1065,10 @@ def runtime_version_unavailable(job: ClaimedJob, backend: SandboxBackend) -> str
     if available is None or version in available:
         return None
     return (
-        f"this attempt is stamped {job.runtime} {version}, which this host's sandbox "
-        f"image does not contain (it offers: {', '.join(available) or 'nothing'}). "
-        "Rebuild the image with that version in its *_EXTRA_VERSIONS, or clear the "
-        "selection on the admin page."
+        f"this attempt is stamped {job.runtime} {version}, which this host does not "
+        f"hold (it offers: {', '.join(available) or 'nothing'}). Update the agent to "
+        "that version again from the admin Settings page so this host downloads it, "
+        "or choose another version there."
     )
 
 
@@ -4009,6 +4014,29 @@ def run_forever(
             if archive_settings.report() != before:
                 pool.wake()
 
+    # The agent versions an admin updated to from the Settings page, kept as
+    # local images beside the sandbox image. Only a container backend has an
+    # image to build them on; any other host reports none and is never asked.
+    downloads: RuntimeDownloads | None = None
+    if isinstance(backend, ContainerBackend):
+        offered = backend.downloaded_versions
+
+        def downloaded() -> None:
+            # Offered on the next beat, not an interval later, and not from a
+            # menu read before the download finished.
+            offered.invalidate()
+            pool.wake()
+
+        downloads = RuntimeDownloads(
+            docker=backend.docker_binary,
+            image=backend.image,
+            namespace=backend.sandbox_namespace,
+            image_menu=backend.image_menu,
+            network=os.environ.get(ENV_RUNTIME_DOWNLOAD_NETWORK, "").strip() or "bridge",
+            registry=os.environ.get(ENV_RUNTIME_REGISTRY_URL, "").strip() or None,
+            on_change=downloaded,
+        )
+
     pool = HostHeartbeat(
         base_url=base_url,
         identity=identity,
@@ -4031,7 +4059,15 @@ def run_forever(
         sandbox_runtime=stamp.get("sandbox_runtime"),
         sandbox_image_digest=stamp.get("sandbox_image_digest"),
         runtime_versions=stamp.get("runtime_versions"),
-        runtime_versions_available=stamp.get("runtime_versions_available"),
+        # Read per beat: the image's own menu, plus whatever has been
+        # downloaded since this runner started.
+        runtime_versions_available=(
+            (lambda: backend.version_stamp().get("runtime_versions_available"))
+            if stamper is not None
+            else stamp.get("runtime_versions_available")
+        ),
+        runtime_downloads_report=None if downloads is None else downloads.report,
+        on_runtime_downloads=None if downloads is None else downloads.apply,
         readiness_marker=_shared_live_ready_file(),
         retained_sandbox_beats=_retained_sandbox_heartbeat_rows,
         # Read per beat, so the age it carries is the age it had when the beat
@@ -4053,6 +4089,8 @@ def run_forever(
         # when a beat does, and a Stop must not wait out the heartbeat interval
         # to be noticed.
         policy_sync.start()
+    if downloads is not None:
+        downloads.start()
     pool.start()
     settings_deadline = time.monotonic() + FIRST_SETTINGS_WAIT_S
     _drain_on_sigterm()
@@ -4068,6 +4106,8 @@ def run_forever(
         if environment_tests is not None:
             environment_tests.close()
         pool.stop()
+        if downloads is not None:
+            downloads.stop()
         retained_stop_worker.close()
         if policy_sync is not None:
             policy_sync.stop()

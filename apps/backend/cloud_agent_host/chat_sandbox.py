@@ -1809,6 +1809,13 @@ class ChatSandboxManager:
         with self._member_reaper_lock:
             ensure_kilo_runtime(self, spec, version)
 
+    def ensure_downloaded_runtime(self, spec: ChatSandboxSpec, runtime: str, version: str) -> None:
+        """Copy a version downloaded after the image was built into this chat."""
+        from cloud_agent_host.runtime_install import ensure_downloaded_runtime
+
+        with self._member_reaper_lock:
+            ensure_downloaded_runtime(self, spec, runtime, version)
+
     def ensure_mcp_helpers(self, spec: ChatSandboxSpec, runtime: str) -> None:
         """Keep existing conversations on the same adapters as new conversations."""
         from cloud_agent_host.mcp_helpers import install_mcp_helpers

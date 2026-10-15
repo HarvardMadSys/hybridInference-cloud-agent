@@ -27,6 +27,7 @@ import {
 import CloudLabSettings from './CloudLabSettings';
 import SandboxArchiveSettingsCard from './SandboxArchiveSettings';
 import { SettingsSearch } from './SettingsSearchPanel';
+import { useRuntimeUpgrades } from './useRuntimeUpgrades';
 import { applicationCategoryName } from './settingsOrganization';
 import { buildSettingsSearchItems, type SettingsSearchItem } from './settingsSearchIndex';
 import { AdminNavigation } from '../AdminNavigation';
@@ -194,6 +195,13 @@ function SettingsView() {
       if (mounted.current && current === sequence.current) setLoading(false);
     }
   }, [fail]);
+
+  const updates = useRuntimeUpgrades({
+    enabled: !denied && selectedTab === 'versions',
+    onAccessDenied: fail,
+    // Finishing switches new chats over, which the version menu shows.
+    onUpdated: () => void load(),
+  });
 
   useEffect(() => {
     mounted.current = true;
@@ -454,10 +462,28 @@ function SettingsView() {
                 onChange={(runtime, version) =>
                   void save(
                     () => setAgentRuntimeVersion(runtime, version || null),
-                    setPool,
+                    (next) => {
+                      setPool(next);
+                      // A version chosen by hand withdraws an update.
+                      void updates.reload();
+                    },
                     version
                       ? `New ${agentName(runtime)} sandboxes use ${version}. Existing sessions keep their version.`
                       : `New ${agentName(runtime)} sandboxes use each server's default version.`,
+                  )
+                }
+                updates={updates.items}
+                updateBusy={updates.busy}
+                updateError={updates.error}
+                onUpdate={(runtime, version) => void updates.update(runtime, version)}
+                onRollback={(runtime, version) =>
+                  void save(
+                    () => setAgentRuntimeVersion(runtime, version),
+                    (next) => {
+                      setPool(next);
+                      void updates.reload();
+                    },
+                    `New ${agentName(runtime)} sandboxes use ${version ?? "each server's default version"} again. Existing sessions keep their version.`,
                   )
                 }
               />

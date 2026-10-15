@@ -7,6 +7,7 @@ import { useSyncExternalStore } from 'react';
 
 import type { AgentRunnerHost, AgentRunnerHostPool, HostSettingDefinition } from '@/lib/api/admin';
 import type { SandboxArchiveSettings } from '@/lib/api/adminArchiveSettings';
+import type { RuntimeUpgradeItem } from '@/lib/api/adminRuntimeUpgrades';
 import type { AgentAdminSettings } from '@/lib/api/adminSettings';
 import type { AgentAccessApi } from '@/lib/api/session';
 import { APIError } from '@/lib/utils/errors';
@@ -53,6 +54,10 @@ vi.mock('@/lib/api/compute', () => ({
   getCloudLabDefaults: vi.fn(),
   saveCloudLabDefaults: vi.fn(),
 }));
+vi.mock('@/lib/api/adminRuntimeUpgrades', () => ({
+  getRuntimeUpgrades: vi.fn(async () => ({ runtimes: [] })),
+  requestRuntimeUpgrade: vi.fn(),
+}));
 vi.mock('@/lib/api/adminArchiveSettings', () => ({
   getSandboxArchiveSettings: vi.fn(),
   updateSandboxArchiveSettings: vi.fn(),
@@ -64,6 +69,7 @@ import {
   getSandboxArchiveSettings,
   updateSandboxArchiveSettings,
 } from '@/lib/api/adminArchiveSettings';
+import { getRuntimeUpgrades, requestRuntimeUpgrade } from '@/lib/api/adminRuntimeUpgrades';
 import { getAgentAdminSettings, setAgentAdminSettings } from '@/lib/api/adminSettings';
 import { getCloudLabDefaults, saveCloudLabDefaults } from '@/lib/api/compute';
 
@@ -369,6 +375,8 @@ beforeEach(() => {
   vi.mocked(saveCloudLabDefaults).mockReset();
   getArchiveSettings.mockReset().mockResolvedValue(archiveSettings);
   updateArchiveSettings.mockReset();
+  vi.mocked(getRuntimeUpgrades).mockReset().mockResolvedValue({ runtimes: [] });
+  vi.mocked(requestRuntimeUpgrade).mockReset();
   vi.mocked(getAgentAdminSettings).mockReset().mockResolvedValue({
     revision: 1,
     definitions: [],
@@ -1978,5 +1986,168 @@ describe('polling and account boundaries', () => {
     finishSave(pool({ runtime_versions: { 'claude-code': '2.1.235' } }));
     await waitFor(() => expect(screen.getByLabelText('Claude Code')).toHaveValue(''));
     expect(screen.queryByText(/sandboxes use/)).not.toBeInTheDocument();
+  });
+});
+
+describe('agent updates', () => {
+  const listUpdates = vi.mocked(getRuntimeUpgrades);
+  const startUpdate = vi.mocked(requestRuntimeUpgrade);
+
+  function update(over: Partial<RuntimeUpgradeItem> = {}): RuntimeUpgradeItem {
+    return {
+      runtime: 'claude-code',
+      current_version: '2.1.220',
+      default_version: '2.1.220',
+      latest_version: '2.1.300',
+      latest_error: null,
+      update_available: true,
+      upgrade: null,
+      ...over,
+    };
+  }
+
+  const downloading = (progress: number) =>
+    update({
+      update_available: false,
+      upgrade: {
+        version: '2.1.300',
+        state: 'downloading',
+        progress,
+        error: null,
+        previous_version: null,
+        requested_at: '2026-10-15T00:00:00Z',
+        activated_at: null,
+      },
+    });
+
+  it('offers the latest release and shows the dinosaur while every server downloads it', async () => {
+    listUpdates.mockResolvedValue({ runtimes: [update()] });
+    startUpdate.mockResolvedValue({ runtimes: [downloading(5)] });
+    renderSettings('Agent versions');
+    const button = await screen.findByRole('button', { name: 'Update to 2.1.300' });
+    listUpdates.mockResolvedValue({ runtimes: [downloading(5)] });
+    fireEvent.click(button);
+    await waitFor(() => expect(startUpdate).toHaveBeenCalledWith('claude-code', '2.1.300'));
+    const bar = await screen.findByRole('progressbar', {
+      name: 'Downloading Claude Code 2.1.300 on every server',
+    });
+    expect(bar).toHaveAttribute('aria-valuenow', '5');
+    expect(screen.queryByRole('button', { name: 'Update to 2.1.300' })).not.toBeInTheDocument();
+  });
+
+  it('reads progress while downloading, then shows the update and refreshes the menu', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    listUpdates.mockResolvedValue({ runtimes: [downloading(40)] });
+    renderSettings('Agent versions');
+    expect(await screen.findByRole('progressbar')).toHaveAttribute('aria-valuenow', '40');
+    const reads = list.mock.calls.length;
+    listUpdates.mockResolvedValue({
+      runtimes: [
+        update({
+          current_version: '2.1.300',
+          update_available: false,
+          upgrade: {
+            ...downloading(100).upgrade!,
+            state: 'updated',
+            progress: 100,
+            activated_at: 'x',
+          },
+        }),
+      ],
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3_100);
+    });
+    expect(
+      await screen.findByText(
+        'Updated to 2.1.300. New chats use it; existing chats keep their version.',
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('progressbar')).not.toBeInTheDocument();
+    // Finishing switched new chats over, so the version menu is read again.
+    await waitFor(() => expect(list.mock.calls.length).toBeGreaterThan(reads));
+  });
+
+  it('rolls an update back to the version new chats used before', async () => {
+    listUpdates.mockResolvedValue({
+      runtimes: [
+        update({
+          current_version: '2.1.300',
+          update_available: false,
+          upgrade: {
+            ...downloading(100).upgrade!,
+            state: 'updated',
+            progress: 100,
+            previous_version: '2.1.235',
+            activated_at: '2026-10-15T00:05:00Z',
+          },
+        }),
+      ],
+    });
+    setVersion.mockResolvedValue(pool({ runtime_versions: { 'claude-code': '2.1.235' } }));
+    renderSettings('Agent versions');
+    fireEvent.click(await screen.findByRole('button', { name: 'Roll back to 2.1.235' }));
+    await waitFor(() => expect(setVersion).toHaveBeenCalledWith('claude-code', '2.1.235'));
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      'New Claude Code sandboxes use 2.1.235 again. Existing sessions keep their version.',
+    );
+  });
+
+  it('says which server failed and retries the same version', async () => {
+    listUpdates.mockResolvedValue({
+      runtimes: [
+        update({
+          update_available: false,
+          upgrade: {
+            ...downloading(0).upgrade!,
+            state: 'failed',
+            error: 'runner-a: npm could not download claude-code 2.1.300',
+          },
+        }),
+      ],
+    });
+    startUpdate.mockResolvedValue({ runtimes: [downloading(5)] });
+    renderSettings('Agent versions');
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Updating to 2.1.300 failed; new chats still use 2.1.220. runner-a: npm could not download',
+    );
+    // It never switched, so there is nothing to roll back.
+    expect(screen.queryByRole('button', { name: /Roll back/ })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(startUpdate).toHaveBeenCalledWith('claude-code', '2.1.300'));
+    expect(await screen.findByRole('progressbar')).toBeInTheDocument();
+  });
+
+  it('says when the agent is current, and why it could not check', async () => {
+    listUpdates.mockResolvedValue({
+      runtimes: [
+        update({ latest_version: '2.1.220', update_available: false }),
+        update({
+          runtime: 'codex',
+          current_version: '0.145.0',
+          latest_version: null,
+          latest_error: 'could not reach the npm registry: ConnectError',
+          update_available: false,
+        }),
+      ],
+    });
+    list.mockResolvedValue(
+      pool({
+        hosts: [
+          host({
+            runtime_versions: { 'claude-code': '2.1.220', codex: '0.145.0' },
+            runtime_versions_available: { 'claude-code': ['2.1.220'], codex: ['0.145.0'] },
+          }),
+        ],
+      }),
+    );
+    renderSettings('Agent versions');
+    expect(await screen.findByText('Up to date (latest 2.1.220).')).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        'Could not check for a newer version: could not reach the npm registry: ConnectError',
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Update to/ })).not.toBeInTheDocument();
   });
 });

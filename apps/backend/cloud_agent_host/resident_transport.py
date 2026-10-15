@@ -812,6 +812,12 @@ class ResidentTransportFactory:
                 # turns without MCP. Refresh it from the host when resuming a
                 # retained container so new native-question commands are
                 # available without replacing its persisted session state.
+                if launch.runtime_version:
+                    # A version an admin updated to after the image was built
+                    # is copied in the first time; one the image has is not.
+                    self._manager.ensure_downloaded_runtime(
+                        spec, runtime_id, launch.runtime_version
+                    )
                 if launch.mcp_server_ids or runtime_id in {"opencode", "kilo"}:
                     self._manager.ensure_mcp_helpers(spec, runtime_id)
                 if runtime_id == "kilo":

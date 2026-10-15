@@ -74,7 +74,7 @@ across restarts. The inventory below records built-in defaults and the
 environment names used for an initial import. Once a setting is registered, the
 service no longer reads it continuously from `.env`.
 
-Run `alembic upgrade head` (through `0072_drop_old_memory_tables`) before
+Run `alembic upgrade head` (through `0073_runtime_upgrades`) before
 starting this release. The updated worker claim query requires
 `agent_jobs.claim_retry_at`, and chat plugin selections require
 `agent_threads.plugins`; existing queued jobs remain immediately eligible and
@@ -296,6 +296,7 @@ permissions, retention and verification requirements.
 | `AGENT_API_DOCS` | **NEW** | Defaults to off. Set to `true` on a development stack to serve `/docs`, `/redoc` and `/openapi.json` on the main API. Off, none of the three is served: the schema is unauthenticated, and the two pages load scripts from a CDN at a floating version. The MCP-only listener never serves them. |
 | `AGENT_MAX_STREAMS_PER_USER` | **NEW** | Default `24`. How many live-update streams (the change stream and job event streams) one account may hold open on one control-plane process; one more answers 429 with `Retry-After`, which the web app backs off on. A browser tab holds one change stream and one stream per conversation it is watching. A missing, non-numeric or non-positive value uses the default. |
 | `AGENT_TRUST_PROXY_HEADERS` | **NEW** | Defaults to off. Set to `true` only when a proxy this deployment controls sits directly in front of the control plane and writes `X-Forwarded-For`; both shipped nginx configurations overwrite it with the peer address. Only the rightmost entry, the one that proxy wrote, is recorded in the admin audit trail, so a proxy that appends instead works too; entries to its left are the caller's own and are ignored. Behind a further proxy, such as a tunnel or load balancer in front of the edge, the recorded address is that hop's unless the edge uses nginx's realip module as its configuration describes. |
+| `AGENT_RUNTIME_REGISTRY_URL` | **NEW** | The npm registry the admin Settings page asks for each agent's latest release, and checks a requested version against. Default `https://registry.npmjs.org`. Set the same value on the hosts, which download from it. An unreachable registry shows on the page and blocks updating; nothing else depends on it. |
 | `AGENT_DEPLOYMENT_SHA` | **NEW** | Exact commit this API serves. Required by the production control-plane Compose stack and exported by `deploy/control-plane/deploy.sh`; do not hand-edit it during a rollout. New retained-group claims require the polling replica to advertise the matching completed host marker, so a pending or failed host deployment cannot claim through a cold-start API. The local stack generates its own stack-scoped marker. |
 
 ### Source control
@@ -668,6 +669,22 @@ suite when intentionally changing a default.
 The Dockerfile still verifies every exact version against the installed binary
 at build time. A dist-tag (`latest`) or range (`^2.1`) fails the build, so its
 labels cannot claim a different binary than the image actually contains.
+
+**Updating an agent without a rebuild.** Claude Code, Codex, OpenCode and pi
+can also be updated from the admin Settings page (_Agent versions_ → _Update
+to …_). Every host then downloads that exact npm release into a local image
+beside the sandbox image, checks it with one real turn through this release's
+driver against a model on loopback, and reports progress on its heartbeat;
+once every online host holds it, new chats use it and existing chats keep
+their version. _Roll back_ returns new chats to the version they used before.
+Kilo is not offered: it runs a source build carrying a reviewed isolation
+patch. The defaults above stay what a host without a selection runs. See the
+[design](docs/agents/specs/2026-10-15-agent-cli-updates-design.zh-CN.md).
+
+| Variable | New? | Notes |
+|---|---|---|
+| `AGENT_RUNTIME_REGISTRY_URL` | **NEW** | Host side of the control-plane row above: the npm registry a host downloads updated agents from. Default `https://registry.npmjs.org`. |
+| `AGENT_RUNTIME_DOWNLOAD_NETWORK` | **NEW** | The Docker network the download step runs on. Default `bridge`. Only npm runs there, with install scripts disabled; the packages' own scripts and the check run later with no network. Name another network only when the host's default bridge cannot reach the registry. |
 
 Each runtime takes a `*_EXTRA_VERSIONS` deployment setting — comma-separated,
 blank by default — naming **additional** versions the same image carries beside

@@ -2,6 +2,9 @@
 
 import { useState } from 'react';
 
+import type { RuntimeUpgradeItem } from '@/lib/api/adminRuntimeUpgrades';
+
+import DinoProgress from './DinoProgress';
 import { SettingsSection } from '../SettingsSection';
 import type { NamedHost } from '../hosts/HostSettings';
 
@@ -80,6 +83,114 @@ function LackingNote({
   );
 }
 
+/** What a rollback returns to, in words. */
+function previousLabel(previous: string | null): string {
+  return previous ?? 'the server default';
+}
+
+/**
+ * Update one agent to npm's latest release, and follow the update through.
+ *
+ * Two states an admin waits on — downloading, then updated — and failed when
+ * a server could not download or check the version, in which case new chats
+ * keep the version they had.
+ */
+export function UpdateControls({
+  item,
+  busy,
+  onUpdate,
+  onRollback,
+}: {
+  item: RuntimeUpgradeItem;
+  busy: boolean;
+  onUpdate: (runtime: string, version: string) => void;
+  onRollback: (runtime: string, version: string | null) => void;
+}) {
+  const name = agentName(item.runtime);
+  const upgrade = item.upgrade;
+  const rollback = upgrade?.activated_at ? (
+    <button
+      type="button"
+      disabled={busy}
+      onClick={() => onRollback(item.runtime, upgrade.previous_version)}
+      className="ui-button ui-button-secondary min-h-11"
+    >
+      Roll back to {previousLabel(upgrade.previous_version)}
+    </button>
+  ) : null;
+
+  if (upgrade?.state === 'downloading') {
+    return (
+      <DinoProgress
+        progress={upgrade.progress}
+        label={`Downloading ${name} ${upgrade.version} on every server`}
+      />
+    );
+  }
+  if (upgrade?.state === 'failed') {
+    return (
+      <div className="mt-3 space-y-2">
+        <p role="alert" className="break-words text-xs leading-5 text-status-error">
+          Updating to {upgrade.version} failed
+          {upgrade.activated_at
+            ? ''
+            : `; new chats still use ${item.current_version ?? 'their version'}`}
+          .{upgrade.error ? ` ${upgrade.error}` : ''}
+        </p>
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => onUpdate(item.runtime, upgrade.version)}
+            className="ui-button ui-button-primary min-h-11"
+          >
+            Try again
+          </button>
+          {rollback}
+        </div>
+      </div>
+    );
+  }
+  const updated =
+    upgrade?.state === 'updated' && item.current_version === upgrade.version ? upgrade : null;
+  return (
+    <div className="mt-3 space-y-2">
+      {updated && (
+        <p className="text-xs leading-5 text-status-success">
+          Updated to {updated.version}. New chats use it; existing chats keep their version.
+        </p>
+      )}
+      {item.update_available && item.latest_version ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => onUpdate(item.runtime, item.latest_version as string)}
+            className="ui-button ui-button-primary min-h-11"
+          >
+            Update to {item.latest_version}
+          </button>
+          {rollback}
+        </div>
+      ) : (
+        <>
+          {item.latest_version && !updated && (
+            <p className="text-xs leading-5 text-muted">
+              Up to date (latest {item.latest_version}).
+            </p>
+          )}
+          {rollback && <div className="flex flex-wrap gap-2">{rollback}</div>}
+        </>
+      )}
+      {item.latest_error && (
+        <p className="break-words text-xs leading-5 text-muted">
+          Could not check for a newer version: {item.latest_error}
+        </p>
+      )}
+    </div>
+  );
+}
+
 function VersionRow({
   runtime,
   versions,
@@ -87,6 +198,10 @@ function VersionRow({
   saved,
   busy,
   onChange,
+  update,
+  updateBusy,
+  onUpdate,
+  onRollback,
 }: {
   runtime: string;
   versions: string[];
@@ -94,6 +209,10 @@ function VersionRow({
   saved: string;
   busy: boolean;
   onChange: (runtime: string, version: string) => void;
+  update?: RuntimeUpgradeItem;
+  updateBusy: boolean;
+  onUpdate: (runtime: string, version: string) => void;
+  onRollback: (runtime: string, version: string | null) => void;
 }) {
   const [draft, setDraft] = useState(saved);
   const unavailable = saved !== '' && !versions.includes(saved);
@@ -151,6 +270,16 @@ function VersionRow({
         </div>
         {pending && <p className="mt-2 text-xs text-muted">Unsaved change</p>}
       </div>
+      {update && (
+        <div className="min-w-0 lg:col-span-2">
+          <UpdateControls
+            item={update}
+            busy={busy || updateBusy}
+            onUpdate={onUpdate}
+            onRollback={onRollback}
+          />
+        </div>
+      )}
     </form>
   );
 }
@@ -161,13 +290,24 @@ export default function AgentVersions({
   selected,
   busy,
   onChange,
+  updates = null,
+  updateBusy = false,
+  updateError = null,
+  onUpdate = () => {},
+  onRollback = () => {},
 }: {
   menu: [string, string[]][];
   servers: NamedHost[];
   selected: Record<string, string>;
   busy: boolean;
   onChange: (runtime: string, version: string) => void;
+  updates?: RuntimeUpgradeItem[] | null;
+  updateBusy?: boolean;
+  updateError?: string | null;
+  onUpdate?: (runtime: string, version: string) => void;
+  onRollback?: (runtime: string, version: string | null) => void;
 }) {
+  const updateFor = new Map((updates ?? []).map((item) => [item.runtime, item]));
   // Keep a saved selection visible if the last server offering it goes away.
   const entries = new Map(menu);
   for (const runtime of Object.keys(selected)) {
@@ -183,7 +323,15 @@ export default function AgentVersions({
       <p className="mt-2 text-sm leading-6 text-muted">
         Default versions for new sandboxes. Existing sessions and their forks keep their version.
       </p>
-      <SettingsSection title="Important" description="Choose the default version for each agent.">
+      <SettingsSection
+        title="Important"
+        description="Update an agent, or pick its version for new sandboxes."
+      >
+        {updateError && (
+          <p role="alert" className="mt-4 break-words text-sm text-status-error">
+            {updateError}
+          </p>
+        )}
         {entries.size === 0 ? (
           <p className="mt-5 rounded-xl bg-surface-muted p-4 text-sm text-muted">
             No server has reported available versions yet.
@@ -201,6 +349,10 @@ export default function AgentVersions({
                   saved={selected[runtime] ?? ''}
                   busy={busy}
                   onChange={onChange}
+                  update={updateFor.get(runtime)}
+                  updateBusy={updateBusy}
+                  onUpdate={onUpdate}
+                  onRollback={onRollback}
                 />
               ))}
           </div>

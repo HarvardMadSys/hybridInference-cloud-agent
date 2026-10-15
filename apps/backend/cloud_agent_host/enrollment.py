@@ -145,6 +145,11 @@ class HostIdentity:
     #: heartbeat. ``None`` means the control plane did not provide the contract,
     #: which is distinct from an explicit policy whose ``enabled`` is false.
     sandbox_archive_settings: dict[str, Any] | None = None
+    #: The agent CLI versions the control plane wants this host to hold, as the
+    #: last answered heartbeat carried them (``runtime_downloads`` targets).
+    #: ``None`` means that control plane does not send them, which leaves
+    #: downloads as they are rather than treating every target as withdrawn.
+    runtime_downloads: list[dict[str, Any]] | None = None
 
 
 def credential_path() -> Path:
@@ -353,6 +358,7 @@ def heartbeat(
     settings_applied: dict[str, int | float] | None = None,
     settings_local: dict[str, int | float] | None = None,
     sandbox_archive_settings_applied_revision: int | None = None,
+    runtime_downloads: dict[str, dict[str, Any]] | None = None,
     on_residencies_lost: Callable[[list[dict[str, Any]]], None] | None = None,
     on_retained_sandboxes_stop: Callable[[list[dict[str, Any]]], None] | None = None,
 ) -> HostIdentity:
@@ -381,6 +387,9 @@ def heartbeat(
     ``settings_applied`` and ``settings_local`` report the runtime settings
     this host applies and what its own environment would give it; the answer's
     ``settings`` are the values an admin set for it, kept on the identity.
+
+    ``runtime_downloads`` reports how far this host has got with each agent
+    version an admin updated to; the answer's targets are kept on the identity.
     """
     answer = _post(
         f"{base_url.rstrip('/')}/v1/agent/host/heartbeat",
@@ -408,6 +417,7 @@ def heartbeat(
             "sandbox_archive_settings_applied_revision": (
                 sandbox_archive_settings_applied_revision
             ),
+            "runtime_downloads": runtime_downloads,
             "physical_host": os.environ.get("AGENT_PHYSICAL_HOST", "").strip() or None,
         },
         bearer=identity.credential,
@@ -460,6 +470,10 @@ def heartbeat(
     # the collector, and the runner is the only thing that should write it.
     policy = answer.get("profiling")
     identity.profiling_policy = policy if isinstance(policy, dict) else None
+    targets = answer.get("runtime_downloads")
+    identity.runtime_downloads = (
+        [item for item in targets if isinstance(item, dict)] if isinstance(targets, list) else None
+    )
     return identity
 
 
@@ -577,7 +591,9 @@ class HostHeartbeat:
         sandbox_runtime: str | None = None,
         sandbox_image_digest: str | None = None,
         runtime_versions: dict[str, str] | None = None,
-        runtime_versions_available: dict[str, list[str]] | None = None,
+        runtime_versions_available: (
+            dict[str, list[str]] | Callable[[], dict[str, list[str]] | None] | None
+        ) = None,
         readiness_marker: str | None = None,
         residency_beats: Callable[[], list[dict[str, Any]]] | None = None,
         retained_sandbox_beats: Callable[[], list[dict[str, Any]] | None] | None = None,
@@ -589,6 +605,8 @@ class HostHeartbeat:
         on_settings: Callable[[dict[str, int]], None] | None = None,
         sandbox_archive_settings_report: Callable[[], int | None] | None = None,
         on_sandbox_archive_settings: Callable[[dict[str, Any] | None], None] | None = None,
+        runtime_downloads_report: Callable[[], dict[str, dict[str, Any]]] | None = None,
+        on_runtime_downloads: Callable[[list[dict[str, Any]]], None] | None = None,
         on_residencies_lost: Callable[[list[dict[str, Any]]], None] | None = None,
         on_retained_sandboxes_stop: Callable[[list[dict[str, Any]]], None] | None = None,
     ) -> None:
@@ -608,6 +626,8 @@ class HostHeartbeat:
         self._sandbox_runtime = sandbox_runtime
         self._sandbox_image_digest = sandbox_image_digest
         self._runtime_versions = runtime_versions
+        # A callable once versions can be downloaded while the host runs: a
+        # version that finished downloading is offered on the next beat.
         self._runtime_versions_available = runtime_versions_available
         #: The deployment publishes the exact target SHA by rewriting this
         #: file, and the control plane's rollout fence admits nothing until a
@@ -644,6 +664,10 @@ class HostHeartbeat:
         self._on_settings = on_settings
         self._sandbox_archive_settings_report = sandbox_archive_settings_report
         self._on_sandbox_archive_settings = on_sandbox_archive_settings
+        # Asked per beat for each download's progress, and told after each
+        # answered beat which versions the control plane wants.
+        self._runtime_downloads_report = runtime_downloads_report
+        self._on_runtime_downloads = on_runtime_downloads
         self._on_residencies_lost = on_residencies_lost
         self._on_retained_sandboxes_stop = on_retained_sandboxes_stop
         self._stop = threading.Event()
@@ -731,7 +755,11 @@ class HostHeartbeat:
                     sandbox_runtime=self._sandbox_runtime,
                     sandbox_image_digest=self._sandbox_image_digest,
                     runtime_versions=self._runtime_versions,
-                    runtime_versions_available=self._runtime_versions_available,
+                    runtime_versions_available=(
+                        self._runtime_versions_available()
+                        if callable(self._runtime_versions_available)
+                        else self._runtime_versions_available
+                    ),
                     residencies=(
                         self._residency_beats() if self._residency_beats is not None else None
                     ),
@@ -745,11 +773,17 @@ class HostHeartbeat:
                     settings_applied=settings_applied,
                     settings_local=settings_local,
                     sandbox_archive_settings_applied_revision=(archive_settings_applied_revision),
+                    runtime_downloads=(
+                        self._runtime_downloads_report()
+                        if self._runtime_downloads_report is not None
+                        else None
+                    ),
                     on_residencies_lost=self._on_residencies_lost,
                     on_retained_sandboxes_stop=self._on_retained_sandboxes_stop,
                 )
                 self._apply_settings()
                 self._apply_sandbox_archive_settings()
+                self._apply_runtime_downloads()
             except HostRemoved:
                 # Definitive: this credential is not one the control plane
                 # accepts. Stop claiming and stop asking — retrying a refusal
@@ -816,6 +850,19 @@ class HostHeartbeat:
                     "event": "agent_sandbox_archive_settings_apply_failed",
                     "host": self._identity.host,
                 },
+            )
+
+    def _apply_runtime_downloads(self) -> None:
+        """Hand the answered download targets on, without stopping the beats."""
+        targets = self._identity.runtime_downloads
+        if self._on_runtime_downloads is None or targets is None:
+            return
+        try:
+            self._on_runtime_downloads(list(targets))
+        except Exception:
+            logger.exception(
+                "agent_runtime_downloads_apply_failed",
+                extra={"event": "agent_runtime_downloads_apply_failed", "host": self._identity.host},
             )
 
     def _wait_for_next_beat(self) -> None:

@@ -8,7 +8,9 @@ they were; only the class holding them changed.
 from __future__ import annotations
 
 import json
+import uuid
 from collections import deque
+from datetime import UTC
 from typing import TYPE_CHECKING
 
 from cloud_agent.capacity_protocol import (
@@ -411,6 +413,7 @@ class PostgresHostPoolRepository:
         settings_local: Mapping[str, int | float] | None = None,
         sandbox_archive_settings_applied_revision: int | None = None,
         sandbox_archive_settings_revision_reported: bool = False,
+        runtime_downloads: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> dict[str, Any] | None:
         """Record a heartbeat, promoting the host to ``online`` when it may.
 
@@ -468,6 +471,8 @@ class PostgresHostPoolRepository:
             settings_applied: The runtime settings the host is applying now.
             settings_local: Legacy environment observations, imported once as
                 per-host overrides. Either ``None`` leaves the report in place.
+            runtime_downloads: This host's progress on each agent version an
+                admin updated to, already validated. ``None`` leaves it.
 
         Returns:
             The updated host row, or ``None`` when the host no longer exists
@@ -511,7 +516,8 @@ class PostgresHostPoolRepository:
                     sandbox_archive_settings_applied_revision = CASE
                         WHEN $15 AND ($16::text IS NULL OR credential_hash = $16) THEN $14
                         ELSE sandbox_archive_settings_applied_revision
-                    END
+                    END,
+                    runtime_downloads = COALESCE($17::jsonb, runtime_downloads)
                 -- The credential the request authenticated with must still be
                 -- the row's: a beat delayed past a re-enrollment or a removal
                 -- must not mark the new machine online, or a removed one alive.
@@ -540,6 +546,9 @@ class PostgresHostPoolRepository:
                 sandbox_archive_settings_applied_revision,
                 sandbox_archive_settings_revision_reported,
                 credential_hash,
+                None
+                if runtime_downloads is None
+                else json.dumps({key: dict(value) for key, value in runtime_downloads.items()}),
             )
             if row is None:
                 return None
@@ -1339,11 +1348,18 @@ class PostgresHostPoolRepository:
         Same lock order as ``set_active_runner_host`` — policy row first, then
         the host rows it is checked against — so the two admin writes and the
         claim's shared read serialize with no cycle to deadlock on.
+
+        A choice made here also withdraws that runtime's update target, in
+        progress or done: the admin picked a version by hand, and an update
+        finishing afterwards must not switch new chats away from it.
         """
         async with self._pool.acquire() as conn, conn.transaction():
-            current = await conn.fetchval(
-                "SELECT runtime_versions FROM agent_runner_policy WHERE id FOR UPDATE"
+            policy = await conn.fetchrow(
+                "SELECT runtime_versions, runtime_upgrades FROM agent_runner_policy "
+                "WHERE id FOR UPDATE"
             )
+            current = None if policy is None else policy["runtime_versions"]
+            upgrades = {} if policy is None else dict(load_json(policy["runtime_upgrades"]) or {})
             if version is not None:
                 offered = await conn.fetch(
                     "SELECT runtime_versions_available FROM agent_runner_hosts "
@@ -1357,18 +1373,187 @@ class PostgresHostPoolRepository:
                 selection.pop(runtime, None)
             else:
                 selection[runtime] = version
+            upgrades.pop(runtime, None)
             # Upsert for the same reason the host pin is one: against a database
             # whose singleton row is missing, a bare UPDATE touches nothing and
             # still reports success.
             await conn.execute(
                 """
-                INSERT INTO agent_runner_policy (id, runtime_versions) VALUES (TRUE, $1::jsonb)
+                INSERT INTO agent_runner_policy (id, runtime_versions, runtime_upgrades)
+                VALUES (TRUE, $1::jsonb, $2::jsonb)
                 ON CONFLICT (id) DO UPDATE
-                SET runtime_versions = EXCLUDED.runtime_versions, updated_at = NOW()
+                SET runtime_versions = EXCLUDED.runtime_versions,
+                    runtime_upgrades = EXCLUDED.runtime_upgrades,
+                    updated_at = NOW()
                 """,
                 json.dumps(selection),
+                json.dumps(upgrades),
             )
             return True
+
+    async def runtime_download_targets(self) -> list[dict[str, str]]:
+        """What every heartbeat answer tells hosts to hold: one version per runtime.
+
+        Done targets stay: a host that joins later, or restarts on a new
+        sandbox image, downloads and checks the version again.
+        """
+        async with self._pool.acquire() as conn:
+            stored = await conn.fetchval("SELECT runtime_upgrades FROM agent_runner_policy WHERE id")
+        targets: list[dict[str, str]] = []
+        for runtime, target in sorted((load_json(stored) or {}).items()):
+            if isinstance(target, dict):
+                targets.append(
+                    {
+                        "runtime": runtime,
+                        "version": str(target.get("version") or ""),
+                        "before": str(target.get("before") or ""),
+                        "nonce": str(target.get("nonce") or ""),
+                    }
+                )
+        return targets
+
+    async def request_runtime_upgrade(
+        self, *, runtime: str, version: str, requested_by: str
+    ) -> dict[str, Any]:
+        """Ask every host to download ``version``, replacing any earlier target.
+
+        A new nonce each time, so asking again for the same version is how a
+        failed download is retried. ``previous_version`` is the selection this
+        replaces — what "Roll back" returns to — or ``None`` for the image
+        default. It is kept from the target being replaced when that one never
+        finished, so retrying does not make the version being retried its own
+        rollback.
+        """
+        async with self._pool.acquire() as conn, conn.transaction():
+            policy = await conn.fetchrow(
+                "SELECT runtime_versions, runtime_upgrades, NOW() AS now "
+                "FROM agent_runner_policy WHERE id FOR UPDATE"
+            )
+            now = await conn.fetchval("SELECT NOW()") if policy is None else policy["now"]
+            selection = {} if policy is None else dict(load_json(policy["runtime_versions"]) or {})
+            upgrades = {} if policy is None else dict(load_json(policy["runtime_upgrades"]) or {})
+            earlier = upgrades.get(runtime)
+            previous = selection.get(runtime)
+            if isinstance(earlier, dict) and not earlier.get("activated_at"):
+                previous = earlier.get("previous_version")
+            stamp = now.astimezone(UTC)
+            target = {
+                "version": version,
+                "before": stamp.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "nonce": uuid.uuid4().hex,
+                "requested_by": requested_by,
+                "requested_at": stamp.isoformat(),
+                "previous_version": previous,
+                "activated_at": None,
+            }
+            upgrades[runtime] = target
+            await conn.execute(
+                """
+                INSERT INTO agent_runner_policy (id, runtime_upgrades) VALUES (TRUE, $1::jsonb)
+                ON CONFLICT (id) DO UPDATE
+                SET runtime_upgrades = EXCLUDED.runtime_upgrades, updated_at = NOW()
+                """,
+                json.dumps(upgrades),
+            )
+            return target
+
+    async def activate_ready_runtime_upgrades(self) -> list[str]:
+        """Switch new chats to each update every online host now holds.
+
+        Called after every heartbeat, so the cheap case — nothing waiting —
+        is one unlocked read. "Every online host" is every enrolled host the
+        claim would hand a new chat to; with none online, nothing switches,
+        because nothing has shown the version runs here.
+
+        Returns the runtimes switched.
+        """
+        async with self._pool.acquire() as conn:
+            stored = await conn.fetchval("SELECT runtime_upgrades FROM agent_runner_policy WHERE id")
+            if not any(
+                isinstance(target, dict) and not target.get("activated_at")
+                for target in (load_json(stored) or {}).values()
+            ):
+                return []
+            async with conn.transaction():
+                policy = await conn.fetchrow(
+                    "SELECT runtime_versions, runtime_upgrades, NOW() AS now "
+                    "FROM agent_runner_policy WHERE id FOR UPDATE"
+                )
+                if policy is None:
+                    return []
+                selection = dict(load_json(policy["runtime_versions"]) or {})
+                upgrades = dict(load_json(policy["runtime_upgrades"]) or {})
+                menus = [
+                    load_json(row["runtime_versions_available"]) or {}
+                    for row in await conn.fetch(
+                        f"""
+                        SELECT runtime_versions_available FROM agent_runner_hosts
+                        WHERE status = '{HOST_ONLINE}' AND credential_hash IS NOT NULL
+                        """
+                    )
+                ]
+                switched: list[str] = []
+                for runtime, target in upgrades.items():
+                    if not isinstance(target, dict) or target.get("activated_at"):
+                        continue
+                    version = target.get("version")
+                    if menus and all(version in (menu.get(runtime) or []) for menu in menus):
+                        selection[runtime] = version
+                        upgrades[runtime] = {
+                            **target,
+                            "activated_at": policy["now"].astimezone(UTC).isoformat(),
+                        }
+                        switched.append(runtime)
+                if switched:
+                    await conn.execute(
+                        """
+                        UPDATE agent_runner_policy
+                        SET runtime_versions = $1::jsonb, runtime_upgrades = $2::jsonb,
+                            updated_at = NOW()
+                        WHERE id
+                        """,
+                        json.dumps(selection),
+                        json.dumps(upgrades),
+                    )
+                return switched
+
+    async def runtime_upgrade_snapshot(
+        self,
+    ) -> tuple[dict[str, Any], dict[str, str], list[dict[str, Any]]]:
+        """Targets, the selection and every host's versions and progress, together.
+
+        One read-only snapshot, so the progress the page shows and the
+        selection it shows beside it are the same moment's.
+        """
+        async with (
+            self._pool.acquire() as conn,
+            conn.transaction(isolation="repeatable_read", readonly=True),
+        ):
+            policy = await conn.fetchrow(
+                "SELECT runtime_versions, runtime_upgrades FROM agent_runner_policy WHERE id"
+            )
+            rows = await conn.fetch(
+                """
+                SELECT host, status, (credential_hash IS NOT NULL) AS enrolled,
+                       runtime_versions, runtime_versions_available, runtime_downloads
+                FROM agent_runner_hosts
+                ORDER BY host
+                """
+            )
+        upgrades = {} if policy is None else dict(load_json(policy["runtime_upgrades"]) or {})
+        selection = {} if policy is None else dict(load_json(policy["runtime_versions"]) or {})
+        hosts = [
+            {
+                "host": row["host"],
+                "status": row["status"],
+                "enrolled": bool(row["enrolled"]),
+                "runtime_versions": load_json(row["runtime_versions"]) or {},
+                "runtime_versions_available": load_json(row["runtime_versions_available"]) or {},
+                "runtime_downloads": load_json(row["runtime_downloads"]) or {},
+            }
+            for row in rows
+        ]
+        return upgrades, selection, hosts
 
     async def host_settings(self) -> dict[str, Any]:
         """The runtime settings set for every server, as stored.

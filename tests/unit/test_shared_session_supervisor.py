@@ -128,6 +128,10 @@ class _Manager:
     def list(self) -> list[ChatSandboxInspection]:
         return list(self.items.values())
 
+    def ensure_downloaded_runtime(self, _spec: ChatSandboxSpec, runtime: str, version: str) -> None:
+        """The image already holds every version these tests launch."""
+        self.runtimes_ensured = [*getattr(self, "runtimes_ensured", []), (runtime, version)]
+
     def network_for(self, _spec: ChatSandboxSpec) -> str:
         return "agent-net"
 

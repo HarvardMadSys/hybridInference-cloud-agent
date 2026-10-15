@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Any
 
 from cloud_agent_host.bounded_output import TextTail, protocol_lines, text_chunks
 from cloud_agent_host.logging_utils import get_logger
+from cloud_agent_host.runtime_images import DownloadedVersions
 from cloud_agent_shared.egress import SandboxNetwork, network_from_env
 from cloud_agent_shared.errors import SandboxError
 
@@ -584,6 +585,10 @@ class ContainerBackend(SandboxBackend):
         # Filled by the first version_stamp() call. The image is pinned for
         # this backend's lifetime, so one inspect answers for every heartbeat.
         self._version_stamp: dict[str, Any] | None = None
+        # Versions an admin updated to after this image was built. Unlike the
+        # labels these change while the process runs, so they are read again
+        # (briefly cached) rather than frozen into the stamp.
+        self.downloaded_versions = DownloadedVersions(docker_binary, sandbox_namespace)
         # Filled by preflight from a real container under the exact runtime
         # passed to jobs. Kept separate so an early image stamp cannot freeze
         # out the later kernel observation.
@@ -622,7 +627,33 @@ class ContainerBackend(SandboxBackend):
         """
         if self._version_stamp is None:
             self._version_stamp = self._collect_version_stamp()
-        return {**self._version_stamp, **self._kernel_probe}
+        stamp = {**self._version_stamp, **self._kernel_probe}
+        downloaded = self.downloaded_versions.versions()
+        if downloaded:
+            # After the image's own menu, whose head is the default: a
+            # downloaded version is offered, never what a job with no
+            # selection runs.
+            menus = {
+                runtime: list(versions)
+                for runtime, versions in (stamp.get("runtime_versions_available") or {}).items()
+            }
+            for runtime, versions in downloaded.items():
+                menu = menus.setdefault(runtime, [])
+                menu.extend(version for version in versions if version not in menu)
+            stamp["runtime_versions_available"] = menus
+        return stamp
+
+    def image_menu(self) -> dict[str, list[str]]:
+        """The versions the sandbox image itself holds, default first.
+
+        What the image was built with, without the versions downloaded since:
+        the one place that has to tell them apart is the copy into a retained
+        chat, which a version already in the image does not need.
+        """
+        if self._version_stamp is None:
+            self._version_stamp = self._collect_version_stamp()
+        menus = self._version_stamp.get("runtime_versions_available") or {}
+        return {runtime: list(versions) for runtime, versions in menus.items()}
 
     def _collect_version_stamp(self) -> dict[str, Any]:
         stamp: dict[str, Any] = {

@@ -596,7 +596,38 @@ def test_version_stamp_reads_runtime_digest_and_baked_versions(monkeypatch):
     assert stamp["runtime_versions"] == {"claude-code": "1.2.3", "codex": "0.5.0"}
     assert stamp["helper_versions"] == {"claude-agent-sdk": "0.2.148"}
     backend.version_stamp()
-    assert len(calls) == 1  # cached — the image is pinned for this process
+    # Cached — the image is pinned for this process. (What has been downloaded
+    # since is asked separately; see the test below.)
+    assert [argv for argv in calls if argv[1:3] == ["image", "inspect"]] == [calls[0]]
+
+
+def test_version_stamp_offers_downloaded_versions_after_the_images_own(monkeypatch):
+    """A version an admin updated to is on the menu, never the default."""
+
+    def fake_run(argv, **kwargs):
+        if argv[1:3] == ["image", "ls"]:
+            # This deployment's downloads, and one tag that is not a download.
+            return SimpleNamespace(
+                returncode=0,
+                stdout=(
+                    "default-agent-runtime:claude-code_2.1.300_0123456789ab\n"
+                    "default-agent-runtime:claude-code_1.2.3_0123456789ab\n"
+                    "default-agent-runtime-candidate:codex_0.9.0_0123456789ab\n"
+                ),
+                stderr="",
+            )
+        return SimpleNamespace(returncode=0, stdout=_inspect_json(), stderr="")
+
+    monkeypatch.setattr("cloud_agent_host.sandbox.subprocess.run", fake_run)
+    backend = ContainerBackend(image="img:1")
+
+    stamp = backend.version_stamp()
+
+    assert stamp["runtime_versions"]["claude-code"] == "1.2.3"
+    assert stamp["runtime_versions_available"]["claude-code"] == ["1.2.3", "2.1.300"]
+    assert stamp["runtime_versions_available"]["codex"] == ["0.5.0"]
+    # The image's own menu, for the one caller that must tell them apart.
+    assert backend.image_menu()["claude-code"] == ["1.2.3"]
 
 
 def test_version_stamp_attests_runc_with_an_empty_string(monkeypatch):

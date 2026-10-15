@@ -157,6 +157,7 @@ class HostPoolRepository(Protocol):
         settings_local: Mapping[str, int | float] | None = None,
         sandbox_archive_settings_applied_revision: int | None = None,
         sandbox_archive_settings_revision_reported: bool = False,
+        runtime_downloads: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> dict[str, Any] | None:
         """Record a heartbeat, promoting the host to ``online`` when it may.
 
@@ -420,7 +421,29 @@ class HostPoolRepository(Protocol):
         Same lock order as ``set_active_runner_host`` — policy row first, then
         the host rows it is checked against — so the two admin writes and the
         claim's shared read serialize with no cycle to deadlock on.
+
+        A choice made here also withdraws that runtime's update target.
         """
+        ...
+
+    async def runtime_download_targets(self) -> list[dict[str, str]]:
+        """The agent versions every heartbeat answer tells hosts to hold."""
+        ...
+
+    async def request_runtime_upgrade(
+        self, *, runtime: str, version: str, requested_by: str
+    ) -> dict[str, Any]:
+        """Ask every host to download ``version``; a new nonce each time."""
+        ...
+
+    async def activate_ready_runtime_upgrades(self) -> list[str]:
+        """Switch new chats to each update every online host now holds."""
+        ...
+
+    async def runtime_upgrade_snapshot(
+        self,
+    ) -> tuple[dict[str, Any], dict[str, str], list[dict[str, Any]]]:
+        """Targets, the selection, and every host's versions and progress."""
         ...
 
     async def host_settings(self) -> dict[str, Any]:

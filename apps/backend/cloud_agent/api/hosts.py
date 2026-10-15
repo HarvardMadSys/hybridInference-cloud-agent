@@ -316,6 +316,7 @@ async def heartbeat_host(
         sandbox_archive_settings_revision_reported=(
             "sandbox_archive_settings_applied_revision" in body.model_fields_set
         ),
+        runtime_downloads=body.runtime_downloads,
     )
     if updated is None:
         # The row vanished, or its credential changed, between authentication
@@ -454,6 +455,22 @@ async def heartbeat_host(
                 )
     if renewals and grants is not None:
         background_tasks.add_task(_renew_residency_grants, grants, list(renewals))
+    # This beat may carry the last report an agent update was waiting for.
+    # Bookkeeping, so a failure here costs the host nothing but a later switch.
+    try:
+        switched = await job_store.host_pool.activate_ready_runtime_upgrades()
+    except Exception:
+        logger.warning(
+            "agent runtime upgrade activation failed",
+            extra={"event": "agent_runtime_upgrade_activation_failed", "host": updated["host"]},
+            exc_info=True,
+        )
+    else:
+        for runtime in switched:
+            logger.info(
+                "agent runtime upgrade activated",
+                extra={"event": "agent_runtime_upgrade_activated", "runtime": runtime},
+            )
     return HostHeartbeatResponse(
         host=updated["host"],
         status=updated["status"],
@@ -473,6 +490,7 @@ async def heartbeat_host(
             await job_store.host_pool.sandbox_archive_settings(),
             updated.get("capabilities") or body.capabilities or [],
         ),
+        runtime_downloads=await job_store.host_pool.runtime_download_targets(),
         residencies_lost=lost,
         retained_sandboxes_stop=retained_stops,
         heartbeat_interval_seconds=HEARTBEAT_INTERVAL_S,

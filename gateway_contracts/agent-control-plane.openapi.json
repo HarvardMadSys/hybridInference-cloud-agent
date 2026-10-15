@@ -11223,6 +11223,22 @@
             ],
             "title": "Runner Version"
           },
+          "runtime_downloads": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "This host's progress on each agent version an admin updated to, keyed by runtime id: version, nonce, state (downloading, ready or failed), progress 0-100 and an error. Entries this control plane cannot read are dropped rather than refusing the heartbeat. Null means not reported and keeps what is stored.",
+            "title": "Runtime Downloads"
+          },
           "runtime_versions": {
             "anyOf": [
               {
@@ -11420,6 +11436,17 @@
               "$ref": "#/components/schemas/RetainedSandboxStop"
             },
             "title": "Retained Sandboxes Stop",
+            "type": "array"
+          },
+          "runtime_downloads": {
+            "description": "Agent CLI versions this host should hold, one per runtime: runtime, version, before (npm dependency cutoff) and nonce. A host downloads and checks each one it lacks and reports its progress on the next heartbeat.",
+            "items": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            "title": "Runtime Downloads",
             "type": "array"
           },
           "sandbox_archive_settings": {
@@ -13416,6 +13443,30 @@
         "title": "RepoBranchesResponse",
         "type": "object"
       },
+      "RequestRuntimeUpgradeRequest": {
+        "description": "Update one agent to one exact npm release.",
+        "properties": {
+          "runtime": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Runtime",
+            "type": "string"
+          },
+          "version": {
+            "description": "An exact npm version; the page sends the latest release.",
+            "maxLength": 64,
+            "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]+)?$",
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "runtime",
+          "version"
+        ],
+        "title": "RequestRuntimeUpgradeRequest",
+        "type": "object"
+      },
       "ResidencyBeat": {
         "description": "One hot sandbox a host reports alive.",
         "properties": {
@@ -13837,6 +13888,180 @@
           "runtime_revision"
         ],
         "title": "RuntimeRefreshInput",
+        "type": "object"
+      },
+      "RuntimeUpgradeItem": {
+        "description": "One agent: what new chats run, and what npm has.",
+        "properties": {
+          "current_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The version new chats use: the admin's selection, else the image default every online host agrees on. Null when servers disagree.",
+            "title": "Current Version"
+          },
+          "default_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The sandbox image's own default, when every online host agrees.",
+            "title": "Default Version"
+          },
+          "latest_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Why the latest release is unknown.",
+            "title": "Latest Error"
+          },
+          "latest_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "npm's latest release.",
+            "title": "Latest Version"
+          },
+          "runtime": {
+            "title": "Runtime",
+            "type": "string"
+          },
+          "update_available": {
+            "default": false,
+            "description": "Whether the latest release is newer than what new chats use.",
+            "title": "Update Available",
+            "type": "boolean"
+          },
+          "upgrade": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RuntimeUpgradeProgress"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "runtime"
+        ],
+        "title": "RuntimeUpgradeItem",
+        "type": "object"
+      },
+      "RuntimeUpgradeProgress": {
+        "description": "An update an admin started, as every online host reports it.",
+        "properties": {
+          "activated_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Activated At"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Which host failed, and why.",
+            "title": "Error"
+          },
+          "previous_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The version new chats used before; null means each server's default.",
+            "title": "Previous Version"
+          },
+          "progress": {
+            "description": "Mean of the online hosts' progress.",
+            "maximum": 100.0,
+            "minimum": 0.0,
+            "title": "Progress",
+            "type": "integer"
+          },
+          "requested_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Requested At"
+          },
+          "state": {
+            "description": "downloading until every online host holds and has checked the version; updated once new chats use it; failed when any host could not download or check it (new chats keep their version).",
+            "enum": [
+              "downloading",
+              "updated",
+              "failed"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "version",
+          "state",
+          "progress"
+        ],
+        "title": "RuntimeUpgradeProgress",
+        "type": "object"
+      },
+      "RuntimeUpgradesResponse": {
+        "description": "Every agent the Settings page can update.",
+        "properties": {
+          "runtimes": {
+            "items": {
+              "$ref": "#/components/schemas/RuntimeUpgradeItem"
+            },
+            "title": "Runtimes",
+            "type": "array"
+          }
+        },
+        "required": [
+          "runtimes"
+        ],
+        "title": "RuntimeUpgradesResponse",
         "type": "object"
       },
       "RuntimeUsage": {
@@ -23073,6 +23298,108 @@
           }
         },
         "summary": "List Admin Llm Requests"
+      }
+    },
+    "/admin/agent/runtime-upgrades": {
+      "get": {
+        "description": "Each agent's version for new chats, npm's latest, and any update's progress.",
+        "operationId": "list_runtime_upgrades_admin_agent_runtime_upgrades_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RuntimeUpgradesResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Runtime Upgrades"
+      },
+      "post": {
+        "description": "Update one agent: every host downloads and checks the version, then new chats use it.\n\nAsking again for the same version retries it. Existing chats keep the\nversion they started on.",
+        "operationId": "request_runtime_upgrade_admin_agent_runtime_upgrades_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RequestRuntimeUpgradeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RuntimeUpgradesResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Request Runtime Upgrade"
       }
     },
     "/admin/agent/runtime-versions": {

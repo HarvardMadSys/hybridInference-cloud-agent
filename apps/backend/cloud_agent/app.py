@@ -156,6 +156,7 @@ def create_app() -> FastAPI:
         admin_measurements,
         admin_profiling_control,
         admin_runs,
+        admin_runtime_upgrades,
         admin_sandboxes,
         admin_settings,
         admin_steps,
@@ -236,6 +237,7 @@ def create_app() -> FastAPI:
     # credential, and it should be removable without editing the host API.
     app.include_router(host_profiling.router)
     app.include_router(admin_hosts.router)
+    app.include_router(admin_runtime_upgrades.router)
     app.include_router(admin_compute.router)
     # A new compute node reports its SSH host keys here with a one-time token,
     # before the control plane connects to it. Public by necessity: the node

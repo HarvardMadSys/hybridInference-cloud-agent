@@ -162,6 +162,12 @@ from cloud_agent.schemas.resources import (
     WorkerToolCallResources,
     WorkerTurnResourcesRequest,
 )
+from cloud_agent.schemas.runtime_upgrades import (
+    RequestRuntimeUpgradeRequest,
+    RuntimeUpgradeItem,
+    RuntimeUpgradeProgress,
+    RuntimeUpgradesResponse,
+)
 from cloud_agent.schemas.session import (
     SessionUserResponse,
 )
@@ -324,12 +330,16 @@ __all__ = [
     "QueuePausedReason",
     "ReleaseHostDrainFenceRequest",
     "RepoBranchesResponse",
+    "RequestRuntimeUpgradeRequest",
     "ResidencyBeat",
     "ResourceMetricBrief",
     "ResourceMetricStatus",
     "RetainedSandboxBeat",
     "RetainedSandboxStop",
     "RunResourceSummary",
+    "RuntimeUpgradeItem",
+    "RuntimeUpgradeProgress",
+    "RuntimeUpgradesResponse",
     "SandboxArchiveSettingsResponse",
     "SandboxCheckpointBeat",
     "SandboxCheckpointMember",

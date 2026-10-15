@@ -967,3 +967,44 @@ def test_a_host_without_a_collector_sends_an_absent_block(monkeypatch) -> None:
     beat._run()
 
     assert bodies[0]["capacity"] is None
+
+
+def test_each_beat_reports_downloads_and_hands_on_the_targets(monkeypatch) -> None:
+    """Progress goes out with every beat; the answered targets reach the downloader."""
+    identity = enrollment.HostIdentity(host="h1", credential="c")
+    menus = [{"claude-code": ["2.1.220"]}, {"claude-code": ["2.1.220", "2.1.300"]}]
+    reports = [
+        {"claude-code": {"version": "2.1.300", "state": "downloading", "progress": 55}},
+        {"claude-code": {"version": "2.1.300", "state": "ready", "progress": 100}},
+    ]
+    target = {"runtime": "claude-code", "version": "2.1.300", "before": "x", "nonce": "n"}
+    handed: list[list[dict]] = []
+    bodies: list[dict] = []
+    beat = enrollment.HostHeartbeat(
+        base_url="http://cp",
+        identity=identity,
+        # Read per beat: a version that finished downloading is offered at once.
+        runtime_versions_available=lambda: menus[len(bodies)],
+        runtime_downloads_report=lambda: reports[len(bodies)],
+        on_runtime_downloads=handed.append,
+    )
+
+    def post(url, body, bearer=""):
+        bodies.append(body)
+        if len(bodies) == 2:
+            beat._stop.set()
+            # A control plane from before this feature sends no targets.
+            return {"status": "online", "heartbeat_interval_seconds": 0.001}
+        return {
+            "status": "online",
+            "heartbeat_interval_seconds": 0.001,
+            "runtime_downloads": [target, "not a target"],
+        }
+
+    monkeypatch.setattr(enrollment, "_post", post)
+    beat._run()
+
+    assert [body["runtime_versions_available"] for body in bodies] == menus
+    assert [body["runtime_downloads"] for body in bodies] == reports
+    # Only the first answer had targets; the second leaves downloads as they are.
+    assert handed == [[target]]

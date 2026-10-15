@@ -25,6 +25,8 @@ from cloud_agent.schemas.workers import (
     WorkerSandboxMember,  # noqa: TC001 — Pydantic resolves annotations at runtime.
 )
 from cloud_agent_shared.host_settings import MAX_SETTINGS_KEYS
+from cloud_agent_shared.runtime_catalog import downloadable_runtimes
+from cloud_agent_shared.runtime_downloads import DownloadReport
 from cloud_agent_shared.sandbox_resources import (
     SandboxResourceSample,
     parse_sandbox_resource_sample,
@@ -402,6 +404,36 @@ class HostHeartbeatRequest(BaseModel):
             "keeps the last observation for compatibility with older runners."
         ),
     )
+    runtime_downloads: dict[str, dict[str, Any]] | None = Field(
+        None,
+        description=(
+            "This host's progress on each agent version an admin updated to, "
+            "keyed by runtime id: version, nonce, state (downloading, ready or "
+            "failed), progress 0-100 and an error. Entries this control plane "
+            "cannot read are dropped rather than refusing the heartbeat. Null "
+            "means not reported and keeps what is stored."
+        ),
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_unusable_runtime_downloads(cls, data: Any) -> Any:
+        """Keep only download reports this control plane can read.
+
+        Optional in the same way as capacity: a host from another release may
+        report a runtime or a shape unknown here, and that must cost it the
+        entry, never the heartbeat.
+        """
+        if not isinstance(data, dict) or data.get("runtime_downloads") is None:
+            return data
+        raw = data["runtime_downloads"]
+        kept: dict[str, dict[str, Any]] = {}
+        if isinstance(raw, dict):
+            for runtime, value in raw.items():
+                report = DownloadReport.from_wire(value)
+                if runtime in downloadable_runtimes() and report is not None:
+                    kept[runtime] = report.to_wire()
+        return {**data, "runtime_downloads": kept}
 
     @model_validator(mode="before")
     @classmethod
@@ -459,6 +491,15 @@ class HostHeartbeatResponse(_SandboxManagerWireNames):
         ),
     )
     sandbox_archive_settings: HostSandboxArchiveSettings
+    runtime_downloads: list[dict[str, str]] = Field(
+        default_factory=list,
+        description=(
+            "Agent CLI versions this host should hold, one per runtime: "
+            "runtime, version, before (npm dependency cutoff) and nonce. A host "
+            "downloads and checks each one it lacks and reports its progress "
+            "on the next heartbeat."
+        ),
+    )
     residencies_lost: list[ResidencyBeat] = Field(
         default_factory=list,
         description=(

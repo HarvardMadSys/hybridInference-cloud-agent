@@ -202,6 +202,24 @@
     }
   }
 
+  /* The update progress bar's dinosaur: two strides, one shown at a time. */
+  .ui-dino-stride-a {
+    animation: ui-dino-stride 240ms steps(1, end) infinite;
+  }
+
+  .ui-dino-stride-b {
+    animation: ui-dino-stride 240ms steps(1, end) infinite reverse;
+  }
+
+  @keyframes ui-dino-stride {
+    0% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0;
+    }
+  }
+
   @keyframes ui-welcome-in {
     from {
       opacity: 0;
@@ -248,6 +266,11 @@
   .ui-button:active:not(:disabled),
   .ui-icon-button:active:not(:disabled) {
     transform: none;
+  }
+
+  /* A standing dinosaur, rather than one with both strides drawn at once. */
+  .ui-dino-stride-b {
+    opacity: 0;
   }
 }
 
