@@ -11663,6 +11663,12 @@
             "title": "Generation",
             "type": "integer"
           },
+          "mcp_credential": {
+            "default": "",
+            "description": "The MCP relay credential for this residency's process. It names the residency, not this attempt, so the process keeps it for every later turn it serves. Empty from a control plane that predates it; the host then uses the turn's own MCP token.",
+            "title": "Mcp Credential",
+            "type": "string"
+          },
           "model": {
             "anyOf": [
               {

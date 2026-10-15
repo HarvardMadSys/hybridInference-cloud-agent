@@ -465,6 +465,15 @@ class HostResidencyEstablishResponse(BaseModel):
     ttl_seconds: float
     credential: str | None = None
     model: str | None = None
+    mcp_credential: str = Field(
+        "",
+        description=(
+            "The MCP relay credential for this residency's process. It names the "
+            "residency, not this attempt, so the process keeps it for every later "
+            "turn it serves. Empty from a control plane that predates it; the "
+            "host then uses the turn's own MCP token."
+        ),
+    )
 
 
 class HostHeartbeatResponse(_SandboxManagerWireNames):

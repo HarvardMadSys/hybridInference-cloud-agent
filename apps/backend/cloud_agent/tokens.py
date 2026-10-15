@@ -48,12 +48,18 @@ import json
 import secrets
 from typing import Any
 
+from cloud_agent_shared.shared_protocol import RESIDENCY_MCP_CREDENTIAL_PREFIX
+
 # Domain separation: a signature over this prefix is meaningless anywhere else.
 _TOKEN_PREFIX = "ajt"
 _SIGNING_CONTEXT = b"agent-job-worker-token:v1"
 
 # Host credentials get their own prefix — see ``mint_host_token``.
 _HOST_TOKEN_PREFIX = "aht"
+
+# A resident process's MCP credential — see ``mint_residency_mcp_token``. The
+# host recognizes it by this prefix, so the two are spelled from one constant.
+_RESIDENCY_MCP_PREFIX = RESIDENCY_MCP_CREDENTIAL_PREFIX.rstrip(".")
 
 
 class InvalidAgentToken(Exception):
@@ -122,6 +128,16 @@ _VALID_SCOPES = (SCOPE_FULL, SCOPE_MODEL, SCOPE_MCP)
 # Separate prefixes make the two mutually unparseable, so the check is
 # structural rather than a comparison somebody has to remember to write.
 SCOPE_HOST = "host"
+
+# ``mcp_residency`` is the MCP credential of a chat's resident process, which
+# outlives the turn it started for. A per-attempt ``mcp`` token cannot serve
+# it: the next turn is a different job, so the process would have to restart
+# for every message just to receive a fresh token. This one names the
+# residency instead — the thread and the residency generation — and the relay
+# resolves it, on every call, to the attempt of that thread currently running
+# under that residency. Like a host token it has its own prefix, so neither
+# parser can be handed the other's credential.
+SCOPE_MCP_RESIDENCY = "mcp_residency"
 
 
 def mint_worker_token(
@@ -237,3 +253,59 @@ def parse_host_token(token: str) -> dict[str, Any]:
         return {"host": host, "scope": SCOPE_HOST}
     except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
         raise InvalidHostToken("bad claims") from exc
+
+
+def mint_residency_mcp_token(*, thread_id: str, residency_generation: int) -> str:
+    """Mint the MCP credential a chat's resident process keeps across turns.
+
+    Stateless and deterministic: every mint for one residency yields the same
+    credential, so nothing has to be stored to recognize it again. It needs no
+    renewal or revocation of its own. It authorizes only while that residency
+    generation is the chat's current, unexpired one *and* one of the chat's
+    turns is running under it; a rotated or released residency, a deleted
+    chat, a stopped turn or an idle process leaves it buying nothing.
+    """
+    if not thread_id or residency_generation <= 0:
+        raise ValueError("a residency MCP credential needs a thread and a residency generation")
+    payload = json.dumps(
+        {"t": thread_id, "r": residency_generation, "s": SCOPE_MCP_RESIDENCY},
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    signature = hmac.new(_signing_key(), payload, hashlib.sha256).digest()
+    return f"{_RESIDENCY_MCP_PREFIX}.{_b64encode(payload)}.{_b64encode(signature)}"
+
+
+def parse_residency_mcp_token(token: str) -> dict[str, Any]:
+    """Verify a residency MCP credential and return the residency it names.
+
+    Returns ``{"thread_id", "residency_generation"}``. Like a host token's
+    signature, this proves only that this service minted it; whether it still
+    authorizes anything is the relay's lookup.
+    """
+    if not token:
+        raise InvalidAgentToken("empty token")
+    parts = token.split(".")
+    if len(parts) != 3 or parts[0] != _RESIDENCY_MCP_PREFIX:
+        raise InvalidAgentToken("malformed token")
+    try:
+        payload = _b64decode(parts[1])
+        signature = _b64decode(parts[2])
+    except (ValueError, TypeError) as exc:
+        raise InvalidAgentToken("undecodable token") from exc
+
+    expected = hmac.new(_signing_key(), payload, hashlib.sha256).digest()
+    if not hmac.compare_digest(signature, expected):
+        raise InvalidAgentToken("bad signature")
+
+    try:
+        claims = json.loads(payload)
+        if str(claims.get("s")) != SCOPE_MCP_RESIDENCY:
+            raise InvalidAgentToken("not a residency MCP credential")
+        thread_id = str(claims["t"])
+        generation = int(claims["r"])
+        if not thread_id or generation <= 0:
+            raise InvalidAgentToken("bad claims")
+        return {"thread_id": thread_id, "residency_generation": generation}
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+        raise InvalidAgentToken("bad claims") from exc

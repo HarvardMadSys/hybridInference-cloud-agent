@@ -44,6 +44,7 @@ from cloud_agent_host.plugins import install_claude_plugins
 from cloud_agent_host.runtimes import RuntimeMCPConfig
 from cloud_agent_host.sandbox import SANDBOX_PATH, SandboxProcess, runtime_bin_dir
 from cloud_agent_shared.plugins import validate_sandbox_plugins
+from cloud_agent_shared.shared_protocol import is_residency_mcp_credential
 
 if TYPE_CHECKING:
     import subprocess
@@ -315,16 +316,24 @@ class ResidentTransport(Generic[_RuntimeT_co]):
 
         The caller normally carries a fresh attempt credential, while the
         resident process intentionally keeps its renewable residency grant.
-        The inference grant therefore does not participate in equality.
-        Everything the CLI fixes at process start still does, including model,
-        effort, MCP configuration and the non-renewable GitHub token. A fresh
-        GitHub token requires native resume in a replacement process.
+        The inference grant therefore does not participate in equality. Nor
+        does a residency MCP credential, for the same reason: it follows the
+        residency, which the supervisor checks beside this, so a probe that
+        carries none may borrow the process holding one. Everything else the
+        CLI fixes at process start still participates, including model,
+        effort, the MCP servers and relay, a per-attempt MCP token and the
+        non-renewable GitHub token. A fresh GitHub token requires native
+        resume in a replacement process.
         """
+        held_mcp = self.launch.mcp_credential
         same_mcp = self.launch.mcp_server_ids == launch.mcp_server_ids and (
             not launch.mcp_server_ids
             or (
                 self.launch.mcp_base_url == launch.mcp_base_url
-                and self.launch.mcp_credential == launch.mcp_credential
+                and (
+                    held_mcp == launch.mcp_credential
+                    or (not launch.mcp_credential and is_residency_mcp_credential(held_mcp))
+                )
             )
         )
         return (

@@ -12,6 +12,13 @@ this whole surface across.
 A leaked grant buys no tools; a leaked MCP token buys no inference, no event
 log, no patch and no terminal state.
 
+**A resident process carries a residency credential instead.** A chat's
+process outlives the turn it was started for and serves the next ones, which
+are other jobs, so a per-attempt token would force a restart at every message.
+Its ``amr.`` credential names the chat's residency, and the fence resolves it on
+every call to the turn that residency is running; with none running it buys
+nothing. From there it is fenced exactly like a turn's own token.
+
 **The scope check is positive.** ``parse_worker_token`` reads a token minted
 before scopes existed as ``full`` — the conservative reading for signing, and
 exactly the wrong one here: a check written as "not full" would admit every
@@ -100,7 +107,13 @@ from cloud_agent.mcp_proxy import (
 )
 from cloud_agent.settings import number_setting
 from cloud_agent.source_control import SourceControlError
-from cloud_agent.tokens import SCOPE_MCP, InvalidAgentToken, parse_worker_token
+from cloud_agent.tokens import (
+    SCOPE_MCP,
+    InvalidAgentToken,
+    parse_residency_mcp_token,
+    parse_worker_token,
+)
+from cloud_agent_shared.shared_protocol import is_residency_mcp_credential
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -205,6 +218,10 @@ class Authorized:
     #: dials the upstream itself; the per-connection route builds its header set
     #: from the same value one field over and never reads this.
     secret: str | None = None
+    #: The attempt the credential was resolved to, and its lease: what every
+    #: invocation record and fenced write of this request belongs to.
+    attempt_id: int | None = None
+    lease_generation: int = 0
     dispatches: list[tuple[int, int]] = field(default_factory=list, compare=False)
 
 
@@ -310,6 +327,15 @@ def _bounded_batch(document: Any) -> Any:
     return document
 
 
+def _require_relay_store(store: _McpRelayStorage | None) -> _McpRelayStorage:
+    """The relay's store, or the refusal a deployment without a database gets."""
+    if store is None:
+        raise _refused(
+            503, "invalid_request_error", "MCP is unavailable without a configured database."
+        )
+    return store
+
+
 async def _authorize_fence(
     authorization: str | None,
     store: _McpRelayStorage | None,
@@ -325,30 +351,49 @@ async def _authorize_fence(
     """
     token = _bearer(authorization)
 
-    try:
-        claims = parse_worker_token(token)
-    except InvalidAgentToken as exc:
-        raise _refused(401, "invalid_request_error", str(exc)) from exc
-
-    # **Positive, and it has to be.** `parse_worker_token` reads a token minted
-    # before scopes existed as `full`, which is the conservative reading when
-    # deciding whether a signature is trustworthy and precisely the wrong one
-    # here -- a check written as "not full" would admit every such token. A
-    # runner's full-scope token is refused too: reporting events and driving
-    # terminal transitions is not a reason to be able to call somebody's tools.
-    if claims.get("scope") != SCOPE_MCP:
-        raise _refused(403, "insufficient_scope", "This endpoint requires an MCP-scoped token.")
-
-    if store is None:
-        raise _refused(
-            503, "invalid_request_error", "MCP is unavailable without a configured database."
+    if is_residency_mcp_credential(token):
+        # A resident process's credential: it names the chat's residency, not
+        # an attempt, because the process serves turn after turn. It parses
+        # only as that, so it is MCP-only by construction, like the scope
+        # check below.
+        try:
+            residency = parse_residency_mcp_token(token)
+        except InvalidAgentToken as exc:
+            raise _refused(401, "invalid_request_error", str(exc)) from exc
+        store = _require_relay_store(store)
+        # Which turn it speaks for is decided now, on every call: the one the
+        # residency is serving. Between turns, or once the residency rotated,
+        # expired or was released, there is none and nothing is authorized.
+        claims = await store.credential_queries.resolve_residency_attempt(
+            thread_id=residency["thread_id"],
+            residency_generation=residency["residency_generation"],
         )
+        if claims is None:
+            raise _refused(
+                401, "invalid_request_error", "This chat has no running turn for tool calls."
+            )
+    else:
+        try:
+            claims = parse_worker_token(token)
+        except InvalidAgentToken as exc:
+            raise _refused(401, "invalid_request_error", str(exc)) from exc
 
-    # The fence, read fresh on every call. The token names an attempt; this
+        # **Positive, and it has to be.** `parse_worker_token` reads a token
+        # minted before scopes existed as `full`, which is the conservative
+        # reading when deciding whether a signature is trustworthy and
+        # precisely the wrong one here -- a check written as "not full" would
+        # admit every such token. A runner's full-scope token is refused too:
+        # reporting events and driving terminal transitions is not a reason to
+        # be able to call somebody's tools.
+        if claims.get("scope") != SCOPE_MCP:
+            raise _refused(403, "insufficient_scope", "This endpoint requires an MCP-scoped token.")
+        store = _require_relay_store(store)
+
+    # The fence, read fresh on every call. The claims name an attempt; this
     # asks whether that attempt is still the job's current one, still running,
     # with an unexpired lease. So revocation is automatic -- the instant the
-    # reaper supersedes the attempt or the owner cancels, the same token stops
-    # buying tools, with no key to remember to revoke.
+    # reaper supersedes the attempt or the owner cancels, the same credential
+    # stops buying tools, with no key to remember to revoke.
     identity = await store.credential_queries.resolve_model_credential(
         job_id=claims["job_id"],
         attempt_id=claims["attempt_id"],
@@ -358,7 +403,13 @@ async def _authorize_fence(
         raise _refused(
             401, "invalid_request_error", "This job token is no longer valid for tool calls."
         )
-    return identity
+    # The attempt travels with the identity, so every record and write below
+    # is fenced to the turn resolved here rather than re-read from the token.
+    return {
+        **identity,
+        "attempt_id": int(claims["attempt_id"]),
+        "lease_generation": int(claims["lease_generation"]),
+    }
 
 
 async def _resolve_binding(
@@ -505,6 +556,8 @@ async def _resolve_binding(
         connection=resolved.connection,
         snapshot=resolved.snapshot,
         secret=resolved.credential.get("secret"),
+        attempt_id=identity.get("attempt_id"),
+        lease_generation=int(identity.get("lease_generation") or 0),
     )
 
 
@@ -523,8 +576,8 @@ async def _authorize(
         identity,
         alias,
         store,
-        attempt_id=_attempt_id_of(authorization),
-        lease_generation=_lease_of(authorization),
+        attempt_id=identity["attempt_id"],
+        lease_generation=identity["lease_generation"],
     )
 
 
@@ -552,6 +605,11 @@ async def _resolve_live_binding(
     )
     if current_identity is None:
         raise _refused(401, "permission_error", "This MCP session is no longer authorized.")
+    current_identity = {
+        **current_identity,
+        "attempt_id": attempt_id,
+        "lease_generation": lease_generation,
+    }
     current = await _resolve_binding(current_identity, alias, store, refresh_credentials=False)
     if (
         current.connection_id != previous.connection_id
@@ -1347,8 +1405,8 @@ async def _host_session(authorized: Authorized, authorization: str | None) -> An
     """
     key = SessionKey(
         connection_id=str(authorized.connection_id),
-        member=f"{authorized.job_id}:{_attempt_id_of(authorization) or 0}",
-        owner_lease_generation=_lease_of(authorization),
+        member=f"{authorized.job_id}:{authorized.attempt_id or 0}",
+        owner_lease_generation=authorized.lease_generation,
     )
     return await _host().open(authorized.connection, secret=authorized.secret, key=key)
 
@@ -1766,8 +1824,8 @@ async def _host_fetch(
         if not reading
         else {"uri": original_uri, "method": method},
         capability=capability,
-        attempt_id=_attempt_id_of(authorization),
-        lease_generation=_lease_of(authorization),
+        attempt_id=identity["attempt_id"],
+        lease_generation=identity["lease_generation"],
         request_id=request_id,
         request=request,
         kind=kind,
@@ -1846,8 +1904,8 @@ async def _host_web_search(
     except web_search.WebSearchInputError as exc:
         return _error_reply(request_id, str(exc), INVALID_PARAMS)
 
-    attempt_id = _attempt_id_of(authorization)
-    lease_generation = _lease_of(authorization)
+    attempt_id = identity["attempt_id"]
+    lease_generation = identity["lease_generation"]
     if attempt_id is None or lease_generation <= 0:
         return _result_reply(
             request_id,
@@ -1969,8 +2027,8 @@ async def _host_call(
         # The owner and task come from the fence, never from the arguments. The
         # attempt goes along so the write re-checks it in its own transaction:
         # this request may have been accepted before the task was stopped.
-        attempt_id = _attempt_id_of(authorization)
-        lease_generation = _lease_of(authorization)
+        attempt_id = identity["attempt_id"]
+        lease_generation = identity["lease_generation"]
         if attempt_id is None or lease_generation <= 0:
             result: dict[str, Any] = {
                 "content": [{"type": "text", "text": "Memory authorization expired."}],
@@ -2017,8 +2075,8 @@ async def _host_call(
         name=capability.name,
         arguments=arguments,
         capability=capability,
-        attempt_id=_attempt_id_of(authorization),
-        lease_generation=_lease_of(authorization),
+        attempt_id=identity["attempt_id"],
+        lease_generation=identity["lease_generation"],
         request_id=request_id,
         request=request,
     )
@@ -2145,8 +2203,8 @@ async def mcp_post(
         authorized,
         store,
         body,
-        attempt_id=_attempt_id_of(authorization),
-        lease_generation=_lease_of(authorization),
+        attempt_id=authorized.attempt_id,
+        lease_generation=authorized.lease_generation,
         request=request,
     )
     if held is not None:
@@ -2226,25 +2284,6 @@ async def mcp_delete(
     return await _proxy(
         request, server=authorized.server, job_id=authorized.job_id, method="DELETE"
     )
-
-
-def _attempt_id_of(authorization: str | None) -> int | None:
-    """The attempt a relayed request belongs to, for the invocation record."""
-    try:
-        claims = parse_worker_token(_bearer(authorization))
-    except (InvalidAgentToken, HTTPException):
-        return None
-    attempt = claims.get("attempt_id")
-    return int(attempt) if attempt is not None else None
-
-
-def _lease_of(authorization: str | None) -> int:
-    """The lease generation a relayed request was minted under."""
-    try:
-        claims = parse_worker_token(_bearer(authorization))
-    except (InvalidAgentToken, HTTPException):
-        return 0
-    return int(claims.get("lease_generation") or 0)
 
 
 __all__ = ["router"]

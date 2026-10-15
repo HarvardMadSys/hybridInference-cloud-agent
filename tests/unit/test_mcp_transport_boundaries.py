@@ -369,7 +369,7 @@ async def test_approved_dispatch_records_unknown_outcome_after_sse_limit(monkeyp
         reply = await mcp_relay._host_call(
             {"params": {"name": "tool"}},
             request_id="request",
-            identity={},
+            identity={"attempt_id": None, "lease_generation": 0},
             store=store,
             authorization=None,
             stateless=True,
@@ -422,7 +422,7 @@ async def test_approved_dispatch_records_unknown_outcome_after_a_malformed_reply
         reply = await mcp_relay._host_call(
             {"params": {"name": "tool"}},
             request_id="request",
-            identity={},
+            identity={"attempt_id": None, "lease_generation": 0},
             store=store,
             authorization=None,
             stateless=True,

@@ -2699,12 +2699,12 @@ def _run_shared_live_attempt(
             github_repo=job.repo or "",
             plugins=tuple(job.plugins),
             mcp_server_ids=tuple(job.mcp_bindings),
-            # The MCP relay token is attempt-fenced. It is process-fixed only
-            # when this turn actually exposes MCP endpoints; carrying an
-            # otherwise-unused fresh token here would restart every ordinary
-            # no-MCP chat and falsely erase HOT continuity.
+            # The MCP credential is process-fixed, and this turn's own token
+            # dies with this attempt, so the probe carries none: a live process
+            # holds its residency's credential, which serves this turn too
+            # (``compatible_with``). Only a process opened below receives one.
             mcp_base_url=mcp_url if job.mcp_bindings else "",
-            mcp_credential=job.mcp_token if job.mcp_bindings else "",
+            mcp_credential="",
             slot_id=slot_id,
             residency_generation=int(running.get("residency_generation") or 0),
         )
@@ -2741,6 +2741,15 @@ def _run_shared_live_attempt(
             launch = replace(
                 launch,
                 credential=credential,
+                # The residency's MCP credential lets this process serve later
+                # turns' tools without a restart. A control plane that predates
+                # it sends none; the turn's own token then works for this turn,
+                # and the next one restarts the process as it always did.
+                mcp_credential=(
+                    str(residency.get("mcp_credential") or "") or job.mcp_token
+                    if job.mcp_bindings
+                    else ""
+                ),
                 residency_generation=int(residency["generation"]),
             )
             resident_call = operation_profiling.expect_fragment(

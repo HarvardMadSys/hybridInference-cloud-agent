@@ -42,6 +42,16 @@ MID_TURN_INPUT_CAPABILITY_PREFIX = "mid-turn-input-v1:"
 #: no MCP relay runs the turn without these; only the owner's own connected
 #: tools make it refuse the turn.
 PLATFORM_MCP_SERVER_PREFIX = ":platform:"
+#: The prefix of an MCP credential that belongs to a chat's resident process
+#: rather than to one turn (``cloud_agent.tokens.mint_residency_mcp_token``).
+#: The relay resolves it to whichever turn of that chat is running, so the
+#: process keeps it across turns; a credential without it names one attempt.
+RESIDENCY_MCP_CREDENTIAL_PREFIX = "amr."
+
+
+def is_residency_mcp_credential(credential: str) -> bool:
+    """Whether ``credential`` serves every turn of one residency, not one attempt."""
+    return credential.startswith(RESIDENCY_MCP_CREDENTIAL_PREFIX)
 
 
 def mid_turn_input_capability(runtime_id: str) -> str:

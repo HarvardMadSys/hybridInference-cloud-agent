@@ -5531,6 +5531,42 @@ def test_unused_mcp_token_does_not_change_live_process_compatibility():
     )
 
 
+def test_a_residency_mcp_credential_lets_a_probe_borrow_the_live_process():
+    """The process keeps its residency's credential; a probe carries none."""
+    launch = replace(
+        _launch("athr_source", native_session_id="native-source", slot=0),
+        mcp_server_ids=(":platform:memory", "github"),
+        mcp_base_url="http://relay",
+        mcp_credential="amr.residency-1",
+    )
+    transport = ResidentTransport(launch=launch, session=SimpleNamespace())
+
+    assert transport.compatible_with(replace(launch, mcp_credential=""))
+    assert transport.compatible_with(launch)
+    # What the CLI fixed at start still has to match.
+    assert not transport.compatible_with(replace(launch, mcp_credential="amr.residency-2"))
+    assert not transport.compatible_with(
+        replace(launch, mcp_credential="", mcp_server_ids=(":platform:memory",))
+    )
+    assert not transport.compatible_with(
+        replace(launch, mcp_credential="", mcp_base_url="http://other-relay")
+    )
+
+
+def test_a_per_attempt_mcp_token_still_needs_a_new_process():
+    """A process holding one turn's token cannot serve the next turn's tools."""
+    launch = replace(
+        _launch("athr_source", native_session_id="native-source", slot=0),
+        mcp_server_ids=(":platform:memory",),
+        mcp_base_url="http://relay",
+        mcp_credential="ajt.turn-1",
+    )
+    transport = ResidentTransport(launch=launch, session=SimpleNamespace())
+
+    assert not transport.compatible_with(replace(launch, mcp_credential=""))
+    assert not transport.compatible_with(replace(launch, mcp_credential="ajt.turn-2"))
+
+
 def test_github_token_rotation_or_removal_requires_a_new_resident_process():
     launch = replace(
         _launch("athr_source", native_session_id="native-source", slot=0),

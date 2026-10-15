@@ -816,11 +816,23 @@ by user id only, because identity tokens carry no display name.
 ## MCP servers
 
 MCP calls pass through the control plane. The sandbox holds a scoped relay
-token; upstream credentials stay outside it:
+credential; upstream credentials stay outside it:
 
 ```text
-sandbox ──[attempt-fenced mcp token]──▶ MCP-only relay ──[owner credential]──▶ MCP server
+sandbox ──[residency or attempt mcp credential]──▶ MCP-only relay ──[owner credential]──▶ MCP server
 ```
+
+A chat member's CLI process serves several turns, so it holds its residency's
+credential (`amr.…`), returned when the residency is established. On every
+call the relay resolves it to the attempt of that chat running under that
+residency, then applies the same fence as a turn's own token: the attempt must
+be current and leased, its job running and not stopped, its host enrolled.
+Between turns, or once the residency rotates, expires or is released, the
+credential authorizes nothing. A follow-up whose MCP servers did not change
+therefore keeps the live process; adding or removing a connection still
+restarts it, because a CLI reads its servers once at start. A process started
+with a turn's own token (from a control plane that predates residency
+credentials) restarts at the next turn, as before.
 
 ### Listeners and connections
 

@@ -184,6 +184,8 @@ async def _streamed_call(store):
     identity = await store.resolve_model_credential(
         job_id=_JOB, attempt_id=_ATTEMPT, lease_generation=_LEASE
     )
+    # The fence hands its resolved attempt on with the identity.
+    identity = {**identity, "attempt_id": _ATTEMPT, "lease_generation": _LEASE}
     return mcp_relay._host_call_stream(
         document=_rpc("tools/call", name="github__get_issue", arguments={"id": 7}),
         identity=identity,

@@ -662,6 +662,7 @@ def _run_shared_boundary_case(
     sandbox_manager_truncated=False,
     thread_sandbox=None,
     heart=None,
+    job_changes=None,
 ):
     backend = ContainerBackend(image="img")
     monkeypatch.setattr(backend, "version_stamp", _stamp)
@@ -736,6 +737,7 @@ def _run_shared_boundary_case(
             runtime=runtime_id,
             runtime_version=runner_mod.SHARED_SANDBOX_RUNTIME_PINS[runtime_id],
             thread_sandbox=thread_sandbox,
+            **(job_changes or {}),
         ),
         control=control,
         heart=heart or SimpleNamespace(cancel_requested=False, lease_lost=False),
@@ -902,6 +904,76 @@ def test_a_lease_lost_before_admission_admits_nothing(monkeypatch):
     stream.assert_not_called()
     finish.assert_not_called()
     assert control.abandon_chat_sandbox.call_args.kwargs["lost"] is False
+
+
+def _probe_then_replace(control, supervisor, *, residency: dict) -> None:
+    """The live process refuses the probe, so a residency is established anew."""
+    control.establish_shared_residency.return_value = {
+        "credential": "grant-2",
+        "generation": 12,
+        "model": _JOB.model,
+        **residency,
+    }
+    answer = supervisor.ensure_shared_resident.side_effect
+
+    def refuse_first(*args, **kwargs):
+        if supervisor.ensure_shared_resident.call_count == 1:
+            raise SessionSupervisorError(503, "resident process restart requires a credential")
+        return answer(*args, **kwargs)
+
+    supervisor.ensure_shared_resident.side_effect = refuse_first
+
+
+@pytest.mark.parametrize(
+    ("residency", "opened_with"),
+    [
+        ({"mcp_credential": "amr.residency-12"}, "amr.residency-12"),
+        # A control plane from before residency credentials: this turn's own token.
+        ({}, "ajt.turn-token"),
+    ],
+)
+def test_a_live_probe_carries_no_mcp_credential_and_a_new_process_gets_one(
+    monkeypatch, residency, opened_with
+):
+    """The probe leaves the held credential to the process; a new one gets the residency's."""
+    monkeypatch.setenv("AGENT_SANDBOX_MCP_URL", "http://relay")
+    result, _control, supervisor, _finish = _run_shared_boundary_case(
+        monkeypatch,
+        0,
+        None,
+        "claude-code",
+        configure=lambda control, supervisor, _finish: _probe_then_replace(
+            control, supervisor, residency=residency
+        ),
+        job_changes={"mcp_bindings": [":platform:memory"], "mcp_token": "ajt.turn-token"},
+    )
+
+    assert result == 0
+    probe, opened = (call.kwargs["launch"] for call in supervisor.ensure_shared_resident.mock_calls)
+    assert (probe.mcp_base_url, probe.mcp_credential, probe.credential) == (
+        "http://relay",
+        "",
+        None,
+    )
+    assert (opened.mcp_credential, opened.credential) == (opened_with, "grant-2")
+    assert opened.residency_generation == 12
+
+
+def test_a_turn_without_mcp_opens_its_process_with_no_mcp_credential(monkeypatch):
+    monkeypatch.setenv("AGENT_SANDBOX_MCP_URL", "http://relay")
+    _result, _control, supervisor, _finish = _run_shared_boundary_case(
+        monkeypatch,
+        0,
+        None,
+        "claude-code",
+        configure=lambda control, supervisor, _finish: _probe_then_replace(
+            control, supervisor, residency={"mcp_credential": "amr.residency-12"}
+        ),
+        job_changes={"mcp_bindings": [], "mcp_token": "ajt.turn-token"},
+    )
+
+    opened = supervisor.ensure_shared_resident.mock_calls[-1].kwargs["launch"]
+    assert (opened.mcp_base_url, opened.mcp_credential) == ("", "")
 
 
 def test_a_stop_during_the_container_start_prepares_nothing_more(monkeypatch):

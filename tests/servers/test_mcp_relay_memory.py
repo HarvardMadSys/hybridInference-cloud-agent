@@ -16,6 +16,7 @@ from tests.servers.test_mcp_relay_host import (
     _OWNER,
     FakeStore,
     _auth,
+    _residency_auth,
     _result,
     _rpc,
     _secrets as _secrets,
@@ -91,6 +92,34 @@ async def test_a_stale_token_cannot_write_memory(
         _HOST_URL,
         json=_rpc("tools/call", name=memory_tool.SAVE, arguments={"content": "Use pnpm."}),
         headers=_auth(),
+    )
+    assert response.status_code == 401
+    assert memory_store.saved == []
+
+
+async def test_a_resident_process_saves_for_the_turn_running_now(
+    api: AsyncClient, memory_store: MemoryStore
+) -> None:
+    """One process credential, two turns: each write is fenced to its own turn."""
+    save = _rpc("tools/call", name=memory_tool.SAVE, arguments={"content": "Use pnpm."})
+    await api.post(_HOST_URL, json=save, headers=_residency_auth())
+    memory_store.live_turns.add(("ajob_next", 9, 1))
+    memory_store.residency_turn = ("ajob_next", 9, 1)
+    await api.post(_HOST_URL, json=save, headers=_residency_auth())
+    assert [entry[0] for entry in memory_store.saved] == [
+        MemoryTask(user_id=_OWNER, job_id=_JOB, attempt_id=_ATTEMPT, lease_generation=_LEASE),
+        MemoryTask(user_id=_OWNER, job_id="ajob_next", attempt_id=9, lease_generation=1),
+    ]
+
+
+async def test_a_resident_process_cannot_write_between_turns(
+    api: AsyncClient, memory_store: MemoryStore
+) -> None:
+    memory_store.residency_turn = None
+    response = await api.post(
+        _HOST_URL,
+        json=_rpc("tools/call", name=memory_tool.SAVE, arguments={"content": "Use pnpm."}),
+        headers=_residency_auth(),
     )
     assert response.status_code == 401
     assert memory_store.saved == []

@@ -6,10 +6,14 @@ import pytest
 
 from cloud_agent.tokens import (
     ENV_SIGNING_SECRET,
+    SCOPE_MCP,
     InvalidAgentToken,
+    mint_residency_mcp_token,
     mint_worker_token,
+    parse_residency_mcp_token,
     parse_worker_token,
 )
+from cloud_agent_shared.shared_protocol import is_residency_mcp_credential
 
 
 @pytest.fixture(autouse=True)
@@ -102,3 +106,41 @@ def test_unknown_scope_is_rejected():
     """A signed token naming a scope we do not implement is refused."""
     with pytest.raises(ValueError):
         mint_worker_token(job_id="j", attempt_id=1, lease_generation=1, scope="admin")
+
+
+def test_a_residency_credential_names_the_residency_and_is_stable():
+    """Every mint for one residency is the same credential, so a probe can match it."""
+    token = mint_residency_mcp_token(thread_id="athr_1", residency_generation=4)
+    assert token == mint_residency_mcp_token(thread_id="athr_1", residency_generation=4)
+    assert token != mint_residency_mcp_token(thread_id="athr_1", residency_generation=5)
+    assert is_residency_mcp_credential(token)
+    assert parse_residency_mcp_token(token) == {"thread_id": "athr_1", "residency_generation": 4}
+
+
+def test_residency_and_worker_credentials_do_not_parse_as_each_other():
+    """Neither parser accepts the other's credential, whatever its signature."""
+    residency = mint_residency_mcp_token(thread_id="athr_1", residency_generation=4)
+    worker = mint_worker_token(job_id="ajob_1", attempt_id=1, lease_generation=1, scope=SCOPE_MCP)
+    assert not is_residency_mcp_credential(worker)
+    with pytest.raises(InvalidAgentToken):
+        parse_worker_token(residency)
+    with pytest.raises(InvalidAgentToken):
+        parse_residency_mcp_token(worker)
+    # A worker payload re-signed under the residency prefix is still refused.
+    _, payload, signature = worker.split(".")
+    with pytest.raises(InvalidAgentToken):
+        parse_residency_mcp_token(f"amr.{payload}.{signature}")
+
+
+def test_a_tampered_residency_credential_is_rejected():
+    token = mint_residency_mcp_token(thread_id="athr_1", residency_generation=4)
+    prefix, _, signature = token.split(".")
+    other = mint_residency_mcp_token(thread_id="athr_2", residency_generation=4).split(".")[1]
+    with pytest.raises(InvalidAgentToken):
+        parse_residency_mcp_token(f"{prefix}.{other}.{signature}")
+
+
+@pytest.mark.parametrize(("thread_id", "generation"), [("", 1), ("athr_1", 0), ("athr_1", -1)])
+def test_a_residency_credential_needs_a_thread_and_a_generation(thread_id, generation):
+    with pytest.raises(ValueError):
+        mint_residency_mcp_token(thread_id=thread_id, residency_generation=generation)

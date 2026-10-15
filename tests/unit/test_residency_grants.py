@@ -13,6 +13,7 @@ from cloud_agent.api import worker
 from cloud_agent.application import residency, session_fork
 from cloud_agent.sandbox_manager_client import SandboxManagerError
 from cloud_agent.schemas import WorkerSandboxResidencyRequest
+from cloud_agent.tokens import ENV_SIGNING_SECRET
 
 
 class IdempotentGrants:
@@ -117,6 +118,8 @@ async def test_worker_replacement_revokes_only_its_previous_resident_grant(
     monkeypatch, revoke_raises
 ):
     """Replacing a process within one attempt ends its predecessor's grant."""
+    # The answer also carries the residency's MCP credential, which is signed.
+    monkeypatch.setenv(ENV_SIGNING_SECRET, "residency-grant-test-secret")
     grants = IdempotentGrants()
     linked: str | None = None
     generation = 0

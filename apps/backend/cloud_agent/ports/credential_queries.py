@@ -40,3 +40,18 @@ class CredentialQueries(Protocol):
         being offered nothing at all.
         """
         ...
+
+    async def resolve_residency_attempt(
+        self, *, thread_id: str, residency_generation: int
+    ) -> dict[str, Any] | None:
+        """Name the attempt a resident process is serving right now.
+
+        Return ``{"job_id", "attempt_id", "lease_generation"}`` only while
+        ``residency_generation`` is the chat's current, unexpired residency and
+        the chat's running turn was admitted to that same membership on the
+        residency's host. ``None`` between turns, after a rotation, release or
+        expiry, and for a deleted chat. The caller still applies
+        :meth:`resolve_model_credential` to the answer, which owns Stop, the
+        lease and host removal.
+        """
+        ...

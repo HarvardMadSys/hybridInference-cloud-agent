@@ -633,7 +633,10 @@ def test_a_turn_with_tools_reaches_them_through_this_hosts_own_mcp_relay(monkeyp
     (launch,) = run.launches
     assert launch.mcp_server_ids == ("deepwiki",)
     assert launch.mcp_base_url == "http://agent-mcp:8000"
-    assert launch.mcp_credential == "mcp-token"
+    # The live probe carries no MCP credential: a process it borrows holds its
+    # residency's, and a process opened anew receives that from the control
+    # plane (``test_agent_runner``), never this turn's own token.
+    assert launch.mcp_credential == ""
 
 
 def test_a_turn_without_tools_is_given_no_relay(monkeypatch):

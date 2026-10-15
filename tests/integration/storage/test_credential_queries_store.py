@@ -28,7 +28,9 @@ from tests.integration.storage.test_agent_job_store import (
     _claim,
     _create_job,
     _expire_attempt,
+    _reserve_shared_chat,
     _settled,
+    _shared_claim_attestation,
 )
 from tests.support.db import reset_agent_tables
 from tests.support.migrations import apply_migrations
@@ -252,3 +254,143 @@ async def test_a_removed_hosts_attempt_resolves_nothing(
     assert await store.host_pool.set_host_status(host="runner-a", status="disabled") == "ok"
 
     assert await credentials.resolve_model_credential(**fence) is None
+
+
+async def _first_turn_settles(store: Storage, job: dict, claim: dict, sandbox: dict) -> None:
+    """Run the first turn of a shared chat to settlement, keeping its residency."""
+    fence = {
+        "thread_id": job["thread_id"],
+        "attempt_id": claim["attempt_id"],
+        "lease_generation": claim["lease_generation"],
+        "sandbox_generation": sandbox["generation"],
+        "activation_generation": sandbox["activation_generation"],
+    }
+    residency = sandbox["residency_generation"]
+    assert await store.sandbox.mark_thread_sandbox_running(
+        **fence, container_id="container-residency-mcp", context_status="new"
+    )
+    assert await store.sandbox.admit_thread_sandbox_turn(
+        **fence, residency_generation=residency, job_id=job["id"]
+    )
+    assert await store.sandbox.settle_thread_sandbox(
+        **fence,
+        residency_generation=residency,
+        job_id=job["id"],
+        context_status="live",
+        native_session_id="native-residency-mcp",
+        idle_timeout_seconds=1800,
+        base_sha=job["base_sha"],
+    )
+    assert await store.attempt_commands.transition(
+        job_id=job["id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        from_states=("running",),
+        to_state="succeeded",
+    )
+
+
+async def test_a_residency_resolves_to_each_turn_it_serves_and_none_between(
+    db, store: Storage, credentials: PostgresCredentialQueries
+) -> None:
+    """One process credential follows the chat from turn to turn, and idles with it."""
+    first, first_claim, sandbox = await _reserve_shared_chat(store)
+    residency = sandbox["residency_generation"]
+    thread_id = first["thread_id"]
+
+    assert await credentials.resolve_residency_attempt(
+        thread_id=thread_id, residency_generation=residency
+    ) == {
+        "job_id": first["id"],
+        "attempt_id": first_claim["attempt_id"],
+        "lease_generation": first_claim["lease_generation"],
+    }
+    # Another residency of the chat, or another chat, names nothing.
+    for other_thread, other_generation in ((thread_id, residency + 1), ("athr_other", residency)):
+        assert (
+            await credentials.resolve_residency_attempt(
+                thread_id=other_thread, residency_generation=other_generation
+            )
+            is None
+        )
+
+    await _first_turn_settles(store, first, first_claim, sandbox)
+    # Between turns the process is idle: no turn, so no tools.
+    assert (
+        await credentials.resolve_residency_attempt(
+            thread_id=thread_id, residency_generation=residency
+        )
+        is None
+    )
+
+    second = await store.conversation_commands.create_follow_up(
+        parent_job_id=first["id"], user_id=first["user_id"], prompt="and the docs"
+    )
+    second_claim = await _claim(
+        store,
+        worker_id="shared-worker-second",
+        lease_ttl_seconds=60,
+        host="shared-runner",
+        host_credential_hash="test-credential-hash",
+        claim_attestation=_shared_claim_attestation(),
+    )
+    assert second_claim is not None and second_claim["id"] == second["id"]
+    assert await store.sandbox.reserve_thread_sandbox(
+        thread_id=thread_id,
+        attempt_id=second_claim["attempt_id"],
+        lease_generation=second_claim["lease_generation"],
+        host="shared-runner",
+        sandbox_id=sandbox["sandbox_id"],
+        container_name=sandbox["container_name"],
+        runtime_id=sandbox["runtime_id"],
+        runtime_version=sandbox["runtime_version"],
+        sandbox_image_digest=sandbox["sandbox_image_digest"],
+        execution_profile=sandbox["execution_profile"],
+    )
+    # The same residency, so the same credential, now speaks for the next turn.
+    resolved = await credentials.resolve_residency_attempt(
+        thread_id=thread_id, residency_generation=residency
+    )
+    assert resolved == {
+        "job_id": second["id"],
+        "attempt_id": second_claim["attempt_id"],
+        "lease_generation": second_claim["lease_generation"],
+    }
+
+    # Stop is the attempt fence's to enforce, applied by the relay on top.
+    async with db.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_jobs SET cancel_requested = TRUE WHERE id = $1", second["id"]
+        )
+    assert await credentials.resolve_model_credential(**resolved) is None
+
+
+async def test_an_expired_or_deleted_residency_resolves_nothing(
+    db, store: Storage, credentials: PostgresCredentialQueries
+) -> None:
+    job, _claim_row, sandbox = await _reserve_shared_chat(store)
+    lookup = {
+        "thread_id": job["thread_id"],
+        "residency_generation": sandbox["residency_generation"],
+    }
+    assert await credentials.resolve_residency_attempt(**lookup) is not None
+
+    async with db.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_thread_sandbox_memberships "
+            "SET residency_lease_expires_at = NOW() - INTERVAL '1 second' WHERE thread_id = $1",
+            job["thread_id"],
+        )
+    assert await credentials.resolve_residency_attempt(**lookup) is None
+
+    async with db.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_thread_sandbox_memberships "
+            "SET residency_lease_expires_at = NOW() + INTERVAL '1 hour' WHERE thread_id = $1",
+            job["thread_id"],
+        )
+        assert await credentials.resolve_residency_attempt(**lookup) is not None
+        await conn.execute(
+            "UPDATE agent_threads SET deleted_at = NOW() WHERE id = $1", job["thread_id"]
+        )
+    assert await credentials.resolve_residency_attempt(**lookup) is None

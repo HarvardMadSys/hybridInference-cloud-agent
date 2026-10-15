@@ -52,7 +52,7 @@ from cloud_agent.domain.pending_messages import SettleOutcome
 from cloud_agent.goals.models import GoalConflict
 from cloud_agent.mcp.registry import mcp_cipher
 from cloud_agent.storage.repositories.goals import _pause_detail
-from cloud_agent.tokens import mint_worker_token
+from cloud_agent.tokens import mint_worker_token, parse_residency_mcp_token
 
 pytestmark = pytest.mark.asyncio
 
@@ -4924,6 +4924,11 @@ async def test_worker_residency_establish_uses_the_token_attempt_fence(
 
     assert response.status_code == 200, response.text
     assert response.json()["generation"] == 7
+    # The process's MCP credential names this residency, not the attempt.
+    assert parse_residency_mcp_token(response.json()["mcp_credential"]) == {
+        "thread_id": store.jobs[job_id]["thread_id"],
+        "residency_generation": 7,
+    }
     assert calls[0]["attempt_id"] == 100
     assert calls[0]["lease_generation"] == 1
     assert calls[0]["thread_id"] == store.jobs[job_id]["thread_id"]

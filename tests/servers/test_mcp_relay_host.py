@@ -42,7 +42,7 @@ from cloud_agent.mcp.host import ContentBlock, Session, ToolResult
 from cloud_agent.mcp.protocol import Handshake
 from cloud_agent.mcp.registry import mcp_cipher
 from cloud_agent.ports.web_search import WebSearchAdmission
-from cloud_agent.tokens import SCOPE_MCP, mint_worker_token
+from cloud_agent.tokens import SCOPE_MCP, mint_residency_mcp_token, mint_worker_token
 
 pytestmark = pytest.mark.asyncio
 
@@ -51,6 +51,7 @@ _JOB = "ajob_host"
 _THREAD = "athr_host"
 _ATTEMPT = 5
 _LEASE = 2
+_RESIDENCY = 3
 _ENCRYPTION_KEY = "mcp-host-test-encryption-key"
 _HOST_URL = "/v1/agent/mcp"
 
@@ -215,15 +216,29 @@ class FakeStore(AllCapabilities):
         self.search_admission_error = False
         self.search_acquired: list[dict[str, Any]] = []
         self.search_released: list[str] = []
+        #: The turns whose attempts are live, and the one the chat's residency
+        #: is serving (``None`` between turns).
+        self.live_turns = {(_JOB, _ATTEMPT, _LEASE)}
+        self.residency_turn: tuple[str, int, int] | None = (_JOB, _ATTEMPT, _LEASE)
+        self.residency_lookups: list[tuple[str, int]] = []
+
+    async def resolve_residency_attempt(
+        self, *, thread_id: str, residency_generation: int
+    ) -> dict[str, Any] | None:
+        self.residency_lookups.append((thread_id, residency_generation))
+        if (thread_id, residency_generation) != (_THREAD, _RESIDENCY) or not self.residency_turn:
+            return None
+        job_id, attempt_id, lease_generation = self.residency_turn
+        return {"job_id": job_id, "attempt_id": attempt_id, "lease_generation": lease_generation}
 
     async def resolve_model_credential(
         self, *, job_id: str, attempt_id: int, lease_generation: int
     ) -> dict[str, Any] | None:
-        if not (self.live and (job_id, attempt_id, lease_generation) == (_JOB, _ATTEMPT, _LEASE)):
+        if not (self.live and (job_id, attempt_id, lease_generation) in self.live_turns):
             return None
         return {
             "user_id": _OWNER,
-            "job_id": _JOB,
+            "job_id": job_id,
             "thread_id": _THREAD,
             "mcp_bindings": [dict(binding) for binding in self.bindings],
             "model": "glm-5.1",
@@ -356,6 +371,12 @@ def _auth(scope: str = SCOPE_MCP) -> dict[str, str]:
     return {"Authorization": f"Bearer {_token(scope)}"}
 
 
+def _residency_auth(thread_id: str = _THREAD, generation: int = _RESIDENCY) -> dict[str, str]:
+    """The credential a chat's resident process keeps across its turns."""
+    token = mint_residency_mcp_token(thread_id=thread_id, residency_generation=generation)
+    return {"Authorization": f"Bearer {token}"}
+
+
 def _rpc(method: str, request_id: Any = 1, **params: Any) -> dict[str, Any]:
     return {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}
 
@@ -385,6 +406,73 @@ async def client(store: FakeStore) -> AsyncClient:
     app.dependency_overrides[get_storage] = lambda: OneFake(store)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as api:
         yield api
+
+
+class TestAResidentProcessCredential:
+    """One credential for a chat's process, resolved to whichever turn is running."""
+
+    async def test_it_reaches_the_tools_of_the_turn_its_residency_is_serving(
+        self, client: AsyncClient, store: FakeStore, host: StubHost
+    ) -> None:
+        listed = await client.post(_HOST_URL, json=_rpc("tools/list"), headers=_residency_auth())
+        assert _tool_names(listed) == _catalogue("docs__search", "github__get_issue")
+        called = await client.post(
+            _HOST_URL,
+            json=_rpc("tools/call", name="docs__search", arguments={"q": "nsi"}),
+            headers=_residency_auth(),
+        )
+        assert _result(called)["content"][0]["text"] == "upstream says hi"
+        assert store.residency_lookups[-1] == (_THREAD, _RESIDENCY)
+        # The upstream session belongs to the resolved attempt, as a turn's
+        # own token would have named it.
+        key = host.opened[-1]["key"]
+        assert (key.member, key.owner_lease_generation) == (f"{_JOB}:{_ATTEMPT}", _LEASE)
+
+    async def test_it_follows_the_chat_to_its_next_turn(
+        self, client: AsyncClient, store: FakeStore, host: StubHost
+    ) -> None:
+        store.live_turns.add(("ajob_next", 9, 1))
+        store.residency_turn = ("ajob_next", 9, 1)
+        response = await client.post(
+            _HOST_URL,
+            json=_rpc("tools/call", name="docs__search", arguments={"q": "nsi"}),
+            headers=_residency_auth(),
+        )
+        assert response.status_code == 200
+        assert host.opened[-1]["key"].member == "ajob_next:9"
+
+    async def test_it_buys_nothing_between_turns(
+        self, client: AsyncClient, store: FakeStore, host: StubHost
+    ) -> None:
+        store.residency_turn = None
+        response = await client.post(
+            _HOST_URL,
+            json=_rpc("tools/call", name="docs__search", arguments={"q": "nsi"}),
+            headers=_residency_auth(),
+        )
+        assert response.status_code == 401
+        assert host.opened == [] and host.called == []
+
+    async def test_a_stopped_turn_refuses_it_like_its_own_token(
+        self, client: AsyncClient, store: FakeStore, host: StubHost
+    ) -> None:
+        store.live = False
+        response = await client.post(_HOST_URL, json=_rpc("tools/list"), headers=_residency_auth())
+        assert response.status_code == 401
+        assert host.opened == []
+
+    @pytest.mark.parametrize("which", ["rotated", "another-chat", "forged"])
+    async def test_another_or_forged_residency_is_refused(
+        self, client: AsyncClient, host: StubHost, which: str
+    ) -> None:
+        headers = {
+            "rotated": lambda: _residency_auth(generation=_RESIDENCY + 1),
+            "another-chat": lambda: _residency_auth(thread_id="athr_other"),
+            "forged": lambda: {"Authorization": "Bearer amr.e30.AAAA"},
+        }[which]()
+        response = await client.post(_HOST_URL, json=_rpc("tools/list"), headers=headers)
+        assert response.status_code == 401
+        assert host.opened == []
 
 
 class TestTheMergedCatalogue:
@@ -1365,6 +1453,8 @@ class TestBuiltInWebSearch:
             job_id=_JOB, attempt_id=_ATTEMPT, lease_generation=_LEASE
         )
         assert identity is not None
+        # The fence hands its resolved attempt on with the identity.
+        identity = {**identity, "attempt_id": _ATTEMPT, "lease_generation": _LEASE}
         task = asyncio.create_task(
             agent_mcp_router._host_web_search(
                 {"query": "anything"},

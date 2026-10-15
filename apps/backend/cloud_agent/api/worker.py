@@ -124,6 +124,7 @@ from cloud_agent.tokens import (
     SCOPE_MCP,
     InvalidAgentToken,
     InvalidHostToken,
+    mint_residency_mcp_token,
     mint_worker_token,
     parse_host_token,
     parse_worker_token,
@@ -1646,6 +1647,12 @@ async def worker_establish_shared_sandbox_residency(
         ttl_seconds=residency_ttl_s(),
         credential=credential,
         model=row.get("model"),
+        # The process this residency opens serves later turns too, which are
+        # other jobs: a turn's own MCP token would die with this attempt and
+        # force a restart at the next message. This one follows the residency.
+        mcp_credential=mint_residency_mcp_token(
+            thread_id=thread_id, residency_generation=int(row["generation"])
+        ),
     )
 
 

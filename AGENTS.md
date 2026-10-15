@@ -147,7 +147,9 @@ requirement, and rules 4 and 5 remain permanent service boundaries.
   heartbeats while the member stays resident (so it can outlive one turn), and
   revoked with the residency. MCP servers are resolved per user by the control
   plane and reached through its MCP-only relay with a separate scoped
-  credential; no inference grant names them.
+  credential; no inference grant names them. A chat member's CLI holds its
+  residency's MCP credential, which the relay resolves on every call to the
+  turn that residency is running, so follow-ups keep the live process.
   **There is no per-task dollar budget** — that design was considered and
   rejected. All inference spend stays subject to the gateway's existing
   per-user quota; a grant narrows *what* can be called, never re-implements
