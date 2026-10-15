@@ -12917,6 +12917,500 @@
         "title": "OAuthConnectRequest",
         "type": "object"
       },
+      "OwnerContainer": {
+        "additionalProperties": false,
+        "description": "One container and the chats that share it.",
+        "properties": {
+          "chat_count": {
+            "minimum": 0.0,
+            "title": "Chat Count",
+            "type": "integer"
+          },
+          "chats": {
+            "items": {
+              "$ref": "#/components/schemas/OwnerContainerChat"
+            },
+            "maxItems": 20,
+            "title": "Chats",
+            "type": "array"
+          },
+          "cpu_limit_cores": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cpu Limit Cores"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "disk_limit_bytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Disk Limit Bytes"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "idle_deadline": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Idle Deadline"
+          },
+          "last_activity_at": {
+            "format": "date-time",
+            "title": "Last Activity At",
+            "type": "string"
+          },
+          "memory_limit_bytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Memory Limit Bytes"
+          },
+          "reading": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OwnerContainerReading"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "repo": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo"
+          },
+          "state": {
+            "enum": [
+              "starting",
+              "running",
+              "stopping",
+              "stopped",
+              "stored",
+              "deleting",
+              "unavailable"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "state",
+          "chats",
+          "chat_count",
+          "created_at",
+          "last_activity_at"
+        ],
+        "title": "OwnerContainer",
+        "type": "object"
+      },
+      "OwnerContainerChat": {
+        "additionalProperties": false,
+        "description": "A chat whose work runs in this container.",
+        "properties": {
+          "archived": {
+            "default": false,
+            "title": "Archived",
+            "type": "boolean"
+          },
+          "job_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Job Id"
+          },
+          "thread_id": {
+            "title": "Thread Id",
+            "type": "string"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          }
+        },
+        "required": [
+          "thread_id"
+        ],
+        "title": "OwnerContainerChat",
+        "type": "object"
+      },
+      "OwnerContainerList": {
+        "additionalProperties": false,
+        "description": "A page of the owner's containers, with counts and sums over all of them.",
+        "properties": {
+          "containers": {
+            "items": {
+              "$ref": "#/components/schemas/OwnerContainer"
+            },
+            "title": "Containers",
+            "type": "array"
+          },
+          "counts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "propertyNames": {
+              "enum": [
+                "starting",
+                "running",
+                "stopping",
+                "stopped",
+                "stored",
+                "deleting",
+                "unavailable"
+              ]
+            },
+            "title": "Counts",
+            "type": "object"
+          },
+          "current": {
+            "$ref": "#/components/schemas/OwnerCurrentUse"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          },
+          "observed_at": {
+            "format": "date-time",
+            "title": "Observed At",
+            "type": "string"
+          },
+          "total_count": {
+            "minimum": 0.0,
+            "title": "Total Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "observed_at",
+          "counts",
+          "total_count",
+          "current",
+          "containers"
+        ],
+        "title": "OwnerContainerList",
+        "type": "object"
+      },
+      "OwnerContainerReading": {
+        "additionalProperties": false,
+        "description": "The latest Docker sample of a running container, with its age.",
+        "properties": {
+          "cpu_cores": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cpu Cores"
+          },
+          "memory_bytes": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Memory Bytes"
+          },
+          "sampled_at": {
+            "format": "date-time",
+            "title": "Sampled At",
+            "type": "string"
+          },
+          "stale": {
+            "title": "Stale",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "sampled_at",
+          "stale"
+        ],
+        "title": "OwnerContainerReading",
+        "type": "object"
+      },
+      "OwnerCurrentUse": {
+        "additionalProperties": false,
+        "description": "What the owner's running containers use now, from their fresh samples.",
+        "properties": {
+          "cpu_cores": {
+            "minimum": 0.0,
+            "title": "Cpu Cores",
+            "type": "number"
+          },
+          "measured": {
+            "minimum": 0.0,
+            "title": "Measured",
+            "type": "integer"
+          },
+          "memory_bytes": {
+            "minimum": 0.0,
+            "title": "Memory Bytes",
+            "type": "integer"
+          },
+          "unmeasured": {
+            "minimum": 0.0,
+            "title": "Unmeasured",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "cpu_cores",
+          "memory_bytes",
+          "measured",
+          "unmeasured"
+        ],
+        "title": "OwnerCurrentUse",
+        "type": "object"
+      },
+      "OwnerResourceDay": {
+        "additionalProperties": false,
+        "description": "One UTC day of the window; the last one ends now.",
+        "properties": {
+          "cpu_core_seconds": {
+            "minimum": 0.0,
+            "title": "Cpu Core Seconds",
+            "type": "number"
+          },
+          "date": {
+            "title": "Date",
+            "type": "string"
+          },
+          "measured_seconds": {
+            "minimum": 0.0,
+            "title": "Measured Seconds",
+            "type": "number"
+          },
+          "memory_byte_seconds": {
+            "minimum": 0.0,
+            "title": "Memory Byte Seconds",
+            "type": "number"
+          },
+          "running_seconds": {
+            "minimum": 0.0,
+            "title": "Running Seconds",
+            "type": "number"
+          },
+          "since": {
+            "format": "date-time",
+            "title": "Since",
+            "type": "string"
+          },
+          "until": {
+            "format": "date-time",
+            "title": "Until",
+            "type": "string"
+          }
+        },
+        "required": [
+          "running_seconds",
+          "measured_seconds",
+          "cpu_core_seconds",
+          "memory_byte_seconds",
+          "date",
+          "since",
+          "until"
+        ],
+        "title": "OwnerResourceDay",
+        "type": "object"
+      },
+      "OwnerResourceHistory": {
+        "additionalProperties": false,
+        "description": "The owner's container use per UTC day, summed over every container.",
+        "properties": {
+          "day_timezone": {
+            "const": "UTC",
+            "default": "UTC",
+            "title": "Day Timezone",
+            "type": "string"
+          },
+          "days": {
+            "items": {
+              "$ref": "#/components/schemas/OwnerResourceDay"
+            },
+            "title": "Days",
+            "type": "array"
+          },
+          "generated_at": {
+            "format": "date-time",
+            "title": "Generated At",
+            "type": "string"
+          },
+          "since": {
+            "format": "date-time",
+            "title": "Since",
+            "type": "string"
+          },
+          "totals": {
+            "$ref": "#/components/schemas/OwnerResourceTotals"
+          },
+          "until": {
+            "format": "date-time",
+            "title": "Until",
+            "type": "string"
+          }
+        },
+        "required": [
+          "since",
+          "until",
+          "generated_at",
+          "totals",
+          "days"
+        ],
+        "title": "OwnerResourceHistory",
+        "type": "object"
+      },
+      "OwnerResourceTotals": {
+        "additionalProperties": false,
+        "description": "Running and measured time, and the CPU and memory used over it.",
+        "properties": {
+          "cpu_core_seconds": {
+            "minimum": 0.0,
+            "title": "Cpu Core Seconds",
+            "type": "number"
+          },
+          "measured_seconds": {
+            "minimum": 0.0,
+            "title": "Measured Seconds",
+            "type": "number"
+          },
+          "memory_byte_seconds": {
+            "minimum": 0.0,
+            "title": "Memory Byte Seconds",
+            "type": "number"
+          },
+          "running_seconds": {
+            "minimum": 0.0,
+            "title": "Running Seconds",
+            "type": "number"
+          }
+        },
+        "required": [
+          "running_seconds",
+          "measured_seconds",
+          "cpu_core_seconds",
+          "memory_byte_seconds"
+        ],
+        "title": "OwnerResourceTotals",
+        "type": "object"
+      },
+      "OwnerTokenUsage": {
+        "additionalProperties": false,
+        "description": "The owner's model usage for runs created in the window.\n\nEvery number is the admin Usage page's for the same runs: a run counts on\nthe UTC day it was created, in full, and an unknown amount stays unknown.",
+        "properties": {
+          "by_model": {
+            "$ref": "#/components/schemas/AdminUsageBreakdown"
+          },
+          "day_timezone": {
+            "const": "UTC",
+            "default": "UTC",
+            "title": "Day Timezone",
+            "type": "string"
+          },
+          "days": {
+            "items": {
+              "$ref": "#/components/schemas/AdminUsageDay"
+            },
+            "title": "Days",
+            "type": "array"
+          },
+          "generated_at": {
+            "format": "date-time",
+            "title": "Generated At",
+            "type": "string"
+          },
+          "since": {
+            "format": "date-time",
+            "title": "Since",
+            "type": "string"
+          },
+          "summary": {
+            "$ref": "#/components/schemas/AdminUsageAggregate"
+          },
+          "time_basis": {
+            "const": "job_created_at",
+            "default": "job_created_at",
+            "title": "Time Basis",
+            "type": "string"
+          },
+          "until": {
+            "format": "date-time",
+            "title": "Until",
+            "type": "string"
+          }
+        },
+        "required": [
+          "since",
+          "until",
+          "generated_at",
+          "summary",
+          "days",
+          "by_model"
+        ],
+        "title": "OwnerTokenUsage",
+        "type": "object"
+      },
       "PgAdminSetup": {
         "description": "The first administrator chooses credentials for pgAdmin's own login.",
         "properties": {
@@ -34151,6 +34645,209 @@
         "summary": "Delete Upload",
         "tags": [
           "agent-uploads"
+        ]
+      }
+    },
+    "/v1/agent/usage/containers": {
+      "get": {
+        "description": "The owner's containers, active first, with counts and current use over all.",
+        "operationId": "list_owner_containers_v1_agent_usage_containers_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 2048,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OwnerContainerList"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Owner Containers",
+        "tags": [
+          "usage"
+        ]
+      }
+    },
+    "/v1/agent/usage/resources": {
+      "get": {
+        "description": "Running time and measured CPU and memory for each of the last ``days`` UTC days.",
+        "operationId": "read_owner_resources_v1_agent_usage_resources_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "days",
+            "required": false,
+            "schema": {
+              "default": 7,
+              "maximum": 90,
+              "minimum": 1,
+              "title": "Days",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OwnerResourceHistory"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Read Owner Resources",
+        "tags": [
+          "usage"
+        ]
+      }
+    },
+    "/v1/agent/usage/tokens": {
+      "get": {
+        "description": "Model usage and cost of the owner's runs created in the last ``days`` UTC days.\n\nRaises:\n    HTTPException: 422 when the selection exceeds the aggregation's bounds,\n        503 when it cannot be read inside them. Neither returns a partial sum.",
+        "operationId": "read_owner_tokens_v1_agent_usage_tokens_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "days",
+            "required": false,
+            "schema": {
+              "default": 7,
+              "maximum": 90,
+              "minimum": 1,
+              "title": "Days",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OwnerTokenUsage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Read Owner Tokens",
+        "tags": [
+          "usage"
         ]
       }
     },

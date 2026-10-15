@@ -246,15 +246,19 @@ describe('sidebar navigation interactions', () => {
     expect(api.thread).not.toHaveBeenCalled();
   });
 
-  it('shows four settings destinations without loading or polling chat lists', async () => {
+  it('shows five settings destinations without loading or polling chat lists', async () => {
     api.pathname = '/settings/plugins';
     vi.useFakeTimers();
     await act(async () => render(<AgentsSidebar settingsNavigation={{ backHref: '/a' }} />));
     const navigation = screen.getByRole('navigation', { name: 'Settings' });
-    expect(within(navigation).getAllByRole('link')).toHaveLength(4);
+    expect(within(navigation).getAllByRole('link')).toHaveLength(5);
     expect(within(navigation).getByRole('link', { name: 'My Settings' })).toHaveAttribute(
       'href',
       '/settings/my-settings',
+    );
+    expect(within(navigation).getByRole('link', { name: 'Usage' })).toHaveAttribute(
+      'href',
+      '/settings/usage',
     );
     expect(within(navigation).getByRole('link', { name: 'Plugins & MCPs' })).toHaveAttribute(
       'aria-current',

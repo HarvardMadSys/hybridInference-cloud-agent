@@ -72,7 +72,7 @@ that URL to another origin is refused while the token is kept. Reset the token,
 save the URL, then enter the token again.
 
 For the first deployment of this release, run `alembic upgrade head` through
-`0076_mcp_residency_fence`. Existing hosts begin without a deployment drain
+`0077_sandbox_usage_days`. Existing hosts begin without a deployment drain
 owner or release receipt, and 0051 backfills each one with a non-null fence
 epoch. 0066 builds an index on `agent_jobs` concurrently: on a long job history
 it takes a while without blocking the running API, and an interrupted run can
@@ -98,6 +98,9 @@ downgrade drops it and leaves a host that was waiting to be removed draining.
 Settings page.
 0076 adds a nullable residency generation to MCP approval records; existing
 approvals keep it empty.
+0077 adds the per-day container usage table and an owner index on
+`agent_sandboxes`, built without `CONCURRENTLY`; that table holds one row per
+retained container, so the brief write lock is short.
 Rebuild the sandbox image for explicit plugin loading.
 Then start the main control-plane listener with its existing complete
 environment. It imports registered environment settings once,
@@ -767,8 +770,30 @@ The append-only admin trajectory requires `0057_admin_sandbox_trajectory`.
 Resource persistence requires migration
 `0034_sandbox_resource_usage` and a host running the updated sandbox manager.
 Older hosts still appear in the inventory with resource usage unavailable.
-Only the latest observation is stored; this view does not provide resource
-history.
+Only the latest observation is stored on the sandbox; this view does not
+provide resource history.
+
+### The owner's Usage page
+
+Settings has a **Usage** page (`/settings/usage`) that shows each owner their
+own containers, what the running ones use now, and what their work used over
+the last 7 or 30 UTC days. It reads three owner-scoped routes, none of which names a host,
+container ID, image or generation:
+
+| Route | What it reads |
+|---|---|
+| `GET /v1/agent/usage/containers` | Containers behind chats the owner has not deleted, active first, with limits and the latest sample of a running one. Fresh samples (90 seconds) are summed into current CPU and memory. |
+| `GET /v1/agent/usage/resources?days=` | Per UTC day: running time from the lifecycle events in `agent_sandbox_events`, and measured CPU and memory from `agent_sandbox_usage_days`. |
+| `GET /v1/agent/usage/tokens?days=` | The admin Usage aggregation, filtered to the owner's runs: cost, tokens and turns by day and by model. |
+
+Running time counts the `starting`, `running` and `stopping` states and has
+history back to `0046_admin_sandbox_trajectory`. CPU and memory history starts
+with migration `0077_sandbox_usage_days`: each accepted sample adds the time
+since the previous accepted sample of the same running container (at most
+120 seconds; after a start or a longer gap, only the sample's own CPU window),
+and its CPU cores and memory bytes over that time, to the container's row for
+the sample's UTC day. The page states how much of the running time the
+measurements cover. Disk usage is not measured.
 
 ## Reading a task's recorded events
 

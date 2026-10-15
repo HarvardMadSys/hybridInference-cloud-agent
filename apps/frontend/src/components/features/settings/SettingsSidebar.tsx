@@ -16,6 +16,11 @@ const ITEMS = [
     icon: 'M4 7h9m4 0h3M4 17h3m4 0h9M13 4v6M7 14v6',
   },
   {
+    href: SETTINGS_PATHS.usage,
+    label: 'settings.usage.title',
+    icon: 'M4 20V11m6 9V5m6 15v-7m4 7H3',
+  },
+  {
     href: SETTINGS_PATHS.plugins,
     label: 'settings.plugins',
     icon: 'M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM17.5 14v7M14 17.5h7',
@@ -80,12 +85,12 @@ export function SettingsSidebar({
             {t('settings.navigation')}
           </p>
           <div className="space-y-1">
-            {ITEMS.map(({ href, label, icon }, index) => (
+            {ITEMS.map(({ href, label, icon }) => (
               <Link
                 key={href}
                 href={href}
                 aria-current={pathname === href ? 'page' : undefined}
-                className={`${itemClass(pathname === href)} ${index === 1 ? '!mt-5' : ''}`}
+                className={`${itemClass(pathname === href)} ${href === SETTINGS_PATHS.plugins ? '!mt-5' : ''}`}
               >
                 <svg
                   aria-hidden="true"

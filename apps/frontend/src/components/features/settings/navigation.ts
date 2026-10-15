@@ -1,5 +1,6 @@
 export const SETTINGS_PATHS = {
   profile: '/settings/my-settings',
+  usage: '/settings/usage',
   plugins: '/settings/plugins',
   integrations: '/settings/integrations',
   environments: '/settings/environments',

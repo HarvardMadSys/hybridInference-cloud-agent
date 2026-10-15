@@ -16,6 +16,7 @@ from uuid import uuid4
 from cloud_agent.capacity_protocol import FRESH_AFTER_SECONDS
 from cloud_agent.domain.execution import TERMINAL_STATES
 from cloud_agent.logging_utils import get_logger
+from cloud_agent.owner_usage import measured_interval
 from cloud_agent.storage._sql.compute_admission import lock_compute_entry
 from cloud_agent.storage._sql.jobs import fail_unrunnable_follow_ups
 from cloud_agent.storage._sql.rows import load_json, sandbox_row_to_dict
@@ -2764,8 +2765,13 @@ class PostgresSandboxRepository:
         sample = parse_sandbox_resource_sample(resource_usage)
         if sample is None:
             return
-        await conn.execute(
+        # The CTE reads the row as this statement found it, so the previous
+        # sample's time comes back beside the one replacing it.
+        accepted = await conn.fetchrow(
             """
+            WITH previous AS (
+                SELECT resource_sampled_at FROM agent_sandboxes WHERE id = $1
+            )
             UPDATE agent_sandboxes
             SET resource_snapshot = $2::jsonb,
                 resource_sampled_at = NOW() - make_interval(secs => $3),
@@ -2774,9 +2780,46 @@ class PostgresSandboxRepository:
               AND resource_snapshot->>'sample_id' IS DISTINCT FROM $4
               AND (resource_sampled_at IS NULL
                    OR resource_sampled_at < NOW() - make_interval(secs => $3))
+            RETURNING user_id, resource_sampled_at,
+                      (SELECT resource_sampled_at FROM previous) AS previous_sampled_at
             """,
             sandbox_id,
             json.dumps(sample.model_dump(mode="json")),
             sample.sample_age_ms / 1000.0,
             sample.sample_id,
         )
+        if accepted is None or sample.cpu_cores is None or sample.memory_bytes is None:
+            return
+        seconds = measured_interval(
+            sampled_at=accepted["resource_sampled_at"],
+            previous_sampled_at=accepted["previous_sampled_at"],
+            cpu_window_seconds=sample.cpu_window_seconds,
+        )
+        if seconds <= 0:
+            return
+        # The owner's history is optional too: losing one day's addition must
+        # not lose the sample the admin inventory shows.
+        try:
+            async with conn.transaction():
+                await conn.execute(
+                    """
+                    INSERT INTO agent_sandbox_usage_days AS d (
+                        sandbox_id, user_id, day,
+                        measured_seconds, cpu_core_seconds, memory_byte_seconds
+                    )
+                    VALUES ($1, $2, ($3::timestamptz AT TIME ZONE 'UTC')::date, $4, $5, $6)
+                    ON CONFLICT (sandbox_id, day) DO UPDATE SET
+                        measured_seconds = d.measured_seconds + EXCLUDED.measured_seconds,
+                        cpu_core_seconds = d.cpu_core_seconds + EXCLUDED.cpu_core_seconds,
+                        memory_byte_seconds = d.memory_byte_seconds + EXCLUDED.memory_byte_seconds,
+                        updated_at = NOW()
+                    """,
+                    sandbox_id,
+                    accepted["user_id"],
+                    accepted["resource_sampled_at"],
+                    seconds,
+                    sample.cpu_cores * seconds,
+                    float(sample.memory_bytes) * seconds,
+                )
+        except Exception:
+            logger.warning("sandbox_usage_day_unavailable", exc_info=True)

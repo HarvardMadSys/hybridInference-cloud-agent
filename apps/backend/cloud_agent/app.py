@@ -167,6 +167,7 @@ def create_app() -> FastAPI:
         host_profiling,
         hosts,
         mcp_connections,
+        owner_usage,
         routes,
         service_jobs,
         session,
@@ -191,6 +192,7 @@ def create_app() -> FastAPI:
     app.add_middleware(_cross_site.CrossSiteWriteGuard)
     app.include_router(routes.router)
     app.include_router(usage.router)
+    app.include_router(owner_usage.router)
     # Owner-facing, and never on the relay's own listener: adding a connection
     # or approving a call is not sandbox work. The relay itself is the reverse
     # — only ``create_mcp_app`` serves it. This application sits behind the
