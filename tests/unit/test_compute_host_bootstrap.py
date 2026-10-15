@@ -630,7 +630,12 @@ async def test_checked_operator_example_loads_and_renders_real_bootstrap_payload
         assert env["AGENT_TUNNEL_SSH_KEY"] == "/opt/cloud-agent-pilot/.compute-secrets/gateway.key"
         assert env["AGENT_SANDBOX_MANAGER_REVERSE_PORT"] == "19092"
         assert "{" not in archive.extractfile(".env").read().decode()
-        assert len([m for m in archive.getmembers() if m.name.startswith(".compute-secrets/")]) == 6
+        secrets = [m for m in archive.getmembers() if m.name.startswith(".compute-secrets/")]
+        assert len(secrets) == 6
+        # The secrets above were written without a final newline, as an Admin
+        # request delivers them; OpenSSH cannot read a key in that form.
+        for member in secrets:
+            assert archive.extractfile(member).read() == b"trusted-test-tunnel-material\n"
 
 
 @pytest.mark.parametrize(
