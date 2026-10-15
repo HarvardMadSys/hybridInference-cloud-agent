@@ -228,6 +228,37 @@ describe('UsageSettings', () => {
     expect(screen.queryByRole('button', { name: /Show/ })).not.toBeInTheDocument();
   });
 
+  it('keeps every shown container when a refresh reads past one page', async () => {
+    // One page holds at most 100 containers; this owner has 150 and has shown
+    // all of them.
+    let read = 'repo';
+    vi.mocked(getOwnerContainers).mockImplementation(async ({ cursor, limit = 50 } = {}) => {
+      const start = cursor ? Number(cursor) : 0;
+      const end = Math.min(150, start + Math.min(limit, 100));
+      return list({
+        total_count: 150,
+        containers: Array.from({ length: end - start }, (_, offset) =>
+          box({ id: `asbx_${start + offset}`, chats: [], repo: `${read}-${start + offset}` }),
+        ),
+        next_cursor: end < 150 ? String(end) : null,
+      });
+    });
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    section();
+    fireEvent.click(await screen.findByRole('button', { name: 'Show 100 more' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Show 50 more' }));
+    await screen.findByText('repo-149');
+
+    read = 'fresh';
+    await act(async () => {
+      vi.advanceTimersByTime(CONTAINER_REFRESH_MS);
+    });
+    await screen.findByText('fresh-0');
+    expect(screen.getAllByRole('listitem')).toHaveLength(150);
+    expect(screen.getByText('fresh-149')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^Show/ })).not.toBeInTheDocument();
+  });
+
   it('reads the containers again while the page is visible', async () => {
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
     section();

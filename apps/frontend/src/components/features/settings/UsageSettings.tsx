@@ -147,10 +147,28 @@ function Containers() {
         const page = await getOwnerContainers({
           limit: Math.min(MAX_PAGE, Math.max(PAGE, shown.current)),
         });
+        // One read returns at most MAX_PAGE rows. Past that, read on until
+        // every row "Show more" added is read again, or the refresh shortens
+        // the list.
+        let rows = page.containers;
+        let next = page.next_cursor;
+        while (
+          next &&
+          shown.current > MAX_PAGE &&
+          rows.length < shown.current &&
+          request === latest.current
+        ) {
+          const more = await getOwnerContainers({
+            cursor: next,
+            limit: Math.min(MAX_PAGE, shown.current - rows.length),
+          });
+          rows = [...rows, ...more.containers];
+          next = more.next_cursor;
+        }
         if (request !== latest.current) return;
         setList(page);
-        setContainers(page.containers);
-        setCursor(page.next_cursor);
+        setContainers(rows);
+        setCursor(next);
         setNowMs(Date.now());
         setError(null);
       } catch (cause) {
