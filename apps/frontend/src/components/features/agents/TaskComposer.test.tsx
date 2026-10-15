@@ -590,7 +590,32 @@ describe('TaskComposer source-control onboarding', () => {
     expect(within(suggestions).getByText('How your avatar is generated')).toBeInTheDocument();
     expect(getInsights).toHaveBeenCalledTimes(1);
     rendered.unmount();
+  });
 
+  it('retains the avatar and suggestions immediately when returning to New task', async () => {
+    account.id = 'alice';
+    vi.mocked(getAgentConfig).mockResolvedValue(config());
+    const profile = userProfile();
+    vi.mocked(getInsights).mockResolvedValueOnce(profile);
+    const first = render(<TaskComposer />);
+    await screen.findByText(profile.suggestions[0].title);
+    expect(screen.getByRole('img')).toHaveAttribute('src', profile.avatar.data_url);
+    first.unmount();
+    vi.mocked(getInsights).mockReturnValueOnce(new Promise(() => {}));
+    vi.mocked(getUserProfile).mockReturnValueOnce(new Promise(() => {}));
+    render(<TaskComposer />);
+    // The composer waits for agent configuration independently of avatar reads.
+    await screen.findByRole('textbox', { name: 'What should the agent do?' });
+    expect(screen.getByRole('img')).toHaveAttribute('src', profile.avatar.data_url);
+    expect(screen.getByText(profile.suggestions[0].title)).toBeVisible();
+    expect(getInsights).toHaveBeenCalledTimes(2);
+    expect(getUserProfile).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps an uncached composer usable when insights fail and allows retrying', async () => {
+    account.id = 'alice';
+    vi.mocked(getAgentConfig).mockResolvedValue(config());
+    const profile = userProfile();
     render(<TaskComposer />);
     expect(await screen.findByRole('textbox', { name: 'What should the agent do?' })).toBeEnabled();
     expect(screen.queryByRole('img')).not.toBeInTheDocument();

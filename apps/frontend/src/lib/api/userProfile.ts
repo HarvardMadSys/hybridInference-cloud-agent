@@ -40,6 +40,6 @@ export async function saveUserProfile(
       signal,
     }),
   );
-  announceProfileSaved(saved);
+  if (!signal?.aborted) announceProfileSaved(saved);
   return saved;
 }

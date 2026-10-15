@@ -8,8 +8,9 @@
 // this provider can answer is "does the cookie still work", which it asks by
 // calling `/v1/session/me`.
 //
-import { createContext, useCallback, useContext, useEffect, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { clearSideChatDrafts } from '@/components/features/agents/sideChatStorage';
+import { clearAccountResources } from '@/components/features/profile/accountResource';
 import { AUTH_EXPIRED_EVENT } from '@/lib/api/client';
 import { APIError } from '@/lib/utils/errors';
 import {
@@ -58,6 +59,7 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 const SIGNED_OUT: AuthState = { isAuthenticated: false, loading: false, user: null };
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
+  const accountId = useRef<string | undefined>(undefined);
   const [state, setState] = useState<AuthState>({
     isAuthenticated: false,
     loading: true,
@@ -69,9 +71,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     try {
       const me = await getSessionUser();
       if (!me) {
+        clearAccountResources();
+        accountId.current = undefined;
         setState(SIGNED_OUT);
         return;
       }
+      if (accountId.current !== me.id) clearAccountResources();
+      accountId.current = me.id;
       setState({
         isAuthenticated: true,
         loading: false,
@@ -89,6 +95,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           : error instanceof APIError && error.code === 'invalid_session_response'
             ? 'invalid_response'
             : 'unavailable';
+      clearAccountResources();
+      accountId.current = undefined;
       setState({ ...SIGNED_OUT, error: category });
     }
   }, []);
@@ -102,6 +110,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     const handleAuthExpired = () => {
       clearSideChatDrafts(state.user?.id);
+      clearAccountResources();
+      accountId.current = undefined;
       setState(SIGNED_OUT);
     };
     window.addEventListener(AUTH_EXPIRED_EVENT, handleAuthExpired);
@@ -115,6 +125,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     // gets the failure and says so.
     await endSession();
     clearSideChatDrafts(state.user?.id);
+    clearAccountResources();
+    accountId.current = undefined;
     setState(SIGNED_OUT);
   }, [state.user?.id]);
 
