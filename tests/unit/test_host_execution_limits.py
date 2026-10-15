@@ -81,6 +81,94 @@ def test_newline_free_stdout_is_read_in_bounded_chunks():
     assert process.wait() == 0
 
 
+def _local_receipt_manager(monkeypatch, tmp_path):
+    """A manager that runs the real launcher and reaper here, with no Docker operation."""
+    monkeypatch.setattr(chat_sandbox, "ACTIVATION_TMPFS", str(tmp_path))
+    spec = ChatSandboxSpec(
+        thread_id="athr_test", sandbox_id="asbx_test", generation=1, runtime_id="codex"
+    )
+    manager = ChatSandboxManager(ContainerBackend(image="test", uid=os.getuid(), gid=os.getgid()))
+    monkeypatch.setattr(manager, "_require", lambda _spec: SimpleNamespace(running=True))
+    monkeypatch.setattr(manager, "build_exec_command", lambda _spec, argv, **_kw: argv)
+    monkeypatch.setattr(
+        manager,
+        "exec_capture",
+        lambda _spec, argv, **kw: subprocess.run(
+            argv, capture_output=True, timeout=kw["timeout_s"], check=False
+        ),
+    )
+    return manager, spec
+
+
+def _wait_for(condition, seconds: float = 10) -> None:
+    deadline = time.monotonic() + seconds
+    while not condition():
+        assert time.monotonic() < deadline, "the condition never held"
+        time.sleep(0.02)
+
+
+def test_a_resident_that_exited_on_end_of_input_closes_without_a_failed_kill(monkeypatch, tmp_path):
+    """Closing a resident sends EOF, then kills; a CLI may already have exited.
+
+    Its launcher removes the receipt on exit, so the reaper finds nothing to
+    signal. Reporting that as a failed kill made every stop skip the final
+    archive as if native history had not been flushed.
+    """
+    manager, spec = _local_receipt_manager(monkeypatch, tmp_path)
+    pidfile = tmp_path / f"command-{'a' * 32}.pid"
+    process = manager.spawn(
+        spec,
+        ["cat"],
+        live_input=True,
+        user_uid=os.getuid(),
+        user_gid=os.getgid(),
+        process_pidfile=str(pidfile),
+    )
+    _wait_for(pidfile.exists)
+    process.close_stdin()
+    _wait_for(lambda: not pidfile.exists())
+
+    process.kill()
+
+    assert process.wait() == 0
+
+
+def test_a_missing_receipt_while_the_command_still_runs_is_a_failed_kill(monkeypatch, tmp_path):
+    """Without a receipt nothing may be signalled, so a live command is a failure."""
+    manager, spec = _local_receipt_manager(monkeypatch, tmp_path)
+    monkeypatch.setattr(chat_sandbox, "_RECEIPT_EXIT_GRACE_S", 0.2)
+    pidfile = tmp_path / f"command-{'b' * 32}.pid"
+    process = manager.spawn(
+        spec,
+        ["sleep", "20"],
+        live_input=True,
+        user_uid=os.getuid(),
+        user_gid=os.getgid(),
+        process_pidfile=str(pidfile),
+    )
+    _wait_for(pidfile.exists)
+    command_pid = int(pidfile.read_text().split()[0])
+    pidfile.unlink()
+    try:
+        with pytest.raises(chat_sandbox.MemberProcessReceiptMissing):
+            process.kill()
+        # The Docker client is killed all the same.
+        assert process.wait() is not None
+    finally:
+        os.killpg(command_pid, 9)
+
+
+def test_only_the_reapers_silent_exit_means_the_receipt_is_missing():
+    missing = chat_sandbox._member_kill_failure(125, "")
+    assert isinstance(missing, chat_sandbox.MemberProcessReceiptMissing)
+    # Docker's own failures share the code and always explain themselves.
+    explained = chat_sandbox._member_kill_failure(125, "Error response from daemon: gone")
+    assert not isinstance(explained, chat_sandbox.MemberProcessReceiptMissing)
+    assert "Error response from daemon" in str(explained)
+    stale = chat_sandbox._member_kill_failure(126, "")
+    assert not isinstance(stale, chat_sandbox.MemberProcessReceiptMissing)
+
+
 def test_command_reaper_refuses_a_stale_start_receipt(tmp_path):
     """A PID reused by a different process is a cleanup failure, never a kill target."""
     sibling = subprocess.Popen(

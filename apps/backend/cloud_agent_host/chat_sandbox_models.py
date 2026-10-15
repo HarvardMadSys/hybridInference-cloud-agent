@@ -74,6 +74,14 @@ class ArchiveExportTooLarge(SandboxError):
     """A container path holds more than the archive export was allowed to carry."""
 
 
+class MemberProcessReceiptMissing(SandboxError):
+    """A member process kill found no process receipt to honour.
+
+    The receipt is either not written yet or already removed: its launcher
+    deletes it when the command exits, as a resident CLI does after stdin EOF.
+    """
+
+
 class SandboxRestoreFailed(SandboxError):
     """A moved group's checkpoint could not become its container on this host.
 

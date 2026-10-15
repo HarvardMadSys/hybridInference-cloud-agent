@@ -73,6 +73,7 @@ from cloud_agent_host.chat_sandbox_models import (
     ChatSandboxInspection as ChatSandboxInspection,
     ChatSandboxSpec as ChatSandboxSpec,
     ChatSandboxStatus as ChatSandboxStatus,
+    MemberProcessReceiptMissing as MemberProcessReceiptMissing,
     RetainedChatFailStopped as RetainedChatFailStopped,
     RetainedChatLost as RetainedChatLost,
     SandboxActionFacts as SandboxActionFacts,
@@ -2584,7 +2585,7 @@ print(' '.join(str(uid) for uid in sorted(uids) if uid in (30000,30001,30002) or
                 if isinstance(result.stderr, bytes)
                 else str(result.stderr or "")
             )
-            raise SandboxError("resident process cleanup failed: " + stderr[:300])
+            raise _member_kill_failure(result.returncode, stderr)
 
     @staticmethod
     def _member_reaper_script(pidfile_expression: str) -> str:
@@ -4609,6 +4610,24 @@ finally:
             raise SandboxError(f"Docker archive command failed: {exc}") from exc
 
 
+#: The member reaper's exit when no process receipt appeared in its wait.
+_REAPER_NO_RECEIPT = 125
+
+#: How long a killed command whose receipt is gone may take to finish exiting.
+_RECEIPT_EXIT_GRACE_S = 5.0
+
+
+def _member_kill_failure(returncode: int, stderr: str) -> SandboxError:
+    """Name a failed member reaper run.
+
+    Only the reaper's own silent exit means the receipt is missing: a Docker
+    exec failure that shares the code always explains itself on stderr.
+    """
+    if returncode == _REAPER_NO_RECEIPT and not stderr.strip():
+        return MemberProcessReceiptMissing("resident process receipt is missing")
+    return SandboxError("resident process cleanup failed: " + stderr[:300])
+
+
 class _RetainedExecProcess(SandboxProcess):
     """An attached ``docker exec`` with container- or member-scoped cleanup."""
 
@@ -4682,15 +4701,30 @@ class _RetainedExecProcess(SandboxProcess):
             if self._process_pidfile is None:
                 raise SandboxError("retained exec has no process-scoped kill receipt")
             assert self._user_uid is not None and self._user_gid is not None
-            self._manager.kill_member_process(
-                self._spec,
-                pidfile=self._process_pidfile,
-                user_uid=self._user_uid,
-                user_gid=self._user_gid,
-            )
+            try:
+                self._manager.kill_member_process(
+                    self._spec,
+                    pidfile=self._process_pidfile,
+                    user_uid=self._user_uid,
+                    user_gid=self._user_gid,
+                )
+            except MemberProcessReceiptMissing:
+                # A resident CLI exits on its own after stdin EOF, and its
+                # launcher then deletes the receipt. Once this exec has
+                # returned too, nothing is left to signal. A receipt missing
+                # while the exec still runs remains a failed kill.
+                if not self._exits_within(_RECEIPT_EXIT_GRACE_S):
+                    raise
         finally:
             if self._process.poll() is None:
                 self._process.kill()
+
+    def _exits_within(self, seconds: float) -> bool:
+        try:
+            self._process.wait(timeout=seconds)
+        except subprocess.TimeoutExpired:
+            return False
+        return True
 
     def wait(self) -> int:
         return self._process.wait()
