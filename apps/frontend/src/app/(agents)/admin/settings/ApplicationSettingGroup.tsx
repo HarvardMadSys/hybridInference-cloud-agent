@@ -4,13 +4,19 @@ import { useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 
 import { useModalDialog } from '@/components/ui/useModalDialog';
-import type { AdminSettingDefinition, AdminSettingValue } from '@/lib/api/adminSettings';
+import type {
+  AdminSettingDefinition,
+  AdminSettingValue,
+  AgentAdminSettings,
+} from '@/lib/api/adminSettings';
 
 import type { ApplicationSettingsState } from './ApplicationSettings';
 import { ARCHIVE_BUCKET, displayValue, parseValue } from './settingValues';
 
 type Changes = Record<string, AdminSettingValue | null>;
-type Review = { changes: Changes; reset?: AdminSettingDefinition };
+// `snapshot` is what the review shows as current. It applies only at that
+// snapshot's revision, so another admin's later save is never overwritten unseen.
+type Review = { changes: Changes; reset?: AdminSettingDefinition; snapshot: AgentAdminSettings };
 const INPUT_CLASS =
   'ui-input min-h-11 w-full disabled:cursor-not-allowed disabled:opacity-50 aria-[invalid=true]:border-status-error';
 const BUTTON_CLASS = 'ui-button ui-button-secondary min-h-11';
@@ -81,6 +87,8 @@ function ReviewChanges({
       ? 'Clear saved secret?'
       : 'Restore default value?'
     : 'Review changes';
+  // A newer read means settings were saved since the review opened.
+  const stale = !!settings.snapshot && settings.snapshot.revision !== review.snapshot.revision;
   useModalDialog(panel, {
     busy: settings.busy,
     onClose,
@@ -120,9 +128,9 @@ function ReviewChanges({
         </p>
         <div className="mx-5 my-5 divide-y divide-border sm:mx-6 sm:my-6">
           {Object.entries(review.changes).map(([key, value]) => {
-            const definition = settings.snapshot?.definitions.find((field) => field.key === key);
+            const definition = review.snapshot.definitions.find((field) => field.key === key);
             if (!definition) return null;
-            const current = settings.snapshot?.values[key] ?? definition.default;
+            const current = review.snapshot.values[key] ?? definition.default;
             const next = value === null ? definition.default : value;
             return (
               <div key={key} className="py-4 first:pt-0 last:pb-0">
@@ -132,7 +140,7 @@ function ReviewChanges({
                     <dt className="mb-2 text-xs font-medium text-muted">Current value</dt>
                     <dd className="whitespace-pre-wrap break-words text-[13px] leading-6 text-muted [overflow-wrap:anywhere]">
                       {definition.secret
-                        ? settings.snapshot?.secret_configured[key]
+                        ? review.snapshot.secret_configured[key]
                           ? 'Configured · hidden'
                           : 'Not configured'
                         : displayValue(current) || '(empty)'}
@@ -168,10 +176,17 @@ function ReviewChanges({
             );
           })}
         </div>
-        {settings.error && (
+        {stale ? (
           <p role="alert" className="mx-5 mb-5 text-sm text-status-error sm:mx-6">
-            {settings.error}
+            Settings changed after this review. Go back to editing to see the current values, then
+            review the changes again.
           </p>
+        ) : (
+          settings.error && (
+            <p role="alert" className="mx-5 mb-5 text-sm text-status-error sm:mx-6">
+              {settings.error}
+            </p>
+          )
         )}
         <div className="flex flex-wrap justify-end gap-2 border-t border-border bg-surface-muted/50 px-5 py-4 sm:px-6">
           <button
@@ -185,7 +200,7 @@ function ReviewChanges({
           </button>
           <button
             type="button"
-            disabled={settings.busy}
+            disabled={settings.busy || stale}
             onClick={onConfirm}
             className={`ui-button min-h-11 ${review.reset ? 'bg-status-error text-white hover:opacity-90' : 'ui-button-primary'}`}
           >
@@ -268,7 +283,7 @@ export function ApplicationSettingGroup({
   };
 
   const prepare = () => {
-    if (busy || !changed.length) return;
+    if (busy || !changed.length || !snapshot) return;
     const changes: Changes = {};
     const additional: Changes = {};
     const invalid: Record<string, string> = {};
@@ -286,7 +301,7 @@ export function ApplicationSettingGroup({
       return;
     }
     // The prefix encoded in an S3 URI takes precedence over a separate prefix draft.
-    setReview({ changes: { ...changes, ...additional } });
+    setReview({ changes: { ...changes, ...additional }, snapshot });
   };
 
   const apply = async () => {
@@ -294,7 +309,7 @@ export function ApplicationSettingGroup({
     const notice = review.reset
       ? `${review.reset.label} ${review.reset.secret ? 'cleared.' : 'restored to its default.'}`
       : `${title} settings saved.`;
-    if (await save(review.changes, notice)) {
+    if (await save(review.changes, notice, review.snapshot.revision)) {
       if (!review.reset) {
         returnFocus.current = editButton.current;
         cancel();
@@ -508,10 +523,11 @@ export function ApplicationSettingGroup({
                           className="ui-button ui-button-ghost min-h-11 w-full justify-start text-status-error"
                           aria-label={`${field.secret ? 'Clear' : 'Restore default for'} ${field.label}`}
                           onClick={(event) => {
+                            if (!snapshot) return;
                             const details = event.currentTarget.closest('details');
                             returnFocus.current = details?.querySelector('summary') ?? null;
                             if (details) details.open = false;
-                            setReview({ changes: { [key]: null }, reset: field });
+                            setReview({ changes: { [key]: null }, reset: field, snapshot });
                           }}
                         >
                           {field.secret ? 'Clear secret…' : 'Restore default…'}

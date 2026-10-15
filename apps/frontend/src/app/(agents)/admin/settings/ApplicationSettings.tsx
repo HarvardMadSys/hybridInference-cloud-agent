@@ -145,6 +145,7 @@ export function useApplicationSettings({
   const save = async (
     changes: Record<string, AdminSettingValue | null>,
     notice: string,
+    revision: number,
   ): Promise<boolean> => {
     if (!enabled || writing.current || revoked.current) return false;
     writing.current = true;
@@ -157,8 +158,8 @@ export function useApplicationSettings({
     const current = ++sequence.current;
     try {
       const next = recoveryToken
-        ? await setAgentAdminSettings(changes, controller.signal, recoveryToken)
-        : await setAgentAdminSettings(changes, controller.signal);
+        ? await setAgentAdminSettings(changes, revision, controller.signal, recoveryToken)
+        : await setAgentAdminSettings(changes, revision, controller.signal);
       if (!mounted.current || controller.signal.aborted || current !== sequence.current)
         return false;
       setSnapshot(next);

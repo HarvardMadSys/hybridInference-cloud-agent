@@ -33,11 +33,11 @@ describe('admin settings client', () => {
       password: 'a\nb',
       reset: null,
     };
-    await setAgentAdminSettings(settings, controller.signal);
+    await setAgentAdminSettings(settings, 7, controller.signal);
     expect(fetch).toHaveBeenCalledWith(expect.any(String), '/admin/agent/settings', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ settings }),
+      body: JSON.stringify({ settings, expected_revision: 7 }),
       signal: controller.signal,
     });
   });
@@ -49,7 +49,7 @@ describe('admin settings client', () => {
         headers: { 'Content-Type': 'application/json' },
       }),
     );
-    await expect(setAgentAdminSettings({ unknown: true })).rejects.toMatchObject({
+    await expect(setAgentAdminSettings({ unknown: true }, 1)).rejects.toMatchObject({
       statusCode: 422,
     });
   });
@@ -65,7 +65,7 @@ describe('admin settings client', () => {
     const token = 'test-administrator-recovery-token';
     const signal = new AbortController().signal;
     await getAgentAdminSettings(signal, token);
-    await setAgentAdminSettings({ gateway_issuer: 'https://identity.example' }, signal, token);
+    await setAgentAdminSettings({ gateway_issuer: 'https://identity.example' }, 1, signal, token);
     expect(normal).not.toHaveBeenCalled();
     expect(recover).toHaveBeenCalledTimes(2);
     for (const [url, init] of recover.mock.calls) {
@@ -78,7 +78,10 @@ describe('admin settings client', () => {
       });
     }
     expect(recover.mock.calls[1][1]?.body).toBe(
-      JSON.stringify({ settings: { gateway_issuer: 'https://identity.example' } }),
+      JSON.stringify({
+        settings: { gateway_issuer: 'https://identity.example' },
+        expected_revision: 1,
+      }),
     );
   });
 });

@@ -65,9 +65,15 @@ export async function getAgentAdminSettings(
   );
 }
 
-/** Patch only the named settings. Null restores the built-in default. */
+/**
+ * Patch only the named settings. Null restores the built-in default.
+ *
+ * Refused with a 409 unless the settings are still at `expectedRevision`, the
+ * revision the change was reviewed against.
+ */
 export async function setAgentAdminSettings(
   settings: Record<string, AdminSettingValue | null>,
+  expectedRevision: number,
   signal?: AbortSignal,
   recoveryToken?: string,
 ): Promise<AgentAdminSettings> {
@@ -76,7 +82,7 @@ export async function setAgentAdminSettings(
       {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ settings }),
+        body: JSON.stringify({ settings, expected_revision: expectedRevision }),
         signal,
       },
       recoveryToken,

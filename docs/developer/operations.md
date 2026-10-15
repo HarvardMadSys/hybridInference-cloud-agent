@@ -55,6 +55,9 @@ settings are stored in the Agent database.
 The application API uses `GET /admin/agent/settings` and
 `PUT /admin/agent/settings`. Send a partial body such as
 `{"settings": {"max_attempts": 3}}`; omitted keys keep their current values.
+Add `"expected_revision"` with the `revision` you read to have the write
+refused with 409 if anyone saved settings since then. The editor always sends
+it, so applying a review never overwrites a change the review did not show.
 Writes use the existing administrator guard and appear in the Audit log.
 Application settings are read-only until you choose **Edit** on a group.
 Change the fields, select **Review changes**, check the current and proposed

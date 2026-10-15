@@ -69,9 +69,14 @@ class PostgresSettingsRepository:
         return _snapshot(row)
 
     async def update_settings(
-        self, changes: Mapping[str, Any]
+        self, changes: Mapping[str, Any], *, expected_revision: int | None = None
     ) -> tuple[int, dict[str, Any], dict[str, Any]]:
-        """Atomically merge encoded changes and return revision, current and previous values."""
+        """Atomically merge encoded changes and return revision, current and previous values.
+
+        With ``expected_revision``, the merge applies only if no other update
+        was saved since that revision; the check holds the row lock, so two
+        updates reviewed against one revision cannot both apply.
+        """
         async with self._pool.acquire() as conn, conn.transaction():
             row = await conn.fetchrow(
                 'SELECT revision, "values" FROM agent_settings WHERE id = TRUE FOR UPDATE'
@@ -79,6 +84,8 @@ class PostgresSettingsRepository:
             if row is None:
                 raise RuntimeError("Agent settings have not been initialized.")
             revision, previous = _snapshot(row)
+            if expected_revision is not None and revision != expected_revision:
+                raise settings.SettingsRevisionConflict()
             values = {**previous, **changes}
             settings.validate_settings_update(previous, values)
             if values == previous:

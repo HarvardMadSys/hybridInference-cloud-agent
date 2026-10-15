@@ -32,8 +32,10 @@ class FakeSettings:
         return self.revision, deepcopy(self.values)
 
     async def update_settings(
-        self, changes: dict[str, Any]
+        self, changes: dict[str, Any], *, expected_revision: int | None = None
     ) -> tuple[int, dict[str, Any], dict[str, Any]]:
+        if expected_revision is not None and expected_revision != self.revision:
+            raise admin_settings.settings.SettingsRevisionConflict()
         previous = deepcopy(self.values)
         self.values.update(changes)
         self.updates.append(changes)
@@ -155,7 +157,7 @@ async def test_identity_conflict_is_a_safe_refusal_without_applying_or_auditing(
 
     client, repository, audit, _, applied = settings_api
 
-    async def conflict(changes):
+    async def conflict(changes, **_kwargs):
         raise IdentityNamespaceError("Gateway issuer does not match the database binding.")
 
     monkeypatch.setattr(repository, "update_settings", conflict)
@@ -165,6 +167,41 @@ async def test_identity_conflict_is_a_safe_refusal_without_applying_or_auditing(
     assert response.status_code == 409
     assert response.headers["cache-control"] == "no-store"
     assert repository.updates == audit.calls == applied == []
+
+
+async def test_a_change_reviewed_before_another_admin_saved_is_refused(settings_api) -> None:
+    """What the review showed as current must still be current when it applies."""
+    client, repository, audit, _, applied = settings_api
+    reviewed = (await client.get("/admin/agent/settings", headers=ADMIN)).json()["revision"]
+    repository.values["name"] = "saved by another admin"
+    repository.revision += 1
+
+    response = await client.put(
+        "/admin/agent/settings",
+        headers=ADMIN,
+        json={"settings": {"name": "reviewed"}, "expected_revision": reviewed},
+    )
+
+    assert response.status_code == 409
+    assert response.headers["cache-control"] == "no-store"
+    assert repository.values["name"] == "saved by another admin"
+    assert repository.updates == audit.calls == applied == []
+
+
+async def test_a_change_reviewed_against_the_current_revision_applies(settings_api) -> None:
+    client, repository, audit, _, applied = settings_api
+    reviewed = (await client.get("/admin/agent/settings", headers=ADMIN)).json()["revision"]
+
+    response = await client.put(
+        "/admin/agent/settings",
+        headers=ADMIN,
+        json={"settings": {"name": "reviewed"}, "expected_revision": reviewed},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["revision"] == reviewed + 1
+    assert repository.values["name"] == "reviewed"
+    assert len(audit.calls) == len(applied) == 1
 
 
 async def test_partial_update_preserves_values_applies_locally_and_audits_safely(

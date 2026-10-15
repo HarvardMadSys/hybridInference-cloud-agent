@@ -40,6 +40,10 @@ class SettingTooShort(ValueError):
     """A value shorter than its setting's minimum length; otherwise acceptable."""
 
 
+class SettingsRevisionConflict(Exception):
+    """Settings were saved after the revision an update was reviewed against."""
+
+
 _CONTACT_MAILTO = re.compile(
     r"mailto:[A-Za-z0-9.!#$%&'*+/=^_`{|}~-]+"
     r"@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)+",

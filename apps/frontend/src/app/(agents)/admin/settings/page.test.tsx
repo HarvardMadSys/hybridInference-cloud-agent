@@ -758,6 +758,7 @@ describe('application category tabs', () => {
     await waitFor(() =>
       expect(setAgentAdminSettings).toHaveBeenCalledWith(
         { 'sandbox_archive.bucket': 'deletion-archive-bucket' },
+        1,
         expect.any(AbortSignal),
       ),
     );
@@ -1094,6 +1095,7 @@ describe('application category tabs', () => {
     expect(setAgentAdminSettings).toHaveBeenNthCalledWith(
       1,
       { 'identity.registration_enabled': false },
+      1,
       expect.any(AbortSignal),
     );
     selectSettingsTab('Appearance');
@@ -1119,6 +1121,7 @@ describe('application category tabs', () => {
     expect(setAgentAdminSettings).toHaveBeenNthCalledWith(
       2,
       { 'identity.registration_enabled': null },
+      2,
       expect.any(AbortSignal),
     );
     expect(screen.getByRole('combobox', { name: 'Registration enabled' })).toHaveValue('true');
@@ -1224,7 +1227,7 @@ describe('application category tabs', () => {
     const name = editField('Application name');
     fireEvent.change(name, { target: { value: 'Saved application' } });
     submit(name);
-    const signal = vi.mocked(setAgentAdminSettings).mock.calls[0][1]!;
+    const signal = vi.mocked(setAgentAdminSettings).mock.calls[0][2]!;
     expect(signal.aborted).toBe(false);
     selectSettingsTab('CloudLab');
     await act(async () => protectedRead.reject(new APIError('FORBIDDEN', 'Forbidden', 403)));

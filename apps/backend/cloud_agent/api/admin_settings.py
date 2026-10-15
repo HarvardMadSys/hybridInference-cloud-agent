@@ -30,11 +30,17 @@ class _SettingsStorage(Protocol):
 
 
 class UpdateSettingsRequest(BaseModel):
-    """A partial settings update; omitted keys retain their existing values."""
+    """A partial settings update; omitted keys retain their existing values.
+
+    ``expected_revision`` is the revision the change was reviewed against.
+    When given, the update applies only if nothing was saved since, so a
+    review cannot silently overwrite another administrator's change.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     settings: dict[str, Any]
+    expected_revision: int | None = None
 
 
 def _no_store(response: Response) -> None:
@@ -73,7 +79,17 @@ async def update_settings(
     storage = require_store(store)
     try:
         changes = settings.encode_changes(payload.settings)
-        revision, encoded, previous = await storage.settings.update_settings(changes)
+        revision, encoded, previous = await storage.settings.update_settings(
+            changes, expected_revision=payload.expected_revision
+        )
+    except settings.SettingsRevisionConflict:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Settings changed after this review. Refresh the settings, check the "
+                "current values, and review the changes again."
+            ),
+        ) from None
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from None
     except IdentityNamespaceError as exc:

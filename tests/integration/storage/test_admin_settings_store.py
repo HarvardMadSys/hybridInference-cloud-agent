@@ -42,6 +42,44 @@ async def test_concurrent_patches_preserve_both_changes_and_advance_revision(sto
     assert second[2] == first[1]
 
 
+async def test_a_reviewed_patch_is_refused_after_another_admin_saved(store):
+    from cloud_agent.settings import SettingsRevisionConflict
+
+    await store.settings.seed_settings({"first": 1, "second": 2})
+    reviewed, _ = await store.settings.read_settings()
+    await store.settings.update_settings({"first": 10})
+
+    with pytest.raises(SettingsRevisionConflict):
+        await store.settings.update_settings({"first": 99}, expected_revision=reviewed)
+
+    assert await store.settings.read_settings() == (2, {"first": 10, "second": 2})
+    assert await store.settings.update_settings({"first": 99}, expected_revision=2) == (
+        3,
+        {"first": 99, "second": 2},
+        {"first": 10, "second": 2},
+    )
+
+
+async def test_two_patches_reviewed_against_one_revision_cannot_both_apply(store):
+    from cloud_agent.settings import SettingsRevisionConflict
+
+    await store.settings.seed_settings({"first": 1})
+    reviewed, _ = await store.settings.read_settings()
+
+    results = await asyncio.gather(
+        store.settings.update_settings({"first": 10}, expected_revision=reviewed),
+        store.settings.update_settings({"first": 20}, expected_revision=reviewed),
+        return_exceptions=True,
+    )
+
+    applied = [result for result in results if isinstance(result, tuple)]
+    assert len(applied) == 1
+    assert [type(result) for result in results if not isinstance(result, tuple)] == [
+        SettingsRevisionConflict
+    ]
+    assert await store.settings.read_settings() == applied[0][:2]
+
+
 async def test_an_unchanged_patch_keeps_revision_and_null_is_persisted_for_reset(store):
     await store.settings.seed_settings({"limit": 20, "secret": "ciphertext"})
     assert await store.settings.update_settings({"limit": 20}) == (

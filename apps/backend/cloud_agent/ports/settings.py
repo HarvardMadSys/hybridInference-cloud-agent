@@ -20,7 +20,11 @@ class SettingsRepository(Protocol):
         ...
 
     async def update_settings(
-        self, changes: Mapping[str, Any]
+        self, changes: Mapping[str, Any], *, expected_revision: int | None = None
     ) -> tuple[int, dict[str, Any], dict[str, Any]]:
-        """Atomically merge encoded changes and return revision, current and previous values."""
+        """Atomically merge encoded changes and return revision, current and previous values.
+
+        With ``expected_revision``, raise ``SettingsRevisionConflict`` unless
+        the stored settings are still at that revision.
+        """
         ...

@@ -18340,8 +18340,19 @@
       },
       "UpdateSettingsRequest": {
         "additionalProperties": false,
-        "description": "A partial settings update; omitted keys retain their existing values.",
+        "description": "A partial settings update; omitted keys retain their existing values.\n\n``expected_revision`` is the revision the change was reviewed against.\nWhen given, the update applies only if nothing was saved since, so a\nreview cannot silently overwrite another administrator's change.",
         "properties": {
+          "expected_revision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Revision"
+          },
           "settings": {
             "additionalProperties": true,
             "title": "Settings",

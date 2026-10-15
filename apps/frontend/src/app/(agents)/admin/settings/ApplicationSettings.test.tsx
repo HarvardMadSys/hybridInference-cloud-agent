@@ -293,9 +293,68 @@ describe('application settings', () => {
     await screen.findByText('Site settings saved.');
     expect(write).toHaveBeenCalledExactlyOnceWith(
       { title: 'New app', runtime: 'claude-code' },
+      1,
       expect.any(AbortSignal),
     );
     expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+  });
+
+  it('applies a review only while the settings it showed are still current', async () => {
+    write.mockRejectedValue(
+      new APIError(
+        'UNKNOWN_ERROR',
+        'Settings changed after this review. Refresh the settings, check the current values, and review the changes again.',
+        409,
+      ),
+    );
+    render(<ApplicationSettings />);
+    fireEvent.change(await loadedField('Product name'), { target: { value: 'New app' } });
+    saveField('Product name');
+    const dialog = screen.getByRole('dialog', { name: 'Review changes' });
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent(
+      'Settings changed after this review.',
+    );
+    expect(write).toHaveBeenCalledExactlyOnceWith({ title: 'New app' }, 1, expect.any(AbortSignal));
+    expect(screen.queryByText('Site settings saved.')).not.toBeInTheDocument();
+    expect(editField('Product name')).toHaveValue('New app');
+  });
+
+  it('keeps showing what was reviewed and does not apply it once another admin saved', async () => {
+    vi.useFakeTimers();
+    render(<ApplicationSettings />);
+    await act(async () => {});
+    fireEvent.change(editField('Product name'), { target: { value: 'New app' } });
+    fireEvent.click(reviewButton('Product name'));
+    const dialog = screen.getByRole('dialog', { name: 'Review changes' });
+    read.mockResolvedValue(
+      snapshot({ revision: 2, values: { ...snapshot().values, title: 'Another admin' } }),
+    );
+    // The page keeps reading every 30 seconds while the review is open.
+    await act(async () => {
+      vi.advanceTimersByTime(30_000);
+    });
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(within(dialog).getByRole('alert')).toHaveTextContent(
+      'Settings changed after this review.',
+    );
+    expect(within(dialog).getByText('Cloud Agent')).toBeVisible();
+    expect(within(dialog).queryByText('Another admin')).not.toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: 'Apply changes' })).toBeDisabled();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Apply changes' }));
+    expect(write).not.toHaveBeenCalled();
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Back to editing' }));
+    write.mockResolvedValue(
+      snapshot({ revision: 3, values: { ...snapshot().values, title: 'New app' } }),
+    );
+    fireEvent.click(reviewButton('Product name'));
+    const review = screen.getByRole('dialog', { name: 'Review changes' });
+    expect(within(review).getByText('Another admin')).toBeVisible();
+    await act(async () => {
+      fireEvent.click(within(review).getByRole('button', { name: 'Apply changes' }));
+    });
+    expect(screen.getByText('Site settings saved.')).toBeInTheDocument();
+    expect(write).toHaveBeenCalledExactlyOnceWith({ title: 'New app' }, 2, expect.any(AbortSignal));
   });
 
   it('shows the default and lets an admin cancel a reset without losing a draft', async () => {
@@ -335,6 +394,7 @@ describe('application settings', () => {
     await screen.findByText('Connections settings saved.');
     expect(write).toHaveBeenCalledExactlyOnceWith(
       { token: 'new-private-token' },
+      1,
       expect.any(AbortSignal),
     );
     expect(screen.queryByPlaceholderText('Enter new secret')).not.toBeInTheDocument();
@@ -354,7 +414,7 @@ describe('application settings', () => {
     expect(write).not.toHaveBeenCalled();
     fireEvent.click(within(dialog).getByRole('button', { name: 'Clear secret' }));
     await screen.findByText('Service token cleared.');
-    expect(write).toHaveBeenCalledExactlyOnceWith({ token: null }, expect.any(AbortSignal));
+    expect(write).toHaveBeenCalledExactlyOnceWith({ token: null }, 1, expect.any(AbortSignal));
     expect(screen.getByLabelText('Service token')).toHaveTextContent('Not configured');
   });
 
@@ -530,6 +590,7 @@ describe('application settings', () => {
         'sandbox_archive.bucket': 'freeinference',
         'sandbox_archive.prefix': 'cloud-agent/sandbox',
       },
+      1,
       expect.any(AbortSignal),
     );
     expect(editField('Sandbox archive S3 bucket')).toHaveValue('freeinference');
@@ -565,6 +626,7 @@ describe('application settings', () => {
     await screen.findByText('Deletion archive storage settings saved.');
     expect(write).toHaveBeenCalledExactlyOnceWith(
       { 'sandbox_archive.bucket': 'freeinference', 'sandbox_archive.prefix': 'unsaved-prefix' },
+      1,
       expect.any(AbortSignal),
     );
     expect(editField('Sandbox archive S3 prefix')).toHaveValue('unsaved-prefix');
@@ -598,6 +660,7 @@ describe('application settings', () => {
     await screen.findByText('Deletion archive storage settings saved.');
     expect(write).toHaveBeenCalledExactlyOnceWith(
       { 'sandbox_archive.bucket': 'freeinference', 'sandbox_archive.prefix': prefix },
+      1,
       expect.any(AbortSignal),
     );
     expect(editField('Sandbox archive S3 bucket')).toHaveValue('freeinference');
@@ -877,6 +940,7 @@ describe('application settings', () => {
     await waitFor(() =>
       expect(write).toHaveBeenCalledWith(
         { title: 'Configured' },
+        1,
         expect.any(AbortSignal),
         'test-recovery-token',
       ),
@@ -891,6 +955,7 @@ describe('application settings', () => {
     await waitFor(() =>
       expect(write).toHaveBeenLastCalledWith(
         { token: 'replacement-service-token' },
+        1,
         expect.any(AbortSignal),
         'test-recovery-token',
       ),
@@ -980,7 +1045,7 @@ describe('application settings', () => {
     fireEvent.change(editField('Registration'), { target: { value: 'false' } });
     saveField('Registration');
     await waitFor(() =>
-      expect(write).toHaveBeenCalledWith({ enabled: false }, expect.any(AbortSignal)),
+      expect(write).toHaveBeenCalledWith({ enabled: false }, 1, expect.any(AbortSignal)),
     );
     expect(await screen.findByText('Access settings saved.')).toBeInTheDocument();
     selectCategory('Limits');
@@ -988,7 +1053,7 @@ describe('application settings', () => {
     write.mockResolvedValue(snapshot({ values: { ...snapshot().values, ratio: 2.75 } }));
     saveField('Retry factor');
     await waitFor(() =>
-      expect(write).toHaveBeenLastCalledWith({ ratio: 2.75 }, expect.any(AbortSignal)),
+      expect(write).toHaveBeenLastCalledWith({ ratio: 2.75 }, 1, expect.any(AbortSignal)),
     );
     await screen.findByText('Limits settings saved.');
     selectCategory('Site');
@@ -996,7 +1061,7 @@ describe('application settings', () => {
     write.mockResolvedValue(snapshot({ values: { ...snapshot().values, title: '' } }));
     saveField('Product name');
     await waitFor(() =>
-      expect(write).toHaveBeenLastCalledWith({ title: '' }, expect.any(AbortSignal)),
+      expect(write).toHaveBeenLastCalledWith({ title: '' }, 1, expect.any(AbortSignal)),
     );
   });
 
@@ -1030,7 +1095,7 @@ describe('application settings', () => {
     fireEvent.change(input, { target: { value: secret } });
     saveField('Service token');
     await waitFor(() =>
-      expect(write).toHaveBeenCalledWith({ token: secret }, expect.any(AbortSignal)),
+      expect(write).toHaveBeenCalledWith({ token: secret }, 1, expect.any(AbortSignal)),
     );
     await screen.findByText('Connections settings saved.');
     expect(screen.getByLabelText('Service token')).toHaveTextContent('Configured');
@@ -1065,7 +1130,7 @@ describe('application settings', () => {
     });
     saveField('Registration');
     await screen.findByText('Access settings saved.');
-    expect(write).toHaveBeenCalledExactlyOnceWith({ enabled: false }, expect.any(AbortSignal));
+    expect(write).toHaveBeenCalledExactlyOnceWith({ enabled: false }, 1, expect.any(AbortSignal));
 
     selectCategory('Limits');
     expect(editField('Files per request')).toHaveValue(101);
@@ -1093,7 +1158,7 @@ describe('application settings', () => {
     fireEvent.change(editField('Files per request'), { target: { value: '70' } });
     resetField('Files per request');
     await waitFor(() =>
-      expect(write).toHaveBeenCalledWith({ limit: null }, expect.any(AbortSignal)),
+      expect(write).toHaveBeenCalledWith({ limit: null }, 1, expect.any(AbortSignal)),
     );
     await screen.findByText('Files per request restored to its default.');
     expect(editField('Files per request')).toHaveValue(50);
@@ -1190,7 +1255,7 @@ describe('application settings', () => {
       target: { value: 'My draft' },
     });
     saveField('Product name');
-    const signal = write.mock.calls[0][1]!;
+    const signal = write.mock.calls[0][2]!;
     view.unmount();
     expect(signal.aborted).toBe(true);
     await act(async () => pending.resolve(snapshot()));
