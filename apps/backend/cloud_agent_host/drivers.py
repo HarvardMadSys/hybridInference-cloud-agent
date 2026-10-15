@@ -1851,7 +1851,12 @@ class CodexAppServerSession(_JsonResidentSession[CodexRuntime]):
 
 
 class PiRpcSession(_JsonResidentSession[PiRuntime]):
-    """pi 0.73.1 RPC mode with an explicit native session locator."""
+    """pi RPC mode with an explicit native session locator.
+
+    Verified against the image's 0.73.1 and against 1.2.0 from the package pi
+    moved to, ``@earendil-works/pi-coding-agent``: the commands this uses, a
+    turn, a fork, a clone, a resume, an abort and an automatic retry.
+    """
 
     def __init__(
         self,
@@ -1917,7 +1922,9 @@ class PiRpcSession(_JsonResidentSession[PiRuntime]):
             and value.get("success") is False
         ):
             return True, True, False
-        if value.get("type") == "agent_end":
+        # From 0.75.4 a transient failure ends the run with ``willRetry`` and
+        # pi runs it again; the turn ends with the run that is not retried.
+        if value.get("type") == "agent_end" and value.get("willRetry") is not True:
             return True, self.runtime.agent_error(value) is not None, True
         return False, False, False
 
@@ -1940,6 +1947,25 @@ class PiRpcSession(_JsonResidentSession[PiRuntime]):
         if event is None:
             return HarnessEvent(LINE, raw_line=line)
         return HarnessEvent(event.event_type, dict(event.payload or {}), raw_line=line)
+
+    def events_for_protocol_line(
+        self, line: str, turn: _JsonResidentTurn[PiRuntime]
+    ) -> list[HarnessEvent]:
+        """Every event a line stands for, through :meth:`PiRuntime.parse_events`.
+
+        An assistant message's ``message_end`` releases the blocks held for its
+        response id, so one line can stand for several events.
+        """
+        value = self._object(line)
+        if value is not None and value.get("type") == "response":
+            return [self.event_for_protocol_line(line, turn)]
+        events = self.runtime.parse_events(line)
+        if not events:
+            return [HarnessEvent(LINE, raw_line=line)]
+        return [
+            HarnessEvent(event.event_type, dict(event.payload or {}), raw_line=line)
+            for event in events
+        ]
 
     def interrupt_turn(self, turn: _JsonResidentTurn[PiRuntime]) -> None:
         """Abort the active Pi RPC turn without closing its session process."""

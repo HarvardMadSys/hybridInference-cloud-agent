@@ -31,11 +31,14 @@ if TYPE_CHECKING:
 #: The reviewed MCP bridge, shipped in the sandbox image and loaded explicitly.
 #: It lives beside the other image helpers rather than in the workspace, so the
 #: code that talks to the relay is the code the image was built and reviewed
-#: with. Verified against pi 0.73.1: with `--no-extensions -e <this>` the relay
-#: is discovered at its merged endpoint, the tools it lists are registered under
-#: that one entry's name followed by the relay's own `<alias>__<tool>`, a call
-#: reaches the upstream with the bare name, and a repository's own
-#: `.pi/extensions/*.ts` does not load.
+#: with. Verified against pi 0.73.1 and 1.2.0: with `--no-extensions -e <this>`
+#: the relay is discovered at its merged endpoint, the tools it lists are
+#: registered under that one entry's name followed by the relay's own
+#: `<alias>__<tool>`, a call reaches the upstream with the bare name, and a
+#: repository's own `.pi/extensions/*.ts` does not load. On 1.2.0 the same flag
+#: also keeps pi's built-in MCP client off, so neither a repository's
+#: `.pi/mcp.json` nor one in pi's config directory starts a server, even with
+#: the project trusted.
 PI_MCP_BRIDGE = "/usr/local/libexec/pi-mcp-bridge.ts"
 
 
@@ -72,7 +75,10 @@ class PiRuntime(GenericRuntime):
     # Recognized and deliberately not emitted. ``turn_end`` and ``agent_end``
     # repeat the whole assistant message that ``*_end`` already reported, and
     # the ``tool_execution_*`` trio repeats the tool call and its output; the
-    # authoritative copies carry ``isError``, which those do not.
+    # authoritative copies carry ``isError``, which those do not. The last three
+    # are newer pi's bookkeeping: ``agent_settled`` follows the ``agent_end``
+    # that already settled the turn, and a retry ends with ``auto_retry_end``
+    # and an ``entry_appended`` recording it in the session.
     _SILENT_KINDS = frozenset(
         {
             "agent_start",
@@ -82,6 +88,9 @@ class PiRuntime(GenericRuntime):
             "tool_execution_start",
             "tool_execution_update",
             "tool_execution_end",
+            "agent_settled",
+            "auto_retry_end",
+            "entry_appended",
         }
     )
 
@@ -109,6 +118,9 @@ class PiRuntime(GenericRuntime):
         # ``responseId`` is absent from ``message_start``; counting messages
         # gives each text block a preview id that its ``text_end`` can name again.
         self._message_no = 0
+        # The completed blocks of the assistant message in progress, waiting
+        # for the ``message_end`` that names its response; see parse_events.
+        self._held: list[NormalizedEvent] = []
 
     def prepare(
         self,
@@ -201,17 +213,47 @@ class PiRuntime(GenericRuntime):
         return argv, env
 
     def parse_event(self, line: str) -> NormalizedEvent | None:
-        """Normalize one ``--mode json`` line (session format v3)."""
+        """Normalize one ``--mode json`` line (session format v3) on its own.
+
+        Holds nothing back, so on pi 0.84.0 and later a block comes out at its
+        own ``*_end`` without the response id. The RPC session reads
+        :meth:`parse_events`, which waits for that id.
+        """
+        events = self._parse(line, hold=False)
+        return events[0] if events else None
+
+    def parse_events(self, line: str) -> list[NormalizedEvent]:
+        """Every event one line stands for, in order; what the RPC session reads.
+
+        One or none, except at the end of an assistant message. pi 0.84.0
+        made ``message_update`` delta-only, so a block's ``*_end`` no longer
+        carries the message, and the message's ``responseId`` first appears on
+        its ``message_end``. Without that id the inspector can neither group a
+        response's thinking, text and calls nor find the request it recorded.
+        So those blocks wait for ``message_end`` and come out there, in the
+        order pi completed them, ahead of the message's usage. pi 0.73.1 repeats
+        the message on every update, so its blocks still come out at once.
+        """
+        return self._parse(line, hold=True)
+
+    def _parse(self, line: str, *, hold: bool) -> list[NormalizedEvent]:
         line = line.strip()
         if not line:
-            return None
+            return []
         try:
             event = json.loads(line)
         except json.JSONDecodeError:
-            return self._raw(line, "not json")
+            return [self._raw(line, "not json")]
         if not isinstance(event, dict):
-            return self._raw(line, "not an object")
+            return [self._raw(line, "not an object")]
+        if event.get("type") == "message_end":
+            return self._from_message_end(event, line)
+        if event.get("type") == "agent_end":
+            return self._from_agent_end(event)
+        mapped = self._map(event, line, hold=hold)
+        return [mapped] if mapped is not None else []
 
+    def _map(self, event: dict[str, Any], line: str, *, hold: bool) -> NormalizedEvent | None:
         kind = event.get("type")
         if kind == "session":
             captured = str(event.get("id") or "").strip()
@@ -229,21 +271,46 @@ class PiRuntime(GenericRuntime):
                 },
             )
         if kind == "message_update":
-            return self._from_message_update(event, line)
-        if kind == "message_end":
-            return self._from_message_end(event, line)
+            return self._from_message_update(event, line, hold=hold)
         if kind == "message_start":
             self._message_no += 1
             return None
-        if kind == "agent_end":
-            self._preview.clear()
-            failure = self.agent_error(event)
-            if failure is not None:
-                return NormalizedEvent(ERROR, {"text": failure})
-            return NormalizedEvent(LIFECYCLE, {"phase": "result"})
+        if kind == "auto_retry_start":
+            # Kept as a diagnostic: a turn that took three tries to answer is
+            # worth seeing in the raw log, and the attempt that failed left no
+            # other trace once the retry succeeded.
+            return NormalizedEvent(
+                RAW,
+                {
+                    "text": _truncate(
+                        f"pi retries ({event.get('attempt')} of {event.get('maxAttempts')}, "
+                        f"in {event.get('delayMs')} ms): {event.get('errorMessage')}"
+                    ),
+                    "reason": "retrying",
+                },
+            )
         if kind in self._SILENT_KINDS:
             return None
         return self._raw(line, f"unknown type {kind!r}")
+
+    def _from_agent_end(self, event: dict[str, Any]) -> list[NormalizedEvent]:
+        """The outcome of a run, unless pi is about to run it again.
+
+        From 0.75.4 pi retries a transient failure itself, ending the failed
+        run first with ``willRetry`` set; 0.73.1 retried below the run and
+        never said so. That run's error is not the turn's outcome, so it is
+        neither reported nor settles anything (see ``PiRpcSession``).
+        """
+        if event.get("willRetry") is True:
+            return []
+        self._preview.clear()
+        # A message whose ``message_end`` never came, as when the process is
+        # stopped mid-stream, still shows what it completed.
+        released, self._held = self._held, []
+        failure = self.agent_error(event)
+        if failure is not None:
+            return [*released, NormalizedEvent(ERROR, {"text": failure})]
+        return [*released, NormalizedEvent(LIFECYCLE, {"phase": "result"})]
 
     @staticmethod
     def agent_error(event: dict[str, Any]) -> str | None:
@@ -258,7 +325,9 @@ class PiRuntime(GenericRuntime):
                 return None
         return None
 
-    def _from_message_update(self, event: dict[str, Any], line: str) -> NormalizedEvent | None:
+    def _from_message_update(
+        self, event: dict[str, Any], line: str, *, hold: bool
+    ) -> NormalizedEvent | None:
         """Map a completed content block; drop the deltas that built it."""
         update = event.get("assistantMessageEvent")
         if not isinstance(update, dict):
@@ -278,6 +347,15 @@ class PiRuntime(GenericRuntime):
             self._reported_subtypes.add(subtype)
             return self._raw(line, f"unclassified message_update subtype {subtype!r}")
 
+        mapped = self._completed_block(subtype, update, event, line)
+        if hold and mapped.event_type != RAW and not isinstance(event.get("message"), dict):
+            self._held.append(mapped)
+            return None
+        return mapped
+
+    def _completed_block(
+        self, subtype: str, update: dict[str, Any], event: dict[str, Any], line: str
+    ) -> NormalizedEvent:
         response = self._response_identity(event)
         if subtype == "thinking_end":
             return NormalizedEvent(THINKING, {"text": _truncate(update.get("content")), **response})
@@ -317,11 +395,12 @@ class PiRuntime(GenericRuntime):
     def _response_identity(event: dict[str, Any]) -> dict[str, str]:
         """Name the provider response a message belongs to, when pi recorded it.
 
-        pi copies the first stream chunk's id into ``responseId`` and repeats
-        the message on every ``message_update`` and ``message_end``. Against
-        the gateway that is the chat-completion id it logs for the request, so
-        ``usage_id`` joins a message to its measured request, as Claude Code's
-        native ``message.id`` does.
+        pi copies the first stream chunk's id into ``responseId``. 0.73.1
+        repeats the message on every ``message_update`` and ``message_end``;
+        from 0.84.0 only ``message_end`` carries it (see :meth:`parse_events`).
+        Against the gateway that is the chat-completion id it logs for the
+        request, so ``usage_id`` joins a message to its measured request, as
+        Claude Code's native ``message.id`` does.
         """
         message = event.get("message")
         response_id = message.get("responseId") if isinstance(message, dict) else None
@@ -330,11 +409,48 @@ class PiRuntime(GenericRuntime):
     def _preview_id(self, update: dict[str, Any]) -> str:
         return f"message-{self._message_no}:{update.get('contentIndex')}"
 
-    def _from_message_end(self, event: dict[str, Any], line: str) -> NormalizedEvent | None:
-        """Map the end of a message: a tool result, or a turn's token usage."""
+    def _from_message_end(self, event: dict[str, Any], line: str) -> list[NormalizedEvent]:
+        """Map the end of a message: a tool result, or a turn's token usage.
+
+        An assistant message also releases the blocks held for it, now
+        stamped with the response this line names.
+        """
         message = event.get("message")
         if not isinstance(message, dict):
-            return self._raw(line, "message_end without a message")
+            return [self._raw(line, "message_end without a message")]
+        role = message.get("role")
+        if role == "assistant":
+            response = self._response_identity(event)
+            released = [
+                NormalizedEvent(held.event_type, {**held.payload, **response})
+                for held in self._held
+            ]
+            self._held = []
+            usage = message.get("usage")
+            if not isinstance(usage, dict):
+                return released
+            return [
+                *released,
+                NormalizedEvent(
+                    USAGE,
+                    {
+                        "input_tokens": usage.get("input"),
+                        "output_tokens": usage.get("output"),
+                        "cache_read_tokens": usage.get("cacheRead"),
+                        "cache_write_tokens": usage.get("cacheWrite"),
+                        "total_tokens": usage.get("totalTokens"),
+                        "model": message.get("model"),
+                        "text": (
+                            f"{usage.get('input', 0)} in / {usage.get('output', 0)} out tokens"
+                        ),
+                        **response,
+                    },
+                ),
+            ]
+        mapped = self._from_other_message_end(message, line)
+        return [mapped] if mapped is not None else []
+
+    def _from_other_message_end(self, message: dict[str, Any], line: str) -> NormalizedEvent | None:
         role = message.get("role")
         if role == "toolResult":
             return NormalizedEvent(
@@ -349,26 +465,11 @@ class PiRuntime(GenericRuntime):
                     "content": _truncate(message.get("content")),
                 },
             )
-        if role == "assistant":
-            usage = message.get("usage")
-            if not isinstance(usage, dict):
-                return None
-            return NormalizedEvent(
-                USAGE,
-                {
-                    "input_tokens": usage.get("input"),
-                    "output_tokens": usage.get("output"),
-                    "cache_read_tokens": usage.get("cacheRead"),
-                    "cache_write_tokens": usage.get("cacheWrite"),
-                    "total_tokens": usage.get("totalTokens"),
-                    "model": message.get("model"),
-                    "text": (f"{usage.get('input', 0)} in / {usage.get('output', 0)} out tokens"),
-                    **self._response_identity(event),
-                },
-            )
         # role="user" is the prompt echoed back; the owner wrote it, and the
-        # thread already has it.
-        if role == "user":
+        # thread already has it. role="system" is pi's own system prompt,
+        # reported since 1.x at the start of a run and again when a section of
+        # it changes: the deployment's instructions, not the conversation.
+        if role in {"user", "system"}:
             return None
         return self._raw(line, f"message_end with unknown role {role!r}")
 

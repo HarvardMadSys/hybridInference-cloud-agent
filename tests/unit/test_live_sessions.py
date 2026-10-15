@@ -975,6 +975,86 @@ def test_pi_reports_a_prompt_it_refused_before_running(tmp_path):
     assert turn.wait().status == "failed"
 
 
+def _pi_turn(tmp_path):
+    process = _LiveProcess()
+    context, _spawned = _protocol_context(process, tmp_path)
+    process.feed = _turn_lines(
+        {
+            "id": "state-1",
+            "type": "response",
+            "command": "get_state",
+            "success": True,
+            "data": {"sessionId": "pi-a", "sessionFile": "/agent-state/pi-a.jsonl"},
+        }
+    )
+    session = PiDriver(PiRuntime()).launch_live(context)
+    session.ensure_started(model="m", reasoning_effort=None)
+    turn = session.start_turn(TurnInput(prompt="hello", model="m"))
+    prompt_id = json.loads(process.sent[-1])["id"]
+    return process, turn, prompt_id
+
+
+def test_pi_rpc_turn_outlasts_a_run_pi_retries(tmp_path):
+    """pi 1.2.0 on two 500s: the turn is the run that answered, not the first.
+
+    Since 0.75.4 a transient failure ends its run with ``willRetry`` before
+    pi runs it again. Settling there failed a turn pi went on to answer, and
+    left that answer to land in whatever turn came next.
+    """
+    process, turn, prompt_id = _pi_turn(tmp_path)
+    failed = {"role": "assistant", "stopReason": "error", "errorMessage": "500: transient"}
+    process.feed = _turn_lines(
+        {"id": prompt_id, "type": "response", "command": "prompt", "success": True},
+        {"type": "agent_end", "messages": [failed], "willRetry": True},
+        {
+            "type": "auto_retry_start",
+            "attempt": 1,
+            "maxAttempts": 3,
+            "delayMs": 2000,
+            "errorMessage": "500: transient",
+        },
+        {"type": "agent_start"},
+        {
+            "type": "message_update",
+            "assistantMessageEvent": {"type": "text_end", "contentIndex": 0, "content": "after"},
+        },
+        {
+            "type": "message_end",
+            "message": {"role": "assistant", "responseId": "chatcmpl-3", "usage": {"input": 1}},
+        },
+        {"type": "auto_retry_end", "attempt": 1, "success": True},
+        {
+            "type": "agent_end",
+            "messages": [{"role": "assistant", "stopReason": "stop"}],
+            "willRetry": False,
+        },
+    )
+    events = list(turn.iter_events())
+
+    assert not [event for event in events if event.event_type == "error"]
+    [message] = [event for event in events if event.event_type == "message"]
+    # Held for the response id its message_end names, then released there.
+    assert message.payload["usage_id"] == "chatcmpl-3"
+    result = turn.wait()
+    assert (result.status, result.final_output) == ("completed", "after")
+
+
+def test_pi_rpc_turn_fails_with_the_run_pi_stops_retrying(tmp_path):
+    process, turn, prompt_id = _pi_turn(tmp_path)
+    failed = {"role": "assistant", "stopReason": "error", "errorMessage": "500: always"}
+    process.feed = _turn_lines(
+        {"id": prompt_id, "type": "response", "command": "prompt", "success": True},
+        {"type": "agent_end", "messages": [failed], "willRetry": True},
+        {"type": "agent_end", "messages": [failed], "willRetry": False},
+    )
+    events = list(turn.iter_events())
+
+    assert [event.payload for event in events if event.event_type == "error"] == [
+        {"text": "500: always"}
+    ]
+    assert turn.wait().status == "failed"
+
+
 def test_pi_rpc_forks_before_the_next_native_prompt(tmp_path):
     process = _LiveProcess()
     context, _spawned = _protocol_context(process, tmp_path)

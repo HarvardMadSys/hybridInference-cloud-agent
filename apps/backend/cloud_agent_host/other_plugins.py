@@ -65,6 +65,15 @@ with os.fdopen(lock_fd, 'r+') as lock:
             install_env['PI_CODING_AGENT_DIR'] = str(root / 'pi-config')
             subprocess.run(['pi', 'install', 'npm:' + spec], env=install_env,
                            cwd=home, check=True)
+            # pi 0.75.0 moved its own installs from npm's global prefix into
+            # the managed project in its config directory. The path handed to
+            # the CLI stays the same for every release: link it there.
+            managed = root / 'pi-config' / 'npm' / 'node_modules' / name
+            if not package.exists() and (managed / 'package.json').is_file():
+                if package.is_symlink():
+                    package.unlink()
+                package.parent.mkdir(parents=True, exist_ok=True)
+                os.symlink(os.path.relpath(managed, package.parent), package)
         else:
             subprocess.run(['npm', 'install', '--prefix', str(root), '--no-audit',
                             '--no-fund', '--save-exact', spec], env=install_env,

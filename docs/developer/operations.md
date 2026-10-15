@@ -967,7 +967,9 @@ arguments name, and only to that task's repository or the owner's user scope.
 ### End-to-end coverage
 
 `tests/external/test_agent_mcp_end_to_end.py` crosses a real listener, migrated
-Postgres database, pinned pi 0.73.1 CLI, and shipped bridge. Its model and
+Postgres database, the image's pi 0.73.1 CLI (or the release named by
+`AGENT_PI_TEST_VERSION`, from the package admin updates download), and shipped
+bridge. Its model and
 upstream MCP server are threaded HTTP stubs; this is transport and authorization
 coverage, not a live-provider acceptance result.
 
@@ -1075,7 +1077,7 @@ not establish that boundary.
 | `opencode` | 1.18.9 | the reviewed `opencode-freeinference` wrapper merges the relay endpoints into the `OPENCODE_CONFIG` it writes | the wrapper exports `OPENCODE_DISABLE_PROJECT_CONFIG`, which covers both `opencode.json` and `.opencode/` |
 | `kilo` | 7.4.17 | the reviewed wrapper configures the authenticated merged relay for run and serve; the live bridge verifies connection before reporting ready | the pinned build patches the legacy MCP loader to honor `KILO_DISABLE_PROJECT_CONFIG`, covering `.kilo/mcp.json` and `.kilocode/mcp.json` alongside the regular project configuration |
 | `codex` | 0.145.0 | exec and app-server share the merged relay URL and token environment reference; app-server verifies MCP startup | trusted guest-root bootstrap atomically installs the deployment's exact relay URL as the sole server identity in `/etc/codex/requirements.toml` before launch; repository and user configuration cannot expand that system allowlist. After `AGENT_SANDBOX_MCP_URL` changes, a retained container's next Codex launch replaces that one-relay policy with the new URL, unless another Codex member of the group is still running; any other policy shape is refused, never replaced |
-| `pi` | 0.73.1 | the reviewed `pi-mcp-bridge.ts` shipped at `/usr/local/libexec/`, loaded with an explicit `-e` | `--no-extensions` disables every other extension source — the project's `.pi/extensions/`, the global directory, and anything a settings file names — so the explicit path is the only way in. Verified against the pinned binary: a repository's own extension does not load, the relay's tools are registered as `<alias>__<tool>`, and a call reaches the upstream |
+| `pi` | 0.73.1 | the reviewed `pi-mcp-bridge.ts` shipped at `/usr/local/libexec/`, loaded with an explicit `-e` | `--no-extensions` disables every other extension source — the project's `.pi/extensions/`, the global directory, and anything a settings file names — so the explicit path is the only way in. Verified against the pinned binary and against 1.2.0 from `@earendil-works/pi-coding-agent`, the package pi moved to: a repository's own extension does not load, the relay's tools are registered as `<alias>__<tool>`, and a call reaches the upstream. On 1.2.0 the flag also keeps pi's built-in MCP client off, so neither `.pi/mcp.json` nor the config directory's `mcp.json` starts a server, with the project trusted or not |
 
 A job naming connections on a runtime that has not declared them is refused at
 creation rather than run with the tools silently missing.
@@ -1474,7 +1476,7 @@ with no leader and no sharding.
 | `AGENT_SANDBOX_IMAGE` | required | Image built from `Dockerfile.agent-sandbox` or an equivalent deployment-owned image |
 | `*_EXTRA_VERSIONS` | blank | Comma-separated tested versions to bake beside each source-reviewed default. Select one for new chats in Admin; retained chats keep the version they started with. The five defaults are not host settings because runner/control-plane capability admission attests them as one protocol unit |
 | `AGENT_RUNTIME_DOWNLOAD_NETWORK` | `bridge` | Docker network for the download step of an agent update from the admin Settings page. Only npm runs there, with package scripts off; the scripts and the check run with no network ([design](../agents/specs/2026-10-15-agent-cli-updates-design.zh-CN.md)) |
-| `AGENT_RUNTIME_REGISTRY_URL` | public npm | Registry a host downloads updated agents from. Set the same value on the control plane, which reads the latest release from it |
+| `AGENT_RUNTIME_REGISTRY_URL` | public npm | Registry a host downloads updated agents from. Set the same value on the control plane, which reads the latest release from it. pi updates come from `@earendil-works/pi-coding-agent`; a private mirror must carry that package as well as the image's `@mariozechner` one |
 | `AGENT_EGRESS_CHAT_NETWORK_POOL` | required | This deployment's RFC1918 IPv4 pool, one daemon-arbitrated `/29` per active group bridge. No default: it must be disjoint from every other deployment's pool on the machine — of two that overlap, the host rules refuse the one installed later — and from the host's Docker, VPN and private-service routes. A group's bridge is removed on stop and rebuilt on wake |
 | `AGENT_EGRESS_DNS_SERVER` | required | The one IPv4 resolver sandboxes may use, on TCP and UDP 53. It is the only exception to the protected ranges, so a site resolver on a private address or on this host works. Not loopback, and not inside the pool; see _Choosing the resolver_ below |
 | `AGENT_EGRESS_PROTECTED_CIDRS` | — | Comma-separated IPv4 blocks to refuse on top of the built-in host, private, link-local/metadata, CGNAT, multicast and reserved ranges — an institution's services on public addresses, for example. It can only add protection |

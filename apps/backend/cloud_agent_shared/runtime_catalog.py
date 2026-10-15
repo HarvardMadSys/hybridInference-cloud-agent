@@ -46,11 +46,15 @@ CODEX = RuntimeDefinition(
     npm_package="@openai/codex",
     binary="codex",
 )
+#: pi moved to ``@earendil-works/pi-coding-agent`` in May 2026 and deprecated
+#: every ``@mariozechner/pi-coding-agent`` release; 0.73.1 was the last there.
+#: Updates come from the new package. The image's default is still 0.73.1 from
+#: the old name until its pin moves, so it stays available to roll back to.
 PI = RuntimeDefinition(
     name="pi",
     mcp=True,
     reasoning_efforts=("minimal", "low", "medium", "high"),
-    npm_package="@mariozechner/pi-coding-agent",
+    npm_package="@earendil-works/pi-coding-agent",
     binary="pi",
 )
 OPENCODE = RuntimeDefinition(

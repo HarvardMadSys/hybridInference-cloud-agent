@@ -18,6 +18,8 @@ LATEST = {
     "@anthropic-ai/claude-code": "2.1.300",
     "@openai/codex": "0.162.1",
     "opencode-ai": "1.19.0",
+    "@earendil-works/pi-coding-agent": "1.2.0",
+    # Where pi used to publish; the page no longer reads it.
     "@mariozechner/pi-coding-agent": "0.73.1",
 }
 PUBLISHED = {("@anthropic-ai/claude-code", "2.1.300"), ("@openai/codex", "0.162.1")}
@@ -26,6 +28,10 @@ DOCUMENTS = {
     "@anthropic-ai/claude-code": {
         "dist-tags": {"latest": "2.1.300"},
         "versions": {"2.1.220": {}, "2.1.300": {}, "2.1.250": {}, "2.2.0-beta.1": {}},
+    },
+    "@earendil-works/pi-coding-agent": {
+        "dist-tags": {"latest": "1.2.0"},
+        "versions": {"0.74.0": {}, "1.2.0": {}, "1.1.0": {}},
     },
     "@mariozechner/pi-coding-agent": {
         "dist-tags": {"latest": "0.73.1"},
@@ -136,8 +142,10 @@ async def test_each_updatable_agent_is_listed_beside_its_latest_release(api):
         "update_available": True,
         "upgrade": None,
     }
-    # pi is already on npm's latest.
-    assert items["pi"]["update_available"] is False
+    # pi's image default is the last release of the package pi left; the
+    # update is the latest of the one it moved to.
+    assert (items["pi"]["current_version"], items["pi"]["latest_version"]) == ("0.73.1", "1.2.0")
+    assert items["pi"]["update_available"] is True
 
 
 async def test_a_chosen_version_shows_only_once_a_host_cannot_download_it(api):
@@ -273,8 +281,9 @@ async def test_the_version_menu_lists_every_stable_release_from_npm(api):
         "deprecated": None,
         "error": None,
     }
-    moved = (await client.get("/admin/agent/runtime-upgrades/pi/versions")).json()
-    assert (moved["versions"], moved["deprecated"]) == (["0.73.1", "0.72.1"], MOVED)
+    # pi's menu is the package it moved to, which deprecates nothing.
+    pi = (await client.get("/admin/agent/runtime-upgrades/pi/versions")).json()
+    assert (pi["versions"], pi["deprecated"]) == (["1.2.0", "1.1.0", "0.74.0"], None)
 
 
 async def test_only_an_agent_the_page_can_update_has_a_version_menu(api):

@@ -80,17 +80,26 @@ def _report(
 # ── what is downloadable ──────────────────────────────────────────────────
 
 
+#: Runtimes whose image default predates a move of their npm package: the
+#: image still installs that default from the old name, and updates come from
+#: the new one. pi 0.73.1 was the last ``@mariozechner`` release.
+_IMAGE_PACKAGE_BEFORE_MOVE = {"pi": "@mariozechner/pi-coding-agent"}
+
+
 def test_every_npm_runtime_but_kilo_can_be_updated():
     """Kilo runs a patched source build that npm does not publish."""
     catalog = downloadable_runtimes()
     assert sorted(catalog) == ["claude-code", "codex", "opencode", "pi"]
-    # The same packages the image build installs.
+    # The same packages the image build installs, but for a recorded move.
     dockerfile = (REPO / "deploy/sandbox/Dockerfile.agent-sandbox").read_text()
     for runtime, definition in catalog.items():
-        assert (
-            f"install-runtimes.sh {runtime} {definition.npm_package} {definition.binary} "
-            in dockerfile
-        )
+        package = _IMAGE_PACKAGE_BEFORE_MOVE.get(runtime, definition.npm_package)
+        assert f"install-runtimes.sh {runtime} {package} {definition.binary} " in dockerfile
+
+
+def test_pi_updates_come_from_the_package_pi_moved_to():
+    """Every ``@mariozechner/pi-coding-agent`` release is deprecated on npm."""
+    assert downloadable_runtimes()["pi"].npm_package == "@earendil-works/pi-coding-agent"
 
 
 # ── the version rules, shared with install-runtimes.sh ───────────────────

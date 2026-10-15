@@ -5,7 +5,7 @@ keeps them fast and deterministic -- and what makes this one worth its cost.
 What it crosses, with nothing faked except the two *ends* (the user's MCP server
 and the model, both of which are HTTP servers it starts itself):
 
-    pi 0.73.1 -> the shipped bridge -> the relay listener on a real socket
+    pi -> the shipped bridge -> the relay listener on a real socket
       -> the fence, read from Postgres -> the protocol host
       -> the user's MCP server
 
@@ -26,9 +26,11 @@ Three facts this can fail on that no per-layer test can:
   credential. The sandbox's job token must not appear there, and the connection's
   credential must not appear in what the model is told.
 
-It needs Postgres, npm and the network to fetch the pinned CLI, so it skips
-rather than fails wherever those are absent -- the external tier is run
-deliberately, never as part of the default gate.
+It needs Postgres, npm and the network to fetch the CLI, so it skips rather
+than fails wherever those are absent -- the external tier is run deliberately,
+never as part of the default gate. It runs the image's pi by default; set
+``AGENT_PI_TEST_VERSION`` to check a release an admin could switch to, which is
+installed from the package the Settings page downloads.
 """
 
 from __future__ import annotations
@@ -55,6 +57,7 @@ from cloud_agent.mcp.registry import mcp_cipher
 from cloud_agent.settings import initialize_settings
 from cloud_agent.storage.assembly import Storage
 from cloud_agent.tokens import SCOPE_MCP, mint_worker_token
+from cloud_agent_shared.runtime_catalog import PI
 
 pytestmark = [pytest.mark.external, pytest.mark.asyncio]
 
@@ -72,12 +75,22 @@ _MODEL_TOOL_CALL = f"session__{_ALIAS}__{_TOOL}"
 _MEMORY_TOOL_CALLS = [f"session__{name}" for name in sorted(memory_tool.TOOL_NAMES)]
 
 
-def _pinned_pi_version() -> str:
-    """The pi version the sandbox image ships, read from its own pin."""
+def _pi_under_test() -> tuple[str, str]:
+    """The npm package and version to run.
+
+    The image's own pin by default, from the package its build installs. A
+    release named by ``AGENT_PI_TEST_VERSION`` comes from the catalog's package
+    instead, as a host downloads it.
+    """
+    chosen = os.getenv("AGENT_PI_TEST_VERSION")
+    if chosen:
+        return PI.npm_package, chosen
     dockerfile = (_REPO_ROOT / "deploy" / "sandbox" / "Dockerfile.agent-sandbox").read_text()
-    match = re.search(r"^ARG PI_VERSION=(\S+)$", dockerfile, re.MULTILINE)
-    assert match, "the sandbox Dockerfile no longer pins PI_VERSION"
-    return match.group(1)
+    version = re.search(r"^ARG PI_VERSION=(\S+)$", dockerfile, re.MULTILINE)
+    assert version, "the sandbox Dockerfile no longer pins PI_VERSION"
+    package = re.search(r"install-runtimes\.sh pi (\S+) pi ", dockerfile)
+    assert package, "the sandbox Dockerfile no longer installs pi"
+    return package.group(1), version.group(1)
 
 
 def _free_port() -> int:
@@ -325,23 +338,23 @@ def _decode(raw: bytes) -> dict[str, Any]:
 
 @pytest.fixture(scope="module")
 def pi_install(tmp_path_factory: pytest.TempPathFactory) -> pathlib.Path:
-    """The pinned pi, installed once for this module.
+    """The pi under test, installed once for this module.
 
     Skipped rather than failed when npm or the registry is unavailable: this
     tier is run deliberately, and a missing network is not a defect in the code
     under test.
     """
     if shutil.which("npm") is None:
-        pytest.skip("npm is not on PATH, so the pinned pi cannot be installed")
+        pytest.skip("npm is not on PATH, so pi cannot be installed")
     root = tmp_path_factory.mktemp("pi-install")
-    version = _pinned_pi_version()
+    package, version = _pi_under_test()
     result = subprocess.run(
         [
             "npm",
             "install",
             "--no-audit",
             "--no-fund",
-            f"@mariozechner/pi-coding-agent@{version}",
+            f"{package}@{version}",
         ],
         cwd=root,
         capture_output=True,
@@ -350,7 +363,7 @@ def pi_install(tmp_path_factory: pytest.TempPathFactory) -> pathlib.Path:
     )
     binary = root / "node_modules" / ".bin" / "pi"
     if result.returncode != 0 or not binary.exists():
-        pytest.skip(f"could not install pi {version}: {result.stderr[-400:]}")
+        pytest.skip(f"could not install {package}@{version}: {result.stderr[-400:]}")
     return binary
 
 
@@ -631,7 +644,7 @@ def _run_pi(
     relay_port: int,
     token: str,
 ) -> dict[str, Any]:
-    """Drive the pinned CLI at the merged endpoint and report what it saw."""
+    """Drive the CLI under test at the merged endpoint and report what it saw."""
     home = pi.parent.parent / "home"
     home.mkdir(parents=True, exist_ok=True)
     (home / "models.json").write_text(

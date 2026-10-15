@@ -86,6 +86,32 @@ def test_native_install_uses_private_prefix_and_retains_success(monkeypatch, tmp
     assert json.loads(marker.read_text()) == {"version": 1, "spec": "example-plugin@1.2.3"}
 
 
+def test_pi_1x_install_is_found_where_the_cli_is_told_to_look(monkeypatch, tmp_path):
+    """From 0.75.0 ``pi install`` puts a package in its config directory's npm project.
+
+    The loading path handed to the CLI stays the one 0.73.1 installed to, so
+    the installer links it there; a link left dangling by a failed attempt is
+    replaced on the next one.
+    """
+    root = tmp_path / ".agent-plugins" / "pi" / "selection"
+    selected = root / "lib/node_modules/example-plugin"
+    managed = root / "pi-config/npm/node_modules/example-plugin"
+
+    def install(argv, *, env, cwd, check):
+        managed.mkdir(parents=True, exist_ok=True)
+        (managed / "package.json").write_text(json.dumps({"name": "example-plugin"}))
+
+    selected.parent.mkdir(parents=True)
+    selected.symlink_to(tmp_path / "gone")
+    monkeypatch.setattr(subprocess, "run", install)
+    _run_script(monkeypatch, tmp_path, "pi")
+
+    assert selected.is_symlink()
+    assert selected.resolve() == managed.resolve()
+    assert json.loads((selected / "package.json").read_text()) == {"name": "example-plugin"}
+    assert (root / ".complete.json").exists()
+
+
 def test_failed_install_has_no_success_receipt(monkeypatch, tmp_path):
     def fail(argv, **kwargs):
         raise subprocess.CalledProcessError(17, argv)

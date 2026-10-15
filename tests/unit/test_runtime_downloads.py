@@ -47,6 +47,7 @@ class FakeDocker:
         self.fetch_exit = 0
         self.fetch_output = "added 2 packages in 2s"
         self.scripts_output = "2.1.300 (Claude Code)\n"
+        self.scripts_stderr = ""
         self.scripts_exit = 0
         self.containers: dict[str, list[str]] = {}
         self.leftover_containers: list[str] = []
@@ -72,7 +73,7 @@ class FakeDocker:
             created = self.containers[args[-1]]
             if "none" not in created:
                 return self._done(self.fetch_output, self.fetch_exit)
-            return self._done(self.scripts_output, self.scripts_exit)
+            return self._done(self.scripts_output, self.scripts_exit, self.scripts_stderr)
         if verb == "commit":
             ref = args[-1] if ":" in args[-1] else None
             image = "sha256:" + f"{len(self.calls):064x}"
@@ -90,8 +91,8 @@ class FakeDocker:
         return self._done("")
 
     @staticmethod
-    def _done(stdout: str, code: int = 0) -> SimpleNamespace:
-        return SimpleNamespace(returncode=code, stdout=stdout, stderr="")
+    def _done(stdout: str, code: int = 0, stderr: str = "") -> SimpleNamespace:
+        return SimpleNamespace(returncode=code, stdout=stdout, stderr=stderr)
 
     def ran(self, verb: str) -> list[list[str]]:
         return [call for call in self.calls if call[0] == verb]
@@ -243,6 +244,20 @@ def test_a_binary_reporting_another_version_is_not_kept(docker):
     )
     assert probe.calls == []
     assert discover("docker", NAMESPACE) == []
+
+
+def test_a_binary_that_reports_its_version_on_stderr_is_kept(docker):
+    """pi before 0.84.0 prints ``--version`` to stderr, after npm's line on stdout."""
+    docker.scripts_output = "rebuilt dependencies successfully\n"
+    docker.scripts_stderr = "2.1.300\n"
+    probe = Probe()
+    downloads = _downloads(probe)
+    downloads.apply([_target()])
+
+    _run_once(downloads)
+
+    assert _reported(downloads)["state"] == "ready"
+    assert len(probe.calls) == 1
 
 
 def test_a_version_that_fails_its_check_is_removed(docker):

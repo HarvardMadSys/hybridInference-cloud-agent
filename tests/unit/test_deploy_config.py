@@ -1368,6 +1368,68 @@ def test_pi_wrapper_writes_the_provider_config_and_execs_pi(tmp_path):
     ]
 
 
+def _pi_install(tmp_path, package: str, version: str) -> Path:
+    """A stub pi laid out as npm installs one, recording the argv it receives."""
+    root = tmp_path / package.replace("/", "_") / version
+    home = root / "lib/node_modules" / package
+    (home / "dist").mkdir(parents=True)
+    (home / "package.json").write_text(f'{{"name": "{package}", "version": "{version}"}}')
+    cli = home / "dist/cli.js"
+    cli.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        f"open({str(root / 'argv.json')!r}, 'w').write(json.dumps(sys.argv[1:]))\n"
+    )
+    cli.chmod(0o755)
+    (root / "bin").mkdir()
+    (root / "bin/pi").symlink_to(cli)
+    return root
+
+
+@pytest.mark.parametrize(
+    ("package", "version", "approved"),
+    [
+        ("@mariozechner/pi-coding-agent", "0.73.1", False),
+        ("@earendil-works/pi-coding-agent", "0.78.1", False),
+        ("@earendil-works/pi-coding-agent", "0.79.0", True),
+        ("@earendil-works/pi-coding-agent", "1.2.0", True),
+        ("@earendil-works/pi-coding-agent", "1.3.0-beta.1", False),
+        ("some-other-cli", "9.9.9", False),
+    ],
+)
+def test_pi_wrapper_reads_the_repositorys_own_resources_on_every_release(
+    tmp_path, package, version, approved
+):
+    """From 0.79.0 pi needs ``--approve`` to read what 0.73.1 always read.
+
+    The version comes from the manifest of the pi on PATH, through npm's
+    ``bin`` link, so a release that would reject the flag never sees it.
+    """
+    import json as _json
+    import os as _os
+    import subprocess as _subprocess
+    import sys as _sys
+
+    install = _pi_install(tmp_path, package, version)
+    result = _subprocess.run(
+        [_sys.executable, str(_PI_WRAPPER), "--mode", "rpc"],
+        env={
+            "PATH": f"{install / 'bin'}:{_os.environ['PATH']}",
+            "HOME": str(tmp_path),
+            "OPENAI_BASE_URL": "http://backend:8080/v1",
+            "OPENAI_API_KEY": "ajt.attempt.key",
+            "PI_GATEWAY_MODEL": "glm-5.1",
+            "PI_CODING_AGENT_DIR": str(tmp_path / "activation"),
+        },
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    argv = _json.loads((install / "argv.json").read_text())
+    assert argv == (["--approve"] if approved else []) + ["--mode", "rpc"]
+
+
 def test_pi_wrapper_refuses_to_run_half_configured(tmp_path):
     """Missing environment is a named refusal, not a job that dials OpenAI."""
     import os as _os

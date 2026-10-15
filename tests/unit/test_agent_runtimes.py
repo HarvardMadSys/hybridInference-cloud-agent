@@ -764,6 +764,145 @@ def test_pi_unknown_line_types_still_become_raw():
     assert runtime.parse_event("   ") is None
 
 
+def _pi_1x_lines() -> list[str]:
+    """pi 1.2.0's ``--mode json`` stream, recorded against a fake gateway, sanitized.
+
+    The same turn as the 0.73.1 fixture, from ``@earendil-works/pi-coding-agent``:
+    one thinking block, one call, its result and one answer.
+    """
+    return (_FIXTURES / "pi_1x_stream_contract.jsonl").read_text().splitlines()
+
+
+def test_pi_1x_stream_maps_to_the_same_kinds_as_0_73_1():
+    """The package pi moved to reports a turn as the image's 0.73.1 does.
+
+    What 1.x adds to the stream is recognized and kept out of it: its system
+    prompt reported as a message, and ``agent_settled`` after ``agent_end``.
+    """
+    runtime = PiRuntime(clock=_Clock(step=1.0))
+    events = [event for line in _pi_1x_lines() for event in runtime.parse_events(line)]
+    kinds = [event.event_type for event in events if event.payload.get("protocol") != REPLY_PREVIEW]
+    assert kinds == [
+        "lifecycle",  # session
+        "thinking",
+        "tool_use",
+        "usage",
+        "tool_result",
+        "message",
+        "usage",
+        "lifecycle",  # agent_end
+    ]
+    answer = next(event for event in events if event.event_type == "message")
+    assert answer.payload["text"] == "PWD_OK: synthetic agent loop round trip complete."
+    tool_use = next(event for event in events if event.event_type == "tool_use")
+    assert (tool_use.payload["name"], tool_use.payload["input"]) == ("bash", {"command": "pwd"})
+
+
+def test_pi_1x_blocks_wait_for_the_response_their_message_end_names():
+    """From 0.84.0 only ``message_end`` names the response, so blocks wait for it.
+
+    The inspector groups a response's thinking, calls and text by this id and
+    asks the gateway for the request under it; without the wait every block
+    of a 1.x turn would stand alone.
+    """
+    runtime = PiRuntime()
+    released: list[tuple[str, str, object]] = []
+    for line in _pi_1x_lines():
+        kind = json.loads(line)["type"]
+        for event in runtime.parse_events(line):
+            if event.event_type in {"thinking", "tool_use", "message", "usage"}:
+                released.append((kind, event.event_type, event.payload.get("usage_id")))
+    assert released == [
+        ("message_end", "thinking", "synthetic-response-1"),
+        ("message_end", "tool_use", "synthetic-response-1"),
+        ("message_end", "usage", "synthetic-response-1"),
+        ("message_end", "message", "synthetic-response-2"),
+        ("message_end", "usage", "synthetic-response-2"),
+    ]
+
+
+def test_pi_1x_read_one_event_per_line_loses_no_block():
+    """``parse_event`` holds nothing back; only the response id is missing."""
+    runtime = PiRuntime()
+    events = [event for line in _pi_1x_lines() if (event := runtime.parse_event(line))]
+    assert [
+        (event.event_type, event.payload.get("usage_id"))
+        for event in events
+        if event.event_type in {"thinking", "tool_use", "message"}
+    ] == [("thinking", None), ("tool_use", None), ("message", None)]
+
+
+def test_pi_a_run_it_retries_is_not_the_turns_outcome():
+    """From 0.75.4 pi ends a failed run, then runs it again itself.
+
+    The failed run's error is not reported, the retry is one diagnostic, and
+    only the run that is not retried says how the turn went.
+    """
+    runtime = PiRuntime()
+    failed = {"role": "assistant", "stopReason": "error", "errorMessage": "500: transient"}
+    assert (
+        runtime.parse_events(
+            json.dumps({"type": "agent_end", "messages": [failed], "willRetry": True})
+        )
+        == []
+    )
+    [notice] = runtime.parse_events(
+        json.dumps(
+            {
+                "type": "auto_retry_start",
+                "attempt": 1,
+                "maxAttempts": 3,
+                "delayMs": 2000,
+                "errorMessage": "500: transient",
+            }
+        )
+    )
+    assert notice.event_type == "raw"
+    assert notice.payload == {
+        "text": "pi retries (1 of 3, in 2000 ms): 500: transient",
+        "reason": "retrying",
+    }
+    for kind in ("auto_retry_end", "entry_appended", "agent_settled"):
+        assert runtime.parse_events(json.dumps({"type": kind})) == []
+    answered = {"role": "assistant", "stopReason": "stop"}
+    final = runtime.parse_events(
+        json.dumps({"type": "agent_end", "messages": [answered], "willRetry": False})
+    )
+    assert [(event.event_type, event.payload) for event in final] == [
+        ("lifecycle", {"phase": "result"})
+    ]
+
+
+def test_pi_1x_blocks_of_a_message_that_never_ended_still_come_out():
+    """A stream stopped before ``message_end`` shows what it completed."""
+    runtime = PiRuntime()
+    text_end = {"type": "text_end", "contentIndex": 0, "content": "partial answer"}
+    assert (
+        runtime.parse_events(
+            json.dumps({"type": "message_update", "assistantMessageEvent": text_end})
+        )
+        == []
+    )
+    aborted = {"role": "assistant", "stopReason": "aborted", "errorMessage": "aborted"}
+    events = runtime.parse_events(
+        json.dumps({"type": "agent_end", "messages": [aborted], "willRetry": False})
+    )
+    assert [event.event_type for event in events] == ["message", "error"]
+    assert events[0].payload["text"] == "partial answer"
+
+
+def test_pi_system_prompt_is_not_part_of_the_conversation():
+    """1.x reports its system prompt as a message; the thread does not show it."""
+    line = json.dumps(
+        {
+            "type": "message_end",
+            "message": {"role": "system", "content": "", "sections": {"preamble": "You are"}},
+        }
+    )
+    assert PiRuntime().parse_events(line) == []
+    assert PiRuntime().parse_event(line) is None
+
+
 def test_claude_prepare_points_at_the_gateway_and_disables_telemetry():
     """The agent talks to our gateway with the job's token and phones nobody."""
     argv, env = ClaudeCodeRuntime().prepare(

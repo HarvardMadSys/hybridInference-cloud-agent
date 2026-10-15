@@ -56,10 +56,12 @@ model was given no instruction". Two consequences, both real:
 Every turn also carries `thinking: {"type": "adaptive"}`, which the OpenAI
 sanitizer drops. That predates this work and is unchanged.
 
-## pi 0.73.1 → `POST /v1/chat/completions`
+## pi 0.73.1 and 1.2.0 → `POST /v1/chat/completions`
 
 `--thinking <level>`, and the level maps onto `reasoning_effort` directly —
 no gateway translation involved, the chat surface already forwards it.
+Rechecked on 2026-10-15 against 1.2.0 from `@earendil-works/pi-coding-agent`,
+the package pi moved to: every row, and both findings below, are unchanged.
 
 | `--thinking` | `reasoning_effort` on the wire |
 |---|---|

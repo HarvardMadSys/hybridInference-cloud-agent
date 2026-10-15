@@ -264,6 +264,11 @@ RUN python3 -m venv /opt/uv \
 # Removed afterwards: an agent that can install another CLI version into its own
 # sandbox is an agent that can step outside the version its attempt is stamped
 # with.
+#
+# pi's default comes from `@mariozechner/pi-coding-agent`, where 0.73.1 was the
+# last release before pi moved to `@earendil-works/pi-coding-agent`. Admin
+# updates download from the new name (`runtime_catalog.PI`); a pin that moves
+# here moves to the new name with it.
 COPY deploy/sandbox/install-runtimes.sh /tmp/install-runtimes.sh
 COPY --from=kilo-build /opt/kilo /opt/kilo
 RUN --mount=type=cache,id=cloud-agent-sandbox-npm,target=/root/.npm,sharing=locked \

@@ -409,8 +409,15 @@ class RuntimeDownloads:
             ran = self._attach(scripts, SCRIPTS_TIMEOUT_S)
             if ran.returncode != 0:
                 raise _StepError(f"{name} did not install: {_tail(ran.stdout + ran.stderr)}")
-            if not reports_version(ran.stdout, target.version):
-                raise _StepError(f"{name} reports a different version: {_tail(ran.stdout)}")
+            # Either stream, as the probe reads it: pi before 0.84.0 prints its
+            # version to stderr, so stdout ends with npm's own last line.
+            if not (
+                reports_version(ran.stdout, target.version)
+                or reports_version(ran.stderr, target.version)
+            ):
+                raise _StepError(
+                    f"{name} reports a different version: {_tail(ran.stdout + ran.stderr)}"
+                )
             self._keep_tree(scripts, prefix, candidate, target)
         finally:
             self._docker_run(["rm", "-f", scripts])

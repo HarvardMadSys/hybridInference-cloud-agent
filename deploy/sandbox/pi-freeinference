@@ -20,7 +20,15 @@ Three properties are deliberate:
 
 import json
 import os
+import shutil
 import sys
+
+#: The packages pi has been published as. It moved to the second in May 2026;
+#: the image's default still comes from the first.
+PI_PACKAGES = ("@mariozechner/pi-coding-agent", "@earendil-works/pi-coding-agent")
+#: The first release that gates a repository's own resources behind project
+#: trust, and the first that accepts ``--approve``.
+PROJECT_TRUST_SINCE = (0, 79, 0)
 
 
 def plugin_args() -> list[str]:
@@ -36,6 +44,51 @@ def plugin_args() -> list[str]:
         sys.stderr.write("pi-freeinference: AGENT_PLUGIN_PATHS must contain absolute paths.\n")
         raise SystemExit(64)
     return [argument for path in paths for argument in ("-e", path)]
+
+
+def pi_release() -> tuple[int, ...] | None:
+    """The release of the pi on PATH, from its package manifest.
+
+    Read from the file rather than asked of the CLI: ``pi --version`` would
+    start a second Node process before every launch. ``None`` when no manifest
+    of pi's is found above the resolved binary, or its version is not a plain
+    release, which leaves pi's own defaults.
+    """
+    found = shutil.which("pi")
+    if not found:
+        return None
+    directory = os.path.dirname(os.path.realpath(found))
+    while True:
+        try:
+            with open(os.path.join(directory, "package.json"), encoding="utf-8") as handle:
+                manifest = json.load(handle)
+        except (OSError, ValueError):
+            manifest = None
+        if isinstance(manifest, dict) and manifest.get("name") in PI_PACKAGES:
+            try:
+                return tuple(int(part) for part in str(manifest.get("version")).split("."))
+            except ValueError:
+                return None
+        parent = os.path.dirname(directory)
+        if parent == directory:
+            return None
+        directory = parent
+
+
+def trust_args() -> list[str]:
+    """Read the repository's own pi resources, as pi did before project trust.
+
+    From 0.79.0 pi loads a repository's ``.pi/settings.json``, ``.pi/skills``,
+    ``.agents/skills`` and ``.pi/SYSTEM.md`` only for a trusted project, and
+    in JSON and RPC mode it skips them unless a saved decision says otherwise.
+    0.73.1 read them all, and so do the other agents here, so the decision is
+    made explicit for every run. That is all it changes: ``--no-extensions``
+    still keeps every extension and MCP server a repository names from
+    loading, trusted or not, and ``PI_OFFLINE`` keeps pi from installing the
+    packages a repository's settings list, as it did on 0.73.1.
+    """
+    release = pi_release()
+    return ["--approve"] if release is not None and release >= PROJECT_TRUST_SINCE else []
 
 
 def main() -> None:
@@ -80,9 +133,10 @@ def main() -> None:
     with open(os.path.join(config_dir, "models.json"), "w", encoding="utf-8") as handle:
         json.dump(config, handle)
 
-    # pi 0.73.1 accepts explicit package directories under --no-extensions;
-    # the CLI resolves each manifest's extensions, skills, prompts, and themes.
-    os.execvp("pi", ["pi", *plugin_args(), *sys.argv[1:]])
+    # pi accepts explicit package directories under --no-extensions (checked on
+    # 0.73.1 and 1.2.0); the CLI resolves each manifest's extensions, skills,
+    # prompts, and themes.
+    os.execvp("pi", ["pi", *plugin_args(), *trust_args(), *sys.argv[1:]])
 
 
 if __name__ == "__main__":
