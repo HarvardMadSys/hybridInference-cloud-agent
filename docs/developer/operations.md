@@ -72,7 +72,8 @@ that URL to another origin is refused while the token is kept. Reset the token,
 save the URL, then enter the token again.
 
 For the first deployment of this release, run `alembic upgrade head` through
-`0077_sandbox_usage_days`. Existing hosts begin without a deployment drain
+`0078_teams`. 0078 only adds the team tables and changes no existing row.
+Existing hosts begin without a deployment drain
 owner or release receipt, and 0051 backfills each one with a non-null fence
 epoch. 0066 builds an index on `agent_jobs` concurrently: on a long job history
 it takes a while without blocking the running API, and an interrupted run can

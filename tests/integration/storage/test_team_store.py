@@ -222,7 +222,10 @@ async def test_dead_links_cannot_be_claimed_and_expired_requests_cannot_be_appro
         await store.teams.decide_join_request("alice", team.id, request.id, approve=True)
     assert expired.value.code == "request_expired"
     assert await store.teams.list_join_requests("alice", team.id) == []
-    statuses = {i.id: (i.status, i.request_state) for i in await store.teams.list_invitations("alice", team.id)}
+    statuses = {
+        i.id: (i.status, i.request_state)
+        for i in await store.teams.list_invitations("alice", team.id)
+    }
     assert sorted(statuses.values()) == [
         ("claimed", "expired"),
         ("expired", None),
@@ -290,9 +293,7 @@ async def test_revoking_a_claimed_link_cancels_its_pending_request_but_not_a_dec
     assert closed.value.code == "invitation_closed"
 
 
-async def test_departures_advance_the_access_generation_and_a_return_advances_it_again(
-    store, pool
-):
+async def test_departures_advance_the_access_generation_and_a_return_advances_it_again(store, pool):
     team = await new_team(store)
     await join(store, team.id, "bob")
     assert tuple(await generation(pool, team.id, "bob")) == ("active", 1)
