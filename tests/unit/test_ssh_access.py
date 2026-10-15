@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -183,14 +184,30 @@ def test_a_digest_names_one_exact_entry_and_never_its_key() -> None:
 # ── the in-guest scripts, run for real ───────────────────────────────────
 
 
-def _run(script: str, request: dict[str, Any]) -> subprocess.CompletedProcess[str]:
+def _run(
+    script: str, request: dict[str, Any], *, prefix: tuple[str, ...] = ()
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [sys.executable, "-I", "-c", script],
+        [*prefix, sys.executable, "-I", "-c", script],
         input=json.dumps(request),
         capture_output=True,
         text=True,
         check=False,
     )
+
+
+def _without_capabilities() -> tuple[str, ...]:
+    """Run as a runc exec's root does: no capability, so no DAC override.
+
+    Unprivileged, a mode 0 directory already refuses this process; as root it
+    must also give up its capabilities first.
+    """
+    if os.geteuid() != 0:
+        return ()
+    setpriv = shutil.which("setpriv")
+    if setpriv is None:
+        pytest.skip("dropping root's capabilities needs setpriv")
+    return (setpriv, "--bounding-set=-all", "--inh-caps=-all", "--")
 
 
 def _gate(
@@ -346,6 +363,9 @@ class FakeManager:
         self.fail_slot = fail_slot
         #: The gate runs, then its exec fails, as one that timed out does.
         self.fail_gate = False
+        #: Slots guest root cannot open, as under runc: the gate runs without
+        #: capabilities and finds them mode 0; each member still opens its own.
+        self.private_slots: set[int] = set()
         self.execs: list[dict[str, Any]] = []
         self.targets: list[set[tuple[str, int]]] = []
         root = tmp_path / "members"
@@ -362,7 +382,18 @@ class FakeManager:
         local = _localize(request, self.tmp_path)
         if argv[3] == host_ssh._GATE_SCRIPT:
             local["owner_uid"] = os.getuid()
-        result = _run(argv[3], local)
+        if argv[3] == host_ssh._GATE_SCRIPT and self.private_slots:
+            prefix = _without_capabilities()
+            slots = [self.tmp_path / "members" / str(slot) for slot in self.private_slots]
+            for slot in slots:
+                slot.chmod(0)
+            try:
+                result = _run(argv[3], local, prefix=prefix)
+            finally:
+                for slot in slots:
+                    slot.chmod(0o700)
+        else:
+            result = _run(argv[3], local)
         if self.fail_gate and argv[3] == host_ssh._GATE_SCRIPT:
             raise SandboxError("chat sandbox exec failed: timed out after 30 seconds")
         return subprocess.CompletedProcess(
@@ -500,6 +531,23 @@ def test_a_gate_that_fails_after_recording_the_newest_state_closes_the_bridge(
     manager.fail_gate = False
     assert _apply(manager, _access(4, ("a", 1, [_GPU])), "a")["newest"] is False
     assert manager.targets[-1] == set()
+
+
+def test_a_slot_guest_root_cannot_open_is_cleared_by_its_own_member(tmp_path: Path) -> None:
+    # A runc container drops every capability, so guest root cannot open a
+    # member's private tmpfs at all; only the member can.
+    manager = FakeManager(tmp_path)
+    manager.private_slots = set(range(_spec().resident_slot_capacity))
+
+    assert _apply(manager, _access(4, ("a", 1, [_GPU]), ("b", 2, [_DB])), "b")["newest"]
+    assert manager.held(2) == ["db"]
+
+    # b's chat turns db off as a's turn starts: b's slot is no longer kept.
+    assert _apply(manager, _access(5, ("a", 1, [_GPU]), ("b", 2, [])), "a")["newest"]
+    assert (manager.held(1), manager.held(2)) == (["gpu"], [])
+    assert manager.targets[-1] == {("93.184.216.34", 22)}
+    clears = [call for call in manager.execs[-8:] if call["user_uid"] == MEMBER_UID_BASE + 2]
+    assert [call["request"] for call in clears] == [host_ssh.narrow_payload(2, set())]
 
 
 def test_an_older_state_that_fails_leaves_the_bridge_alone(tmp_path: Path) -> None:
