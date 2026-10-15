@@ -344,6 +344,8 @@ class FakeManager:
         self.backend = FakeBackend()
         self.tmp_path = tmp_path
         self.fail_slot = fail_slot
+        #: The gate runs, then its exec fails, as one that timed out does.
+        self.fail_gate = False
         self.execs: list[dict[str, Any]] = []
         self.targets: list[set[tuple[str, int]]] = []
         root = tmp_path / "members"
@@ -361,6 +363,8 @@ class FakeManager:
         if argv[3] == host_ssh._GATE_SCRIPT:
             local["owner_uid"] = os.getuid()
         result = _run(argv[3], local)
+        if self.fail_gate and argv[3] == host_ssh._GATE_SCRIPT:
+            raise SandboxError("chat sandbox exec failed: timed out after 30 seconds")
         return subprocess.CompletedProcess(
             argv, result.returncode, result.stdout.encode(), result.stderr.encode()
         )
@@ -473,6 +477,29 @@ def test_a_newest_state_that_fails_closes_the_bridge(tmp_path: Path) -> None:
     assert manager.targets[-1] == set()
     assert _apply(manager, _access(5, ("a", 1, [_GPU])), "a")["newest"] is True
     assert manager.targets[-1] == {("93.184.216.34", 22)}
+
+
+def test_a_gate_that_fails_after_recording_the_newest_state_closes_the_bridge(
+    tmp_path: Path,
+) -> None:
+    manager = FakeManager(tmp_path)
+    _apply(manager, _access(4, ("a", 1, [_GPU])), "a")
+    assert manager.targets == [{("93.184.216.34", 22)}]
+
+    # The owner deletes gpu. The gate records revision 5 as the newest state,
+    # then its exec fails (a member's directory took too long to remove).
+    manager.fail_gate = True
+    with pytest.raises(SandboxError):
+        _apply(manager, _access(5, ("a", 1, [])), None)
+    state = json.loads((tmp_path / "members" / ".ssh-access-state").read_text())
+    assert state["revision"] == 5
+    assert manager.targets[-1] == set(), "the deleted server's live sessions are cut"
+
+    # A late claim read before the delete is older than what was recorded, so
+    # it does not reopen the bridge either.
+    manager.fail_gate = False
+    assert _apply(manager, _access(4, ("a", 1, [_GPU])), "a")["newest"] is False
+    assert manager.targets[-1] == set()
 
 
 def test_an_older_state_that_fails_leaves_the_bridge_alone(tmp_path: Path) -> None:

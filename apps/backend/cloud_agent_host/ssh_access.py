@@ -25,8 +25,9 @@ container and the host toward it, in three steps under one per-group lock:
    as the member means a symlink the member planted can only ever redirect a
    write to somewhere the member could already write.
 
-When a newest state fails after it was recorded, the bridge's exceptions are
-cleared, so the group fails closed until a state applies whole.
+When a newest state fails after it was recorded, or the gate itself fails or
+times out and so may have recorded it, the bridge's exceptions are cleared, so
+the group fails closed until a state applies whole.
 
 Keys travel on stdin, never in argv, and live only in tmpfs: they are gone when
 the container stops and never reach the workspace, a snapshot or an archive.
@@ -367,34 +368,42 @@ def apply_ssh_access(
     if any(slot >= spec.resident_slot_capacity for slot in slots.values()):
         raise SandboxError("SSH access names a slot outside this sandbox")
     with _group_lock(spec.sandbox_id):
-        gate = manager.exec_capture(
-            spec,
-            ["/usr/bin/python3", "-I", "-c", _GATE_SCRIPT],
-            workdir="/",
-            timeout_s=_TIMEOUT_S,
-            input_bytes=json.dumps(
-                {
-                    "revision": access.revision,
-                    "members": {
-                        member.thread_id: sorted(server.digest() for server in member.servers)
-                        for member in access.members
-                        if member.servers
-                    },
-                    "slots": slots,
-                    "state_file": STATE_FILE,
-                    "root": MEMBER_TMPFS_ROOT,
-                    "owner_uid": 0,
-                    "capacity": spec.resident_slot_capacity,
-                }
-            ).encode(),
-            user_uid=0,
-            user_gid=0,
-        )
-        if gate.returncode != 0:
-            raise SandboxError(
-                "SSH access state could not be checked: "
-                + gate.stderr.decode("utf-8", "replace")[-300:]
+        try:
+            gate = manager.exec_capture(
+                spec,
+                ["/usr/bin/python3", "-I", "-c", _GATE_SCRIPT],
+                workdir="/",
+                timeout_s=_TIMEOUT_S,
+                input_bytes=json.dumps(
+                    {
+                        "revision": access.revision,
+                        "members": {
+                            member.thread_id: sorted(server.digest() for server in member.servers)
+                            for member in access.members
+                            if member.servers
+                        },
+                        "slots": slots,
+                        "state_file": STATE_FILE,
+                        "root": MEMBER_TMPFS_ROOT,
+                        "owner_uid": 0,
+                        "capacity": spec.resident_slot_capacity,
+                    }
+                ).encode(),
+                user_uid=0,
+                user_gid=0,
             )
+            if gate.returncode != 0:
+                raise SandboxError(
+                    "SSH access state could not be checked: "
+                    + gate.stderr.decode("utf-8", "replace")[-300:]
+                )
+        except Exception:
+            # The gate records the newest state before it clears any slot, so
+            # one that failed or timed out may have recorded this state with
+            # nothing after it in place. Older states then leave the bridge
+            # alone, so it is closed here rather than left open.
+            _close_bridge(manager, spec)
+            raise
         fresh, revision, allowed, keep = _newest(gate.stdout)
         try:
             if fresh:
@@ -428,10 +437,15 @@ def apply_ssh_access(
             if fresh:
                 # The newest state is recorded but not in place: close the
                 # bridge rather than leave an older selection open behind it.
-                with contextlib.suppress(Exception):
-                    manager.sync_ssh_targets(spec, set())
+                _close_bridge(manager, spec)
             raise
     return {"newest": fresh, "revision": revision}
+
+
+def _close_bridge(manager: ChatSandboxManager, spec: ChatSandboxSpec) -> None:
+    """Drop every SSH exception of the group's bridge, without masking the failure."""
+    with contextlib.suppress(Exception):
+        manager.sync_ssh_targets(spec, set())
 
 
 __all__ = [
