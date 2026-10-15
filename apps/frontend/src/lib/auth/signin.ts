@@ -35,18 +35,38 @@ export function safeReturnTo(candidate: string | undefined): string {
   return candidate;
 }
 
+/** What a sign-in asks of the gateway's consent page, in OIDC's terms. */
+export interface SignInOptions {
+  /** List the browser's gateway accounts even when one would be chosen for you. */
+  prompt?: 'select_account';
+  /** The gateway account id to preselect there. */
+  loginHint?: string;
+}
+
 /**
  * The control plane's sign-in entry point, with the landing path attached.
  *
  * Returned rather than navigated to so it can be asserted on in a test — a
  * function that only ever calls `location.assign` has nothing to check.
+ * `options` are passed through to the gateway by the control plane, which
+ * drops anything it does not recognise.
  */
-export function signInUrl(returnTo: string): string {
+export function signInUrl(returnTo: string, options: SignInOptions = {}): string {
   // An empty `agentApiBase` is not a missing one: it is the same-origin
   // deployment, and the result is a relative URL the browser resolves
   // against the page. There is nothing here to refuse.
   const params = new URLSearchParams({ return_to: safeReturnTo(returnTo) });
+  if (options.prompt) params.set('prompt', options.prompt);
+  if (options.loginHint) params.set('login_hint', options.loginHint);
   return `${agentApiBase}/v1/session/login?${params.toString()}`;
+}
+
+/**
+ * Sign in again through the gateway's account chooser, keeping this session
+ * until another one replaces it: cancelling there leaves the Agent as it was.
+ */
+export function switchAccountUrl(returnTo: string, loginHint?: string): string {
+  return signInUrl(returnTo, { prompt: 'select_account', loginHint });
 }
 
 /** Send the browser to the control plane, which sends it on to the gateway. */

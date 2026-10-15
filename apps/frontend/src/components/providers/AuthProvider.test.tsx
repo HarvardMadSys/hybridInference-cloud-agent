@@ -10,6 +10,7 @@ vi.mock('@/lib/api/session', () => ({ getSessionUser: vi.fn(), endSession: vi.fn
 import { sideChatKeys } from '@/components/features/agents/sideChatStorage';
 import { endSession, getSessionUser } from '@/lib/api/session';
 import { APIError } from '@/lib/utils/errors';
+import { SESSION_SWITCHED_EVENT } from '@/lib/auth/sessionSync';
 import { AuthProvider, hasAgentPermission, useAuth } from './AuthProvider';
 
 const getMe = vi.mocked(getSessionUser);
@@ -202,4 +203,108 @@ it('stays signed in, drafts kept, when the server did not end the session', asyn
   expect(current().isAuthenticated).toBe(true);
   expect(current().user.id).toBe('draft-owner');
   expect(sessionStorage.getItem(own)).toBe('private draft');
+});
+
+describe('AuthProvider and the browser’s other Agents tabs', () => {
+  const access: AgentAccessApi = { allowed: true, permissions: ['agent.use'] };
+
+  // Another tab of the same browser, as BroadcastChannel sees one.
+  function announceFromAnotherTab(userId: string | null) {
+    const tab = new BroadcastChannel('cloud-agent:session');
+    tab.postMessage({ userId });
+    tab.close();
+  }
+
+  async function renderAs(id: string) {
+    getMe.mockResolvedValue({ id, agent_access: access });
+    render(
+      <AuthProvider>
+        <Consumer />
+      </AuthProvider>,
+    );
+    await waitFor(() => expect(current().user?.id).toBe(id));
+  }
+
+  it('follows another tab that switched the session, and says it did', async () => {
+    const switched = vi.fn();
+    window.addEventListener(SESSION_SWITCHED_EVENT, switched);
+    await renderAs('first');
+    getMe.mockResolvedValue({ id: 'second', agent_access: access });
+
+    announceFromAnotherTab('second');
+
+    await waitFor(() => expect(current().user?.id).toBe('second'));
+    expect(switched).toHaveBeenCalledTimes(1);
+    expect((switched.mock.calls[0][0] as CustomEvent).detail).toBe('second');
+    window.removeEventListener(SESSION_SWITCHED_EVENT, switched);
+  });
+
+  it('signs this tab out when another one signed the session out', async () => {
+    await renderAs('first');
+    getMe.mockResolvedValue(null);
+
+    announceFromAnotherTab(null);
+
+    await waitFor(() => expect(current().isAuthenticated).toBe(false));
+  });
+
+  it('ignores an announcement of the account it already shows', async () => {
+    await renderAs('first');
+    getMe.mockClear();
+
+    announceFromAnotherTab('first');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(getMe).not.toHaveBeenCalled();
+  });
+
+  it('checks again when the tab is looked at', async () => {
+    await renderAs('first');
+    getMe.mockResolvedValue({ id: 'second', agent_access: access });
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 60_000);
+
+    act(() => {
+      window.dispatchEvent(new Event('focus'));
+    });
+
+    await waitFor(() => expect(current().user?.id).toBe('second'));
+    vi.restoreAllMocks();
+  });
+
+  it('shows no loading state when that check finds the same account', async () => {
+    await renderAs('first');
+    getMe.mockClear();
+    const loading: boolean[] = [];
+    const observer = new MutationObserver(() => loading.push(current().loading));
+    observer.observe(screen.getByTestId('auth'), {
+      childList: true,
+      characterData: true,
+      subtree: true,
+    });
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 60_000);
+
+    act(() => {
+      window.dispatchEvent(new Event('focus'));
+    });
+
+    await waitFor(() => expect(getMe).toHaveBeenCalledTimes(1));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    observer.disconnect();
+    vi.restoreAllMocks();
+    expect(loading).not.toContain(true);
+    expect(current().user?.id).toBe('first');
+  });
+
+  it('tells the other tabs when it signs out', async () => {
+    await renderAs('first');
+    vi.mocked(endSession).mockResolvedValue(undefined);
+    const heard: unknown[] = [];
+    const tab = new BroadcastChannel('cloud-agent:session');
+    tab.onmessage = (event) => heard.push(event.data);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
+
+    await waitFor(() => expect(heard).toContainEqual({ userId: null }));
+    tab.close();
+  });
 });

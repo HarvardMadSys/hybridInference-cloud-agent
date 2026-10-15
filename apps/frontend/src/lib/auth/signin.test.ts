@@ -59,6 +59,23 @@ describe('signInUrl', () => {
     expect(url.searchParams.get('return_to')).toBe('/ajob_123');
   });
 
+  it('asks the gateway for its account chooser when switching accounts', async () => {
+    const { switchAccountUrl } = await loadSignin('/agents', '');
+
+    const url = new URL(switchAccountUrl('/agents/ajob_123', '01JUSER'), 'https://agents.example');
+
+    expect(url.searchParams.get('return_to')).toBe('/ajob_123');
+    expect(url.searchParams.get('prompt')).toBe('select_account');
+    expect(url.searchParams.get('login_hint')).toBe('01JUSER');
+  });
+
+  it('adds neither prompt nor hint to an ordinary sign-in', async () => {
+    const { signInUrl, switchAccountUrl } = await loadSignin('', '');
+
+    expect(signInUrl('/')).toBe('/v1/session/login?return_to=%2F');
+    expect(switchAccountUrl('/')).toBe('/v1/session/login?return_to=%2F&prompt=select_account');
+  });
+
   it('refuses to carry an off-site landing path', async () => {
     // `return_to` survives a round trip through the gateway, so it is
     // attacker-influenced. The server checks this too — that copy is the one

@@ -248,6 +248,40 @@ async def test_login_redirects_to_the_gateway_with_a_challenge(client_and_gatewa
     assert query["state"][0]
 
 
+async def test_login_asks_the_gateway_for_its_account_chooser(client_and_gateway):
+    """Switch account: the gateway lists the browser's accounts, one preselected."""
+    client, _ = client_and_gateway
+
+    response = await client.get(
+        "/v1/session/login",
+        params={"return_to": "/", "prompt": "select_account", "login_hint": "01JABCDEF_ghi-9"},
+    )
+
+    query = parse_qs(urlparse(response.headers["location"]).query)
+    assert query["prompt"] == ["select_account"]
+    assert query["login_hint"] == ["01JABCDEF_ghi-9"]
+
+
+@pytest.mark.parametrize(
+    ("prompt", "login_hint"),
+    [("consent", "a b"), ("none", "x" * 65), ("login", "<script>"), ("", "")],
+)
+async def test_login_drops_a_prompt_or_hint_it_does_not_recognise(
+    client_and_gateway, prompt, login_hint
+):
+    client, _ = client_and_gateway
+
+    response = await client.get(
+        "/v1/session/login",
+        params={"return_to": "/", "prompt": prompt, "login_hint": login_hint},
+    )
+
+    assert response.status_code == 303
+    query = parse_qs(urlparse(response.headers["location"]).query)
+    assert "prompt" not in query
+    assert "login_hint" not in query
+
+
 async def test_the_parked_flow_is_httponly_and_carries_no_verifier_to_the_page(
     client_and_gateway,
 ):

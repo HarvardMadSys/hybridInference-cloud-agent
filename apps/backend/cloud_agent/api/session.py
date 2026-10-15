@@ -50,6 +50,7 @@ require operator action; temporary failures offer retry without signing in again
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import Any, Literal
 from urllib.parse import urlencode
 
@@ -229,15 +230,33 @@ def _callback_error_response(
     return response
 
 
+#: What a sign-in may ask the gateway's consent page for, in OIDC's terms.
+#: ``select_account`` shows the browser's accounts even when the gateway would
+#: have gone straight to the one the console is using; it is how "Switch
+#: account" reaches the chooser.
+_PROMPTS = frozenset({"select_account"})
+
+#: A gateway account id as a ``login_hint``: a ULID, or anything as plain.
+#: The hint only preselects an account on the gateway's page, which decides
+#: everything else, but nothing the browser sends is relayed unvetted.
+_LOGIN_HINT = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
+
 @router.get("/login")
 async def session_login(
     return_to: str = Query(default="/"),
+    prompt: str | None = Query(default=None),
+    login_hint: str | None = Query(default=None),
 ) -> RedirectResponse:
     """Start a sign-in: park the PKCE flow and redirect to the gateway.
 
     Args:
         return_to: Where in the app to land afterwards. Reduced to a same-site
             path before it is parked.
+        prompt: ``select_account`` to have the gateway list the browser's
+            accounts. Any other value is dropped.
+        login_hint: The gateway account id to preselect there. Dropped unless
+            it looks like one.
 
     Returns:
         A redirect to the gateway's consent page.
@@ -263,15 +282,18 @@ async def session_login(
     except identity.IdentityNotConfigured as exc:
         return _unavailable_response(str(exc))
 
-    query = urlencode(
-        {
-            "client_id": OAUTH_CLIENT_ID,
-            "redirect_uri": redirect_uri,
-            "code_challenge": identity.challenge_for(verifier),
-            "code_challenge_method": "S256",
-            "state": state,
-        }
-    )
+    params = {
+        "client_id": OAUTH_CLIENT_ID,
+        "redirect_uri": redirect_uri,
+        "code_challenge": identity.challenge_for(verifier),
+        "code_challenge_method": "S256",
+        "state": state,
+    }
+    if prompt in _PROMPTS:
+        params["prompt"] = prompt
+    if login_hint and _LOGIN_HINT.fullmatch(login_hint):
+        params["login_hint"] = login_hint
+    query = urlencode(params)
     separator = "&" if "?" in authorize_url else "?"
     # 303, not 302: this is a redirect to a different resource after a request
     # that is itself not the destination, and 303 is unambiguous about the

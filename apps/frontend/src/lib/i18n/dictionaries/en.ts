@@ -373,6 +373,13 @@ export const en = {
   'nav.dashboard': 'Dashboard',
   'nav.logOut': 'Log out',
   'nav.logOutFailed': 'Could not log out. You are still signed in; try again.',
+  'nav.switchAccount': 'Switch account',
+  'session.switchedElsewhere':
+    'Agents switched to another account in a different tab, so this tab went back to the start.',
+  'session.consoleMismatch':
+    'You opened Agents from a different account than the one Agents is signed in to.',
+  'session.consoleMismatchSwitch': 'Switch to that account',
+  'session.consoleMismatchDismiss': 'Keep this account',
   'nav.account': 'Account menu',
   'nav.help': 'Help',
   'nav.docsNamed': '{name} Docs',

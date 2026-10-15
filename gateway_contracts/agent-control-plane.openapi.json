@@ -36596,7 +36596,7 @@
     },
     "/v1/session/login": {
       "get": {
-        "description": "Start a sign-in: park the PKCE flow and redirect to the gateway.\n\nArgs:\n    return_to: Where in the app to land afterwards. Reduced to a same-site\n        path before it is parked.\n\nReturns:\n    A redirect to the gateway's consent page.\n\nRaises:\n    HTTPException: 503 if this deployment cannot sign anyone in.",
+        "description": "Start a sign-in: park the PKCE flow and redirect to the gateway.\n\nArgs:\n    return_to: Where in the app to land afterwards. Reduced to a same-site\n        path before it is parked.\n    prompt: ``select_account`` to have the gateway list the browser's\n        accounts. Any other value is dropped.\n    login_hint: The gateway account id to preselect there. Dropped unless\n        it looks like one.\n\nReturns:\n    A redirect to the gateway's consent page.\n\nRaises:\n    HTTPException: 503 if this deployment cannot sign anyone in.",
         "operationId": "session_login_v1_session_login_get",
         "parameters": [
           {
@@ -36607,6 +36607,38 @@
               "default": "/",
               "title": "Return To",
               "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "prompt",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Prompt"
+            }
+          },
+          {
+            "in": "query",
+            "name": "login_hint",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Login Hint"
             }
           }
         ],

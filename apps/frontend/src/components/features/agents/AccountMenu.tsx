@@ -23,12 +23,14 @@ import {
   HomeIcon,
   LogOutIcon,
   MailIcon,
+  RefreshIcon,
   MonitorIcon,
   MoonIcon,
   MoreIcon,
   SunIcon,
 } from '@/components/features/settings/icons';
 import { isSettingsPath, SETTINGS_PATHS } from '@/components/features/settings/navigation';
+import { switchAccountUrl } from '@/lib/auth/signin';
 import { LOCALES, LOCALE_LABELS } from '@/lib/i18n/locales';
 import { THEME_PREFERENCES, type ThemePreference } from '@/lib/theme';
 
@@ -375,6 +377,16 @@ export function AccountMenu({ variant }: { variant: 'sidebar' | 'header' }) {
                 ? parentItem('help', <HelpIcon className="h-4 w-4 shrink-0" />, t('nav.help'))
                 : null}
               <div role="separator" className={SEPARATOR} />
+              <a
+                role="menuitem"
+                href={switchAccountUrl(pathname ?? '/')}
+                className={ITEM}
+                onClick={() => close(false)}
+                {...plain}
+              >
+                <RefreshIcon className="h-4 w-4 shrink-0 text-muted" />
+                <span className="min-w-0 flex-1 truncate">{t('nav.switchAccount')}</span>
+              </a>
               <button
                 type="button"
                 role="menuitem"

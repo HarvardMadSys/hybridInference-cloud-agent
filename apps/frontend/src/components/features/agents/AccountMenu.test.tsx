@@ -153,7 +153,15 @@ describe('account menu', () => {
       within(menu)
         .getAllByRole('menuitem')
         .map((item) => item.textContent),
-    ).toEqual(['Dashboard', 'My Settings', 'Appearance', 'Language', 'Help', 'Log out']);
+    ).toEqual([
+      'Dashboard',
+      'My Settings',
+      'Appearance',
+      'Language',
+      'Help',
+      'Switch account',
+      'Log out',
+    ]);
     expect(within(menu).getByRole('menuitem', { name: 'Dashboard' })).toHaveAttribute(
       'href',
       'https://gateway.example/dashboard',
@@ -164,6 +172,19 @@ describe('account menu', () => {
     expect(document.activeElement).toBe(within(menu).getByRole('menuitem', { name: 'Dashboard' }));
   });
 
+  it('switches account through the gateway’s chooser, back to this page', async () => {
+    pathname = '/ajob_123';
+    renderMenu();
+    const menu = await openMenu();
+
+    const item = within(menu).getByRole('menuitem', { name: 'Switch account' });
+    const url = new URL(item.getAttribute('href') ?? '', 'https://agents.example');
+
+    expect(url.pathname).toBe('/v1/session/login');
+    expect(url.searchParams.get('prompt')).toBe('select_account');
+    expect(url.searchParams.get('return_to')).toBe('/ajob_123');
+  });
+
   it('leaves out Dashboard without a gateway and Help without docs or contact', async () => {
     renderMenu();
     const menu = await openMenu();
@@ -171,7 +192,7 @@ describe('account menu', () => {
       within(menu)
         .getAllByRole('menuitem')
         .map((item) => item.textContent),
-    ).toEqual(['My Settings', 'Appearance', 'Language', 'Log out']);
+    ).toEqual(['My Settings', 'Appearance', 'Language', 'Switch account', 'Log out']);
     expect(menu.querySelector('a[href=""]')).toBeNull();
   });
 

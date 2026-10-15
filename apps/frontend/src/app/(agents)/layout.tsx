@@ -3,7 +3,9 @@
 import Link from 'next/link';
 import { usePathname, useSearchParams } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
+import { GatewayAccountBanner } from '@/components/features/auth/GatewayAccountBanner';
 import { ProtectedRoute } from '@/components/features/auth/ProtectedRoute';
+import { SessionSwitchWatcher } from '@/components/features/auth/SessionSwitchWatcher';
 import { AgentsSidebar } from '@/components/features/agents/AgentsSidebar';
 import { useAgentChangeStream } from '@/components/features/agents/agentPush';
 import { AgentNotifications } from '@/components/features/agents/AgentNotifications';
@@ -442,6 +444,8 @@ export default function AgentsLayout({ children }: { children: React.ReactNode }
               ) : undefined
             }
           />
+          <GatewayAccountBanner />
+          <SessionSwitchWatcher />
           <AgentsShell
             settingsNavigation={
               onSettings
