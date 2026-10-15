@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -363,6 +364,140 @@ async def test_a_host_that_may_take_no_new_group_does_not_restore_one(pool, stor
     claim = await _claim(store, "runner-d", _RESTORE_HOST)
     assert claim is not None and claim["id"] == follow_up["id"]
     assert claim["thread_sandbox"]["host"] == "runner-d"
+
+
+async def _run_turn_and_stop(pool, store: Storage, parent: dict) -> dict:
+    """Run one more turn of the chat on ``runner-a`` and let its container stop."""
+    job = await store.conversation_commands.create_follow_up(
+        parent_job_id=parent["id"], user_id="user-1", prompt="continue"
+    )
+    assert job is not None
+    claim = await _claim(store, "runner-a", _ARCHIVE_HOST)
+    assert claim is not None and claim["id"] == job["id"]
+    sandbox = await _reserve(store, job, claim, "runner-a")
+    residency = await store.residency.establish_residency(
+        thread_id=job["thread_id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        host="runner-a",
+        sandbox_id=sandbox["sandbox_id"],
+        runtime_id="claude-code",
+        runtime_version=sandbox["runtime_version"],
+        ttl_seconds=1800,
+    )
+    assert residency is not None
+    fence = _fence(job, claim, sandbox)
+    assert await store.sandbox.mark_thread_sandbox_running(
+        **fence, container_id="container-a", context_status="restored"
+    )
+    assert await store.sandbox.admit_thread_sandbox_turn(
+        **fence, residency_generation=residency["generation"], job_id=job["id"]
+    )
+    assert await store.sandbox.settle_thread_sandbox(
+        **fence,
+        residency_generation=residency["generation"],
+        job_id=job["id"],
+        context_status="live",
+        native_session_id="native-restore",
+        idle_timeout_seconds=15,
+        base_sha=parent["base_sha"],
+    )
+    assert await store.attempt_commands.transition(
+        job_id=job["id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        from_states=("running",),
+        to_state="succeeded",
+    )
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_sandboxes SET state = 'stopped', idle_deadline = NULL WHERE id = $1",
+            "asbx_restore",
+        )
+    return job
+
+
+async def test_a_cold_groups_base_import_waits_for_the_restore(pool, store: Storage):
+    job, _ = await _settled_stopped_group(pool, store)
+    requested = await store.snapshot.request_snapshot_publication(
+        thread_id=job["thread_id"], user_id=job["user_id"]
+    )
+    assert requested.get("requested") is True, requested
+    capture = await store.snapshot.claim_due_sandbox_snapshot()
+    assert capture is not None
+    patch = "diff --git a/answer.txt b/answer.txt\nnew file mode 100644\n"
+    assert (
+        await store.snapshot.record_sandbox_snapshot_capture(
+            snapshot_id=capture["snapshot_id"],
+            sandbox_id=capture["sandbox_id"],
+            sandbox_generation=capture["generation"],
+            container_id=capture["container_id"],
+            workspace_epoch=capture["workspace_epoch"],
+            base_sha=capture["base_sha"],
+            patch=patch,
+            content_sha256=hashlib.sha256(patch.encode()).hexdigest(),
+        )
+        == "captured"
+    )
+    publication = await store.snapshot.claim_for_publish()
+    assert publication is not None
+    commit_sha = "b" * 40
+    assert await store.snapshot.record_snapshot_publish(
+        snapshot_id=capture["snapshot_id"],
+        expected_publish_attempt_count=publication["publish_attempt_count"],
+        pr_url="https://example.test/pull/1",
+        commit_sha=commit_sha,
+    )
+    # The base import does not land (GitHub may ask the retry to wait for an
+    # hour), and the chat goes on: another turn, a clean stop, a checkpoint
+    # of that stop. Then the host is removed while still up.
+    latest = await _run_turn_and_stop(pool, store, job)
+    group = await store.sandbox.thread_sandbox(thread_id=job["thread_id"])
+    assert group is not None
+    assert await store.sandbox.record_sandbox_checkpoint(
+        host="runner-a",
+        thread_id=job["thread_id"],
+        checkpoint=_receipt(
+            group,
+            job,
+            members=[
+                {
+                    "thread_id": job["thread_id"],
+                    "native_session_id": "native-restore",
+                    "last_settled_job_id": latest["id"],
+                    "context_status": "live",
+                }
+            ],
+        ),
+    )
+    assert await store.host_pool.remove_host(host="runner-a") == "ok"
+    assert (await _state(pool))["state"] == "cold"
+
+    # Only a checkpoint holds the group: the import must wait for the
+    # restore, and an import the removed host still answered must not bring
+    # the group back to life there, where no host can ever claim it again.
+    assert await store.snapshot.pending_snapshot_base_import() is None
+    assert not await store.snapshot.complete_snapshot_base_import(
+        snapshot_id=capture["snapshot_id"], commit_sha=commit_sha
+    )
+    assert (await _state(pool))["state"] == "cold"
+
+    await _host(store, "runner-c", _RESTORE_HOST)
+    follow_up = await store.conversation_commands.create_follow_up(
+        parent_job_id=latest["id"], user_id="user-1", prompt="continue"
+    )
+    assert follow_up is not None
+    claim = await _claim(store, "runner-c", _RESTORE_HOST)
+    assert claim is not None and claim["id"] == follow_up["id"]
+    reserved = await _reserve(store, follow_up, claim, "runner-c")
+    assert await store.sandbox.mark_thread_sandbox_running(
+        **_fence(follow_up, claim, reserved),
+        container_id="container-c",
+        context_status="restored",
+    )
+    pending = await store.snapshot.pending_snapshot_base_import()
+    assert pending is not None
+    assert pending["generation"] == 2 and pending["container_id"] == "container-c"
 
 
 async def test_a_stale_host_cannot_touch_a_rehomed_group(pool, store: Storage):

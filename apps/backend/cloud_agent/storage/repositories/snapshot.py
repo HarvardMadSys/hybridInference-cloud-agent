@@ -1314,6 +1314,9 @@ class PostgresSnapshotRepository:
                 JOIN agent_jobs j ON j.id = latest.anchor_job_id
                 JOIN agent_threads t ON t.id = j.thread_id
                 WHERE g.snapshot_state = 'importing'
+                  -- A group only its checkpoint holds has no container to
+                  -- import into; it waits until a restore recreates one.
+                  AND g.state NOT IN ('cold', 'restoring')
                   AND g.stop_requested_at IS NULL
                   AND g.deletion_state NOT IN ('pending', 'archived', 'deleted')
                   AND (latest.retry_at IS NULL OR latest.retry_at <= NOW())
@@ -1364,6 +1367,10 @@ class PostgresSnapshotRepository:
                     updated_at = NOW()
                 WHERE g.id = $1 AND g.snapshot_state = 'importing'
                   AND g.published_base_sha = $2
+                  -- An import answered by a host that no longer holds the
+                  -- group did not land in it; the restored container imports
+                  -- again. Marking the group running here would strand it.
+                  AND g.state NOT IN ('cold', 'restoring')
                 RETURNING g.id
                 """,
                 sandbox_id,
