@@ -1961,7 +1961,12 @@ class ChatSandboxManager:
         user_uid: int,
         user_gid: int,
     ) -> None:
-        """Kill unattached live CLI trees in exactly one private member slot."""
+        """Kill unattached live CLI trees in exactly one private member slot.
+
+        Every launch reaps its slot first, which also drops the owner inference
+        credentials an earlier launch left for its bash: a launch with them
+        writes them again, and one whose owner removed them must not find them.
+        """
         if not 0 <= slot_id < spec.resident_slot_capacity:
             raise ValueError("resident slot is outside this shared sandbox")
         if user_uid != MEMBER_UID_BASE + slot_id:
@@ -1976,7 +1981,11 @@ class ChatSandboxManager:
         )
         result = self.exec_capture(
             spec,
-            ["/bin/sh", "-c", f"rm -f -- {directory}/resident-*.pid"],
+            [
+                "/bin/sh",
+                "-c",
+                f"rm -f -- {directory}/resident-*.pid {member_inference_env_path(slot_id)}",
+            ],
             workdir="/",
             timeout_s=20,
             user_uid=user_uid,

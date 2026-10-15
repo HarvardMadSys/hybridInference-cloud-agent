@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+from functools import partial
 from types import SimpleNamespace
 
 import httpx
@@ -12,6 +13,7 @@ import pytest
 
 from cloud_agent.sandbox_manager_client import SandboxManagerClient, SandboxManagerError
 from cloud_agent_host.chat_sandbox import (
+    MEMBER_TMPFS_ROOT,
     MEMBER_UID_BASE,
     ChatSandboxManager,
     ChatSandboxSpec,
@@ -223,6 +225,64 @@ def test_the_script_crosses_stdin_into_the_member_tmpfs():
         ChatSandboxManager.write_member_inference_env(
             manager, spec, script, slot_id=1, user_uid=MEMBER_UID_BASE, user_gid=10001
         )
+
+
+def test_a_launch_without_them_leaves_no_earlier_credentials_in_the_slot(tmp_path):
+    """An owner who removes their key also removes it from the member tmpfs.
+
+    The script is only rewritten when a launch has inference credentials, so a
+    launch after they were removed must not find the earlier one still there.
+    """
+    root = tmp_path / "members"
+    (root / "1").mkdir(parents=True)
+
+    def exec_capture(spec, argv, *, input_bytes=None, **kwargs):
+        # The member tmpfs, here a directory: run the container command locally.
+        local = [part.replace(MEMBER_TMPFS_ROOT, str(root)) for part in argv]
+        return subprocess.run(local, input=input_bytes or b"", capture_output=True, check=False)
+
+    manager = SimpleNamespace(
+        exec_capture=exec_capture,
+        reap_member_processes_except=lambda spec, **kwargs: None,
+        backend=SimpleNamespace(gid=10001, base_env=lambda: {}),
+        spawn=lambda spec, argv, **kwargs: object(),
+    )
+    manager.reap_member_processes = partial(ChatSandboxManager.reap_member_processes, manager)
+    manager.write_member_inference_env = partial(
+        ChatSandboxManager.write_member_inference_env, manager
+    )
+    spec = ChatSandboxSpec(
+        thread_id="athr_owner",
+        sandbox_id="asbx_owner",
+        generation=1,
+        runtime_id="codex",
+        shared_live=True,
+    )
+    stored = root / "1" / "inference-env.sh"
+
+    def launch(environment: BoundEnvironment) -> None:
+        resident = ResidentLaunch(
+            thread_id="athr_owner",
+            runtime_id="codex",
+            runtime_version=None,
+            native_session_id=None,
+            model="model",
+            reasoning_effort=None,
+            gateway_base_url="http://gateway",
+            credential="grant",
+            slot_id=1,
+            environment=environment,
+        )
+        context = ResidentTransportFactory(manager)._launch_context(
+            spec, resident, credential="grant"
+        )
+        context.spawn_live(["codex"], context.base_env)
+
+    launch(_bound(EnvironmentVariable(name="OPENAI_API_KEY", value=OWNER_OPENAI)))
+    assert OWNER_OPENAI in stored.read_text()
+    # The owner removed the key and refreshed the workspace's runtime variables.
+    launch(_bound(EnvironmentVariable(name="TOKEN", value="private-example")))
+    assert not stored.exists()
 
 
 _OWNER_KEY = EnvironmentVariable(name="OPENAI_API_KEY", value=OWNER_OPENAI)
