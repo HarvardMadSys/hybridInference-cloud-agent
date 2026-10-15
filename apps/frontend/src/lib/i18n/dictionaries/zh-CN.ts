@@ -874,6 +874,8 @@ export const zhCN: Record<TranslationKey, string> = {
   'composer.chooseRepository': '先选择仓库',
   'composer.branch': '分支',
   'composer.agent': 'Agent',
+  'picker.search': '搜索…',
+  'picker.noResults': '没有匹配的选项',
   'composer.model': '模型',
   'composer.reasoning': '推理强度',
   'composer.run': '运行',

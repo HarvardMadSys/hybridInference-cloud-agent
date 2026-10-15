@@ -1163,7 +1163,8 @@ describe('JobDetail', () => {
     const box = screen.getByLabelText('Add a follow-up');
     fireEvent.change(box, { target: { value: 'Keep this draft for later' } });
     const model = await screen.findByLabelText('Model for this turn');
-    fireEvent.change(model, { target: { value: 'glm-test' } });
+    fireEvent.click(model);
+    fireEvent.click(screen.getByRole('option', { name: 'glm-test' }));
     const watch = screen.getByRole('button', { name: 'Watch PR and merge' });
     await waitFor(() => expect(watch).toBeEnabled());
     const initialReads = vi.mocked(getThreadQueue).mock.calls.length;
@@ -1395,7 +1396,8 @@ describe('JobDetail', () => {
     const box = screen.getByLabelText('Add a follow-up');
     fireEvent.change(box, { target: { value: 'Use this spec next' } });
     const model = await screen.findByLabelText('Model for this turn');
-    fireEvent.change(model, { target: { value: 'glm-test' } });
+    fireEvent.click(model);
+    fireEvent.click(screen.getByRole('option', { name: 'glm-test' }));
     fireEvent.click(screen.getByRole('button', { name: 'Add to message' }));
     fireEvent.click(screen.getByRole('menuitem', { name: /Skills\s*1/ }));
     fireEvent.click(await screen.findByRole('switch'));
@@ -1844,9 +1846,8 @@ describe('JobDetail', () => {
     );
 
     // Equal to the turn on screen, but not to the one the message follows.
-    fireEvent.change(await screen.findByLabelText('Model for this turn'), {
-      target: { value: 'qwen-test' },
-    });
+    fireEvent.click(await screen.findByLabelText('Model for this turn'));
+    fireEvent.click(screen.getByRole('option', { name: 'qwen-test' }));
     fireEvent.change(screen.getByLabelText('Add a follow-up'), {
       target: { value: 'Back to the first model' },
     });
@@ -2984,7 +2985,8 @@ describe('JobDetail', () => {
     const picker = await screen.findByLabelText('Model for this turn');
     expect(picker).toHaveValue('qwen-test');
 
-    fireEvent.change(picker, { target: { value: 'glm-test' } });
+    fireEvent.click(picker);
+    fireEvent.click(screen.getByRole('option', { name: 'glm-test' }));
     fireEvent.change(screen.getByLabelText('Add a follow-up'), {
       target: { value: 'Now try it on the other model' },
     });
@@ -6072,7 +6074,8 @@ describe('JobDetail reasoning effort', () => {
     render(<JobDetail job={makeJob()} />);
 
     const picker = await screen.findByLabelText('Reasoning for this turn');
-    const offered = Array.from(picker.querySelectorAll('option')).map((o) => o.textContent);
+    fireEvent.click(picker);
+    const offered = screen.getAllByRole('option').map((o) => o.textContent);
     expect(offered).toEqual(['low', 'medium', 'high', 'max']);
   });
 
@@ -6114,9 +6117,8 @@ describe('JobDetail reasoning effort', () => {
 
     vi.mocked(submitThreadMessage).mockClear();
     render(<JobDetail job={makeJob({ reasoningEffort: 'high' })} />);
-    fireEvent.change(await screen.findByLabelText('Reasoning for this turn'), {
-      target: { value: 'low' },
-    });
+    fireEvent.click(await screen.findByLabelText('Reasoning for this turn'));
+    fireEvent.click(screen.getByRole('option', { name: 'low' }));
     fireEvent.change(screen.getByLabelText('Add a follow-up'), { target: { value: 'easy one' } });
     fireEvent.click(screen.getByRole('button', { name: /^(Send|Queue)$/ }));
 
@@ -6150,9 +6152,8 @@ describe('JobDetail reasoning effort', () => {
 
     // glm-test takes no effort, so the control disappears and the inherited
     // level must not ride along to a model that would refuse it.
-    fireEvent.change(await screen.findByLabelText('Model for this turn'), {
-      target: { value: 'glm-test' },
-    });
+    fireEvent.click(await screen.findByLabelText('Model for this turn'));
+    fireEvent.click(screen.getByRole('option', { name: 'glm-test' }));
     await waitFor(() =>
       expect(screen.queryByLabelText('Reasoning for this turn')).not.toBeInTheDocument(),
     );

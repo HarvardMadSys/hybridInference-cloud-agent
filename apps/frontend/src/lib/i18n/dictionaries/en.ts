@@ -912,6 +912,8 @@ export const en = {
   'composer.chooseRepository': 'Choose a repository first',
   'composer.branch': 'Branch',
   'composer.agent': 'Agent',
+  'picker.search': 'Search…',
+  'picker.noResults': 'No matching options',
   'composer.model': 'Model',
   'composer.reasoning': 'Reasoning',
   'composer.run': 'Run',
