@@ -18,6 +18,10 @@ from cloud_agent_shared.environment import ENVIRONMENT_CAPABILITY, BoundEnvironm
 from cloud_agent_shared.environment_snapshots import ENVIRONMENT_SNAPSHOT_CAPABILITY
 from cloud_agent_shared.secret_redaction import SecretRedactor
 
+#: Snapshot ids per question to the control plane; one Sandbox Manager delete
+#: request takes as many.
+_RETIRED_IMAGES_BATCH = 100
+
 
 def environment_run_spec(run_id: str, generation: int, image_digest: str | None) -> ChatSandboxSpec:
     """The disposable group one environment run (test or prebuild) executes in."""
@@ -93,9 +97,11 @@ def execute_test(
 
     bound = BoundEnvironment.model_validate(run["environment"])
     prebuild = run.get("purpose") == "prebuild"
-    # A prebuild only installs: what it saves is the installation.
+    # A prebuild only installs: what it saves is the installation. Only a
+    # prebuild saves one. A test also runs the start and verify scripts with
+    # runtime values, and nothing they write may reach another workspace.
     prepared = bound.model_copy(update={"start_script": ""}) if prebuild else bound
-    target = run.get("snapshot") if isinstance(run.get("snapshot"), dict) else None
+    target = run.get("snapshot") if prebuild and isinstance(run.get("snapshot"), dict) else None
     redactor = SecretRedactor(bound.secrets())
     manager = ChatSandboxManager(backend)
     spec = environment_run_spec(
@@ -151,6 +157,10 @@ def execute_test(
     try:
         if cancelled.is_set():
             raise RuntimeError("Environment test cancelled")
+        if prebuild and (target is None or not bound.setup_fingerprint):
+            # Its snapshot was deleted after it was queued: installing would
+            # save nothing.
+            raise RuntimeError("This prebuild has no installation snapshot to save")
         manager.create(spec)
         inspection = manager.start(spec)
         container_id = inspection.container_id
@@ -219,32 +229,19 @@ def execute_test(
                 raise RuntimeError(f"Verification failed ({result.exit_code})")
         if cancelled.is_set():
             raise RuntimeError("Environment test cancelled")
-        if target is not None and bound.setup_fingerprint:
-            try:
-                report(
-                    snapshot=_save_snapshot(
-                        manager,
-                        spec,
-                        bound,
-                        run,
-                        target,
-                        container_id=container_id,
-                        source_sha=source_sha,
-                        lockfiles=source.lockfiles(),
-                    )
+        if target is not None:
+            report(
+                snapshot=_save_snapshot(
+                    manager,
+                    spec,
+                    bound,
+                    run,
+                    target,
+                    container_id=container_id,
+                    source_sha=source_sha,
+                    lockfiles=source.lockfiles(),
                 )
-            except Exception as exc:
-                # The test itself passed; only its snapshot is missing, and
-                # the control plane retires a build that never reported.
-                logging.getLogger(__name__).warning(
-                    "environment snapshot was not saved",
-                    extra={
-                        "event": "environment_snapshot_failed",
-                        "error_type": type(exc).__name__,
-                    },
-                )
-                if prebuild:
-                    raise
+            )
         outcome, detail = "succeeded", ""
     except Exception as exc:
         outcome, detail = ("cancelled" if cancelled.is_set() else "failed"), str(exc)
@@ -332,16 +329,44 @@ def _save_snapshot(
 
 
 def _delete_retired_snapshots(client: httpx.Client) -> None:
-    """Drop retired snapshots' images here, and delete their objects when named."""
+    """Delete retired snapshots' stored objects, and drop retired images held here."""
     from cloud_agent_host.runner import _session_supervisor_from_env
+    from cloud_agent_host.sandbox import SandboxError
+    from cloud_agent_host.session_supervisor_client import SessionSupervisorError
 
+    try:
+        supervisor = _session_supervisor_from_env()
+    except SandboxError:
+        # Without a Sandbox Manager this host neither stores nor holds snapshots.
+        return
     response = client.get("/v1/agent/worker/environment-snapshots/deletions")
     response.raise_for_status()
     retired = response.json().get("snapshots", [])
-    if not retired:
+    if retired:
+        for snapshot_id in supervisor.delete_environment_snapshots(retired):
+            client.post(f"/v1/agent/worker/environment-snapshots/{snapshot_id}/deleted")
+    # Each host names the images it holds, so it clears all of its own however
+    # many snapshots were retired since.
+    try:
+        held = supervisor.environment_snapshot_images()
+    except SessionSupervisorError:
+        # An older Sandbox Manager cannot list them.
         return
-    for snapshot_id in _session_supervisor_from_env().delete_environment_snapshots(retired):
-        client.post(f"/v1/agent/worker/environment-snapshots/{snapshot_id}/deleted")
+    for start in range(0, len(held), _RETIRED_IMAGES_BATCH):
+        answer = client.post(
+            "/v1/agent/worker/environment-snapshots/retired",
+            json={"snapshot_ids": held[start : start + _RETIRED_IMAGES_BATCH]},
+        )
+        if answer.status_code == 404:
+            # An older control plane names them among its deletions instead.
+            return
+        answer.raise_for_status()
+        drop = [
+            {**item, "object_key": None, "version_id": None}
+            for item in answer.json().get("snapshots", [])
+        ]
+        if drop:
+            supervisor.delete_environment_snapshots(drop)
 
 
 class EnvironmentTestWorker:

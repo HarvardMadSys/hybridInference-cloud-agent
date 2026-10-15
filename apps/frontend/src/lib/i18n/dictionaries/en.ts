@@ -172,8 +172,8 @@ export const en = {
   'environment.snapshot.failed': 'Prebuild failed',
   'environment.snapshot.rebuild': 'Prebuild again',
   'environment.snapshot.delete': 'Delete saved installation',
-  'environment.snapshot.savedByTest':
-    'A passing test saves its installation. New tasks start from it while the lockfiles are unchanged.',
+  'environment.snapshot.prebuildAfterTest':
+    'A passing test queues a prebuild of this installation. New tasks start from it while the lockfiles are unchanged.',
   'environment.choose': 'Choose environment',
   'environment.automaticHint':
     'The repository default is selected. Change it only when this task needs a different environment.',

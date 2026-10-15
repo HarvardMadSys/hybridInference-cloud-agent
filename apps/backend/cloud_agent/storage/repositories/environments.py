@@ -1114,16 +1114,22 @@ class PostgresEnvironmentRepository:
             raise EnvironmentConflict("Idempotency key already used for another test")
         return self._environment_run_view(row)
 
-    async def fail_environment_preflight(self, run_id: str, host: str, generation: int) -> bool:
+    async def fail_environment_preflight(
+        self,
+        run_id: str,
+        host: str,
+        generation: int,
+        detail: str = "Environment credentials or repository access are unavailable",
+    ) -> bool:
         """Release a failed claim that has never been handed to a host for execution."""
         async with self._pool.acquire() as conn:
             result = await conn.execute(
-                "UPDATE agent_environment_runs SET state='failed',cleanup_complete=TRUE,"
-                "detail='Environment credentials or repository access are unavailable',"
+                "UPDATE agent_environment_runs SET state='failed',cleanup_complete=TRUE,detail=$4,"
                 "finished_at=NOW(),updated_at=NOW() WHERE id=$1 AND host=$2 AND lease_generation=$3 AND state='running'",
                 run_id,
                 host,
                 generation,
+                detail,
             )
         return result == "UPDATE 1"
 
@@ -1314,9 +1320,12 @@ class PostgresEnvironmentRepository:
                 for k in ("slots_total", "slots_desired")
             ):
                 return None
+            # A prebuild whose snapshot was deleted since would install for nothing.
             row = await conn.fetchrow(
                 "SELECT * FROM agent_environment_runs WHERE state='queued' AND (execution_profile='trusted-v1' OR $1) "
-                "AND (purpose='test' OR $2) ORDER BY purpose='prebuild', created_at FOR UPDATE SKIP LOCKED LIMIT 1",
+                "AND (purpose='test' OR ($2 AND EXISTS (SELECT 1 FROM agent_environment_snapshots s "
+                "WHERE s.id=agent_environment_runs.snapshot_id AND s.state IN ('queued','building')))) "
+                "ORDER BY purpose='prebuild', created_at FOR UPDATE SKIP LOCKED LIMIT 1",
                 kata,
                 snapshot_capable,
             )

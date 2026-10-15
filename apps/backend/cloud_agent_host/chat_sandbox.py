@@ -165,6 +165,22 @@ PRIVATE_MEMBER_HOME_COLLECTIONS = tuple(
 LEGACY_MEMBER_HOME_COLLECTIONS = tuple(
     f"{CHAT_STATE_DIR}/{runtime}-members" for runtime in ("codex", "opencode", "kilo")
 )
+#: Opens a new chat's imported tree to the shared group, run as the sandbox
+#: user before its first turn. Only the sandbox user's own files change. A
+#: workspace started from an installation snapshot already holds the
+#: installer's files (another UID, which the sandbox user may not chmod); they
+#: keep the modes the installer gave them, as in a workspace that installs in
+#: full, where installation runs after this step. A directory of theirs the
+#: sandbox user cannot search is skipped rather than failing the turn.
+_NOT_OURS_AND_UNSEARCHABLE = '\\( -type d ! -uid "$me" ! \\( -readable -executable \\) -prune \\)'
+SHARED_WORKSPACE_PERMISSIONS_SCRIPT = (
+    "set -eu; me=$(id -u); "
+    f"find {CHAT_WORKDIR} {CHAT_STATE_DIR} -xdev {_NOT_OURS_AND_UNSEARCHABLE} "
+    '-o \\( -type d -uid "$me" -exec chmod g+rwx,g+s -- {} + \\); '
+    f"find {CHAT_WORKDIR} {CHAT_STATE_DIR} -xdev {_NOT_OURS_AND_UNSEARCHABLE} "
+    '-o \\( -type f -uid "$me" -exec chmod g+rw -- {} + \\); '
+    f"git -C {CHAT_WORKDIR} config core.sharedRepository group"
+)
 ACTIVATION_TMPFS = "/run/agent-activation"
 MEMBER_TMPFS_ROOT = "/run/agent-members"
 #: Sandbox Manager-owned durable receipt for the immutable pre-prompt archive. It is
@@ -2068,17 +2084,9 @@ class ChatSandboxManager:
 
     def prepare_shared_workspace(self, spec: ChatSandboxSpec) -> None:
         """Make the imported owner tree writable through the shared group."""
-        script = (
-            "set -eu; "
-            f"find {CHAT_WORKDIR} {CHAT_STATE_DIR} -xdev -type d "
-            "-exec chmod g+rwx,g+s -- {} +; "
-            f"find {CHAT_WORKDIR} {CHAT_STATE_DIR} -xdev -type f "
-            "-exec chmod g+rw -- {} +; "
-            f"git -C {CHAT_WORKDIR} config core.sharedRepository group"
-        )
         result = self.exec_capture(
             spec,
-            ["/bin/sh", "-c", script],
+            ["/bin/sh", "-c", SHARED_WORKSPACE_PERMISSIONS_SCRIPT],
             workdir="/",
             timeout_s=120,
         )

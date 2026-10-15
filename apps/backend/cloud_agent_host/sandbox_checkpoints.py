@@ -38,7 +38,11 @@ from datetime import UTC, datetime
 from typing import IO, TYPE_CHECKING, Any, BinaryIO, Final, TypeVar
 
 from cloud_agent_host.sandbox_archive_s3 import SandboxArchiveDownloadError
-from cloud_agent_shared.environment_snapshots import snapshot_image_reference
+from cloud_agent_shared.environment_snapshots import (
+    SNAPSHOT_IMAGE_REPOSITORY,
+    snapshot_image_reference,
+    valid_snapshot_id,
+)
 from cloud_agent_shared.errors import SandboxError
 from cloud_agent_shared.sandbox_restore import pullable_image
 
@@ -1259,6 +1263,30 @@ class SandboxCheckpointCapture:
     def remove_environment_image(self, owner: str, snapshot_id: str) -> None:
         """Drop a deleted snapshot's local image, if this host has it."""
         self._remove_image(snapshot_image_reference(owner, snapshot_id))
+
+    def environment_images(self) -> list[str]:
+        """The snapshot ids of the installation snapshot images this host holds."""
+        try:
+            listed = self._run(
+                [
+                    self._docker,
+                    "image",
+                    "ls",
+                    "--format",
+                    "{{.Tag}}",
+                    "--filter",
+                    f"reference={SNAPSHOT_IMAGE_REPOSITORY}/*:*",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=_IMAGE_REMOVE_TIMEOUT_S,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise SandboxCheckpointError("snapshot images could not be listed") from exc
+        if listed.returncode != 0:
+            raise SandboxCheckpointError("snapshot images could not be listed")
+        return sorted({tag for tag in listed.stdout.split() if valid_snapshot_id(tag)})
 
     def _load(
         self,

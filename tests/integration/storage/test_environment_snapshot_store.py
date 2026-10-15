@@ -138,7 +138,7 @@ async def test_a_prebuild_needs_a_capable_host_and_never_takes_the_owners_test(
     assert (await _claim(store, capable=True))["id"] == test["id"]
     prebuild = await _claim(store, capable=True)
     assert prebuild["purpose"] == "prebuild" and prebuild["snapshot_id"] == snapshot_id
-    # A test while a build of the same installation is pending saves nothing.
+    # A test never saves its container.
     assert await snapshots.capture_target({**test, "purpose": "test"}, "environment-host") is None
     assert await snapshots.capture_target(prebuild, "environment-host") is not None
 
@@ -264,27 +264,44 @@ async def test_use_keeps_a_snapshot_and_shortfalls_queue_a_build(store, pool, mo
         await snapshots.record_use(job_id=job_id, snapshot_id=None, outcome="used", base_sha=None)
 
 
-async def test_a_newer_build_supersedes_and_retired_objects_are_deleted(store, pool, monkeypatch):
+async def test_a_passing_test_queues_the_build_that_supersedes(store, pool, monkeypatch):
     first, _, _run = await _ready_snapshot(store, pool, monkeypatch)
     snapshots = store.environment_snapshots
-    # A passing test of the same installation saves the next snapshot.
     env = (await store.environments.list_environments("alice"))[0]
-    test = await store.environments.create_environment_run(
-        "alice",
-        repo="org/repo",
-        base_sha=SOURCE,
-        selection={"environment_id": env["id"], "environment_id_provided": True},
-        key="test",
-    )
-    run = await _claim(store, capable=True)
-    assert run["id"] == test["id"]
-    target = await snapshots.capture_target(run, "environment-host")
-    assert target is not None
+
+    async def passing_test(base_sha: str, key: str) -> str | None:
+        test = await store.environments.create_environment_run(
+            "alice",
+            repo="org/repo",
+            base_sha=base_sha,
+            selection={"environment_id": env["id"], "environment_id_provided": True},
+            key=key,
+        )
+        run = await _claim(store, capable=True)
+        assert run["id"] == test["id"]
+        # A test's start script ran with runtime values: its container is never saved.
+        assert await snapshots.capture_target(run, "environment-host") is None
+        assert await store.environments.update_environment_run(
+            run["id"],
+            "environment-host",
+            run["lease_generation"],
+            {"state": "succeeded", "cleanup_complete": True, "steps": [], "detail": ""},
+        )
+        return await snapshots.queue_after_test(run["id"])
+
+    # The tested commit already has a ready snapshot of this installation.
+    assert await passing_test(SOURCE, "same-commit") is None
+    newer = await passing_test("f" * 40, "newer-commit")
+    assert newer is not None
+    prebuild = await _claim(store, capable=True)
+    assert prebuild["purpose"] == "prebuild" and prebuild["snapshot_id"] == newer
+    assert prebuild["base_sha"] == "f" * 40
+    assert await snapshots.capture_target(prebuild, "environment-host") is not None
     assert await snapshots.record_capture(
-        run_id=run["id"],
+        run_id=prebuild["id"],
         host="environment-host",
-        generation=run["lease_generation"],
-        receipt=_receipt(target["snapshot_id"]),
+        generation=prebuild["lease_generation"],
+        receipt=_receipt(newer, source_sha="f" * 40),
     )
     async with pool.acquire() as conn:
         states = dict(
@@ -292,10 +309,16 @@ async def test_a_newer_build_supersedes_and_retired_objects_are_deleted(store, p
                 "SELECT id, state FROM agent_environment_snapshots ORDER BY created_at"
             )
         )
-    assert states == {first: "superseded", target["snapshot_id"]: "ready"}
+    assert states == {first: "superseded", newer: "ready"}
+    # A prebuild's own success queues nothing more.
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_environment_runs SET state='succeeded' WHERE id=$1", prebuild["id"]
+        )
+    assert await snapshots.queue_after_test(prebuild["id"]) is None
     # Workspaces already starting from the old one get a grace period.
     await snapshots.maintain()
-    assert all(d["object_key"] is None for d in await snapshots.deletions())
+    assert await snapshots.deletions() == []
     async with pool.acquire() as conn:
         await conn.execute(
             "UPDATE agent_environment_snapshots SET updated_at=NOW()-INTERVAL '25 hours' WHERE id=$1",
@@ -303,12 +326,13 @@ async def test_a_newer_build_supersedes_and_retired_objects_are_deleted(store, p
         )
     await snapshots.maintain()
     deletions = await snapshots.deletions()
-    assert [d["snapshot_id"] for d in deletions if d["object_key"]] == [first]
+    assert [d["snapshot_id"] for d in deletions] == [first] and deletions[0]["object_key"]
     assert await snapshots.confirm_deleted(first)
     assert not await snapshots.confirm_deleted(first)
-    # A deleted snapshot is still named for a while, so hosts drop its image.
-    retired = next(d for d in await snapshots.deletions() if d["snapshot_id"] == first)
-    assert retired["object_key"] is None
+    # Every host that holds its image is told to drop it; unknown images are left alone.
+    assert await snapshots.retired_images([first, newer, "0" * 32]) == [
+        {"snapshot_id": first, "owner": owner_hash("alice")}
+    ]
 
 
 async def test_unused_old_and_archived_snapshots_are_retired(store, pool, monkeypatch):
@@ -390,3 +414,138 @@ async def test_a_build_whose_run_failed_is_marked_failed(store, pool, monkeypatc
     assert await store.environment_snapshots.queue_prebuild(
         user_id="alice", binding_id=binding, repo="org/repo", base_sha=SOURCE, requested=True
     )
+
+
+async def _building(store, pool, monkeypatch):
+    """A claimed prebuild whose snapshot is building; return the snapshot id and run."""
+    monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "environment-test-key")
+    await _enable_archives(store)
+    await _host(store)
+    env = await _save(store, script="npm ci")
+    binding = await _binding(store, pool, env)
+    snapshot_id = await store.environment_snapshots.queue_prebuild(
+        user_id="alice", binding_id=binding, repo="org/repo", base_sha=SOURCE
+    )
+    run = await _claim(store, capable=True)
+    assert await store.environment_snapshots.capture_target(run, "environment-host")
+    return snapshot_id, run, env, binding
+
+
+@pytest.mark.parametrize(
+    "ended",
+    [
+        "cancel_requested=TRUE",
+        "lease_expires_at=NOW()-INTERVAL '1 second'",
+        "started_at=NOW()-INTERVAL '31 minutes'",
+        "purpose='test'",
+    ],
+)
+async def test_a_receipt_from_a_run_that_may_no_longer_report_is_refused(
+    store, pool, monkeypatch, ended
+):
+    snapshot_id, run, _env, binding = await _building(store, pool, monkeypatch)
+    async with pool.acquire() as conn:
+        await conn.execute(f"UPDATE agent_environment_runs SET {ended} WHERE id=$1", run["id"])
+    assert not await store.environment_snapshots.record_capture(
+        run_id=run["id"],
+        host="environment-host",
+        generation=run["lease_generation"],
+        receipt=_receipt(snapshot_id),
+    )
+    async with pool.acquire() as conn:
+        state = await conn.fetchval(
+            "SELECT state FROM agent_environment_snapshots WHERE id=$1", snapshot_id
+        )
+    assert state == "building"
+    assert (
+        await store.environment_snapshots.snapshot_for_claim(
+            user_id="alice", binding_id=binding, base_image=IMAGE
+        )
+        is None
+    )
+
+
+async def test_deleting_snapshots_cancels_their_prebuilds(store, pool, monkeypatch):
+    _snapshot_id, running, env, binding = await _building(store, pool, monkeypatch)
+    snapshots = store.environment_snapshots
+    assert await snapshots.discard("alice", env["id"]) == 1
+    # The running build's host is refused at its next report, and stops.
+    assert not await store.environments.update_environment_run(
+        running["id"], "environment-host", running["lease_generation"], {"steps": []}
+    )
+    queued = await snapshots.queue_prebuild(
+        user_id="alice", binding_id=binding, repo="org/repo", base_sha=SOURCE, requested=True
+    )
+    assert queued is not None
+    assert await snapshots.discard("alice", env["id"]) == 1
+    async with pool.acquire() as conn:
+        runs = await conn.fetch(
+            "SELECT state, cancel_requested, cleanup_complete, host FROM agent_environment_runs "
+            "WHERE purpose='prebuild' ORDER BY created_at"
+        )
+    assert [(r["state"], r["cancel_requested"]) for r in runs] == [
+        ("cancelled", True),
+        ("cancelled", True),
+    ]
+    # Nothing ran the queued one, so nothing is left to clean up.
+    assert runs[1]["host"] is None and runs[1]["cleanup_complete"]
+    assert await _claim(store, capable=True) is None
+
+
+async def test_a_prebuild_whose_snapshot_ended_is_never_claimed(store, pool, monkeypatch):
+    monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "environment-test-key")
+    await _enable_archives(store)
+    await _host(store)
+    env = await _save(store, script="npm ci")
+    binding = await _binding(store, pool, env)
+    snapshot_id = await store.environment_snapshots.queue_prebuild(
+        user_id="alice", binding_id=binding, repo="org/repo", base_sha=SOURCE
+    )
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_environment_snapshots SET state='failed' WHERE id=$1", snapshot_id
+        )
+    assert await _claim(store, capable=True) is None
+
+
+async def test_a_snapshot_saved_by_a_test_is_never_handed_out_and_is_retired(
+    store, pool, monkeypatch
+):
+    snapshot_id, binding, run = await _ready_snapshot(store, pool, monkeypatch)
+    # As earlier releases saved a passing test's container.
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_environment_runs SET purpose='test' WHERE id=$1", run["id"]
+        )
+    snapshots = store.environment_snapshots
+    assert (
+        await snapshots.snapshot_for_claim(user_id="alice", binding_id=binding, base_image=IMAGE)
+        is None
+    )
+    await snapshots.maintain()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT state, detail FROM agent_environment_snapshots WHERE id=$1", snapshot_id
+        )
+    assert dict(row) == {"state": "deleting", "detail": "Saved by an environment test"}
+
+
+async def test_objects_a_bucket_will_not_delete_never_hold_back_the_rest(store, pool):
+    ids = [f"{index:032x}" for index in range(25)]
+    async with pool.acquire() as conn:
+        for index, snapshot_id in enumerate(ids):
+            await conn.execute(
+                "INSERT INTO agent_environment_snapshots "
+                "(id, user_id, environment_id, revision, setup_fingerprint, state, object_key, updated_at) "
+                "VALUES ($1, 'alice', 'env', 1, $2, 'deleting', $3, NOW() - $4 * INTERVAL '1 minute')",
+                snapshot_id,
+                "f" * 64,
+                snapshot_object_key(owner_hash("alice"), snapshot_id),
+                25 - index,
+            )
+    snapshots = store.environment_snapshots
+    first = {d["snapshot_id"] for d in await snapshots.deletions()}
+    assert first == set(ids[:20])
+    # Those just handed out wait behind the ones not yet tried.
+    second = {d["snapshot_id"] for d in await snapshots.deletions()}
+    assert len(second) == 20 and set(ids[20:]) <= second

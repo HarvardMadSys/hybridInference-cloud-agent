@@ -29,7 +29,7 @@ from cloud_agent_shared.sandbox_restore import pullable_image
 
 if TYPE_CHECKING:
     import builtins
-    from collections.abc import Mapping
+    from collections.abc import Iterable, Mapping
 
     import asyncpg
 
@@ -54,6 +54,11 @@ SNAPSHOT_OUTCOMES = frozenset(
     }
 )
 _SUMMARY_STATES = ("queued", "building", "ready", "failed")
+#: Earlier releases also saved a passing test's container, which a start
+#: script may have written runtime values into. Such a snapshot is retired.
+_SAVED_BY_TEST = (
+    "EXISTS (SELECT 1 FROM agent_environment_runs r WHERE r.id = s.run_id AND r.purpose = 'test')"
+)
 #: After a failed build, tasks stop queueing new ones for this long; the owner
 #: can still ask for one. A setup that fails would otherwise rerun in the
 #: background beside every task.
@@ -121,6 +126,9 @@ class PostgresEnvironmentSnapshotRepository:
                   ON s.environment_id = v.environment_id
                  AND s.setup_fingerprint = b.setup_fingerprint
                  AND s.user_id = b.user_id
+                -- Only a prebuild's container is an installation alone; see
+                -- capture_target.
+                JOIN agent_environment_runs r ON r.id = s.run_id AND r.purpose = 'prebuild'
                 WHERE b.id = $1 AND b.user_id = $2 AND s.state = 'ready'
                   AND s.base_image = $3
                   AND s.ready_at > NOW() - INTERVAL '{SNAPSHOT_MAX_AGE_DAYS} days'
@@ -212,59 +220,51 @@ class PostgresEnvironmentSnapshotRepository:
     async def capture_target(self, run: Mapping[str, Any], host: str) -> dict[str, Any] | None:
         """What a host that just claimed ``run`` should save, if anything.
 
-        A prebuild saves the snapshot it was queued for. A test saves one too,
-        when snapshots are on, its installation can be snapshotted and no
-        build of it is already pending.
+        Only a prebuild saves a snapshot: the one it was queued for, unless
+        that was deleted since. A test runs the start and verify scripts with
+        runtime values, so its container is never saved; a passing one queues
+        a prebuild instead (:meth:`queue_after_test`).
         """
-        async with self._pool.acquire() as conn, conn.transaction():
-            if run.get("purpose") == "prebuild":
-                row = await conn.fetchrow(
-                    "UPDATE agent_environment_snapshots SET state='building', host=$3, updated_at=NOW() "
-                    "WHERE id=$1 AND run_id=$2 AND state IN ('queued','building') RETURNING user_id",
-                    run.get("snapshot_id"),
-                    run["id"],
-                    host,
-                )
-                if row is None:
-                    return None
-                return {"snapshot_id": run["snapshot_id"], "owner": owner_hash(row["user_id"])}
-            if not await self._enabled(conn):
-                return None
-            binding = await conn.fetchrow(
-                "SELECT b.setup_fingerprint, v.environment_id, v.revision FROM agent_environment_bindings b "
-                "JOIN agent_environment_versions v ON v.id = b.environment_version_id "
-                "WHERE b.id = $1 AND b.user_id = $2",
-                run["binding_id"],
-                run["user_id"],
-            )
-            if binding is None or not binding["setup_fingerprint"]:
-                return None
-            snapshot_id = secrets.token_hex(16)
-            inserted = await conn.fetchval(
-                """
-                INSERT INTO agent_environment_snapshots
-                    (id, user_id, environment_id, revision, setup_fingerprint, run_id, state, host)
-                VALUES ($1, $2, $3, $4, $5, $6, 'building', $7)
-                ON CONFLICT (environment_id, setup_fingerprint)
-                    WHERE state IN ('queued', 'building') DO NOTHING
-                RETURNING id
-                """,
-                snapshot_id,
-                run["user_id"],
-                binding["environment_id"],
-                binding["revision"],
-                binding["setup_fingerprint"],
+        if run.get("purpose") != "prebuild":
+            return None
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "UPDATE agent_environment_snapshots SET state='building', host=$3, updated_at=NOW() "
+                "WHERE id=$1 AND run_id=$2 AND state IN ('queued','building') RETURNING user_id",
+                run.get("snapshot_id"),
                 run["id"],
                 host,
             )
-            if inserted is None:
-                return None
-            await conn.execute(
-                "UPDATE agent_environment_runs SET snapshot_id=$2 WHERE id=$1",
-                run["id"],
-                snapshot_id,
+        if row is None:
+            return None
+        return {"snapshot_id": run["snapshot_id"], "owner": owner_hash(row["user_id"])}
+
+    async def queue_after_test(self, run_id: str) -> str | None:
+        """Queue a prebuild of the installation a test just passed with.
+
+        Nothing is queued when the installation already has a ready snapshot
+        of the tested commit. The owner asked for the test, so a recent failed
+        build does not hold this one back.
+        """
+        async with self._pool.acquire() as conn:
+            run = await conn.fetchrow(
+                "SELECT r.user_id, r.repo, r.base_sha, r.binding_id FROM agent_environment_runs r "
+                "JOIN agent_environment_bindings b ON b.id = r.binding_id "
+                "JOIN agent_environment_versions v ON v.id = b.environment_version_id "
+                "WHERE r.id=$1 AND r.purpose='test' AND r.state='succeeded' AND NOT EXISTS ("
+                "SELECT 1 FROM agent_environment_snapshots s WHERE s.environment_id=v.environment_id "
+                "AND s.setup_fingerprint=b.setup_fingerprint AND s.state='ready' AND s.source_sha=r.base_sha)",
+                run_id,
             )
-            return {"snapshot_id": snapshot_id, "owner": owner_hash(run["user_id"])}
+        if run is None or not run["repo"]:
+            return None
+        return await self.queue_prebuild(
+            user_id=run["user_id"],
+            binding_id=run["binding_id"],
+            repo=run["repo"],
+            base_sha=run["base_sha"],
+            requested=True,
+        )
 
     async def record_capture(
         self, *, run_id: str, host: str, generation: int, receipt: Mapping[str, Any]
@@ -272,8 +272,11 @@ class PostgresEnvironmentSnapshotRepository:
         """Make a building snapshot ready from its own run's host receipt.
 
         The receipt is checked against what the control plane decided: the
-        run, its lease, the snapshot it builds, and the one object key that
-        snapshot may have. A host can only report the snapshot it was handed.
+        run, its live lease, the snapshot it builds, and the one object key
+        that snapshot may have. A host can only report the snapshot it was
+        handed, and only while its run may still report at all: the run row is
+        locked with the snapshot, so a cancel or an expired lease cannot slip
+        between this check and the snapshot becoming ready.
         """
         snapshot_id = str(receipt.get("snapshot_id") or "")
         lockfiles = receipt.get("lockfiles")
@@ -289,7 +292,10 @@ class PostgresEnvironmentSnapshotRepository:
             row = await conn.fetchrow(
                 "SELECT s.* FROM agent_environment_snapshots s JOIN agent_environment_runs r ON r.id = s.run_id "
                 "WHERE s.id=$1 AND r.id=$2 AND r.host=$3 AND r.lease_generation=$4 AND s.state='building' "
-                "FOR UPDATE OF s",
+                "AND r.purpose='prebuild' AND r.state='running' AND NOT r.cancel_requested "
+                "AND NOT r.cleanup_complete AND r.lease_expires_at>NOW() "
+                "AND r.started_at>NOW()-INTERVAL '30 minutes' "
+                "FOR UPDATE OF s, r",
                 snapshot_id,
                 run_id,
                 host,
@@ -449,17 +455,31 @@ class PostgresEnvironmentSnapshotRepository:
         return result
 
     async def discard(self, user_id: str, environment_id: str) -> int:
-        """Delete an environment's snapshots; pending builds are abandoned."""
-        async with self._pool.acquire() as conn:
-            result = await conn.execute(
+        """Delete an environment's snapshots, and cancel the prebuilds of pending ones.
+
+        A prebuild is cancelled the way an owner cancels a test: a queued one
+        is never claimed, and a running one's host is refused at its next
+        report and stops.
+        """
+        async with self._pool.acquire() as conn, conn.transaction():
+            rows = await conn.fetch(
                 "UPDATE agent_environment_snapshots SET state=CASE WHEN object_key IS NULL THEN 'deleted' ELSE 'deleting' END, "
                 "detail='Deleted by the owner', updated_at=NOW(), "
                 "deleted_at=CASE WHEN object_key IS NULL THEN NOW() ELSE NULL END "
-                "WHERE user_id=$1 AND environment_id=$2 AND state IN ('queued','building','ready','superseded','failed')",
+                "WHERE user_id=$1 AND environment_id=$2 AND state IN ('queued','building','ready','superseded','failed') "
+                "RETURNING run_id",
                 user_id,
                 environment_id,
             )
-        return int(result.split()[-1])
+            await conn.execute(
+                "UPDATE agent_environment_runs SET cancel_requested=TRUE, cleanup_complete=(host IS NULL), "
+                "state='cancelled', detail='The installation snapshot was deleted', "
+                "finished_at=NOW(), updated_at=NOW() "
+                "WHERE id=ANY($1::text[]) AND user_id=$2 AND purpose='prebuild' AND state IN ('queued','running')",
+                [row["run_id"] for row in rows if row["run_id"]],
+                user_id,
+            )
+        return len(rows)
 
     async def maintain(self) -> None:
         """Expire, retire and abandon snapshots; hosts then delete their objects."""
@@ -469,12 +489,14 @@ class PostgresEnvironmentSnapshotRepository:
                 UPDATE agent_environment_snapshots s SET state='deleting', updated_at=NOW(),
                     detail=CASE
                         WHEN e.archived_at IS NOT NULL THEN 'Environment archived'
+                        WHEN {_SAVED_BY_TEST} THEN 'Saved by an environment test'
                         WHEN s.state='superseded' THEN 'Replaced by a newer snapshot'
                         WHEN s.ready_at <= NOW() - INTERVAL '{SNAPSHOT_MAX_AGE_DAYS} days' THEN 'Snapshot expired'
                         ELSE 'Not used for {SNAPSHOT_UNUSED_DAYS} days' END
                 FROM agent_environments e
                 WHERE e.id = s.environment_id AND (
                     (s.state IN ('ready','superseded') AND e.archived_at IS NOT NULL)
+                    OR (s.state IN ('ready','superseded') AND {_SAVED_BY_TEST})
                     OR (s.state='superseded' AND s.updated_at <= NOW() - INTERVAL '{SNAPSHOT_SUPERSEDED_GRACE_HOURS} hours')
                     OR (s.state='ready' AND s.ready_at <= NOW() - INTERVAL '{SNAPSHOT_MAX_AGE_DAYS} days')
                     OR (s.state='ready' AND COALESCE(s.last_used_at, s.ready_at)
@@ -497,14 +519,20 @@ class PostgresEnvironmentSnapshotRepository:
             )
 
     async def deletions(self, limit: int = 20) -> builtins.list[dict[str, Any]]:
-        """Stored objects a host should delete, and recent ones to drop from local images."""
+        """Stored objects a host should delete, those waiting longest first.
+
+        Handing one out counts as an attempt and moves it to the back, so
+        objects a bucket refuses to delete (the permission is optional) never
+        hold back the rest.
+        """
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                SELECT id, user_id, object_key, object_version_id, state FROM agent_environment_snapshots
-                WHERE state='deleting'
-                   OR (state IN ('deleted','failed') AND updated_at > NOW() - INTERVAL '7 days')
-                ORDER BY state <> 'deleting', updated_at LIMIT $1
+                UPDATE agent_environment_snapshots SET updated_at=NOW()
+                WHERE id IN (
+                    SELECT id FROM agent_environment_snapshots WHERE state='deleting'
+                    ORDER BY updated_at, id LIMIT $1 FOR UPDATE SKIP LOCKED)
+                RETURNING id, user_id, object_key, object_version_id
                 """,
                 limit,
             )
@@ -512,11 +540,26 @@ class PostgresEnvironmentSnapshotRepository:
             {
                 "snapshot_id": row["id"],
                 "owner": owner_hash(row["user_id"]),
-                "object_key": row["object_key"] if row["state"] == "deleting" else None,
-                "version_id": row["object_version_id"] if row["state"] == "deleting" else None,
+                "object_key": row["object_key"],
+                "version_id": row["object_version_id"],
             }
             for row in rows
         ]
+
+    async def retired_images(self, snapshot_ids: Iterable[str]) -> builtins.list[dict[str, Any]]:
+        """Which of the snapshot images a host holds it should drop.
+
+        The host names the images it has, so each host clears all of its own
+        however many snapshots were retired elsewhere. An image this
+        deployment has no record of is left alone.
+        """
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT id, user_id FROM agent_environment_snapshots "
+                "WHERE id = ANY($1::text[]) AND state IN ('deleting','deleted','failed')",
+                list(snapshot_ids),
+            )
+        return [{"snapshot_id": row["id"], "owner": owner_hash(row["user_id"])} for row in rows]
 
     async def confirm_deleted(self, snapshot_id: str) -> bool:
         """Record that a host deleted a snapshot's stored object."""

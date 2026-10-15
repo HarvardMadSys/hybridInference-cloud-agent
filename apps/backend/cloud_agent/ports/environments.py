@@ -113,7 +113,13 @@ class EnvironmentRepository(Protocol):
         """Return the original logical test request before resolving a branch."""
         ...
 
-    async def fail_environment_preflight(self, run_id: str, host: str, generation: int) -> bool:
+    async def fail_environment_preflight(
+        self,
+        run_id: str,
+        host: str,
+        generation: int,
+        detail: str = "Environment credentials or repository access are unavailable",
+    ) -> bool:
         """Release a fenced test claim before any host execution starts."""
         ...
 

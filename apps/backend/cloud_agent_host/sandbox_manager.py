@@ -2772,6 +2772,20 @@ def create_app(
         except (SandboxError, ValueError) as exc:
             raise HTTPException(status_code=409, detail=str(exc)[:300]) from exc
 
+    @app.post("/environment-snapshots/images")
+    async def environment_snapshot_images(_: None = Depends(authenticate)) -> dict[str, Any]:
+        """Name the snapshot images on this host, so the runner can ask which are retired."""
+        if archive_controller is None:
+            return {"snapshot_ids": []}
+        try:
+            return {
+                "snapshot_ids": await endpoint_calls.run(
+                    archive_controller.environment_snapshot_images
+                )
+            }
+        except SandboxError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)[:300]) from exc
+
     @app.post("/environment-snapshots/delete")
     async def delete_environment_snapshots(
         body: EnvironmentSnapshotDeleteRequest,

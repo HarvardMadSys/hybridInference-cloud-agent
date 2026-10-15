@@ -12716,6 +12716,26 @@
         "title": "ListAgentRunnerHostsResponse",
         "type": "object"
       },
+      "LocalSnapshotImages": {
+        "additionalProperties": false,
+        "description": "The snapshot images one host holds, by snapshot id.",
+        "properties": {
+          "snapshot_ids": {
+            "items": {
+              "pattern": "^[0-9a-f]{32}$",
+              "type": "string"
+            },
+            "maxItems": 500,
+            "title": "Snapshot Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "snapshot_ids"
+        ],
+        "title": "LocalSnapshotImages",
+        "type": "object"
+      },
       "McpBindingInput": {
         "description": "One connection's use by a session, as the caller asks for it.\n\nThe policy map is name to ``deny`` / ``confirm`` / ``allow``. A name that\nis absent is denied: a session means what it says, and a capability the\nserver adds later is not covered by what its owner chose earlier.",
         "properties": {
@@ -37175,7 +37195,7 @@
     },
     "/v1/agent/worker/environment-snapshots/deletions": {
       "get": {
-        "description": "Snapshot objects to delete from S3, and local snapshot images to drop.",
+        "description": "Snapshot objects to delete from S3, those waiting longest first.",
         "operationId": "snapshot_deletions_v1_agent_worker_environment_snapshots_deletions_get",
         "parameters": [
           {
@@ -37220,6 +37240,68 @@
           }
         },
         "summary": "Snapshot Deletions",
+        "tags": [
+          "environments"
+        ]
+      }
+    },
+    "/v1/agent/worker/environment-snapshots/retired": {
+      "post": {
+        "description": "Which of this host's snapshot images belong to retired snapshots.",
+        "operationId": "retired_snapshot_images_v1_agent_worker_environment_snapshots_retired_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LocalSnapshotImages"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Retired Snapshot Images V1 Agent Worker Environment Snapshots Retired Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Retired Snapshot Images",
         "tags": [
           "environments"
         ]

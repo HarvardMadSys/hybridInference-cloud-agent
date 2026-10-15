@@ -2117,13 +2117,17 @@ stored like a checkpoint. Design: [install snapshots](../agents/specs/2026-10-15
   `If-None-Match` writes as checkpoints. A building host keeps the committed
   image locally as `freeinference-environment/<owner hash>:<snapshot id>`; any
   other host loads it on first use after the same checks as a restore.
-- **Who builds.** Snapshots are built only in disposable environment-run
-  containers, never from a chat's workspace: by a passing environment test, or
-  by a `prebuild` run the control plane queues when a new task had none, its
-  lockfiles changed, or the owner asked. Prebuilds use environment-run slots,
-  are handed only to hosts that advertise `environment-snapshot-v1`, and never
-  count as the owner's one running test. After a failed build, tasks queue no
-  new one for that installation for 6 hours; an owner's rebuild still does.
+- **Who builds.** Snapshots are built only by `prebuild` runs, in disposable
+  environment-run containers, never from a chat's workspace. The control plane
+  queues one when a new task had none, its lockfiles changed, the owner asked,
+  or an environment test passed. A test's own container is never saved: its
+  start and verify scripts ran with runtime values, which the setup
+  fingerprint does not cover. Prebuilds use environment-run slots, are handed
+  only to hosts that advertise `environment-snapshot-v1`, and never count as
+  the owner's one running test. After a failed build, tasks queue no new one
+  for that installation for 6 hours; a passing test or an owner's rebuild
+  still does. Deleting snapshots cancels their pending prebuilds, and a
+  receipt is accepted only while its run's lease is live.
 - **Who uses.** A claim names a snapshot only for a new group on a host whose
   sandbox image is the snapshot's base image, and only when the binding's setup
   fingerprint (an HMAC of the install script and setup-time variables, keyed by
@@ -2138,8 +2142,11 @@ stored like a checkpoint. Design: [install snapshots](../agents/specs/2026-10-15
   deleted by the owner, and beyond 20 GiB of ready snapshots per owner (least
   recently used first).
 - **Deletion.** Hosts poll `/v1/agent/worker/environment-snapshots/deletions`
-  every 10 minutes, drop the local image and delete the object version. That
-  needs `s3:DeleteObject` and `s3:DeleteObjectVersion` on
+  every 10 minutes and delete the object versions it names, least recently
+  tried first, so objects the bucket refuses to delete never hold back the
+  rest. Each host also lists its own `freeinference-environment/*` images,
+  asks `/v1/agent/worker/environment-snapshots/retired` which belong to
+  retired snapshots, and drops those. Deleting objects needs `s3:DeleteObject` and `s3:DeleteObjectVersion` on
   `cloud-agent/sandbox/env/*`, which nothing else requires. Without them the
   delete is logged as `environment_snapshot_delete_failed` and retried; add a
   bucket lifecycle rule on the `cloud-agent/sandbox/env/` prefix that expires

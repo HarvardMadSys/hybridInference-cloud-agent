@@ -575,7 +575,7 @@ export function EnvironmentDialog({
             {run.detail ? <p className="text-sm text-status-error">{run.detail}</p> : null}
             <EnvironmentSteps steps={run.steps} />
             {snapshotsEnabled && run.state === 'succeeded' && value.setup_script ? (
-              <p className="text-xs text-muted">{t('environment.snapshot.savedByTest')}</p>
+              <p className="text-xs text-muted">{t('environment.snapshot.prebuildAfterTest')}</p>
             ) : null}
           </div>
         ) : (

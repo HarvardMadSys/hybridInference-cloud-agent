@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 import asyncpg
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
@@ -703,6 +703,15 @@ async def claim_environment_test(
         if snapshot_capable and snapshots is not None
         else None
     )
+    if run.get("purpose") == "prebuild" and snapshot is None:
+        # Its snapshot was deleted after the claim query chose it.
+        await store.environments.fail_environment_preflight(
+            run["id"],
+            host["host"],
+            run["lease_generation"],
+            detail="The installation snapshot was deleted",
+        )
+        return None
     return {
         **run,
         "environment": environment_payload(bound, body.capabilities),
@@ -737,6 +746,9 @@ async def report_test(
         raise HTTPException(409, "Environment test was cancelled or its lease was lost")
     if body.state in {"failed", "cancelled"} and snapshots is not None:
         await snapshots.fail_capture(run_id=run_id, detail=body.detail or "Snapshot build failed")
+    if body.state == "succeeded" and snapshots is not None:
+        # A test never saves its own container; a prebuild saves what it installed.
+        await snapshots.queue_after_test(run_id)
     return {"accepted": True}
 
 
@@ -744,10 +756,31 @@ async def report_test(
 async def snapshot_deletions(
     host: dict[str, str] = Depends(verify_claiming_host), store: Any = Depends(get_storage)
 ) -> dict[str, Any]:
-    """Snapshot objects to delete from S3, and local snapshot images to drop."""
+    """Snapshot objects to delete from S3, those waiting longest first."""
     _ = host
     snapshots = _snapshots(require_store(store))
     return {"snapshots": await snapshots.deletions() if snapshots is not None else []}
+
+
+class LocalSnapshotImages(BaseModel):
+    """The snapshot images one host holds, by snapshot id."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    snapshot_ids: list[Annotated[str, Field(pattern=r"^[0-9a-f]{32}$")]] = Field(max_length=500)
+
+
+@router.post("/worker/environment-snapshots/retired")
+async def retired_snapshot_images(
+    body: LocalSnapshotImages,
+    host: dict[str, str] = Depends(verify_claiming_host),
+    store: Any = Depends(get_storage),
+) -> dict[str, Any]:
+    """Which of this host's snapshot images belong to retired snapshots."""
+    _ = host
+    snapshots = _snapshots(require_store(store))
+    if snapshots is None or not body.snapshot_ids:
+        return {"snapshots": []}
+    return {"snapshots": await snapshots.retired_images(body.snapshot_ids)}
 
 
 @router.post("/worker/environment-snapshots/{snapshot_id}/deleted", status_code=204)

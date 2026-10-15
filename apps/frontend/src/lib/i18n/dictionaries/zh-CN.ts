@@ -164,8 +164,8 @@ export const zhCN: Record<TranslationKey, string> = {
   'environment.snapshot.failed': '预构建失败',
   'environment.snapshot.rebuild': '重新预构建',
   'environment.snapshot.delete': '删除安装快照',
-  'environment.snapshot.savedByTest':
-    '测试通过时会保存安装结果。锁文件不变时，新任务会直接从它开始。',
+  'environment.snapshot.prebuildAfterTest':
+    '测试通过后会为这份安装排一次预构建。锁文件不变时，新任务会直接从它开始。',
   'environment.choose': '选择环境',
   'environment.automaticHint': '已自动选择仓库的默认环境。只有这个任务需要不同配置时才需要修改。',
   'environment.temporaryHint':

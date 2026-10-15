@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
     import builtins
-    from collections.abc import Mapping
+    from collections.abc import Iterable, Mapping
 
 
 class EnvironmentSnapshotRepository(Protocol):
@@ -35,7 +35,11 @@ class EnvironmentSnapshotRepository(Protocol):
         ...
 
     async def capture_target(self, run: Mapping[str, Any], host: str) -> dict[str, Any] | None:
-        """What a host that just claimed ``run`` should save, if anything."""
+        """What a host that just claimed ``run`` should save, if anything (prebuilds only)."""
+        ...
+
+    async def queue_after_test(self, run_id: str) -> str | None:
+        """Queue a prebuild of the installation a test just passed with."""
         ...
 
     async def record_capture(
@@ -61,7 +65,7 @@ class EnvironmentSnapshotRepository(Protocol):
         ...
 
     async def discard(self, user_id: str, environment_id: str) -> int:
-        """Delete an environment's snapshots."""
+        """Delete an environment's snapshots and cancel their pending prebuilds."""
         ...
 
     async def maintain(self) -> None:
@@ -69,7 +73,11 @@ class EnvironmentSnapshotRepository(Protocol):
         ...
 
     async def deletions(self, limit: int = 20) -> builtins.list[dict[str, Any]]:
-        """Stored objects a host should delete, and local images to drop."""
+        """Stored objects a host should delete, those waiting longest first."""
+        ...
+
+    async def retired_images(self, snapshot_ids: Iterable[str]) -> builtins.list[dict[str, Any]]:
+        """Which of the snapshot images a host holds it should drop."""
         ...
 
     async def confirm_deleted(self, snapshot_id: str) -> bool:

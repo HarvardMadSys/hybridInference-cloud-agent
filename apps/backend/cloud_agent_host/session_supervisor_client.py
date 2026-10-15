@@ -418,6 +418,14 @@ class SessionSupervisorClient:
         deleted = body.get("deleted")
         return [str(item) for item in deleted] if isinstance(deleted, list) else []
 
+    def environment_snapshot_images(self) -> builtins.list[str]:
+        """The snapshot ids of the installation snapshot images on this host."""
+        body = self._manager_post("/environment-snapshots/images", {}, timeout=150)
+        found = body.get("snapshot_ids")
+        if not isinstance(found, list):
+            raise SessionSupervisorError(502, "sandbox manager returned invalid data")
+        return [str(item) for item in found]
+
     def ensure_shared_resident(
         self,
         thread_id: str,

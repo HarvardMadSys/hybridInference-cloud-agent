@@ -1031,6 +1031,12 @@ class SandboxArchiveController:
         if self._checkpoint_capture is not None:
             self._checkpoint_capture.remove_environment_image(owner, snapshot_id)
 
+    def environment_snapshot_images(self) -> list[str]:
+        """The snapshot ids of the local snapshot images; no bucket access is needed."""
+        if self._checkpoint_capture is None:
+            return []
+        return self._checkpoint_capture.environment_images()
+
     def _acquire_final_slot(
         self,
         spec: ChatSandboxSpec,

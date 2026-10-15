@@ -42,6 +42,8 @@ def _snapshots(**methods):
         "capture_target": AsyncMock(return_value={"snapshot_id": "5" * 32, "owner": "o" * 64}),
         "record_capture": AsyncMock(return_value=True),
         "fail_capture": AsyncMock(),
+        "queue_after_test": AsyncMock(return_value="6" * 32),
+        "retired_images": AsyncMock(return_value=[]),
     }
     return SimpleNamespace(**{**defaults, **methods})
 
@@ -101,19 +103,7 @@ async def test_an_owner_deletes_only_their_own_environments_snapshots():
     snapshots.discard.assert_awaited_once_with("alice", "env")
 
 
-@pytest.mark.parametrize("capable", [False, True])
-async def test_a_prebuild_or_test_claim_names_its_snapshot_only_to_a_capable_host(
-    monkeypatch, capable
-):
-    run = {
-        "id": "run",
-        "user_id": "alice",
-        "repo": "org/repo",
-        "binding_id": "bound",
-        "lease_generation": 2,
-        "purpose": "prebuild",
-        "snapshot_id": "5" * 32,
-    }
+def _claimed(monkeypatch, run, snapshots):
     environments_repo = SimpleNamespace(
         claim_environment_run=AsyncMock(return_value=run),
         get_environment_binding=AsyncMock(
@@ -121,14 +111,35 @@ async def test_a_prebuild_or_test_claim_names_its_snapshot_only_to_a_capable_hos
                 binding_id="bound", setup_script="npm ci", setup_fingerprint="f" * 64
             )
         ),
+        fail_environment_preflight=AsyncMock(return_value=True),
     )
-    snapshots = _snapshots()
-    store = SimpleNamespace(environments=environments_repo, environment_snapshots=snapshots)
     monkeypatch.setattr(environments, "_entitled", AsyncMock())
     monkeypatch.setattr(
         "cloud_agent.environment_source.read_repository_token", AsyncMock(return_value=None)
     )
     monkeypatch.setattr(environments, "require_agent_access", AsyncMock())
+    return SimpleNamespace(environments=environments_repo, environment_snapshots=snapshots)
+
+
+_RUN = {
+    "id": "run",
+    "user_id": "alice",
+    "repo": "org/repo",
+    "binding_id": "bound",
+    "lease_generation": 2,
+    "purpose": "test",
+    "snapshot_id": None,
+}
+
+
+@pytest.mark.parametrize("capable", [False, True])
+async def test_a_claim_names_a_prebuilds_snapshot_only_to_a_capable_host(monkeypatch, capable):
+    # The claim query hands prebuilds only to capable hosts; others get tests.
+    run = {**_RUN, "purpose": "prebuild", "snapshot_id": "5" * 32} if capable else _RUN
+    snapshots = _snapshots(capture_target=AsyncMock(return_value=None))
+    if capable:
+        snapshots.capture_target.return_value = {"snapshot_id": "5" * 32, "owner": "o" * 64}
+    store = _claimed(monkeypatch, run, snapshots)
     capabilities = ["environment-v1"] + (["environment-snapshot-v1"] if capable else [])
     async with AsyncClient(transport=ASGITransport(app=_app(store)), base_url="http://t") as http:
         body = (
@@ -137,11 +148,27 @@ async def test_a_prebuild_or_test_claim_names_its_snapshot_only_to_a_capable_hos
                 json={"capabilities": capabilities, "attestation": {}},
             )
         ).json()
-    assert environments_repo.claim_environment_run.await_args.kwargs == {
+    assert store.environments.claim_environment_run.await_args.kwargs == {
         "snapshot_capable": capable
     }
     assert ("setup_fingerprint" in body["environment"]) is capable
     assert (body["snapshot"] is not None) is capable
+
+
+async def test_a_prebuild_whose_snapshot_was_deleted_is_ended_at_its_claim(monkeypatch):
+    snapshots = _snapshots(capture_target=AsyncMock(return_value=None))
+    store = _claimed(
+        monkeypatch, {**_RUN, "purpose": "prebuild", "snapshot_id": "5" * 32}, snapshots
+    )
+    async with AsyncClient(transport=ASGITransport(app=_app(store)), base_url="http://t") as http:
+        response = await http.post(
+            "/v1/agent/worker/environment-runs/claim",
+            json={"capabilities": ["environment-v1", "environment-snapshot-v1"], "attestation": {}},
+        )
+    assert response.status_code == 200 and response.json() is None
+    store.environments.fail_environment_preflight.assert_awaited_once_with(
+        "run", "runner", 2, detail="The installation snapshot was deleted"
+    )
 
 
 async def test_a_receipt_that_does_not_match_its_run_is_refused():
@@ -169,3 +196,46 @@ async def test_a_receipt_that_does_not_match_its_run_is_refused():
     update = environments_repo.update_environment_run.await_args_list[0].args[3]
     assert "snapshot" not in update
     snapshots.fail_capture.assert_awaited_once_with(run_id="run", detail="npm ci failed")
+
+
+async def test_only_a_finished_successful_run_asks_for_a_prebuild():
+    environments_repo = SimpleNamespace(update_environment_run=AsyncMock(return_value=True))
+    snapshots = _snapshots()
+    store = SimpleNamespace(environments=environments_repo, environment_snapshots=snapshots)
+    async with AsyncClient(transport=ASGITransport(app=_app(store)), base_url="http://t") as http:
+        await http.post("/v1/agent/worker/environment-runs/run", json={"generation": 2})
+        snapshots.queue_after_test.assert_not_awaited()
+        await http.post(
+            "/v1/agent/worker/environment-runs/run",
+            json={"generation": 2, "state": "succeeded", "cleanup_complete": True},
+        )
+        environments_repo.update_environment_run.return_value = False
+        refused = await http.post(
+            "/v1/agent/worker/environment-runs/run",
+            json={"generation": 2, "state": "succeeded", "cleanup_complete": True},
+        )
+    snapshots.queue_after_test.assert_awaited_once_with("run")
+    assert refused.status_code == 409
+
+
+async def test_a_host_asks_which_of_its_images_are_retired():
+    snapshots = _snapshots(
+        retired_images=AsyncMock(return_value=[{"snapshot_id": "5" * 32, "owner": "o" * 64}])
+    )
+    store = SimpleNamespace(environments=SimpleNamespace(), environment_snapshots=snapshots)
+    async with AsyncClient(transport=ASGITransport(app=_app(store)), base_url="http://t") as http:
+        answer = await http.post(
+            "/v1/agent/worker/environment-snapshots/retired",
+            json={"snapshot_ids": ["5" * 32, "6" * 32]},
+        )
+        malformed = await http.post(
+            "/v1/agent/worker/environment-snapshots/retired",
+            json={"snapshot_ids": ["../latest"]},
+        )
+        too_many = await http.post(
+            "/v1/agent/worker/environment-snapshots/retired",
+            json={"snapshot_ids": ["5" * 32] * 501},
+        )
+    assert answer.json() == {"snapshots": [{"snapshot_id": "5" * 32, "owner": "o" * 64}]}
+    snapshots.retired_images.assert_awaited_once_with(["5" * 32, "6" * 32])
+    assert malformed.status_code == 422 and too_many.status_code == 422

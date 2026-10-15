@@ -21,7 +21,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from cloud_agent_host.chat_sandbox import ChatSandboxSpec
+from cloud_agent_host.chat_sandbox import SHARED_WORKSPACE_PERMISSIONS_SCRIPT, ChatSandboxSpec
 from cloud_agent_host.sandbox_archive_s3 import SandboxArchiveReceipt
 from cloud_agent_host.sandbox_checkpoints import (
     CheckpointArchiveInvalid,
@@ -230,3 +230,75 @@ def test_a_tampered_object_never_reaches_docker_load(docker_ready, cleanup, tmp_
             deadline=time.monotonic() + 600,
         )
     assert _docker("image", "inspect", reference, check=False).returncode != 0
+
+
+def test_a_workspace_from_a_snapshot_opens_its_own_files_and_leaves_the_installers(
+    docker_ready, cleanup
+):
+    """The permission step before a first turn tolerates the installer's files.
+
+    The installation is made as an environment run makes it: UID 30000 in the
+    sandbox group, after the tree was opened to that group. The new workspace
+    then imports its source as the sandbox user (10001), which may not chmod
+    the installer's files.
+    """
+    containers, images = cleanup
+
+    def run_as(container: str, user: str, script: str) -> subprocess.CompletedProcess[str]:
+        return _docker(
+            "exec", "-u", user, "-w", "/workspace", container, "sh", "-c", script, check=False
+        )
+
+    built = f"snapshot-permissions-{secrets.token_hex(4)}"
+    containers.append(built)
+    _docker("create", "--name", built, BASE, "sleep", "600")
+    _docker("start", built)
+    # The sandbox image's layout; the stand-in git only answers the final config step.
+    _docker(
+        "exec",
+        built,
+        "sh",
+        "-c",
+        "mkdir -p /workspace /agent-state && chown 10001:10001 /workspace /agent-state && "
+        "(command -v git >/dev/null || { printf '#!/bin/sh\\nexit 0\\n' > /usr/local/bin/git; "
+        "chmod 755 /usr/local/bin/git; })",
+    )
+    assert run_as(built, "10001:10001", "echo old > app.py").returncode == 0
+    assert run_as(built, "10001:10001", SHARED_WORKSPACE_PERMISSIONS_SCRIPT).returncode == 0
+    installed = run_as(
+        built,
+        "30000:10001",
+        "umask 002; mkdir -p .cloud-agent-tools/home node_modules/left-pad private "
+        "&& echo x > node_modules/left-pad/index.js && echo s > private/key && chmod 700 private",
+    )
+    assert installed.returncode == 0, installed.stderr
+    assert run_as(built, "10001:10001", "rm -f app.py").returncode == 0
+    _docker("stop", "--time", "1", built)
+    reference = f"snapshot-permissions:{secrets.token_hex(4)}"
+    images.append(reference)
+    _docker("commit", built, reference)
+
+    workspace = f"snapshot-permissions-{secrets.token_hex(4)}"
+    containers.append(workspace)
+    _docker("create", "--name", workspace, reference, "sleep", "600")
+    _docker("start", workspace)
+    assert (
+        run_as(workspace, "10001:10001", "umask 022; mkdir sub && echo y > sub/a.py").returncode
+        == 0
+    )
+    prepared = run_as(workspace, "10001:10001", SHARED_WORKSPACE_PERMISSIONS_SCRIPT)
+    assert prepared.returncode == 0, prepared.stderr
+    modes = run_as(
+        workspace,
+        "0",
+        "stat -c '%n %u %A' sub sub/a.py node_modules node_modules/left-pad/index.js "
+        ".cloud-agent-tools private",
+    ).stdout.splitlines()
+    assert modes == [
+        "sub 10001 drwxrwsr-x",
+        "sub/a.py 10001 -rw-rw-r--",
+        "node_modules 30000 drwxrwsr-x",
+        "node_modules/left-pad/index.js 30000 -rw-rw-r--",
+        ".cloud-agent-tools 30000 drwxrwsr-x",
+        "private 30000 drwx--S---",
+    ]

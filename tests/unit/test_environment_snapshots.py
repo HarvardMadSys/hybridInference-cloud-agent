@@ -8,6 +8,7 @@ from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
 from tests.unit.test_repository_environments import _Backend
 from tests.unit.test_sandbox_restore import _inspection
@@ -383,3 +384,213 @@ def test_a_snapshot_is_marked_emptied_of_the_repository_stopped_then_uploaded(mo
             source_sha="c" * 40,
             lockfiles=None,
         )
+
+
+# -- which environment runs save a snapshot ---------------------------------------
+
+
+def _execute(monkeypatch, tmp_path, **run_fields: Any) -> tuple[list[str], dict[str, Any]]:
+    """Run one environment run against stand-ins; return its steps and final report."""
+    from cloud_agent_host import environment_tests
+
+    events: list[str] = []
+
+    class _RunManager:
+        def __init__(self, backend):
+            self.backend = backend
+
+        def create(self, spec):
+            events.append("create")
+
+        def start(self, spec):
+            return SimpleNamespace(container_id="container-1")
+
+        def prepare_shared_workspace(self, spec):
+            pass
+
+        def inspect(self, name):
+            return SimpleNamespace(container_id="container-1") if "create" in events else None
+
+        def remove_environment_test(self, spec, *, container_id):
+            events.append("remove")
+
+    class _Source:
+        def __init__(self, job, **kwargs):
+            pass
+
+        def import_into(self, manager, spec):
+            return "c" * 40
+
+        def lockfiles(self):
+            return {"uv.lock": "d" * 40}
+
+        def discard(self):
+            pass
+
+    class _Preparation:
+        root = tmp_path
+
+        def prepare(self, backend, environment, **kwargs):
+            events.append("install, start" if environment.start_script else "install")
+
+    def save(*args, **kwargs):
+        events.append("save")
+        return {"snapshot_id": SNAPSHOT}
+
+    reports: list[dict[str, Any]] = []
+
+    def post(path, json):
+        reports.append(json)
+        return httpx.Response(200, request=httpx.Request("POST", f"http://t{path}"))
+
+    monkeypatch.setattr(environment_tests, "ChatSandboxManager", _RunManager)
+    monkeypatch.setattr(environment_tests, "RetainedChatBackend", lambda manager, spec: None)
+    monkeypatch.setattr(environment_tests, "EnvironmentPreparation", _Preparation)
+    monkeypatch.setattr(environment_tests, "_save_snapshot", save)
+    monkeypatch.setattr("cloud_agent_host.runner._SourcePrefetch", _Source)
+    environment_tests.execute_test(
+        client=SimpleNamespace(post=post),
+        run={
+            "id": "run-1",
+            "lease_generation": 1,
+            "repo": "org/repo",
+            "base_sha": "c" * 40,
+            "environment": _bound().model_dump(mode="json"),
+            **run_fields,
+        },
+        backend=SimpleNamespace(
+            uid=1000, gid=1000, version_stamp=lambda: {"sandbox_image_digest": IMAGE}
+        ),
+    )
+    return events, reports[-1]
+
+
+@pytest.mark.parametrize(
+    ("purpose", "steps"),
+    [
+        # A test's start script ran with runtime values: its container is never saved,
+        # even when a control plane names a snapshot for it.
+        ("test", ["create", "install, start", "remove"]),
+        ("prebuild", ["create", "install", "save", "remove"]),
+    ],
+)
+def test_only_a_prebuild_saves_its_container(monkeypatch, tmp_path, purpose, steps):
+    events, final = _execute(
+        monkeypatch, tmp_path, purpose=purpose, snapshot={"snapshot_id": SNAPSHOT, "owner": OWNER}
+    )
+    assert events == steps
+    assert final["state"] == "succeeded" and final["cleanup_complete"] is True
+
+
+def test_a_prebuild_whose_snapshot_is_gone_installs_nothing(monkeypatch, tmp_path):
+    events, final = _execute(monkeypatch, tmp_path, purpose="prebuild", snapshot=None)
+    assert events == []
+    assert final["state"] == "failed" and "no installation snapshot" in final["detail"]
+
+
+# -- dropping retired snapshots ---------------------------------------------------
+
+
+class _RetiringSupervisor:
+    def __init__(self, held: list[str] | None) -> None:
+        self.held = held
+        self.deletes: list[list[dict[str, Any]]] = []
+
+    def delete_environment_snapshots(self, items):
+        self.deletes.append([dict(item) for item in items])
+        return [item["snapshot_id"] for item in items if item["object_key"]]
+
+    def environment_snapshot_images(self):
+        from cloud_agent_host.session_supervisor_client import SessionSupervisorError
+
+        if self.held is None:
+            raise SessionSupervisorError(404, "sandbox manager refused")
+        return self.held
+
+
+def _retire(monkeypatch, supervisor, *, retired_status: int = 200) -> list[list[str]]:
+    from cloud_agent_host import environment_tests
+
+    monkeypatch.setattr(
+        "cloud_agent_host.runner._session_supervisor_from_env", lambda **_: supervisor
+    )
+    asked: list[list[str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/deletions"):
+            deletion = {
+                "snapshot_id": SNAPSHOT,
+                "owner": OWNER,
+                "object_key": "k",
+                "version_id": "v",
+            }
+            return httpx.Response(200, json={"snapshots": [deletion]})
+        if request.url.path.endswith("/retired"):
+            ids = json.loads(request.content)["snapshot_ids"]
+            asked.append(ids)
+            return httpx.Response(
+                retired_status, json={"snapshots": [{"snapshot_id": ids[0], "owner": OWNER}]}
+            )
+        return httpx.Response(204)
+
+    with httpx.Client(transport=httpx.MockTransport(handler), base_url="http://t") as client:
+        environment_tests._delete_retired_snapshots(client)
+    return asked
+
+
+def test_a_host_drops_every_retired_image_it_holds(monkeypatch):
+    held = [f"{index:032x}" for index in range(150)]
+    supervisor = _RetiringSupervisor(held)
+    asked = _retire(monkeypatch, supervisor)
+    # Stored objects first, then the host's own images, a batch at a time.
+    assert supervisor.deletes[0][0]["object_key"] == "k"
+    assert [len(batch) for batch in asked] == [100, 50]
+    assert [batch[0]["snapshot_id"] for batch in supervisor.deletes[1:]] == [held[0], held[100]]
+    assert all(item["object_key"] is None for batch in supervisor.deletes[1:] for item in batch)
+
+
+@pytest.mark.parametrize(("held", "status"), [(None, 200), ([SNAPSHOT], 404)])
+def test_older_components_still_delete_stored_objects(monkeypatch, held, status):
+    supervisor = _RetiringSupervisor(held)
+    _retire(monkeypatch, supervisor, retired_status=status)
+    assert len(supervisor.deletes) == 1 and supervisor.deletes[0][0]["object_key"] == "k"
+
+
+def test_a_host_without_a_sandbox_manager_has_no_snapshots_to_drop(monkeypatch):
+    from cloud_agent_host import environment_tests
+
+    def missing(**_):
+        raise SandboxError("restartable chat execution needs AGENT_SANDBOX_MANAGER_URL")
+
+    monkeypatch.setattr("cloud_agent_host.runner._session_supervisor_from_env", missing)
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"snapshots": []})
+
+    with httpx.Client(transport=httpx.MockTransport(handler), base_url="http://t") as client:
+        environment_tests._delete_retired_snapshots(client)
+    assert requests == []
+
+
+def test_snapshot_images_are_named_by_their_ids(tmp_path):
+    from cloud_agent_host.sandbox_checkpoints import (
+        SandboxCheckpointCapture,
+        SandboxCheckpointStore,
+    )
+
+    seen: list[list[str]] = []
+
+    def run(argv, **kwargs):
+        seen.append(argv)
+        return subprocess.CompletedProcess(argv, 0, f"{SNAPSHOT}\nlatest\n{SNAPSHOT}\n", "")
+
+    capture = SandboxCheckpointCapture(
+        docker_binary="docker",
+        spool_dir=tmp_path / "spool",
+        store=SandboxCheckpointStore(tmp_path / "checkpoints"),
+        run=run,
+    )
+    assert capture.environment_images() == [SNAPSHOT]
+    assert "reference=freeinference-environment/*:*" in seen[0]
