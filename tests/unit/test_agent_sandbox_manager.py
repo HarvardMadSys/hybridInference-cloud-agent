@@ -2374,13 +2374,22 @@ async def test_terminal_routes_resolve_their_workspace_off_the_event_loop(method
     supervisor = _SharedSupervisor()
     status = supervisor.status
     backend = supervisor.backend
+    loop = asyncio.get_running_loop()
+    loop_thread = threading.get_ident()
+    inspection_started = asyncio.Event()
+    release_inspection = threading.Event()
+
+    def wait_for_event_loop():
+        assert threading.get_ident() != loop_thread, "workspace inspection ran on the event loop"
+        loop.call_soon_threadsafe(inspection_started.set)
+        assert release_inspection.wait(5), "event loop could not release workspace inspection"
 
     def inspecting_status(thread_id: str):
-        time.sleep(0.5)
+        wait_for_event_loop()
         return status(thread_id)
 
     def inspecting_backend(thread_id: str):
-        time.sleep(0.5)
+        wait_for_event_loop()
         return backend(thread_id)
 
     supervisor.status = inspecting_status  # type: ignore[method-assign]
@@ -2390,19 +2399,22 @@ async def test_terminal_routes_resolve_their_workspace_off_the_event_loop(method
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://sandbox_manager"
     ) as client:
-        started = time.monotonic()
-        tick = asyncio.create_task(asyncio.sleep(0.05))
         answered = asyncio.create_task(client.request(method, path, headers=headers, json=body))
-        await tick
-        stalled_for = time.monotonic() - started
-        response = await answered
+        try:
+            # Prove that the loop runs while inspection is still blocked. A
+            # wall-clock request budget also measures lazy route setup and
+            # shared-runner scheduling, neither of which is the regression.
+            await asyncio.wait_for(inspection_started.wait(), timeout=5)
+            assert not answered.done()
+        finally:
+            release_inspection.set()
+            response = await asyncio.wait_for(answered, timeout=5)
         if path.endswith("/terminals") and method == "POST":
             await client.delete(
                 f"/workspaces/athr_source/terminals/{response.json()['id']}", headers=headers
             )
 
     assert response.status_code in {200, 404}
-    assert stalled_for < 0.4
 
 
 @pytest.mark.parametrize("blocked", ["write", "suspend"])
