@@ -266,6 +266,33 @@ async def test_a_removed_hosts_covered_group_is_restored_on_another_host(pool, s
         )
 
 
+async def test_a_moved_group_is_reached_on_its_new_host_from_any_of_its_turns(pool, store: Storage):
+    job, _ = await _covered(pool, store)
+    follow_up = await store.conversation_commands.create_follow_up(
+        parent_job_id=job["id"], user_id="user-1", prompt="continue"
+    )
+    assert follow_up is not None
+    assert await store.host_pool.remove_host(host="runner-a") == "ok"
+    await _host(store, "runner-c", _RESTORE_HOST)
+    claim = await _claim(store, "runner-c", _RESTORE_HOST)
+    assert claim is not None
+    reserved = await _reserve(store, follow_up, claim, "runner-c")
+    assert await store.sandbox.mark_thread_sandbox_running(
+        **_fence(follow_up, claim, reserved),
+        container_id="container-c",
+        context_status="restored",
+    )
+
+    # A workspace request, a capture or a base import may name a turn that
+    # ran before the move, such as a sibling chat's latest one. Its attempt's
+    # host no longer holds the group; the request must reach the group itself.
+    for named in (job["id"], follow_up["id"]):
+        owner = await store.host_pool.host_for_job(job_id=named)
+        assert owner is not None
+        assert owner["host"] == "runner-c"
+        assert owner["status"] == "online"
+
+
 async def test_a_stale_host_cannot_touch_a_rehomed_group(pool, store: Storage):
     job, group = await _covered(pool, store)
     await store.conversation_commands.create_follow_up(

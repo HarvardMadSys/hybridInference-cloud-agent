@@ -1017,17 +1017,23 @@ class PostgresHostPoolRepository:
         return None if row is None else self._host_row_to_dict(row)
 
     async def host_for_job(self, *, job_id: str) -> dict[str, Any] | None:
-        """The job attempt's host, or its retained thread's durable host."""
+        """The job's running attempt's host, else its retained thread's durable host.
+
+        A finished attempt names where the turn ran, which is not where the
+        group is once a restore has moved it to another host; the group's own
+        host is. Only a thread without a group falls back to that attempt.
+        """
+        owner = "COALESCE(CASE WHEN a.status = 'running' THEN a.host_id END, s.host, a.host_id)"
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 f"""
-                SELECT COALESCE(a.host_id, s.host) AS owner_host,
+                SELECT {owner} AS owner_host,
                        {QUALIFIED_HOST_COLUMNS}
                 FROM agent_jobs j
                 LEFT JOIN agent_attempts a ON a.id = j.current_attempt_id
                 LEFT JOIN {THREAD_SANDBOX_SOURCE} ON s.thread_id = j.thread_id
                 LEFT JOIN agent_runner_hosts h
-                  ON h.host = COALESCE(a.host_id, s.host)
+                  ON h.host = {owner}
                 WHERE j.id = $1
                 """,
                 job_id,

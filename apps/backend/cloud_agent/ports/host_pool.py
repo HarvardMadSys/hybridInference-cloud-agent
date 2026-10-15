@@ -364,7 +364,7 @@ class HostPoolRepository(Protocol):
         ...
 
     async def host_for_job(self, *, job_id: str) -> dict[str, Any] | None:
-        """The job attempt's host, or its retained thread's durable host."""
+        """The job's running attempt's host, else its retained thread's durable host."""
         ...
 
     async def active_runner_host(self) -> str | None:
