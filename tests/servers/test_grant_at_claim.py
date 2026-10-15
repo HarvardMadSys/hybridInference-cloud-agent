@@ -922,3 +922,56 @@ async def test_an_ssh_claim_carries_the_groups_state_only_to_a_capable_runner(
         assert store.released == [(_JOB, _ATTEMPT)]
         assert store.retry_delays == [30]
         assert grants.calls == []
+
+
+async def test_an_ssh_claim_survives_a_group_that_kept_many_forks(monkeypatch):
+    """Every Fork leaves a membership row, deleted or failed, and the state lists them all.
+
+    Only the chats with a usable server change anything on the host, so the
+    claim still carries the state when the group has more rows than the
+    protocol's member bound.
+    """
+    from unittest.mock import AsyncMock
+
+    from tests.support.ssh_keys import host_key as fresh_host_key
+
+    from cloud_agent.application.ssh_servers import generate_key_pair, ssh_key_cipher
+
+    monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "ssh-claim-encryption-key")
+    _public, private = generate_key_pair("cloud-agent:gpu-3f9c2a1e")
+    server = {
+        "id": "3f9c2a1e-0000-4000-8000-000000000001",
+        "name": "gpu",
+        "description": "",
+        "pinned_ipv4": "93.184.216.34",
+        "port": 22,
+        "username": "ubuntu",
+        "host_key_type": "ssh-ed25519",
+        "host_key": fresh_host_key(),
+        "private_key_ciphertext": ssh_key_cipher().encrypt(private),
+    }
+    forks = [
+        {"thread_id": f"athr_fork_{index:03d}", "slot_id": None, "servers": []}
+        for index in range(128)
+    ]
+    store, grants = _ClaimStore(), _Grants()
+    store.ssh_group_state = AsyncMock(
+        return_value={
+            "revision": 9,
+            "sandbox_id": "asbx_1",
+            "members": [{"thread_id": "athr_1", "slot_id": 2, "servers": [server]}, *forks],
+        }
+    )
+    body = {"worker_id": "w1", "attestation": {"runner_capabilities": ["ssh-access-v1"]}}
+    async with AsyncClient(
+        transport=ASGITransport(app=_app(store, grants)), base_url="http://test"
+    ) as client:
+        response = await client.post("/v1/agent/worker/claim", json=body)
+
+    assert response.status_code == 200, response.text
+    assert store.released == []
+    access = response.json()["ssh_access"]
+    assert [(member["thread_id"], member["slot_id"]) for member in access["members"]] == [
+        ("athr_1", 2)
+    ]
+    assert access["members"][0]["servers"][0]["private_key"] == private

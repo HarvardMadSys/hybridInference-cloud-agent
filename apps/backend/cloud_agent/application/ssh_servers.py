@@ -351,11 +351,19 @@ async def check_login(
 
 
 def build_ssh_access(state: dict[str, Any] | None, cipher: SourceControlCipher) -> SshAccess | None:
-    """A group state from the store, with its keys decrypted, as the host receives it."""
+    """A group state from the store, with its keys decrypted, as the host receives it.
+
+    Only chats with a usable server are listed. The host clears every slot the
+    state keeps nothing in, listed or not, so the others change nothing there,
+    and a group keeps a membership for every Fork it ever made, deleted or
+    failed, which could otherwise outgrow the protocol's member bound.
+    """
     if state is None:
         return None
     members = []
     for member in state["members"]:
+        if not member["servers"]:
+            continue
         servers = [
             SshServerAccess(
                 server_id=row["id"],
