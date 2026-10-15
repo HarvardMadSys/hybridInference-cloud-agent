@@ -253,9 +253,12 @@ class PostgresAttemptCommands:
             # sandbox manager must be able to download (archives on) and turn
             # back into the group (it attests restore). The host row and the
             # replica both say so: during a rolling deploy the row describes
-            # whichever replica beat last.
+            # whichever replica beat last. Restoring creates the group's only
+            # container here, so the machine must also still take new groups:
+            # not one whose lease is about to end, or that a hold keeps empty.
             restore_capable = bool(
-                archive_required
+                resource_new
+                and archive_required
                 and SANDBOX_RESTORE_CAPABILITY in capabilities
                 and SANDBOX_RESTORE_CAPABILITY in runner_capabilities
             )

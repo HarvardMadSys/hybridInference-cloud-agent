@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -14,6 +14,7 @@ from tests.integration.storage.test_agent_job_store import (
     store as store,
 )
 
+from cloud_agent.storage._sql.compute_admission import host_compute_admission
 from cloud_agent_shared.sandbox_archive_settings import SANDBOX_ARCHIVE_CAPABILITY
 from cloud_agent_shared.sandbox_restore import MAX_RESTORE_ATTEMPTS, SANDBOX_RESTORE_CAPABILITY
 
@@ -291,6 +292,77 @@ async def test_a_moved_group_is_reached_on_its_new_host_from_any_of_its_turns(po
         assert owner is not None
         assert owner["host"] == "runner-c"
         assert owner["status"] == "online"
+
+
+async def _expiring_host(store: Storage, host: str, capabilities: list[str]) -> None:
+    """A restore-capable Host on a managed machine whose lease ends in 20 minutes."""
+    repo = store.compute_resources
+    request = f"allocation-{host}"
+    op = await repo.create_allocation_operation(
+        request_id=request,
+        fingerprint=request,
+        kind="add",
+        allocation={
+            "name": host,
+            "provider_id": "cloudlab",
+            "mode": "attach",
+            "management_mode": "manage",
+            "lease_managed": True,
+            "release_supported": True,
+        },
+        parameters={},
+        requested_by="admin",
+    )
+    claimed = await repo.claim_operation(worker_id="fixture")
+    assert claimed is not None and claimed["id"] == op["id"]
+    node = await repo.upsert_node(
+        allocation_id=op["allocation_id"],
+        node={"provider_node_id": "node-1", "instance_identity": request, "name": host},
+    )
+    await repo.observe_allocation(
+        allocation_id=op["allocation_id"],
+        observation={
+            "external_id": request,
+            "observed_state": "ready",
+            "expiration_known": True,
+            # Inside the default 30 minutes before expiry in which a machine
+            # takes no new group, but still claims follow-ups of its own.
+            "expires_at": datetime.now(UTC) + timedelta(minutes=20),
+            "scope_complete": True,
+        },
+    )
+    await repo.prepare_bootstrap_binding(node_id=node["id"], host=host, operation_id=op["id"])
+    await _host(store, host, capabilities)
+    assert await repo.clear_bootstrap_hold(node_id=node["id"], host=host, operation_id=op["id"])
+    assert await repo.finish_operation(
+        operation_id=op["id"],
+        generation=claimed["generation"],
+        worker_id="fixture",
+        state="succeeded",
+        step="ready",
+    )
+
+
+async def test_a_host_that_may_take_no_new_group_does_not_restore_one(pool, store: Storage):
+    job, _ = await _covered(pool, store)
+    follow_up = await store.conversation_commands.create_follow_up(
+        parent_job_id=job["id"], user_id="user-1", prompt="continue"
+    )
+    assert follow_up is not None
+    assert await store.host_pool.remove_host(host="runner-a") == "ok"
+
+    # Restoring creates the group's only container on the claiming machine.
+    # One about to expire would take the chat down with it.
+    await _expiring_host(store, "runner-c", _RESTORE_HOST)
+    async with pool.acquire() as conn:
+        assert await host_compute_admission(conn, "runner-c") == (False, True)
+    assert await _claim(store, "runner-c", _RESTORE_HOST) is None
+    assert (await _state(pool))["state"] == "cold"
+
+    await _host(store, "runner-d", _RESTORE_HOST)
+    claim = await _claim(store, "runner-d", _RESTORE_HOST)
+    assert claim is not None and claim["id"] == follow_up["id"]
+    assert claim["thread_sandbox"]["host"] == "runner-d"
 
 
 async def test_a_stale_host_cannot_touch_a_rehomed_group(pool, store: Storage):
