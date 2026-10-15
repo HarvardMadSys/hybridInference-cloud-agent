@@ -143,16 +143,20 @@ _PAGE_SQL = f"""
 #: before it; every transition inside the window then starts a new span, and
 #: the last span runs to the window's end. The lifecycle trigger records these
 #: transitions; ``current_state_imported`` is the state the history began with.
+#: A container's transitions follow one another in the order of their ids, as
+#: its row lock serializes them. Each is stamped with its transaction's start,
+#: so one that began before the transition it follows is stamped earlier; its
+#: span starts where that transition's did, and never runs backwards.
 _RUNNING_TIME_SQL = """
     WITH owned AS (
         SELECT id FROM agent_sandboxes WHERE user_id = $1
     ),
     transitions AS (
-        SELECT o.id AS sandbox_id, $2::timestamptz AS at, 0::bigint AS seq,
+        SELECT o.id AS sandbox_id, $2::timestamptz AS at, initial.id AS seq,
                initial.to_state AS state
         FROM owned o
         CROSS JOIN LATERAL (
-            SELECT e.to_state FROM agent_sandbox_events e
+            SELECT e.id, e.to_state FROM agent_sandbox_events e
             WHERE e.sandbox_id = o.id AND e.created_at < $2 AND e.to_state IS NOT NULL
               AND e.event_type IN ('created', 'state_changed', 'current_state_imported')
             ORDER BY e.id DESC
@@ -165,10 +169,15 @@ _RUNNING_TIME_SQL = """
         WHERE e.created_at >= $2 AND e.created_at < $3 AND e.to_state IS NOT NULL
           AND e.event_type IN ('created', 'state_changed', 'current_state_imported')
     ),
+    ordered AS (
+        SELECT sandbox_id, seq, state,
+               MAX(at) OVER (PARTITION BY sandbox_id ORDER BY seq) AS at
+        FROM transitions
+    ),
     spans AS (
         SELECT state, at AS started,
-               COALESCE(LEAD(at) OVER (PARTITION BY sandbox_id ORDER BY at, seq), $3) AS ended
-        FROM transitions
+               COALESCE(LEAD(at) OVER (PARTITION BY sandbox_id ORDER BY seq), $3) AS ended
+        FROM ordered
     )
     SELECT b.n,
            COALESCE(SUM(EXTRACT(EPOCH FROM LEAST(s.ended, b.until) - GREATEST(s.started, b.since))),

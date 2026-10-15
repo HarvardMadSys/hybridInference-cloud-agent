@@ -266,6 +266,36 @@ async def test_a_container_still_running_counts_until_the_window_ends(db, store)
     assert history.days[0].running_seconds == pytest.approx(6 * 3600)
 
 
+async def test_a_stop_committed_by_an_earlier_transaction_ends_the_running_time(db, store):
+    # Each transition is stamped with its transaction's start. A heartbeat that
+    # began before an admin stop, and recorded the stopped container after the
+    # stop committed, is stamped before the transition it follows.
+    job = await _create_job(store)
+    await container(
+        db, job, "asbx_raced", state="running", created_at=datetime.now(UTC) - timedelta(hours=1)
+    )
+    async with db.acquire() as heartbeat, db.acquire() as admin:
+        late = heartbeat.transaction()
+        await late.start()
+        began = await heartbeat.fetchval("SELECT NOW()")
+        async with admin.transaction():
+            await admin.execute(
+                "UPDATE agent_sandboxes SET state = 'stopping' WHERE id = 'asbx_raced'"
+            )
+        await heartbeat.execute(
+            "UPDATE agent_sandboxes SET state = 'stopped' WHERE id = 'asbx_raced'"
+        )
+        await late.commit()
+
+    until = began + timedelta(hours=6)
+    history = await store.owner_usage.resource_history(
+        "user-1", buckets=[(until - timedelta(hours=8), until)]
+    )
+
+    # It ran for the hour before the stop, not until the window's end.
+    assert history.days[0].running_seconds == pytest.approx(3600.0, abs=60.0)
+
+
 async def test_measured_use_is_read_from_the_owners_daily_totals(db, store):
     mine = await _create_job(store)
     theirs = await _create_job(store, user_id="user-2")
