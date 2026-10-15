@@ -124,7 +124,7 @@ describe('keyboard shortcut settings', () => {
   it('provides Chinese labels and built-in chat shortcuts', () => {
     localStorage.setItem(LOCALE_STORAGE_KEY, 'zh-CN');
     renderSettings();
-    expect(screen.getByRole('heading', { name: '键盘快捷键' })).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: '键盘快捷键' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '修改“搜索聊天”的快捷键' })).toBeInTheDocument();
     expect(screen.getByText('Shift + Enter')).toBeInTheDocument();
     expect(screen.getByText('聊天内置快捷键')).toBeInTheDocument();

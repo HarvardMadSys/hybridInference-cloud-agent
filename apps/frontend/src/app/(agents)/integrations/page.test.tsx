@@ -29,8 +29,9 @@ it.each([
 });
 it.each([
   ['#settings-environments', '/settings/environments'],
-  ['#settings-user-memory', '/settings/my-settings'],
-  ['#settings-shortcuts', '/settings/my-settings'],
+  ['#settings-user-memory', '/settings/memory'],
+  ['#settings-memory', '/settings/memory'],
+  ['#settings-shortcuts', '/settings/keyboard-shortcuts'],
   ['#settings-skills', '/settings/plugins'],
   ['#settings-getting-started', '/settings/getting-started'],
 ])('preserves the legacy bookmark %s', (hash, page) => {

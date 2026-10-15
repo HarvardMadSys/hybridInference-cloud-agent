@@ -209,7 +209,11 @@ describe('AgentsLayout sidebar collapse', () => {
 
   it.each([
     ['/', 'sidebar-stub', /(Collapse|Expand) task list/],
-    ['/settings/my-settings', 'settings-sidebar-stub', /(Collapse|Expand) settings navigation/],
+    [
+      '/settings/keyboard-shortcuts',
+      'settings-sidebar-stub',
+      /(Collapse|Expand) settings navigation/,
+    ],
   ])(
     'applies shortcut changes immediately on %s and keeps the mouse toggle after disabling',
     (route, sidebar, name) => {
@@ -657,6 +661,8 @@ describe('AgentsLayout product navigation', () => {
   it.each([
     '/integrations',
     '/settings/my-settings',
+    '/settings/memory',
+    '/settings/keyboard-shortcuts',
     '/settings/plugins',
     '/settings/integrations',
     '/settings/environments',

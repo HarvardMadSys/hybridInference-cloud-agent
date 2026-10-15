@@ -485,8 +485,7 @@ export const en = {
   'settings.backToChats': 'Back to chats',
   'settings.collapseNavigation': 'Collapse settings navigation',
   'settings.expandNavigation': 'Expand settings navigation',
-  'settings.personalDescription':
-    'Manage your profile, notifications, keyboard shortcuts, and memory.',
+  'settings.personalDescription': 'Manage your profile and notifications.',
   'settings.plugins': 'Plugins & MCPs',
   'settings.pluginsDescription':
     'Connect MCP servers and manage the skills available to your agents.',

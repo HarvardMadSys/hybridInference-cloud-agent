@@ -463,7 +463,7 @@ export const zhCN: Record<TranslationKey, string> = {
   'settings.backToChats': '返回对话',
   'settings.collapseNavigation': '收起设置导航',
   'settings.expandNavigation': '展开设置导航',
-  'settings.personalDescription': '管理你的个人资料、通知、键盘快捷键和记忆。',
+  'settings.personalDescription': '管理你的个人资料和通知。',
   'settings.plugins': '插件与 MCP',
   'settings.pluginsDescription': '连接 MCP 服务器，管理 Agent 可使用的技能。',
   'settings.integrations': '集成',

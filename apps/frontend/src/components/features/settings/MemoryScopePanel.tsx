@@ -222,7 +222,7 @@ export function MemoryScopePanel({ repo }: { repo: string | null }) {
       </form>
 
       <div className="mt-4 flex items-baseline justify-between gap-3">
-        <h3 className="text-sm font-semibold text-foreground">{t('settings.memory.memories')}</h3>
+        <h2 className="text-sm font-semibold text-foreground">{t('settings.memory.memories')}</h2>
         <span className="text-xs text-muted">
           {t('settings.memory.count', { count: scope.memories.length })}
         </span>

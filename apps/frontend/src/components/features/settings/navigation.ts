@@ -1,5 +1,7 @@
 export const SETTINGS_PATHS = {
   profile: '/settings/my-settings',
+  memory: '/settings/memory',
+  shortcuts: '/settings/keyboard-shortcuts',
   usage: '/settings/usage',
   plugins: '/settings/plugins',
   integrations: '/settings/integrations',
@@ -25,6 +27,10 @@ export function legacySettingsDestination(search: string, hash: string): string 
     path = SETTINGS_PATHS.plugins;
   } else if (hash === '#source-control-heading') {
     path = SETTINGS_PATHS.integrations;
+  } else if (hash === '#settings-user-memory' || hash === '#settings-memory') {
+    path = SETTINGS_PATHS.memory;
+  } else if (hash === '#settings-shortcuts') {
+    path = SETTINGS_PATHS.shortcuts;
   } else if (hash === '#settings-environments') {
     path = SETTINGS_PATHS.environments;
   } else if (hash === '#settings-getting-started') {
