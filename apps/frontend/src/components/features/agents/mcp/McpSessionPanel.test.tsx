@@ -261,7 +261,7 @@ describe('McpSessionPanel', () => {
     expect(await screen.findByText('Needs attention')).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Manage connection' })).toHaveAttribute(
       'href',
-      '/integrations',
+      '/settings/plugins',
     );
     expect(screen.getByRole('switch', { name: /Use Team wiki/ })).toBeChecked();
   });
@@ -271,7 +271,7 @@ describe('McpSessionPanel', () => {
     render(<McpSessionPanel jobId="job-1" threadId="thread-1" active />);
     expect(await screen.findByRole('link', { name: 'Add MCP server' })).toHaveAttribute(
       'href',
-      '/integrations',
+      '/settings/plugins',
     );
   });
   it('follows an approved call to its final outcome without reviving stale approvals', async () => {

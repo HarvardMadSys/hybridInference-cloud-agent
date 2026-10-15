@@ -315,6 +315,7 @@ export function reconcileSidebarPins(
 
 export function ProjectFolder({
   repo,
+  enabled = true,
   active,
   activeCount,
   expanded,
@@ -332,6 +333,7 @@ export function ProjectFolder({
   ...actions
 }: RowActions & {
   repo: string;
+  enabled?: boolean;
   active: boolean;
   activeCount: number;
   expanded: boolean;
@@ -348,11 +350,20 @@ export function ProjectFolder({
   reorderProps: SidebarReorderProps;
 }) {
   const t = useT();
-  const list = useConversationList({ repo, pinned: false, enabled: expanded, userId, refresh });
+  const list = useConversationList({
+    repo,
+    pinned: false,
+    enabled: enabled && expanded,
+    userId,
+    refresh,
+  });
   const [shown, setShown] = useState(15);
   useEffect(() => {
     registerRows(list.rows, list.loadedRefresh);
   }, [list.rows, list.loadedRefresh, registerRows]);
+  // Keep pagination and loaded rows while settings replaces the chat sidebar.
+  // Unmount the rows themselves so hidden sessions do not keep polling reviews.
+  if (!enabled) return null;
   const byKey = new Map(initial.map((row) => [row.key, row]));
   for (const row of list.rows) byKey.set(row.key, row);
   if (selected && !selected.archived && !byKey.has(selected.key)) byKey.set(selected.key, selected);

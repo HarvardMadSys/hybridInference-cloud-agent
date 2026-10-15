@@ -109,7 +109,7 @@ describe('add workspace picker', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
     expect(await screen.findByRole('link', { name: 'Manage repository access' })).toHaveAttribute(
       'href',
-      '/integrations',
+      '/settings/integrations',
     );
     expect(screen.queryByTitle('owner/repo')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Create repository' })).not.toBeInTheDocument();

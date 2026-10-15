@@ -75,7 +75,7 @@ export function SkillSelectionDialog({
       footer={
         <>
           <Link
-            href="/integrations"
+            href="/settings/plugins"
             className="mr-auto text-sm text-gray-500 underline dark:text-gray-400"
           >
             {t('skills.manage')}

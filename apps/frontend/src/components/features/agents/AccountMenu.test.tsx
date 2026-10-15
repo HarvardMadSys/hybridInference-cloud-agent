@@ -144,7 +144,7 @@ describe('account menu', () => {
   });
 
   it('holds the account pages, preferences, help and sign-out', async () => {
-    pathname = '/integrations';
+    pathname = '/settings/my-settings';
     renderMenu({ gatewayUrl: 'https://gateway.example', docsUrl: 'https://docs.example/agents' });
     const menu = await openMenu();
 
@@ -159,7 +159,7 @@ describe('account menu', () => {
       'https://gateway.example/dashboard',
     );
     const settings = within(menu).getByRole('menuitem', { name: 'My Settings' });
-    expect(settings).toHaveAttribute('href', '/integrations');
+    expect(settings).toHaveAttribute('href', '/settings/my-settings');
     expect(settings).toHaveAttribute('aria-current', 'page');
     expect(document.activeElement).toBe(within(menu).getByRole('menuitem', { name: 'Dashboard' }));
   });

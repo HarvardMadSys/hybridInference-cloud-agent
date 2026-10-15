@@ -28,6 +28,7 @@ import {
   MoreIcon,
   SunIcon,
 } from '@/components/features/settings/icons';
+import { isSettingsPath, SETTINGS_PATHS } from '@/components/features/settings/navigation';
 import { LOCALES, LOCALE_LABELS } from '@/lib/i18n/locales';
 import { THEME_PREFERENCES, type ThemePreference } from '@/lib/theme';
 
@@ -350,9 +351,9 @@ export function AccountMenu({ variant }: { variant: 'sidebar' | 'header' }) {
               ) : null}
               <Link
                 role="menuitem"
-                href="/integrations"
-                aria-current={pathname === '/integrations' ? 'page' : undefined}
-                className={`${ITEM} ${pathname === '/integrations' ? 'font-medium' : ''}`}
+                href={SETTINGS_PATHS.profile}
+                aria-current={isSettingsPath(pathname ?? '') ? 'page' : undefined}
+                className={`${ITEM} ${isSettingsPath(pathname ?? '') ? 'font-medium' : ''}`}
                 onClick={() => close(false)}
                 {...plain}
               >

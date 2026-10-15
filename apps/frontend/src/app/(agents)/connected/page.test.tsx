@@ -44,7 +44,7 @@ describe('AgentsConnectedPage', () => {
     await waitFor(() =>
       expect(mockedConnectGitLab).toHaveBeenCalledWith('gitlab-code', 'signed-state'),
     );
-    expect(navigation.replace).toHaveBeenCalledWith('/integrations?connected=gitlab');
+    expect(navigation.replace).toHaveBeenCalledWith('/settings/integrations?connected=gitlab');
   });
 
   it('defaults legacy callbacks without a provider to GitHub', async () => {
@@ -56,7 +56,7 @@ describe('AgentsConnectedPage', () => {
     await waitFor(() =>
       expect(mockedConnectGitHub).toHaveBeenCalledWith('github-code', 'signed-state'),
     );
-    expect(navigation.replace).toHaveBeenCalledWith('/integrations?connected=github');
+    expect(navigation.replace).toHaveBeenCalledWith('/settings/integrations?connected=github');
   });
 
   it('submits a single-use OAuth state only once in React Strict Mode', async () => {
@@ -118,7 +118,7 @@ describe('AgentsConnectedPage', () => {
     render(<AgentsConnectedPage />);
 
     await waitFor(() =>
-      expect(navigation.replace).toHaveBeenCalledWith('/integrations?connected=github'),
+      expect(navigation.replace).toHaveBeenCalledWith('/settings/integrations?connected=github'),
     );
   });
 
@@ -178,7 +178,7 @@ describe('AgentsConnectedPage', () => {
     render(<AgentsConnectedPage />);
 
     fireEvent.click(await screen.findByRole('button', { name: 'Not now' }));
-    expect(navigation.replace).toHaveBeenCalledWith('/integrations?connected=github');
+    expect(navigation.replace).toHaveBeenCalledWith('/settings/integrations?connected=github');
   });
 
   // Back from GitHub's install page, or a refresh, opens the same callback
@@ -199,7 +199,7 @@ describe('AgentsConnectedPage', () => {
     render(<AgentsConnectedPage />);
 
     await waitFor(() =>
-      expect(navigation.replace).toHaveBeenCalledWith('/integrations?connected=github'),
+      expect(navigation.replace).toHaveBeenCalledWith('/settings/integrations?connected=github'),
     );
     expect(mockedConnectGitHub).toHaveBeenCalledTimes(1);
     expect(screen.queryByText(/Could not connect/)).not.toBeInTheDocument();
@@ -218,7 +218,7 @@ describe('AgentsConnectedPage', () => {
     render(<AgentsConnectedPage />);
 
     await waitFor(() =>
-      expect(navigation.replace).toHaveBeenCalledWith('/integrations?connected=github'),
+      expect(navigation.replace).toHaveBeenCalledWith('/settings/integrations?connected=github'),
     );
     expect(mockedConnectGitHub).toHaveBeenCalledTimes(2);
   });

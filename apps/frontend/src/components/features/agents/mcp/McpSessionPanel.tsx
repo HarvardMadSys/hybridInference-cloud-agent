@@ -656,7 +656,7 @@ function McpSessionPanelContent({
               MCP servers
             </h3>
             <div className="flex gap-3 text-xs text-gray-500 dark:text-gray-400">
-              <Link href="/integrations" className="hover:underline">
+              <Link href="/settings/plugins" className="hover:underline">
                 Manage servers
               </Link>
               <button
@@ -694,7 +694,7 @@ function McpSessionPanelContent({
                 Connect a server to give your agent access to your tools and data.
               </p>
               <Link
-                href="/integrations"
+                href="/settings/plugins"
                 className="mt-3 inline-block text-sm font-medium text-gray-900 underline dark:text-gray-100"
               >
                 Add MCP server
@@ -737,7 +737,7 @@ function McpSessionPanelContent({
                 {!binding.available ? (
                   <p className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800 dark:bg-amber-500/10 dark:text-amber-300">
                     {binding.error ?? 'This server is currently unavailable.'}{' '}
-                    <Link href="/integrations" className="underline">
+                    <Link href="/settings/plugins" className="underline">
                       Manage connection
                     </Link>
                   </p>
@@ -774,7 +774,7 @@ function McpSessionPanelContent({
                 ) : binding.available ? (
                   <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
                     No tools discovered yet.{' '}
-                    <Link href="/integrations" className="underline">
+                    <Link href="/settings/plugins" className="underline">
                       Refresh the connection
                     </Link>
                   </p>

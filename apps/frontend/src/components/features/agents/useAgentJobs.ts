@@ -124,7 +124,10 @@ export function applyAgentLifecycleEvent(
 export type SidebarProject = Omit<AgentProjectApi, 'repo'> & { repo: string };
 
 /** The caller's projects, for the sidebar's folder tree. */
-export function useAgentProjects(archived = false): {
+export function useAgentProjects(
+  archived = false,
+  enabled = true,
+): {
   projects: SidebarProject[];
   loading: boolean;
   error: string | null;
@@ -146,6 +149,7 @@ export function useAgentProjects(archived = false): {
   useEffect(() => {
     let cancelled = false;
     const requestGeneration = generation.current;
+    if (!enabled) return;
     listAgentProjects(archived)
       .then((api) => {
         if (cancelled || requestGeneration !== generation.current) return;
@@ -162,7 +166,7 @@ export function useAgentProjects(archived = false): {
     return () => {
       cancelled = true;
     };
-  }, [archived, tick]);
+  }, [archived, tick, enabled]);
 
   return { projects, loading, error, reload };
 }

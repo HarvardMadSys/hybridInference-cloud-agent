@@ -127,7 +127,7 @@ describe('create repository dialog', () => {
     submit();
     await screen.findByRole('status');
     const configure = screen.getByRole('link', { name: 'Configure repository access' });
-    expect(configure).toHaveAttribute('href', '/integrations');
+    expect(configure).toHaveAttribute('href', '/settings/integrations');
     expect(configure).toHaveAttribute('target', '_blank');
     expect(configure).toHaveAttribute('rel', 'noopener noreferrer');
     expect(available).not.toHaveBeenCalled();

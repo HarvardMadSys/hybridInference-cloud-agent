@@ -167,10 +167,10 @@ export function GettingStarted() {
         leaveFor(url);
         return;
       }
-      router.push('/integrations');
+      router.push('/settings/integrations');
     } catch {
       // The Integrations page is where a failed lookup is reported and retried.
-      router.push('/integrations');
+      router.push('/settings/integrations');
     }
     setLeaving(false);
   }
