@@ -861,3 +861,64 @@ async def test_owner_inference_credentials_wait_for_a_runner_that_keeps_them_fro
         assert owner_value not in response.text
         assert store.released == [(_JOB, _ATTEMPT)]
         assert grants.calls == []
+
+
+@pytest.mark.parametrize("compatibility", ["old-runner", "ready"])
+async def test_an_ssh_claim_carries_the_groups_state_only_to_a_capable_runner(
+    monkeypatch, compatibility
+):
+    from unittest.mock import AsyncMock
+
+    from cloud_agent.application.ssh_servers import generate_key_pair, ssh_key_cipher
+
+    monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "ssh-claim-encryption-key")
+    _public, private = generate_key_pair("cloud-agent:gpu-3f9c2a1e")
+    from tests.support.ssh_keys import host_key as fresh_host_key
+
+    host_key = fresh_host_key()
+    server = {
+        "id": "3f9c2a1e-0000-4000-8000-000000000001",
+        "name": "gpu",
+        "description": "",
+        "pinned_ipv4": "93.184.216.34",
+        "port": 22,
+        "username": "ubuntu",
+        "host_key_type": "ssh-ed25519",
+        "host_key": host_key,
+        "private_key_ciphertext": ssh_key_cipher().encrypt(private),
+    }
+    store, grants = _ClaimStore(), _Grants()
+    store.ssh_group_state = AsyncMock(
+        return_value={
+            "revision": 9,
+            "sandbox_id": "asbx_1",
+            "members": [{"thread_id": "athr_1", "slot_id": 2, "servers": [server]}],
+        }
+    )
+    body = {
+        "worker_id": "w1",
+        "attestation": {
+            "runner_capabilities": [] if compatibility == "old-runner" else ["ssh-access-v1"]
+        },
+    }
+    async with AsyncClient(
+        transport=ASGITransport(app=_app(store, grants)), base_url="http://test"
+    ) as client:
+        response = await client.post("/v1/agent/worker/claim", json=body)
+    store.ssh_group_state.assert_awaited_once_with(thread_id="athr_1")
+    if compatibility == "ready":
+        assert response.status_code == 200, response.text
+        access = response.json()["ssh_access"]
+        assert access["revision"] == 9
+        (member,) = access["members"]
+        assert member["slot_id"] == 2
+        assert member["servers"][0]["private_key"] == private
+        prompt = response.json()["task_prompt"]
+        assert '"login": "ubuntu@93.184.216.34:22"' in prompt and prompt.endswith("fix it")
+        assert private not in prompt
+    else:
+        assert response.status_code == 503, response.text
+        assert private not in response.text
+        assert store.released == [(_JOB, _ATTEMPT)]
+        assert store.retry_delays == [30]
+        assert grants.calls == []

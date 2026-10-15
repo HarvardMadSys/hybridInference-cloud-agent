@@ -315,6 +315,7 @@ from cloud_agent_host.action_receipts import ActionReceipts
 from cloud_agent_host.environment_preparation import EnvironmentPreparation
 from cloud_agent_host.environment_process import tool_environment
 from cloud_agent_host.environment_snapshot import check_snapshot_secrets
+from cloud_agent_host.ssh_access import apply_ssh_access
 from cloud_agent_shared.environment import (
     ENVIRONMENT_CAPABILITY,
     ENVIRONMENT_INFERENCE_CAPABILITY,
@@ -325,6 +326,18 @@ from cloud_agent_shared.environment_snapshots import (
     EnvironmentSnapshotRef,
 )
 from cloud_agent_shared.secret_redaction import SecretRedactor
+from cloud_agent_shared.ssh_access import SSH_ACCESS_CAPABILITY, SshAccess
+
+
+class SshAccessRequest(BaseModel):
+    """A group's whole SSH state, sent by the runner or the control plane."""
+
+    model_config = ConfigDict(extra="forbid")
+    access: SshAccess = Field(repr=False)
+    #: The workspace's own turn starts with this state, so its member's keys
+    #: are written. Only the runner, which masks exactly those keys, says so;
+    #: a push leaves it False and can only take access away.
+    starting: bool = False
 
 
 class EnvironmentPrepareRequest(BaseModel):
@@ -2501,6 +2514,7 @@ def create_app(
             "capabilities": [
                 ENVIRONMENT_CAPABILITY,
                 ENVIRONMENT_INFERENCE_CAPABILITY,
+                SSH_ACCESS_CAPABILITY,
                 *(
                     [ENVIRONMENT_SNAPSHOT_CAPABILITY]
                     if getattr(archive_controller, "snapshots_available", False)
@@ -3714,6 +3728,39 @@ def create_app(
             environment_preparation,
             activation_owner=body.activation_owner,
         )
+
+    @app.put("/workspaces/{workspace_id}/ssh-access")
+    async def sync_ssh_access(
+        workspace_id: str, body: SshAccessRequest, _: None = Depends(authenticate)
+    ) -> dict[str, Any]:
+        """Converge a running group to its owner's SSH state; a stopped one waits.
+
+        A stopped group has no bridge and no member tmpfs to update; its next
+        turn carries the state again before anything runs in it.
+        """
+
+        def sync() -> dict[str, Any]:
+            retained = retained_owner(workspace_id).backend(workspace_id)
+            current = retained.manager.inspect(retained.spec.container_name)
+            if current is None or not current.running:
+                return {"newest": False, "running": False}
+            retained.manager.require_network(retained.spec)
+            return {
+                **apply_ssh_access(
+                    retained.manager,
+                    retained.spec,
+                    body.access,
+                    starting_thread_id=workspace_id if body.starting else None,
+                ),
+                "running": True,
+            }
+
+        try:
+            return await endpoint_calls.run(sync)
+        except RetainedWorkspaceError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+        except (SandboxError, ValueError) as exc:
+            raise supervisor_error(exc) from exc
 
     @app.post("/workspaces/{workspace_id}/terminal")
     async def terminal(

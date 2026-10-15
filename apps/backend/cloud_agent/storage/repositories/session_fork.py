@@ -313,6 +313,16 @@ class PostgresSessionForkRepository:
                 target_thread_id,
                 source["thread_id"],
             )
+            # A Fork belongs to the source's owner, so its SSH selection does too.
+            await conn.execute(
+                """
+                INSERT INTO agent_ssh_thread_bindings (thread_id, server_id, enabled)
+                SELECT $1, server_id, enabled
+                FROM agent_ssh_thread_bindings WHERE thread_id = $2
+                """,
+                target_thread_id,
+                source["thread_id"],
+            )
             await conn.execute(
                 """
                 INSERT INTO agent_session_forks (

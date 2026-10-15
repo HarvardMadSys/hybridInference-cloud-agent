@@ -13,6 +13,7 @@ from typing import Any
 from cloud_agent_shared.environment import BoundEnvironment
 from cloud_agent_shared.environment_snapshots import EnvironmentSnapshotRef
 from cloud_agent_shared.plugins import MAX_SANDBOX_PLUGINS, validate_sandbox_plugins
+from cloud_agent_shared.ssh_access import SshAccess
 
 
 class LeaseLost(Exception):
@@ -79,6 +80,9 @@ class ClaimedJob:
     # An installation snapshot a new workspace of this binding may start
     # from. A follow-up turn, or a group restored from its checkpoint, ignores it.
     environment_snapshot: EnvironmentSnapshotRef | None = None
+    # The group's whole SSH state, present only for a group whose chats have
+    # ever selected an SSH server. It carries private keys.
+    ssh_access: SshAccess | None = field(default=None, repr=False)
     # Explicit CLI plugins installed in this chat's private member state.
     plugins: list[dict[str, str]] = field(default_factory=list)
     # Read-only, single-repo, short-lived: what the runner clones with. Never
@@ -134,6 +138,9 @@ class ClaimedJob:
             if body.get("environment")
             else None,
             environment_snapshot=_snapshot_ref(body.get("environment_snapshot")),
+            ssh_access=SshAccess.model_validate(body["ssh_access"])
+            if body.get("ssh_access")
+            else None,
             plugins=plugins,
             runtime=body["runtime"],
             model=body["model"],

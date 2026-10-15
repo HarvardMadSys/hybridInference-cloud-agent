@@ -64,6 +64,17 @@ vi.mock('@/lib/api/mcp', () => ({
   authorizeMcpConnection: vi.fn(),
 }));
 
+// The SSH section has its own tests; here it only has to load quietly.
+vi.mock('@/lib/api/sshServers', () => ({
+  listSshServers: vi.fn(async () => ({ configured: true, servers: [] })),
+  createSshServer: vi.fn(),
+  updateSshServer: vi.fn(),
+  scanSshServer: vi.fn(),
+  verifySshServer: vi.fn(),
+  rotateSshServerKey: vi.fn(),
+  deleteSshServer: vi.fn(),
+}));
+
 import {
   disconnectAgentIntegration,
   disconnectGitHubAccount,

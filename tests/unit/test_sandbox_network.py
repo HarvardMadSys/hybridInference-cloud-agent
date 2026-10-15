@@ -257,3 +257,23 @@ def test_relay_updates_touch_only_the_relay_sets() -> None:
 
 def test_rendering_is_deterministic() -> None:
     assert render_ruleset(_network()) == render_ruleset(_network())
+
+
+def test_ssh_targets_sit_between_the_protected_set_and_the_public_ports() -> None:
+    network = _network()
+    text = render_ruleset(network)
+    assert (
+        f"add set inet {network.table} ssh_targets "
+        "{ type ifname . ipv4_addr . inet_service; }" in text
+    )
+    outbound = _rules(text, "from_group")
+    protected = next(i for i, line in enumerate(outbound) if "@protected4" in line)
+    ssh = next(i for i, line in enumerate(outbound) if "@ssh_targets" in line)
+    public = next(i for i, line in enumerate(outbound) if "tcp dport {" in line)
+    # Protected space stays refused even if an element names it, and the
+    # exception is exact: this bridge, this address, this port.
+    assert protected < ssh < public
+    assert outbound[ssh].endswith("iifname . ip daddr . tcp dport @ssh_targets accept")
+    # Routed traffic only: the bridged path never consults it.
+    bridged = [line for line in text.splitlines() if line.startswith("add rule bridge")]
+    assert not any("ssh_targets" in line for line in bridged)

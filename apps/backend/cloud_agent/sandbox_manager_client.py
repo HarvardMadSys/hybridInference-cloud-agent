@@ -326,6 +326,20 @@ class SandboxManagerClient:
             timeout=1050,
         )
 
+    async def sync_ssh_access(self, workspace_id: str, access: Any) -> dict[str, Any]:
+        """Push a running group's whole SSH state.
+
+        A push only ever takes access away from a running member: keys reach a
+        member with its next turn, whose runner masks them.
+        """
+        return await self._request(
+            "PUT",
+            quote(workspace_id, safe=""),
+            "ssh-access",
+            json={"access": access.model_dump(mode="json")},
+            timeout=120,
+        )
+
     async def environment_status(self, workspace_id: str, binding_id: str) -> dict[str, Any]:
         """Read only masked steps from an already materialized workspace."""
         return await self._request(

@@ -21,6 +21,9 @@ from cloud_agent.schemas._host_reports import (
 from cloud_agent_shared.plugins import (
     SandboxPlugin,  # noqa: TC001 — Pydantic resolves annotations at runtime.
 )
+from cloud_agent_shared.ssh_access import (
+    SshAccess,  # noqa: TC001 — Pydantic resolves annotations at runtime.
+)
 
 # A lease is the only thing that lets the reaper take a job back from a stuck
 # or malicious worker. If the worker could pick the TTL, it could pick one long
@@ -240,6 +243,9 @@ class WorkerClaimResponse(BaseModel):
     #: An installation snapshot a new workspace of this binding may start
     #: from (``EnvironmentSnapshotRef``). Only for a host that can.
     environment_snapshot: dict[str, Any] | None = None
+    #: The sandbox group's whole SSH state, keys included; absent for a group
+    #: whose chats never selected an SSH server.
+    ssh_access: SshAccess | None = Field(None, repr=False)
 
     #: How many uploads this whole conversation holds, not just this turn.
     #: A host with zero here skips the upload fetch entirely, which is every

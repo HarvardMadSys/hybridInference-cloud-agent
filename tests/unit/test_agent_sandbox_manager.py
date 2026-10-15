@@ -3132,3 +3132,34 @@ async def test_inventory_rows_carry_each_groups_latest_checkpoint(tmp_path):
     assert response.status_code == 200
     assert response.json()["sandboxes"][0]["checkpoint"] == receipt.as_dict()
     assert without_store.json()["sandboxes"][0]["checkpoint"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("starting", [True, False])
+async def test_only_a_starting_turn_has_its_members_ssh_keys_written(monkeypatch, starting):
+    """The runner says its turn starts and masks exactly those keys; a push cannot say so."""
+    from cloud_agent_shared.ssh_access import SshAccess
+
+    supervisor = _SharedSupervisor()
+    supervisor.workspace_backend.manager.inspect = lambda _name: SimpleNamespace(running=True)
+    supervisor.workspace_backend.spec.container_name = "container-shared"
+    applied: list[str | None] = []
+
+    def apply(_manager, _spec, access, *, starting_thread_id):
+        applied.append(starting_thread_id)
+        return {"newest": True, "revision": access.revision}
+
+    monkeypatch.setattr(sandbox_manager_mod, "apply_ssh_access", apply)
+    body = {"access": SshAccess(revision=3, members=[]).model_dump(mode="json")}
+    async with AsyncClient(
+        transport=ASGITransport(app=_app(supervisor)), base_url="http://sandbox_manager"
+    ) as client:
+        response = await client.put(
+            "/workspaces/athr_source/ssh-access",
+            json={**body, "starting": True} if starting else body,
+            headers={"X-Agent-Workspace-Token": "sandbox-manager-secret"},
+        )
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"newest": True, "revision": 3, "running": True}
+    assert applied == ["athr_source" if starting else None]

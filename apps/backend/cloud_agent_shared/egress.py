@@ -6,6 +6,8 @@ deployment's address pool, and the host enforces one fixed rule set on it:
 - public IPv4 unicast on TCP 80 and 443;
 - the one named DNS resolver, TCP/UDP 53;
 - the group's own two relays (inference and MCP), by exact address and port;
+- the exact public ``IPv4:port`` of each SSH server its owner registered,
+  verified and enabled for one of the group's chats (``ssh_targets``);
 - nothing else: not the host, not private, link-local (cloud metadata), CGNAT,
   multicast or reserved space, not another group, not other ports, not UDP 443,
   not IPv6, and no connection started from outside.
@@ -29,6 +31,14 @@ only when the kernel's bridge netfilter is loaded, so a ``bridge`` table polices
 them directly; when bridge netfilter is loaded, the ``inet`` table applies the
 same relay exceptions and lets nothing else through.
 
+**SSH targets are per bridge.** The ``ssh_targets`` set holds
+``bridge . address . port`` elements the host writes for one group when its
+owner's SSH selection changes (:mod:`cloud_agent_shared.ssh_access`). It is
+consulted after the protected set, so an address in protected space stays
+refused even if an element names it, and before the 80/443 rule, which it does
+not widen for anyone else. The forward chain checks every packet rather than
+only new connections, so deleting an element cuts a live SSH session too.
+
 **Ports, not protocols.** TCP 80/443 is a port rule. Nothing inspects what
 travels inside, so this is not a promise that only HTTP leaves, and it does not
 stop a sandbox sending the repository or its own short-lived tokens to a public
@@ -48,6 +58,9 @@ from urllib.parse import urlparse
 from cloud_agent_shared.errors import SandboxError
 
 PUBLIC_TCP_PORTS: tuple[int, ...] = (80, 443)
+#: The set of per-bridge SSH exceptions. Routed traffic only, so ``inet`` alone.
+SSH_TARGETS_SET = "ssh_targets"
+SSH_TARGET_FAMILIES: tuple[str, ...] = ("inet",)
 DNS_PORT = 53
 
 #: Every IPv4 block that is not ordinary global unicast (IANA's special-purpose
@@ -243,7 +256,8 @@ def render_ruleset(network: SandboxNetwork) -> str:
     Safe to re-run while groups are live: tables, sets and chains are declared
     with ``add``; the chains, the protected set and the pool registration are
     replaced wholesale; the relay sets, which change as relays attach to and
-    leave group bridges, are left as they are.
+    leave group bridges, and the SSH target set, which changes with owners'
+    selections, are left as they are.
     """
     table = network.table
     bridges = f'"{network.interface_prefix}*"'
@@ -281,6 +295,7 @@ def render_ruleset(network: SandboxNetwork) -> str:
                 f"ip saddr != {pool} counter drop",
                 *dns_accept,
                 "ip daddr @protected4 counter reject with icmp type admin-prohibited",
+                f"iifname . ip daddr . tcp dport @{SSH_TARGETS_SET} accept",
                 f"tcp dport {{ {ports} }} accept",
                 "meta l4proto tcp counter reject with tcp reset",
                 "counter reject with icmp type admin-prohibited",
@@ -323,6 +338,7 @@ def render_ruleset(network: SandboxNetwork) -> str:
         f"add set inet {table} pool4 {{ type ipv4_addr; flags interval; }}",
         f"add set inet {table} protected4 {{ type ipv4_addr; flags interval; auto-merge; }}",
         f"add set inet {table} relays {{ type ifname . ipv4_addr . inet_service; }}",
+        f"add set inet {table} {SSH_TARGETS_SET} {{ type ifname . ipv4_addr . inet_service; }}",
     ]
     for name, (header, _) in chains.items():
         lines.append(
@@ -389,6 +405,8 @@ __all__ = [
     "PROTECTED_IPV4",
     "PUBLIC_TCP_PORTS",
     "RELAY_FAMILIES",
+    "SSH_TARGETS_SET",
+    "SSH_TARGET_FAMILIES",
     "TABLE_PREFIX",
     "RelayEndpoint",
     "SandboxNetwork",

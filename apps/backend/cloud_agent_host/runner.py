@@ -192,6 +192,7 @@ from cloud_agent_shared.shared_protocol import (
     mid_turn_input_capability,
     shared_deployment_capability,
 )
+from cloud_agent_shared.ssh_access import SSH_ACCESS_CAPABILITY
 
 DEFAULT_LEASE_TTL_S = 120.0
 HEARTBEAT_INTERVAL_S = 30.0
@@ -1253,7 +1254,7 @@ def _shared_live_host_capabilities(
 
 
 def _environment_host_capabilities(backend: SandboxBackend, stamp: dict[str, Any]) -> list[str]:
-    """Advertise environment execution only beside proven shared-live support."""
+    """Advertise environment execution and SSH access only beside proven shared-live support."""
     capabilities = _shared_live_host_capabilities(backend, stamp)
     if not capabilities:
         return []
@@ -1262,7 +1263,16 @@ def _environment_host_capabilities(backend: SandboxBackend, stamp: dict[str, Any
         ENVIRONMENT_CAPABILITY,
         ENVIRONMENT_INFERENCE_CAPABILITY,
         ENVIRONMENT_SNAPSHOT_CAPABILITY,
+        SSH_ACCESS_CAPABILITY,
     ]
+
+
+def _claim_secret_values(job: ClaimedJob) -> dict[str, str]:
+    """Every value the claim put in the sandbox that output must never show."""
+    values = job.environment.secrets() if job.environment else {}
+    if job.ssh_access is not None:
+        values = {**values, **job.ssh_access.secrets()}
+    return values
 
 
 def _shared_live_deployment_ready(
@@ -2785,6 +2795,17 @@ def _run_shared_live_attempt(
         # setup ran past a minute.
         network_observer = operation_profiling.stage_observer(measurement)
         retained.require_network(observer=network_observer)
+        if job.ssh_access is not None:
+            # Before setup and the agent: this member holds the keys of its
+            # selected servers, which _claim_secret_values already masks, and
+            # the bridge reaches them. A newer state the control plane already
+            # pushed wins: what it closed stays closed.
+            ssh_slot = int(
+                running.get("resident_slot_id") or reservation.get("resident_slot_id") or 0
+            )
+            supervisor.sync_ssh_access(
+                job.thread_id, job.ssh_access.with_slot(job.thread_id, ssh_slot), starting=True
+            )
         if job.environment is not None:
             prepared = supervisor.prepare_environment(
                 job.thread_id,
@@ -3393,7 +3414,7 @@ def _deliver_in_background(
         control: ControlPlane | None = None
         try:
             control = ControlPlane(base_url, job.worker_token)
-            control._secret_values = job.environment.secrets() if job.environment else {}
+            control._secret_values = _claim_secret_values(job)
             control._redactor = SecretRedactor(control._secret_values)
             outcome = measurement.frozen_outcome or "incomplete"
             record = operation_profiling.frozen_record(measurement, outcome)
@@ -3508,7 +3529,7 @@ def _run_turn(
         host,
     )
     control = ControlPlane(base_url, job.worker_token)
-    control._secret_values = job.environment.secrets() if job.environment else {}
+    control._secret_values = _claim_secret_values(job)
     control._redactor = SecretRedactor(control._secret_values)
     control.job_id = job.job_id
     heart = Heartbeater(control, ttl=lease_ttl, interval=HEARTBEAT_INTERVAL_S)

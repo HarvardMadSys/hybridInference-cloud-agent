@@ -688,6 +688,10 @@ class ChatSandboxManager:
         """Delegate to the group-network lifecycle owner."""
         return self._network_lifecycle._ensure_group_services(network, spec, sandbox=sandbox)
 
+    def sync_ssh_targets(self, spec: ChatSandboxSpec, endpoints: set[tuple[str, int]]) -> None:
+        """Delegate to the group-network lifecycle owner."""
+        return self._network_lifecycle.sync_ssh_targets(spec, endpoints)
+
     def require_host_rules(self) -> None:
         """Delegate to the group-network lifecycle owner."""
         return self._network_lifecycle.require_host_rules()

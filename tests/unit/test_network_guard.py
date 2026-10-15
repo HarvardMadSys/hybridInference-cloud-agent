@@ -318,7 +318,7 @@ def test_a_flushed_chain_is_detected_and_repaired() -> None:
         guard._verify(render_ruleset(guard.network))
     # ...and the next ensure reinstalls it.
     guard.ensure(max_age_s=0)
-    assert nft.table("inet", guard.network.table)["rules"]["from_group"] == 8
+    assert nft.table("inet", guard.network.table)["rules"]["from_group"] == 9
 
 
 def test_a_chain_without_its_hook_fails_verification() -> None:
@@ -895,3 +895,81 @@ def test_a_flushed_table_refuses_an_activation_once_the_sweep_falls_behind(monke
 
     with pytest.raises(NetworkGuardError):
         guard.sync_relays(bridge, {("10.240.0.3", 8080)}, network_id=_NET)
+
+
+def test_ssh_targets_are_exact_per_bridge_and_routed_only() -> None:
+    nft = FakeNft()
+    guard = _guard(nft)
+    guard.ensure()
+    bridge = guard.network.bridge_name("freeinference-chat-net-x")
+    other = guard.network.bridge_name("freeinference-chat-net-y")
+    calls = len(nft.calls)
+
+    guard.sync_ssh_targets(bridge, {("93.184.216.34", 22), ("93.184.216.35", 2222)})
+    guard.sync_ssh_targets(other, {("93.184.216.36", 22)})
+
+    assert len(nft.calls) == calls + 2, "one helper reads, compares and writes"
+    assert nft.requests()[-2] == {
+        "reads": [],
+        "ssh_targets": {
+            "table": guard.network.table,
+            "families": ["inet"],
+            "bridge": bridge,
+            "wanted": [["93.184.216.34", 22], ["93.184.216.35", 2222]],
+        },
+    }
+    assert "ssh_targets" not in nft.table("bridge", guard.network.table)["sets"]
+    guard.sync_ssh_targets(bridge, {("93.184.216.35", 2222)})
+    assert guard.ssh_target_endpoints(bridge) == {("93.184.216.35", 2222)}
+    assert guard.ssh_target_endpoints(other) == {("93.184.216.36", 22)}
+
+
+def test_ssh_targets_survive_a_reinstall_of_the_rules() -> None:
+    nft = FakeNft()
+    guard = _guard(nft)
+    guard.ensure()
+    bridge = guard.network.bridge_name("freeinference-chat-net-x")
+    guard.sync_ssh_targets(bridge, {("93.184.216.34", 22)})
+    nft.table("inet", guard.network.table)["rules"]["from_group"] = 0
+
+    guard.ensure(max_age_s=0)
+
+    assert guard.ssh_target_endpoints(bridge) == {("93.184.216.34", 22)}
+
+
+def test_releasing_a_bridge_drops_its_relays_and_ssh_targets_in_one_helper() -> None:
+    nft = FakeNft()
+    guard = _guard(nft)
+    guard.ensure()
+    bridge = guard.network.bridge_name("freeinference-chat-net-x")
+    other = guard.network.bridge_name("freeinference-chat-net-y")
+    guard.sync_relays(bridge, {("10.240.0.3", 8080)})
+    guard.sync_ssh_targets(bridge, {("93.184.216.34", 22)})
+    guard.sync_ssh_targets(other, {("93.184.216.36", 22)})
+    calls = len(nft.calls)
+
+    guard.release_bridge(bridge)
+
+    assert len(nft.calls) == calls + 1
+    assert guard.relay_endpoints(bridge) == set()
+    assert guard.ssh_target_endpoints(bridge) == set()
+    assert guard.ssh_target_endpoints(other) == {("93.184.216.36", 22)}
+
+
+@pytest.mark.parametrize(
+    ("target", "message"),
+    [
+        (("2001:db8::1", 22), "IPv4"),
+        (("ssh.example.com", 22), "IPv4"),
+        (("93.184.216.34", 0), "port"),
+        (("93.184.216.34", 65536), "port"),
+    ],
+)
+def test_an_ssh_target_must_be_an_ipv4_address_and_port(target, message) -> None:
+    nft = FakeNft()
+    guard = _guard(nft)
+    bridge = guard.network.bridge_name("freeinference-chat-net-x")
+    with pytest.raises(NetworkGuardError, match=message):
+        guard.sync_ssh_targets(bridge, {target})
+    with pytest.raises(NetworkGuardError, match="not one of this deployment"):
+        guard.sync_ssh_targets("eth0", set())

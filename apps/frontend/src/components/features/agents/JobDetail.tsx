@@ -46,6 +46,7 @@ import { isGoalRevisionConflict, writeGoal } from './goal/goalApi';
 import { hasLiveWork } from './goal/liveWork';
 import { GOAL_COMMAND_PREFIX, useGoalCommand } from './goal/useGoalCommand';
 import { useThreadComposerMcp } from './mcp/useThreadComposerMcp';
+import { useThreadComposerSsh } from './ssh/useComposerSsh';
 import { createRecordedOutputsSelector } from './recordedTurnOutputs';
 import { useTranscriptPresentation } from './transcriptPresentation';
 import type { AgentJob } from './types';
@@ -176,6 +177,7 @@ export function JobDetail({
   const { config, model, effort } = settings;
   const attachments = useAttachments(t, config?.attachment_limits);
   const mcp = useThreadComposerMcp(job.threadId);
+  const ssh = useThreadComposerSsh(job.threadId);
   const selectedSkills = chosenSkills ?? inheritedSkills;
   const mcpBlockedReason =
     config?.mcp_runtimes && !config.mcp_runtimes.includes(job.runtime)
@@ -339,7 +341,8 @@ export function JobDetail({
       isArchived ||
       attachments.uploading ||
       readingFiles ||
-      mcp.saving
+      mcp.saving ||
+      ssh.saving
     )
       return null;
     const snapshot = draft.capture();
@@ -601,6 +604,7 @@ export function JobDetail({
     !submitting &&
     !rewriting &&
     !mcp.saving &&
+    !ssh.saving &&
     !publicationPending &&
     watchPrAcceptedJobId !== job.id &&
     queue.loaded &&
@@ -814,6 +818,7 @@ export function JobDetail({
                 draft={draft}
                 attachments={attachments}
                 mcp={mcp}
+                ssh={ssh}
                 queue={queue}
                 goalCommand={goalCommand}
                 composerRef={scroll.composerRef}

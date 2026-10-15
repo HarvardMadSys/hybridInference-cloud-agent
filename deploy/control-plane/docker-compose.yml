@@ -104,6 +104,9 @@ services:
       AGENT_SETTINGS_ENCRYPTION_KEY: ${AGENT_SETTINGS_ENCRYPTION_KEY:-}
       AGENT_CONTROL_TOKEN_SECRET: ${AGENT_CONTROL_TOKEN_SECRET:-}
       AGENT_SOURCE_CONTROL_ENCRYPTION_KEY: ${AGENT_SOURCE_CONTROL_ENCRYPTION_KEY:-}
+      # The blocks the hosts add to the sandbox's protected space. Checking an
+      # owner's SSH server refuses an address in them, as the sandbox would.
+      AGENT_EGRESS_PROTECTED_CIDRS: ${AGENT_EGRESS_PROTECTED_CIDRS:-}
       # The API enforces the same exact host-generation capability as the
       # deploy gate. Without this, a pending runner could claim queued work
       # while deploy.sh correctly refused to replace the old API.

@@ -37,6 +37,7 @@ import { useAttachments } from './attachments/useAttachments';
 import { filesFromDataTransfer } from '@/lib/dataTransferFiles';
 import { GOAL_COMMAND_PREFIX, useGoalCommand } from './goal/useGoalCommand';
 import { useComposerMcp } from './mcp/useComposerMcp';
+import { useComposerSsh } from './ssh/useComposerSsh';
 import { useSkillLibrary } from './skills/useSkillLibrary';
 import type { SelectedSkillApi } from '@/lib/api/skills';
 import { readDraftPlugins, validPluginForRuntime } from '@/lib/pluginConfiguration';
@@ -196,6 +197,7 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
   const [error, setError] = useState<string | null>(null);
   const attachments = useAttachments(t, config?.attachment_limits);
   const mcp = useComposerMcp(t);
+  const ssh = useComposerSsh();
   const saveDraft = draftStore.setValue;
   const savedBranch =
     branchOptionsRepo === repo ? branch : draft?.repo === repo ? draft.branch : '';
@@ -576,6 +578,8 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
       // Omitted gives the task no servers at all, which is the right default:
       // connecting a server and letting a task call it are separate choices.
       ...(mcp.bindings.length ? { mcp_bindings: mcp.bindings } : {}),
+      // Likewise: an SSH server is reachable only from chats that turned it on.
+      ...(ssh.serverIds.length ? { ssh_server_ids: ssh.serverIds } : {}),
       ...(plugins.length ? { plugins } : {}),
       // The completion condition rides the first message, so the first turn
       // is already working toward it rather than learning about it later.
@@ -820,6 +824,7 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
             onOpenGoal={insertGoalCommand}
             mcp={mcp}
             mcpBlockedReason={mcpBlockedReason}
+            ssh={ssh}
             onOpenPlugins={
               pluginsSupported || plugins.length ? () => setPluginsOpen(true) : undefined
             }

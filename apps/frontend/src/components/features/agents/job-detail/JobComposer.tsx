@@ -24,6 +24,7 @@ import { hasLiveWork } from '../goal/liveWork';
 import type { useGoalCommand } from '../goal/useGoalCommand';
 import { McpSessionPanel } from '../mcp/McpSessionPanel';
 import type { useThreadComposerMcp } from '../mcp/useThreadComposerMcp';
+import type { ComposerSsh } from '../ssh/useComposerSsh';
 import type { AgentJob } from '../types';
 import type { useComposerDraft } from '../useComposerDraft';
 import type { usePendingMessages } from '../usePendingMessages';
@@ -39,6 +40,7 @@ export function JobComposer({
   draft,
   attachments,
   mcp,
+  ssh,
   queue,
   goalCommand,
   composerRef,
@@ -68,6 +70,7 @@ export function JobComposer({
   draft: ReturnType<typeof useComposerDraft>;
   attachments: ReturnType<typeof useAttachments>;
   mcp: ReturnType<typeof useThreadComposerMcp>;
+  ssh?: ComposerSsh;
   queue: ReturnType<typeof usePendingMessages>;
   goalCommand: ReturnType<typeof useGoalCommand>;
   composerRef: (element: HTMLElement | null) => void;
@@ -292,6 +295,7 @@ export function JobComposer({
                   goalSummary={t('commands.goalHint')}
                   onOpenGoal={insertGoalCommand}
                   mcp={mcp}
+                  ssh={ssh}
                   onOpen={() => {
                     goalCommand.dismiss();
                     mcp.reload();
@@ -355,6 +359,7 @@ export function JobComposer({
                     attachments.uploading ||
                     readingFiles ||
                     mcp.saving ||
+                    Boolean(ssh?.saving) ||
                     goalCommand.busy
                   }
                   busy={submitting || goalCommand.busy}

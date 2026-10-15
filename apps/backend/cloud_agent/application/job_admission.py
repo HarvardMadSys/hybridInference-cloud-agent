@@ -21,6 +21,7 @@ from fastapi import HTTPException
 from cloud_agent.attachments.models import AttachmentError
 from cloud_agent.attachments.selection import resolve_attachments
 from cloud_agent.domain.requests import request_fingerprint
+from cloud_agent.domain.ssh_servers import SshServerUnavailable
 from cloud_agent.entitlement import RepoNotAllowed, require_entitled_repo
 from cloud_agent.execution_profiles import (
     RESERVED_EXECUTION_METADATA_KEYS,
@@ -663,7 +664,21 @@ async def _create_job_as(
             # same value the replay lookup above used, so the pre-check and the
             # unique index cannot disagree about what was sent.
             client_request_fingerprint=fingerprint,
+            ssh_server_ids=body.ssh_server_ids,
         )
+    except SshServerUnavailable as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": {
+                    "type": "invalid_request",
+                    "message": (
+                        "Only your SSH servers that passed their check can be selected: "
+                        f"{', '.join(exc.server_ids)}."
+                    ),
+                }
+            },
+        ) from exc
     except AttachmentError as exc:
         # The claim inside the store's transaction is the authoritative check:
         # another submission, the stale-upload sweep or a waiting message can

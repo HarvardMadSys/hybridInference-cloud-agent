@@ -87,6 +87,7 @@ class FakeGuard:
         self.fail: Exception | None = None
         self.relays: dict[str, set[tuple[str, int]]] = {}
         self.network_ids: dict[str, str | None] = {}
+        self.ssh_targets: dict[str, set[tuple[str, int]]] = {}
         self.events: list[str] = []
 
     def ensure(self, **_kwargs: Any) -> None:
@@ -101,6 +102,16 @@ class FakeGuard:
         self.events.append("sync_relays")
         self.relays[bridge] = set(endpoints)
         self.network_ids[bridge] = network_id
+
+    def sync_ssh_targets(self, bridge: str, endpoints: set[tuple[str, int]]) -> None:
+        self.events.append("sync_ssh_targets")
+        self.ssh_targets[bridge] = set(endpoints)
+
+    def release_bridge(self, bridge: str) -> None:
+        self.events.append("release_bridge")
+        self.relays[bridge] = set()
+        self.network_ids[bridge] = None
+        self.ssh_targets[bridge] = set()
 
 
 class FakeDocker:

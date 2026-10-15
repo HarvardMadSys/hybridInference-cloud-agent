@@ -4,6 +4,8 @@ import { useEffect, useId, useRef, useState } from 'react';
 import { useT } from '@/components/providers';
 import { SkillIcon } from './skills/SkillDialog';
 import { McpSubmenu } from './mcp/McpSubmenu';
+import { SshSubmenu } from './ssh/SshSubmenu';
+import type { ComposerSsh } from './ssh/useComposerSsh';
 import { useComposerMenuLayout } from './useComposerMenuLayout';
 import type { McpChoice } from './mcp/useComposerMcp';
 import {
@@ -63,6 +65,23 @@ function McpIcon() {
         strokeLinejoin="round"
         d="M9 3v4m6-4v4M5 7h14v5a7 7 0 0 1-14 0V7Zm7 12v2"
       />
+    </svg>
+  );
+}
+
+function SshIcon() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.6}
+      aria-hidden="true"
+      className="h-[17px] w-[17px] shrink-0"
+    >
+      <rect x="3" y="4" width="18" height="7" rx="2" />
+      <rect x="3" y="13" width="18" height="7" rx="2" />
+      <path strokeLinecap="round" d="M7 7.5h.01M7 16.5h.01" />
     </svg>
   );
 }
@@ -142,6 +161,7 @@ export function ComposerPlusMenu({
   onOpenGoal,
   mcp,
   mcpBlockedReason,
+  ssh,
   onOpenPlugins,
   pluginSummary,
   onOpenEnvironment,
@@ -165,6 +185,8 @@ export function ComposerPlusMenu({
     toggle: (connection: McpChoice['connection'], on: boolean) => void;
   };
   mcpBlockedReason?: string;
+  /** The owner's SSH servers this chat can reach; absent hides the row. */
+  ssh?: ComposerSsh;
   onOpenPlugins?: () => void;
   pluginSummary?: string;
   onOpenEnvironment?: () => void;
@@ -175,24 +197,29 @@ export function ComposerPlusMenu({
   const t = useT();
   const id = useId();
   const [open, setOpen] = useState(false);
-  const [submenu, setSubmenu] = useState(false);
+  const [submenu, setSubmenu] = useState<'mcp' | 'ssh' | null>(null);
   const trigger = useRef<HTMLButtonElement>(null);
   const mcpTrigger = useRef<HTMLButtonElement>(null);
+  const sshTrigger = useRef<HTMLButtonElement>(null);
   const menu = useRef<HTMLDivElement>(null);
   const filePicker = useRef<HTMLInputElement>(null);
-  const wasSubmenu = useRef(false);
+  const wasSubmenu = useRef<'mcp' | 'ssh' | null>(null);
   const openAtEnd = useRef(false);
   const menuStyle = useComposerMenuLayout(open, menu);
 
   useEffect(() => {
     if (!open) {
-      wasSubmenu.current = false;
+      wasSubmenu.current = null;
       return;
     }
     if (submenu) {
-      menu.current?.querySelector<HTMLInputElement>('input[type="search"]')?.focus();
+      (
+        menu.current?.querySelector<HTMLElement>('input[type="search"]') ??
+        menu.current?.querySelector<HTMLElement>('[role="switch"]') ??
+        menu.current?.querySelector<HTMLElement>('button')
+      )?.focus();
     } else if (wasSubmenu.current) {
-      mcpTrigger.current?.focus();
+      (wasSubmenu.current === 'ssh' ? sshTrigger : mcpTrigger).current?.focus();
     } else {
       const items = menu.current?.querySelectorAll<HTMLElement>('[role="menuitem"]');
       items?.[openAtEnd.current ? items.length - 1 : 0]?.focus();
@@ -206,7 +233,7 @@ export function ComposerPlusMenu({
       const target = event.target as Node;
       if (menu.current?.contains(target) || trigger.current?.contains(target)) return;
       setOpen(false);
-      setSubmenu(false);
+      setSubmenu(null);
     }
     document.addEventListener('pointerdown', onPointerDown);
     return () => document.removeEventListener('pointerdown', onPointerDown);
@@ -214,7 +241,7 @@ export function ComposerPlusMenu({
 
   function close(restoreFocus = true) {
     setOpen(false);
-    setSubmenu(false);
+    setSubmenu(null);
     if (restoreFocus) trigger.current?.focus();
   }
 
@@ -289,7 +316,9 @@ export function ComposerPlusMenu({
           ref={menu}
           id={id}
           role={submenu ? 'dialog' : 'menu'}
-          aria-label={t(submenu ? 'attach.mcp' : 'attach.open')}
+          aria-label={t(
+            submenu === 'ssh' ? 'attach.ssh' : submenu === 'mcp' ? 'attach.mcp' : 'attach.open',
+          )}
           className={COMPOSER_MENU_SURFACE}
           style={menuStyle}
           onBlur={(event) => {
@@ -305,7 +334,7 @@ export function ComposerPlusMenu({
             if (event.key === 'Escape') {
               event.preventDefault();
               event.stopPropagation();
-              if (submenu) setSubmenu(false);
+              if (submenu) setSubmenu(null);
               else close();
             } else if (!submenu && ['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
               event.preventDefault();
@@ -313,9 +342,27 @@ export function ComposerPlusMenu({
             }
           }}
         >
-          {submenu && mcp ? (
+          {submenu === 'ssh' && ssh ? (
             <>
-              <button type="button" className={COMPOSER_MENU_ROW} onClick={() => setSubmenu(false)}>
+              <button type="button" className={COMPOSER_MENU_ROW} onClick={() => setSubmenu(null)}>
+                <span className="rotate-180">
+                  <ChevronIcon />
+                </span>
+                {t('attach.back')}
+                <span className={COMPOSER_MENU_DETAIL}>{t('attach.ssh')}</span>
+              </button>
+              <SshSubmenu
+                choices={ssh.choices}
+                loading={ssh.loading}
+                saving={ssh.saving}
+                error={ssh.error}
+                onRetry={ssh.reload}
+                onToggle={(choice, on) => ssh.toggle(choice.id, on)}
+              />
+            </>
+          ) : submenu === 'mcp' && mcp ? (
+            <>
+              <button type="button" className={COMPOSER_MENU_ROW} onClick={() => setSubmenu(null)}>
                 <span className="rotate-180">
                   <ChevronIcon />
                 </span>
@@ -395,7 +442,7 @@ export function ComposerPlusMenu({
                     aria-disabled={mcpBlockedReason ? true : undefined}
                     className={COMPOSER_MENU_ROW}
                     onClick={() => {
-                      if (!mcpBlockedReason) setSubmenu(true);
+                      if (!mcpBlockedReason) setSubmenu('mcp');
                     }}
                   >
                     <McpIcon />
@@ -404,6 +451,25 @@ export function ComposerPlusMenu({
                       {mcpBlockedReason ?? (mcp.count ? mcp.count : '')}
                     </span>
                     {mcpBlockedReason ? null : <ChevronIcon />}
+                  </button>
+                ) : null}
+                {ssh ? (
+                  <button
+                    ref={sshTrigger}
+                    type="button"
+                    role="menuitem"
+                    tabIndex={-1}
+                    aria-haspopup="dialog"
+                    className={COMPOSER_MENU_ROW}
+                    onClick={() => {
+                      ssh.reload();
+                      setSubmenu('ssh');
+                    }}
+                  >
+                    <SshIcon />
+                    <span className="shrink-0">{t('attach.ssh')}</span>
+                    <span className={COMPOSER_MENU_DETAIL}>{ssh.count ? ssh.count : ''}</span>
+                    <ChevronIcon />
                   </button>
                 ) : null}
                 {onOpenPlugins ? (

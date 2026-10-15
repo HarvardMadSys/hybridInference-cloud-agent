@@ -173,6 +173,7 @@ def create_app() -> FastAPI:
         session,
         site_config,
         skills,
+        ssh_servers,
         teams,
         uploads,
         usage,
@@ -235,6 +236,7 @@ def create_app() -> FastAPI:
     app.include_router(teams.router)
     app.include_router(uploads.router)
     app.include_router(mcp_connections.router)
+    app.include_router(ssh_servers.router)
     app.include_router(hosts.router)
     # Host policy exchange. A sibling of the host routes rather than part of
     # them: it is the profiling feature's own channel, it shares the same

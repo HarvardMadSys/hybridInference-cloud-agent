@@ -49,6 +49,12 @@ from cloud_agent.api.deps import (
 )
 from cloud_agent.application.pending_messages import settle_queue_when_possible
 from cloud_agent.application.residency import _mint_residency_grant, residency_ttl_s
+from cloud_agent.application.ssh_servers import (
+    build_ssh_access,
+    prompt_with_ssh_servers,
+    servers_for_thread,
+    ssh_key_cipher,
+)
 from cloud_agent.attachments.models import AttachmentLeaseLost, AttachmentView
 from cloud_agent.attachments.selection import prompt_with_attachments
 from cloud_agent.domain.execution import FAILED, QUEUED, RUNNING, TERMINAL_STATES
@@ -140,6 +146,7 @@ from cloud_agent_shared.environment import (
 )
 from cloud_agent_shared.environment_snapshots import ENVIRONMENT_SNAPSHOT_CAPABILITY
 from cloud_agent_shared.runtime_catalog import runtimes_supporting_mcp
+from cloud_agent_shared.ssh_access import SSH_ACCESS_CAPABILITY
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
@@ -162,6 +169,7 @@ if TYPE_CHECKING:
         SandboxRepository,
         SkillRepository,
         SourceControlRepository as SourceControlPort,
+        SshServerRepository,
     )
     from cloud_agent.ports.environment_snapshots import EnvironmentSnapshotRepository
     from cloud_agent.ports.environments import EnvironmentRepository
@@ -281,6 +289,7 @@ class _WorkerStorage(Protocol):
     source_control: SourceControlPort
     environments: EnvironmentRepository
     environment_snapshots: EnvironmentSnapshotRepository
+    ssh_servers: SshServerRepository
 
 
 def _require_store(store: _WorkerStorage | None) -> _WorkerStorage:
@@ -1037,6 +1046,23 @@ async def _hand_over_claim(
                 base_image=attestation.sandbox_image_digest if attestation else None,
             )
 
+    # The group's SSH state, or None when none of its chats ever selected a
+    # server. Settled before any credential is minted, like the environment:
+    # a host that cannot apply it must not start the turn at all.
+    ssh_state = await job_store.ssh_servers.ssh_group_state(thread_id=str(claim["thread_id"]))
+    ssh_access = None
+    if ssh_state is not None:
+        capabilities = attestation.runner_capabilities if attestation else []
+        try:
+            if SSH_ACCESS_CAPABILITY not in capabilities:
+                raise SourceControlError("Host cannot apply SSH access")
+            ssh_access = build_ssh_access(ssh_state, ssh_key_cipher())
+        except (SourceControlError, ValueError):
+            await job_store.attempt_commands.release_claim(**fence, retry_after_seconds=30)
+            raise HTTPException(
+                503, "Waiting for an SSH-capable host or available encryption"
+            ) from None
+
     # Two credentials with different powers. The runner keeps the full one. The
     # sandbox gets neither: its CLI runs on the member's own residency grant
     # (``worker_establish_shared_sandbox_residency``), so a credential that
@@ -1174,12 +1200,15 @@ async def _hand_over_claim(
         # of all, and reaches human and automatic turns alike — the turn that
         # set the objective is the first one that should be working toward it.
         task_prompt=prompt_with_goal(
-            prompt_with_skills(
-                prompt_with_agent_memories(
-                    prompt_with_attachments(claim["task_prompt"], claim.get("attachments")),
-                    durable_memories,
+            prompt_with_ssh_servers(
+                prompt_with_skills(
+                    prompt_with_agent_memories(
+                        prompt_with_attachments(claim["task_prompt"], claim.get("attachments")),
+                        durable_memories,
+                    ),
+                    claim.get("skills"),
                 ),
-                claim.get("skills"),
+                servers_for_thread(ssh_state, str(claim["thread_id"])),
             ),
             # The goal preamble is the same for every runtime and every turn.
             # It used to branch on whether this turn's sandbox could reach a
@@ -1192,6 +1221,7 @@ async def _hand_over_claim(
             environment_payload(environment, capabilities) if environment is not None else None
         ),
         environment_snapshot=environment_snapshot,
+        ssh_access=ssh_access,
         plugins=claim.get("plugins") or [],
         runtime=claim["runtime"],
         model=claim["model"],

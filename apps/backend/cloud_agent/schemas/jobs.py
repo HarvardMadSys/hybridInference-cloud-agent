@@ -79,6 +79,9 @@ MAX_JOB_METADATA_KEYS = 64
 MAX_JOB_METADATA_BYTES = 16 * 1024
 
 
+_UUID_PATTERN = r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+
+
 # Unknown fields are still ignored here rather than refused, unlike a message's
 # body: the on-call relay posts this same model to its own door, and what it
 # sends has included a field this model never declared (``mcp_servers``), so
@@ -166,6 +169,14 @@ class AgentJobCreate(BaseModel):
             "MCP connections this session may use, with the capabilities it may use on "
             "each. Omitted means none: there is no implicit default, because connecting "
             "a server is not the same decision as letting a task call it."
+        ),
+    )
+    ssh_server_ids: list[Annotated[str, Field(pattern=_UUID_PATTERN)]] | None = Field(
+        None,
+        max_length=1024,
+        description=(
+            "SSH servers this chat can reach: the owner's servers that passed their check. "
+            "Omitted means none."
         ),
     )
     attachment_ids: list[Annotated[int, Field(gt=0, strict=True)]] | None = Field(

@@ -160,6 +160,8 @@ export interface CreateAgentJobRequest {
   attachment_ids?: number[];
   /** MCP connections this task may call. Omitted gives it none. */
   mcp_bindings?: McpBindingInputApi[];
+  /** The owner's checked SSH servers this chat can reach. Omitted gives it none. */
+  ssh_server_ids?: string[];
   /** Omitted means no goal: nothing continues without the owner asking again. */
   goal?: GoalInputApi;
   /** Null starts a temporary workspace: an empty sandbox whose work is never published. */

@@ -798,16 +798,15 @@ class ChatSandboxNetwork:
         )
 
     def _drop_relay_exceptions(self, network_name: str) -> None:
-        """Forget a removed bridge's relay exceptions, without failing the removal.
+        """Forget a removed bridge's relay and SSH exceptions, without failing the removal.
 
         They match nothing once the bridge is gone, and a later bridge with the
-        same name has its own set written when its relays attach. A guard that
-        cannot run here fails the next activation instead.
+        same name has its own relays written when they attach and its own SSH
+        targets written before its first turn. A guard that cannot run here
+        fails the next activation instead.
         """
         try:
-            self.backend.network_guard().sync_relays(
-                self._network().bridge_name(network_name), set()
-            )
+            self.backend.network_guard().release_bridge(self._network().bridge_name(network_name))
         except SandboxError as exc:
             logger.warning(
                 "chat_group_relay_exceptions_left",
@@ -859,6 +858,16 @@ class ChatSandboxNetwork:
                 network, addresses, network_id=str(reconciled.get("Id") or "") or None
             )
         return _GroupNetworkSnapshot(network=reconciled, owners=owners, addresses=addresses)
+
+    def sync_ssh_targets(self, spec: ChatSandboxSpec, endpoints: set[tuple[str, int]]) -> None:
+        """Make the group bridge's SSH exceptions exactly ``endpoints``.
+
+        The caller proves the group network first (:meth:`require_network`
+        through the manager), so the bridge exists and the rules are verified.
+        """
+        self.backend.network_guard().sync_ssh_targets(
+            self._network().bridge_name(self.network_for(spec)), endpoints
+        )
 
     def require_host_rules(self) -> None:
         """Install and verify this deployment's host rules, unless a recent check stands."""

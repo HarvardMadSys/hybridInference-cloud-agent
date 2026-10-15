@@ -30,6 +30,7 @@ from cloud_agent.storage._sql.jobs import JOB_SELECT, SESSION_DELETE_BLOCK_SQL
 from cloud_agent.storage._sql.mcp import write_mcp_bindings
 from cloud_agent.storage._sql.pending_messages import PAUSE_QUEUE_SQL
 from cloud_agent.storage._sql.rows import job_row_to_dict, load_json
+from cloud_agent.storage._sql.ssh import enable_ssh_servers
 from cloud_agent.storage.repositories.conversation_queries import PostgresConversationQueries
 from cloud_agent.storage.repositories.environments import PostgresEnvironmentRepository
 from cloud_agent.storage.repositories.goals import new_goal_id
@@ -101,11 +102,16 @@ class PostgresConversationCommands:
         goal: GoalInput | None = None,
         client_request_id: str | None = None,
         client_request_fingerprint: str | None = None,
+        ssh_server_ids: list[str] | None = None,
     ) -> dict[str, Any]:
         """Create a queued job and return it.
 
         A null ``repo`` creates a temporary workspace: a conversation whose
         sandbox starts empty and whose turns are never published.
+
+        ``ssh_server_ids`` are enabled for the new chat in this transaction,
+        so its first claim already carries them; any that is not the owner's
+        ready server raises ``SshServerUnavailable`` and nothing is created.
 
         ``goal`` sets the conversation's completion condition in the same
         transaction that creates it, so the first turn is already working
@@ -191,6 +197,10 @@ class PostgresConversationCommands:
                         binding_id,
                     )
                 await write_mcp_bindings(conn, thread_id=thread_id, bindings=mcp_bindings)
+                if ssh_server_ids:
+                    await enable_ssh_servers(
+                        conn, user_id=user_id, thread_id=thread_id, server_ids=ssh_server_ids
+                    )
                 await conn.execute(
                     """
                     INSERT INTO agent_jobs

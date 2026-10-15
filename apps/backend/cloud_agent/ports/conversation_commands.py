@@ -39,8 +39,14 @@ class ConversationCommands(Protocol):
         goal: GoalInput | None = None,
         client_request_id: str | None = None,
         client_request_fingerprint: str | None = None,
+        ssh_server_ids: list[str] | None = None,
     ) -> dict[str, Any]:
         """Create a queued job and return it.
+
+        ``ssh_server_ids`` enables the owner's ready SSH servers for the new
+        chat in the same transaction, so its first turn can already reach
+        them; one that is not raises ``SshServerUnavailable`` and creates
+        nothing.
 
         ``goal`` sets the conversation's completion condition in the same
         transaction that creates it, so the first turn is already working

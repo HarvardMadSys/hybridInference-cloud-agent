@@ -40,6 +40,10 @@ class AllCapabilities:
         """Legacy fixtures have no archived environments or test leases to reap."""
         return None
 
+    async def ssh_group_state(self, *, thread_id: str):
+        """Legacy fixtures have no chat that ever selected an SSH server."""
+        return None
+
     def __getattr__(self, name: str) -> Any:
         """Resolve a capability name to this object; anything else is an error."""
         if name in CAPABILITIES:

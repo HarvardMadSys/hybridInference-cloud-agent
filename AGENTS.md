@@ -174,6 +174,8 @@ requirement, and rules 4 and 5 remain permanent service boundaries.
   - the one named resolver on TCP/UDP 53;
   - the two relays' service ports on the group's own bridge — the gateway for
     inference and the MCP-only listener for tools;
+  - the exact public IPv4 address and port of each SSH server its owner
+    registered, checked and enabled for one of the group's chats;
   - and nothing else: not the host, private or special-purpose addresses,
     other groups, other ports, UDP 443, or IPv6. Neither relay is a
     caller-selected forward proxy, and there is no proxy at all.
@@ -181,7 +183,9 @@ requirement, and rules 4 and 5 remain permanent service boundaries.
 ## 7. Security boundaries — do not relax without review
 
 - A sandbox group reaches public IPv4 on TCP 80/443, the one named resolver,
-  and its own two relays — and nothing else: none of the host's addresses, no
+  its own two relays, and the exact public IPv4 address and port of each SSH
+  server its owner registered, checked and enabled for one of the group's
+  chats — and nothing else: none of the host's addresses, no
   private, link-local/metadata, CGNAT, multicast or reserved range, nothing in
   `AGENT_EGRESS_PROTECTED_CIDRS`, no other group, and no IPv6. Per-group
   bridges and this deployment's host nftables table enforce it on the actual
@@ -230,6 +234,22 @@ requirement, and rules 4 and 5 remain permanent service boundaries.
   environment, which keeps the platform grant; a member-private `BASH_ENV`
   script gives them to the commands the CLI runs. See the
   [environment design](docs/agents/specs/2026-10-12-repository-environment-design.zh-CN.md).
+- **Owner SSH servers (2026-10-15).** An owner may register their own SSH
+  servers and enable them per chat. The platform generates one Ed25519 key per
+  server, stores it encrypted, and writes it only into the enabled chat
+  member's private tmpfs, with the host key the owner confirmed pinned. The
+  agent, repository code and anything they run can read that key, use or
+  exfiltrate it, and run anything the server account may run; an owner revokes
+  it by deleting the server, which cuts live sessions and erases the stored
+  key, and by removing the key line from `authorized_keys`. Keys are masked in
+  the runner's durable output: a key reaches a member only when that member's
+  own turn starts, from that turn's claim, and a push mid-turn only takes
+  access away, so every key in a sandbox is one its running turn masks.
+  Snapshot and publication scanning do not look for them. The control plane
+  dials a server only when its owner runs a check, under the same
+  public-address rules, an hourly per-owner limit, and a 64 KB cap on what it
+  reads back. See the
+  [SSH server design](docs/agents/specs/2026-10-15-user-ssh-servers-design.zh-CN.md).
 - Public multi-tenant use requires Kata isolation, non-root, dropped
   capabilities, seccomp, and resource limits — plain Docker containers are for
   trusted internal repositories only.

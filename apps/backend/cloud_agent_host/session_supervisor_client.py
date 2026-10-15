@@ -180,6 +180,27 @@ class SessionSupervisorClient:
             )
         return response.json()
 
+    def sync_ssh_access(
+        self, thread_id: str, access: Any, *, starting: bool = False
+    ) -> dict[str, Any]:
+        """Converge this member's group to the claim's SSH state before the agent runs.
+
+        ``starting`` says this member's turn starts with this state, so its keys
+        are written; they are the keys this runner masks. A sandbox manager
+        without the route answers 404/405, which fails the turn rather than
+        starting an agent its servers were promised to.
+        """
+        response = self._client.put(
+            f"{self._base_url}/workspaces/{quote(thread_id, safe='')}/ssh-access",
+            json={"access": access.model_dump(mode="json"), "starting": starting},
+            timeout=120,
+        )
+        if response.is_error:
+            raise SessionSupervisorError(
+                response.status_code, _error_detail(response, "SSH access could not be applied")
+            )
+        return response.json()
+
     def close(self) -> None:
         """Close the reusable private HTTP connection pool."""
         self._client.close()

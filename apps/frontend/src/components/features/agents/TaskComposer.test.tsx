@@ -98,6 +98,9 @@ vi.mock('@/lib/api/mcp', () => ({
   getMcpConnectionCapabilities: vi.fn(),
 }));
 
+import { listSshServers, type SshServerApi } from '@/lib/api/sshServers';
+vi.mock('@/lib/api/sshServers', () => ({ listSshServers: vi.fn() }));
+
 import { deleteAttachment, uploadAttachment } from '@/lib/api/attachments';
 vi.mock('@/lib/api/attachments', () => ({
   uploadAttachment: vi.fn(),
@@ -1857,6 +1860,42 @@ describe('TaskComposer source-control onboarding', () => {
     ]);
   });
 
+  it('lets a new chat reach only the checked SSH servers its owner turned on', async () => {
+    vi.mocked(getAgentConfig).mockResolvedValue(config());
+    vi.mocked(createAgentJob).mockResolvedValue({ id: 'ajob_1' } as never);
+    const server = (overrides: Partial<SshServerApi>): SshServerApi =>
+      ({
+        id: 'srv-ready',
+        name: 'gpu',
+        username: 'ubuntu',
+        address: 'gpu.example.org',
+        pinned_address: '93.184.216.34',
+        port: 22,
+        status: 'ready',
+        ...overrides,
+      }) as SshServerApi;
+    vi.mocked(listSshServers).mockResolvedValue({
+      configured: true,
+      servers: [server({}), server({ id: 'srv-new', name: 'lab', status: 'pending' })],
+    });
+    render(<TaskComposer />);
+    await chooseRepository();
+    expect(listSshServers).not.toHaveBeenCalled();
+    await openAttachMenu();
+    fireEvent.click(await screen.findByRole('menuitem', { name: /SSH/ }));
+
+    expect(await screen.findByText('ubuntu@93.184.216.34:22')).toBeInTheDocument();
+    expect(screen.getByText('not checked')).toBeInTheDocument();
+    expect(screen.queryByRole('switch', { name: 'lab' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('switch', { name: 'gpu' }));
+    await waitFor(() => expect(screen.getByRole('switch', { name: 'gpu' })).toBeChecked());
+
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Run it on gpu' } });
+    await runWhenReady();
+    await waitFor(() => expect(createAgentJob).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(createAgentJob).mock.calls[0][0].ssh_server_ids).toEqual(['srv-ready']);
+  });
+
   it('gives a task no servers unless one was chosen', async () => {
     vi.mocked(getAgentConfig).mockResolvedValue(config({ mcp_runtimes: ['claude-code'] }));
     vi.mocked(createAgentJob).mockResolvedValue({ id: 'ajob_1' } as never);
@@ -1870,6 +1909,7 @@ describe('TaskComposer source-control onboarding', () => {
     await runWhenReady();
     await waitFor(() => expect(createAgentJob).toHaveBeenCalledTimes(1));
     expect(vi.mocked(createAgentJob).mock.calls[0][0]).not.toHaveProperty('mcp_bindings');
+    expect(vi.mocked(createAgentJob).mock.calls[0][0]).not.toHaveProperty('ssh_server_ids');
   });
 
   it('says a runtime cannot take MCP before the job is created, not after', async () => {

@@ -81,8 +81,8 @@ that URL to another origin is refused while the token is kept. Clear the token,
 save the URL, then enter the token again.
 
 For the first deployment of this release, run `alembic upgrade head` through
-`0079_teams`. 0079 only adds the team tables and changes no existing row.
-Existing hosts begin without a deployment drain
+`0080_user_ssh_servers`. 0079 and 0080 only add tables and change no existing
+row. Existing hosts begin without a deployment drain
 owner or release receipt, and 0051 backfills each one with a non-null fence
 epoch. 0066 builds an index on `agent_jobs` concurrently: on a long job history
 it takes a while without blocking the running API, and an interrupted run can
@@ -1492,7 +1492,7 @@ with no leader and no sharding.
 | `AGENT_RUNTIME_REGISTRY_URL` | public npm | Registry a host downloads updated agents from. Set the same value on the control plane, which reads the latest release from it |
 | `AGENT_EGRESS_CHAT_NETWORK_POOL` | required | This deployment's RFC1918 IPv4 pool, one daemon-arbitrated `/29` per active group bridge. No default: it must be disjoint from every other deployment's pool on the machine — of two that overlap, the host rules refuse the one installed later — and from the host's Docker, VPN and private-service routes. A group's bridge is removed on stop and rebuilt on wake |
 | `AGENT_EGRESS_DNS_SERVER` | required | The one IPv4 resolver sandboxes may use, on TCP and UDP 53. It is the only exception to the protected ranges, so a site resolver on a private address or on this host works. Not loopback, and not inside the pool; see _Choosing the resolver_ below |
-| `AGENT_EGRESS_PROTECTED_CIDRS` | — | Comma-separated IPv4 blocks to refuse on top of the built-in host, private, link-local/metadata, CGNAT, multicast and reserved ranges — an institution's services on public addresses, for example. It can only add protection |
+| `AGENT_EGRESS_PROTECTED_CIDRS` | — | Comma-separated IPv4 blocks to refuse on top of the built-in host, private, link-local/metadata, CGNAT, multicast and reserved ranges — an institution's services on public addresses, for example. It can only add protection. Set the same value on the control plane, where an owner's SSH server check refuses these blocks too |
 | `AGENT_RELAY_NETWORK` | derived | Where lifecycle finds the two relays; the host stack derives `<COMPOSE_PROJECT>-agent-relays`. It must exist and be `internal`, or preflight refuses, and no sandbox group ever joins it. Set it only to name an existing network |
 | `AGENT_EGRESS_SETUP_TIER`, `_AGENT_TIER` | removed | Retired with the network tiers and the Squid proxy, together with `AGENT_EGRESS_ALLOWLIST`, `AGENT_EGRESS_NETWORK_*`, `AGENT_EGRESS_PROXY_*`, `AGENT_EGRESS_STOP_GRACE`, `AGENT_SANDBOX_NETWORK` and `AGENT_SANDBOX_ALLOW_OPEN_NETWORK`. Nothing reads them, so setting one changes nothing; delete them from `.env` |
 | `AGENT_RUNNER_HOST` | host name | Enrolled execution environment, shared by every turn it runs — the unit the admin placement switch picks between. `deploy/host/sandbox_host.sh` fills it from the host's own name. Never derived inside the container, where the hostname is a container id. After enrolment the persisted credential is authoritative, so editing this renames nothing. Unset keeps the environment out of the pool and changes nothing else. Distinct from `AGENT_PHYSICAL_HOST`, which is the display-only inventory name grouping environments that share one server |
@@ -3270,7 +3270,9 @@ files persist in that container's Docker writable layer across follow-ups, idle
 stop/start, and host service restarts; there is no host-side setup cache or
 portable setup archive. Package managers reach their public registries directly
 over HTTPS — there is no proxy to configure — and anything that needs another
-port, Git over SSH for one, is refused. Long-lived platform and upstream
+port, Git over SSH for one, is refused. The one exception is an owner's own
+checked SSH servers, each reachable only from the chats that enabled it
+([SSH servers](#ssh-servers)). Long-lived platform and upstream
 credentials stay outside the sandbox; member-scoped inference and MCP tokens
 enter their CLI processes. The sandbox runs unprivileged, so `apt install`
 does not work — use `pip --user`, a virtualenv, `npm ci`.
@@ -3315,7 +3317,11 @@ Allowed:
   checked before the protected ranges, so a resolver on a private address or
   on this host works — on port 53 only;
 - the group's own two relays, by exact bridge, address and port: the gateway
-  tunnel for inference and the MCP tunnel for tools.
+  tunnel for inference and the MCP tunnel for tools;
+- the exact public IPv4 address and port of each SSH server the group's owner
+  registered, checked and enabled for one of its chats, by exact bridge, in the
+  `ssh_targets` set. It is consulted after the protected ranges, so a protected
+  address stays refused whatever an element names ([SSH servers](#ssh-servers)).
 
 Refused:
 
@@ -3892,6 +3898,66 @@ to date.
   in [cutover.md](../agents/specs/cutover.md) and `ENVIRONMENT.md`; this page documents the
   resulting runtime topology.
 
+
+## SSH servers
+
+An owner registers their own Linux servers under **Settings → Integrations →
+SSH servers**, checks each one, and turns servers on per chat from **+ → SSH
+servers**. The agent then runs `ssh`, `scp` and `rsync` against them directly
+from the sandbox; the platform never runs a command on a server. Design and
+accepted risks:
+[SSH server design](../agents/specs/2026-10-15-user-ssh-servers-design.zh-CN.md),
+and the owner SSH servers entry in [AGENTS.md](../../AGENTS.md) §7.
+
+- **Migration and key.** `0080_user_ssh_servers` adds `agent_ssh_servers`,
+  `agent_ssh_thread_bindings`, `agent_ssh_server_events` and the
+  `agent_ssh_access_revision_seq` sequence. Each server's Ed25519 private key is
+  encrypted with `AGENT_SOURCE_CONTROL_ENCRYPTION_KEY` under its own
+  `hybridinference/ssh-server-key/v1` domain; without that key the section
+  says so and nothing can be added.
+- **Rollout.** Runners and sandbox managers advertise `ssh-access-v1`, and the
+  sandbox image now ships `openssh-client`. A claim for a group whose chats
+  ever selected a server is released, without spending an attempt, to any
+  runner that does not attest the capability, and a sandbox manager without
+  the `PUT /workspaces/{workspace_id}/ssh-access` route fails the turn rather
+  than starting an agent without its servers. Roll hosts out before owners
+  enable servers on them; a group already pinned to an old host waits.
+- **What a turn does.** Before setup and the agent start, the runner sends the
+  sandbox manager the group's whole SSH state from the claim, marked as this
+  member's starting turn. The manager compares it with the newest state it
+  recorded in a root-owned file, `/run/agent-members/.ssh-access-state`
+  (revision and per-chat entry digests, no keys). A state at least as new is
+  recorded and sets the bridge's `ssh_targets`; an older one leaves the bridge
+  alone and is trimmed to what the newest allows rather than skipped. The
+  manager then removes the SSH directory of every member slot the newest state
+  allows nothing, and, as the starting member's UID, writes that member's
+  servers into its private tmpfs (one directory per server with key,
+  `known_hosts`, `Host` block and digest) with one `Include` line at the top of
+  its `~/.ssh/config`. Every other member only loses servers. A group none of
+  whose chats ever selected a server costs nothing: no state is sent.
+- **Taking access away is immediate; granting it waits for the next turn.**
+  Turning a server on or off for a chat, editing, checking, rekeying or
+  deleting a server pushes the new state to every running group it reaches. A
+  push only removes: deleting an element cuts a live SSH session on its next
+  packet, and a member's directory for a server it may no longer use, or whose
+  key changed, is deleted. A server turned on, or a new key, arrives with the
+  chat's next turn, whose runner masks the key. If a newest state fails after
+  it was recorded, the manager clears the bridge's SSH elements and the call
+  fails, so the group stays closed until a state applies whole. A stopped
+  group, or a host the control plane cannot reach, gets the state before its
+  next turn runs anything.
+- **Checks dial out from the control plane.** A check resolves the address,
+  refuses it whole if any answer is private, reserved or protected, reads the
+  host keys with `ssh-keyscan`, and after the owner confirms a fingerprint logs
+  in once with the platform key and runs `true`. Set
+  `AGENT_EGRESS_PROTECTED_CIDRS` on the control plane to the hosts' value so a
+  check refuses the same blocks a sandbox would. The control plane needs
+  outbound TCP to owners' SSH ports. Each owner may run 20 checks an hour. A
+  check reads at most 64 KB of each output stream and kills the client past
+  that, so a server that floods it fails the check instead of filling the
+  control plane's memory.
+- **Owner firewalls.** A server that limits who may connect must allow both
+  the control plane (for checks) and every host its chats may run on.
 
 ## Reusable cloud environments
 

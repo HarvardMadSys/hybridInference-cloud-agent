@@ -19,7 +19,7 @@ pytestmark = pytest.mark.dbtest
 _BEFORE = "0057_admin_sandbox_trajectory"
 _THIS = "0058_mcp_connector_invariant"
 _NEXT = "0059_counter_constraints"
-_HEAD = "0079_teams"
+_HEAD = "0080_user_ssh_servers"
 _OWNER = "user-owner"
 _OTHER = "user-other"
 _PRESERVED_AUTHORIZED_AT = datetime(2001, 2, 3, 4, 5, 6, tzinfo=timezone.utc)
@@ -73,7 +73,8 @@ def test_mcp_connector_invariant_revision_follows_trajectory_merge() -> None:
     assert (
         script.get_revision("0078_environment_snapshots").down_revision == "0077_sandbox_usage_days"
     )
-    assert script.get_revision(_HEAD).down_revision == "0078_environment_snapshots"
+    assert script.get_revision("0079_teams").down_revision == "0078_environment_snapshots"
+    assert script.get_revision(_HEAD).down_revision == "0079_teams"
 
 
 async def _local_connection(

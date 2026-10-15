@@ -54,6 +54,8 @@ from typing import Any
 from cloud_agent_host.logging_utils import get_logger
 from cloud_agent_shared.egress import (
     RELAY_FAMILIES,
+    SSH_TARGET_FAMILIES,
+    SSH_TARGETS_SET,
     TABLE_PREFIX,
     SandboxNetwork,
     render_ruleset,
@@ -86,11 +88,11 @@ _RULE = re.compile(r"^add rule (\w+) (\S+) (\w+) ")
 _BASE_CHAIN = re.compile(r"^add chain (\w+) (\S+) (\w+) \{ type filter hook (\w+) ")
 
 # One guard step in one disposable helper: an optional install, then the reads
-# in order, then optionally one bridge's relay update, computed from what the
-# kernel holds at that moment and rendered as ``render_relay_update`` renders
-# it. Every nft call is checked, and the first failure ends the helper with
-# nft's own message and no output. No shell, persistent helper or cached
-# kernel state is involved.
+# in order, then optionally one bridge's relay update and one bridge's SSH
+# target update, each computed from what the kernel holds at that moment and
+# rendered as ``render_relay_update`` renders it. Every nft call is checked,
+# and the first failure ends the helper with nft's own message and no output.
+# No shell, persistent helper or cached kernel state is involved.
 _NFT_BATCH = """
 import json
 import subprocess
@@ -115,23 +117,24 @@ def fail(message):
 if request.get("install"):
     nft(["-f", "-"], request["install"])
 answer = {"listings": [json.loads(nft(["-j", *args])) for args in request.get("reads", [])]}
-relays = request.get("relays")
-if relays:
-    table, bridge, families = relays["table"], relays["bridge"], relays["families"]
-    wanted = {(bridge, address, int(port)) for address, port in relays["wanted"]}
+
+
+def converge(spec, name, label):
+    table, bridge, families = spec["table"], spec["bridge"], spec["families"]
+    wanted = {(bridge, address, int(port)) for address, port in spec["wanted"]}
     held = {}
     for family in families:
-        listing = json.loads(nft(["-j", "list", "set", family, table, "relays"]))
+        listing = json.loads(nft(["-j", "list", "set", family, table, name]))
         found = [item["set"] for item in listing.get("nftables", []) if "set" in item]
         if not found:
-            fail("%s %s has no set 'relays'" % (family, table))
+            fail("%s %s has no set '%s'" % (family, table, name))
         elements = found[0].get("elem") or []
         held[family] = set()
         for element in elements if isinstance(elements, list) else [elements]:
             value = element.get("elem", {}).get("val", element) if isinstance(element, dict) else element
             parts = value.get("concat") if isinstance(value, dict) else None
             if not isinstance(parts, list) or len(parts) != 3:
-                fail("unreadable relay set element: %r" % (element,))
+                fail("unreadable %s set element: %r" % (label, element))
             if str(parts[0]) == bridge:
                 held[family].add((str(parts[0]), str(parts[1]), int(parts[2])))
 
@@ -142,17 +145,23 @@ if relays:
     for family in families:
         if held[family] - wanted:
             doomed = render(held[family] - wanted)
-            lines.append("delete element %s %s relays { %s }" % (family, table, doomed))
+            lines.append("delete element %s %s %s { %s }" % (family, table, name, doomed))
     add = set()
     for family in families:
         add |= wanted - held[family]
     if add:
         for family in families:
-            lines.append("add element %s %s relays { %s }" % (family, table, render(add)))
+            lines.append("add element %s %s %s { %s }" % (family, table, name, render(add)))
     update = "\\n".join(lines) + ("\\n" if lines else "")
     if update:
         nft(["-f", "-"], update)
-    answer["relay_update"] = update
+    return update
+
+
+if request.get("relays"):
+    answer["relay_update"] = converge(request["relays"], "relays", "relay")
+if request.get("ssh_targets"):
+    answer["ssh_update"] = converge(request["ssh_targets"], "ssh_targets", "SSH target")
 json.dump(answer, sys.stdout)
 """
 
@@ -325,8 +334,7 @@ class HostNetworkGuard:
         within :data:`HELD_RELAYS_TRUST_S` is not made again; without it the
         kernel is always read and corrected.
         """
-        if not bridge.startswith(self.network.interface_prefix):
-            raise NetworkGuardError(f"{bridge!r} is not one of this deployment's bridges")
+        self._require_own_bridge(bridge)
         wanted = frozenset((str(address), int(port)) for address, port in endpoints)
         with self._lock:
             held = self._held.pop(bridge, None)
@@ -356,6 +364,63 @@ class HostNetworkGuard:
             )
             if network_id:
                 self._held[bridge] = _HeldRelays(network_id, wanted, written_at)
+
+    def sync_ssh_targets(self, bridge: str, endpoints: set[tuple[str, int]]) -> None:
+        """Make one bridge's SSH exceptions exactly ``endpoints``.
+
+        Always read from the kernel and corrected in one helper. These change
+        only when an owner's SSH selection does and are synced only for groups
+        that have one, so there is no per-activation cost to save by
+        remembering them.
+        """
+        self._require_own_bridge(bridge)
+        with self._lock:
+            self._batch([], ssh_targets=self._target_update(bridge, endpoints))
+
+    def release_bridge(self, bridge: str) -> None:
+        """Drop every exception a removed bridge had, relays and SSH alike, in one helper."""
+        self._require_own_bridge(bridge)
+        with self._lock:
+            self._held.pop(bridge, None)
+            self._batch(
+                [],
+                relays={
+                    "table": self.network.table,
+                    "families": list(RELAY_FAMILIES),
+                    "bridge": bridge,
+                    "wanted": [],
+                },
+                ssh_targets=self._target_update(bridge, set()),
+            )
+
+    def ssh_target_endpoints(self, bridge: str) -> set[tuple[str, int]]:
+        """The SSH exceptions the kernel currently holds for one bridge."""
+        table = self.network.table
+        with self._lock:
+            (listing,) = self._list_many([["list", "set", "inet", table, SSH_TARGETS_SET]])
+        elements = _relay_elements(self._set_elements(listing, "inet", table, SSH_TARGETS_SET))
+        return {(address, port) for owner, address, port in elements if owner == bridge}
+
+    def _require_own_bridge(self, bridge: str) -> None:
+        if not bridge.startswith(self.network.interface_prefix):
+            raise NetworkGuardError(f"{bridge!r} is not one of this deployment's bridges")
+
+    def _target_update(self, bridge: str, endpoints: set[tuple[str, int]]) -> dict[str, Any]:
+        wanted: set[tuple[str, int]] = set()
+        for address, port in endpoints:
+            try:
+                parsed = ipaddress.IPv4Address(address)
+            except ValueError as exc:
+                raise NetworkGuardError(f"SSH target {address!r} is not an IPv4 address") from exc
+            if not 0 < int(port) < 65536:
+                raise NetworkGuardError(f"SSH target port {port!r} is out of range")
+            wanted.add((str(parsed), int(port)))
+        return {
+            "table": self.network.table,
+            "families": list(SSH_TARGET_FAMILIES),
+            "bridge": bridge,
+            "wanted": sorted([address, port] for address, port in wanted),
+        }
 
     def relay_endpoints(self, bridge: str) -> set[tuple[str, int]]:
         """The exceptions both tables currently hold for one bridge."""
@@ -559,6 +624,7 @@ class HostNetworkGuard:
         *,
         install: str | None = None,
         relays: dict[str, Any] | None = None,
+        ssh_targets: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Run one guard step in one helper; see :data:`_NFT_BATCH`."""
         request: dict[str, Any] = {"reads": reads}
@@ -566,6 +632,8 @@ class HostNetworkGuard:
             request["install"] = install
         if relays is not None:
             request["relays"] = relays
+        if ssh_targets is not None:
+            request["ssh_targets"] = ssh_targets
         result = self._helper("python3", ["-c", _NFT_BATCH], stdin=json.dumps(request), label="nft")
         try:
             answer = json.loads(result.stdout)
@@ -582,6 +650,8 @@ class HostNetworkGuard:
             listings.append(items)
         if relays is not None and not isinstance(answer.get("relay_update"), str):
             raise NetworkGuardError("nft returned no relay update")
+        if ssh_targets is not None and not isinstance(answer.get("ssh_update"), str):
+            raise NetworkGuardError("nft returned no SSH target update")
         return {**answer, "listings": listings}
 
     def _helper(
