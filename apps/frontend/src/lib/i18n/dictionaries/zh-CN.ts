@@ -499,6 +499,7 @@ export const zhCN: Record<TranslationKey, string> = {
   'settings.plugins': '插件与 MCP',
   'settings.pluginsDescription': '连接 MCP 服务器，管理 Agent 可使用的技能。',
   'settings.integrations': '集成',
+  'settings.ssh': 'SSH 连接',
   'settings.integrationsDescription': '连接代码托管账号，管理仓库访问权限。',
   'settings.environments': '环境',
   'settings.environmentsDescription': '管理仓库环境、初始化脚本和个人变量。',
@@ -927,7 +928,7 @@ export const zhCN: Record<TranslationKey, string> = {
   'attach.mcpUnsupported': '{runtime} 不能接 MCP 连接',
   'attach.ssh': 'SSH 服务器',
   'attach.sshEmpty': '还没有 SSH 服务器。',
-  'attach.sshManage': '管理 SSH 服务器',
+  'attach.sshManage': '管理 SSH 连接',
   'attach.sshNotChecked': '未检测',
   'attach.sshRetry': '重试',
   'attach.skills': 'Skills',
@@ -1227,7 +1228,6 @@ export const zhCN: Record<TranslationKey, string> = {
   'teams.join.checkAgain': '刷新状态',
   'teams.join.openTeams': '前往团队',
   // ── Shared ──────────────────────────────────────────────────────────────
-  'ssh.title': 'SSH 服务器',
   'ssh.description':
     '让 Agent 用 ssh、scp、rsync 连接你自己的 Linux 服务器。平台为每台服务器生成一把专用密钥，你把公钥加到服务器上。',
   'ssh.risk':

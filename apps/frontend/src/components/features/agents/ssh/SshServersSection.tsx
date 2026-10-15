@@ -111,11 +111,9 @@ export function SshServersSection() {
   }
 
   return (
-    <section aria-labelledby="ssh-servers-heading" className="ui-card mt-4 bg-surface px-3 sm:px-4">
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border py-3">
-        <h2 id="ssh-servers-heading" className="text-sm font-semibold text-foreground">
-          {t('ssh.title')}
-        </h2>
+    <section aria-label={t('settings.ssh')} className="ui-card mt-6 bg-surface px-3 sm:px-4">
+      <div className="flex flex-wrap items-center justify-between gap-3 py-3">
+        <p className="min-w-0 flex-1 text-xs leading-5 text-muted">{t('ssh.risk')}</p>
         <button
           type="button"
           disabled={!configured || loading}
@@ -124,10 +122,6 @@ export function SshServersSection() {
         >
           {t('ssh.add')}
         </button>
-      </div>
-      <div className="space-y-1 py-3 text-sm leading-6 text-muted">
-        <p>{t('ssh.description')}</p>
-        <p className="text-xs">{t('ssh.risk')}</p>
       </div>
       {notice ? (
         <p

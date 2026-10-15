@@ -1886,6 +1886,10 @@ describe('TaskComposer source-control onboarding', () => {
 
     expect(await screen.findByText('ubuntu@93.184.216.34:22')).toBeInTheDocument();
     expect(screen.getByText('not checked')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Manage SSH connections' })).toHaveAttribute(
+      'href',
+      '/settings/ssh-connections',
+    );
     expect(screen.queryByRole('switch', { name: 'lab' })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('switch', { name: 'gpu' }));
     await waitFor(() => expect(screen.getByRole('switch', { name: 'gpu' })).toBeChecked());

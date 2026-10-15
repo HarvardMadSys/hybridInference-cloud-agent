@@ -5,6 +5,7 @@ export const SETTINGS_PATHS = {
   usage: '/settings/usage',
   plugins: '/settings/plugins',
   integrations: '/settings/integrations',
+  ssh: '/settings/ssh-connections',
   environments: '/settings/environments',
   teams: '/settings/teams',
   help: '/settings/getting-started',

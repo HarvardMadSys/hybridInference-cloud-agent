@@ -523,6 +523,7 @@ export const en = {
   'settings.pluginsDescription':
     'Connect MCP servers and manage the skills available to your agents.',
   'settings.integrations': 'Integrations',
+  'settings.ssh': 'SSH connections',
   'settings.integrationsDescription':
     'Connect your source control accounts and manage repository access.',
   'settings.environments': 'Environments',
@@ -982,7 +983,7 @@ export const en = {
   'attach.mcpUnsupported': '{runtime} cannot be given MCP connections',
   'attach.ssh': 'SSH servers',
   'attach.sshEmpty': 'No SSH servers yet.',
-  'attach.sshManage': 'Manage SSH servers',
+  'attach.sshManage': 'Manage SSH connections',
   'attach.sshNotChecked': 'not checked',
   'attach.sshRetry': 'Try again',
   'attach.skills': 'Skills',
@@ -1319,7 +1320,6 @@ export const en = {
   'teams.join.checkAgain': 'Refresh status',
   'teams.join.openTeams': 'Go to Teams',
   // ── Shared ──────────────────────────────────────────────────────────────
-  'ssh.title': 'SSH servers',
   'ssh.description':
     'Let agents reach your own Linux servers with ssh, scp and rsync. The platform makes a key for each server; you add its public key to the server.',
   'ssh.risk':

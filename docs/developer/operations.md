@@ -3910,9 +3910,9 @@ to date.
 
 ## SSH servers
 
-An owner registers their own Linux servers under **Settings → Integrations →
-SSH servers**, checks each one, and turns servers on per chat from **+ → SSH
-servers**. The agent then runs `ssh`, `scp` and `rsync` against them directly
+An owner registers their own Linux servers under **Settings → SSH
+connections** (`/settings/ssh-connections`), checks each one, and turns
+servers on per chat from **+ → SSH servers**. The agent then runs `ssh`, `scp` and `rsync` against them directly
 from the sandbox; the platform never runs a command on a server. Design and
 accepted risks:
 [SSH server design](../agents/specs/2026-10-15-user-ssh-servers-design.zh-CN.md),

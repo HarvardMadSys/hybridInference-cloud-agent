@@ -665,6 +665,7 @@ describe('AgentsLayout product navigation', () => {
     '/settings/keyboard-shortcuts',
     '/settings/plugins',
     '/settings/integrations',
+    '/settings/ssh-connections',
     '/settings/environments',
   ])('replaces the task sidebar with collapsible settings navigation on %s', (route) => {
     pathname = route;

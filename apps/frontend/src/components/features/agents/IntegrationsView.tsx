@@ -10,7 +10,6 @@ import {
 } from '@/lib/api/agents';
 import type { AgentIntegrationProvider, AgentIntegrationProviderApi } from '@/lib/api/agents';
 import { SOURCE_CONTROL_RECHECK_MS } from './sourceControlRecovery';
-import { SshServersSection } from './ssh/SshServersSection';
 
 const PROVIDERS: AgentIntegrationProvider[] = ['github', 'gitlab'];
 
@@ -420,8 +419,6 @@ export function IntegrationsView({
           })}
         </div>
       </section>
-
-      <SshServersSection />
     </SettingsPage>
   );
 }

@@ -21,6 +21,7 @@ import { MemorySettingsView } from '../settings/MemorySettingsView';
 import { MySettingsView } from '../settings/MySettingsView';
 import { PluginsSettingsView } from '../settings/PluginsSettingsView';
 import { EnvironmentsSettingsView } from '../settings/EnvironmentsSettingsView';
+import { SshConnectionsView } from '../settings/SshConnectionsView';
 import type { AgentIntegrationProviderApi, AgentIntegrationsApi } from '@/lib/api/agents';
 
 vi.mock('@/components/features/agents/environment/EnvironmentManager', () => ({
@@ -32,6 +33,7 @@ vi.mock('@/components/providers/AuthProvider', () => ({
 }));
 
 import { listSkills } from '@/lib/api/skills';
+import { listSshServers } from '@/lib/api/sshServers';
 vi.mock('@/lib/api/skills', () => ({ listSkills: vi.fn() }));
 vi.mock('@/lib/api/userProfile', () => ({ getUserProfile: vi.fn(), saveUserProfile: vi.fn() }));
 
@@ -64,7 +66,7 @@ vi.mock('@/lib/api/mcp', () => ({
   authorizeMcpConnection: vi.fn(),
 }));
 
-// The SSH section has its own tests; here it only has to load quietly.
+// The SSH section has its own tests; here only which page loads it matters.
 vi.mock('@/lib/api/sshServers', () => ({
   listSshServers: vi.fn(async () => ({ configured: true, servers: [] })),
   createSshServer: vi.fn(),
@@ -271,6 +273,26 @@ describe('IntegrationsView', () => {
     expect(getMemories).not.toHaveBeenCalled();
     expect(mockedGetIntegrations).not.toHaveBeenCalled();
   });
+  it('gives SSH connections a page of their own that loads only SSH servers', async () => {
+    vi.mocked(listSshServers).mockResolvedValue({ configured: true, servers: [] });
+    render(<SshConnectionsView />);
+    expect(screen.getByRole('heading', { level: 1, name: 'SSH connections' })).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'SSH connections' })).toBeInTheDocument();
+    await waitFor(() => expect(listSshServers).toHaveBeenCalled());
+    expect(await screen.findByRole('button', { name: 'Add server' })).toBeEnabled();
+    expect(mockedGetIntegrations).not.toHaveBeenCalled();
+    expect(getUserProfile).not.toHaveBeenCalled();
+    expect(listMcpConnections).not.toHaveBeenCalled();
+  });
+
+  it('leaves SSH servers out of Integrations', async () => {
+    render(<IntegrationsView />);
+    await waitFor(() => expect(mockedGetIntegrations).toHaveBeenCalled());
+    expect(screen.queryByRole('region', { name: 'SSH connections' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Add server' })).not.toBeInTheDocument();
+    expect(listSshServers).not.toHaveBeenCalled();
+  });
+
   it('groups skills with MCP servers and loads only their data', async () => {
     render(<PluginsSettingsView />);
     expect(screen.getByRole('heading', { level: 1, name: 'Plugins & MCPs' })).toBeInTheDocument();
