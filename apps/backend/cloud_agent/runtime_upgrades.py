@@ -234,4 +234,3 @@ def is_newer(candidate: str | None, current: str | None) -> bool:
 def update_runtimes() -> list[str]:
     """The runtimes this page can update, in display order."""
     return sorted(downloadable_runtimes())
-

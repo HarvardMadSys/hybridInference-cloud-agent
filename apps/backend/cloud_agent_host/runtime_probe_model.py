@@ -160,7 +160,10 @@ class _Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         path = self.path.split("?", 1)[0].rstrip("/")
         if path.endswith("/models"):
-            listing = {"object": "list", "data": [{"id": MODEL, "object": "model", "owned_by": "probe"}]}
+            listing = {
+                "object": "list",
+                "data": [{"id": MODEL, "object": "model", "owned_by": "probe"}],
+            }
             self._send(200, "application/json", json.dumps(listing).encode())
             return
         self._send(404, "application/json", b'{"error":{"message":"not found"}}')

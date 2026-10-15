@@ -165,8 +165,7 @@ def _prepare(box: _Container, runtime_id: str, version: str) -> str | None:
         return f"{binary} does not report version {version} ({output or 'no output'})"
     deadline = time.monotonic() + _MODEL_READY_S
     check = (
-        "import socket,sys;"
-        f"socket.create_connection(('127.0.0.1',{PROBE_MODEL_PORT}),1).close()"
+        f"import socket,sys;socket.create_connection(('127.0.0.1',{PROBE_MODEL_PORT}),1).close()"
     )
     while time.monotonic() < deadline:
         if box.run("python3", "-I", "-c", check, user=member, timeout=10).returncode == 0:
@@ -297,9 +296,7 @@ def probe_runtime(
         try:
             problem = _prepare(box, runtime_id, version)
             outcome.append(
-                ProbeResult(False, problem)
-                if problem
-                else _turn(box, runtime_id, version)
+                ProbeResult(False, problem) if problem else _turn(box, runtime_id, version)
             )
         except Exception as exc:  # the probe reports; it does not crash the runner
             logger.warning(

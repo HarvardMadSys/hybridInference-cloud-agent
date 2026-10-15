@@ -165,7 +165,11 @@ def test_only_npm_has_a_network_and_only_a_checked_version_is_kept(docker):
     for step in (fetch, scripts):
         assert step[step.index("--cap-drop") + 1] == "ALL"
         assert "no-new-privileges" in step
-    assert fetch[-3:] == ["/opt/runtimes/claude-code/2.1.300", BEFORE, "@anthropic-ai/claude-code@2.1.300"]
+    assert fetch[-3:] == [
+        "/opt/runtimes/claude-code/2.1.300",
+        BEFORE,
+        "@anthropic-ai/claude-code@2.1.300",
+    ]
     # Step 2: the packages' own scripts, with no network at all…
     assert scripts[scripts.index("--network") + 1] == "none"
     assert scripts[scripts.index("-c") + 1].startswith("set -e; npm rebuild")
@@ -227,7 +231,9 @@ def test_a_binary_reporting_another_version_is_not_kept(docker):
 
 
 def test_a_version_that_fails_its_check_is_removed(docker):
-    probe = Probe(ProbeResult(False, "claude-code 2.1.300 completed a turn without the model's answer"))
+    probe = Probe(
+        ProbeResult(False, "claude-code 2.1.300 completed a turn without the model's answer")
+    )
     downloads = _downloads(probe)
     downloads.apply([_target()])
 
@@ -303,7 +309,10 @@ def test_image_names_are_this_deployments_and_parse_back():
     assert ref == f"{NAMESPACE}-agent-runtime:claude-code_2.1.300-beta.1_{'ab12' * 3}"
     assert runtime_images._parse(ref, NAMESPACE) is not None
     assert runtime_images._parse(ref, "another-deployment") is None
-    assert runtime_images._parse(f"{NAMESPACE}-agent-runtime:kilo_7.4.17_{'ab12' * 3}", NAMESPACE) is None
+    assert (
+        runtime_images._parse(f"{NAMESPACE}-agent-runtime:kilo_7.4.17_{'ab12' * 3}", NAMESPACE)
+        is None
+    )
     assert runtime_images._parse(f"{NAMESPACE}-agent-runtime:<none>", NAMESPACE) is None
 
 
@@ -446,4 +455,3 @@ def test_the_activation_refuses_a_tree_root_does_not_own_outright(tmp_path):
     # Owned by the test runner's user and writable by anyone: both refuse it.
     assert "not protected" in result.stderr
     assert not target.exists()
-

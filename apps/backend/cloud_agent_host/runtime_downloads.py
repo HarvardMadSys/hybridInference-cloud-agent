@@ -178,11 +178,13 @@ class RuntimeDownloads:
     # ── lifecycle ───────────────────────────────────────────────────────
 
     def start(self) -> None:
+        """Clear what a stopped predecessor left, then start working."""
         self._remove_leftovers()
         self._thread = threading.Thread(target=self._run, daemon=True, name="runtime-downloads")
         self._thread.start()
 
     def stop(self) -> None:
+        """Stop taking work; a download cut short starts over on the next start."""
         self._stop.set()
         self._wake.set()
         if self._thread is not None:

@@ -83,6 +83,7 @@ class DownloadTarget:
     nonce: str
 
     def to_wire(self) -> dict[str, str]:
+        """The target as a heartbeat answer carries it."""
         return {
             "runtime": self.runtime,
             "version": self.version,
@@ -124,6 +125,7 @@ class DownloadReport:
     error: str | None = None
 
     def to_wire(self) -> dict[str, Any]:
+        """The report as a heartbeat carries it."""
         return {
             "version": self.version,
             "nonce": self.nonce,

@@ -123,7 +123,15 @@ def ensure_downloaded_runtime(
     docker = manager.backend.docker_binary
     current = manager._require(spec)
     source = manager._run(
-        [docker, "create", "--network", "none", "--entrypoint", "/bin/true", _source_image(manager, runtime_id, version)],
+        [
+            docker,
+            "create",
+            "--network",
+            "none",
+            "--entrypoint",
+            "/bin/true",
+            _source_image(manager, runtime_id, version),
+        ],
         timeout=60,
     )
     if source.returncode != 0:
@@ -176,8 +184,7 @@ def ensure_downloaded_runtime(
             stderr = activated.stderr
             detail = stderr.decode("utf-8", "replace") if isinstance(stderr, bytes) else stderr
             raise SandboxError(
-                f"could not activate {runtime_id} {version} in this chat: "
-                + detail.strip()[-300:]
+                f"could not activate {runtime_id} {version} in this chat: " + detail.strip()[-300:]
             )
     finally:
         manager.exec_capture(

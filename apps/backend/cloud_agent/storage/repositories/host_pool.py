@@ -1398,7 +1398,9 @@ class PostgresHostPoolRepository:
         sandbox image, downloads and checks the version again.
         """
         async with self._pool.acquire() as conn:
-            stored = await conn.fetchval("SELECT runtime_upgrades FROM agent_runner_policy WHERE id")
+            stored = await conn.fetchval(
+                "SELECT runtime_upgrades FROM agent_runner_policy WHERE id"
+            )
         targets: list[dict[str, str]] = []
         for runtime, target in sorted((load_json(stored) or {}).items()):
             if isinstance(target, dict):
@@ -1468,7 +1470,9 @@ class PostgresHostPoolRepository:
         Returns the runtimes switched.
         """
         async with self._pool.acquire() as conn:
-            stored = await conn.fetchval("SELECT runtime_upgrades FROM agent_runner_policy WHERE id")
+            stored = await conn.fetchval(
+                "SELECT runtime_upgrades FROM agent_runner_policy WHERE id"
+            )
             if not any(
                 isinstance(target, dict) and not target.get("activated_at")
                 for target in (load_json(stored) or {}).values()

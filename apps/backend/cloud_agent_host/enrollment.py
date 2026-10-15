@@ -862,7 +862,10 @@ class HostHeartbeat:
         except Exception:
             logger.exception(
                 "agent_runtime_downloads_apply_failed",
-                extra={"event": "agent_runtime_downloads_apply_failed", "host": self._identity.host},
+                extra={
+                    "event": "agent_runtime_downloads_apply_failed",
+                    "host": self._identity.host,
+                },
             )
 
     def _wait_for_next_beat(self) -> None:

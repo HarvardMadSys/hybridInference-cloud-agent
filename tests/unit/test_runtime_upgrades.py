@@ -56,7 +56,13 @@ def _host(name: str, *, available=None, report=None, status="online", enrolled=T
 
 
 def _report(state: str, progress: int = 0, *, nonce: str = NONCE, error: str | None = None):
-    return {"version": "2.1.300", "nonce": nonce, "state": state, "progress": progress, "error": error}
+    return {
+        "version": "2.1.300",
+        "nonce": nonce,
+        "state": state,
+        "progress": progress,
+        "error": error,
+    }
 
 
 # ── what is downloadable ──────────────────────────────────────────────────
@@ -322,7 +328,8 @@ async def test_a_requested_version_is_checked_against_npm(status, expected):
         paths.append(request.url.path)
         return httpx.Response(status, json={})
 
-    registry = RegistryClient(base_url="https://registry.test", transport=httpx.MockTransport(answer))
+    registry = RegistryClient(
+        base_url="https://registry.test", transport=httpx.MockTransport(answer)
+    )
     assert await registry.has_version("@mariozechner/pi-coding-agent", "0.74.0") is expected
     assert paths == ["/@mariozechner/pi-coding-agent/0.74.0"]
-

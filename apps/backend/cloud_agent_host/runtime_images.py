@@ -157,6 +157,7 @@ class DownloadedVersions:
         self._versions: dict[str, list[str]] = {}
 
     def versions(self) -> dict[str, list[str]]:
+        """Downloaded versions per runtime, at most a few seconds old."""
         with self._lock:
             if time.monotonic() - self._read_at >= _CACHE_S:
                 self._versions = by_runtime(discover(self._docker, self._namespace))
@@ -164,5 +165,6 @@ class DownloadedVersions:
             return {runtime: list(found) for runtime, found in self._versions.items()}
 
     def invalidate(self) -> None:
+        """Read Docker again next time: a download has just finished."""
         with self._lock:
             self._read_at = float("-inf")
