@@ -771,6 +771,62 @@ async def test_abandoning_an_activation_takes_its_attempt_before_its_membership(
     assert abandoned is not None and abandoned["context_status"] == "lost"
 
 
+async def test_losing_an_activation_waits_for_a_deletion_that_holds_its_queued_turns(
+    pool, store: Storage
+):
+    """Both serialize on the conversation instead of crossing over its turns.
+
+    Losing an activation fails the turns queued behind it, after writing its
+    membership. Deleting the conversation cancels those turns and then
+    releases that membership. Neither took the other's lock first, so a turn
+    lost while its owner deleted the chat deadlocked: the owner's delete
+    answered 500, or the runner's abandon failed. Losing it now takes the
+    conversation after its attempt, where deletion starts.
+    """
+    job, claim, sandbox = await _reserve_shared_chat(store)
+    queued = await store.conversation_commands.create_follow_up(
+        parent_job_id=job["id"], user_id=job["user_id"], prompt="and update the docs"
+    )
+    assert queued is not None and queued.get("error") is None
+    abandon = None
+    async with pool.acquire() as deletion:
+        try:
+            async with deletion.transaction():
+                # ``delete_sessions`` up to its residency release: the
+                # conversation, then the turns queued in it.
+                await deletion.execute(
+                    "SELECT id FROM agent_threads WHERE id = $1 FOR UPDATE", job["thread_id"]
+                )
+                await deletion.execute(
+                    "UPDATE agent_jobs SET state = 'cancelled', cancel_requested = TRUE "
+                    "WHERE thread_id = $1 AND state = 'queued'",
+                    job["thread_id"],
+                )
+                abandon = asyncio.create_task(
+                    store.sandbox.abandon_thread_sandbox(
+                        thread_id=job["thread_id"],
+                        attempt_id=claim["attempt_id"],
+                        lease_generation=claim["lease_generation"],
+                        sandbox_generation=sandbox["generation"],
+                        activation_generation=sandbox["activation_generation"],
+                        lost=True,
+                        detail="the runner lost its Agent CLI mid-turn",
+                        idle_timeout_seconds=1800,
+                    )
+                )
+                await _blocked_by(pool, await deletion.fetchval("SELECT pg_backend_pid()"))
+                # Its next lock, which the waiting abandon must not be holding.
+                await deletion.execute(
+                    "SELECT thread_id FROM agent_thread_sandbox_memberships "
+                    "WHERE thread_id = $1 FOR UPDATE NOWAIT",
+                    job["thread_id"],
+                )
+            abandoned = await asyncio.wait_for(abandon, timeout=10)
+        finally:
+            await _settle(abandon)
+    assert abandoned is not None and abandoned["context_status"] == "lost"
+
+
 @pytest.mark.parametrize("sibling", ["claim", "finish"])
 async def test_the_attempt_reaper_gives_a_slot_back_after_writing_the_group(
     pool, store: Storage, sibling: str

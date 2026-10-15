@@ -1,10 +1,11 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useAuth, useT } from '@/components/providers';
 import { getUserProfile, saveUserProfile, type UserProfile } from '@/lib/api/userProfile';
 import { APIError } from '@/lib/utils/errors';
 import { AvatarImage } from '@/components/features/profile/AvatarImage';
+import { cacheUserProfile } from '@/components/features/profile/useUserProfile';
 
 const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
 const IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp']);
@@ -22,7 +23,7 @@ export function ProfileSettings() {
         {t('settings.profile.title')}
       </h2>
       {state.user?.id ? (
-        <ProfileEditor key={state.user.id} />
+        <ProfileEditor key={state.user.id} userId={state.user.id} />
       ) : (
         <p className="text-sm text-muted">{t('settings.profile.signIn')}</p>
       )}
@@ -30,7 +31,7 @@ export function ProfileSettings() {
   );
 }
 
-function ProfileEditor() {
+function ProfileEditor({ userId }: { userId: string }) {
   const t = useT();
   const [saved, setSaved] = useState<UserProfile | null>(null);
   const [firstName, setFirstName] = useState('');
@@ -47,12 +48,16 @@ function ProfileEditor() {
   const reader = useRef<FileReader | null>(null);
   const savingRequest = useRef<AbortController | null>(null);
 
-  const applyProfile = (profile: UserProfile) => {
-    setSaved(profile);
-    setFirstName(profile.first_name);
-    setLastName(profile.last_name);
-    setImage(profile.image_data_url);
-  };
+  const applyProfile = useCallback(
+    (profile: UserProfile) => {
+      cacheUserProfile(userId, profile);
+      setSaved(profile);
+      setFirstName(profile.first_name);
+      setLastName(profile.last_name);
+      setImage(profile.image_data_url);
+    },
+    [userId],
+  );
 
   useEffect(() => {
     const controller = new AbortController();
@@ -71,7 +76,7 @@ function ProfileEditor() {
         if (!controller.signal.aborted) setLoading(false);
       });
     return () => controller.abort();
-  }, [reload]);
+  }, [applyProfile, reload]);
 
   useEffect(
     () => () => {

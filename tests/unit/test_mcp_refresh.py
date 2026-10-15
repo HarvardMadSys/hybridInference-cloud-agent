@@ -127,6 +127,7 @@ class FakeStore:
         for key, column in (
             ("expected_oauth_generation", "oauth_generation"),
             ("expected_config_revision", "config_revision"),
+            ("expected_credential_version", "credential_version"),
         ):
             expected = kwargs.get(key)
             if expected is not None and int(self.row.get(column) or 0) != expected:
@@ -398,6 +399,35 @@ class TestRefresh:
             )
         cipher = mcp_cipher(_KEY)
         assert cipher.decrypt(store.row["access_token_ciphertext"]) == "old-access"
+
+    @pytest.mark.asyncio
+    async def test_a_refresh_does_not_overwrite_a_callback_that_lands_first(
+        self, monkeypatch
+    ) -> None:
+        """A flow already started when the refresh claimed shares its generation.
+
+        Its callback can then write the new account's tokens while the refresh
+        is on the network. That write moves only the credential version, so the
+        version the refresh claimed is what keeps the old grant's answer out.
+        """
+        store = FakeStore(_row(oauth_generation=3, config_revision=5))
+        cipher = mcp_cipher(_KEY)
+
+        async def post_while_a_callback_lands(
+            request: Any, *, policy: Any, fetcher: Any
+        ) -> dict[str, Any]:
+            store.row["access_token_ciphertext"] = cipher.encrypt("callback-access")
+            store.row["credential_version"] = int(store.row["credential_version"]) + 1
+            return {"access_token": "stale-access", "expires_in": 3600}
+
+        monkeypatch.setattr(refresh, "_post", post_while_a_callback_lands)
+        with pytest.raises(refresh.RefreshRefused):
+            await refresh.refresh_credential(
+                store,
+                row=store.row,
+                policy=EgressPolicy(),  # type: ignore[arg-type]
+            )
+        assert cipher.decrypt(store.row["access_token_ciphertext"]) == "callback-access"
 
     @pytest.mark.asyncio
     async def test_a_non_rotating_issuer_keeps_the_refresh_token(self, monkeypatch) -> None:

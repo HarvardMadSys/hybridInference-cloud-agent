@@ -46,6 +46,13 @@ re-encodes them as metadata-free PNGs up to 512 by 512 pixels before saving.
 Migration `0063_user_profiles` adds `agent_user_profiles`; it contains no email,
 roles, or credentials. Profile editing does not modify Gateway account details.
 
+The frontend shares successful profile and homepage-insights reads in memory,
+keyed by account. Returning to New task displays the cached avatar immediately
+while refreshing in the background; a failed refresh preserves the last image.
+Profile saves update the shared cache immediately and supersede older reads.
+The cache lasts only within the browser tab and is cleared before sign-out or
+an account change; it does not change the APIs' `Cache-Control: no-store` policy.
+
 Tasks, messages, connection identifiers, encrypted Git/MCP credentials, and
 other user-authored content remain Agent-owned data.
 

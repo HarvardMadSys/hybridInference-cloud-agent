@@ -86,12 +86,27 @@ async def test_environment_create_test_bind_rotate_reuse_and_archive_via_http(ap
     assert response.json()["cleanup_complete"] is True
     assert "http-secret-one" not in response.text
     assert "[secret:TOKEN]" in response.text
+    # A page loaded before task-only variables were removed may still send
+    # them; the task is refused rather than started without them.
+    refused = await http.post(
+        "/v1/agent/jobs",
+        json={
+            "repo": env["repo"],
+            "task_prompt": "Task with its own variables",
+            "model": "glm-5.1",
+            "base_sha": "a" * 40,
+            "environment_id": env["id"],
+            "environment_overrides": [{"name": "TASK_TOKEN", "value": "temporary-http-secret"}],
+        },
+    )
+    assert refused.status_code == 422
+    assert "temporary-http-secret" not in refused.text
     first = await api.create(
         "First bound task",
         environment_id=env["id"],
         environment_revision=1,
         global_revision=1,
-        environment_overrides=[{"name": "TASK_TOKEN", "value": "temporary-http-secret"}],
+        environment_overrides=[],
     )
     path = f"/v1/agent/jobs/{first['id']}/thread/environment"
     response = await http.get(path)
@@ -101,9 +116,7 @@ async def test_environment_create_test_bind_rotate_reuse_and_archive_via_http(ap
     assert {v["name"]: v["source"] for v in original["variables"]} == {
         "APP_ENV": "environment",
         "TOKEN": "environment",
-        "TASK_TOKEN": "override",
     }
-    assert "temporary-http-secret" not in response.text
     update = {
         **body,
         "revision": 1,

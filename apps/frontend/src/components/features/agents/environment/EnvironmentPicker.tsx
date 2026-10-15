@@ -1,20 +1,71 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { useT } from '@/components/providers';
 import { useModalDialog } from '@/components/ui/useModalDialog';
 import { getGlobalEnvironment, listEnvironments } from '@/lib/api/environments';
-import type { EnvironmentConfig, EnvironmentVariable, VariableEdit } from '@/lib/api/environments';
-import { EnvironmentManager } from './EnvironmentManager';
-import { VariableEditor } from './VariableEditor';
+import type { EnvironmentConfig, EnvironmentVariable } from '@/lib/api/environments';
+import { EnvironmentDialog } from './EnvironmentDialog';
+import { emptyEnvironment } from './EnvironmentManager';
+import { Badge, TestBadge } from './EnvironmentStatus';
 
 export interface EnvironmentSelection {
   environment_id: string | null;
   environment_revision: number;
   global_revision: number;
-  environment_overrides: EnvironmentVariable[];
 }
+
+/** What the task will run with, after an environment's variables replace global ones. */
+function EffectiveConfiguration({
+  globals,
+  environment,
+}: {
+  globals: EnvironmentConfig;
+  environment?: EnvironmentConfig;
+}) {
+  const t = useT();
+  const effective = new Map<string, EnvironmentVariable & { from: string }>(
+    globals.variables.map((v) => [v.name, { ...v, from: t('environment.sourceGlobal') }]),
+  );
+  environment?.variables.forEach((v) => effective.set(v.name, { ...v, from: environment.name }));
+  const scripts = (
+    [
+      ['setup_script', 'environment.installScript'],
+      ['start_script', 'environment.startScript'],
+    ] as const
+  ).filter(([key]) => environment?.[key]);
+  return (
+    <div className="space-y-3">
+      {effective.size ? (
+        <ul className="divide-y divide-border rounded-lg border border-border text-xs">
+          {Array.from(effective.values()).map((v) => (
+            <li key={v.name} className="flex items-center gap-3 px-3 py-1.5">
+              <code className="min-w-0 flex-1 truncate text-foreground">{v.name}</code>
+              <span className="text-muted">
+                {v.secret ? t('environment.secret') : t('environment.ordinary')}
+              </span>
+              <span className="w-24 truncate text-right text-muted" title={v.from}>
+                {v.from}
+              </span>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="text-xs text-muted">{t('environment.noVariables')}</p>
+      )}
+      {scripts.map(([key, label]) => (
+        <div key={key}>
+          <p className="mb-1 text-xs text-muted">{t(label)}</p>
+          <pre className="max-h-32 overflow-auto whitespace-pre-wrap rounded-md bg-surface-muted p-2 font-mono text-xs">
+            {environment![key]}
+          </pre>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export function EnvironmentPicker({
   repo,
   temporary = false,
@@ -27,8 +78,7 @@ export function EnvironmentPicker({
   repo: string;
   /**
    * A temporary workspace: environments belong to one repository, so it runs
-   * on the platform's base with the owner's global variables and this task's
-   * own overrides.
+   * on the platform's base with the owner's global variables.
    */
   temporary?: boolean;
   open: boolean;
@@ -38,23 +88,27 @@ export function EnvironmentPicker({
   onSummaryChange?: (summary: string) => void;
 }) {
   const t = useT();
+  const titleId = useId();
   const [items, setItems] = useState<EnvironmentConfig[]>([]);
   const [globals, setGlobals] = useState<EnvironmentConfig | null>(null);
   const [selected, setSelected] = useState('');
-  const [overrides, setOverrides] = useState<VariableEdit[]>([]);
-  const [managing, setManaging] = useState(false);
+  // The dialog keeps the global variables it opened with: a reload after its
+  // save clears `globals` while the list is fetched again.
+  const [editing, setEditing] = useState<{
+    config: EnvironmentConfig;
+    globals: EnvironmentConfig;
+  } | null>(null);
   const [error, setError] = useState('');
   const [reload, setReload] = useState(0);
-  const previousRepo = useRef<string | null>(null);
   const initializedRepo = useRef<string | null>(null);
-  // One scope key, so switching between a repository and a temporary
-  // workspace clears overrides typed for the other.
+  // An environment created from here is the one the task should use.
+  const created = useRef<string | null>(null);
   const scope = temporary ? ':temporary' : repo;
   const panel = useRef<HTMLDivElement>(null);
   useModalDialog(panel, {
     open: open && !!scope,
     onClose,
-    initialFocus: temporary ? '[data-environment-done]' : 'select',
+    initialFocus: temporary ? '[data-environment-done]' : 'input[type="radio"]:checked',
   });
   useEffect(() => {
     let active = true;
@@ -62,9 +116,6 @@ export function EnvironmentPicker({
     onStatusChange?.(scope ? 'loading' : 'ready');
     setError('');
     setGlobals(null);
-    const changedRepo = previousRepo.current !== scope;
-    previousRepo.current = scope;
-    if (changedRepo) setOverrides([]);
     if (!scope) return;
     if (temporary) {
       void getGlobalEnvironment()
@@ -94,12 +145,17 @@ export function EnvironmentPicker({
         onStatusChange?.('ready');
         setItems(result.environments);
         setGlobals(result.globals);
+        const exists = (id: string | null) => result.environments.some((e) => e.id === id);
+        const pending = created.current;
+        created.current = null;
         setSelected((previous) =>
-          initialLoad
-            ? (result.environments.find((e) => e.is_default)?.id ?? '')
-            : result.environments.some((e) => e.id === previous)
-              ? previous
-              : '',
+          pending && exists(pending)
+            ? pending
+            : initialLoad
+              ? (result.environments.find((e) => e.is_default)?.id ?? '')
+              : exists(previous)
+                ? previous
+                : '',
         );
       })
       .catch((e) => {
@@ -119,36 +175,12 @@ export function EnvironmentPicker({
       environment_id: selected || null,
       environment_revision: env?.revision ?? 0,
       global_revision: globals.revision,
-      environment_overrides: overrides
-        .filter((v) => v.operation !== 'remove' && v.name.trim())
-        .map((v) => ({ name: v.name, value: v.value ?? '', phase: v.phase, secret: v.secret })),
     });
-  }, [globals, items, selected, overrides, onChange]);
+  }, [globals, items, selected, onChange]);
   const env = items.find((e) => e.id === selected);
   useEffect(() => {
-    if (!globals) {
-      onSummaryChange?.('');
-      return;
-    }
-    const name = env?.name ?? t('environment.platformBase');
-    const count = overrides.filter((v) => v.operation !== 'remove' && v.name.trim()).length;
-    onSummaryChange?.(count ? t('environment.selectionWithOverrides', { name, count }) : name);
-  }, [globals, env, overrides, onSummaryChange, t]);
-  const effective = new Map(
-    (globals?.variables ?? []).map((v) => [v.name, { ...v, source: 'global' }]),
-  );
-  env?.variables.forEach((v) => effective.set(v.name, { ...v, source: 'environment' }));
-  overrides
-    .filter((v) => v.operation !== 'remove' && v.name)
-    .forEach((v) =>
-      effective.set(v.name, {
-        name: v.name,
-        value: v.value ?? null,
-        secret: v.secret,
-        phase: v.phase,
-        source: 'override',
-      }),
-    );
+    onSummaryChange?.(globals ? (env?.name ?? t('environment.none')) : '');
+  }, [globals, env, onSummaryChange, t]);
   const errorNotice = error ? (
     <p role="alert" className="text-sm text-status-error">
       {t('environment.loadFailed')} {error}
@@ -164,6 +196,30 @@ export function EnvironmentPicker({
   if (!scope) return null;
   if (!open) return errorNotice ? <div className="px-3 py-2">{errorNotice}</div> : null;
   if (typeof document === 'undefined') return null;
+  const option = (id: string, title: string, children: ReactNode) => (
+    <label
+      key={id || 'none'}
+      className={`flex cursor-pointer items-start gap-3 rounded-lg border px-3 py-2.5 transition-colors ${
+        selected === id
+          ? 'border-accent bg-accent-subtle/40'
+          : 'border-border hover:bg-surface-hover'
+      }`}
+    >
+      <input
+        type="radio"
+        name={`${titleId}-environment`}
+        value={id}
+        checked={selected === id}
+        disabled={!globals}
+        onChange={() => setSelected(id)}
+        className="mt-1 accent-[rgb(var(--ui-accent))]"
+      />
+      <span className="min-w-0 flex-1">
+        <span className="block text-sm font-medium text-foreground">{title}</span>
+        {children}
+      </span>
+    </label>
+  );
   return createPortal(
     <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
       <button
@@ -177,127 +233,129 @@ export function EnvironmentPicker({
         ref={panel}
         role="dialog"
         aria-modal="true"
-        aria-label={t('environment.title')}
-        className="relative flex max-h-full w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-border bg-surface shadow-card"
+        aria-labelledby={titleId}
+        className="relative flex max-h-full w-full max-w-xl flex-col overflow-hidden rounded-2xl border border-border bg-surface shadow-card"
       >
-        <div className="shrink-0 px-6 pb-4 pt-5">
-          <h2 className="text-lg font-semibold text-foreground">{t('environment.title')}</h2>
+        <div className="shrink-0 px-6 pb-3 pt-5">
+          <h2 id={titleId} className="text-lg font-semibold text-foreground">
+            {t('environment.title')}
+          </h2>
           <p
-            className="mt-1 truncate text-sm text-muted"
+            className="mt-0.5 truncate text-sm text-muted"
             title={temporary ? t('temporaryWorkspace.name') : repo}
           >
             {temporary ? t('temporaryWorkspace.name') : repo}
           </p>
-          {temporary ? null : (
-            <p className="mt-3 text-sm text-muted">{t('environment.automaticHint')}</p>
-          )}
+          <p className="mt-3 text-sm text-muted">
+            {t(temporary ? 'environment.temporaryHint' : 'environment.automaticHint')}
+          </p>
         </div>
         <div className="min-h-0 space-y-4 overflow-y-auto px-6 pb-5 text-sm">
           {errorNotice}
-          {temporary ? (
-            <p className="text-muted">{t('environment.platformBase')}</p>
-          ) : (
-            <div className="flex flex-wrap items-end gap-2">
-              <label className="min-w-0 flex-1 space-y-2">
-                <span className="block font-medium">{t('environment.choose')}</span>
-                <select
-                  className="ui-input w-full"
-                  value={selected}
-                  disabled={!globals}
-                  onChange={(e) => setSelected(e.target.value)}
-                >
-                  <option value="">{t('environment.platformBase')}</option>
-                  {items.map((item) => (
-                    <option key={item.id} value={item.id!}>
-                      {item.name} · v{item.revision}
-                      {item.is_default ? ` · ${t('environment.default')}` : ''}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <button
-                type="button"
-                className="ui-button ui-button-secondary"
-                aria-expanded={managing}
-                onClick={() => setManaging(!managing)}
-              >
-                {t('environment.manage')}
-              </button>
-            </div>
-          )}
           {!globals && !error ? (
             <p role="status" className="text-muted">
               {t('environment.loading')}
             </p>
           ) : null}
-          <details className="rounded-xl border border-border">
-            <summary className="cursor-pointer px-4 py-3 font-medium">
-              {t('environment.details')}{' '}
-              <span className="ml-1 text-xs font-normal text-muted">
-                {effective.size} {t('environment.variables')}
-              </span>
-            </summary>
-            <div className="space-y-3 border-t border-border px-4 py-3">
-              {effective.size ? (
-                <ul className="space-y-2 text-xs text-muted">
-                  {Array.from(effective.values()).map((v) => (
-                    <li key={v.name} className="break-words">
-                      <code className="text-foreground">{v.name}</code> ·{' '}
-                      {v.secret ? t('environment.secret') : t('environment.ordinary')} · {v.phase} ·{' '}
-                      {v.source === 'override'
-                        ? t('environment.overrides')
-                        : v.source === 'environment'
-                          ? env?.name
-                          : t('environment.globalVariables')}
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="text-xs text-muted">{t('environment.noVariables')}</p>
+          {temporary ? (
+            globals ? (
+              <EffectiveConfiguration globals={globals} />
+            ) : null
+          ) : (
+            <fieldset className="space-y-2">
+              <legend className="sr-only">{t('environment.choose')}</legend>
+              {items.map((item) =>
+                option(
+                  item.id!,
+                  item.name,
+                  <span className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-muted">
+                    {item.is_default ? (
+                      <Badge tone="neutral" dot={false}>
+                        {t('environment.default')}
+                      </Badge>
+                    ) : null}
+                    {globals ? (
+                      <TestBadge environment={item} globalRevision={globals.revision} />
+                    ) : null}
+                    <span>{t('environment.variableCount', { count: item.variables.length })}</span>
+                    {item.setup_script ? <span>· {t('environment.installScript')}</span> : null}
+                    {item.start_script ? <span>· {t('environment.startScript')}</span> : null}
+                  </span>,
+                ),
               )}
-              {env?.setup_script ? (
-                <div>
-                  <p className="mb-1 text-xs text-muted">{t('environment.installScript')}</p>
-                  <pre className="max-h-32 overflow-auto whitespace-pre-wrap rounded-lg bg-surface-muted p-3 text-xs">
-                    {env.setup_script}
-                  </pre>
-                </div>
-              ) : null}
-              {env?.start_script ? (
-                <div>
-                  <p className="mb-1 text-xs text-muted">{t('environment.startScript')}</p>
-                  <pre className="max-h-32 overflow-auto whitespace-pre-wrap rounded-lg bg-surface-muted p-3 text-xs">
-                    {env.start_script}
-                  </pre>
-                </div>
-              ) : null}
-            </div>
-          </details>
-          <details className="rounded-xl border border-border">
-            <summary className="cursor-pointer px-4 py-3 font-medium">
-              {t('environment.overrides')}
-            </summary>
-            <div className="border-t border-border px-4 py-3">
-              <VariableEditor values={overrides} onChange={setOverrides} />
-            </div>
-          </details>
-          {managing && !temporary && (
-            <div className="border-t border-border pt-4">
-              <EnvironmentManager repo={repo} onChanged={() => setReload((v) => v + 1)} />
-            </div>
+              {option(
+                '',
+                t('environment.none'),
+                <span className="mt-0.5 block text-xs text-muted">
+                  {t('environment.noneDescription')}
+                </span>,
+              )}
+            </fieldset>
           )}
+          {!temporary && globals ? (
+            <details className="rounded-lg border border-border">
+              <summary className="cursor-pointer px-3 py-2 font-medium hover:bg-surface-hover">
+                {t('environment.details')}
+              </summary>
+              <div className="border-t border-border p-3">
+                <EffectiveConfiguration globals={globals} environment={env} />
+              </div>
+            </details>
+          ) : null}
         </div>
-        <div className="flex shrink-0 justify-end border-t border-border px-6 py-4">
+        <div className="flex shrink-0 flex-wrap items-center gap-2 border-t border-border px-6 py-3">
+          {temporary ? (
+            <button
+              type="button"
+              className="ui-button ui-button-ghost"
+              disabled={!globals}
+              onClick={() => globals && setEditing({ config: globals, globals })}
+            >
+              {t('environment.editGlobals')}
+            </button>
+          ) : (
+            <>
+              <button
+                type="button"
+                className="ui-button ui-button-ghost"
+                disabled={!globals}
+                onClick={() => globals && setEditing({ config: emptyEnvironment(repo), globals })}
+              >
+                <span aria-hidden="true">+</span>
+                {t('environment.new')}
+              </button>
+              {env ? (
+                <button
+                  type="button"
+                  className="ui-button ui-button-ghost"
+                  onClick={() => globals && setEditing({ config: env, globals })}
+                >
+                  {t('environment.editItem', { name: env.name })}
+                </button>
+              ) : null}
+            </>
+          )}
           <button
             type="button"
             data-environment-done
             onClick={onClose}
-            className="ui-button ui-button-primary"
+            className="ui-button ui-button-primary ml-auto"
           >
             {t('environment.done')}
           </button>
         </div>
       </div>
+      {editing ? (
+        <EnvironmentDialog
+          initial={editing.config}
+          globals={editing.globals}
+          onSaved={(next) => {
+            if (next.repo !== null && !editing.config.id) created.current = next.id;
+            setReload((v) => v + 1);
+          }}
+          onClose={() => setEditing(null)}
+        />
+      ) : null}
     </div>,
     document.body,
   );

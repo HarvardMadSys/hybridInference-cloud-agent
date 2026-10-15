@@ -101,19 +101,21 @@ async def require_agent_owner(
     user: dict[str, Any] = Depends(authenticate_agent_owner),
     gateway: GatewayClient = Depends(get_gateway_client),
 ) -> dict[str, Any]:
-    """Require current Gateway admission for every owner read and write.
+    """Require Gateway admission for every owner read and write.
 
     Identity selects the owner; the Gateway's explicit agent.use permission
     admits the request. Local ownership checks still fence every resource.
+    The grant may be one the Gateway gave a few seconds ago: see
+    :class:`~cloud_agent.api.deps.AgentAccessAdmission`.
 
     The owner identity carries no admin flag. Admin authority lives behind
     ``verify_admin_access`` on the ``/admin`` surface, which asks the Gateway
     itself — an ``is_admin`` here would be a second answer to that question,
     and one every owner route could branch on.
     """
-    from cloud_agent.api.deps import require_agent_access
+    from cloud_agent.api.deps import admit_agent_owner
 
-    decision = await require_agent_access(gateway, user["user_id"])
+    decision = await admit_agent_owner(request, gateway, user["user_id"])
     return {
         **user,
         "agent_access": decision.public().model_dump(),

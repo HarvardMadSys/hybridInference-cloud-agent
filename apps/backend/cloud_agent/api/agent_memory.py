@@ -28,6 +28,9 @@ if TYPE_CHECKING:
     from cloud_agent.ports.agent_memory import AgentMemoryRepository
 
 
+_INVALID_MESSAGE = "Memory must be one lasting rule of at most 240 characters, without credentials."
+
+
 class _MemoryValidationRoute(APIRoute):
     """Keep rejected memory text out of request-validation error responses."""
 
@@ -38,10 +41,19 @@ class _MemoryValidationRoute(APIRoute):
         async def safe_handler(request: Request) -> Response:
             try:
                 return await handler(request)
-            except RequestValidationError:
+            except RequestValidationError as exc:
+                errors = exc.errors()
+                # Text over the limit is refused here, before it is normalized,
+                # and carries the same typed reason as text normalizing refuses.
+                detail: Any = (
+                    {"error": {"type": "memory_invalid", "message": _INVALID_MESSAGE}}
+                    if errors
+                    and all(tuple(error["loc"]) == ("body", "content") for error in errors)
+                    else "Check the required memory fields and values."
+                )
                 return JSONResponse(
                     status_code=422,
-                    content={"detail": "Check the required memory fields and values."},
+                    content={"detail": detail},
                     headers={"Cache-Control": "no-store"},
                 )
 
@@ -83,17 +95,15 @@ class MemoryVersion(BaseModel):
     expected_version: int = Field(ge=0)
 
 
+def _refused(status: int, kind: str, message: str) -> HTTPException:
+    return HTTPException(status, {"error": {"type": kind, "message": message}})
+
+
 def _content(content: str) -> str:
     try:
         return normalize_memory(content)
-    except ValueError:
-        raise HTTPException(
-            422, "Memory must be one lasting rule of at most 240 characters, without credentials."
-        ) from None
-
-
-def _refused(status: int, kind: str, message: str) -> HTTPException:
-    return HTTPException(status, {"error": {"type": kind, "message": message}})
+    except ValueError as exc:
+        raise _failure(exc) from None
 
 
 def _failure(exc: ValueError) -> HTTPException:
@@ -108,11 +118,7 @@ def _failure(exc: ValueError) -> HTTPException:
             "memory_scope_full",
             "This scope is full of memories you wrote. Remove one before adding another.",
         )
-    return _refused(
-        422,
-        "memory_invalid",
-        "Memory must be one lasting rule of at most 240 characters, without credentials.",
-    )
+    return _refused(422, "memory_invalid", _INVALID_MESSAGE)
 
 
 @router.get("", response_model=AgentMemoryScopeView)

@@ -43,6 +43,7 @@ from typing import TYPE_CHECKING, Any
 
 from cloud_agent_host.bounded_output import OutputPump, TextTail, protocol_lines, text_chunks
 from cloud_agent_host.chat_sandbox_models import (
+    CHAT_CHECKPOINT_LABEL as CHAT_CHECKPOINT_LABEL,
     CHAT_CONTAINER_PREFIX as CHAT_CONTAINER_PREFIX,
     CHAT_CPU_LIMIT_LABEL as CHAT_CPU_LIMIT_LABEL,
     CHAT_DISK_LIMIT_LABEL as CHAT_DISK_LIMIT_LABEL,
@@ -73,6 +74,7 @@ from cloud_agent_host.chat_sandbox_models import (
     RetainedChatFailStopped as RetainedChatFailStopped,
     RetainedChatLost as RetainedChatLost,
     SandboxActionFacts as SandboxActionFacts,
+    SandboxRestoreFailed as SandboxRestoreFailed,
 )
 from cloud_agent_host.chat_sandbox_network import (
     _GUEST_NETWORK_CHECK as _GUEST_NETWORK_CHECK,
@@ -109,6 +111,7 @@ from cloud_agent_host.sandbox import (
     SandboxSpec,
     TerminalProcess,
 )
+from cloud_agent_host.sandbox_checkpoints import checkpoint_image_reference
 from cloud_agent_host.tool_windows import MAX_TOOL_MARK_BYTES, TOOL_MARK_FILE, ToolMarkReader
 from cloud_agent_shared.environment import (
     DOCKER_CLIENT_ENV as _DOCKER_CLIENT_ENV,
@@ -685,6 +688,10 @@ class ChatSandboxManager:
         """Delegate to the group-network lifecycle owner."""
         return self._network_lifecycle.require_host_rules()
 
+    def renew_host_rules(self) -> None:
+        """Delegate to the group-network lifecycle owner."""
+        return self._network_lifecycle.renew_host_rules()
+
     def _ensure_group_network(
         self,
         spec: ChatSandboxSpec,
@@ -845,10 +852,19 @@ class ChatSandboxManager:
         spec: ChatSandboxSpec,
         *,
         image: str | None = None,
+        checkpoint_id: str | None = None,
     ) -> builtins.list[str]:
-        """Compose a no-secret, no-chat-volume ``docker create`` command."""
+        """Compose a no-secret, no-chat-volume ``docker create`` command.
+
+        ``checkpoint_id`` recreates a moved group: the image is that
+        checkpoint's local image and nothing else, and the container records
+        which checkpoint it came from.
+        """
         self._validate_extra_args()
-        if (
+        if checkpoint_id is not None:
+            if image != checkpoint_image_reference(spec.sandbox_id, checkpoint_id):
+                raise SandboxError("chat sandbox restore image does not match its checkpoint")
+        elif (
             image is not None
             and spec.sandbox_image_digest is not None
             and image != spec.sandbox_image_digest
@@ -865,6 +881,8 @@ class ChatSandboxManager:
             **spec.docker_labels(),
             CHAT_NAMESPACE_LABEL: self.backend.sandbox_namespace,
         }
+        if checkpoint_id is not None:
+            labels[CHAT_CHECKPOINT_LABEL] = checkpoint_id
         for key, value in sorted(labels.items()):
             argv += ["--label", f"{key}={value}"]
         argv += [
@@ -957,6 +975,7 @@ class ChatSandboxManager:
         spec: ChatSandboxSpec,
         *,
         image: str | None = None,
+        checkpoint_id: str | None = None,
         facts: SandboxActionFacts | None = None,
         observer: StageObserver | None = None,
     ) -> ChatSandboxInspection:
@@ -979,7 +998,7 @@ class ChatSandboxManager:
             # `docker start`, and that is what classifies the path.
             self._verify_identity(existing, spec)
             return existing
-        command = self.build_create_command(spec, image=image)
+        command = self.build_create_command(spec, image=image, checkpoint_id=checkpoint_id)
         with substage(observer, "container_create"):
             created = self._run(command, timeout=120)
         if created.returncode != 0:
@@ -1007,6 +1026,37 @@ class ChatSandboxManager:
             raise SandboxError("Docker created the chat sandbox but it cannot be inspected")
         self._verify_identity(inspected, spec)
         return inspected
+
+    def remove_superseded(self, spec: ChatSandboxSpec) -> bool:
+        """Remove this group's container from an older generation, if one holds its name.
+
+        A group moved here was rehomed under a new generation; whatever an
+        earlier attempt left on this host under the old one is fenced out by
+        the control plane and can never run again. Anything else holding the
+        name is left alone. Returns whether a container was removed.
+        """
+        current = self.inspect(spec.container_name)
+        if current is None:
+            return False
+        labels = current.labels
+        try:
+            generation = int(labels.get(CHAT_GENERATION_LABEL) or "0")
+        except ValueError:
+            return False
+        if (
+            labels.get(CHAT_SANDBOX_ID_LABEL) != spec.sandbox_id
+            or labels.get(CHAT_NAMESPACE_LABEL) != self.backend.sandbox_namespace
+            or not 0 < generation < spec.generation
+        ):
+            return False
+        removed = self._run(
+            [self.backend.docker_binary, "rm", "--force", current.container_id], timeout=120
+        )
+        if removed.returncode != 0 and self.inspect(spec.container_name) is not None:
+            raise SandboxError(
+                "superseded chat sandbox could not be removed: " + removed.stderr.strip()[:300]
+            )
+        return True
 
     def require_existing(
         self,
@@ -4318,11 +4368,19 @@ finally:
                 namespace,
                 self.backend.sandbox_namespace,
             )
-        if spec.sandbox_image_digest is not None and inspection.image != spec.sandbox_image_digest:
-            mismatched["container-image"] = (
-                inspection.image,
-                spec.sandbox_image_digest,
-            )
+        # A recreated group runs its checkpoint's image, which extends the
+        # immutable one; the checkpoint label says which, and only that image
+        # is accepted for it.
+        checkpoint_id = inspection.labels.get(CHAT_CHECKPOINT_LABEL)
+        expected_image = (
+            checkpoint_image_reference(spec.sandbox_id, checkpoint_id)
+            if checkpoint_id
+            else spec.sandbox_image_digest
+        )
+        if (checkpoint_id or spec.sandbox_image_digest is not None) and (
+            inspection.image != expected_image
+        ):
+            mismatched["container-image"] = (inspection.image, expected_image or "")
         if (require_name and inspection.name != spec.container_name) or mismatched:
             raise SandboxError(
                 "Docker name is occupied by a container outside this chat/generation"

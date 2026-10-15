@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LocaleProvider } from '@/components/providers/LocaleProvider';
 import { getInsights, type WorkInsights } from '@/lib/api/insights';
 import { getUserProfile, type UserProfile } from '@/lib/api/userProfile';
+import { announceProfileSaved } from '@/lib/api/profileEvents';
 import { LOCALE_STORAGE_KEY } from '@/lib/i18n/locales';
 import { UserAvatar } from './UserAvatar';
 
@@ -49,6 +50,102 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe('homepage avatar', () => {
+  it('shows the cached avatar immediately on return while both reads refresh', async () => {
+    const first = render(avatar());
+    expect(await screen.findByRole('img')).toHaveAttribute('src', view.avatar.data_url);
+    first.unmount();
+    let resolveInsights!: (next: WorkInsights) => void;
+    let resolveProfile!: (next: UserProfile) => void;
+    vi.mocked(getInsights).mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveInsights = resolve;
+      }),
+    );
+    vi.mocked(getUserProfile).mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveProfile = resolve;
+      }),
+    );
+    render(avatar());
+    expect(screen.getByRole('img')).toHaveAttribute('src', view.avatar.data_url);
+    expect(getInsights).toHaveBeenCalledTimes(2);
+    expect(getUserProfile).toHaveBeenCalledTimes(2);
+    const updated = {
+      ...view,
+      avatar: { ...view.avatar, data_url: 'data:image/svg+xml,<svg id="new"></svg>' },
+    };
+    await act(async () => resolveInsights(updated));
+    expect(screen.getByRole('img')).toHaveAttribute('src', updated.avatar.data_url);
+    await act(async () => resolveProfile({ ...profile, image_data_url: photo }));
+    expect(screen.getByRole('img', { name: 'Your profile image' })).toHaveAttribute('src', photo);
+  });
+
+  it('keeps the cached photo if background profile and insights reads fail', async () => {
+    vi.mocked(getUserProfile).mockResolvedValueOnce({ ...profile, image_data_url: photo });
+    const first = render(avatar());
+    expect(await screen.findByRole('img')).toHaveAttribute('src', photo);
+    first.unmount();
+    vi.mocked(getUserProfile).mockRejectedValueOnce(new Error('Offline'));
+    vi.mocked(getInsights).mockRejectedValueOnce(new Error('Offline'));
+    render(avatar());
+    expect(screen.getByRole('img')).toHaveAttribute('src', photo);
+    await act(async () => {});
+    expect(screen.getByRole('img')).toHaveAttribute('src', photo);
+  });
+
+  it('shares pending reads and keeps them alive until the last avatar unmounts', async () => {
+    let resolveInsights!: (next: WorkInsights) => void;
+    let resolveProfile!: (next: UserProfile) => void;
+    vi.mocked(getInsights).mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveInsights = resolve;
+      }),
+    );
+    vi.mocked(getUserProfile).mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveProfile = resolve;
+      }),
+    );
+    const first = render(avatar());
+    const second = render(avatar());
+    expect(getInsights).toHaveBeenCalledTimes(1);
+    expect(getUserProfile).toHaveBeenCalledTimes(1);
+    const insightsSignal = vi.mocked(getInsights).mock.calls[0][0]!;
+    const profileSignal = vi.mocked(getUserProfile).mock.calls[0][0]!;
+    first.unmount();
+    expect(insightsSignal.aborted).toBe(false);
+    expect(profileSignal.aborted).toBe(false);
+    await act(async () => {
+      resolveInsights(view);
+      resolveProfile(profile);
+    });
+    expect(screen.getByRole('img')).toHaveAttribute('src', view.avatar.data_url);
+    second.unmount();
+  });
+
+  it('caches saved photos immediately and rejects an older background response', async () => {
+    const first = render(avatar());
+    await screen.findByRole('img');
+    first.unmount();
+    let resolveOld!: (next: UserProfile) => void;
+    vi.mocked(getUserProfile).mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveOld = resolve;
+      }),
+    );
+    const second = render(avatar());
+    const signal = vi.mocked(getUserProfile).mock.calls[1][0]!;
+    act(() => announceProfileSaved({ ...profile, image_data_url: photo, revision: 2 }));
+    expect(signal.aborted).toBe(true);
+    expect(screen.getByRole('img')).toHaveAttribute('src', photo);
+    await act(async () => resolveOld(profile));
+    expect(screen.getByRole('img')).toHaveAttribute('src', photo);
+    second.unmount();
+    vi.mocked(getUserProfile).mockReturnValueOnce(new Promise(() => {}));
+    render(avatar());
+    expect(screen.getByRole('img')).toHaveAttribute('src', photo);
+  });
+
   it('prefers the uploaded photo even when the work profile cannot load', async () => {
     vi.mocked(getUserProfile).mockResolvedValue({ ...profile, image_data_url: photo });
     vi.mocked(getInsights).mockRejectedValue(new Error('Offline'));

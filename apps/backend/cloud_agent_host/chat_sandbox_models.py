@@ -22,6 +22,10 @@ CHAT_GENERATION_LABEL = "org.freeinference.chat-generation"
 CHAT_RUNTIME_LABEL = "org.freeinference.chat-runtime"
 CHAT_RUNTIME_VERSION_LABEL = "org.freeinference.chat-runtime-version"
 CHAT_IMAGE_DIGEST_LABEL = "org.freeinference.chat-image-digest"
+#: Set only on a container recreated from a checkpoint: the checkpoint's id.
+#: Its image is that checkpoint's local image, which extends the image the
+#: digest label still names.
+CHAT_CHECKPOINT_LABEL = "org.freeinference.chat-checkpoint"
 CHAT_MEMORY_LIMIT_LABEL = "org.freeinference.chat-memory-limit"
 CHAT_CPU_LIMIT_LABEL = "org.freeinference.chat-cpu-limit"
 CHAT_DISK_LIMIT_LABEL = "org.freeinference.chat-disk-limit-mib"
@@ -60,6 +64,14 @@ class RetainedChatLost(SandboxError):
 
 class ArchiveExportTooLarge(SandboxError):
     """A container path holds more than the archive export was allowed to carry."""
+
+
+class SandboxRestoreFailed(SandboxError):
+    """A moved group's checkpoint could not become its container on this host.
+
+    Unlike :class:`RetainedChatLost`, the chat is intact: its checkpoint is
+    unchanged and another attempt, here or elsewhere, may restore it.
+    """
 
 
 class RetainedChatFailStopped(SandboxError):

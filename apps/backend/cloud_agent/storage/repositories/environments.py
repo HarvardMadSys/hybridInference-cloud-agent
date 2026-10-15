@@ -605,8 +605,7 @@ class PostgresEnvironmentRepository:
         """Freeze a snapshot inside the transaction that creates its work item.
 
         A null ``repo`` is a temporary workspace. Environments belong to one
-        repository, so it binds only the owner's global variables and this
-        task's own overrides.
+        repository, so it binds only the owner's global variables.
         """
         await self._environment_lock(conn, user_id)
         environment_id = selection.get("environment_id")
@@ -637,9 +636,6 @@ class PostgresEnvironmentRepository:
             if global_row
             else None
         )
-        overrides = [EnvironmentVariable.model_validate(v) for v in selection.get("overrides", [])]
-        if len(overrides) > 50 or len(overrides) != len({v.name for v in overrides}):
-            raise EnvironmentInputError("Task overrides must have at most 50 distinct variables")
         merged = merge_variables(
             self._environment_decode(
                 await self._environment_stored_variables(
@@ -649,7 +645,6 @@ class PostgresEnvironmentRepository:
             self._environment_decode(
                 await self._environment_stored_variables(conn, version["id"] if version else None)
             ),
-            overrides,
         )
         has_override = bool(selection.get("has_setup_override", False))
         setup = (
@@ -661,13 +656,12 @@ class PostgresEnvironmentRepository:
         required = bool(merged or setup or document.get("start_script") or document.get("actions"))
         binding_id = _id()
         await conn.execute(
-            "INSERT INTO agent_environment_bindings(id,user_id,repo,environment_version_id,global_version_id,overrides,setup_override,has_setup_override,required) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9)",
+            "INSERT INTO agent_environment_bindings(id,user_id,repo,environment_version_id,global_version_id,setup_override,has_setup_override,required) VALUES($1,$2,$3,$4,$5,$6,$7,$8)",
             binding_id,
             user_id,
             repo,
             version["id"] if version else None,
             global_version["id"] if global_version else None,
-            json.dumps(self._environment_encode(overrides)),
             selection.get("setup_override"),
             has_override,
             required,
@@ -710,6 +704,8 @@ class PostgresEnvironmentRepository:
                     await self._environment_stored_variables(conn, row["environment_version_id"]),
                     include_secrets=include_secrets,
                 ),
+                # Task-only variables are no longer accepted, but a workspace
+                # bound before their removal keeps the ones it was given.
                 self._environment_decode(_json(row["overrides"]), include_secrets=include_secrets),
             )
             document = _json(version["document"]) if version else EnvironmentScripts().model_dump()
@@ -786,18 +782,34 @@ class PostgresEnvironmentRepository:
                 self._environment_decode(
                     await self._environment_stored_variables(conn, latest["id"] if latest else None)
                 ),
+                # Empty for every binding made since task-only variables were removed.
                 self._environment_decode(_json(binding["overrides"])),
             )
             runtime = [v for v in merged if v.phase in ("runtime", "both")]
             # Original installation secrets remain in the base snapshot. Retain prior
-            # runtime values as scan material for files produced by earlier turns.
+            # runtime values as scan material for files produced by earlier turns:
+            # each value once, and none still current, which the new runtime
+            # variables carry. Otherwise every refresh re-adds the unchanged
+            # Secrets, and a few refreshes exhaust the history limit.
             prior = _json(binding["runtime_secret_history"])
-            old = (
-                _json(binding["runtime_variables"])
-                if binding["runtime_variables"] is not None
-                else []
-            )
-            prior += [v for v in old if v["secret"]]
+            old = [
+                v
+                for v in (
+                    _json(binding["runtime_variables"])
+                    if binding["runtime_variables"] is not None
+                    else []
+                )
+                if v["secret"]
+            ]
+            if old:
+                cipher = _cipher()
+                kept = {cipher.decrypt(v["value_ciphertext"]) for v in prior}
+                kept.update(v.value for v in runtime if v.secret)
+                for v in old:
+                    value = cipher.decrypt(v["value_ciphertext"])
+                    if value not in kept:
+                        prior.append(v)
+                        kept.add(value)
             if len(prior) > 512 or sum(v["value_bytes"] for v in prior) > 262144:
                 raise EnvironmentInputError(
                     "Runtime Secret history limit reached; create a new workspace"

@@ -10,6 +10,7 @@ import type { AgentJobApi, AgentJobEventApi } from '@/lib/api/agents';
 import { getConversationState, toConversationState } from './conversationState';
 
 import {
+  createDisplayJobAdapter,
   lifecyclePhaseLabel,
   ownerFailureMessage,
   siteMisconfiguredReason,
@@ -1055,6 +1056,23 @@ describe('toDisplayJob', () => {
     expect(rows.some((row) => row.kind === 'message' && row.streaming)).toBe(false);
   });
 
+  it('keeps answers of different attempts apart when they share a preview id', () => {
+    const rows = toDisplayJob(
+      { ...JOB, current_attempt_id: 2 },
+      {
+        events: [
+          event(1, 'raw', { protocol: 'reply-preview', preview_id: 'same', delta: 'First try' }),
+          event(2, 'raw', { protocol: 'reply-preview', preview_id: 'same', delta: 'Second' }, 2),
+          event(3, 'raw', { protocol: 'reply-preview', preview_id: 'same', delta: ' try' }, 2),
+        ],
+      },
+    ).events;
+    expect(rows.map((row) => [row.attemptNo, 'text' in row ? row.text : ''])).toEqual([
+      [1, 'First try'],
+      [2, 'Second try'],
+    ]);
+  });
+
   it('shows a complete message on its own when nothing was previewed before it', () => {
     const job = toDisplayJob(JOB, {
       events: [event(1, 'message', { text: 'Hello.', usage_id: 'msg_1' })],
@@ -1637,5 +1655,56 @@ describe('subagentDisplayEvents', () => {
         (row) => row.kind === 'message' && row.text,
       ),
     ).toEqual(['From the thread', 'From a sibling']);
+  });
+});
+
+describe('projecting a running turn again', () => {
+  const call = (id: number, callId: string, command: string) =>
+    event(id, 'tool_use', { id: callId, name: 'bash', input: { command } });
+
+  it('keeps each unchanged row and builds a new one only for a row that changed', () => {
+    const project = createDisplayJobAdapter();
+    const streamed = [call(1, 'call_1', 'pwd'), event(2, 'message', { text: 'Checking.' })];
+    const before = project(JOB, { events: [...streamed, call(3, 'call_2', 'ls')] }).events;
+    const after = project(JOB, {
+      events: [
+        ...streamed,
+        call(3, 'call_2', 'ls'),
+        event(4, 'tool_result', { tool_use_id: 'call_1', content: '/workspace' }),
+      ],
+    }).events;
+
+    expect(after[0]).not.toBe(before[0]);
+    expect(after[0]).toMatchObject({ kind: 'tool_use', output: ['/workspace'] });
+    expect(after[1]).toBe(before[1]);
+    expect(after[2]).toBe(before[2]);
+  });
+
+  it('returns the same rows when nothing changed', () => {
+    const project = createDisplayJobAdapter();
+    const events = [call(1, 'call_1', 'pwd'), event(2, 'tool_result', { tool_use_id: 'call_1' })];
+    const before = project(JOB, { events }).events;
+    expect(project(JOB, { events: [...events] }).events).toBe(before);
+  });
+
+  it('does not carry rows from one turn into another', () => {
+    const project = createDisplayJobAdapter();
+    const events = [event(1, 'message', { text: 'Same text.' })];
+    const before = project(JOB, { events }).events;
+    const other = project({ ...JOB, id: 'ajob_2' }, { events }).events;
+    expect(other).toEqual(before);
+    expect(other[0]).not.toBe(before[0]);
+  });
+
+  it('reads an unchanged workspace patch once', () => {
+    const project = createDisplayJobAdapter();
+    const patch = 'diff --git a/x.ts b/x.ts\n--- a/x.ts\n+++ b/x.ts\n@@ -1 +1 @@\n-a\n+b';
+    const first = project(JOB, { events: [], patch });
+    const again = project(JOB, { events: [], patch });
+    expect(again.diffFileDetails).toBe(first.diffFileDetails);
+    expect(again.diffFiles).toBe(first.diffFiles);
+    const changed = project(JOB, { events: [], patch: `${patch}\n+c` });
+    expect(changed.diffFileDetails).not.toBe(first.diffFileDetails);
+    expect(changed.diffStat).toEqual({ add: 2, del: 1 });
   });
 });

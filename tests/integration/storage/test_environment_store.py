@@ -10,7 +10,7 @@ import pytest
 from tests.integration.storage.test_agent_job_store import pool, store  # noqa: F401
 
 from cloud_agent.environments import EnvironmentConflict, EnvironmentNotFound
-from cloud_agent_shared.environment import EnvironmentScripts
+from cloud_agent_shared.environment import EnvironmentScripts, EnvironmentVariable
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
@@ -37,7 +37,7 @@ async def _save(
     )
 
 
-async def _job(store, env, overrides=None):
+async def _job(store, env):
     return await store.conversation_commands.create_job(
         user_id="alice",
         repo=env["repo"],
@@ -48,7 +48,6 @@ async def _job(store, env, overrides=None):
             "environment_id": env["id"],
             "environment_id_provided": True,
             "environment_revision": env["revision"],
-            "overrides": overrides or [],
         },
     )
 
@@ -75,7 +74,9 @@ async def test_ciphertext_and_write_only_values_at_every_version(store, pool, mo
         )
 
 
-async def test_new_messages_keep_bound_versions_after_rotation_and_global_edit(store, monkeypatch):
+async def test_new_messages_keep_bound_versions_after_rotation_and_global_edit(
+    store, pool, monkeypatch
+):
     monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "environment-test-key")
     await _save(
         store,
@@ -85,8 +86,20 @@ async def test_new_messages_keep_bound_versions_after_rotation_and_global_edit(s
         variables=[{"name": "GLOBAL", "value": "global-one"}],
     )
     env = await _save(store, variables=[{"name": "TOKEN", "value": "private-one"}])
-    job = await _job(store, env, [{"name": "TASK_ONLY", "value": "override-one"}])
+    job = await _job(store, env)
     binding = job["environment_binding_id"]
+    # Task-only variables are no longer accepted; a workspace bound before
+    # their removal still has its own, and keeps them.
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_environment_bindings SET overrides=$2::jsonb WHERE id=$1",
+            binding,
+            json.dumps(
+                store.environments._environment_encode(
+                    [EnvironmentVariable(name="TASK_ONLY", value="override-one")]
+                )
+            ),
+        )
     await _save(
         store,
         environment_id=env["id"],
@@ -649,6 +662,29 @@ async def test_legacy_disabled_setting_cannot_block_bindings_or_runtime_refresh(
             "alice", job["environment_binding_id"], 0
         )
     )["runtime_revision"] == 1
+
+
+async def test_unchanged_runtime_secrets_do_not_fill_the_history(store, monkeypatch):
+    """Each replaced value is kept once; refreshing without a change adds nothing."""
+    monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "environment-test-key")
+    env = await _save(store, variables=[{"name": "TOKEN", "value": "original-secret"}])
+    job = await _job(store, env)
+    binding = job["environment_binding_id"]
+    for revision in range(10):
+        await store.environments.refresh_runtime_environment("alice", binding, revision)
+    bound = await store.environments.get_environment_binding("alice", binding)
+    assert bound.previous_secrets == {}
+    await _save(
+        store,
+        environment_id=env["id"],
+        revision=1,
+        variables=[{"name": "TOKEN", "value": "rotated-secret"}],
+    )
+    for revision in range(10, 15):
+        await store.environments.refresh_runtime_environment("alice", binding, revision)
+    bound = await store.environments.get_environment_binding("alice", binding)
+    assert list(bound.previous_secrets.values()) == ["original-secret"]
+    assert bound.values("runtime") == {"TOKEN": "rotated-secret"}
 
 
 async def test_start_skip_only_consumes_requesting_chat_next_turn(store, pool, monkeypatch):

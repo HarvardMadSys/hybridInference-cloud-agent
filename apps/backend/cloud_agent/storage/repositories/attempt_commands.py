@@ -54,13 +54,14 @@ from cloud_agent.storage._sql.ledger import (
 )
 from cloud_agent.storage._sql.pending_messages import PAUSE_QUEUE_SQL
 from cloud_agent.storage._sql.rows import job_row_to_dict, load_json
-from cloud_agent.storage._sql.sandbox import THREAD_SANDBOX_SOURCE
+from cloud_agent.storage._sql.sandbox import THREAD_SANDBOX_SOURCE, release_failed_restore
 from cloud_agent.storage.deadlocks import retry_deadlock_victim
 from cloud_agent.task_titles import thread_title_needs_generation
 from cloud_agent_shared.sandbox_archive_settings import (
     SANDBOX_ARCHIVE_CAPABILITY,
     SandboxArchivePolicyError,
 )
+from cloud_agent_shared.sandbox_restore import MAX_RESTORE_ATTEMPTS, SANDBOX_RESTORE_CAPABILITY
 
 if TYPE_CHECKING:
     from cloud_agent.goals.report import GoalReportEnvelope
@@ -248,6 +249,16 @@ class PostgresAttemptCommands:
                 or attested_archive_revision != archive_revision
             ):
                 return None
+            # A cold group lives only in its checkpoint, which this replica's
+            # sandbox manager must be able to download (archives on) and turn
+            # back into the group (it attests restore). The host row and the
+            # replica both say so: during a rolling deploy the row describes
+            # whichever replica beat last.
+            restore_capable = bool(
+                archive_required
+                and SANDBOX_RESTORE_CAPABILITY in capabilities
+                and SANDBOX_RESTORE_CAPABILITY in runner_capabilities
+            )
             credential_matches = bool(host_row["credential_matches"])
             secure_attestation = bool(
                 credential_matches
@@ -323,6 +334,24 @@ class PostgresAttemptCommands:
                             )
                             AND s.shared_live
                         )
+                        OR (
+                            -- A group whose host is gone, held by its
+                            -- checkpoint: any restore-capable host may take
+                            -- it, and the claim below rehomes it.
+                            s.state = 'cold'
+                            AND $7::boolean
+                            AND $6::boolean
+                            AND s.restore_attempts < {MAX_RESTORE_ATTEMPTS}
+                            AND NOT EXISTS (
+                                SELECT 1 FROM agent_sandboxes deleting
+                                WHERE deleting.id = s.sandbox_id
+                                  AND deleting.deletion_state IN ('pending', 'archived', 'deleted')
+                            )
+                            AND s.fork_operation_id IS NULL
+                            AND s.context_status <> 'lost'
+                            AND s.native_state <> 'lost'
+                            AND s.shared_live
+                        )
                   )
                 ORDER BY j.created_at
                 LIMIT 1
@@ -334,22 +363,28 @@ class PostgresAttemptCommands:
                 shared_attestation,
                 pin_allows_new_sandbox,
                 followup_attestation,
+                restore_capable,
             )
             if job_row is None:
                 return None
             job_id = job_row["id"]
             thread_sandbox = load_json(job_row["thread_sandbox"])
+            restore = isinstance(thread_sandbox, dict) and thread_sandbox.get("state") == "cold"
             if isinstance(thread_sandbox, dict):
                 # Serialize a retained claim with an administrative stop. A
                 # claim committed first is visible to the stop's busy check;
-                # a stop committed first leaves this job queued.
+                # a stop committed first leaves this job queued. A cold group
+                # is locked for the rehome below, so of two siblings claiming
+                # it only the first moves it.
                 claimable = await conn.fetchval(
-                    "SELECT state IN ('provisioning', 'starting', 'running', 'stopped') "
+                    "SELECT (state IN ('provisioning', 'starting', 'running', 'stopped') "
+                    "OR ($2 AND state = 'cold' AND restore_checkpoint_id IS NOT NULL)) "
                     "AND stop_requested_at IS NULL "
                     "AND deletion_state NOT IN ('pending', 'archived', 'deleted') "
                     "FROM agent_sandboxes "
-                    "WHERE id = $1 FOR SHARE",
+                    "WHERE id = $1 " + ("FOR UPDATE" if restore else "FOR SHARE"),
                     thread_sandbox["sandbox_id"],
+                    restore,
                 )
                 if not claimable:
                     return None
@@ -385,6 +420,22 @@ class PostgresAttemptCommands:
             )
             if took_slot is None:
                 return None
+            if restore:
+                # The fence that makes this host the group's only owner: a new
+                # generation, no container yet, and the checkpoint kept as the
+                # source. Anything the previous host still holds names the old
+                # generation and is refused from here on.
+                await conn.execute(
+                    """
+                    UPDATE agent_sandboxes
+                    SET state = 'restoring', host = $2, generation = generation + 1,
+                        container_id = NULL, restore_attempts = restore_attempts + 1,
+                        idle_deadline = NULL, last_error = NULL, updated_at = NOW()
+                    WHERE id = $1 AND state = 'cold'
+                    """,
+                    thread_sandbox["sandbox_id"],
+                    host,
+                )
             next_no = await conn.fetchval(
                 "SELECT COALESCE(MAX(attempt_no), 0) + 1 FROM agent_attempts WHERE job_id = $1",
                 job_id,
@@ -456,6 +507,20 @@ class PostgresAttemptCommands:
                 job_id,
                 attempt["id"],
             )
+            if restore:
+                # However this attempt ends before the recreated container is
+                # confirmed, ``release_failed_restore`` finds the group by it.
+                await conn.execute(
+                    "UPDATE agent_sandboxes SET restore_attempt_id = $2 WHERE id = $1",
+                    thread_sandbox["sandbox_id"],
+                    attempt["id"],
+                )
+                thread_sandbox = load_json(
+                    await conn.fetchval(
+                        f"SELECT to_jsonb(s) FROM {THREAD_SANDBOX_SOURCE} WHERE s.thread_id = $1",
+                        job_row["thread_id"],
+                    )
+                )
             # Nothing is charged here. What this goal has spent is *derived*
             # from the rounds that have actually started — see
             # ``storage._sql.goals.ROUNDS_USED_SQL`` — so a round costs
@@ -601,6 +666,21 @@ class PostgresAttemptCommands:
             # UPDATE above, this still runs once and cannot double-count even
             # when the job UPDATE changed no row.
             await release_host_slot(conn, released_row["host_id"])
+            # A restore handed back before its container was confirmed leaves
+            # the group to its checkpoint for the next claim.
+            restored_state = await release_failed_restore(
+                conn, attempt_id, f"sandbox restore released: {reason}"
+            )
+            if restored_state == "lost":
+                # The attempts ran out: this turn and those queued behind it
+                # can never run, including the one just put back.
+                await fail_unrunnable_follow_ups(
+                    conn,
+                    thread_id=await conn.fetchval(
+                        "SELECT thread_id FROM agent_jobs WHERE id = $1", released
+                    ),
+                    detail="not run because the sandbox could not be restored",
+                )
             if released_state == CANCELLED:
                 # A cancelled parent is a turn boundary like any other
                 # terminal outcome: fail any child that cannot preserve
@@ -748,6 +828,22 @@ class PostgresAttemptCommands:
                     goal_envelope.source_digest,
                 )
             if to_state in TERMINAL_STATES:
+                # A turn that ends while its attempt was still recreating the
+                # group admitted nothing. Hand the group back to its checkpoint
+                # first, so the backstop below does not read the missing
+                # container as lost context.
+                if (
+                    await release_failed_restore(
+                        conn, attempt_id, detail or "turn ended during sandbox restore"
+                    )
+                    == "lost"
+                    and updated["thread_id"] is not None
+                ):
+                    await fail_unrunnable_follow_ups(
+                        conn,
+                        thread_id=updated["thread_id"],
+                        detail="not run because the sandbox could not be restored",
+                    )
                 sandbox_transition = None
                 # Close any retained-sandbox turn boundary in the same
                 # transaction as the job outcome.  A successful turn has
@@ -1534,6 +1630,18 @@ class PostgresAttemptCommands:
             admitted_ambiguously or owns_retained_activation
         ) and not settled_retained_turn
         settled_finalization_expired = settled_retained_turn and sandbox_admitted_job_id == job_id
+        # An attempt that died while recreating a cold group from its
+        # checkpoint admitted nothing: admission waits for the recreated
+        # container. The group goes back to its checkpoint and the turn back
+        # to the queue, until the restore attempts run out.
+        restored_state = await release_failed_restore(
+            conn, attempt_id, "sandbox restore lease expired"
+        )
+        restore_exhausted = restored_state == "lost"
+        if restored_state is not None:
+            retained_activation_expired = False
+            if restore_exhausted:
+                await fail_unrunnable_follow_ups(conn, thread_id=sandbox_thread_id)
         cleanup_residency: dict[str, Any] | None = None
         if retained_activation_expired:
             # The admission receipt identifies a definitely ambiguous
@@ -1729,6 +1837,14 @@ class PostgresAttemptCommands:
                         "the prompt was not replayed"
                     )
                 ),
+            )
+        elif restore_exhausted and not row["cancel_requested"]:
+            action = FAILED
+            await conn.execute(
+                "UPDATE agent_jobs SET state = 'failed', detail = $2, "
+                "terminal_resume_pending = TRUE, updated_at = NOW() WHERE id = $1",
+                job_id,
+                f"the sandbox could not be restored after {MAX_RESTORE_ATTEMPTS} attempts",
             )
         elif row["cancel_requested"]:
             action = CANCELLED

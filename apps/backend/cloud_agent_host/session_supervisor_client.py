@@ -319,6 +319,8 @@ class SessionSupervisorClient:
         members: builtins.list[dict[str, Any]],
         expected_container_id: str | None = None,
         profiling: dict[str, Any] | None = None,
+        start_seq: int | None = None,
+        restore: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Lease one member without excluding turns on sibling members."""
         return self._shared_request(
@@ -343,6 +345,8 @@ class SessionSupervisorClient:
                 "activation_generation": activation_generation,
                 "has_settled_context": has_settled_context,
                 "profiling": profiling,
+                "start_seq": start_seq,
+                "restore": restore,
             },
         )
 

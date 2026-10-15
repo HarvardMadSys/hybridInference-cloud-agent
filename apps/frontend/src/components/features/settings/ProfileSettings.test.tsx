@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, renderHook, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { APIError } from '@/lib/utils/errors';
 import { getUserProfile, saveUserProfile, type UserProfile } from '@/lib/api/userProfile';
+import { useUserProfile } from '@/components/features/profile/useUserProfile';
 import { ProfileSettings } from './ProfileSettings';
 
 const auth = vi.hoisted(() => ({ user: { id: 'alice' } as { id: string } | null }));
@@ -43,6 +44,22 @@ async function openProfile() {
 }
 
 describe('Profile settings', () => {
+  it('makes a removed photo available from cache before another view can refresh', async () => {
+    vi.mocked(getUserProfile).mockResolvedValueOnce({
+      ...profile,
+      image_data_url: 'data:image/png;base64,eA==',
+    });
+    const editor = await openProfile();
+    fireEvent.click(screen.getByRole('button', { name: 'Remove image' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await screen.findByText('Profile saved.');
+    editor.unmount();
+    vi.mocked(getUserProfile).mockReturnValueOnce(new Promise(() => {}));
+    const { result } = renderHook(() => useUserProfile('alice'));
+    expect(result.current.loading).toBe(false);
+    expect(result.current.profile).toMatchObject({ image_data_url: null, revision: 4 });
+  });
+
   it("shows the account's fixed Pokémon companion when no photo is saved", async () => {
     await openProfile();
     expect(screen.getByRole('img', { name: 'Your Pokémon companion avatar' })).toHaveAttribute(

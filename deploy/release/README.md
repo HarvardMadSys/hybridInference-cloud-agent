@@ -161,6 +161,12 @@ After its smoke test passes, each digest receives a tag such as
 `control-<sha>`, `web-agents-<sha>`, or `sandbox-<sha>`. These tags help people
 inspect images and are not deployment selectors.
 
+Tags such as `buildcache-sandbox-2026-w42` are the publication workflow's layer
+cache, not images. Only that workflow writes them, and it starts a new one each
+ISO week. Because a layer whose inputs did not change keeps its digest from one
+release to the next, a host that runs the previous release pulls only the
+layers that changed.
+
 When changing registry layout, verify whether the copy preserves the original
 index digest. Recreating an index or converting its format can change that
 digest and requires a reviewed lock update. Keep old addresses available until

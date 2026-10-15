@@ -146,7 +146,6 @@ export interface CreateAgentJobRequest {
   environment_id?: string | null;
   environment_revision?: number;
   global_revision?: number;
-  environment_overrides?: import('../environments').EnvironmentVariable[];
   /** Installed before the first agent turn in this conversation's sandbox. */
   plugins?: AgentPluginInputApi[];
   /** Omitted uses personal defaults; an empty list selects none. */

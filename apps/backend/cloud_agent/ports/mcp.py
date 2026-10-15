@@ -160,6 +160,7 @@ class McpConnectionRepository(Protocol):
         expected_config_revision: int | None = None,
         expected_refresh_generation: int | None = None,
         reset_status: bool = False,
+        expected_credential_version: int | None = None,
     ) -> bool:
         """Write a credential, conditional on the state the flow started in.
 

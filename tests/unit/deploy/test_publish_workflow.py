@@ -11,6 +11,7 @@ a change to the workflow has to change a test.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -352,7 +353,8 @@ def test_each_cell_builds_through_a_fresh_builder_no_other_job_used(tmp_path: Pa
     CI's trusted cells keep a persistent `ci-<runner>` builder under `_work`
     on these same runners, and that state outlives whoever wrote it. The
     publisher therefore creates its own builder, configured under this job's
-    RUNNER_TEMP, and never reuses or self-heals into an existing one.
+    RUNNER_TEMP, and never reuses or self-heals into an existing one. The only
+    layers it reuses are the release cache's, read from the registry.
     """
     outputs, calls = run_builder_step(tmp_path, existing=[])
     builder = "publish-harvardmadsys-hybridinference-cloud-agent-image-verify-x64-1-123-2-sandbox"
@@ -387,6 +389,63 @@ def test_the_cells_builder_is_removed_whatever_happened() -> None:
     assert position("Make this job's own builder") < position(
         "Build ${{ matrix.artifact.name }} and push it by digest"
     )
+
+
+def test_both_builds_read_and_write_the_release_cache() -> None:
+    """Every stage's layers, and a failed export never fails the release."""
+    for fragment in (
+        "Build ${{ matrix.artifact.name }} and push it by digest",
+        "Build ${{ matrix.artifact.name }} and push it by digest (retry)",
+    ):
+        build = step(fragment)["with"]
+        assert build["cache-from"] == "type=registry,ref=${{ env.RELEASE_CACHE }}", fragment
+        assert build["cache-to"] == (
+            "type=registry,ref=${{ env.RELEASE_CACHE }},mode=max,ignore-error=true"
+        ), fragment
+    assert position("Name the release cache") < position(
+        "Build ${{ matrix.artifact.name }} and push it by digest"
+    )
+
+
+def test_the_release_cache_sits_in_the_cells_package_and_turns_over_weekly(
+    tmp_path: Path,
+) -> None:
+    """A week's name, so no reused layer holds packages older than a week.
+
+    ISO year with ISO week: `%Y-w%V` names the last days of some Decembers
+    as week 1 of the year they end, and would reuse that January's cache.
+    """
+    script = str(step("Name the release cache")["run"]).replace(
+        "${{ matrix.artifact.name }}", "sandbox"
+    )
+    assert "date -u +%G-w%V" in script
+    github_env = tmp_path / "github-env"
+    subprocess.run(
+        ["bash", "--noprofile", "--norc", "-c", script],
+        env={
+            **os.environ,
+            "BASH_ENV": "/dev/null",
+            "GITHUB_ENV": str(github_env),
+            "PUBLISH_REPOSITORY": "ghcr.io/harvardmadsys/cloud-agent-sandbox",
+        },
+        check=True,
+    )
+    name, value = github_env.read_text().strip().split("=", 1)
+    assert name == "RELEASE_CACHE"
+    assert re.fullmatch(
+        r"ghcr\.io/harvardmadsys/cloud-agent-sandbox:buildcache-sandbox-\d{4}-w\d{2}", value
+    ), value
+
+
+def test_no_other_workflow_touches_the_release_cache() -> None:
+    """CI and the pull-request caches neither read nor write what releases reuse."""
+    for path in PUBLISH.parent.glob("*.yml"):
+        if path == PUBLISH:
+            continue
+        text = path.read_text()
+        assert "buildcache-" not in text, path.name
+        assert "RELEASE_CACHE" not in text, path.name
+        assert "type=registry" not in text, path.name
 
 
 # ------------------------------------------------------------------- publish

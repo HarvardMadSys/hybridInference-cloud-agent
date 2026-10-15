@@ -13,6 +13,7 @@
  * environment-dependent crash into a named error at the call site.
  */
 import { afterEach, beforeEach, vi } from 'vitest';
+import { clearAccountResources } from './src/components/features/profile/accountResource';
 
 let blocked: string[] = [];
 
@@ -21,11 +22,12 @@ function blockedFetch(input: RequestInfo | URL): never {
   blocked.push(url);
   throw new Error(
     `Unit tests must not reach the network, but something requested ${url}. ` +
-      'Mock the API module for this test (vi.mock(\'@/lib/api/...\')).',
+      "Mock the API module for this test (vi.mock('@/lib/api/...')).",
   );
 }
 
 beforeEach(() => {
+  clearAccountResources();
   blocked = [];
   vi.stubGlobal('fetch', vi.fn(blockedFetch));
 });

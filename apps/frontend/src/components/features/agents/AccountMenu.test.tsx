@@ -313,6 +313,26 @@ describe('account menu', () => {
     expect(document.activeElement).toBe(trigger);
   });
 
+  it('moves focus into a submenu clicked after the pointer opened it, and no further', async () => {
+    localStorage.setItem(THEME_STORAGE_KEY, 'dark');
+    renderMenu();
+    await openMenu();
+    const menu = screen.getByRole('menu', { name: 'Account menu' });
+    const appearance = within(menu).getByRole('menuitem', { name: 'Appearance' });
+
+    fireEvent.pointerEnter(appearance);
+    fireEvent.click(appearance);
+    const panel = screen.getByRole('menu', { name: 'Appearance' });
+    expect(document.activeElement).toBe(within(panel).getByRole('menuitemradio', { name: 'Dark' }));
+
+    // Passing over another parent opens it without taking the focus.
+    const settings = within(menu).getByRole('menuitem', { name: 'My Settings' });
+    settings.focus();
+    fireEvent.pointerEnter(within(menu).getByRole('menuitem', { name: 'Language' }));
+    expect(screen.getByRole('menu', { name: 'Language' })).toBeInTheDocument();
+    expect(document.activeElement).toBe(settings);
+  });
+
   it('closes on a click outside', async () => {
     renderMenu();
     await openMenu();

@@ -1,5 +1,6 @@
 import type { KeyboardEventHandler, Ref } from 'react';
 import { useT } from '@/components/providers';
+import { projectTitle } from './conversations';
 
 export function SearchControls({
   inputRef,
@@ -94,7 +95,7 @@ export function SearchControls({
               ? t('sidebar.searchScopeUnavailable')
               : currentOnly
                 ? t('sidebar.searchAllProjects')
-                : t('sidebar.searchCurrentProject', { repo: activeRepo })
+                : t('sidebar.searchCurrentProject', { repo: projectTitle(activeRepo, t) })
           }
           onClick={() => onScopeChange(currentOnly ? 'all' : 'current')}
           className={chipClass(currentOnly)}

@@ -14,6 +14,27 @@ export interface VariableEdit extends Omit<EnvironmentVariable, 'value'> {
   operation: 'keep' | 'replace' | 'remove';
   value?: string | null;
   original_name?: string;
+  /** The saved type, so returning to it with nothing typed keeps the saved value. */
+  original_secret?: boolean;
+  /** The saved value of an ordinary variable; a Secret's is never known here. */
+  original_value?: string;
+}
+/**
+ * The edits a save sends. A removed row that was never saved has nothing to
+ * remove, and a saved name removed and then added again is that new row's
+ * replacement: sending either would be refused, and the row is not shown.
+ */
+function variableEditPayload(variables: VariableEdit[]) {
+  const live = new Set(variables.filter((v) => v.operation !== 'remove').map((v) => v.name));
+  return variables
+    .filter((v) => v.operation !== 'remove' || (v.original_name && !live.has(v.name)))
+    .map((v) => ({
+      name: v.name,
+      secret: v.secret,
+      phase: v.phase,
+      operation: v.operation,
+      ...(v.operation === 'replace' ? { value: v.value ?? '' } : {}),
+    }));
 }
 export interface EnvironmentAction {
   id: string;
@@ -25,8 +46,9 @@ export interface EnvironmentStep {
   phase: string;
   state: string;
   output: string;
-  exit_code?: number;
+  exit_code?: number | null;
   duration_seconds?: number;
+  detail?: string;
 }
 export interface EnvironmentRun {
   id: string;
@@ -51,6 +73,8 @@ export interface EnvironmentConfig {
   is_default?: boolean;
   default_revision?: number;
   latest_test?: { id: string; state: string; revision: number; global_revision: number } | null;
+  /** When this version was saved; present on version history entries. */
+  created_at?: string;
 }
 export interface EnvironmentBinding {
   binding_id: string | null;
@@ -59,6 +83,8 @@ export interface EnvironmentBinding {
   revision?: number;
   global_revision?: number;
   legacy: boolean;
+  required?: boolean;
+  environment_archived?: boolean;
   has_new_version?: boolean;
   runtime_revision?: number;
   runtime_variables?: EnvironmentVariable[] | null;
@@ -117,26 +143,14 @@ export const saveEnvironment = (
       start_script,
       verify_script,
       actions,
-      variables: variables.map((v) => ({
-        name: v.name,
-        secret: v.secret,
-        phase: v.phase,
-        operation: v.operation,
-        ...(v.operation === 'replace' ? { value: v.value ?? '' } : {}),
-      })),
+      variables: variableEditPayload(variables),
     },
   );
 };
 export const saveGlobalVariables = (revision: number, variables: VariableEdit[]) =>
   call<EnvironmentConfig>('environment-globals', 'PATCH', {
     revision,
-    variables: variables.map((v) => ({
-      name: v.name,
-      secret: v.secret,
-      phase: v.phase,
-      operation: v.operation,
-      ...(v.operation === 'replace' ? { value: v.value ?? '' } : {}),
-    })),
+    variables: variableEditPayload(variables),
   });
 export const deleteEnvironment = (id: string, revision: number) =>
   call<void>(`environments/${id}?revision=${revision}`, 'DELETE');

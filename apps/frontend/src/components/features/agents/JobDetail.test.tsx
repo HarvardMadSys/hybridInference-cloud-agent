@@ -2363,6 +2363,7 @@ describe('JobDetail', () => {
     ) {
       saved[saved.length - 1].name = this.download;
     });
+    const timers = vi.spyOn(window, 'setTimeout');
     try {
       render(<JobDetail job={makeJob({ threadId: 'thread-1' })} />);
       fireEvent.click(screen.getByRole('button', { name: 'Task actions' }));
@@ -2379,8 +2380,14 @@ describe('JobDetail', () => {
       expect((await saved[0].blob.text()).split('\n').map((line) => JSON.parse(line))).toEqual(
         stored,
       );
+      // Released later, once the browser has certainly taken the bytes.
+      expect(revoked).not.toHaveBeenCalled();
+      const release = timers.mock.calls.find(([, delay]) => delay === 60_000)?.[0];
+      expect(release).toBeTypeOf('function');
+      (release as () => void)();
       expect(revoked).toHaveBeenCalledWith('blob:session-log');
     } finally {
+      timers.mockRestore();
       click.mockRestore();
       Object.assign(URL, original);
     }
@@ -2393,6 +2400,32 @@ describe('JobDetail', () => {
     fireEvent.click(screen.getByRole('menuitem', { name: 'Download session log' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('job not found');
     expect(screen.getByRole('menuitem', { name: 'Download session log' })).toBeEnabled();
+  });
+
+  it('says a session log failed even after its menu was dismissed, and leaves focus alone', async () => {
+    const toast = await import('react-hot-toast');
+    const failed = vi.spyOn(toast.default, 'error').mockImplementation(() => '');
+    let fail!: (error: Error) => void;
+    vi.mocked(listAllAgentThreadEvents).mockReturnValueOnce(
+      new Promise((_resolve, reject) => (fail = reject)),
+    );
+    try {
+      render(<JobDetail job={makeJob()} />);
+      const trigger = screen.getByRole('button', { name: 'Task actions' });
+      fireEvent.click(trigger);
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Download session log' }));
+      fireEvent.keyDown(window, { key: 'Escape' });
+      expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+      const elsewhere = screen.getAllByRole('textbox')[0];
+      elsewhere.focus();
+
+      await act(async () => fail(new Error('job not found')));
+
+      expect(failed).toHaveBeenCalledWith('job not found');
+      expect(elsewhere).toHaveFocus();
+    } finally {
+      failed.mockRestore();
+    }
   });
 
   it('uses the native fork action from the task menu', async () => {

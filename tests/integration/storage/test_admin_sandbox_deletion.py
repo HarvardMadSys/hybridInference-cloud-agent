@@ -335,6 +335,36 @@ async def test_delete_claim_excludes_other_workers_and_expired_worker_receipts(d
     assert await checkpoint_archive(store, replacement)
 
 
+async def test_claim_serves_a_newer_request_before_older_ones_due_again(db, store):
+    """Two slow failures taking turns ahead of a newer request must not starve it."""
+    for sandbox_id in ("asbx_old_a", "asbx_old_b", "asbx_new"):
+        await seed(db, store, sandbox_id, state="stopped")
+    assert await request_delete(store, "asbx_old_a", discard=True) == "accepted"
+    assert await request_delete(store, "asbx_old_b", discard=True) == "accepted"
+    old_a = await store.sandbox.claim_due_admin_sandbox_deletion(ttl_seconds=3600)
+    assert old_a is not None and old_a["id"] == "asbx_old_a"
+    assert await store.sandbox.fail_admin_sandbox_deletion(
+        **worker_fence(old_a), error="The host timed out.", retain_pending=True
+    )
+    old_b = await store.sandbox.claim_due_admin_sandbox_deletion(ttl_seconds=3600)
+    assert old_b is not None and old_b["id"] == "asbx_old_b"
+    # The newer request arrives while that attempt is still waiting on its host.
+    assert await request_delete(store, "asbx_new", discard=True) == "accepted"
+    assert await store.sandbox.fail_admin_sandbox_deletion(
+        **worker_fence(old_b), error="The host timed out.", retain_pending=True
+    )
+    # The attempt outlasted the retry delay, so the first request is due again.
+    async with db.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_sandboxes SET deletion_retry_at = clock_timestamp() WHERE id = $1",
+            "asbx_old_a",
+        )
+    claim = await store.sandbox.claim_due_admin_sandbox_deletion(ttl_seconds=3600)
+    assert claim is not None and claim["id"] == "asbx_new"
+    retry = await store.sandbox.claim_due_admin_sandbox_deletion(ttl_seconds=3600)
+    assert retry is not None and retry["id"] == "asbx_old_a"
+
+
 async def test_deletion_receipt_rechecks_claim_expiry_after_a_plain_row_lock(db, store):
     await seed(db, store, "asbx_blocked_lease", state="stopped")
     assert await request_delete(store, "asbx_blocked_lease") == "accepted"

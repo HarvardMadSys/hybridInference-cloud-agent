@@ -534,7 +534,6 @@ async def _create_job_as(
                     else {}
                 ),
             },
-            sensitive=bool(body.environment_overrides),
         )
         if client_request_id is not None
         else None
@@ -644,7 +643,6 @@ async def _create_job_as(
                 "environment_id_provided": "environment_id" in body.model_fields_set,
                 "environment_revision": body.environment_revision,
                 "global_revision": body.global_revision,
-                "overrides": [v.model_dump() for v in body.environment_overrides],
                 "has_setup_override": "setup_script" in body.model_fields_set,
                 "setup_override": body.setup_script,
             },

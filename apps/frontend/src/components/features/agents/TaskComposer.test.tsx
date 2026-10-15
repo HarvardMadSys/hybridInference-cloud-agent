@@ -237,8 +237,15 @@ async function pick(container: HTMLElement, files: File[]) {
   });
 }
 
+// The composer is busy until the chosen repository's environments arrive: the
+// plus menu is disabled for exactly that long, and a paste is ignored.
+async function untilIdle() {
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Add to message' })).toBeEnabled());
+}
+
 async function openAttachMenu() {
-  fireEvent.click(await screen.findByRole('button', { name: 'Add to message' }));
+  await untilIdle();
+  fireEvent.click(screen.getByRole('button', { name: 'Add to message' }));
   return screen.findByRole('menu');
 }
 
@@ -271,10 +278,16 @@ function disconnected(overrides: Partial<AgentConfigApi> = {}): AgentConfigApi {
   });
 }
 
+// Run stays disabled until the composer has its config and the repository's
+// environments. A click or Enter before then sends nothing, so a test that
+// sends waits for it, as a person would.
+async function untilRunnable() {
+  await waitFor(() => expect(screen.getByRole('button', { name: /^Run/ })).toBeEnabled());
+}
+
 async function runWhenReady() {
-  const run = screen.getByRole('button', { name: /^Run/ });
-  await waitFor(() => expect(run).toBeEnabled());
-  fireEvent.click(run);
+  await untilRunnable();
+  fireEvent.click(screen.getByRole('button', { name: /^Run/ }));
 }
 
 // Nothing is chosen for the owner, so every test that runs a task picks where
@@ -317,9 +330,8 @@ describe('TaskComposer source-control onboarding', () => {
     render(<TaskComposer />);
     await chooseRepository();
     await waitFor(() => expect(listEnvironments).toHaveBeenCalledWith('owner/repository'));
-    expect(screen.queryByRole('combobox', { name: 'Choose environment' })).not.toBeInTheDocument();
-    expect(screen.queryByText('Effective configuration')).not.toBeInTheDocument();
-    expect(screen.queryByText('Variables for this workspace only')).not.toBeInTheDocument();
+    expect(screen.queryByRole('radio')).not.toBeInTheDocument();
+    expect(screen.queryByText('What this task will use')).not.toBeInTheDocument();
     fireEvent.change(screen.getByRole('textbox', { name: 'What should the agent do?' }), {
       target: { value: 'Fix tests' },
     });
@@ -331,54 +343,57 @@ describe('TaskComposer source-control onboarding', () => {
           environment_id: 'env',
           environment_revision: 4,
           global_revision: 2,
-          environment_overrides: [],
         }),
       ),
     );
   });
 
-  it('keeps task-specific environment choices after closing and reopening the dialog', async () => {
+  it('keeps the chosen environment after closing and reopening the dialog', async () => {
     vi.mocked(getAgentConfig).mockResolvedValue(config());
+    vi.mocked(listEnvironments).mockResolvedValue({
+      globals: globalEnvironment({ revision: 2 }),
+      environments: [
+        {
+          ...globalEnvironment(),
+          id: 'env',
+          name: 'Development',
+          repo: 'owner/repository',
+          revision: 4,
+          is_default: true,
+        },
+      ],
+    });
     vi.mocked(createAgentJob).mockResolvedValue({ id: 'new-job' } as AgentJobApi);
     render(<TaskComposer />);
     await chooseRepository();
     await openAttachMenu();
     fireEvent.click(await screen.findByRole('menuitem', { name: /Environment/ }));
     const dialog = screen.getByRole('dialog', { name: 'Environment' });
-    expect(within(dialog).getByRole('combobox', { name: 'Choose environment' })).toHaveFocus();
-    fireEvent.click(within(dialog).getByText('Variables for this workspace only'));
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Add variable' }));
-    fireEvent.change(within(dialog).getByLabelText('Variable name'), {
-      target: { value: 'APP_ENV' },
-    });
-    fireEvent.change(within(dialog).getByLabelText('Value APP_ENV'), {
-      target: { value: 'testing' },
-    });
+    const development = await within(dialog).findByRole('radio', { name: /Development/ });
+    expect(development).toBeChecked();
+    expect(development).toHaveFocus();
+    expect(within(dialog).queryByText('Variables for this workspace only')).toBeNull();
+    fireEvent.click(within(dialog).getByRole('radio', { name: /No environment/ }));
     fireEvent.click(within(dialog).getByRole('button', { name: 'Done' }));
     expect(screen.queryByRole('dialog', { name: 'Environment' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Add to message' })).toHaveFocus();
     await openAttachMenu();
     const item = screen.getByRole('menuitem', { name: /Environment/ });
-    expect(item).toHaveTextContent('1 overrides');
+    expect(item).toHaveTextContent('No environment');
     fireEvent.click(item);
-    expect(screen.getByLabelText('Value APP_ENV')).toHaveValue('testing');
+    expect(screen.getByRole('radio', { name: /No environment/ })).toBeChecked();
     fireEvent.keyDown(window, { key: 'Escape' });
     fireEvent.change(screen.getByRole('textbox', { name: 'What should the agent do?' }), {
       target: { value: 'Fix tests' },
     });
-    fireEvent.click(screen.getByRole('button', { name: 'Run' }));
-    await waitFor(() =>
-      expect(createAgentJob).toHaveBeenCalledWith(
-        expect.objectContaining({
-          environment_overrides: [
-            { name: 'APP_ENV', value: 'testing', secret: true, phase: 'both' },
-          ],
-        }),
-      ),
-    );
+    await runWhenReady();
+    await waitFor(() => expect(createAgentJob).toHaveBeenCalled());
+    const request = vi.mocked(createAgentJob).mock.calls[0][0];
+    expect(request).toMatchObject({ environment_id: null, global_revision: 2 });
+    expect(request).not.toHaveProperty('environment_overrides');
   });
 
-  it('edits and submits scratch workspace variables from the plus menu without GitHub', async () => {
+  it('runs a scratch workspace with the global variables and no task variables', async () => {
     account.id = 'alice';
     localStorage.setItem(ACKNOWLEDGED, '1');
     vi.mocked(getAgentConfig).mockResolvedValue(disconnected());
@@ -389,69 +404,41 @@ describe('TaskComposer source-control onboarding', () => {
     fireEvent.click(await screen.findByRole('menuitem', { name: /Environment/ }));
     const dialog = screen.getByRole('dialog', { name: 'Environment' });
     expect(dialog).toHaveTextContent('Start from scratch');
-    expect(dialog).not.toHaveTextContent('Your repository default');
+    expect(dialog).toHaveTextContent('cannot use a repository environment');
+    expect(within(dialog).queryByRole('radio')).not.toBeInTheDocument();
+    expect(within(dialog).queryByRole('button', { name: 'Add variable' })).not.toBeInTheDocument();
     expect(
-      within(dialog).queryByRole('combobox', { name: 'Choose environment' }),
-    ).not.toBeInTheDocument();
-    expect(within(dialog).queryByRole('button', { name: 'Manage' })).not.toBeInTheDocument();
+      within(dialog).getByRole('button', { name: 'Edit personal global variables' }),
+    ).toBeInTheDocument();
     expect(within(dialog).getByRole('button', { name: 'Done' })).toHaveFocus();
-    fireEvent.click(within(dialog).getByText('Variables for this workspace only'));
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Add variable' }));
-    fireEvent.change(within(dialog).getByLabelText('Variable name'), {
-      target: { value: 'APP_ENV' },
-    });
-    fireEvent.change(within(dialog).getByLabelText('Value APP_ENV'), {
-      target: { value: 'scratch-env' },
-    });
     fireEvent.click(within(dialog).getByRole('button', { name: 'Done' }));
-    await openAttachMenu();
-    const item = screen.getByRole('menuitem', { name: /Environment/ });
-    expect(item).toHaveTextContent('1 overrides');
-    fireEvent.click(item);
-    expect(screen.getByLabelText('Value APP_ENV')).toHaveValue('scratch-env');
-    fireEvent.keyDown(window, { key: 'Escape' });
     fireEvent.change(screen.getByRole('textbox', { name: 'What should the agent do?' }), {
       target: { value: 'Write hello.py' },
     });
     await runWhenReady();
     await waitFor(() =>
       expect(createAgentJob).toHaveBeenCalledWith(
-        expect.objectContaining({
-          repo: null,
-          environment_id: null,
-          global_revision: 3,
-          environment_overrides: [
-            { name: 'APP_ENV', value: 'scratch-env', secret: true, phase: 'both' },
-          ],
-        }),
+        expect.objectContaining({ repo: null, environment_id: null, global_revision: 3 }),
       ),
     );
+    expect(vi.mocked(createAgentJob).mock.calls[0][0]).not.toHaveProperty('environment_overrides');
     expect(getGlobalEnvironment).toHaveBeenCalledOnce();
     expect(listEnvironments).not.toHaveBeenCalled();
   });
 
-  it('clears scratch task variables when switching to a repository', async () => {
+  it('offers repository environments after switching from a scratch workspace', async () => {
     vi.mocked(getAgentConfig).mockResolvedValue(config());
     vi.mocked(createAgentJob).mockResolvedValue({ id: 'new-job' } as AgentJobApi);
     render(<TaskComposer initialRepo=":temporary" />);
     expect(await repositoryButton()).toHaveAccessibleName('Repository: Start from scratch');
     await openAttachMenu();
     fireEvent.click(await screen.findByRole('menuitem', { name: /Environment/ }));
-    const dialog = screen.getByRole('dialog', { name: 'Environment' });
-    fireEvent.click(within(dialog).getByText('Variables for this workspace only'));
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Add variable' }));
-    fireEvent.change(within(dialog).getByLabelText('Variable name'), {
-      target: { value: 'SCRATCH_ONLY' },
-    });
-    fireEvent.change(within(dialog).getByLabelText('Value SCRATCH_ONLY'), {
-      target: { value: 'scratch-env' },
-    });
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Done' }));
+    expect(screen.queryByRole('radio')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }));
     await chooseRepository();
     await openAttachMenu();
     fireEvent.click(await screen.findByRole('menuitem', { name: /Environment/ }));
-    expect(screen.getByRole('combobox', { name: 'Choose environment' })).toBeInTheDocument();
-    expect(screen.queryByLabelText('Value SCRATCH_ONLY')).not.toBeInTheDocument();
+    expect(await screen.findByRole('radio', { name: /No environment/ })).toBeInTheDocument();
     fireEvent.keyDown(window, { key: 'Escape' });
     fireEvent.change(screen.getByRole('textbox', { name: 'What should the agent do?' }), {
       target: { value: 'Fix tests' },
@@ -463,7 +450,6 @@ describe('TaskComposer source-control onboarding', () => {
           repo: 'owner/repository',
           environment_id: null,
           global_revision: 0,
-          environment_overrides: [],
         }),
       ),
     );
@@ -474,9 +460,7 @@ describe('TaskComposer source-control onboarding', () => {
     vi.mocked(listEnvironments).mockRejectedValueOnce(new Error('Environment unavailable'));
     render(<TaskComposer />);
     await chooseRepository();
-    expect(
-      await screen.findByText(/Environment configuration could not be loaded/),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(/Environments could not be loaded/)).toBeInTheDocument();
     expect(await repositoryButton()).toBeEnabled();
     fireEvent.change(screen.getByRole('textbox', { name: 'What should the agent do?' }), {
       target: { value: 'Fix tests' },
@@ -505,11 +489,11 @@ describe('TaskComposer source-control onboarding', () => {
     vi.mocked(createAgentJob).mockResolvedValue({ id: 'new-job' } as AgentJobApi);
     render(<TaskComposer />);
     await chooseRepository();
-    await screen.findByText(/Environment configuration could not be loaded/);
+    await screen.findByText(/Environments could not be loaded/);
     fireEvent.change(screen.getByRole('textbox', { name: 'What should the agent do?' }), {
       target: { value: 'Fix tests' },
     });
-    fireEvent.click(screen.getByRole('button', { name: 'Run' }));
+    await runWhenReady();
     await waitFor(() => expect(createAgentJob).toHaveBeenCalled());
     const request = vi.mocked(createAgentJob).mock.calls[0][0];
     expect(request).not.toHaveProperty('environment_id');
@@ -577,7 +561,32 @@ describe('TaskComposer source-control onboarding', () => {
     expect(within(suggestions).getByText('How your avatar is generated')).toBeInTheDocument();
     expect(getInsights).toHaveBeenCalledTimes(1);
     rendered.unmount();
+  });
 
+  it('retains the avatar and suggestions immediately when returning to New task', async () => {
+    account.id = 'alice';
+    vi.mocked(getAgentConfig).mockResolvedValue(config());
+    const profile = userProfile();
+    vi.mocked(getInsights).mockResolvedValueOnce(profile);
+    const first = render(<TaskComposer />);
+    await screen.findByText(profile.suggestions[0].title);
+    expect(screen.getByRole('img')).toHaveAttribute('src', profile.avatar.data_url);
+    first.unmount();
+    vi.mocked(getInsights).mockReturnValueOnce(new Promise(() => {}));
+    vi.mocked(getUserProfile).mockReturnValueOnce(new Promise(() => {}));
+    render(<TaskComposer />);
+    // The composer waits for agent configuration independently of avatar reads.
+    await screen.findByRole('textbox', { name: 'What should the agent do?' });
+    expect(screen.getByRole('img')).toHaveAttribute('src', profile.avatar.data_url);
+    expect(screen.getByText(profile.suggestions[0].title)).toBeVisible();
+    expect(getInsights).toHaveBeenCalledTimes(2);
+    expect(getUserProfile).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps an uncached composer usable when insights fail and allows retrying', async () => {
+    account.id = 'alice';
+    vi.mocked(getAgentConfig).mockResolvedValue(config());
+    const profile = userProfile();
     render(<TaskComposer />);
     expect(await screen.findByRole('textbox', { name: 'What should the agent do?' })).toBeEnabled();
     expect(screen.queryByRole('img')).not.toBeInTheDocument();
@@ -657,7 +666,7 @@ describe('TaskComposer source-control onboarding', () => {
       expect(box).toHaveValue('Add CSV export with accessible controls and clear error feedback.'),
     );
     expect(createAgentJob).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole('button', { name: /^Run/ }));
+    await runWhenReady();
     await waitFor(() =>
       expect(createAgentJob).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -848,6 +857,31 @@ describe('TaskComposer source-control onboarding', () => {
     );
   });
 
+  it('comes back from GitHub to the picker, not the temporary workspaces it left', async () => {
+    account.id = 'alice';
+    localStorage.setItem(ACKNOWLEDGED, '1');
+    vi.mocked(getAgentConfig).mockResolvedValue(disconnected());
+    vi.mocked(githubAccessUrl).mockResolvedValue('https://github.test/login/oauth/authorize');
+    const view = render(<TaskComposer initialRepo=":temporary" />);
+    fireEvent.change(await screen.findByRole('textbox', { name: 'What should the agent do?' }), {
+      target: { value: 'Fix the flaky test' },
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Connect GitHub to use a repository' }));
+
+    await waitFor(() =>
+      expect(leaveFor).toHaveBeenCalledWith('https://github.test/login/oauth/authorize'),
+    );
+    expect(JSON.parse(sessionStorage.getItem('agents.github.return')!).value).toBe('/');
+
+    view.unmount();
+    vi.mocked(getAgentConfig).mockResolvedValue(config({ repos: ['owner/other'] }));
+    render(<TaskComposer />);
+
+    const dialog = await screen.findByRole('dialog', { name: 'Repository' });
+    expect(within(dialog).getByRole('searchbox')).toHaveFocus();
+  });
+
   it('asks where to run a task written before connecting, once back from GitHub', async () => {
     sessionStorage.setItem(
       'agents.composer.draft',
@@ -874,6 +908,7 @@ describe('TaskComposer source-control onboarding', () => {
     fireEvent.click(within(dialog).getByRole('button', { name: 'owner/repository' }));
     expect(box).toHaveFocus();
     await screen.findByLabelText('Branch');
+    await untilRunnable();
     fireEvent.keyDown(box, { key: 'Enter' });
     await waitFor(() =>
       expect(createAgentJob).toHaveBeenCalledWith(
@@ -1273,7 +1308,7 @@ describe('TaskComposer source-control onboarding', () => {
     expect(screen.getByRole('textbox')).not.toBeDisabled();
 
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Fix the flaky test' } });
-    fireEvent.click(screen.getByRole('button', { name: /Run/ }));
+    await runWhenReady();
 
     await waitFor(() =>
       expect(createAgentJob).toHaveBeenCalledWith({
@@ -1285,7 +1320,6 @@ describe('TaskComposer source-control onboarding', () => {
         environment_id: null,
         environment_revision: 0,
         global_revision: 0,
-        environment_overrides: [],
       }),
     );
     expect(navigation.push).toHaveBeenCalledWith('/ajob_1');
@@ -1318,7 +1352,7 @@ describe('TaskComposer source-control onboarding', () => {
     expect(await skillsMenuItem()).toHaveTextContent('0');
     fireEvent.keyDown(screen.getByRole('menu'), { key: 'Escape' });
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Review the diff' } });
-    fireEvent.click(screen.getByRole('button', { name: /Run/ }));
+    await runWhenReady();
     await waitFor(() =>
       expect(createAgentJob).toHaveBeenCalledWith(expect.objectContaining({ skill_ids: [] })),
     );
@@ -1346,7 +1380,7 @@ describe('TaskComposer source-control onboarding', () => {
     expect(await skillsMenuItem()).toHaveTextContent('1');
     fireEvent.keyDown(screen.getByRole('menu'), { key: 'Escape' });
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Review the diff' } });
-    fireEvent.click(screen.getByRole('button', { name: /Run/ }));
+    await runWhenReady();
     await waitFor(() => expect(createAgentJob).toHaveBeenCalledTimes(1));
     expect(vi.mocked(createAgentJob).mock.calls[0][0]).not.toHaveProperty('skill_ids');
   });
@@ -1388,6 +1422,7 @@ describe('TaskComposer source-control onboarding', () => {
       .mockResolvedValue([]);
     render(<TaskComposer />);
     await chooseRepository();
+    await untilIdle();
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Review the diff' } });
     expect(await screen.findByRole('alert')).toHaveTextContent('Skills unavailable');
     expect(screen.getByRole('button', { name: /Run/ })).toBeEnabled();
@@ -1418,7 +1453,7 @@ describe('TaskComposer source-control onboarding', () => {
     );
 
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Read my notes' } });
-    fireEvent.click(screen.getByRole('button', { name: /Run/ }));
+    await runWhenReady();
     await waitFor(() =>
       expect(createAgentJob).toHaveBeenCalledWith(
         expect.objectContaining({ attachment_ids: [41] }),
@@ -1462,6 +1497,7 @@ describe('TaskComposer source-control onboarding', () => {
       getAsFile.mockReturnValue(null);
     };
 
+    await untilIdle();
     pasteImage(box);
     pasteImage(box);
     await waitFor(() => expect(screen.getByRole('button', { name: /Run/ })).toBeEnabled());
@@ -1478,6 +1514,7 @@ describe('TaskComposer source-control onboarding', () => {
     view.unmount();
     render(<TaskComposer />);
     await chooseRepository();
+    await untilIdle();
     pasteImage(screen.getByRole('textbox'));
     await waitFor(() => expect(uploadAttachment).toHaveBeenCalledTimes(3));
     const paths = vi.mocked(uploadAttachment).mock.calls.map(([file, path]) => {
@@ -1531,6 +1568,7 @@ describe('TaskComposer source-control onboarding', () => {
     const box = await screen.findByRole('textbox', { name: 'What should the agent do?' });
     fireEvent.change(box, { target: { value: 'Describe this chart' } });
 
+    await untilIdle();
     fireEvent.paste(box, {
       clipboardData: {
         items: [],
@@ -1569,7 +1607,7 @@ describe('TaskComposer source-control onboarding', () => {
     await chooseRepository();
     const box = screen.getByRole('textbox');
     fireEvent.change(box, { target: { value: 'Start the task' } });
-    fireEvent.click(screen.getByRole('button', { name: /Run/ }));
+    await runWhenReady();
     await waitFor(() => expect(createAgentJob).toHaveBeenCalledOnce());
     fireEvent.paste(box, {
       clipboardData: {
@@ -1662,7 +1700,7 @@ describe('TaskComposer source-control onboarding', () => {
 
     await waitFor(() => expect(deleteAttachment).toHaveBeenCalledWith(41));
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Read my notes' } });
-    fireEvent.click(screen.getByRole('button', { name: /Run/ }));
+    await runWhenReady();
     await waitFor(() => expect(createAgentJob).toHaveBeenCalledTimes(1));
     expect(vi.mocked(createAgentJob).mock.calls[0][0]).not.toHaveProperty('attachment_ids');
   });
@@ -1804,7 +1842,7 @@ describe('TaskComposer source-control onboarding', () => {
 
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Sync the spec' } });
     await waitFor(() => expect(screen.getByRole('switch', { name: 'Notion' })).toBeChecked());
-    fireEvent.click(screen.getByRole('button', { name: /Run/ }));
+    await runWhenReady();
 
     await waitFor(() => expect(createAgentJob).toHaveBeenCalledTimes(1));
     // Every tool named at `confirm`: the control plane denies what a binding
@@ -1829,7 +1867,7 @@ describe('TaskComposer source-control onboarding', () => {
     render(<TaskComposer />);
     await chooseRepository();
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Sync the spec' } });
-    fireEvent.click(screen.getByRole('button', { name: /Run/ }));
+    await runWhenReady();
     await waitFor(() => expect(createAgentJob).toHaveBeenCalledTimes(1));
     expect(vi.mocked(createAgentJob).mock.calls[0][0]).not.toHaveProperty('mcp_bindings');
   });
@@ -1940,6 +1978,7 @@ describe('TaskComposer source-control onboarding', () => {
     // The caret is back in the task, so the same key now sends it.
     expect(box).toHaveFocus();
     await screen.findByLabelText('Branch');
+    await untilRunnable();
     fireEvent.keyDown(box, { key: 'Enter' });
 
     await waitFor(() =>
@@ -2153,7 +2192,7 @@ describe('TaskComposer source-control onboarding', () => {
     await waitFor(() => expect(screen.queryByLabelText('Branch')).not.toBeInTheDocument());
 
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Ship it' } });
-    fireEvent.click(screen.getByRole('button', { name: /Run/ }));
+    await runWhenReady();
     await waitFor(() => expect(createAgentJob).toHaveBeenCalledTimes(1));
     // No `base_ref`: the repository's own default, not owner/a's `release`.
     expect(vi.mocked(createAgentJob).mock.calls[0][0]).toMatchObject({ repo: 'owner/b' });
@@ -2169,6 +2208,7 @@ describe('TaskComposer source-control onboarding', () => {
 
     const composer = screen.getByRole('textbox');
     fireEvent.change(composer, { target: { value: 'Fix the flaky test' } });
+    await untilRunnable();
 
     // Shift+Enter and Alt+Enter stay the newline, so the browser keeps them.
     expect(fireEvent.keyDown(composer, { key: 'Enter', shiftKey: true })).toBe(true);
@@ -2187,7 +2227,6 @@ describe('TaskComposer source-control onboarding', () => {
         environment_id: null,
         environment_revision: 0,
         global_revision: 0,
-        environment_overrides: [],
       }),
     );
     expect(navigation.push).toHaveBeenCalledWith('/ajob_1');
@@ -2202,6 +2241,7 @@ describe('TaskComposer source-control onboarding', () => {
 
     const composer = screen.getByRole('textbox');
     fireEvent.change(composer, { target: { value: '\u4fee\u590d' } });
+    await untilRunnable();
 
     // Committing a Chinese, Japanese or Korean candidate reaches the page as an
     // Enter keypress. Sending on it would cut the message off mid-word.
@@ -2225,6 +2265,7 @@ describe('TaskComposer source-control onboarding', () => {
 
     const composer = screen.getByRole('textbox');
     fireEvent.change(composer, { target: { value: 'Fix the flaky test' } });
+    await untilRunnable();
     fireEvent.keyDown(composer, { key: 'Enter', ...modifier });
 
     await waitFor(() => expect(createAgentJob).toHaveBeenCalledTimes(1));
@@ -2321,7 +2362,7 @@ describe('durable new-task drafts', () => {
     const view = render(<TaskComposer />);
     await chooseRepository();
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Alice task' } });
-    fireEvent.click(screen.getByRole('button', { name: /Run/ }));
+    await runWhenReady();
     await waitFor(() => expect(finish).toBeDefined());
     account.id = 'bob';
     view.rerender(<TaskComposer />);
@@ -2345,7 +2386,7 @@ describe('durable new-task drafts', () => {
     const first = render(<TaskComposer />);
     await chooseRepository();
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'First task' } });
-    fireEvent.click(screen.getByRole('button', { name: /Run/ }));
+    await runWhenReady();
     await waitFor(() => expect(finish).toBeDefined());
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Next task' } });
     await act(async () => finish({ id: 'accepted-task' } as AgentJobApi));
@@ -2398,6 +2439,9 @@ describe('TaskComposer plugins', () => {
   afterEach(cleanup);
 
   async function openPlugins() {
+    // `initialRepo` is applied a render after the textbox appears, and the
+    // composer is busy again while that repository's environments load.
+    await screen.findByLabelText('Branch');
     const menu = await openAttachMenu();
     fireEvent.click(within(menu).getByRole('menuitem', { name: /Plugins/ }));
     await screen.findByRole('button', { name: 'Done' });
@@ -2421,7 +2465,7 @@ describe('TaskComposer plugins', () => {
       const box = await screen.findByRole('textbox', { name: 'What should the agent do?' });
       await selectPlugin();
       fireEvent.change(box, { target: { value: prompt } });
-      fireEvent.click(screen.getByRole('button', { name: /Run/ }));
+      await runWhenReady();
       await waitFor(() => expect(createAgentJob).toHaveBeenCalledTimes(1));
       expect(vi.mocked(createAgentJob).mock.calls[0][0]).toMatchObject({ plugins: [plugin] });
       expect(vi.mocked(createAgentJob).mock.calls[0][0].goal).toEqual(
@@ -2453,7 +2497,7 @@ describe('TaskComposer plugins', () => {
       fireEvent.click(dialog.getByRole('button', { name: 'Add plugin' }));
       fireEvent.click(dialog.getByRole('button', { name: 'Done' }));
       fireEvent.change(box, { target: { value: 'Review' } });
-      fireEvent.click(screen.getByRole('button', { name: /Run/ }));
+      await runWhenReady();
       await waitFor(() => expect(createAgentJob).toHaveBeenCalledTimes(1));
       expect(vi.mocked(createAgentJob).mock.calls[0][0]).toMatchObject({
         runtime,
@@ -2494,7 +2538,7 @@ describe('TaskComposer plugins', () => {
     expect(createAgentJob).not.toHaveBeenCalled();
     fireEvent.change(screen.getByLabelText('Agent'), { target: { value: 'claude-code' } });
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: /Run/ }));
+    await runWhenReady();
     await waitFor(() => expect(createAgentJob).toHaveBeenCalledTimes(1));
     expect(vi.mocked(createAgentJob).mock.calls[0][0]).toMatchObject({ plugins: [plugin] });
   });
@@ -2633,7 +2677,7 @@ describe('TaskComposer reasoning effort', () => {
     if (effort) {
       fireEvent.change(screen.getByLabelText('Reasoning'), { target: { value: effort } });
     }
-    fireEvent.click(screen.getByRole('button', { name: /Run/ }));
+    await runWhenReady();
     await waitFor(() => expect(createAgentJob).toHaveBeenCalled());
     return vi.mocked(createAgentJob).mock.calls[0][0];
   }
@@ -2645,7 +2689,7 @@ describe('TaskComposer reasoning effort', () => {
     expect(await screen.findByLabelText('Reasoning')).toHaveValue('max');
     await chooseRepository();
     fireEvent.change(await screen.findByRole('textbox'), { target: { value: 'do it' } });
-    fireEvent.click(screen.getByRole('button', { name: /Run/ }));
+    await runWhenReady();
 
     await waitFor(() => expect(createAgentJob).toHaveBeenCalled());
     expect(vi.mocked(createAgentJob).mock.calls[0][0]).toMatchObject({ reasoning_effort: 'max' });
@@ -2675,7 +2719,7 @@ describe('TaskComposer reasoning effort', () => {
 
     await waitFor(() => expect(screen.queryByLabelText('Reasoning')).not.toBeInTheDocument());
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'do it' } });
-    fireEvent.click(screen.getByRole('button', { name: /Run/ }));
+    await runWhenReady();
 
     await waitFor(() => expect(createAgentJob).toHaveBeenCalled());
     expect(vi.mocked(createAgentJob).mock.calls[0][0]).not.toHaveProperty('reasoning_effort');
@@ -2742,6 +2786,7 @@ describe('TaskComposer goal command', () => {
     const box = await composer();
     fireEvent.change(box, { target: { value: '/go' } });
     expect(menu()).toBeInTheDocument();
+    await untilIdle();
     fireEvent.click(screen.getByRole('button', { name: 'Add to message' }));
     expect(menu()).not.toBeInTheDocument();
     expect(screen.getByRole('menu')).toBeInTheDocument();
@@ -2778,6 +2823,7 @@ describe('TaskComposer goal command', () => {
     // The token, chosen (so the menu has already handed the caret back) and
     // then submitted with nothing after it.
     fireEvent.change(box, { target: { value: '/goal ' } });
+    await untilRunnable();
     fireEvent.keyDown(box, { key: 'Enter' });
 
     // No empty goal, no task, and nothing sent to the model as prose: the
@@ -2798,6 +2844,7 @@ describe('TaskComposer goal command', () => {
     vi.mocked(createAgentJob).mockResolvedValue({ id: 'ajob_1' } as never);
     const box = await composer();
     fireEvent.change(box, { target: { value: '/goal make the suite pass' } });
+    await untilRunnable();
     fireEvent.keyDown(box, { key: 'Enter' });
 
     // One request, one task: the objective is the first turn's content *and*
@@ -2822,7 +2869,7 @@ describe('TaskComposer goal command', () => {
     vi.mocked(createAgentJob).mockResolvedValue({ id: 'ajob_1' } as never);
     const box = await composer();
     fireEvent.change(box, { target: { value: '/goal make the suite pass' } });
-    fireEvent.click(screen.getByRole('button', { name: /Run/ }));
+    await runWhenReady();
 
     await waitFor(() => expect(createAgentJob).toHaveBeenCalledTimes(1));
     expect(vi.mocked(createAgentJob).mock.calls[0][0]).toHaveProperty(
@@ -2837,6 +2884,7 @@ describe('TaskComposer goal command', () => {
     fireEvent.change(box, {
       target: { value: 'please read `/goal` and tell me what it does' },
     });
+    await untilRunnable();
     fireEvent.keyDown(box, { key: 'Enter' });
 
     await waitFor(() => expect(createAgentJob).toHaveBeenCalledTimes(1));
@@ -2849,6 +2897,7 @@ describe('TaskComposer goal command', () => {
     vi.mocked(createAgentJob).mockRejectedValue(new Error('repository is not accessible'));
     const box = await composer();
     fireEvent.change(box, { target: { value: '/goal make the suite pass' } });
+    await untilRunnable();
     fireEvent.keyDown(box, { key: 'Enter' });
 
     // The retry is the same command, so nothing may be thrown away.

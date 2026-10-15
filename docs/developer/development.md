@@ -192,7 +192,11 @@ dispatches, keep the self-hosted pools, which also run publication and
 synchronization. Every PR has only a read token, checkout does not persist it,
 image jobs use anonymous registry pulls, and no PR job receives a secret. Release
 publication shares no builder with any of them: each publish cell creates a
-fresh builder under its own `RUNNER_TEMP` and removes it when the job ends. Real
+fresh builder under its own `RUNNER_TEMP` and removes it when the job ends. The
+only layers a release reuses come from its own registry cache, a
+`buildcache-<artifact>-<ISO week>` tag in the artifact's package that only the
+publish workflow writes; it is renamed weekly, so the first release of each
+week builds cold. Real
 Kata host qualification remains excluded from every PR and runs only on trusted
 `dev` events.
 

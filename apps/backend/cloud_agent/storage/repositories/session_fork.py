@@ -15,7 +15,11 @@ from cloud_agent.domain.ids import new_job_id, new_session_fork_id, new_thread_i
 from cloud_agent.storage._sql.compute_admission import host_compute_admission, lock_compute_entry
 from cloud_agent.storage._sql.jobs import JOB_SELECT
 from cloud_agent.storage._sql.rows import job_row_to_dict, load_json, sandbox_row_to_dict
-from cloud_agent.storage._sql.sandbox import NATIVE_FORK_CAPABLE, THREAD_SANDBOX_SOURCE
+from cloud_agent.storage._sql.sandbox import (
+    FENCE_START_SQL,
+    NATIVE_FORK_CAPABLE,
+    THREAD_SANDBOX_SOURCE,
+)
 from cloud_agent.storage.repositories.conversation_queries import PostgresConversationQueries
 from cloud_agent.storage.repositories.goals import new_goal_id
 
@@ -179,6 +183,9 @@ class PostgresSessionForkRepository:
                 "stopped_dirty",
                 "provisioning",
                 "stopping",
+                # Only a checkpoint holds the group; the next turn restores it.
+                "cold",
+                "restoring",
             }:
                 return {"error": "sandbox_not_ready"}
             if not row["container_id"]:
@@ -359,10 +366,12 @@ class PostgresSessionForkRepository:
                 source["thread_id"],
                 operation_id,
             )
+            # A fork starts the source container if it is stopped.
             await conn.execute(
-                """
+                f"""
                 UPDATE agent_sandboxes
                 SET active_operation_count = active_operation_count + 1,
+                    {FENCE_START_SQL},
                     idle_deadline = NULL, archived_at = NULL,
                     last_activity_at = NOW(), updated_at = NOW()
                 WHERE id = $1

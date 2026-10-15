@@ -9,6 +9,7 @@ import { useState, type ReactNode } from 'react';
 import toast from 'react-hot-toast';
 
 import { formatBytes } from './TurnFooter';
+import { saveFile } from '@/lib/saveFile';
 
 /** A stored timestamp, or the fact that none was recorded. */
 export function recordedAt(value: string | null | undefined): string {
@@ -219,13 +220,7 @@ export function StoredRecord({ title, event }: { title: string; event: unknown }
 
 export function DownloadButton({ text, filename }: { text: string; filename: string }) {
   function download() {
-    const blob = new Blob([text], { type: 'application/x-ndjson' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = filename;
-    link.click();
-    URL.revokeObjectURL(url);
+    saveFile(new Blob([text], { type: 'application/x-ndjson' }), filename);
   }
   return (
     <button

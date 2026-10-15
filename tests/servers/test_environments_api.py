@@ -231,6 +231,50 @@ async def test_completed_action_retry_never_dispatches_or_changes_the_result(mon
     repo.update_environment_action_run.assert_not_awaited()
 
 
+@pytest.mark.parametrize("stopped", [False, True])
+async def test_an_action_stopped_while_preparing_does_not_run_untracked(monkeypatch, stopped):
+    """A stop that finds no terminal yet must not leave the one created after it running."""
+    from cloud_agent.api import _owner_auth, workspace
+
+    job = {"id": "job", "thread_id": "thread", "environment_binding_id": "bound"}
+    starting = {"id": "run", "state": "starting", "terminal_id": None, "binding_id": "bound"}
+    final = {**starting, "state": "stopped"}
+
+    def update(_user, _run_id, change):
+        # The store refuses to change a run that already ended.
+        return dict(final) if stopped else {**starting, **change}
+
+    repo = SimpleNamespace(
+        create_environment_action_run=AsyncMock(return_value=starting),
+        get_environment_binding=AsyncMock(return_value=object()),
+        update_environment_action_run=AsyncMock(side_effect=update),
+    )
+    broker = SimpleNamespace(
+        create_terminal=AsyncMock(return_value={"id": "term_run", "state": "running"}),
+        delete_terminal=AsyncMock(),
+    )
+    monkeypatch.setattr(_owner_auth, "_owned_job", AsyncMock(return_value=job))
+    monkeypatch.setattr(
+        workspace, "_terminal_owner_workspace", AsyncMock(return_value=(job, broker))
+    )
+
+    result = await environments.start_action(
+        "job",
+        "deploy",
+        idempotency_key="key",
+        user={"user_id": "alice"},
+        store=SimpleNamespace(environments=repo, conversation_queries=object()),
+        credentials=None,
+    )
+
+    if stopped:
+        assert result["state"] == "stopped"
+        broker.delete_terminal.assert_awaited_once_with("thread", "term_run")
+    else:
+        assert result["terminal_id"] == "term_run"
+        broker.delete_terminal.assert_not_awaited()
+
+
 @pytest.mark.parametrize("operation", ["action_status", "stop_action"])
 async def test_lost_terminal_becomes_an_explicit_unknown_result_not_an_endless_404(
     monkeypatch, operation

@@ -2566,6 +2566,42 @@ async def test_a_refresh_does_not_overwrite_a_newer_authorization(
     assert row["refresh_lease_expires_at"] is not None
 
 
+async def test_a_refresh_does_not_overwrite_a_callback_that_landed_first(
+    store: Storage,
+) -> None:
+    """A flow that had started before the claim shares the refresh's generation.
+
+    Its callback writes the new account's tokens while the refresh is still on
+    the network, and moves none of the fences the generation check reads -- only
+    the credential version the refresh claimed.
+    """
+    connection = await _connect(store, _OWNER, auth_kind="oauth", refresh_token="rt")
+    claim = await store.mcp.claim_mcp_refresh(
+        connection_id=connection["id"],
+        expected_credential_version=int(connection["credential_version"]),
+        lease_seconds=60,
+    )
+    assert claim is not None
+    assert await store.mcp.set_mcp_credential(
+        connection_id=connection["id"],
+        expected_authorization_epoch=int(claim["authorization_epoch"]),
+        access_token_ciphertext="callback-access",
+        expected_oauth_generation=int(claim["oauth_generation"]),
+        expected_config_revision=int(claim["config_revision"]),
+    )
+    assert not await store.mcp.set_mcp_credential(
+        connection_id=connection["id"],
+        expected_authorization_epoch=int(claim["authorization_epoch"]),
+        access_token_ciphertext="stale-access",
+        expected_oauth_generation=int(claim["oauth_generation"]),
+        expected_config_revision=int(claim["config_revision"]),
+        expected_refresh_generation=int(claim["refresh_generation"]),
+        expected_credential_version=int(claim["credential_version"]),
+    )
+    row = await store.mcp.get_mcp_connection(connection_id=connection["id"])
+    assert row["access_token_ciphertext"] == "callback-access"
+
+
 async def test_releasing_a_refresh_claim_is_fenced_on_its_generation(
     store: Storage,
 ) -> None:
@@ -2638,6 +2674,40 @@ async def test_recording_a_client_registration_moves_the_oauth_generation(
     assert updated["oauth_generation"] == connection["oauth_generation"] + 1
     assert updated["config_revision"] == connection["config_revision"]
     assert updated["authorization_epoch"] == connection["authorization_epoch"]
+
+
+async def test_a_client_secret_stays_with_the_client_it_was_issued_to(
+    store: Storage,
+) -> None:
+    """Naming another client without a secret must not lend it the old one's."""
+    connection = await _connect(store, _OWNER, auth_kind="oauth", refresh_token="rt")
+    assert await store.mcp.set_mcp_client_registration(
+        connection_id=connection["id"],
+        user_id=_OWNER,
+        client_id="client-a",
+        client_secret_ciphertext="secret-a",
+    )
+    # The same client again, its secret not retyped: kept.
+    assert await store.mcp.set_mcp_client_registration(
+        connection_id=connection["id"],
+        user_id=_OWNER,
+        client_id="client-a",
+        client_secret_ciphertext=None,
+    )
+    kept = await store.mcp.get_mcp_connection(connection_id=connection["id"])
+    assert kept is not None
+    assert kept["client_secret_ciphertext"] == "secret-a"
+    # A public client: client A's secret goes with client A.
+    assert await store.mcp.set_mcp_client_registration(
+        connection_id=connection["id"],
+        user_id=_OWNER,
+        client_id="client-b",
+        client_secret_ciphertext=None,
+    )
+    switched = await store.mcp.get_mcp_connection(connection_id=connection["id"])
+    assert switched is not None
+    assert switched["auth_config"]["client_id"] == "client-b"
+    assert switched["client_secret_ciphertext"] is None
 
 
 async def test_a_client_identity_written_with_a_credential_reaches_the_refresh(

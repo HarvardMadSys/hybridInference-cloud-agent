@@ -1,7 +1,7 @@
 """Remember that an operator asked to remove a host that was still busy.
 
-Revision ID: 0073_host_removal_pending
-Revises: 0072_drop_old_memory_tables
+Revision ID: 0074_host_removal_pending
+Revises: 0073_sandbox_restore
 
 Remove used to refuse a host that still held slots, so an operator had to
 drain it, wait, and come back. Now Remove drains a busy host itself and this
@@ -13,8 +13,8 @@ out of ``draining`` has to clear it.
 
 from alembic import op
 
-revision = "0073_host_removal_pending"
-down_revision = "0072_drop_old_memory_tables"
+revision = "0074_host_removal_pending"
+down_revision = "0073_sandbox_restore"
 branch_labels = None
 depends_on = None
 

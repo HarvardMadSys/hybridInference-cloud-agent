@@ -54,6 +54,7 @@ from cloud_agent.environments import EnvironmentEncryptionError
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.pr_titles import generate_pr_title, is_generic_pr_summary
 from cloud_agent.publisher import (
+    PatchRejected,
     PublishError,
     TransientPublishError,
     fetch_base_bundle,
@@ -141,10 +142,30 @@ def _retryable_github_status(status: int | None) -> bool:
     return status is not None and (status in {408, 429} or 500 <= status < 600)
 
 
+def _rate_limited(response: httpx.Response) -> bool:
+    """Whether GitHub refused for its rate limit, which it may answer with a 403.
+
+    Both the primary and the secondary limit come back as 403 or 429; the
+    headers, or else the message, say which, and that waiting will lift it.
+    """
+    if response.status_code not in (403, 429):
+        return False
+    if response.headers.get("retry-after") or response.headers.get("x-ratelimit-remaining") == "0":
+        return True
+    try:
+        payload = response.json()
+    except ValueError:
+        return False
+    message = payload.get("message") if isinstance(payload, dict) else None
+    return isinstance(message, str) and "rate limit" in message.lower()
+
+
 def _github_api_error(operation: str, response: httpx.Response) -> PublishError:
     """Classify an API refusal without retaining an untrusted response body."""
     error = (
-        TransientPublishError if _retryable_github_status(response.status_code) else PublishError
+        TransientPublishError
+        if _retryable_github_status(response.status_code) or _rate_limited(response)
+        else PublishError
     )
     return error(f"GitHub refused {operation} ({response.status_code})")
 
@@ -552,6 +573,7 @@ async def _retry_base_import(
             clone_url=credential.clone_url(snapshot["repo"]),
             commit_sha=commit_sha,
             auth_env=credential.git_auth_env(),
+            base_sha=snapshot.get("base_sha") or None,
         )
         return await _import_snapshot_base(
             store,
@@ -626,6 +648,9 @@ def _is_retryable_publication_failure(exc: BaseException) -> bool:
     """
     if isinstance(exc, (TransientPublishError, EnvironmentEncryptionError)):
         return True
+    if isinstance(exc, PatchRejected):
+        # Its detail quotes the patch's own paths, not a status or a disconnect.
+        return False
     status = _http_status(exc)
     if _retryable_github_status(status):
         return True
@@ -885,6 +910,7 @@ async def _publish_claimed_owned(
         )
         result = await asyncio.to_thread(
             publish_patch,
+            own_pushes=tuple(job.get("own_pushes") or ()),
             job_id=job_id,
             branch_id=job.get("branch_id") or job.get("thread_id") or job_id,
             patch=job["patch"],
@@ -896,6 +922,21 @@ async def _publish_claimed_owned(
             auth_env=credential.git_auth_env(),
             **({"known_secrets": environment.secrets()} if environment else {}),
         )
+        # The push is done and the pull request step below can still fail.
+        # Recorded first, the commit is this base's own push to the next
+        # publication, which builds on it instead of finding the branch moved.
+        try:
+            await store.snapshot.record_snapshot_push(
+                snapshot_id=int(job["snapshot_id"]),
+                expected_publish_attempt_count=expected_publish_attempt_count,
+                commit_sha=result.commit_sha,
+            )
+        except Exception:
+            logger.warning(
+                "agent_snapshot_push_not_recorded",
+                extra={"event": "agent_snapshot_push_not_recorded", "job_id": job_id},
+                exc_info=True,
+            )
         title = await generate_pr_title(job, result.changed_files, grants=grants)
         pr_url = await ensure_draft_pull_request(
             repo=job["repo"],

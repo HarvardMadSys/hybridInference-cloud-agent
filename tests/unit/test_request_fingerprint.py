@@ -96,15 +96,11 @@ def test_every_later_request_field_is_omitted_by_a_value_the_rule_drops(model: A
 
     This is what keeps the frozen set honest: a new field defaulting to null
     needs nothing, one defaulting to ``False`` must be named beside
-    ``require_idle``, one defaulting to an empty list beside
-    ``environment_overrides``, and any other default needs its own decision
-    here.
+    ``require_idle``, and any other default needs its own decision here.
     """
     for name, field in model.model_fields.items():
         if name in requests._HISTORICAL_FIELDS:
             continue
-        assert (
-            field.default is None
-            or (name in requests._FALSE_WHEN_OMITTED and field.default is False)
-            or (name in requests._EMPTY_WHEN_OMITTED and field.default_factory is list)
+        assert field.default is None or (
+            name in requests._FALSE_WHEN_OMITTED and field.default is False
         ), name

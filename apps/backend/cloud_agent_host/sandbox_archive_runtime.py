@@ -61,6 +61,7 @@ if TYPE_CHECKING:
         RetainedChatBackend,
     )
     from cloud_agent_host.sandbox_checkpoints import (
+        CheckpointRestore,
         SandboxCheckpointCapture,
         SandboxCheckpointReceipt,
     )
@@ -108,6 +109,8 @@ class _ArchiveService(Protocol):
         inspection: ChatSandboxInspection,
         members: tuple[SharedMemberManifest, ...],
     ) -> SandboxCheckpointReceipt: ...
+
+    def restore_checkpoint(self, sandbox_id: str, restore: CheckpointRestore) -> str: ...
 
 
 @dataclass(eq=False)
@@ -935,6 +938,24 @@ class SandboxArchiveController:
                 "durations_ms": receipt.durations_ms,
             },
         )
+
+    def restore_checkpoint(self, sandbox_id: str, restore: CheckpointRestore) -> str:
+        """Load a moved group's checkpoint image with the currently applied policy.
+
+        The checkpoint lives in the archive bucket, so restoring needs enabled
+        archives and the credentials they carry.
+        """
+        with self._condition:
+            if self._closed or not self._started:
+                raise SandboxError("sandbox archive controller is not running")
+            slot = self._current
+            if slot is None or not slot.policy.enabled:
+                raise SandboxError("sandbox archives are disabled; a checkpoint cannot be restored")
+            slot.active += 1
+        try:
+            return slot.service.restore_checkpoint(sandbox_id, restore)
+        finally:
+            self._release(slot)
 
     def _acquire_final_slot(
         self,

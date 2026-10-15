@@ -9,12 +9,9 @@ remote untouched.
 from __future__ import annotations
 
 import subprocess
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import pytest
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 from cloud_agent.publisher import (
     PublishError,
@@ -321,6 +318,21 @@ def test_staged_total_blob_limit_refuses_before_push(origin, tmp_path, monkeypat
             commit_message="agent: too many decoded bytes",
         )
     assert _branches(origin[0]) == ["main"]
+
+
+def test_the_branch_tip_is_read_from_the_exact_ref_only(origin, tmp_path):
+    """``ls-remote`` also lists any ref ending in the branch's name, and it can sort first."""
+    from cloud_agent.publisher import _remote_branch_tip
+
+    bare, base_sha = origin
+    clone = tmp_path / "clone"
+    _git(["clone", "--quiet", bare, str(clone)], cwd=tmp_path)
+    _git(["commit", "--quiet", "--allow-empty", "-m", "decoy"], cwd=clone)
+    _git(["push", "--quiet", "origin", "HEAD:refs/heads/a/refs/heads/agent/t1"], cwd=clone)
+
+    assert _remote_branch_tip(clone, "agent/t1") is None
+    _git(["push", "--quiet", "origin", f"{base_sha}:refs/heads/agent/t1"], cwd=clone)
+    assert _remote_branch_tip(clone, "agent/t1") == base_sha
 
 
 def test_publishes_branch_with_applied_patch(origin):
@@ -1007,6 +1019,163 @@ def test_base_bundle_carries_only_what_the_published_commit_adds(origin, tmp_pat
         _git(["bundle", "unbundle", str(bundle)], cwd=workspace)
     _git(["cat-file", "-e", f"{result.commit_sha}^{{commit}}"], cwd=workspace)
     assert _git(["rev-parse", "HEAD"], cwd=workspace).strip() == base_sha
+
+
+_PATCH_APP_AND_README = _PATCH_APP + (
+    "diff --git a/README.md b/README.md\n"
+    "--- a/README.md\n+++ b/README.md\n@@ -1 +1,2 @@\n # demo\n+turn two\n"
+)
+
+
+def _workspace_at(base_sha: str, clone_url: str, tmp_path: Path) -> Path:
+    """A shallow checkout of the base, as the retained workspace holds it."""
+    workspace = tmp_path / "workspace"
+    _git(["init", "--quiet", str(workspace)], cwd=tmp_path)
+    _git(["fetch", "--quiet", "--depth", "1", f"file://{clone_url}", base_sha], cwd=workspace)
+    _git(["checkout", "--quiet", "--detach", "FETCH_HEAD"], cwd=workspace)
+    return workspace
+
+
+def test_a_push_whose_pull_request_failed_is_built_on_by_the_next_publication(origin, tmp_path):
+    """The next capture is cut from the same base and carries that push's changes.
+
+    Unrecorded, the push reads as somebody else's and the branch as moved.
+    Recorded as the group's own, the branch fast-forwards to the new tree on
+    top of it, a retry reuses that commit, and both bundles import into a
+    workspace that holds only the base.
+    """
+    clone_url, base_sha = origin
+    first = publish_patch(
+        job_id="ajob_pushed",
+        branch_id="athr_pushed",
+        patch=_PATCH_APP,
+        clone_url=clone_url,
+        base_sha=base_sha,
+        commit_message="agent: turn 1",
+    )
+    # Its pull request step failed, so the group's published base stayed put.
+    with pytest.raises(PublishError, match="has moved"):
+        publish_patch(
+            job_id="ajob_next",
+            branch_id="athr_pushed",
+            patch=_PATCH_APP_AND_README,
+            clone_url=clone_url,
+            base_sha=base_sha,
+            commit_message="agent: turn 2",
+        )
+
+    second = publish_patch(
+        job_id="ajob_next",
+        branch_id="athr_pushed",
+        patch=_PATCH_APP_AND_README,
+        clone_url=clone_url,
+        base_sha=base_sha,
+        commit_message="agent: turn 2",
+        include_base_bundle=True,
+        own_pushes=[first.commit_sha],
+    )
+
+    bare = Path(clone_url)
+    assert _git(["rev-parse", "refs/heads/agent/athr_pushed"], cwd=bare).strip() == (
+        second.commit_sha
+    )
+    assert _git(["rev-list", "--parents", "-n", "1", second.commit_sha], cwd=bare).split() == [
+        second.commit_sha,
+        first.commit_sha,
+    ]
+    assert "x = 1" in _git(["show", f"{second.commit_sha}:app.py"], cwd=bare)
+    assert "turn two" in _git(["show", f"{second.commit_sha}:README.md"], cwd=bare)
+    assert second.changed_files == ["README.md", "app.py"]
+
+    retry = publish_patch(
+        job_id="ajob_next",
+        branch_id="athr_pushed",
+        patch=_PATCH_APP_AND_README,
+        clone_url=clone_url,
+        base_sha=base_sha,
+        commit_message="agent: a rebuilt commit would differ",
+        own_pushes=[first.commit_sha],
+    )
+    assert retry.commit_sha == second.commit_sha
+
+    fetched = fetch_base_bundle(
+        clone_url=f"file://{clone_url}", commit_sha=second.commit_sha, base_sha=base_sha
+    )
+    assert second.base_bundle is not None
+    workspace = _workspace_at(base_sha, clone_url, tmp_path)
+    bundle = tmp_path / "base.bundle"
+    for payload in (second.base_bundle, fetched):
+        assert _prerequisites(payload) == [base_sha]
+        bundle.write_bytes(payload)
+        _git(["bundle", "verify", str(bundle)], cwd=workspace)
+        _git(["bundle", "unbundle", str(bundle)], cwd=workspace)
+    _git(["cat-file", "-e", f"{second.commit_sha}^{{commit}}"], cwd=workspace)
+
+
+def test_only_the_groups_own_pushes_are_built_on(origin, tmp_path):
+    """A commit somebody else pushed over a recorded push still reads as a moved branch."""
+    clone_url, base_sha = origin
+    first = publish_patch(
+        job_id="ajob_own",
+        branch_id="athr_own",
+        patch=_PATCH_APP,
+        clone_url=clone_url,
+        base_sha=base_sha,
+        commit_message="agent: turn 1",
+    )
+    human = tmp_path / "human"
+    _git(["clone", "--quiet", "--branch", "agent/athr_own", clone_url, str(human)], cwd=tmp_path)
+    (human / "notes.md").write_text("by hand\n", encoding="utf-8")
+    _git(["add", "notes.md"], cwd=human)
+    _git(["commit", "--quiet", "-m", "by hand"], cwd=human)
+    _git(["push", "--quiet", "origin", "HEAD:refs/heads/agent/athr_own"], cwd=human)
+    human_tip = _git(["rev-parse", "HEAD"], cwd=human).strip()
+
+    with pytest.raises(PublishError, match="has moved"):
+        publish_patch(
+            job_id="ajob_own_next",
+            branch_id="athr_own",
+            patch=_PATCH_APP_AND_README,
+            clone_url=clone_url,
+            base_sha=base_sha,
+            commit_message="agent: turn 2",
+            own_pushes=[first.commit_sha],
+        )
+    assert _git(["rev-parse", "refs/heads/agent/athr_own"], cwd=Path(clone_url)).strip() == (
+        human_tip
+    )
+
+
+def test_an_import_retry_reaches_the_base_under_any_number_of_own_pushes(origin, tmp_path):
+    """Publication builds on every recorded push, so the retry must reach that base too.
+
+    Forty failed pull request steps leave forty pushes between the published
+    commit and the base. The retried bundle still names the base and imports
+    into a workspace that holds only it. A base the commit was never built on
+    ends the search once the whole history is fetched.
+    """
+    clone_url, base_sha = origin
+    chain = tmp_path / "chain"
+    _git(["clone", "--quiet", clone_url, str(chain)], cwd=tmp_path)
+    for turn in range(41):
+        (chain / "turns.md").write_text(f"turn {turn}\n", encoding="utf-8")
+        _git(["add", "turns.md"], cwd=chain)
+        _git(["commit", "--quiet", "-m", f"agent: turn {turn}"], cwd=chain)
+    _git(["push", "--quiet", "origin", "HEAD:refs/heads/agent/athr_chain"], cwd=chain)
+    published = _git(["rev-parse", "HEAD"], cwd=chain).strip()
+
+    fetched = fetch_base_bundle(
+        clone_url=f"file://{clone_url}", commit_sha=published, base_sha=base_sha
+    )
+
+    assert _prerequisites(fetched) == [base_sha]
+    workspace = _workspace_at(base_sha, clone_url, tmp_path)
+    bundle = tmp_path / "base.bundle"
+    bundle.write_bytes(fetched)
+    _git(["bundle", "unbundle", str(bundle)], cwd=workspace)
+    _git(["cat-file", "-e", f"{published}^{{commit}}"], cwd=workspace)
+    with pytest.raises(PublishError, match="is not built on"):
+        fetch_base_bundle(clone_url=f"file://{clone_url}", commit_sha=published, base_sha="f" * 40)
 
 
 def test_republishing_the_same_patch_reuses_the_commit_already_pushed(origin):

@@ -60,6 +60,10 @@ _ARCHIVE_PHASES: Final = frozenset(("initial", "final"))
 # Phases written exactly once: a retry may only find byte-identical content.
 _IMMUTABLE_PHASES: Final = frozenset(("initial", "checkpoint"))
 _CHECKPOINT_ID_RE: Final = re.compile(r"[0-9a-f]{32}")
+_CHECKPOINT_KEY_RE: Final = re.compile(
+    re.escape(SANDBOX_ARCHIVE_PREFIX) + r"/v2/([0-9a-f]{64})/g[1-9][0-9]*/[0-9a-f]{32}\.oci\.tar"
+)
+_DOWNLOAD_CHUNK_BYTES: Final = 1024 * 1024
 CHECKPOINT_FORMAT: Final = "oci-layer-archive-v1"
 _ACCOUNT_ID_RE: Final = re.compile(r"[0-9]{12}")
 _ACCESS_KEY_ID_RE: Final = re.compile(r"[A-Z0-9]{20}")
@@ -84,6 +88,10 @@ class SandboxArchiveDeadlineExceeded(SandboxArchiveUploadError):
     """The caller's archive work deadline has elapsed between bounded calls."""
 
 
+class SandboxArchiveDownloadError(RuntimeError):
+    """A checkpoint object could not be read back exactly as recorded."""
+
+
 class SandboxArchiveAlreadyExists(SandboxArchiveUploadError):
     """The deterministic initial key already holds the exact same archive."""
 
@@ -101,6 +109,9 @@ class S3ArchiveClient(Protocol):
 
     def head_object(self, **kwargs: Any) -> Mapping[str, Any]:
         """Read metadata for one exact immutable-initial key."""
+
+    def get_object(self, **kwargs: Any) -> Mapping[str, Any]:
+        """Read one exact object version, as a checkpoint restore does."""
 
     def put_object(self, **kwargs: Any) -> Mapping[str, Any]:
         """Upload one object in a single request."""
@@ -430,6 +441,64 @@ class SandboxArchiveS3Uploader:
                 s3_checksum_sha256=_optional_response_string(existing, "ChecksumSHA256"),
                 multipart=False,
             )
+
+    def download_checkpoint(
+        self,
+        *,
+        sandbox_id: str,
+        key: str,
+        version_id: str | None,
+        size: int,
+        sha256: str,
+        output: BinaryIO,
+        deadline: float | None = None,
+    ) -> None:
+        """Copy one checkpoint object into ``output``, exactly as its receipt describes it.
+
+        The size and digest come from the control plane's record of the
+        receipt, so a missing, replaced or truncated object fails here rather
+        than reaching ``docker load``. The named version is read when the
+        receipt has one; checkpoint keys are written once either way.
+        """
+        _validate_deadline(deadline)
+        self._check_deadline(deadline)
+        _validate_upload_size(size, maximum=self.config.max_archive_bytes)
+        digest = _validate_sha256(sha256)
+        matched = _CHECKPOINT_KEY_RE.fullmatch(key)
+        if matched is None or matched.group(1) != _identity_hash("sandbox id", sandbox_id):
+            raise SandboxArchiveDownloadError("sandbox checkpoint key does not name this sandbox")
+        arguments: dict[str, Any] = {"Bucket": self.config.bucket, "Key": key}
+        if version_id:
+            arguments["VersionId"] = version_id
+        response = self._get_client().get_object(**arguments, **self._owner_arguments())
+        body = response.get("Body")
+        if body is None or response.get("ContentLength") not in (None, size):
+            raise SandboxArchiveDownloadError("sandbox checkpoint object has the wrong size")
+        hasher = hashlib.sha256()
+        copied = 0
+        try:
+            while True:
+                self._check_deadline(deadline)
+                chunk = body.read(min(_DOWNLOAD_CHUNK_BYTES, size - copied + 1))
+                if not chunk:
+                    break
+                copied += len(chunk)
+                if copied > size:
+                    raise SandboxArchiveDownloadError(
+                        "sandbox checkpoint object is larger than its receipt"
+                    )
+                hasher.update(chunk)
+                output.write(chunk)
+        finally:
+            close = getattr(body, "close", None)
+            if callable(close):
+                close()
+        if copied != size:
+            raise SandboxArchiveDownloadError(
+                "sandbox checkpoint object is shorter than its receipt"
+            )
+        if hasher.hexdigest() != digest:
+            raise SandboxArchiveDownloadError("sandbox checkpoint object does not match its digest")
 
     def _upload_object(
         self,
@@ -1160,6 +1229,7 @@ __all__ = [
     "SandboxArchiveAlreadyExists",
     "SandboxArchiveConfigError",
     "SandboxArchiveDeadlineExceeded",
+    "SandboxArchiveDownloadError",
     "SandboxArchiveReceipt",
     "SandboxArchiveS3Config",
     "SandboxArchiveS3Uploader",

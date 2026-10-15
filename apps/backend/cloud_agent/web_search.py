@@ -20,6 +20,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from cloud_agent.settings import text_setting
+from cloud_agent_shared.shared_protocol import PLATFORM_MCP_SERVER_PREFIX
 
 SERPER_API_URL = "https://google.serper.dev/search"
 SERPER_API_KEY_SETTING = "serper_api_key"
@@ -28,7 +29,7 @@ BRAVE_API_KEY_SETTING = "brave_search_api_key"
 PARALLEL_API_URL = "https://api.parallel.ai/v1/search"
 PARALLEL_API_KEY_SETTING = "parallel_api_key"
 PROVIDER_SETTING = "web_search_provider"
-RUNTIME_SERVER_ID = ":platform:web-search"
+RUNTIME_SERVER_ID = PLATFORM_MCP_SERVER_PREFIX + "web-search"
 TOOL_NAME = "web_search"
 
 Provider = Literal["serper", "brave", "parallel"]

@@ -52,6 +52,7 @@ import {
   windowDuration,
   type TimelineViewport,
 } from './trajectoryViewport';
+import { saveFile } from '@/lib/saveFile';
 
 const LANES: { key: TrajectoryLane; label: string; tone: string }[] = [
   { key: 'input', label: 'Input', tone: 'bg-sky-400' },
@@ -755,13 +756,10 @@ export function TrajectoryView({
   }, [focused, range, steps, visible]);
 
   function download() {
-    const blob = new Blob([toSessionLog(events)], { type: 'application/x-ndjson' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = 'session-log.ndjson';
-    link.click();
-    URL.revokeObjectURL(url);
+    saveFile(
+      new Blob([toSessionLog(events)], { type: 'application/x-ndjson' }),
+      'session-log.ndjson',
+    );
   }
 
   if (allSteps.length === 0 && !subagentFilter) {

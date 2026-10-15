@@ -663,3 +663,45 @@ async def test_a_failed_earlier_snapshot_no_longer_blocks_the_lineage(store, poo
         "last_error": "publisher rejected the immutable patch",
     }
     assert await store.snapshot.claim_for_publish() is None
+
+
+async def test_a_push_recorded_before_its_failed_pull_request_reaches_the_next_claim(store, pool):
+    """The next publication from that base builds on the push instead of refusing it.
+
+    The record is fenced like every other publisher write, and survives the
+    failure that follows it; the group's published base does not move.
+    """
+    job, capture, _patch = await _capture_settled_workspace(store, "pushed")
+    claimed = await store.snapshot.claim_for_publish()
+    assert claimed is not None and claimed["own_pushes"] == []
+    pushed = "c" * 40
+    assert not await store.snapshot.record_snapshot_push(
+        snapshot_id=capture["snapshot_id"],
+        expected_publish_attempt_count=claimed["publish_attempt_count"] + 1,
+        commit_sha=pushed,
+    )
+    assert await store.snapshot.record_snapshot_push(
+        snapshot_id=capture["snapshot_id"],
+        expected_publish_attempt_count=claimed["publish_attempt_count"],
+        commit_sha=pushed,
+    )
+    await store.snapshot.fail_snapshot_publish(
+        snapshot_id=capture["snapshot_id"],
+        expected_publish_attempt_count=claimed["publish_attempt_count"],
+        detail="GitHub refused the draft PR (422)",
+    )
+    later_id = await _insert_later_snapshot(
+        pool, job=job, capture=capture, patch="diff --git a/later.txt b/later.txt\n"
+    )
+
+    later = await store.snapshot.claim_for_publish()
+
+    assert later is not None and later["snapshot_id"] == later_id
+    assert later["own_pushes"] == [pushed]
+    async with pool.acquire() as conn:
+        group = await conn.fetchrow(
+            "SELECT published_base_sha, snapshot_state FROM agent_sandboxes WHERE id = $1",
+            capture["sandbox_id"],
+        )
+    assert group["published_base_sha"] != pushed
+    assert group["snapshot_state"] == "dirty"

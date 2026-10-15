@@ -36,7 +36,9 @@ releasing, reaping or abandoning a turn fails the ones queued behind it, and
 completing an admin deletion fails the ones in its group. Nothing holds those
 turns then -- the turn ahead of them is still running, or their group is being
 deleted -- and a claim, the one writer that holds a queued turn while it waits
-for a group and a host, takes neither kind. A publication's outcome event
+for a group and a host, takes neither kind. Deleting a conversation does hold
+its queued turns on the way to their membership, so each late failure first
+takes the turns' conversation, where deletion starts. A publication's outcome event
 key-share-locks the attempt of its anchor turn last; that attempt has finished,
 and every lock that conflicts with a key share is taken on running attempts
 only.

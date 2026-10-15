@@ -270,10 +270,11 @@ export function ArchivedTasksView() {
     setBusy('prepare-delete');
     setActionError(null);
     setDeleteError(null);
+    const title = project !== undefined ? projectTitle(project, t) : '';
     const scope = session
       ? t('archive.scopeSession', { title: session.title })
       : project !== undefined
-        ? t(filtered ? 'archive.scopeProjectFiltered' : 'archive.scopeProject', { project })
+        ? t(filtered ? 'archive.scopeProjectFiltered' : 'archive.scopeProject', { project: title })
         : t(filtered ? 'archive.scopeFiltered' : 'archive.scopeAll');
     try {
       const sessions = session ? [session] : await collectSessions(project);

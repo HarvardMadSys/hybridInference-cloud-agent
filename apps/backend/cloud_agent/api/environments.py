@@ -12,6 +12,7 @@ from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from cloud_agent.api._owner_auth import require_agent_owner
+from cloud_agent.api._workspace_access import fence_workspace_start
 from cloud_agent.api.deps import (
     get_agent_app_credentials,
     get_gateway_client,
@@ -213,6 +214,16 @@ async def _entitled(store: Any, user_id: str, repo: str, credentials: Any) -> No
         )
     except RepoNotAllowed:
         raise HTTPException(403, "Repository is not available to this owner") from None
+
+
+async def _job_entitled(store: Any, user_id: str, job: dict[str, Any], credentials: Any) -> None:
+    """Recheck the owner's access to a job's repository.
+
+    A temporary workspace has no repository: ownership of the job, already
+    checked by every caller, is the whole question.
+    """
+    if job["repo"] is not None:
+        await _entitled(store, user_id, job["repo"], credentials)
 
 
 @router.get("/environments")
@@ -736,9 +747,18 @@ async def start_action(
         action_id=action_id,
         run_id=run["id"],
     )
-    return await store.environments.update_environment_action_run(
+    updated = await store.environments.update_environment_action_run(
         user["user_id"], run["id"], {"terminal_id": terminal["id"], **_action_result(terminal)}
     )
+    if updated["terminal_id"] != terminal["id"]:
+        # Stopped while the host was still preparing: the stop found no
+        # terminal to end, and nothing tracks this one, so end it here.
+        try:
+            await broker.delete_terminal(str(job["thread_id"]), terminal["id"])
+        except SandboxManagerError as exc:
+            if exc.status_code != 404:
+                raise
+    return updated
 
 
 def _action_result(terminal: dict[str, Any]) -> dict[str, Any]:
@@ -841,9 +861,11 @@ async def retry_preparation(
 
     store = require_store(store)
     job = await _owned_job(store.conversation_queries, job_id, user)
-    await _entitled(store, user["user_id"], job["repo"], credentials)
+    await _job_entitled(store, user["user_id"], job, credentials)
     if not job.get("environment_binding_id"):
         raise HTTPException(409, "Workspace has no environment binding")
+    # Preparation runs inside the container, starting it if stopped.
+    await fence_workspace_start(store, job)
     broker = await sandbox_manager_for_job(store.host_pool, job_id)
     if broker is None:
         raise HTTPException(503, "Workspace host is unavailable")
@@ -877,7 +899,7 @@ async def refresh_runtime_environment(
 
     store = require_store(store)
     job = await _owned_job(store.conversation_queries, job_id, user)
-    await _entitled(store, user["user_id"], job["repo"], credentials)
+    await _job_entitled(store, user["user_id"], job, credentials)
     if not job.get("environment_binding_id"):
         raise HTTPException(409, "Workspace has no environment binding")
     return await store.environments.refresh_runtime_environment(
@@ -898,7 +920,7 @@ async def skip_environment_start(
 
     store = require_store(store)
     job = await _owned_job(store.conversation_queries, job_id, user)
-    await _entitled(store, user["user_id"], job["repo"], credentials)
+    await _job_entitled(store, user["user_id"], job, credentials)
     if not job.get("environment_binding_id"):
         raise HTTPException(409, "Workspace has no environment binding")
     broker = await sandbox_manager_for_job(store.host_pool, job_id)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import os
 import shutil
 import stat
@@ -76,6 +77,9 @@ class _Manager:
         # The host-rule check: how many of the next checks fail, and how many ran.
         self.host_rule_failures = 0
         self.host_rule_checks = 0
+        # Renewals of the host-rule verification the sweep makes while idle.
+        self.host_rule_renewals = 0
+        self.host_rule_renewal_failures = 0
         self.pruned_specs: list[ChatSandboxSpec] = []
         self.process_baseline: tuple[tuple[int, int], ...] = ((41, 400),)
         self.initial_archive_marker: bytes | None = None
@@ -220,6 +224,12 @@ class _Manager:
 
     def prune_orphan_networks(self, specs: list[ChatSandboxSpec]) -> None:
         self.pruned_specs = specs
+
+    def renew_host_rules(self) -> None:
+        self.host_rule_renewals += 1
+        if self.host_rule_renewal_failures:
+            self.host_rule_renewal_failures -= 1
+            raise SandboxError("nft failed: Error: Could not process rule")
 
     def verify_host_rules(self) -> None:
         self.host_rule_checks += 1
@@ -1985,12 +1995,43 @@ def test_one_failed_check_is_retried_before_anything_is_stopped():
     assert manager.stop_count == 0
 
 
-def test_the_rules_are_not_checked_while_nothing_runs():
+def test_while_nothing_runs_the_rules_are_renewed_not_read_every_pass():
+    """An idle host keeps its verification fresh so the next start does not pay for it.
+
+    Nothing is read back every pass and nothing is stopped: the renewal is the
+    guard's own cached ensure, which installs and reads back only once the
+    last verification is old enough to need it.
+    """
     manager = _Manager()
     supervisor = SharedChatSessionSupervisor(manager)
 
     assert supervisor.guard_network() == []
     assert manager.host_rule_checks == 0
+    assert manager.host_rule_renewals == 1
+    assert manager.stop_count == 0
+
+
+def test_an_idle_renewal_that_fails_is_logged_once_and_stops_nothing(caplog):
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager)
+    manager.host_rule_renewal_failures = 2
+
+    with caplog.at_level(logging.WARNING):
+        assert supervisor.guard_network() == []
+        assert supervisor.guard_network() == []
+        assert supervisor.guard_network() == []
+        supervisor.guard_network()
+        manager.host_rule_renewal_failures = 1
+        supervisor.guard_network()
+
+    warnings = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "shared_chat_idle_host_rules_unavailable"
+    ]
+    assert len(warnings) == 2, "once per failing streak, not once per pass"
+    assert manager.host_rule_renewals == 5
+    assert manager.stop_count == 0
 
 
 def test_stale_activation_does_not_wake_a_stopped_shared_container():
@@ -4476,6 +4517,74 @@ def test_initial_archive_waits_out_a_concurrent_start_and_workspace_request() ->
     assert "error" not in outcome
     assert captured.is_set()
     assert supervisor._members["athr_source"].snapshotting is False
+
+
+class _HeldStartManager(_Manager):
+    """Hold every start once armed, including a running group's bridge check."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.hold_start = False
+        self.start_entered = threading.Event()
+        self.start_release = threading.Event()
+
+    def start(self, spec, **kwargs):
+        if self.hold_start:
+            self.start_entered.set()
+            assert self.start_release.wait(timeout=2)
+        return super().start(spec, **kwargs)
+
+
+def test_initial_archive_waits_out_a_start_that_begins_under_its_barrier(monkeypatch) -> None:
+    """A request admitted before the barrier may begin its bridge check under it."""
+    manager = _HeldStartManager()
+    supervisor = SharedChatSessionSupervisor(manager)
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=False,
+        manifest=_members(),
+    )
+    running, _ = supervisor.operation_opened("athr_peer")
+    group = supervisor._members["athr_source"]
+    # A second read passes its first admission, then is held before its check.
+    entered, release = _gated_inspect(manager, monkeypatch, _spec().container_name)
+    manager.hold_start = True
+    opening, _ = _in_thread(lambda: supervisor.operation_opened("athr_peer"))
+    assert entered.wait(timeout=1)
+    captured = threading.Event()
+
+    def capture(*_args):
+        captured.set()
+        return {"enabled": True, "stored": True}
+
+    capturing, outcome = _in_thread(
+        lambda: supervisor.capture_initial_archive("athr_source", lease.token, capture=capture)
+    )
+    try:
+        deadline = time.monotonic() + 1
+        while not group.snapshotting and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert group.snapshotting
+        release.set()
+        assert manager.start_entered.wait(timeout=1)
+        assert group.starting
+        supervisor.operation_closed("athr_peer", running)
+        capturing.join(timeout=0.6)
+        assert capturing.is_alive(), f"the archive did not wait for the start: {outcome}"
+        assert not captured.is_set()
+    finally:
+        release.set()
+        manager.start_release.set()
+        opening.join(timeout=2)
+        capturing.join(timeout=2)
+
+    assert not capturing.is_alive()
+    assert "error" not in outcome
+    assert captured.is_set()
+    assert group.snapshotting is False
 
 
 def test_initial_archive_reports_busy_once_a_request_outlasts_its_wait() -> None:

@@ -118,6 +118,17 @@ class SnapshotRepository(Protocol):
         """
         ...
 
+    async def record_snapshot_push(
+        self, *, snapshot_id: int, expected_publish_attempt_count: int, commit_sha: str
+    ) -> bool:
+        """Remember the commit this claim pushed, before its pull request exists.
+
+        A later publication cut from the same base receives it in ``own_pushes``
+        and may build on it. Returns ``False`` unless this exact claim is still
+        ``publishing``.
+        """
+        ...
+
     async def record_snapshot_publish(
         self,
         *,

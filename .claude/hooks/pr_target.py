@@ -31,8 +31,23 @@ import shlex
 import subprocess
 import sys
 
-_OPERATORS = {";", "&&", "||", "|", "&", "\n", "(", ")"}
+# The characters that separate shell commands. A newline ends a command just as
+# `;` does, and shlex joins adjacent ones into one token, such as `;(` or `&&\n`.
+_PUNCTUATION = ";&|()\n"
 _GH_PR_CREATE = re.compile(r"\bgh\s+pr\s+create\b")
+# A backslash-newline continues a line; one escaped backslash before it does not.
+_LINE_CONTINUATION = re.compile(r"(?<!\\)((?:\\\\)*)\\\n")
+# The `gh pr create` options that take a value. A value is skipped, so a title
+# such as `-Hotfix` or a body of `--repo` is never read as an option.
+_VALUE_OPTIONS = frozenset(
+    {
+        *("-a", "--assignee", "-B", "--base", "-b", "--body", "-F", "--body-file"),
+        *("-H", "--head", "-l", "--label", "-m", "--milestone", "-p", "--project"),
+        *("-R", "--repo", "-r", "--reviewer", "-T", "--template", "-t", "--title"),
+        "--recover",
+    }
+)
+_LONG_OPTION = {"-H": "--head", "-R": "--repo"}
 # The OWNER/NAME of a GitHub remote URL or a `--repo` value, which may also be
 # HOST/OWNER/NAME or a full URL.
 _GITHUB_REPOSITORY = re.compile(r"(?:^|[:/])([^/:]+/[^/:]+?)(?:\.git)?/?$")
@@ -43,10 +58,38 @@ class TargetError(Exception):
 
 
 def _tokens(command: str) -> list[str]:
-    lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|()")
+    # The shell drops a line continuation, so `gh pr create \` and the options
+    # on the next line stay one command rather than splitting at the newline.
+    command = _LINE_CONTINUATION.sub(r"\1", command)
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=_PUNCTUATION)
+    lexer.whitespace = " \t\r"
     lexer.whitespace_split = True
     lexer.commenters = ""
     return list(lexer)
+
+
+def _is_operator(token: str) -> bool:
+    return bool(token) and set(token) <= set(_PUNCTUATION)
+
+
+def _options(args: list[str]) -> dict[str, str]:
+    """Read ``gh pr create``'s options in every form `gh` accepts; the last one wins."""
+    values: dict[str, str] = {}
+    position = 0
+    while position < len(args):
+        arg = args[position]
+        position += 1
+        if arg in _VALUE_OPTIONS:
+            if position < len(args):
+                values[_LONG_OPTION.get(arg, arg)] = args[position]
+                position += 1
+        elif arg.startswith("--") and "=" in arg:
+            name, value = arg.split("=", 1)
+            values[name] = value
+        elif arg[:2] in _VALUE_OPTIONS and len(arg) > 2:
+            # A short option's value may be attached: `-Htopic` or `-H=topic`.
+            values[_LONG_OPTION.get(arg[:2], arg[:2])] = arg[2:].removeprefix("=")
+    return values
 
 
 def parse_command(command: str, cwd: str) -> tuple[str, str | None, str | None] | None:
@@ -64,32 +107,33 @@ def parse_command(command: str, cwd: str) -> tuple[str, str | None, str | None] 
         raise TargetError(f"cannot parse the pull-request command ({error})") from error
 
     directory = cwd
+    # A `cd` inside `( ... )` runs in a subshell and ends with it.
+    subshells: list[str] = []
     index = 0
     while index < len(tokens):
         token = tokens[index]
-        if token == "cd" and index + 1 < len(tokens) and tokens[index + 1] not in _OPERATORS:
+        if _is_operator(token):
+            for char in token:
+                if char == "(":
+                    subshells.append(directory)
+                elif char == ")" and subshells:
+                    directory = subshells.pop()
+            index += 1
+            continue
+        if token == "cd" and index + 1 < len(tokens) and not _is_operator(tokens[index + 1]):
             directory = os.path.normpath(
                 os.path.join(directory, os.path.expanduser(tokens[index + 1]))
             )
             index += 2
             continue
         if tokens[index : index + 3] == ["gh", "pr", "create"]:
-            head = repo = None
             args = []
             for arg in tokens[index + 3 :]:
-                if arg in _OPERATORS:
+                if _is_operator(arg):
                     break
                 args.append(arg)
-            for position, arg in enumerate(args):
-                if arg in ("--head", "-H") and position + 1 < len(args):
-                    head = args[position + 1]
-                elif arg.startswith("--head="):
-                    head = arg.split("=", 1)[1]
-                elif arg in ("--repo", "-R") and position + 1 < len(args):
-                    repo = args[position + 1]
-                elif arg.startswith("--repo="):
-                    repo = arg.split("=", 1)[1]
-            return directory, head, repo
+            options = _options(args)
+            return directory, options.get("--head"), options.get("--repo")
         index += 1
     # The text matched but no `gh pr create` invocation was found in it, for
     # example inside a quoted argument. Nothing will create a pull request.
@@ -123,21 +167,31 @@ def _github_repository(value: str) -> str | None:
     return match.group(1).lower() if match else None
 
 
+def _own_repositories(project: str) -> set[str]:
+    """The repositories this checkout's remotes name: ``origin``, and an upstream a fork tracks."""
+    urls = _git_output(project, "config", "--get-regexp", r"^remote\..*\.url$") or ""
+    return {
+        own
+        for line in urls.splitlines()
+        if (own := _github_repository(line.split(None, 1)[-1])) is not None
+    }
+
+
 def is_other_repository(directory: str, repo: str | None) -> bool:
     """Whether the pull request belongs to a repository other than this one.
 
-    ``repo`` (``--repo``, or an MCP call's owner and name) is compared with this
-    repository's ``origin``; otherwise ``directory`` is compared by the Git
-    directory its worktrees share. Anything that cannot be told apart counts
-    as this repository, so the gate still runs.
+    ``repo`` (``--repo``, or an MCP call's owner and name) is compared with the
+    repositories this checkout's remotes name, so a fork's pull request into
+    the upstream it tracks is still this repository's; otherwise ``directory``
+    is compared by the Git directory its worktrees share. Anything that cannot
+    be told apart counts as this repository, so the gate still runs.
     """
     project = _project_dir()
     if repo is not None:
-        origin = _git_output(project, "remote", "get-url", "origin")
-        own = _github_repository(origin) if origin else None
+        own = _own_repositories(project)
         named = _github_repository(repo)
-        if own is not None and named is not None:
-            return named != own
+        if own and named is not None:
+            return named not in own
     common = _common_dir(directory)
     return common is not None and common != _common_dir(project)
 

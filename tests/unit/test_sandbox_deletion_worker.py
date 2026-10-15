@@ -469,3 +469,39 @@ async def test_cancellation_preserves_checkpoint_for_restart(monkeypatch):
         await run(store, archives)
     sandbox_manager.abort_sandbox_deletion.assert_not_awaited()
     assert store.sandbox.fail_admin_sandbox_deletion.call_args.kwargs["retain_pending"] is True
+
+
+@pytest.mark.asyncio
+async def test_requests_that_stay_due_do_not_stop_the_deleted_session_sweep(monkeypatch):
+    import asyncio
+
+    swept_again = asyncio.Event()
+    sweeps = 0
+
+    async def sweep(_store):
+        nonlocal sweeps
+        sweeps += 1
+        if sweeps > 1:
+            swept_again.set()
+        return 0
+
+    async def always_due(_store):
+        # Failing requests retried a minute later can leave one due at every pass.
+        await asyncio.sleep(0)
+        return True
+
+    monkeypatch.setattr(worker, "retire_deleted_session_sandboxes", sweep)
+    monkeypatch.setattr(worker, "delete_one_archived_sandbox", always_due)
+    task = asyncio.create_task(
+        worker.coordinate_sandbox_deletions(
+            SimpleNamespace(),  # type: ignore[arg-type]
+            interval_seconds=0.01,
+            deleted_sessions_interval_seconds=0.01,
+        )
+    )
+    try:
+        await asyncio.wait_for(swept_again.wait(), timeout=2)
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task

@@ -1516,7 +1516,6 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
             "environment_id": environment["id"],
             "environment_id_provided": True,
             "environment_revision": 1,
-            "overrides": [{"name": "TEMP_TOKEN", "value": "temporary-secret"}],
         },
     )
     assert job["plugins"] == claim["plugins"] == saved_plugins
@@ -1808,10 +1807,7 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
     inherited = await store.environments.get_environment_binding(
         "user-1", child["environment_binding_id"]
     )
-    assert inherited.values("runtime") == {
-        "FORK_TOKEN": "fixed-secret-one",
-        "TEMP_TOKEN": "temporary-secret",
-    }
+    assert inherited.values("runtime") == {"FORK_TOKEN": "fixed-secret-one"}
     assert child["title_source"] == "inherited"
     assert child["title"] == f"{job['title']} (fork)"
     assert child["execution_profile"] == job["execution_profile"]

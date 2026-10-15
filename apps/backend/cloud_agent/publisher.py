@@ -24,6 +24,7 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.settings import number_setting, setting_env
@@ -38,6 +39,9 @@ from cloud_agent_shared.git.patch_gate import (
 )
 from cloud_agent_shared.git.source_archive import build_base_bundle
 from cloud_agent_shared.secret_redaction import secret_patterns
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 logger = get_logger(__name__)
 
@@ -72,6 +76,15 @@ _GIT_ENV = {
 
 class PublishError(Exception):
     """Raised when publication fails; the message is safe to store as detail."""
+
+
+class PatchRejected(PublishError):
+    """The patch itself was refused: by the gate, or by a check of what it staged.
+
+    Never retried, whatever its text says: the detail names the patch's own
+    paths, and a path such as ``x(503)`` or ``timed out.md`` must not read as an
+    HTTP status or a disconnect.
+    """
 
 
 class TransientPublishError(PublishError):
@@ -161,16 +174,24 @@ class _StagedChangeSet:
 def _remote_branch_tip(
     repo: Path, branch: str, auth_env: dict[str, str] | None = None
 ) -> str | None:
-    """Return the remote tip of ``branch``, or ``None`` when it does not exist."""
+    """Return the remote tip of ``branch``, or ``None`` when it does not exist.
+
+    ``ls-remote`` matches its pattern against the end of every ref, so a ref
+    named ``refs/heads/x/refs/heads/<branch>`` is listed too, and can sort
+    first. Only the exact ref is read.
+    """
+    want = f"refs/heads/{branch}"
     raw = _run_git(
-        ["ls-remote", "origin", "--end-of-options", f"refs/heads/{branch}"],
+        ["ls-remote", "origin", "--end-of-options", want],
         cwd=repo,
         env_extra=auth_env,
         remote=True,
-    ).strip()
-    if not raw:
-        return None
-    return raw.split()[0]
+    )
+    for line in raw.splitlines():
+        sha, _, ref = line.partition("\t")
+        if ref.strip() == want:
+            return sha.strip()
+    return None
 
 
 def _branch_moved(branch: str, tip: str, base_sha: str) -> PublishError:
@@ -206,22 +227,32 @@ def _reuse_pushed_commit(
     tip: str,
     base_sha: str,
     local_sha: str,
+    own_pushes: Iterable[str] = (),
     auth_env: dict[str, str] | None = None,
 ) -> str:
-    """Return ``tip`` when it is already this patch; otherwise the branch moved.
+    """Return the commit the branch names for this patch; otherwise the branch moved.
 
     A retry builds a second commit for the same tree, because the timestamps
     differ. The branch already points at the first object. Reusing it keeps
-    the push idempotent. Anything else on the branch is still a refusal.
+    the push idempotent.
+
+    ``own_pushes`` are this group's earlier commits on this base that were
+    pushed but never published, because the pull request step failed after
+    the push. This patch, cut from the same base, carries their changes, so a
+    tip that is one of them is built on rather than refused: the branch
+    fast-forwards to this patch's tree. Either way every commit between the tip
+    and the base must be one of those recorded pushes, with a single parent.
+    Anything else on the branch is still a refusal, and nothing is force-pushed.
     """
     if tip.lower() == local_sha.lower():
         return local_sha
+    own = {sha.lower() for sha in own_pushes}
     _run_git(
         [
             "fetch",
             "--quiet",
             "--depth",
-            "2",
+            str(len(own) + 2),
             "origin",
             "--end-of-options",
             f"refs/heads/{branch}",
@@ -233,28 +264,46 @@ def _reuse_pushed_commit(
     fetched = _run_git(["rev-parse", "FETCH_HEAD"], cwd=repo).strip()
     if not fetched.lower().startswith(tip.lower()) and not tip.lower().startswith(fetched.lower()):
         raise _branch_moved(branch, fetched, base_sha)
-    ancestry = _run_git(["rev-list", "--parents", "-n", "1", "FETCH_HEAD"], cwd=repo).split()
+    base = _run_git(["rev-parse", "--verify", f"{base_sha}^{{commit}}"], cwd=repo).strip().lower()
     # Publisher commits have exactly one parent. A matching tree and first
     # parent must never disguise a merge that also carries human ancestry.
-    if len(ancestry) != 2 or not ancestry[1].lower().startswith(base_sha.lower()):
+    current = fetched
+    for _ in range(len(own) + 1):
+        ancestry = _run_git(["rev-list", "--parents", "-n", "1", current], cwd=repo).split()
+        if len(ancestry) != 2:
+            raise _branch_moved(branch, tip, base_sha)
+        parent = ancestry[1].lower()
+        if parent == base:
+            break
+        if parent not in own:
+            raise _branch_moved(branch, tip, base_sha)
+        current = parent
+    else:
         raise _branch_moved(branch, tip, base_sha)
     tip_tree = _run_git(["rev-parse", "FETCH_HEAD^{tree}"], cwd=repo).strip()
     local_tree = _run_git(["rev-parse", f"{local_sha}^{{tree}}"], cwd=repo).strip()
-    if tip_tree.lower() != local_tree.lower():
+    if tip_tree.lower() == local_tree.lower():
+        result = fetched
+    elif fetched.lower() in own:
+        message = _run_git(["log", "-1", "--format=%B", local_sha], cwd=repo).strip()
+        result = _run_git(
+            ["commit-tree", local_tree, "-p", fetched, "-m", message], cwd=repo
+        ).strip()
+    else:
         raise _branch_moved(branch, tip, base_sha)
-    # Ordinary receive-pack is the final compare-and-set fence. It changes
-    # nothing while the branch still names ``fetched`` and fails transiently
-    # if somebody advanced it while we reconciled.
+    # Ordinary receive-pack is the final compare-and-set fence: it changes
+    # nothing, or fast-forwards, while the branch still names ``fetched``, and
+    # fails transiently if somebody advanced it while we reconciled.
     _run_git(
-        ["push", "--quiet", "origin", f"{fetched}:refs/heads/{branch}"],
+        ["push", "--quiet", "origin", f"{result}:refs/heads/{branch}"],
         cwd=repo,
         env_extra=auth_env,
         remote=True,
     )
     # The retained bundle names HEAD, so the recorded commit has to be the one
     # the branch actually points at, not the retry's duplicate object.
-    _run_git(["checkout", "--quiet", "--detach", fetched], cwd=repo)
-    return fetched
+    _run_git(["checkout", "--quiet", "--detach", result], cwd=repo)
+    return result
 
 
 def _staged_change_set(repo: Path) -> _StagedChangeSet:
@@ -304,7 +353,7 @@ def _blob_size(repo: Path, sha: str) -> int:
     """Check an immutable object's size before capturing any of its contents."""
     size = int(_run_git(["cat-file", "-s", sha], cwd=repo).strip())
     if size > MAX_BLOB_BYTES:
-        raise PublishError(
+        raise PatchRejected(
             f"patch rejected after apply: blob exceeds the {MAX_BLOB_BYTES} byte limit"
         )
     return size
@@ -336,7 +385,7 @@ def _validate_staged_blobs(
     """Reject new credentials in staged text or binary files before committing."""
     sizes = [_blob_size(repo, blob.sha) for blob in blobs]
     if sum(sizes) > MAX_CHANGED_BLOB_BYTES:
-        raise PublishError(
+        raise PatchRejected(
             f"patch rejected after apply: blobs exceed the {MAX_CHANGED_BLOB_BYTES} total byte limit"
         )
     for blob, size in zip(blobs, sizes, strict=True):
@@ -354,7 +403,7 @@ def _validate_staged_blobs(
                     else b""
                 )
                 if content.count(token) > old_content.count(token):
-                    raise PublishError(f"patch rejected: Secret {name} in {blob.path!r}")
+                    raise PatchRejected(f"patch rejected: Secret {name} in {blob.path!r}")
         # Most files need no baseline read. A match requires checking the same
         # path's original object; deletion has no new blob and is never scanned.
         if not scan_blob_secrets(content):
@@ -366,7 +415,7 @@ def _validate_staged_blobs(
         )
         secrets = scan_blob_secrets(content, baseline)
         if secrets:
-            raise PublishError(
+            raise PatchRejected(
                 "patch rejected after apply: credential-shaped content in "
                 f"{blob.path!r}: {', '.join(secrets)}"
             )
@@ -384,6 +433,7 @@ def publish_patch(
     include_base_bundle: bool = False,
     auth_env: dict[str, str] | None = None,
     known_secrets: dict[str, str] | None = None,
+    own_pushes: Iterable[str] = (),
 ) -> PublishResult:
     """Validate and publish one run's patch on its stable thread branch.
 
@@ -399,7 +449,8 @@ def publish_patch(
     Actual staged files, including binary assets, are size-checked and scanned
     for newly introduced credentials before committing or pushing;
     ``known_secrets`` adds the values of the job's environment secrets to that
-    scan.
+    scan. ``own_pushes`` are this group's commits on ``base_sha`` that were
+    pushed but never published (see :func:`_reuse_pushed_commit`).
 
     Raises :class:`PublishError` with a reviewer-readable message on any gate
     violation or git failure.
@@ -411,7 +462,7 @@ def publish_patch(
 
     gate = validate_patch(patch)
     if not _gate_permits(gate, allow_workflow_changes=allow_workflow_changes):
-        raise PublishError(f"patch rejected: {gate.reason}")
+        raise PatchRejected(f"patch rejected: {gate.reason}")
 
     branch = branch_name_for(branch_id or job_id)
     workdir = Path(tempfile.mkdtemp(prefix=f"agent-publish-{job_id}-"))
@@ -468,7 +519,7 @@ def publish_patch(
         staged = _staged_change_set(repo)
         post = validate_change_set(staged.paths, staged.symlinks, staged.gitlinks)
         if not _gate_permits(post, allow_workflow_changes=allow_workflow_changes):
-            raise PublishError(f"patch rejected after apply: {post.reason}")
+            raise PatchRejected(f"patch rejected after apply: {post.reason}")
         _validate_staged_blobs(
             repo, staged.blobs, **({"known_secrets": known_secrets} if known_secrets else {})
         )
@@ -482,10 +533,19 @@ def publish_patch(
                 tip=displaced,
                 base_sha=base_sha,
                 local_sha=commit_sha,
+                own_pushes=own_pushes,
                 auth_env=auth_env,
             )
+        # The workspace holds the base, which is not the published commit's
+        # parent when that commit is built on unpublished pushes of its own.
         base_bundle = (
-            build_base_bundle(str(repo), commit=commit_sha, prerequisite=_head_parent(repo))
+            build_base_bundle(
+                str(repo),
+                commit=commit_sha,
+                prerequisite=_run_git(
+                    ["rev-parse", "--verify", f"{base_sha}^{{commit}}"], cwd=repo
+                ).strip(),
+            )
             if include_base_bundle
             else None
         )
@@ -529,16 +589,27 @@ def _head_parent(repo: Path) -> str:
 
 
 def fetch_base_bundle(
-    *, clone_url: str, commit_sha: str, auth_env: dict[str, str] | None = None
+    *,
+    clone_url: str,
+    commit_sha: str,
+    auth_env: dict[str, str] | None = None,
+    base_sha: str | None = None,
 ) -> bytes:
     """Fetch one published commit and return its bounded credential-free bundle.
 
     Two commits deep, so the parent is at hand to leave out of the bundle. The
     credential travels as in :func:`publish_patch`: in ``auth_env``, never in
     ``clone_url``.
+
+    ``base_sha`` is the commit the workspace holds. A commit built on
+    unpublished pushes of its own (see :func:`_reuse_pushed_commit`) is not its
+    parent; the history is then deepened down to it, and the bundle carries
+    those pushes too.
     """
     if not _COMMIT_SHA.fullmatch(commit_sha or ""):
         raise PublishError(f"commit_sha must be a full commit hash, got {commit_sha!r}")
+    if base_sha is not None and not _COMMIT_SHA.fullmatch(base_sha):
+        raise PublishError(f"base_sha must be a full commit hash, got {base_sha!r}")
     workdir = Path(tempfile.mkdtemp(prefix="agent-base-import-"))
     try:
         repo = workdir / "repo"
@@ -551,12 +622,55 @@ def fetch_base_bundle(
             remote=True,
         )
         _run_git(["checkout", "--quiet", "--detach", "FETCH_HEAD"], cwd=repo)
+        prerequisite = _head_parent(repo)
+        if (
+            base_sha is not None
+            and not commit_sha.lower().startswith(base_sha.lower())
+            and not prerequisite.lower().startswith(base_sha.lower())
+        ):
+            prerequisite = _deepen_to_base(repo, commit_sha, base_sha, auth_env)
         try:
-            return build_base_bundle(str(repo), commit=commit_sha, prerequisite=_head_parent(repo))
+            return build_base_bundle(str(repo), commit=commit_sha, prerequisite=prerequisite)
         except Exception as exc:
             raise PublishError(f"could not build the retained base bundle: {exc}") from exc
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
+
+
+def _deepen_to_base(
+    repo: Path, commit_sha: str, base_sha: str, auth_env: dict[str, str] | None
+) -> str:
+    """Fetch ``commit_sha``'s first-parent history down to ``base_sha``; return its full id.
+
+    Publication builds on any number of the group's own pushes, so the depth
+    doubles until the base appears. History is immutable and publication
+    checked that the commit descends from the base, so the search ends there;
+    it fails only once the whole history is fetched without it.
+    """
+    depth = 2
+    while True:
+        depth *= 2
+        _run_git(
+            [
+                "fetch",
+                "--quiet",
+                "--depth",
+                str(depth),
+                "origin",
+                "--end-of-options",
+                commit_sha,
+            ],
+            cwd=repo,
+            env_extra=auth_env,
+            remote=True,
+        )
+        for ancestor in _run_git(["rev-list", "--first-parent", "HEAD"], cwd=repo).split():
+            if ancestor.lower().startswith(base_sha.lower()):
+                return ancestor
+        if _run_git(["rev-parse", "--is-shallow-repository"], cwd=repo).strip() != "true":
+            raise PublishError(
+                f"published commit {commit_sha[:12]} is not built on {base_sha[:12]}"
+            )
 
 
 def _gate_permits(gate: PatchGateResult, *, allow_workflow_changes: bool) -> bool:

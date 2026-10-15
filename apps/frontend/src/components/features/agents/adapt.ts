@@ -120,7 +120,24 @@ function toolOutput(payload: Record<string, unknown>): string[] | undefined {
     readableValue(payload.output) ||
     readableValue(payload.aggregated_output) ||
     readableValue(payload.stdout);
-  return output ? output.split('\n') : undefined;
+  return output ? linesOf(payload, output) : undefined;
+}
+
+/**
+ * `text` split into lines, kept with the stored object it was read from.
+ *
+ * A running turn projects its events again for each one it streams. Splitting
+ * each output anew made new arrays every time, so a row that had not changed
+ * could not be told apart from one that had without reading every line.
+ */
+const splitOutputs = new WeakMap<object, { text: string; lines: string[] }>();
+
+function linesOf(source: object, text: string): string[] {
+  const kept = splitOutputs.get(source);
+  if (kept?.text === text) return kept.lines;
+  const lines = text.split('\n');
+  splitOutputs.set(source, { text, lines });
+  return lines;
 }
 
 /** Map one stored event onto a UI row, or null when it has nothing to show. */
@@ -352,6 +369,35 @@ function diffStat(patch: string): { add: number; del: number } | undefined {
     else if (line.startsWith('-') && !line.startsWith('---')) del += 1;
   }
   return { add, del };
+}
+
+/**
+ * The workspace patch, read once per distinct patch.
+ *
+ * A running turn's stream projects the conversation again for each event,
+ * while its patch only changes when the workspace is read again. Reading it
+ * three ways on every event allocated one object per patch line each time.
+ * The results are never mutated, so sharing them is safe.
+ */
+let lastPatch:
+  | {
+      patch: string;
+      files: string[];
+      details: AgentDiffFile[];
+      stat: ReturnType<typeof diffStat>;
+    }
+  | undefined;
+
+function parsePatch(patch: string): NonNullable<typeof lastPatch> {
+  if (lastPatch?.patch !== patch) {
+    lastPatch = {
+      patch,
+      files: toDiffFiles(patch),
+      details: toDiffFileDetails(patch),
+      stat: diffStat(patch),
+    };
+  }
+  return lastPatch;
 }
 
 /** Describe the trusted execution backend reported for the current attempt. */
@@ -592,6 +638,10 @@ function displayEvents(events: AgentJobEventApi[], job?: AgentJobApi): AgentEven
   const lastToolByAttempt = new Map<number, number>();
   const reasoningByItem = new Map<string, number>();
   const reasoningChannelsByItem = new Map<string, Map<string, Map<number, string>>>();
+  // The row each answer still being written occupies, by attempt and preview.
+  // An answer's first piece has no row yet, and searching back for one read
+  // every row before it, once per answer and again for each streamed event.
+  const streamingPreviewRows = new Map<string, number>();
   const identifiedReasoning = new Set(
     events.flatMap((event) => {
       const id = event.event_type === 'thinking' ? asText(event.payload, 'native_item_id') : '';
@@ -669,7 +719,7 @@ function displayEvents(events: AgentJobEventApi[], job?: AgentJobApi): AgentEven
       ) {
         rows[targetIndex] = {
           ...target,
-          output: row.text ? row.text.split('\n') : [EMPTY_TOOL_OUTPUT],
+          output: row.text ? linesOf(storedEvent, row.text) : [EMPTY_TOOL_OUTPUT],
           outputIsError: row.isError,
           ...(row.truncated ? { outputTruncated: true } : {}),
           ...(row.structuredOutput !== undefined ? { structuredOutput: row.structuredOutput } : {}),
@@ -688,20 +738,10 @@ function displayEvents(events: AgentJobEventApi[], job?: AgentJobApi): AgentEven
     if (row.kind === 'message' && row.previewId) {
       // Pieces of an answer grow one row, and the complete message takes that
       // row's place, between whatever came before and after it.
-      let previewIndex = rows.length - 1;
-      for (; previewIndex >= 0; previewIndex -= 1) {
-        const item = rows[previewIndex];
-        if (
-          item.kind === 'message' &&
-          item.streaming === true &&
-          item.previewId === row.previewId &&
-          item.attemptNo === row.attemptNo
-        ) {
-          break;
-        }
-      }
-      const preview = rows[previewIndex];
-      if (preview?.kind === 'message') {
+      const previewKey = `${row.attemptNo}:${row.previewId}`;
+      const previewIndex = streamingPreviewRows.get(previewKey);
+      const preview = previewIndex === undefined ? undefined : rows[previewIndex];
+      if (previewIndex !== undefined && preview?.kind === 'message') {
         // The first piece's id stays the row's identity, live and on reload,
         // so completing the answer never moves the reading anchor.
         rows[previewIndex] = !row.streaming
@@ -709,6 +749,7 @@ function displayEvents(events: AgentJobEventApi[], job?: AgentJobApi): AgentEven
           : replyPreviewPiece(event)?.reset
             ? { ...preview, text: row.text }
             : { ...preview, text: preview.text + row.text };
+        if (!row.streaming) streamingPreviewRows.delete(previewKey);
         continue;
       }
     }
@@ -801,7 +842,9 @@ function displayEvents(events: AgentJobEventApi[], job?: AgentJobApi): AgentEven
       continue;
     }
 
-    rows.push(row);
+    const index = rows.push(row) - 1;
+    if (row.kind === 'message' && row.streaming === true && row.previewId)
+      streamingPreviewRows.set(`${row.attemptNo}:${row.previewId}`, index);
   }
 
   return rows;
@@ -1126,6 +1169,11 @@ export function createDisplayJobAdapter(): typeof toDisplayJob {
     if (!sameRecords(history, nextHistory)) history = nextHistory;
     return history;
   };
+  // The live turn's rows from the last projection. A running turn projects
+  // again for every event it streams, building every row anew; a row that
+  // reads the same keeps its object, so the rows that did not change are not
+  // rendered again.
+  let live: { jobId: string; rows: AgentEvent[] } = { jobId: '', rows: [] };
   return (job, options = {}) => {
     const nextScope = options.thread?.thread_id ?? job.thread_id ?? job.id;
     if (scope !== nextScope || options.threadEvents === undefined) {
@@ -1133,8 +1181,65 @@ export function createDisplayJobAdapter(): typeof toDisplayJob {
       history = [];
       scope = nextScope;
     }
-    return adaptJob(job, options, projectHistory);
+    const adapted = adaptJob(job, options, projectHistory);
+    const rows =
+      live.jobId === job.id ? keepUnchangedRows(live.rows, adapted.events) : adapted.events;
+    live = { jobId: job.id, rows };
+    return rows === adapted.events ? adapted : { ...adapted, events: rows };
   };
+}
+
+/**
+ * `next`, with each row that reads the same as the row at its place in
+ * `previous` replaced by that earlier object. Rows are only ever appended or
+ * replaced where they stand, so a row's place identifies it.
+ */
+function keepUnchangedRows(previous: AgentEvent[], next: AgentEvent[]): AgentEvent[] {
+  let reused = 0;
+  const rows = next.map((row, index) => {
+    const earlier = previous[index];
+    if (earlier === undefined || !sameRow(earlier, row)) return row;
+    reused += 1;
+    return earlier;
+  });
+  return reused === next.length && next.length === previous.length ? previous : rows;
+}
+
+/** Field by field; a field whose value is a new object is compared by content. */
+function sameRow(left: AgentEvent, right: AgentEvent): boolean {
+  const leftRecord = left as unknown as Record<string, unknown>;
+  const rightRecord = right as unknown as Record<string, unknown>;
+  let fields = 0;
+  for (const key in leftRecord) {
+    fields += 1;
+    if (!Object.hasOwn(rightRecord, key)) return false;
+    const value = leftRecord[key];
+    if (value !== rightRecord[key] && !sameValue(value, rightRecord[key])) return false;
+  }
+  for (const key in rightRecord) if (Object.hasOwn(rightRecord, key)) fields -= 1;
+  return fields === 0;
+}
+
+function sameValue(left: unknown, right: unknown): boolean {
+  if (left === right) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return (
+      Array.isArray(left) &&
+      Array.isArray(right) &&
+      left.length === right.length &&
+      left.every((item, index) => sameValue(item, right[index]))
+    );
+  }
+  if (!left || !right || typeof left !== 'object' || typeof right !== 'object') return false;
+  const leftRecord = left as Record<string, unknown>;
+  const rightRecord = right as Record<string, unknown>;
+  const keys = Object.keys(leftRecord);
+  return (
+    keys.length === Object.keys(rightRecord).length &&
+    keys.every(
+      (key) => Object.hasOwn(rightRecord, key) && sameValue(leftRecord[key], rightRecord[key]),
+    )
+  );
 }
 
 export function toDisplayJob(job: AgentJobApi, options: AdaptOptions = {}): AgentJob {
@@ -1149,6 +1254,7 @@ function adaptJob(
   const failureCause = failureCauseOf(job.detail);
   const events = options.events ?? [];
   const patch = options.patch ?? '';
+  const parsed = parsePatch(patch);
   const ownStoredMessages = (options.thread?.messages ?? []).filter(
     (message) => message.job_id === job.id,
   );
@@ -1330,10 +1436,10 @@ function adaptJob(
     events: renderedEvents,
     liveNote: liveStatus?.note,
     liveNoteStartedAt: liveStatus?.startedAt,
-    diffFiles: toDiffFiles(patch),
+    diffFiles: parsed.files,
     workspaceDiffAvailable: typeof options.patch === 'string',
-    diffFileDetails: toDiffFileDetails(patch),
-    diffStat: diffStat(patch),
+    diffFileDetails: parsed.details,
+    diffStat: parsed.stat,
     gates: [],
     usage: {
       tokensIn: formatTokens(job.tokens_in),

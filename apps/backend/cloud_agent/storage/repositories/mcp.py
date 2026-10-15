@@ -712,6 +712,7 @@ class PostgresMcpConnectionRepository:
         expected_config_revision: int | None = None,
         expected_refresh_generation: int | None = None,
         reset_status: bool = False,
+        expected_credential_version: int | None = None,
     ) -> bool:
         """Write a credential, conditional on the state the flow started in.
 
@@ -753,6 +754,12 @@ class PostgresMcpConnectionRepository:
 
         ``reset_status`` publishes a new authorization's draft state with its
         credential, so a later discovery cannot be overwritten by the callback.
+
+        ``expected_credential_version`` is the version the refresh claimed. The
+        generation and lease fences cannot see an authorization callback that
+        completes while the refresh is on the network: the callback moves none
+        of them, so without this the refresh would write the old grant's
+        tokens over the new one.
         """
         async with self._pool.acquire() as conn, conn.transaction():
             if not await self._lock_connection(conn, connection_id):
@@ -792,6 +799,7 @@ class PostgresMcpConnectionRepository:
                   AND config_revision = COALESCE($20::bigint, config_revision)
                   AND ($21::bigint IS NULL
                        OR (refresh_generation = $21 AND refresh_lease_expires_at > clock_timestamp()))
+                  AND credential_version = COALESCE($23::bigint, credential_version)
                 RETURNING id
                 """,
                 connection_id,
@@ -816,6 +824,7 @@ class PostgresMcpConnectionRepository:
                 expected_config_revision,
                 expected_refresh_generation,
                 reset_status,
+                expected_credential_version,
             )
         return updated is not None
 
@@ -834,13 +843,21 @@ class PostgresMcpConnectionRepository:
         is being reached*. The OAuth generation does move, because an
         authorization already in flight was started by the previous client and
         its callback must not complete the flow that replaces it.
+
+        A secret belongs to one client. Naming the same client again without
+        one keeps it; naming another client drops it, so a public client can
+        be adopted and the previous client's secret is never sent as the new
+        one's.
         """
         async with self._pool.acquire() as conn:
             updated = await conn.fetchval(
                 """
                 UPDATE agent_mcp_connections SET
                     auth_config = auth_config || jsonb_build_object('client_id', $3::text),
-                    client_secret_ciphertext = COALESCE($4, client_secret_ciphertext),
+                    client_secret_ciphertext = CASE
+                        WHEN $4::text IS NOT NULL THEN $4::text
+                        WHEN auth_config->>'client_id' IS DISTINCT FROM $3::text THEN NULL
+                        ELSE client_secret_ciphertext END,
                     oauth_generation = oauth_generation + 1,
                     updated_at = NOW()
                 WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL

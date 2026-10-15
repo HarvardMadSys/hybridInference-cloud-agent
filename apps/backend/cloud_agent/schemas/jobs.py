@@ -34,9 +34,6 @@ from cloud_agent.schemas.resources import (  # noqa: TC001 — Pydantic resolves
 from cloud_agent.skills.models import (
     SelectedSkill,  # noqa: TC001 — Pydantic resolves annotations at runtime.
 )
-from cloud_agent_shared.environment import (
-    EnvironmentVariable,  # noqa: TC001 — Pydantic resolves annotations at runtime.
-)
 from cloud_agent_shared.plugins import MAX_SANDBOX_PLUGINS, SandboxPlugin
 
 # Where a job's `base_ref` lives once it is persisted. The column stores the
@@ -124,9 +121,6 @@ class AgentJobCreate(BaseModel):
     environment_id: str | None = Field(None, max_length=80)
     environment_revision: int | None = Field(None, ge=0)
     global_revision: int | None = Field(None, ge=0)
-    environment_overrides: list[EnvironmentVariable] = Field(
-        default_factory=list, max_length=50, repr=False
-    )
     setup_script: str | None = Field(
         None,
         max_length=8000,
@@ -217,6 +211,22 @@ class AgentJobCreate(BaseModel):
         if isinstance(value, dict) and "execution_profile" in value:
             raise ValueError(
                 "execution_profile is server-owned; callers cannot select or downgrade it"
+            )
+        return value
+
+    @model_validator(mode="before")
+    @classmethod
+    def task_variables_were_removed(cls, value: Any) -> Any:
+        """Refuse task-only variables instead of starting a task without them.
+
+        A page loaded before their removal can still send some. Dropping them
+        would run the task without values its owner set; an empty list is what
+        that page sends when none were set, and means nothing.
+        """
+        if isinstance(value, dict) and value.get("environment_overrides"):
+            raise ValueError(
+                "Task-only environment variables are no longer supported; "
+                "save them in a repository environment"
             )
         return value
 

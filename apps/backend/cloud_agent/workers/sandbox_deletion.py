@@ -371,6 +371,8 @@ async def coordinate_sandbox_deletions(
 
     Less often, also request the stop and deletion of sandboxes whose chats
     were all deleted; those requests then flow through the same retries.
+    Requests that keep failing can keep the queue from ever emptying, so the
+    sweep does not wait for it to.
     """
     if interval_seconds <= 0:
         raise ValueError("Sandbox deletion interval must be positive.")
@@ -385,7 +387,8 @@ async def coordinate_sandbox_deletions(
                 logger.warning("Deleted-session sandbox sweep failed")
         try:
             while await delete_one_archived_sandbox(store):
-                pass
+                if loop.time() >= next_sweep:
+                    break
         except Exception:
             logger.warning("Sandbox deletion coordinator pass failed")
         await asyncio.sleep(interval_seconds)

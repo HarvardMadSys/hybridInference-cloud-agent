@@ -228,6 +228,15 @@ compose() {
 
 SANDBOX_IMAGE="$(env_or_dotenv AGENT_SANDBOX_IMAGE)"
 SANDBOX_IMAGE="${SANDBOX_IMAGE:-freeinference-cloud-agent-job:latest}"
+# A source deployment normally builds its sandbox image. With this set it
+# pulls AGENT_SANDBOX_IMAGE instead: the image published for this same commit,
+# whose registry digest every host can fetch, so a group created here can be
+# restored on another host from its checkpoint.
+SANDBOX_IMAGE_PULL="$(env_or_dotenv AGENT_SANDBOX_IMAGE_PULL)"
+case "${SANDBOX_IMAGE_PULL:-false}" in
+  true|false) ;;
+  *) die "AGENT_SANDBOX_IMAGE_PULL must be true or false" ;;
+esac
 GATEWAY_HOSTNAME="$(env_or_dotenv AGENT_GATEWAY_HOSTNAME)"
 GATEWAY_HOSTNAME="${GATEWAY_HOSTNAME:-agent-gateway}"
 TUNNEL_PORT="$(env_or_dotenv AGENT_TUNNEL_LISTEN_PORT)"
@@ -1762,6 +1771,15 @@ cmd_prepare() {
 
   if [[ "$AGENT_DEPLOY_MODE" == "artifacts" ]]; then
     log "pulling sandbox image (${SANDBOX_IMAGE})"
+    docker pull "$SANDBOX_IMAGE"
+  elif [[ "${SANDBOX_IMAGE_PULL:-false}" == "true" ]]; then
+    # The published image has the reviewed default menu only; extra versions
+    # need a local build, which this switch exists to avoid.
+    for name in CLAUDE_CODE_EXTRA_VERSIONS CODEX_EXTRA_VERSIONS PI_EXTRA_VERSIONS \
+                OPENCODE_EXTRA_VERSIONS KILO_EXTRA_VERSIONS; do
+      [[ -z "${!name}" ]] || die "${name} needs a local sandbox build; unset AGENT_SANDBOX_IMAGE_PULL"
+    done
+    log "pulling the published sandbox image (${SANDBOX_IMAGE})"
     docker pull "$SANDBOX_IMAGE"
   else
     # Only extra, operator-approved menu entries are passed. The defaults fall
