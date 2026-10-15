@@ -37,6 +37,8 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from typing import IO, TYPE_CHECKING, Any, BinaryIO, Final, TypeVar
 
+from cloud_agent_host.sandbox_archive_s3 import SandboxArchiveDownloadError
+from cloud_agent_shared.environment_snapshots import snapshot_image_reference
 from cloud_agent_shared.errors import SandboxError
 from cloud_agent_shared.sandbox_restore import pullable_image
 
@@ -47,6 +49,7 @@ if TYPE_CHECKING:
     from cloud_agent_host.chat_sandbox import ChatSandboxInspection, ChatSandboxSpec
     from cloud_agent_host.sandbox_archive_s3 import SandboxArchiveReceipt
     from cloud_agent_host.shared_session_supervisor import SharedMemberManifest
+    from cloud_agent_shared.environment_snapshots import EnvironmentSnapshotRef
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +92,10 @@ _LOAD_TIMEOUT_S: Final = 1800.0
 
 class SandboxCheckpointError(SandboxError):
     """A checkpoint could not be captured or its archive was malformed."""
+
+
+class CheckpointArchiveInvalid(SandboxCheckpointError):
+    """A stored archive is not what its record says; retrying cannot help."""
 
 
 @dataclass(frozen=True)
@@ -407,7 +414,7 @@ def export_checkpoint_archive(
 
     metadata: dict[str, bytes] = {}
     small_blobs: dict[str, bytes] = {}
-    kept_blob_bytes: dict[str, int] = {}
+    large_blob_bytes: dict[str, int] = {}
     with (
         tarfile.open(fileobj=save_stream, mode="r|") as source,
         tarfile.open(fileobj=output, mode="w|", format=tarfile.PAX_FORMAT) as target,
@@ -424,8 +431,6 @@ def export_checkpoint_archive(
                 reserve(0)
                 target.addfile(entry)
                 continue
-            reserve(member.size)
-            entry.size = member.size
             handle = source.extractfile(member)
             if handle is None:
                 raise SandboxCheckpointError("checkpoint archive entry is unreadable")
@@ -437,28 +442,52 @@ def export_checkpoint_archive(
                 if kind == "metadata":
                     metadata[name] = body
                 else:
+                    # Held back until the manifest says whether the image uses
+                    # it: a classic image store's `docker save` also emits
+                    # metadata blobs no manifest names, which a restore refuses.
                     if hashlib.sha256(body).hexdigest() != name:
                         raise SandboxCheckpointError("checkpoint blob does not match its digest")
                     small_blobs[name] = body
-                    kept_blob_bytes[name] = len(body)
-                target.addfile(entry, _BytesReader(body))
             else:
+                reserve(member.size)
+                entry.size = member.size
                 reader = _DigestingReader(handle, member.size)
                 target.addfile(entry, reader)
                 assert name is not None
                 if reader.digest.hexdigest() != name:
                     raise SandboxCheckpointError("checkpoint blob does not match its digest")
-                kept_blob_bytes[name] = member.size
+                large_blob_bytes[name] = member.size
+        manifests = _image_manifests(metadata, small_blobs)
+        if len(manifests) != 1:
+            raise SandboxCheckpointError("checkpoint archive must describe exactly one image")
+        manifest_digest, manifest = manifests[0]
+        config_digest = _descriptor_digest(manifest.get("config"))
+        if config_digest not in small_blobs:
+            raise SandboxCheckpointError("checkpoint archive is missing its image config")
+        inherited, added = _split_new_layers(_manifest_layers(manifest), base_layers)
+        used = {manifest_digest, config_digest, *added}
+        if set(large_blob_bytes) - used:
+            raise SandboxCheckpointError("checkpoint archive holds blobs its image does not use")
+        # The index names the image manifest itself, so a nested index's
+        # blob, like any other the image does not use, is left out.
+        metadata["index.json"] = _direct_index(
+            metadata["index.json"], manifest_digest, small_blobs[manifest_digest], manifest
+        )
+        written = [
+            (f"blobs/sha256/{name}", small_blobs[name]) for name in sorted(used & set(small_blobs))
+        ]
+        for name, body in [*written, *sorted(metadata.items())]:
+            entry = tarfile.TarInfo(name)
+            entry.mode = 0o644
+            entry.size = len(body)
+            reserve(len(body))
+            target.addfile(entry, _BytesReader(body))
     if output.tell() > max_bytes:
         raise SandboxCheckpointError("sandbox checkpoint exceeds the archive size limit")
-    manifests = _image_manifests(metadata, small_blobs)
-    if len(manifests) != 1:
-        raise SandboxCheckpointError("checkpoint archive must describe exactly one image")
-    manifest_digest, manifest = manifests[0]
-    config_digest = _descriptor_digest(manifest.get("config"))
-    if config_digest not in small_blobs:
-        raise SandboxCheckpointError("checkpoint archive is missing its image config")
-    inherited, added = _split_new_layers(_manifest_layers(manifest), base_layers)
+    kept_blob_bytes = {
+        **large_blob_bytes,
+        **{name: len(body) for name, body in small_blobs.items() if name in used},
+    }
     missing = [layer for layer in added if layer not in kept_blob_bytes]
     if missing:
         raise SandboxCheckpointError("checkpoint archive is missing a new layer")
@@ -469,6 +498,32 @@ def export_checkpoint_archive(
         new_layers=added,
         new_layer_bytes=sum(kept_blob_bytes[layer] for layer in added),
     )
+
+
+def _direct_index(
+    original: bytes, manifest_digest: str, manifest_body: bytes, manifest: Mapping[str, Any]
+) -> bytes:
+    """An ``index.json`` naming the image manifest directly, keeping the image's name."""
+    try:
+        descriptors = json.loads(original).get("manifests") or [{}]
+        annotations = descriptors[0].get("annotations") or {}
+    except (ValueError, AttributeError, IndexError):
+        annotations = {}
+    descriptor: dict[str, Any] = {
+        "mediaType": manifest.get("mediaType") or "application/vnd.oci.image.manifest.v1+json",
+        "digest": f"sha256:{manifest_digest}",
+        "size": len(manifest_body),
+    }
+    if isinstance(annotations, dict) and annotations:
+        descriptor["annotations"] = annotations
+    return json.dumps(
+        {
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.index.v1+json",
+            "manifests": [descriptor],
+        },
+        separators=(",", ":"),
+    ).encode()
 
 
 def _split_new_layers(
@@ -943,18 +998,128 @@ class SandboxCheckpointCapture:
         checkpoint_id = secrets.token_hex(16)
         reference = checkpoint_image_reference(spec.sandbox_id, checkpoint_id)
         durations: dict[str, int] = {}
+        uploaded, archive = self._commit_and_upload(
+            inspection.container_id,
+            reference,
+            base_image,
+            lambda body, size, sha256: upload(
+                sandbox_id=spec.sandbox_id,
+                generation=spec.generation,
+                checkpoint_id=checkpoint_id,
+                body=body,
+                size=size,
+                sha256=sha256,
+                deadline=deadline,
+            ),
+            max_bytes=max_bytes,
+            deadline=deadline,
+            durations=durations,
+            keep_image=False,
+        )
+        receipt = SandboxCheckpointReceipt(
+            checkpoint_id=checkpoint_id,
+            sandbox_id=spec.sandbox_id,
+            generation=spec.generation,
+            container_id=inspection.container_id,
+            base_image=base_image,
+            runtime_id=spec.runtime_id,
+            runtime_version=spec.runtime_version,
+            object_key=uploaded.key,
+            version_id=uploaded.version_id,
+            sha256=uploaded.sha256,
+            size_bytes=uploaded.size,
+            new_layer_bytes=archive.new_layer_bytes,
+            layer_count=len(archive.base_layers) + len(archive.new_layers),
+            created_at=self._now().isoformat(),
+            members=tuple(
+                {
+                    "thread_id": member.thread_id,
+                    "native_session_id": member.native_session_id,
+                    "last_settled_job_id": member.last_settled_job_id,
+                    "context_status": member.context_status,
+                }
+                for member in members
+            ),
+            durations_ms=durations,
+            start_seq=start_seq,
+        )
+        self.store.save(receipt)
+        return receipt
+
+    def capture_environment(
+        self,
+        spec: ChatSandboxSpec,
+        inspection: ChatSandboxInspection,
+        *,
+        owner: str,
+        snapshot_id: str,
+        upload: Callable[..., SandboxArchiveReceipt],
+        max_bytes: int,
+        deadline: float,
+    ) -> dict[str, Any]:
+        """Save one stopped environment run's container as an installation snapshot.
+
+        The same commit, export and upload as a checkpoint, under the
+        snapshot's own image name and key. The committed image is kept: this
+        host is the likeliest to start the next workspace from it.
+        """
+        if inspection.running:
+            raise SandboxCheckpointError("refusing to snapshot a running sandbox")
+        base_image = spec.sandbox_image_digest or inspection.image
+        if not base_image:
+            raise SandboxCheckpointError("environment snapshot needs its base image identity")
+        reference = snapshot_image_reference(owner, snapshot_id)
+        durations: dict[str, int] = {}
+        uploaded, archive = self._commit_and_upload(
+            inspection.container_id,
+            reference,
+            base_image,
+            lambda body, size, sha256: upload(
+                owner=owner,
+                snapshot_id=snapshot_id,
+                body=body,
+                size=size,
+                sha256=sha256,
+                deadline=deadline,
+            ),
+            max_bytes=max_bytes,
+            deadline=deadline,
+            durations=durations,
+            keep_image=True,
+        )
+        return {
+            "snapshot_id": snapshot_id,
+            "object_key": uploaded.key,
+            "version_id": uploaded.version_id,
+            "sha256": uploaded.sha256,
+            "size_bytes": uploaded.size,
+            "new_layer_bytes": archive.new_layer_bytes,
+            "base_image": base_image,
+            "durations_ms": durations,
+        }
+
+    def _commit_and_upload(
+        self,
+        container_id: str,
+        reference: str,
+        base_image: str,
+        upload: Callable[[BinaryIO, int, str], SandboxArchiveReceipt],
+        *,
+        max_bytes: int,
+        deadline: float,
+        durations: dict[str, int],
+        keep_image: bool,
+    ) -> tuple[SandboxArchiveReceipt, CheckpointArchive]:
+        """Commit a stopped container as ``reference`` and upload its new layers.
+
+        The committed image is removed once uploaded unless ``keep_image``,
+        and whenever the export or upload fails.
+        """
         started = self._clock()
         timeout = min(_COMMIT_TIMEOUT_S, self._remaining(deadline))
         try:
             committed = self._run(
-                [
-                    self._docker,
-                    "container",
-                    "commit",
-                    "--pause=false",
-                    inspection.container_id,
-                    reference,
-                ],
+                [self._docker, "container", "commit", "--pause=false", container_id, reference],
                 capture_output=True,
                 text=True,
                 timeout=timeout,
@@ -986,47 +1151,14 @@ class SandboxCheckpointCapture:
                     digest.update(chunk)
                 spool.seek(0)
                 started = self._clock()
-                uploaded = upload(
-                    sandbox_id=spec.sandbox_id,
-                    generation=spec.generation,
-                    checkpoint_id=checkpoint_id,
-                    body=spool,
-                    size=size,
-                    sha256=digest.hexdigest(),
-                    deadline=deadline,
-                )
+                uploaded = upload(spool, size, digest.hexdigest())
                 durations["upload"] = self._elapsed_ms(started)
-        finally:
+        except BaseException:
             self._remove_image(reference)
-        receipt = SandboxCheckpointReceipt(
-            checkpoint_id=checkpoint_id,
-            sandbox_id=spec.sandbox_id,
-            generation=spec.generation,
-            container_id=inspection.container_id,
-            base_image=base_image,
-            runtime_id=spec.runtime_id,
-            runtime_version=spec.runtime_version,
-            object_key=uploaded.key,
-            version_id=uploaded.version_id,
-            sha256=uploaded.sha256,
-            size_bytes=uploaded.size,
-            new_layer_bytes=archive.new_layer_bytes,
-            layer_count=len(archive.base_layers) + len(archive.new_layers),
-            created_at=self._now().isoformat(),
-            members=tuple(
-                {
-                    "thread_id": member.thread_id,
-                    "native_session_id": member.native_session_id,
-                    "last_settled_job_id": member.last_settled_job_id,
-                    "context_status": member.context_status,
-                }
-                for member in members
-            ),
-            durations_ms=durations,
-            start_seq=start_seq,
-        )
-        self.store.save(receipt)
-        return receipt
+            raise
+        if not keep_image:
+            self._remove_image(reference)
+        return uploaded, archive
 
     def _export_from_content(
         self,
@@ -1078,12 +1210,70 @@ class SandboxCheckpointCapture:
         host already holds under the checkpoint's name came from that same
         path (or is the original commit) and is reused.
         """
-        reference = checkpoint_image_reference(sandbox_id, restore.checkpoint_id)
+        return self._load(
+            checkpoint_image_reference(sandbox_id, restore.checkpoint_id),
+            restore.base_image,
+            lambda output: download(
+                sandbox_id=sandbox_id,
+                key=restore.object_key,
+                version_id=restore.version_id,
+                size=restore.size_bytes,
+                sha256=restore.sha256,
+                output=output,
+                deadline=deadline,
+            ),
+            max_bytes=max_bytes,
+            deadline=deadline,
+        )
+
+    def load_environment(
+        self,
+        snapshot: EnvironmentSnapshotRef,
+        *,
+        download: Callable[..., None],
+        max_bytes: int,
+        deadline: float,
+    ) -> str:
+        """Make an installation snapshot a local image and return its name.
+
+        Checked and loaded exactly as a checkpoint restore, under the one name
+        the snapshot may have, so its archive cannot retag another image.
+        """
+        return self._load(
+            snapshot_image_reference(snapshot.owner, snapshot.snapshot_id),
+            snapshot.base_image,
+            lambda output: download(
+                owner=snapshot.owner,
+                snapshot_id=snapshot.snapshot_id,
+                key=snapshot.object_key,
+                version_id=snapshot.version_id,
+                size=snapshot.size_bytes,
+                sha256=snapshot.sha256,
+                output=output,
+                deadline=deadline,
+            ),
+            max_bytes=max_bytes,
+            deadline=deadline,
+        )
+
+    def remove_environment_image(self, owner: str, snapshot_id: str) -> None:
+        """Drop a deleted snapshot's local image, if this host has it."""
+        self._remove_image(snapshot_image_reference(owner, snapshot_id))
+
+    def _load(
+        self,
+        reference: str,
+        base_image: str,
+        download_into: Callable[[IO[bytes]], None],
+        *,
+        max_bytes: int,
+        deadline: float,
+    ) -> str:
         if self._image_present(reference, deadline):
             return reference
-        if not self._image_present(restore.base_image, deadline):
+        if not self._image_present(base_image, deadline):
             pulled = self._run(
-                [self._docker, "image", "pull", "--quiet", restore.base_image],
+                [self._docker, "image", "pull", "--quiet", base_image],
                 capture_output=True,
                 text=True,
                 timeout=min(_PULL_TIMEOUT_S, self._remaining(deadline)),
@@ -1091,30 +1281,28 @@ class SandboxCheckpointCapture:
             )
             if pulled.returncode != 0:
                 raise SandboxCheckpointError("sandbox image could not be pulled for restore")
-        base_layers = self.base_layers(restore.base_image, deadline)
+        base_layers = self.base_layers(base_image, deadline)
         self._spool_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         with (
             tempfile.NamedTemporaryFile(dir=self._spool_dir, prefix="restore-") as downloaded,
             tempfile.NamedTemporaryFile(dir=self._spool_dir, prefix="restore-") as prepared,
         ):
-            download(
-                sandbox_id=sandbox_id,
-                key=restore.object_key,
-                version_id=restore.version_id,
-                size=restore.size_bytes,
-                sha256=restore.sha256,
-                output=downloaded,
-                deadline=deadline,
-            )
+            try:
+                download_into(downloaded)
+            except SandboxArchiveDownloadError as exc:
+                raise CheckpointArchiveInvalid(str(exc)) from exc
             downloaded.flush()
             downloaded.seek(0)
-            prepare_restore_archive(
-                downloaded,
-                prepared,
-                reference=reference,
-                base_layers=base_layers,
-                max_bytes=max_bytes,
-            )
+            try:
+                prepare_restore_archive(
+                    downloaded,
+                    prepared,
+                    reference=reference,
+                    base_layers=base_layers,
+                    max_bytes=max_bytes,
+                )
+            except SandboxCheckpointError as exc:
+                raise CheckpointArchiveInvalid(str(exc)) from exc
             prepared.flush()
             loaded = self._run(
                 [self._docker, "image", "load", "--quiet", "--input", prepared.name],

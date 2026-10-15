@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Literal
 
+from cloud_agent_shared.environment_snapshots import SNAPSHOT_LABEL
 from cloud_agent_shared.errors import SandboxError
 
 CHAT_SANDBOX_LABEL = "org.freeinference.chat-sandbox"
@@ -26,6 +27,13 @@ CHAT_IMAGE_DIGEST_LABEL = "org.freeinference.chat-image-digest"
 #: Its image is that checkpoint's local image, which extends the image the
 #: digest label still names.
 CHAT_CHECKPOINT_LABEL = "org.freeinference.chat-checkpoint"
+#: ``<owner hash>:<snapshot id>`` of the installation snapshot a new group was
+#: created from; its image is that snapshot's and nothing else.
+CHAT_ENVIRONMENT_SNAPSHOT_LABEL = SNAPSHOT_LABEL
+#: Marks an environment run's disposable container. A snapshot's image
+#: inherits it from the run it was committed from, so a group created from a
+#: snapshot sets it empty: a marked container is never adopted as a chat.
+ENVIRONMENT_TEST_LABEL = "hybridinference.environment-test"
 CHAT_MEMORY_LIMIT_LABEL = "org.freeinference.chat-memory-limit"
 CHAT_CPU_LIMIT_LABEL = "org.freeinference.chat-cpu-limit"
 CHAT_DISK_LIMIT_LABEL = "org.freeinference.chat-disk-limit-mib"

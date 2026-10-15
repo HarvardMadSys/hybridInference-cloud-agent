@@ -58,6 +58,9 @@ from cloud_agent.storage.repositories import (
     PostgresWebSearchRepository,
     PostgresWorkInsightsRepository,
 )
+from cloud_agent.storage.repositories.environment_snapshots import (
+    PostgresEnvironmentSnapshotRepository,
+)
 from cloud_agent.storage.repositories.environments import PostgresEnvironmentRepository
 
 if TYPE_CHECKING:
@@ -98,6 +101,7 @@ if TYPE_CHECKING:
         WebSearchRepository,
         WorkInsightsRepository,
     )
+    from cloud_agent.ports.environment_snapshots import EnvironmentSnapshotRepository
     from cloud_agent.ports.environments import EnvironmentRepository
 
 
@@ -117,6 +121,9 @@ class Storage:
         self.admin_usage = AdminUsageQueries(pool)
 
         self.environments: EnvironmentRepository = PostgresEnvironmentRepository(pool)
+        self.environment_snapshots: EnvironmentSnapshotRepository = (
+            PostgresEnvironmentSnapshotRepository(pool)
+        )
         self.attempt_commands: AttemptCommands = PostgresAttemptCommands(pool)
         self.audit: AuditRepository = PostgresAuditRepository(pool)
         self.audit_log: AuditLogQueries = PostgresAuditLogRepository(pool)

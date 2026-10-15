@@ -15,6 +15,7 @@ from cloud_agent_host.bounded_output import (
     MAX_PROTOCOL_LINE_BYTES,
     protocol_lines,
 )
+from cloud_agent_shared.environment import ENVIRONMENT_CAPABILITY, environment_payload
 
 if TYPE_CHECKING:
     import builtins
@@ -132,7 +133,8 @@ class SessionSupervisorClient:
         """Verify broker capability and prepare the exact bound workspace."""
         health = self._client.get(f"{self._base_url}/health")
         health.raise_for_status()
-        if "environment-v1" not in health.json().get("capabilities", []):
+        capabilities = [str(c) for c in health.json().get("capabilities", [])]
+        if ENVIRONMENT_CAPABILITY not in capabilities:
             raise SessionSupervisorError(
                 503, "Sandbox manager does not support environment configuration"
             )
@@ -155,7 +157,8 @@ class SessionSupervisorClient:
             response = self._client.post(
                 f"{self._base_url}/workspaces/{quote(thread_id, safe='')}/environment/prepare",
                 json={
-                    "environment": environment.model_dump(mode="json"),
+                    # A sandbox manager a release behind refuses fields it lacks.
+                    "environment": environment_payload(environment, capabilities),
                     "activation_owner": activation_owner,
                 },
                 timeout=1050,
@@ -321,6 +324,7 @@ class SessionSupervisorClient:
         profiling: dict[str, Any] | None = None,
         start_seq: int | None = None,
         restore: dict[str, Any] | None = None,
+        environment_snapshot: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Lease one member without excluding turns on sibling members."""
         return self._shared_request(
@@ -347,8 +351,64 @@ class SessionSupervisorClient:
                 "profiling": profiling,
                 "start_seq": start_seq,
                 "restore": restore,
+                **(
+                    {"environment_snapshot": environment_snapshot}
+                    if environment_snapshot is not None
+                    else {}
+                ),
             },
         )
+
+    def _manager_post(
+        self, path: str, payload: dict[str, Any], *, timeout: float
+    ) -> dict[str, Any]:
+        try:
+            response = self._client.post(f"{self._base_url}{path}", json=payload, timeout=timeout)
+        except httpx.HTTPError as exc:
+            raise SessionSupervisorError(503, "sandbox manager is unavailable") from exc
+        if response.is_error:
+            raise SessionSupervisorError(
+                response.status_code, _error_detail(response, f"sandbox manager refused {path}")
+            )
+        body = response.json()
+        if not isinstance(body, dict):
+            raise SessionSupervisorError(502, "sandbox manager returned invalid data")
+        return body
+
+    def capture_environment_snapshot(
+        self,
+        *,
+        run_id: str,
+        lease_generation: int,
+        container_id: str,
+        sandbox_image_digest: str | None,
+        owner: str,
+        snapshot_id: str,
+    ) -> dict[str, Any]:
+        """Have the sandbox manager commit and upload a stopped environment run's container."""
+        return self._manager_post(
+            "/environment-snapshots/capture",
+            {
+                "run_id": run_id,
+                "lease_generation": lease_generation,
+                "container_id": container_id,
+                "sandbox_image_digest": sandbox_image_digest,
+                "owner": owner,
+                "snapshot_id": snapshot_id,
+            },
+            # Commit, export and upload of a large installation take a while.
+            timeout=1800,
+        )
+
+    def delete_environment_snapshots(
+        self, snapshots: builtins.list[dict[str, Any]]
+    ) -> builtins.list[str]:
+        """Drop retired snapshots here; return those whose stored object was deleted."""
+        body = self._manager_post(
+            "/environment-snapshots/delete", {"snapshots": snapshots}, timeout=300
+        )
+        deleted = body.get("deleted")
+        return [str(item) for item in deleted] if isinstance(deleted, list) else []
 
     def ensure_shared_resident(
         self,

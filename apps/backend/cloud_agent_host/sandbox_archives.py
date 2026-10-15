@@ -17,7 +17,7 @@ import tempfile
 import threading
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, BinaryIO, Final, cast
+from typing import TYPE_CHECKING, Any, BinaryIO, Final, cast
 
 from cloud_agent_host.sandbox_archive_bundle import build_sandbox_archive_bundle
 from cloud_agent_host.sandbox_archive_s3 import (
@@ -47,6 +47,7 @@ if TYPE_CHECKING:
         SandboxCheckpointReceipt,
     )
     from cloud_agent_host.shared_session_supervisor import SharedMemberManifest
+    from cloud_agent_shared.environment_snapshots import EnvironmentSnapshotRef
 
 logger = logging.getLogger(__name__)
 
@@ -698,6 +699,77 @@ class SandboxArchiveService:
             )
         finally:
             self._capture_slots.release()
+
+    def capture_environment_snapshot(
+        self,
+        spec: ChatSandboxSpec,
+        inspection: ChatSandboxInspection,
+        *,
+        owner: str,
+        snapshot_id: str,
+    ) -> dict[str, Any]:
+        """Upload an installation snapshot of a stopped environment run's container.
+
+        It shares the checkpoint's capture slot and deadline, so scratch space
+        stays within the same budget.
+        """
+        capture = self._checkpoint_capture
+        if capture is None:
+            raise SandboxError("sandbox checkpoints are not configured on this sandbox manager")
+        deadline = self._new_deadline()
+        self._admit_capture("checkpoint")
+        acquired = False
+        uploaded = False
+        try:
+            self._acquire_capture_slot(deadline)
+            acquired = True
+            exact = self._exact_inspection(
+                spec,
+                expected_container_id=inspection.container_id,
+                running=False,
+                deadline=deadline,
+            )
+            receipt = capture.capture_environment(
+                spec,
+                exact,
+                owner=owner,
+                snapshot_id=snapshot_id,
+                upload=self._uploader.upload_environment_snapshot,
+                max_bytes=self._config.max_archive_bytes,
+                deadline=deadline,
+            )
+            uploaded = True
+            return receipt
+        finally:
+            if acquired:
+                self._capture_slots.release()
+            self._finish_capture("checkpoint", uploaded=uploaded)
+
+    def load_environment_snapshot(self, snapshot: EnvironmentSnapshotRef) -> str:
+        """Load an installation snapshot's image under the capture budget."""
+        capture = self._checkpoint_capture
+        if capture is None:
+            raise SandboxError("sandbox checkpoints are not configured on this sandbox manager")
+        deadline = self._new_deadline()
+        self._acquire_capture_slot(deadline)
+        try:
+            return capture.load_environment(
+                snapshot,
+                download=self._uploader.download_environment_snapshot,
+                max_bytes=self._config.max_archive_bytes,
+                deadline=deadline,
+            )
+        finally:
+            self._capture_slots.release()
+
+    def delete_environment_snapshot(
+        self, *, owner: str, snapshot_id: str, key: str, version_id: str | None
+    ) -> None:
+        """Delete one snapshot's stored object."""
+        self._require_accepting()
+        self._uploader.delete_environment_snapshot(
+            owner=owner, snapshot_id=snapshot_id, key=key, version_id=version_id
+        )
 
     def _require_accepting(self) -> None:
         with self._lock:

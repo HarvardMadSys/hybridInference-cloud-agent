@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import hmac
 import math
 import secrets
 from dataclasses import dataclass
@@ -78,10 +79,15 @@ class SourceControlCipher:
             )
         digest = hashlib.sha256(domain + b"\0" + material.encode("utf-8")).digest()
         self._fernet = Fernet(base64.urlsafe_b64encode(digest))
+        self._mac_key = hashlib.sha256(domain + b"\0mac\0" + material.encode("utf-8")).digest()
 
     def encrypt(self, value: str) -> str:
         """Return authenticated ciphertext; plaintext is never persisted."""
         return self._fernet.encrypt(value.encode("utf-8")).decode("ascii")
+
+    def mac(self, value: bytes) -> str:
+        """Keyed SHA-256 of ``value``: equal inputs compare equal, and neither is kept."""
+        return hmac.new(self._mac_key, value, hashlib.sha256).hexdigest()
 
     def decrypt(self, value: str) -> str:
         """Decrypt a persisted secret and fail closed on corruption."""

@@ -142,6 +142,12 @@ from cloud_agent_host.setup import run_setup
 from cloud_agent_host.storage_admission import new_sandbox_storage_error
 from cloud_agent_shared import operation_profiling
 from cloud_agent_shared.environment import ENVIRONMENT_CAPABILITY
+from cloud_agent_shared.environment_snapshots import (
+    ENVIRONMENT_SNAPSHOT_CAPABILITY,
+    MAX_LOCKFILES,
+    EnvironmentSnapshotRef,
+    is_lockfile,
+)
 from cloud_agent_shared.git.patch_gate import branch_name_for
 from cloud_agent_shared.git.source_archive import (
     DEFAULT_MAX_SOURCE_ARCHIVE_BYTES,
@@ -629,6 +635,66 @@ def _checkout_bytes(workdir: str) -> int:
             if stat.S_ISREG(info.st_mode):
                 total += info.st_size
     return total
+
+
+def tracked_lockfiles(workdir: str) -> dict[str, str] | None:
+    """Each tracked dependency manifest's Git object id, the snapshot match key.
+
+    Equal object ids mean byte-identical files, on the host checkout of a
+    snapshot's build and of a later task alike. ``None`` when Git cannot say,
+    or when a repository has more manifests than a snapshot records, so that it
+    is never matched.
+    """
+    listed = _run_git(["ls-files", "-s", "-z"], cwd=workdir)
+    if listed.returncode != 0:
+        return None
+    found: dict[str, str] = {}
+    for entry in listed.stdout.split("\0"):
+        meta, _, path = entry.partition("\t")
+        fields = meta.split()
+        if len(fields) != 3 or not is_lockfile(path):
+            continue
+        found[path] = fields[1]
+        if len(found) > MAX_LOCKFILES:
+            return None
+    return found
+
+
+def _choose_environment_snapshot(
+    job: ClaimedJob,
+    spec: ChatSandboxSpec,
+    source: _SourcePrefetch | None,
+    *,
+    new_group: bool,
+) -> tuple[EnvironmentSnapshotRef | None, str | None]:
+    """Whether a new workspace starts from the snapshot it was handed, and what to report.
+
+    Only a group this turn creates can, and only from a snapshot built on
+    this host's sandbox image and from the same dependency manifests as the
+    checkout. Waiting for the checkout here costs only the turns that were
+    handed a snapshot. The outcome is ``None`` when there is nothing to
+    report: no installation to snapshot, or a checkout that failed.
+    """
+    environment = job.environment
+    if (
+        not new_group
+        or source is None
+        or environment is None
+        or not environment.setup_script
+        or not environment.setup_fingerprint
+    ):
+        return None, None
+    offered = job.environment_snapshot
+    if offered is None:
+        return None, "absent"
+    if offered.base_image != spec.sandbox_image_digest:
+        return None, "image_changed"
+    lockfiles = source.lockfiles()
+    if lockfiles is None:
+        return None, None
+    if lockfiles != offered.lockfiles:
+        return None, "lockfiles_changed"
+    return offered, None
 
 
 def _run_git_within(
@@ -1186,7 +1252,9 @@ def _shared_live_host_capabilities(
 def _environment_host_capabilities(backend: SandboxBackend, stamp: dict[str, Any]) -> list[str]:
     """Advertise environment execution only beside proven shared-live support."""
     capabilities = _shared_live_host_capabilities(backend, stamp)
-    return [*capabilities, ENVIRONMENT_CAPABILITY] if capabilities else []
+    if not capabilities:
+        return []
+    return [*capabilities, ENVIRONMENT_CAPABILITY, ENVIRONMENT_SNAPSHOT_CAPABILITY]
 
 
 def _shared_live_deployment_ready(
@@ -1575,6 +1643,7 @@ class _SourcePrefetch:
         self._stop = threading.Event()
         self._discarded = False
         self._base_sha = ""
+        self._lockfiles: dict[str, str] | None = None
         self._archive: Any = None
         self._error: BaseException | None = None
         self._thread = threading.Thread(target=self._prepare, name="source-prefetch")
@@ -1598,6 +1667,7 @@ class _SourcePrefetch:
                         stop=self._stop,
                     )
                     checkout_output_branch(source, self._job.thread_id)
+                self._lockfiles = tracked_lockfiles(source)
                 # Unnamed and outside the checkout: the archive is spooled to
                 # disk, not held in this process, and gone when it is closed,
                 # which import_into or discard does once the clone is done.
@@ -1625,6 +1695,16 @@ class _SourcePrefetch:
                     self._base_sha, self._archive = base_sha, archive
         finally:
             self._done.set()
+
+    def lockfiles(self) -> dict[str, str] | None:
+        """The checkout's dependency manifests, once it is prepared; ``None`` if it failed."""
+        self._done.wait()
+        return None if self._error is not None else self._lockfiles
+
+    def base_sha(self) -> str | None:
+        """The commit the checkout resolved, once it is prepared."""
+        self._done.wait()
+        return self._base_sha or None
 
     def import_into(
         self,
@@ -2381,6 +2461,12 @@ def _run_shared_live_attempt(
                 gid=manager.backend.gid,
                 max_bytes=None if import_mib is None else int(import_mib) * 1024 * 1024,
             )
+        snapshot, snapshot_outcome = _choose_environment_snapshot(
+            job,
+            spec,
+            source,
+            new_group=not has_context and restore is None and not reservation.get("container_id"),
+        )
         supervisor = _session_supervisor_from_env()
         try:
             acquire_call = operation_profiling.expect_fragment(
@@ -2400,6 +2486,9 @@ def _run_shared_live_attempt(
                 profiling=operation_profiling.measurement_context(measurement, acquire_call),
                 start_seq=reservation.get("start_seq"),
                 restore=restore,
+                environment_snapshot=(
+                    snapshot.model_dump(mode="json") if snapshot is not None else None
+                ),
             )
         except SessionSupervisorError as exc:
             if restore is not None and exc.status_code == 424:
@@ -2407,6 +2496,15 @@ def _run_shared_live_attempt(
             context_invalid = has_context and exc.status_code == 410
             raise
         lease_token = str(lease["token"])
+        # The container holds a snapshot's installation, whether this attempt
+        # or an earlier one created it, and its workspace must be kept.
+        from_snapshot = bool(lease.get("environment_snapshot_id"))
+        if snapshot is not None:
+            snapshot_outcome = (
+                "used"
+                if lease.get("environment_snapshot_id") == snapshot.snapshot_id
+                else str(lease.get("environment_snapshot_failure") or "unavailable")
+            )
         container_action = str(lease.get("container_action") or "unknown")
         # One answer for one call. Sub-stages the sandbox manager measured are durations,
         # not offsets, so they hang off the stage they happened in rather than
@@ -2504,13 +2602,23 @@ def _run_shared_live_attempt(
                 # The marker probe above proved there is no prepared baseline.
                 # Only now may the prefetched source mutate the sandbox.
                 stage = _stage(measurement, "workspace_reset")
-                manager.reset_unsettled_state(spec)
+                manager.reset_unsettled_state(spec, keep_workspace=from_snapshot)
                 stage = _stage(measurement, "checkout")
                 if source is None:
                     raise SandboxError("a new chat's source was never prepared")
                 base_sha = source.import_into(
                     manager, spec, observer=operation_profiling.stage_observer(measurement)
                 )
+                if snapshot_outcome is not None:
+                    control.report_environment_snapshot(
+                        snapshot_id=(
+                            None
+                            if snapshot_outcome == "absent" or job.environment_snapshot is None
+                            else job.environment_snapshot.snapshot_id
+                        ),
+                        outcome=snapshot_outcome,
+                        base_sha=base_sha,
+                    )
                 reused_workspace = False
                 if job.setup_script and job.environment is None:
                     stage = _stage(measurement, "setup")

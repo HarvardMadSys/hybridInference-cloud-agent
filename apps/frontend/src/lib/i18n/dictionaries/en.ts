@@ -106,7 +106,10 @@ export const en = {
   'environment.confirmImport': 'Import {count} variables',
   'environment.installScript': 'Install script',
   'environment.installHelp':
-    'Runs once in each new workspace to install dependencies, for example npm ci. Up to 15 minutes.',
+    'Runs once in each new workspace to install dependencies, for example npm ci. Skipped when the workspace starts from a saved installation. Up to 15 minutes.',
+  'environment.updateScript': 'Update script (optional)',
+  'environment.updateHelp':
+    'Runs instead of the install script when a new workspace starts from a saved installation, for steps that follow the source such as code generation or migrations. A saved installation is used only while the lockfiles are unchanged. Up to 15 minutes.',
   'environment.startScript': 'Start script',
   'environment.startHelp':
     'Runs after installation and whenever the container restarts. Start background services, wait until they are ready, then exit. Up to 2 minutes.',
@@ -158,6 +161,17 @@ export const en = {
   'environment.phase.setup': 'Install',
   'environment.phase.start': 'Start',
   'environment.phase.verify': 'Verify',
+  'environment.phase.update': 'Update',
+  'environment.fromSnapshot': 'From saved installation',
+  'environment.keptAfterRestore': 'Kept after restore',
+  'environment.snapshot.none': 'Not prebuilt',
+  'environment.snapshot.ready': 'Prebuilt',
+  'environment.snapshot.building': 'Prebuilding',
+  'environment.snapshot.failed': 'Prebuild failed',
+  'environment.snapshot.rebuild': 'Prebuild again',
+  'environment.snapshot.delete': 'Delete saved installation',
+  'environment.snapshot.savedByTest':
+    'A passing test saves its installation. New tasks start from it while the lockfiles are unchanged.',
   'environment.choose': 'Choose environment',
   'environment.automaticHint':
     'The repository default is selected. Change it only when this task needs a different environment.',

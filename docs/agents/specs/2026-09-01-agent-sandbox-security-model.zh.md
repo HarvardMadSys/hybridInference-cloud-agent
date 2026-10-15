@@ -167,6 +167,11 @@ Relay 是固定目的地转发器，不是让 caller 自选目标的通用 HTTP 
 覆盖平台 grant、MCP、GitHub、Docker 和网络配置。全局及仓库配置变化只影响
 未来工作区，同 owner Fork 继承原绑定；不新增跨 owner 分享。
 
+安装快照（[设计](2026-10-15-environment-install-snapshots-design.zh-CN.md)）只在一次性的
+环境运行容器里生成，不截取对话工作区；只给同一 owner、同一环境、同一安装指纹的新工作区
+使用。快照是不可信的沙盒输出，与检查点恢复一样核对 SHA-256、归档结构和镜像名后才
+`docker load`。
+
 安装、服务、验证和快捷操作使用受管 non-root 身份，各自拥有私有 HOME。
 安装与验证后清理对应 UID 的进程，包括 detached 后代；服务属于容器 boot。
 快照冻结纳入这些身份，操作停止只清理本次操作身份。真实 Kata 和五种 CLI

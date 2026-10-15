@@ -11,12 +11,24 @@ from typing import Any
 import httpx
 
 from cloud_agent_host.chat_sandbox import ChatSandboxManager, ChatSandboxSpec, RetainedChatBackend
-from cloud_agent_host.environment_preparation import EnvironmentPreparation
+from cloud_agent_host.chat_sandbox_models import ENVIRONMENT_TEST_LABEL
+from cloud_agent_host.environment_preparation import EnvironmentPreparation, write_setup_marker
 from cloud_agent_host.setup import run_setup
 from cloud_agent_shared.environment import ENVIRONMENT_CAPABILITY, BoundEnvironment
+from cloud_agent_shared.environment_snapshots import ENVIRONMENT_SNAPSHOT_CAPABILITY
 from cloud_agent_shared.secret_redaction import SecretRedactor
 
-ENVIRONMENT_TEST_LABEL = "hybridinference.environment-test"
+
+def environment_run_spec(run_id: str, generation: int, image_digest: str | None) -> ChatSandboxSpec:
+    """The disposable group one environment run (test or prebuild) executes in."""
+    return ChatSandboxSpec(
+        thread_id=f"athr_env_{run_id}",
+        sandbox_id=f"aenv_{run_id}",
+        generation=generation,
+        runtime_id="claude-code",
+        sandbox_image_digest=image_digest,
+        labels={ENVIRONMENT_TEST_LABEL: run_id},
+    )
 
 
 def claim_and_execute(
@@ -26,8 +38,9 @@ def claim_and_execute(
     backend: Any,
     stop: threading.Event | None = None,
     cleanup_orphans: bool = True,
+    cleanup_snapshots: bool = False,
 ) -> bool:
-    """Claim and clean up one test using a normal registered host slot."""
+    """Claim and clean up one test or prebuild using a normal registered host slot."""
     from cloud_agent_host.runner import _claim_attestation
 
     with httpx.Client(
@@ -38,13 +51,8 @@ def claim_and_execute(
             orphan_response.raise_for_status()
             manager = ChatSandboxManager(backend)
             for orphan in orphan_response.json().get("runs", []):
-                spec = ChatSandboxSpec(
-                    thread_id=f"athr_env_{orphan['id']}",
-                    sandbox_id=f"aenv_{orphan['id']}",
-                    generation=int(orphan["lease_generation"]),
-                    runtime_id="claude-code",
-                    sandbox_image_digest=orphan.get("image_digest"),
-                    labels={ENVIRONMENT_TEST_LABEL: orphan["id"]},
+                spec = environment_run_spec(
+                    orphan["id"], int(orphan["lease_generation"]), orphan.get("image_digest")
                 )
                 inspection = manager.inspect(spec.container_name)
                 if inspection is not None:
@@ -58,12 +66,14 @@ def claim_and_execute(
                     },
                 )
                 result.raise_for_status()
+        if cleanup_snapshots:
+            _delete_retired_snapshots(client)
         if stop is not None and stop.is_set():
             return False
         response = client.post(
             "/v1/agent/worker/environment-runs/claim",
             json={
-                "capabilities": [ENVIRONMENT_CAPABILITY],
+                "capabilities": [ENVIRONMENT_CAPABILITY, ENVIRONMENT_SNAPSHOT_CAPABILITY],
                 "attestation": _claim_attestation(backend),
             },
         )
@@ -82,15 +92,16 @@ def execute_test(
     from cloud_agent_host.runner import ClaimedJob, _SourcePrefetch
 
     bound = BoundEnvironment.model_validate(run["environment"])
+    prebuild = run.get("purpose") == "prebuild"
+    # A prebuild only installs: what it saves is the installation.
+    prepared = bound.model_copy(update={"start_script": ""}) if prebuild else bound
+    target = run.get("snapshot") if isinstance(run.get("snapshot"), dict) else None
     redactor = SecretRedactor(bound.secrets())
     manager = ChatSandboxManager(backend)
-    spec = ChatSandboxSpec(
-        thread_id=f"athr_env_{run['id']}",
-        sandbox_id=f"aenv_{run['id']}",
-        generation=int(run["lease_generation"]),
-        runtime_id="claude-code",
-        sandbox_image_digest=backend.version_stamp().get("sandbox_image_digest"),
-        labels={ENVIRONMENT_TEST_LABEL: run["id"]},
+    spec = environment_run_spec(
+        run["id"],
+        int(run["lease_generation"]),
+        backend.version_stamp().get("sandbox_image_digest"),
     )
     cancelled = stop or threading.Event()
     heartbeat_stop = threading.Event()
@@ -99,7 +110,13 @@ def execute_test(
     path = f"/v1/agent/worker/environment-runs/{run['id']}"
     began = time.monotonic()
 
-    def report(state: str = "running", detail: str = "", *, cleanup_complete: bool = False) -> None:
+    def report(
+        state: str = "running",
+        detail: str = "",
+        *,
+        cleanup_complete: bool = False,
+        snapshot: dict[str, Any] | None = None,
+    ) -> None:
         with data_lock:
             payload = {
                 "generation": int(run["lease_generation"]),
@@ -108,6 +125,7 @@ def execute_test(
                 "detail": redactor.text(detail)[-1000:],
                 "image_digest": spec.sandbox_image_digest,
                 "cleanup_complete": cleanup_complete,
+                **({"snapshot": snapshot} if snapshot is not None else {}),
             }
         answer = client.post(path, json=payload)
         if answer.status_code == 409:
@@ -151,7 +169,7 @@ def execute_test(
             clone_token=run.get("clone_token"),
         )
         source = _SourcePrefetch(job, uid=backend.uid, gid=backend.gid, max_bytes=None)
-        source.import_into(manager, spec)
+        source_sha = source.import_into(manager, spec)
         manager.prepare_shared_workspace(spec)
         retained = RetainedChatBackend(manager, spec)
         last_upload = 0.0
@@ -171,8 +189,8 @@ def execute_test(
                 report()
                 last_upload = now
 
-        EnvironmentPreparation().prepare(retained, bound, callback=on_step, cancel=cancelled)
-        if bound.verify_script:
+        EnvironmentPreparation().prepare(retained, prepared, callback=on_step, cancel=cancelled)
+        if bound.verify_script and not prebuild:
             step: dict[str, Any] = {"phase": "verify", "state": "running", "output": ""}
 
             def output(chunk: str) -> None:
@@ -201,6 +219,32 @@ def execute_test(
                 raise RuntimeError(f"Verification failed ({result.exit_code})")
         if cancelled.is_set():
             raise RuntimeError("Environment test cancelled")
+        if target is not None and bound.setup_fingerprint:
+            try:
+                report(
+                    snapshot=_save_snapshot(
+                        manager,
+                        spec,
+                        bound,
+                        run,
+                        target,
+                        container_id=container_id,
+                        source_sha=source_sha,
+                        lockfiles=source.lockfiles(),
+                    )
+                )
+            except Exception as exc:
+                # The test itself passed; only its snapshot is missing, and
+                # the control plane retires a build that never reported.
+                logging.getLogger(__name__).warning(
+                    "environment snapshot was not saved",
+                    extra={
+                        "event": "environment_snapshot_failed",
+                        "error_type": type(exc).__name__,
+                    },
+                )
+                if prebuild:
+                    raise
         outcome, detail = "succeeded", ""
     except Exception as exc:
         outcome, detail = ("cancelled" if cancelled.is_set() else "failed"), str(exc)
@@ -229,6 +273,77 @@ def execute_test(
             report(outcome, detail, cleanup_complete=True)
 
 
+def _save_snapshot(
+    manager: ChatSandboxManager,
+    spec: ChatSandboxSpec,
+    bound: BoundEnvironment,
+    run: dict[str, Any],
+    target: dict[str, Any],
+    *,
+    container_id: str,
+    source_sha: str,
+    lockfiles: dict[str, str] | None,
+) -> dict[str, Any]:
+    """Turn this run's container into an installation snapshot and return its receipt.
+
+    The marker names the snapshot, the repository's own files and history are
+    removed (a workspace started from it imports its own), and the stopped
+    container is committed and uploaded by the sandbox manager, which holds
+    the bucket's credentials.
+    """
+    from cloud_agent_host.runner import _SAFE_DIRECTORY_ENV, _session_supervisor_from_env
+
+    if lockfiles is None:
+        raise RuntimeError("the checkout's dependency manifests are unknown")
+    write_setup_marker(
+        manager.write_environment_setup_marker,
+        spec,
+        container_id,
+        setup_fingerprint=bound.setup_fingerprint,
+        binding_id=bound.binding_id,
+        snapshot_id=str(target["snapshot_id"]),
+    )
+    removed = manager.exec_capture(
+        spec,
+        [
+            "/bin/sh",
+            "-c",
+            "set -eu; git ls-files -z | xargs -0 -r rm -f --; rm -rf .git",
+        ],
+        env=dict(_SAFE_DIRECTORY_ENV),
+        workdir="/workspace",
+        timeout_s=300,
+        user_uid=manager.backend.uid,
+        user_gid=manager.backend.gid,
+        expected_container_id=container_id,
+    )
+    if removed.returncode != 0:
+        raise RuntimeError("the repository could not be removed from the snapshot")
+    manager.stop(spec, expected_container_id=container_id)
+    receipt = _session_supervisor_from_env().capture_environment_snapshot(
+        run_id=str(run["id"]),
+        lease_generation=int(run["lease_generation"]),
+        container_id=container_id,
+        sandbox_image_digest=spec.sandbox_image_digest,
+        owner=str(target["owner"]),
+        snapshot_id=str(target["snapshot_id"]),
+    )
+    return {**receipt, "lockfiles": lockfiles, "source_sha": source_sha}
+
+
+def _delete_retired_snapshots(client: httpx.Client) -> None:
+    """Drop retired snapshots' images here, and delete their objects when named."""
+    from cloud_agent_host.runner import _session_supervisor_from_env
+
+    response = client.get("/v1/agent/worker/environment-snapshots/deletions")
+    response.raise_for_status()
+    retired = response.json().get("snapshots", [])
+    if not retired:
+        return
+    for snapshot_id in _session_supervisor_from_env().delete_environment_snapshots(retired):
+        client.post(f"/v1/agent/worker/environment-snapshots/{snapshot_id}/deleted")
+
+
 class EnvironmentTestWorker:
     """Keep test execution and orphan RPCs off the host's coding-task claim loop."""
 
@@ -239,6 +354,7 @@ class EnvironmentTestWorker:
         self._thread: threading.Thread | None = None
         self._next_poll = 0.0
         self._next_cleanup = 0.0
+        self._next_snapshot_cleanup = 0.0
 
     @property
     def busy(self) -> bool:
@@ -253,6 +369,9 @@ class EnvironmentTestWorker:
         cleanup = time.monotonic() >= self._next_cleanup
         if cleanup:
             self._next_cleanup = time.monotonic() + 60
+        snapshots = time.monotonic() >= self._next_snapshot_cleanup
+        if snapshots:
+            self._next_snapshot_cleanup = time.monotonic() + 600
 
         def execute() -> None:
             try:
@@ -262,6 +381,7 @@ class EnvironmentTestWorker:
                     backend=self._backend,
                     stop=self._stop,
                     cleanup_orphans=cleanup,
+                    cleanup_snapshots=snapshots,
                 )
             except Exception:
                 logging.getLogger(__name__).warning("environment_test_poll_failed")

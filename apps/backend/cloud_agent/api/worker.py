@@ -91,6 +91,7 @@ from cloud_agent.schemas import (
     WorkerClaimRequest,
     WorkerClaimResponse,
     WorkerContinuityRequest,
+    WorkerEnvironmentSnapshotReport,
     WorkerEventRequest,
     WorkerEventResponse,
     WorkerFinishRequest,
@@ -131,7 +132,8 @@ from cloud_agent.tokens import (
 )
 from cloud_agent.workers.work_signal import WorkSignal  # noqa: TC001 — FastAPI resolves it.
 from cloud_agent.workspace_errors import _sandbox_manager_http_error
-from cloud_agent_shared.environment import ENVIRONMENT_CAPABILITY
+from cloud_agent_shared.environment import ENVIRONMENT_CAPABILITY, environment_payload
+from cloud_agent_shared.environment_snapshots import ENVIRONMENT_SNAPSHOT_CAPABILITY
 from cloud_agent_shared.runtime_catalog import runtimes_supporting_mcp
 
 if TYPE_CHECKING:
@@ -156,6 +158,7 @@ if TYPE_CHECKING:
         SkillRepository,
         SourceControlRepository as SourceControlPort,
     )
+    from cloud_agent.ports.environment_snapshots import EnvironmentSnapshotRepository
     from cloud_agent.ports.environments import EnvironmentRepository
     from cloud_agent.sandbox_manager_client import SandboxManagerClient
 
@@ -272,6 +275,7 @@ class _WorkerStorage(Protocol):
     skills: SkillRepository
     source_control: SourceControlPort
     environments: EnvironmentRepository
+    environment_snapshots: EnvironmentSnapshotRepository
 
 
 def _require_store(store: _WorkerStorage | None) -> _WorkerStorage:
@@ -982,12 +986,13 @@ async def _hand_over_claim(
         ) from exc
 
     environment = None
+    environment_snapshot = None
+    capabilities = attestation.runner_capabilities if attestation else []
     if claim.get("environment_binding_id"):
         try:
             environment = await job_store.environments.environment_for_claim(
                 claim["user_id"], claim["environment_binding_id"], claim["id"]
             )
-            capabilities = attestation.runner_capabilities if attestation else []
             if environment.required:
                 if ENVIRONMENT_CAPABILITY not in capabilities:
                     raise SourceControlError("Host cannot execute environment configuration")
@@ -1008,6 +1013,19 @@ async def _hand_over_claim(
             raise HTTPException(
                 503, "Waiting for environment-capable host or available encryption"
             ) from None
+        if (
+            environment is not None
+            and environment.setup_script
+            and environment.setup_fingerprint
+            # Only a workspace this turn creates can start from a snapshot.
+            and not claim.get("thread_sandbox")
+            and ENVIRONMENT_SNAPSHOT_CAPABILITY in capabilities
+        ):
+            environment_snapshot = await job_store.environment_snapshots.snapshot_for_claim(
+                user_id=claim["user_id"],
+                binding_id=claim["environment_binding_id"],
+                base_image=attestation.sandbox_image_digest if attestation else None,
+            )
 
     # Two credentials with different powers. The runner keeps the full one. The
     # sandbox gets neither: its CLI runs on the member's own residency grant
@@ -1160,7 +1178,10 @@ async def _hand_over_claim(
             claim.get("goal"),
         ),
         setup_script=claim.get("setup_script"),
-        environment=environment,
+        environment=(
+            environment_payload(environment, capabilities) if environment is not None else None
+        ),
+        environment_snapshot=environment_snapshot,
         plugins=claim.get("plugins") or [],
         runtime=claim["runtime"],
         model=claim["model"],
@@ -1546,6 +1567,33 @@ async def worker_reserve_thread_sandbox(
     if row is None:
         raise _lease_lost()
     return WorkerThreadSandbox(**row)
+
+
+@router.post("/worker/jobs/{job_id}/environment-snapshot", status_code=204)
+async def worker_report_environment_snapshot(
+    job_id: str,
+    body: WorkerEnvironmentSnapshotReport,
+    authorization: str | None = Header(None),
+    store: _WorkerStorage | None = Depends(get_storage),
+) -> Response:
+    """Record what a new workspace did with its installation snapshot.
+
+    Usage keeps a snapshot from expiring; a workspace that had none, or whose
+    lockfiles or image differed, queues a build for its commit.
+    """
+    job_store = _require_store(store)
+    claims = _worker_claims(authorization)
+    _match_job(claims, job_id)
+    try:
+        await job_store.environment_snapshots.record_use(
+            job_id=job_id,
+            snapshot_id=body.snapshot_id,
+            outcome=body.outcome,
+            base_sha=body.base_sha,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return Response(status_code=204)
 
 
 @router.post(

@@ -23,6 +23,29 @@ if TYPE_CHECKING:
     from cloud_agent_shared.environment import BoundEnvironment
 
 
+def write_setup_marker(
+    write: Callable[..., None],
+    spec: Any,
+    container_id: str,
+    *,
+    setup_fingerprint: str,
+    binding_id: str,
+    snapshot_id: str | None = None,
+) -> None:
+    """Write the root-only "installation done" marker through ``write``."""
+    payload = json.dumps(
+        {
+            "v": 1,
+            "setup_fingerprint": setup_fingerprint,
+            "binding_id": binding_id,
+            **({"snapshot_id": snapshot_id} if snapshot_id else {}),
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    write(spec, payload, expected_container_id=container_id)
+
+
 class EnvironmentPreparation:
     """One host-private receipt per exact container and frozen binding."""
 
@@ -68,16 +91,21 @@ class EnvironmentPreparation:
             receipt.setdefault("binding_id", environment.binding_id)
             receipt.setdefault("container_id", container_id)
             receipt.setdefault("steps", [])
+            if not receipt.get("setup_done") and environment.setup_fingerprint:
+                self._adopt_installation(backend, environment, receipt, container_id, callback)
+                self._save(path, receipt)
             redactor = SecretRedactor(environment.secrets())
             for phase, script, timeout in (
                 ("setup", environment.setup_script, 900),
+                ("update", environment.update_script, 900),
                 ("start", environment.start_script, 120),
             ):
-                done = (
-                    receipt.get("setup_done")
-                    if phase == "setup"
-                    else receipt.get("start_done") and receipt.get("boot_id") == boot_id
-                )
+                if phase == "update":
+                    done = not receipt.get("update_pending")
+                elif phase == "setup":
+                    done = bool(receipt.get("setup_done"))
+                else:
+                    done = bool(receipt.get("start_done") and receipt.get("boot_id") == boot_id)
                 if done:
                     continue
                 if phase == "start" and environment.skip_start:
@@ -121,11 +149,11 @@ class EnvironmentPreparation:
                     workdir="/workspace",
                     backend=backend,
                     timeout_s=timeout,
-                    env=environment.values("setup" if phase == "setup" else "runtime"),
+                    env=environment.values("runtime" if phase == "start" else "setup"),
                     secrets=environment.secrets(),
                     on_output=output,
                     cancel=cancel,
-                    cleanup_background=phase == "setup",
+                    cleanup_background=phase != "start",
                     phase=phase,
                 )
                 step.update(
@@ -137,6 +165,10 @@ class EnvironmentPreparation:
                 )
                 receipt[phase + "_done"] = result.exit_code == 0
                 receipt["boot_id"] = boot_id
+                if phase == "update" and result.exit_code == 0:
+                    receipt["update_pending"] = False
+                if phase in ("setup", "update") and result.exit_code == 0:
+                    self._mark_installed(backend, environment, container_id)
                 self._save(path, receipt)
                 if callback:
                     callback(dict(step))
@@ -150,6 +182,71 @@ class EnvironmentPreparation:
                 "boot_id": boot_id,
                 "steps": receipt["steps"],
             }
+
+    @staticmethod
+    def _adopt_installation(
+        backend: RetainedChatBackend,
+        environment: BoundEnvironment,
+        receipt: dict[str, Any],
+        container_id: str,
+        callback: Callable[[dict[str, Any]], None] | None,
+    ) -> None:
+        """Count an installation this container's layer already holds as done.
+
+        This host has no record of the container: it was just created from an
+        installation snapshot, or restored from a checkpoint here. The
+        root-only marker says which installation the layer holds; the same
+        fingerprint means the same script and setup values. A snapshot was
+        built for another workspace, so its update script still runs here.
+        """
+        read = getattr(backend.manager, "read_environment_setup_marker", None)
+        if read is None:
+            return
+        try:
+            raw = read(backend.spec, expected_container_id=container_id)
+            marker = json.loads(raw) if raw else None
+        except (SandboxError, ValueError):
+            return
+        if (
+            not isinstance(marker, dict)
+            or marker.get("v") != 1
+            or marker.get("setup_fingerprint") != environment.setup_fingerprint
+        ):
+            return
+        from_snapshot = marker.get("binding_id") != environment.binding_id
+        snapshot_id = marker.get("snapshot_id") if from_snapshot else None
+        step: dict[str, Any] = {
+            "phase": "setup",
+            "state": "succeeded",
+            "output": "",
+            "duration_seconds": 0,
+            "ran": False,
+            "detail": (
+                "Installed from a snapshot" if from_snapshot else "Installed before a restore"
+            ),
+            **({"snapshot_id": snapshot_id} if isinstance(snapshot_id, str) else {}),
+        }
+        receipt["steps"] = [s for s in receipt["steps"] if s.get("phase") != "setup"] + [step]
+        receipt["setup_done"] = True
+        receipt["update_pending"] = from_snapshot
+        if callback:
+            callback(dict(step))
+
+    @staticmethod
+    def _mark_installed(
+        backend: RetainedChatBackend, environment: BoundEnvironment, container_id: str
+    ) -> None:
+        """Record in the layer that this binding's installation is complete."""
+        write = getattr(backend.manager, "write_environment_setup_marker", None)
+        if write is None or not environment.setup_fingerprint:
+            return
+        write_setup_marker(
+            write,
+            backend.spec,
+            container_id,
+            setup_fingerprint=environment.setup_fingerprint,
+            binding_id=environment.binding_id,
+        )
 
     def status(self, backend: RetainedChatBackend, binding_id: str) -> dict[str, Any]:
         """Read a masked receipt for this exact running container only."""
@@ -174,6 +271,7 @@ class EnvironmentPreparation:
             **receipt,
             "ready": bool(
                 receipt.get("setup_done")
+                and not receipt.get("update_pending")
                 and receipt.get("start_done")
                 and receipt.get("boot_id") == inspection.started_at
             ),

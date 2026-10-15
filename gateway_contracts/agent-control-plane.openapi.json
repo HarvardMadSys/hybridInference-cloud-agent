@@ -8491,109 +8491,6 @@
         "title": "BindingsResponse",
         "type": "object"
       },
-      "BoundEnvironment": {
-        "additionalProperties": false,
-        "description": "A frozen execution binding sent only over protected execution channels.",
-        "properties": {
-          "actions": {
-            "items": {
-              "$ref": "#/components/schemas/EnvironmentAction"
-            },
-            "maxItems": 20,
-            "title": "Actions",
-            "type": "array"
-          },
-          "binding_id": {
-            "title": "Binding Id",
-            "type": "string"
-          },
-          "environment_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Environment Id"
-          },
-          "global_revision": {
-            "default": 0,
-            "title": "Global Revision",
-            "type": "integer"
-          },
-          "previous_secrets": {
-            "additionalProperties": {
-              "type": "string"
-            },
-            "maxProperties": 512,
-            "title": "Previous Secrets",
-            "type": "object"
-          },
-          "revision": {
-            "default": 0,
-            "title": "Revision",
-            "type": "integer"
-          },
-          "runtime_revision": {
-            "default": 0,
-            "title": "Runtime Revision",
-            "type": "integer"
-          },
-          "runtime_variables": {
-            "anyOf": [
-              {
-                "items": {
-                  "$ref": "#/components/schemas/EnvironmentVariable"
-                },
-                "maxItems": 150,
-                "type": "array"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Runtime Variables"
-          },
-          "setup_script": {
-            "default": "",
-            "maxLength": 8000,
-            "title": "Setup Script",
-            "type": "string"
-          },
-          "skip_start": {
-            "default": false,
-            "title": "Skip Start",
-            "type": "boolean"
-          },
-          "start_script": {
-            "default": "",
-            "maxLength": 8000,
-            "title": "Start Script",
-            "type": "string"
-          },
-          "variables": {
-            "items": {
-              "$ref": "#/components/schemas/EnvironmentVariable"
-            },
-            "maxItems": 150,
-            "title": "Variables",
-            "type": "array"
-          },
-          "verify_script": {
-            "default": "",
-            "maxLength": 8000,
-            "title": "Verify Script",
-            "type": "string"
-          }
-        },
-        "required": [
-          "binding_id"
-        ],
-        "title": "BoundEnvironment",
-        "type": "object"
-      },
       "ClaimTestInput": {
         "additionalProperties": false,
         "description": "Host proof that this process understands the environment contract.",
@@ -9943,57 +9840,6 @@
           "command"
         ],
         "title": "EnvironmentAction",
-        "type": "object"
-      },
-      "EnvironmentVariable": {
-        "additionalProperties": false,
-        "description": "A value-bearing variable, never suitable for request logging.",
-        "properties": {
-          "name": {
-            "title": "Name",
-            "type": "string"
-          },
-          "phase": {
-            "default": "both",
-            "enum": [
-              "setup",
-              "runtime",
-              "both"
-            ],
-            "title": "Phase",
-            "type": "string"
-          },
-          "secret": {
-            "default": true,
-            "title": "Secret",
-            "type": "boolean"
-          },
-          "source": {
-            "anyOf": [
-              {
-                "enum": [
-                  "global",
-                  "environment",
-                  "override"
-                ],
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Source"
-          },
-          "value": {
-            "title": "Value",
-            "type": "string"
-          }
-        },
-        "required": [
-          "name",
-          "value"
-        ],
-        "title": "EnvironmentVariable",
         "type": "object"
       },
       "ExecutionProfile": {
@@ -13763,6 +13609,27 @@
         "title": "PromptRewriteRequest",
         "type": "object"
       },
+      "RebuildInput": {
+        "additionalProperties": false,
+        "description": "Which branch's head to build the installation snapshot from.",
+        "properties": {
+          "ref": {
+            "anyOf": [
+              {
+                "maxLength": 255,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ref"
+          }
+        },
+        "title": "RebuildInput",
+        "type": "object"
+      },
       "RegisterConnectorRequest": {
         "additionalProperties": false,
         "description": "Register one machine as this user's connector.",
@@ -15241,6 +15108,12 @@
             "title": "Start Script",
             "type": "string"
           },
+          "update_script": {
+            "default": "",
+            "maxLength": 8000,
+            "title": "Update Script",
+            "type": "string"
+          },
           "variables": {
             "items": {
               "$ref": "#/components/schemas/VariableEdit"
@@ -16329,6 +16202,18 @@
               }
             ],
             "title": "Image Digest"
+          },
+          "snapshot": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Snapshot"
           },
           "state": {
             "default": "running",
@@ -17663,12 +17548,26 @@
           "environment": {
             "anyOf": [
               {
-                "$ref": "#/components/schemas/BoundEnvironment"
+                "additionalProperties": true,
+                "type": "object"
               },
               {
                 "type": "null"
               }
-            ]
+            ],
+            "title": "Environment"
+          },
+          "environment_snapshot": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Environment Snapshot"
           },
           "execution_profile": {
             "$ref": "#/components/schemas/ExecutionProfile",
@@ -17883,6 +17782,52 @@
           }
         },
         "title": "WorkerContinuityRequest",
+        "type": "object"
+      },
+      "WorkerEnvironmentSnapshotReport": {
+        "description": "What a new workspace did with the installation snapshot it was handed.",
+        "properties": {
+          "base_sha": {
+            "anyOf": [
+              {
+                "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Sha"
+          },
+          "outcome": {
+            "enum": [
+              "used",
+              "absent",
+              "lockfiles_changed",
+              "image_changed",
+              "unavailable",
+              "invalid"
+            ],
+            "title": "Outcome",
+            "type": "string"
+          },
+          "snapshot_id": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{32}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Snapshot Id"
+          }
+        },
+        "required": [
+          "outcome"
+        ],
+        "title": "WorkerEnvironmentSnapshotReport",
         "type": "object"
       },
       "WorkerEventRequest": {
@@ -26742,7 +26687,7 @@
     },
     "/v1/agent/environments": {
       "get": {
-        "description": "List owned repository configurations and their default selection.",
+        "description": "List owned repository configurations, their default selection and snapshot.",
         "operationId": "list_environments_v1_agent_environments_get",
         "parameters": [
           {
@@ -27213,6 +27158,127 @@
           }
         },
         "summary": "Restore Environment",
+        "tags": [
+          "environments"
+        ]
+      }
+    },
+    "/v1/agent/environments/{environment_id}/snapshot": {
+      "delete": {
+        "description": "Delete an environment's installation snapshots; new tasks install in full.",
+        "operationId": "delete_snapshot_v1_agent_environments__environment_id__snapshot_delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "environment_id",
+            "required": true,
+            "schema": {
+              "title": "Environment Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Snapshot",
+        "tags": [
+          "environments"
+        ]
+      },
+      "post": {
+        "description": "Queue a fresh installation snapshot of the environment as it is now.",
+        "operationId": "rebuild_snapshot_v1_agent_environments__environment_id__snapshot_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "environment_id",
+            "required": true,
+            "schema": {
+              "title": "Environment Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RebuildInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Rebuild Snapshot V1 Agent Environments  Environment Id  Snapshot Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Rebuild Snapshot",
         "tags": [
           "environments"
         ]
@@ -35020,7 +35086,7 @@
     },
     "/v1/agent/worker/environment-runs/claim": {
       "post": {
-        "description": "Hand only an environment-capable enrolled host a test lease.",
+        "description": "Hand only an environment-capable enrolled host a test or prebuild lease.",
         "operationId": "claim_environment_test_v1_agent_worker_environment_runs_claim_post",
         "parameters": [
           {
@@ -35212,6 +35278,110 @@
         ]
       }
     },
+    "/v1/agent/worker/environment-snapshots/deletions": {
+      "get": {
+        "description": "Snapshot objects to delete from S3, and local snapshot images to drop.",
+        "operationId": "snapshot_deletions_v1_agent_worker_environment_snapshots_deletions_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Snapshot Deletions V1 Agent Worker Environment Snapshots Deletions Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Snapshot Deletions",
+        "tags": [
+          "environments"
+        ]
+      }
+    },
+    "/v1/agent/worker/environment-snapshots/{snapshot_id}/deleted": {
+      "post": {
+        "description": "Record that this host deleted a snapshot's stored object.",
+        "operationId": "snapshot_deleted_v1_agent_worker_environment_snapshots__snapshot_id__deleted_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "snapshot_id",
+            "required": true,
+            "schema": {
+              "title": "Snapshot Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Snapshot Deleted",
+        "tags": [
+          "environments"
+        ]
+      }
+    },
     "/v1/agent/worker/jobs/{job_id}/attachments": {
       "get": {
         "description": "List what this conversation's /uploads holds, so it can be rebuilt.\n\nScoped to the thread rather than the claimed turn: a retry on a fresh\ncontainer has to restore all of them, and re-importing into a retained one\nsimply overwrites the same paths. A file attached again by a later turn is\nlisted once, as its newest upload.",
@@ -35397,6 +35567,65 @@
           }
         },
         "summary": "Worker Report Continuity"
+      }
+    },
+    "/v1/agent/worker/jobs/{job_id}/environment-snapshot": {
+      "post": {
+        "description": "Record what a new workspace did with its installation snapshot.\n\nUsage keeps a snapshot from expiring; a workspace that had none, or whose\nlockfiles or image differed, queues a build for its commit.",
+        "operationId": "worker_report_environment_snapshot_v1_agent_worker_jobs__job_id__environment_snapshot_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkerEnvironmentSnapshotReport"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Worker Report Environment Snapshot"
       }
     },
     "/v1/agent/worker/jobs/{job_id}/events": {

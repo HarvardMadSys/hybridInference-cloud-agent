@@ -72,7 +72,7 @@ that URL to another origin is refused while the token is kept. Reset the token,
 save the URL, then enter the token again.
 
 For the first deployment of this release, run `alembic upgrade head` through
-`0077_sandbox_usage_days`. Existing hosts begin without a deployment drain
+`0078_environment_snapshots`. Existing hosts begin without a deployment drain
 owner or release receipt, and 0051 backfills each one with a non-null fence
 epoch. 0066 builds an index on `agent_jobs` concurrently: on a long job history
 it takes a while without blocking the running API, and an interrupted run can
@@ -2018,7 +2018,9 @@ see [Restoring a removed host's sandboxes](#restoring-a-removed-hosts-sandboxes)
   mount is missing, empty, or belongs to another daemon, the broker logs
   `sandbox_checkpoint_content_unavailable` and falls back to `docker image save`,
   which streams the whole image (once per image for the base scan, then once
-  per checkpoint) and keeps the same blobs. On a CloudLab Kata host the save
+  per checkpoint). It keeps only the blobs the committed image uses: a classic
+  (overlay2) image store's save also emits metadata blobs no manifest names,
+  which a restore would refuse. On a CloudLab Kata host the save
   path took about 90 seconds per export for a 12 MiB change; the content-store
   path writes only the change.
 - The broker keeps the latest receipt per sandbox under
@@ -2084,6 +2086,56 @@ published image with `AGENT_SANDBOX_IMAGE_PULL=true` (see `ENVIRONMENT.md`).
 A host that is enrolled again after its groups moved cannot start or report
 them: their generation has moved on. Remove those old containers with the
 admin **Discard** action.
+
+#### Environment installation snapshots
+
+A new task whose environment has an install script can start from a saved
+installation instead of running the script again. A snapshot is a container
+after the environment's installation, without the repository's own files,
+stored like a checkpoint. Design: [install snapshots](../agents/specs/2026-10-15-environment-install-snapshots-design.zh-CN.md).
+
+- **On with checkpoints.** Snapshots need archives and checkpoints enabled
+  (**Save restorable checkpoints**). With either off, every task installs in
+  full, the environment list shows no snapshot state, and nothing is queued.
+- **Where.** `cloud-agent/sandbox/env/v1/<sha256(owner)>/<snapshot id>.oci.tar`,
+  under the prefix hosts already write, with the same size limit, KMS and
+  `If-None-Match` writes as checkpoints. A building host keeps the committed
+  image locally as `freeinference-environment/<owner hash>:<snapshot id>`; any
+  other host loads it on first use after the same checks as a restore.
+- **Who builds.** Snapshots are built only in disposable environment-run
+  containers, never from a chat's workspace: by a passing environment test, or
+  by a `prebuild` run the control plane queues when a new task had none, its
+  lockfiles changed, or the owner asked. Prebuilds use environment-run slots,
+  are handed only to hosts that advertise `environment-snapshot-v1`, and never
+  count as the owner's one running test. After a failed build, tasks queue no
+  new one for that installation for 6 hours; an owner's rebuild still does.
+- **Who uses.** A claim names a snapshot only for a new group on a host whose
+  sandbox image is the snapshot's base image, and only when the binding's setup
+  fingerprint (an HMAC of the install script and setup-time variables, keyed by
+  `AGENT_SOURCE_CONTROL_ENCRYPTION_KEY`) matches. The runner also compares the
+  checkout's lockfiles (Git object ids). Any mismatch or failure creates the
+  group from the sandbox image and installs in full; the turn never fails
+  because of a snapshot. Without the encryption key, bindings carry no
+  fingerprint and nothing is snapshotted.
+- **Retention.** The newest snapshot of an installation supersedes older ones,
+  which are deleted after 24 hours. A snapshot is not handed out after 25 days,
+  and is deleted after 7 days unused, when its environment is archived or
+  deleted by the owner, and beyond 20 GiB of ready snapshots per owner (least
+  recently used first).
+- **Deletion.** Hosts poll `/v1/agent/worker/environment-snapshots/deletions`
+  every 10 minutes, drop the local image and delete the object version. That
+  needs `s3:DeleteObject` and `s3:DeleteObjectVersion` on
+  `cloud-agent/sandbox/env/*`, which nothing else requires. Without them the
+  delete is logged as `environment_snapshot_delete_failed` and retried; add a
+  bucket lifecycle rule on the `cloud-agent/sandbox/env/` prefix that expires
+  current versions 30 days after creation and noncurrent versions after 1 day
+  as the backstop, which is later than the 25-day limit on use.
+- **Preparation records.** Installation writes a root-only marker,
+  `/var/lib/freeinference-broker/environment-setup-v1.json`, into the container.
+  A container this host has no record of (created from a snapshot, or restored
+  from a checkpoint) counts its installation as done when the marker's
+  fingerprint matches, so a restore no longer reruns the install script. A
+  snapshot's container then runs the environment's optional update script.
 
 #### Launch failures and queue order
 

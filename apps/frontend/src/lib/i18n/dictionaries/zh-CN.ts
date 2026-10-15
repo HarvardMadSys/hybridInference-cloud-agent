@@ -100,7 +100,11 @@ export const zhCN: Record<TranslationKey, string> = {
   'environment.importReplace': '替换已有值',
   'environment.confirmImport': '导入 {count} 个变量',
   'environment.installScript': '安装脚本',
-  'environment.installHelp': '每个新工作区运行一次，用来安装依赖，例如 npm ci。最长 15 分钟。',
+  'environment.installHelp':
+    '每个新工作区运行一次，用来安装依赖，例如 npm ci。新工作区从已保存的安装结果启动时会跳过。最长 15 分钟。',
+  'environment.updateScript': '更新脚本（可选）',
+  'environment.updateHelp':
+    '新工作区从已保存的安装结果启动时，代替安装脚本运行，用于代码生成、数据库迁移等跟随源码的步骤。只有锁文件没变时才会使用已保存的安装结果。最长 15 分钟。',
   'environment.startScript': '启动脚本',
   'environment.startHelp':
     '安装完成后、以及容器重启后运行。用来启动数据库等后台服务，等服务就绪后退出。最长 2 分钟。',
@@ -149,6 +153,17 @@ export const zhCN: Record<TranslationKey, string> = {
   'environment.phase.setup': '安装',
   'environment.phase.start': '启动',
   'environment.phase.verify': '验证',
+  'environment.phase.update': '更新',
+  'environment.fromSnapshot': '使用安装快照',
+  'environment.keptAfterRestore': '恢复后无需重装',
+  'environment.snapshot.none': '未预构建',
+  'environment.snapshot.ready': '已预构建',
+  'environment.snapshot.building': '预构建中',
+  'environment.snapshot.failed': '预构建失败',
+  'environment.snapshot.rebuild': '重新预构建',
+  'environment.snapshot.delete': '删除安装快照',
+  'environment.snapshot.savedByTest':
+    '测试通过时会保存安装结果。锁文件不变时，新任务会直接从它开始。',
   'environment.choose': '选择环境',
   'environment.automaticHint': '已自动选择仓库的默认环境。只有这个任务需要不同配置时才需要修改。',
   'environment.temporaryHint':

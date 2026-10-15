@@ -19,7 +19,7 @@ pytestmark = pytest.mark.dbtest
 _BEFORE = "0057_admin_sandbox_trajectory"
 _THIS = "0058_mcp_connector_invariant"
 _NEXT = "0059_counter_constraints"
-_HEAD = "0077_sandbox_usage_days"
+_HEAD = "0078_environment_snapshots"
 _OWNER = "user-owner"
 _OTHER = "user-other"
 _PRESERVED_AUTHORIZED_AT = datetime(2001, 2, 3, 4, 5, 6, tzinfo=timezone.utc)
@@ -67,7 +67,10 @@ def test_mcp_connector_invariant_revision_follows_trajectory_merge() -> None:
     assert script.get_revision("0074_host_removal_pending").down_revision == "0073_sandbox_restore"
     assert script.get_revision("0075_runtime_upgrades").down_revision == "0074_host_removal_pending"
     assert script.get_revision("0076_mcp_residency_fence").down_revision == "0075_runtime_upgrades"
-    assert script.get_revision(_HEAD).down_revision == "0076_mcp_residency_fence"
+    assert (
+        script.get_revision("0077_sandbox_usage_days").down_revision == "0076_mcp_residency_fence"
+    )
+    assert script.get_revision(_HEAD).down_revision == "0077_sandbox_usage_days"
 
 
 async def _local_connection(
