@@ -730,3 +730,143 @@ async def test_a_runner_that_started_but_did_not_finish_target_deploy_stays_clos
 
     assert verdict.ready is False
     assert f"has not completed target deployment {DEPLOYMENT_SHA}" in verdict.detail
+
+
+def _previous_release_capabilities() -> list[str]:
+    return [SHARED_SANDBOX_CAPABILITY, NATIVE_FORK_AT_ANCHOR_CAPABILITY]
+
+
+@pytest.mark.asyncio
+async def test_an_unpinned_managed_host_follows_the_control_plane_instead_of_blocking() -> None:
+    """Only the new control plane rolls a managed Host; waiting for it never ends."""
+    started = datetime.now(UTC)
+    calls: list[tuple[str, str, bool]] = []
+
+    async def probe(host: str, url: str, *, force: bool = False) -> None:
+        calls.append((host, url, force))
+
+    verdict = await shared_live_readiness(
+        _Store(
+            [
+                _host(
+                    started + timedelta(seconds=1),
+                    host="runner-host",
+                    status="draining",
+                    slots_used=0,
+                ),
+                _host(
+                    started + timedelta(seconds=1),
+                    host="compute-managed",
+                    sandbox_manager_url="http://compute-sandbox-manager:8092",
+                    capabilities=_previous_release_capabilities(),
+                    release_follows_control_plane=True,
+                ),
+            ],
+            retained_hosts={"compute-managed"},
+        ),
+        not_before=started,
+        sandbox_manager_token="sandbox-manager-token",
+        expected_deployment_sha=DEPLOYMENT_SHA,
+        draining_host="runner-host",
+        sandbox_manager_probe=probe,
+    )
+
+    assert verdict.ready is True
+    assert "new-chat placement hosts runner-host completed target deployment" in verdict.detail
+    assert "compatible retained owners also answered: compute-managed" in verdict.detail
+    assert "rolls its managed hosts forward after activation: compute-managed" in verdict.detail
+    assert calls == [
+        ("runner-host", "http://sandbox-manager-a:8092", True),
+        ("compute-managed", "http://compute-sandbox-manager:8092", True),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_managed_retained_owner_must_still_answer_its_sandbox_manager() -> None:
+    started = datetime.now(UTC)
+
+    async def probe(host: str, _url: str, *, force: bool = False) -> str | None:
+        return "connection refused" if host == "compute-managed" else None
+
+    verdict = await shared_live_readiness(
+        _Store(
+            [
+                _host(started + timedelta(seconds=1), host="runner-host"),
+                _host(
+                    started + timedelta(seconds=1),
+                    host="compute-managed",
+                    capabilities=_previous_release_capabilities(),
+                    release_follows_control_plane=True,
+                ),
+            ],
+            retained_hosts={"compute-managed"},
+        ),
+        not_before=started,
+        sandbox_manager_token="sandbox-manager-token",
+        expected_deployment_sha=DEPLOYMENT_SHA,
+        sandbox_manager_probe=probe,
+    )
+
+    assert verdict.ready is False
+    assert "compute-managed: control plane cannot use its sandbox manager" in verdict.detail
+
+
+@pytest.mark.asyncio
+async def test_a_pinned_managed_host_needs_a_draining_host_to_prove_the_target() -> None:
+    started = datetime.now(UTC)
+    pinned = _host(
+        started + timedelta(seconds=1),
+        host="compute-managed",
+        capabilities=_previous_release_capabilities(),
+        release_follows_control_plane=True,
+    )
+
+    alone = await shared_live_readiness(
+        _Store([pinned], active_host="compute-managed"),
+        not_before=started,
+        sandbox_manager_token="sandbox-manager-token",
+        expected_deployment_sha=DEPLOYMENT_SHA,
+        sandbox_manager_probe=lambda *_args, **_kwargs: _async_none(),
+    )
+
+    assert alone.ready is False
+    assert "no draining host proves the target" in alone.detail
+
+    with_runner = await shared_live_readiness(
+        _Store(
+            [
+                pinned,
+                _host(
+                    started + timedelta(seconds=1),
+                    host="runner-host",
+                    status="draining",
+                    slots_used=0,
+                ),
+            ],
+            active_host="compute-managed",
+        ),
+        not_before=started,
+        sandbox_manager_token="sandbox-manager-token",
+        expected_deployment_sha=DEPLOYMENT_SHA,
+        draining_host="runner-host",
+        sandbox_manager_probe=lambda *_args, **_kwargs: _async_none(),
+    )
+
+    assert with_runner.ready is True
+    assert "new-chat placement hosts runner-host completed target deployment" in with_runner.detail
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_pin_is_still_reported_as_unregistered() -> None:
+    started = datetime.now(UTC)
+
+    verdict = await shared_live_readiness(
+        _Store([_host(started + timedelta(seconds=1))], active_host="missing-host"),
+        not_before=started,
+        sandbox_manager_token="sandbox-manager-token",
+        expected_deployment_sha=DEPLOYMENT_SHA,
+        sandbox_manager_probe=lambda *_args, **_kwargs: _async_none(),
+    )
+
+    assert verdict.ready is False
+    assert verdict.detail == "pinned host 'missing-host' is not registered"

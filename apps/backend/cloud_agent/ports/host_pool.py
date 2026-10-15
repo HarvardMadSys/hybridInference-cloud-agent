@@ -408,7 +408,9 @@ class HostPoolRepository(Protocol):
         shared lock and the owners in the same transaction: a concurrent host
         switch cannot make the snapshot describe two different placement
         policies, and any newly claimed group while this lock is held belongs
-        to one of the placement hosts this snapshot already includes.
+        to one of the placement hosts this snapshot already includes. Each host
+        row also carries ``release_follows_control_plane``: whether it belongs
+        to a managed compute allocation the new control plane rolls forward.
         """
         ...
 

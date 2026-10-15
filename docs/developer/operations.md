@@ -2358,6 +2358,15 @@ online host that still owns a retained group; changing the pin must not make old
 chats disappear from rollout safety. `SHARED_READY_TIMEOUT` controls that wait
 and defaults to 900 seconds.
 
+A Host of a compute allocation the control plane manages, not just observes,
+is not waited for. Only the new control plane rolls it forward (see
+[Compute resources](operations-compute.md)), so requiring the target first would
+time out every rollout while such a Host is online. The check treats it like a
+retained owner instead: if it owns a retained group it must send a fresh
+compatible heartbeat and answer its sandbox manager. The claim route still keeps
+it from starting new chats until it reports the target commit. A pin to a
+managed Host therefore needs the deployment's draining host to prove the target.
+
 The deploy user writes `.shared-live-ready` in the deployment checkout, separate
 from the container-owned enrollment directory. Runners mount only that file
 read-only at `/run/cloud-agent/shared-live-ready`. The host script preserves its

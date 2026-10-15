@@ -168,6 +168,9 @@ unavailable. Tunnel credentials, the install directory, and enrollment stay
 fixed. A control-plane release rolls managed hosts forward: stored profiles
 that share the previous commit and bundle, and the live allocations using
 them, advance together so a later node replacement still sees one revision.
+That rollout starts only once the new control plane runs, so the deployment's
+readiness check does not wait for managed hosts; they take new chats again
+when they report the new commit.
 A rollout that takes the running generation down and then fails restores the
 previous stored bundle. File-backed profile files are not rewritten.
 

@@ -1107,6 +1107,10 @@ class PostgresHostPoolRepository:
         switch cannot make the snapshot describe two different placement
         policies, and any newly claimed group while this lock is held belongs
         to one of the placement hosts this snapshot already includes.
+
+        ``release_follows_control_plane`` marks a Host of a managed compute
+        allocation. The control plane rolls such a Host forward itself once it
+        runs the new release, so the rollout cannot wait for it first.
         """
         async with self._pool.acquire() as conn, conn.transaction():
             policy = await conn.fetchrow(
@@ -1114,9 +1118,15 @@ class PostgresHostPoolRepository:
             )
             rows = await conn.fetch(
                 f"""
-                SELECT {HOST_COLUMNS}
-                FROM agent_runner_hosts
-                ORDER BY last_seen_at DESC
+                SELECT {QUALIFIED_HOST_COLUMNS},
+                       COALESCE(a.management_mode = 'manage'
+                                AND a.desired_state = 'present'
+                                AND a.release_committed_at IS NULL, FALSE)
+                           AS release_follows_control_plane
+                FROM agent_runner_hosts h
+                LEFT JOIN agent_compute_nodes n ON n.id = h.compute_node_id
+                LEFT JOIN agent_compute_allocations a ON a.id = n.allocation_id
+                ORDER BY h.last_seen_at DESC
                 """
             )
             owner_rows = await conn.fetch(

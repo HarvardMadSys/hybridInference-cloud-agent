@@ -12,6 +12,11 @@ ordering edge between them. A control plane cannot replace the current API
 until every new-chat placement host has heartbeated at the exact target commit
 and every online retained owner has proved its compatible sandbox manager path. There
 is no alternate executor to enable or fall back to.
+
+A Host of a managed compute allocation is not a placement host here. Only the
+new control plane rolls it forward, so waiting for it would never end. Claim
+admission keeps it from creating a group until it reports the target commit;
+until then it is checked like any other retained owner.
 """
 
 from __future__ import annotations
@@ -59,6 +64,11 @@ def _heartbeat_at(row: dict[str, Any]) -> datetime | None:
     if not isinstance(value, datetime):
         return None
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value
+
+
+def _follows_control_plane(row: dict[str, Any]) -> bool:
+    """Whether the control plane, once it runs the target, rolls this Host forward."""
+    return bool(row.get("release_follows_control_plane"))
 
 
 def _host_rejection(
@@ -136,9 +146,13 @@ async def shared_live_readiness(
     if draining_host is not None and draining_host not in rows_by_host:
         return SharedLiveReadiness(False, f"draining host {draining_host!r} is not registered")
     if active_host is not None:
-        placement_rows = [row for row in rows if row.get("host") == active_host]
-        if not placement_rows:
+        if active_host not in rows_by_host:
             return SharedLiveReadiness(False, f"pinned host {active_host!r} is not registered")
+        placement_rows = [
+            row
+            for row in rows
+            if row.get("host") == active_host and not _follows_control_plane(row)
+        ]
         # New chats stay on the pin. A rollout may still replace a different
         # enrolled host. That host has to stay draining and idle, and the pin
         # has to stay online at the same target commit. Treating the name
@@ -146,6 +160,12 @@ async def shared_live_readiness(
         # placement moved to another server.
         if draining_host is not None and draining_host != active_host:
             placement_rows.append(rows_by_host[draining_host])
+        if not placement_rows:
+            return SharedLiveReadiness(
+                False,
+                f"pinned host {active_host!r} follows this release only after the control "
+                "plane runs it, and no draining host proves the target",
+            )
     else:
         # With no pin, every online host advertising the current historical-
         # fork surface may claim one of the new jobs this rollout enables.
@@ -161,6 +181,7 @@ async def shared_live_readiness(
             and isinstance(row.get("capabilities"), list)
             and SHARED_SANDBOX_CAPABILITY in row["capabilities"]
             and NATIVE_FORK_AT_ANCHOR_CAPABILITY in row["capabilities"]
+            and not _follows_control_plane(row)
         ]
         if draining_host is not None and all(
             row.get("host") != draining_host for row in placement_rows
@@ -274,7 +295,9 @@ async def shared_live_readiness(
         )
     if active_host is not None:
         current_placement_names = {
-            str(row["host"]) for row in current_rows if row.get("host") == active_host
+            str(row["host"])
+            for row in current_rows
+            if row.get("host") == active_host and not _follows_control_plane(row)
         }
         if (
             draining_host is not None
@@ -290,6 +313,7 @@ async def shared_live_readiness(
             and isinstance(row.get("capabilities"), list)
             and SHARED_SANDBOX_CAPABILITY in row["capabilities"]
             and NATIVE_FORK_AT_ANCHOR_CAPABILITY in row["capabilities"]
+            and not _follows_control_plane(row)
         }
         if draining_host is not None and draining_host in current_by_host:
             current_placement_names.add(draining_host)
@@ -337,6 +361,19 @@ async def shared_live_readiness(
         if retained_owner_hosts
         else ""
     )
+    following_hosts = sorted(
+        str(row["host"])
+        for row in current_rows
+        if row.get("host")
+        and row.get("status") == HOST_ONLINE
+        and _follows_control_plane(row)
+        and str(row["host"]) not in placement_host_names
+    )
+    if following_hosts:
+        retained_detail += (
+            "; the control plane rolls its managed hosts forward after activation: "
+            + ", ".join(following_hosts)
+        )
     return SharedLiveReadiness(
         True,
         f"new-chat placement hosts {placement_hosts} completed target deployment "
