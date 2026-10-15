@@ -173,6 +173,7 @@ def create_app() -> FastAPI:
         session,
         site_config,
         skills,
+        teams,
         uploads,
         usage,
         user_profile,
@@ -231,6 +232,7 @@ def create_app() -> FastAPI:
     app.include_router(work_insights.router)
     app.include_router(agent_memory.router)
     app.include_router(user_profile.router)
+    app.include_router(teams.router)
     app.include_router(uploads.router)
     app.include_router(mcp_connections.router)
     app.include_router(hosts.router)

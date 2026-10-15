@@ -6,6 +6,7 @@ export const SETTINGS_PATHS = {
   plugins: '/settings/plugins',
   integrations: '/settings/integrations',
   environments: '/settings/environments',
+  teams: '/settings/teams',
   help: '/settings/getting-started',
 } as const;
 

@@ -45,6 +45,11 @@ const ITEMS = [
     label: 'settings.environments',
     icon: 'm12 3 9 5-9 5-9-5 9-5ZM3 8v9l9 5 9-5V8M12 13v9',
   },
+  {
+    href: SETTINGS_PATHS.teams,
+    label: 'teams.title',
+    icon: 'M16 19v-1a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v1M9 10a3 3 0 1 0 0-6 3 3 0 0 0 0 6M22 19v-1a4 4 0 0 0-3-3.87M16 4.13a3 3 0 0 1 0 5.74',
+  },
 ] as const;
 
 export function SettingsSidebar({
