@@ -127,6 +127,9 @@ services:
       AGENT_CLOUDLAB_API_URL: ${AGENT_CLOUDLAB_API_URL:-}
       # Imported once; blank derives it from AGENT_SESSION_REDIRECT_URI.
       AGENT_COMPUTE_REGISTRATION_URL: ${AGENT_COMPUTE_REGISTRATION_URL:-}
+      # Where automatic setup finds the sandbox image a release published.
+      # Unset keeps the default; an explicit empty value turns the lookup off.
+      AGENT_COMPUTE_SANDBOX_IMAGE_REPOSITORY: ${AGENT_COMPUTE_SANDBOX_IMAGE_REPOSITORY-ghcr.io/harvardmadsys/cloud-agent-sandbox}
       # How long a member-scoped resident credential lives between runner
       # heartbeats. Chat inactivity is a separate group clock on the host
       # (AGENT_CHAT_IDLE_TIMEOUT_S); refreshing this lease does not keep an

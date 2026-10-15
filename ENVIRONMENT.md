@@ -432,6 +432,7 @@ for deployment profiles, verified SSH access and CloudLab endpoint setup.
 
 | Variable | Meaning |
 | --- | --- |
+| `AGENT_COMPUTE_SANDBOX_IMAGE_REPOSITORY` | **NEW** | Control plane. Where automatic Server setup looks for the sandbox image this release published, as `<repository>:sandbox-<commit>`. Default `ghcr.io/harvardmadsys/cloud-agent-sandbox`; empty disables the lookup. When the image exists (checked anonymously), the generated Host configuration pulls `<repository>:sandbox-{deployment_sha}` with `AGENT_SANDBOX_IMAGE_PULL=true`, so its chats record a registry digest and can be restored on another Host. Otherwise the Host builds its own image, as before, and its chats stay on it. |
 | `AGENT_COMPUTE_SECRET_KEY` | Independent encryption key, at least 32 bytes, for stored compute connections and Admin-managed deployment profiles. The supported deployer generates and persists a random value in `.env` when blank. Preserve it with database backups. |
 | `AGENT_COMPUTE_CONFIG` | Absolute path inside the control-plane process to the operator-owned JSON deployment configuration. |
 | `AGENT_COMPUTE_DIRECTORY` | Absolute host directory mounted read-only at `/run/compute` by the optional Compose overlay; `deploy.sh` includes the overlay when this is set. |
