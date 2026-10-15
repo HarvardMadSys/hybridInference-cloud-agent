@@ -155,6 +155,44 @@ function selectCategory(category: string) {
   fireEvent.click(within(navigation).getByRole('button', { name: category }));
 }
 
+function editField(label: string): HTMLElement {
+  let field = screen.getByLabelText(label);
+  if (!field.matches('input,select,textarea')) {
+    const group = field.closest('form')!.parentElement!;
+    const edit = within(group).queryByRole('button', { name: /^Edit .* settings$/ });
+    if (edit) fireEvent.click(edit);
+    const replace = within(group).queryByRole('button', {
+      name: new RegExp(`^(Replace|Set) ${label}$`),
+    });
+    if (replace) fireEvent.click(replace);
+    field = screen.getByLabelText(label);
+  }
+  return field;
+}
+async function loadedField(label: string) {
+  await screen.findByLabelText(label);
+  return editField(label);
+}
+function reviewButton(label: string) {
+  return within(editField(label).closest('form')!).getByRole('button', {
+    name: /^Review .* changes$/,
+  });
+}
+function saveField(label: string) {
+  fireEvent.click(reviewButton(label));
+  const dialog = screen.queryByRole('dialog', { name: 'Review changes' });
+  if (dialog) fireEvent.click(within(dialog).getByRole('button', { name: 'Apply changes' }));
+}
+function resetField(label: string) {
+  const group = editField(label).closest('form')!;
+  fireEvent.click(within(group).getByLabelText(`More actions for ${label}`));
+  fireEvent.click(within(group).getByRole('button', { name: `Restore default for ${label}` }));
+  expect(write).not.toHaveBeenCalled();
+  fireEvent.click(
+    within(screen.getByRole('dialog')).getByRole('button', { name: 'Restore default' }),
+  );
+}
+
 function organizedSnapshot(): AgentAdminSettings {
   const fields: [
     string,
@@ -213,6 +251,123 @@ afterEach(() => {
 });
 
 describe('application settings', () => {
+  it('starts read-only and discards an entire group without writing', async () => {
+    render(<ApplicationSettings />);
+    expect(await screen.findByLabelText('Product name')).toHaveTextContent('Cloud Agent');
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Restore default/ })).not.toBeInTheDocument();
+    fireEvent.change(editField('Product name'), { target: { value: 'Accidental edit' } });
+    fireEvent.change(editField('Default runtime'), { target: { value: 'claude-code' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel editing Site' }));
+    expect(screen.getByLabelText('Product name')).toHaveTextContent('Cloud Agent');
+    expect(screen.getByLabelText('Default runtime')).toHaveTextContent('codex');
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Edit Site settings' })).toHaveFocus(),
+    );
+    expect(editField('Product name')).toHaveValue('Cloud Agent');
+    expect(reviewButton('Product name')).toBeDisabled();
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it('reviews both old and new values and writes a group only after confirmation', async () => {
+    const current = snapshot();
+    write.mockResolvedValue(
+      snapshot({ values: { ...current.values, title: 'New app', runtime: 'claude-code' } }),
+    );
+    render(<ApplicationSettings />);
+    fireEvent.change(await loadedField('Product name'), { target: { value: 'New app' } });
+    fireEvent.change(editField('Default runtime'), { target: { value: 'claude-code' } });
+    fireEvent.submit(editField('Product name').closest('form')!);
+    const dialog = screen.getByRole('dialog', { name: 'Review changes' });
+    expect(within(dialog).getByText('Cloud Agent')).toBeVisible();
+    expect(within(dialog).getByText('New app')).toBeVisible();
+    expect(within(dialog).getByText('codex')).toBeVisible();
+    expect(within(dialog).getByText('claude-code')).toBeVisible();
+    expect(within(dialog).getByRole('button', { name: 'Back to editing' })).toHaveFocus();
+    expect(write).not.toHaveBeenCalled();
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(editField('Product name')).toHaveValue('New app');
+    saveField('Product name');
+    await screen.findByText('Site settings saved.');
+    expect(write).toHaveBeenCalledExactlyOnceWith(
+      { title: 'New app', runtime: 'claude-code' },
+      expect.any(AbortSignal),
+    );
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+  });
+
+  it('shows the default and lets an admin cancel a reset without losing a draft', async () => {
+    render(<ApplicationSettings />);
+    fireEvent.change(await loadedField('Product name'), { target: { value: 'Keep this draft' } });
+    fireEvent.click(screen.getByLabelText('More actions for Product name'));
+    fireEvent.click(screen.getByRole('button', { name: 'Restore default for Product name' }));
+    const dialog = screen.getByRole('dialog', { name: 'Restore default value?' });
+    expect(within(dialog).getByText('Default value')).toBeVisible();
+    expect(within(dialog).getAllByText('Cloud Agent')).toHaveLength(2);
+    expect(within(dialog).getByRole('button', { name: 'Cancel' })).toHaveFocus();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    expect(screen.getByLabelText('Product name')).toHaveValue('Keep this draft');
+    expect(screen.getByLabelText('More actions for Product name')).toHaveFocus();
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it('requires explicit secret replacement and keeps the new secret out of its review', async () => {
+    write.mockResolvedValue(snapshot());
+    render(<ApplicationSettings />);
+    await screen.findByLabelText('Product name');
+    selectCategory('Connections');
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Connections settings' }));
+    expect(screen.getByLabelText('Service token')).toHaveTextContent('Configured');
+    expect(screen.queryByPlaceholderText('Enter new secret')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Replace Service token' }));
+    expect(screen.getByRole('button', { name: 'Review Connections changes' })).toBeDisabled();
+    fireEvent.change(screen.getByLabelText('Service token'), {
+      target: { value: 'new-private-token' },
+    });
+    fireEvent.click(reviewButton('Service token'));
+    const dialog = screen.getByRole('dialog');
+    expect(dialog).not.toHaveTextContent('new-private-token');
+    expect(within(dialog).getByText('New secret · hidden')).toBeVisible();
+    expect(write).not.toHaveBeenCalled();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Apply changes' }));
+    await screen.findByText('Connections settings saved.');
+    expect(write).toHaveBeenCalledExactlyOnceWith(
+      { token: 'new-private-token' },
+      expect.any(AbortSignal),
+    );
+    expect(screen.queryByPlaceholderText('Enter new secret')).not.toBeInTheDocument();
+  });
+
+  it('confirms clearing a configured secret and sends null only after approval', async () => {
+    write.mockResolvedValue(snapshot({ secret_configured: { token: false } }));
+    render(<ApplicationSettings />);
+    await screen.findByLabelText('Product name');
+    selectCategory('Connections');
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Connections settings' }));
+    fireEvent.click(screen.getByLabelText('More actions for Service token'));
+    fireEvent.click(screen.getByRole('button', { name: 'Clear Service token' }));
+    const dialog = screen.getByRole('dialog', { name: 'Clear saved secret?' });
+    expect(dialog).toHaveTextContent('secret will be cleared');
+    expect(dialog).toHaveTextContent('may stop working');
+    expect(write).not.toHaveBeenCalled();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Clear secret' }));
+    await screen.findByText('Service token cleared.');
+    expect(write).toHaveBeenCalledExactlyOnceWith({ token: null }, expect.any(AbortSignal));
+    expect(screen.getByLabelText('Service token')).toHaveTextContent('Not configured');
+  });
+
+  it('warns before leaving with drafts in an inactive category', async () => {
+    render(<ApplicationSettings />);
+    fireEvent.change(await loadedField('Product name'), { target: { value: 'Draft app' } });
+    selectCategory('Access');
+    const event = new Event('beforeunload', { cancelable: true });
+    window.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(true);
+    expect(write).not.toHaveBeenCalled();
+  });
+
   it('merges related categories while keeping settings from each original category', async () => {
     const categoryFields = [
       ['gateway_authorize_url', 'Sign-in', 'Sign-in authorization URL'],
@@ -274,12 +429,12 @@ describe('application settings', () => {
   it('keeps Important visible and preserves Advanced drafts when closed or switched to another category', async () => {
     read.mockResolvedValue(organizedSnapshot());
     render(<ApplicationSettings />);
-    await screen.findByLabelText('Application name');
+    await loadedField('Application name');
     selectCategory('Source control');
-    const appId = screen.getByLabelText('GitHub App ID');
-    const timeout = screen.getByLabelText('Publication Git timeout');
+    const appId = editField('GitHub App ID');
+    const timeout = editField('Publication Git timeout');
     expect(appId).toBeVisible();
-    expect(screen.getByLabelText('Default pull request base branch')).toBeVisible();
+    expect(editField('Default pull request base branch')).toBeVisible();
     expect(timeout).not.toBeVisible();
     expect(timeout.closest('details')).not.toHaveAttribute('open');
     fireEvent.change(appId, { target: { value: '456' } });
@@ -292,7 +447,7 @@ describe('application settings', () => {
     selectCategory('Appearance');
     selectCategory('Source control');
     toggleAdvanced(timeout);
-    expect(screen.getByLabelText('Publication Git timeout')).toBe(timeout);
+    expect(editField('Publication Git timeout')).toBe(timeout);
     expect(timeout).toHaveValue(180);
     expect(appId).toHaveValue('456');
     expect(write).not.toHaveBeenCalled();
@@ -302,7 +457,7 @@ describe('application settings', () => {
     read.mockResolvedValue(organizedSnapshot());
     window.history.replaceState(null, '', '#application-setting-publish_git_timeout_s');
     render(<ApplicationSettings />);
-    const input = await screen.findByRole('spinbutton', { name: 'Publication Git timeout' });
+    const input = await screen.findByLabelText('Publication Git timeout');
     await waitFor(() => expect(input).toHaveFocus());
     expect(input.closest('details')).toHaveAttribute('open');
     expect(screen.getByRole('region', { name: 'Source control' })).toBeVisible();
@@ -356,19 +511,20 @@ describe('application settings', () => {
       }),
     );
     render(<ApplicationSettings />);
-    fireEvent.change(await screen.findByLabelText('Product name'), {
+    fireEvent.change(await loadedField('Product name'), {
       target: { value: 'Unsaved name' },
     });
     selectCategory('Sandbox archives');
+    editField('Sandbox archive S3 bucket');
     expect(screen.getByText(/Saving an S3 URI replaces the prefix/)).toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText('Sandbox archive S3 prefix'), {
+    fireEvent.change(editField('Sandbox archive S3 prefix'), {
       target: { value: 'unsaved-prefix' },
     });
-    fireEvent.change(screen.getByLabelText('Sandbox archive S3 bucket'), {
+    fireEvent.change(editField('Sandbox archive S3 bucket'), {
       target: { value: 's3://freeinference/cloud-agent/sandbox' },
     });
-    fireEvent.click(screen.getByRole('button', { name: 'Save Sandbox archive S3 bucket' }));
-    await screen.findByText('Sandbox archive S3 bucket saved. Prefix set to cloud-agent/sandbox.');
+    saveField('Sandbox archive S3 bucket');
+    await screen.findByText('Deletion archive storage settings saved.');
     expect(write).toHaveBeenCalledExactlyOnceWith(
       {
         'sandbox_archive.bucket': 'freeinference',
@@ -376,39 +532,43 @@ describe('application settings', () => {
       },
       expect.any(AbortSignal),
     );
-    expect(screen.getByLabelText('Sandbox archive S3 bucket')).toHaveValue('freeinference');
-    expect(screen.getByLabelText('Sandbox archive S3 prefix')).toHaveValue('cloud-agent/sandbox');
-    expect(screen.getByRole('button', { name: 'Save Sandbox archive S3 bucket' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Save Sandbox archive S3 prefix' })).toBeDisabled();
+    expect(editField('Sandbox archive S3 bucket')).toHaveValue('freeinference');
+    expect(editField('Sandbox archive S3 prefix')).toHaveValue('cloud-agent/sandbox');
+    expect(reviewButton('Sandbox archive S3 bucket')).toBeDisabled();
+    expect(reviewButton('Sandbox archive S3 prefix')).toBeDisabled();
     selectCategory('Site');
-    expect(screen.getByLabelText('Product name')).toHaveValue('Unsaved name');
+    expect(editField('Product name')).toHaveValue('Unsaved name');
   });
 
-  it('saves a bare archive bucket without changing a saved prefix or its unsaved draft', async () => {
+  it('saves a bare archive bucket and an explicitly edited prefix together', async () => {
     const current = archiveSnapshot();
     read.mockResolvedValue(current);
     write.mockResolvedValue(
       archiveSnapshot({
-        values: { ...current.values, 'sandbox_archive.bucket': 'freeinference' },
+        values: {
+          ...current.values,
+          'sandbox_archive.bucket': 'freeinference',
+          'sandbox_archive.prefix': 'unsaved-prefix',
+        },
       }),
     );
     render(<ApplicationSettings />);
-    await screen.findByLabelText('Product name');
+    await loadedField('Product name');
     selectCategory('Sandbox archives');
-    fireEvent.change(screen.getByLabelText('Sandbox archive S3 prefix'), {
+    fireEvent.change(editField('Sandbox archive S3 prefix'), {
       target: { value: 'unsaved-prefix' },
     });
-    fireEvent.change(screen.getByLabelText('Sandbox archive S3 bucket'), {
+    fireEvent.change(editField('Sandbox archive S3 bucket'), {
       target: { value: 'freeinference' },
     });
-    fireEvent.click(screen.getByRole('button', { name: 'Save Sandbox archive S3 bucket' }));
-    await screen.findByText('Sandbox archive S3 bucket saved.');
+    saveField('Sandbox archive S3 bucket');
+    await screen.findByText('Deletion archive storage settings saved.');
     expect(write).toHaveBeenCalledExactlyOnceWith(
-      { 'sandbox_archive.bucket': 'freeinference' },
+      { 'sandbox_archive.bucket': 'freeinference', 'sandbox_archive.prefix': 'unsaved-prefix' },
       expect.any(AbortSignal),
     );
-    expect(screen.getByLabelText('Sandbox archive S3 prefix')).toHaveValue('unsaved-prefix');
-    expect(screen.getByRole('button', { name: 'Save Sandbox archive S3 prefix' })).toBeEnabled();
+    expect(editField('Sandbox archive S3 prefix')).toHaveValue('unsaved-prefix');
+    expect(reviewButton('Sandbox archive S3 prefix')).toBeDisabled();
   });
 
   it.each([
@@ -429,29 +589,27 @@ describe('application settings', () => {
       }),
     );
     render(<ApplicationSettings />);
-    await screen.findByLabelText('Product name');
+    await loadedField('Product name');
     selectCategory('Sandbox archives');
-    fireEvent.change(screen.getByLabelText('Sandbox archive S3 bucket'), {
+    fireEvent.change(editField('Sandbox archive S3 bucket'), {
       target: { value: uri },
     });
-    fireEvent.click(screen.getByRole('button', { name: 'Save Sandbox archive S3 bucket' }));
-    await screen.findByText(
-      `Sandbox archive S3 bucket saved. Prefix set to ${prefix || '(empty)'}.`,
-    );
+    saveField('Sandbox archive S3 bucket');
+    await screen.findByText('Deletion archive storage settings saved.');
     expect(write).toHaveBeenCalledExactlyOnceWith(
       { 'sandbox_archive.bucket': 'freeinference', 'sandbox_archive.prefix': prefix },
       expect.any(AbortSignal),
     );
-    expect(screen.getByLabelText('Sandbox archive S3 bucket')).toHaveValue('freeinference');
-    expect(screen.getByLabelText('Sandbox archive S3 prefix')).toHaveValue(prefix);
+    expect(editField('Sandbox archive S3 bucket')).toHaveValue('freeinference');
+    expect(editField('Sandbox archive S3 prefix')).toHaveValue(prefix);
   });
 
   it('rejects malformed archive buckets and URIs before making an API call', async () => {
     read.mockResolvedValue(archiveSnapshot());
     render(<ApplicationSettings />);
-    await screen.findByLabelText('Product name');
+    await loadedField('Product name');
     selectCategory('Sandbox archives');
-    const input = screen.getByLabelText('Sandbox archive S3 bucket');
+    const input = editField('Sandbox archive S3 bucket');
     for (const value of [
       's3:/freeinference/cloud-agent/sandbox',
       'S3://freeinference/cloud-agent/sandbox',
@@ -488,7 +646,7 @@ describe('application settings', () => {
       'a'.repeat(64),
     ]) {
       fireEvent.change(input, { target: { value } });
-      fireEvent.click(screen.getByRole('button', { name: 'Save Sandbox archive S3 bucket' }));
+      saveField('Sandbox archive S3 bucket');
       expect(screen.getByRole('alert')).toHaveTextContent(
         /Enter (a valid S3 bucket name|an S3 URI)/,
       );
@@ -521,7 +679,7 @@ describe('application settings', () => {
       within(screen.getByRole('region', { name: 'Application settings' })).getAllByRole('region'),
     ).toHaveLength(1);
     expect(screen.getByRole('region', { name: 'Site' })).toBeVisible();
-    expect(screen.getByRole('textbox', { name: 'Product name' })).toHaveValue('Cloud Agent');
+    expect(screen.getByLabelText('Product name')).toHaveTextContent('Cloud Agent');
     expect(screen.queryByRole('combobox', { name: 'Registration' })).not.toBeInTheDocument();
     expect(screen.getByLabelText('Registration')).not.toBeVisible();
 
@@ -532,7 +690,7 @@ describe('application settings', () => {
     expect(screen.getByRole('region', { name: 'Access' })).toBeVisible();
     expect(screen.getByRole('button', { name: 'Site' })).toHaveAttribute('aria-pressed', 'false');
     expect(screen.getByRole('button', { name: 'Access' })).toHaveAttribute('aria-pressed', 'true');
-    expect(screen.getByRole('combobox', { name: 'Registration' })).toHaveValue('true');
+    expect(screen.getByLabelText('Registration')).toHaveTextContent('Enabled');
     expect(screen.queryByRole('textbox', { name: 'Product name' })).not.toBeInTheDocument();
     expect(screen.getByLabelText('Product name')).not.toBeVisible();
     expect(screen.getByText('Deployment setup')).toBeVisible();
@@ -556,15 +714,15 @@ describe('application settings', () => {
       'aria-pressed',
       'true',
     );
-    expect(screen.getByRole('textbox', { name: 'Product name' })).toBeVisible();
+    expect(screen.getByLabelText('Product name')).toBeVisible();
     selectCategory('Integration extensions');
-    expect(screen.getByRole('combobox', { name: 'Registration' })).toBeVisible();
+    expect(screen.getByLabelText('Registration')).toBeVisible();
     expect(screen.getByRole('region', { name: 'Integration extensions' })).toBeVisible();
   });
 
   it('falls back to the first remaining category when a refresh removes the selected one', async () => {
     render(<ApplicationSettings />);
-    fireEvent.change(await screen.findByLabelText('Product name'), {
+    fireEvent.change(await loadedField('Product name'), {
       target: { value: 'Unsaved name' },
     });
     selectCategory('Limits');
@@ -582,7 +740,7 @@ describe('application settings', () => {
     ).toHaveLength(1);
     expect(screen.getByRole('region', { name: 'Site' })).toBeVisible();
     expect(screen.getByRole('button', { name: 'Site' })).toHaveAttribute('aria-pressed', 'true');
-    expect(screen.getByRole('textbox', { name: 'Product name' })).toHaveValue('Unsaved name');
+    expect(editField('Product name')).toHaveValue('Unsaved name');
   });
 
   it('shows the empty state without category navigation when no definitions are available', async () => {
@@ -598,7 +756,7 @@ describe('application settings', () => {
   it('opens and focuses an initial deep link after the definitions load', async () => {
     window.history.replaceState(null, '', '#application-setting-limit');
     render(<ApplicationSettings />);
-    const input = await screen.findByRole('spinbutton', { name: 'Files per request' });
+    const input = await screen.findByLabelText('Files per request');
     await waitFor(() => expect(input).toHaveFocus());
     expect(screen.getByRole('region', { name: 'Limits' })).toBeVisible();
     expect(screen.getByRole('button', { name: 'Limits' })).toHaveAttribute('aria-pressed', 'true');
@@ -606,7 +764,7 @@ describe('application settings', () => {
 
   it('reveals a changed deep link without stealing focus or changing category on refresh', async () => {
     render(<ApplicationSettings />);
-    const name = await screen.findByRole('textbox', { name: 'Product name' });
+    const name = await screen.findByLabelText('Product name');
     const token = screen.getByLabelText('Service token');
     const scroll = vi.fn();
     token.scrollIntoView = scroll;
@@ -623,7 +781,7 @@ describe('application settings', () => {
       snapshot({ revision: 2, values: { ...snapshot().values, title: 'Another admin' } }),
     );
     fireEvent.click(screen.getByRole('button', { name: 'Refresh settings' }));
-    await waitFor(() => expect(name).toHaveValue('Another admin'));
+    await waitFor(() => expect(name).toHaveTextContent('Another admin'));
     expect(name).toHaveFocus();
     expect(screen.getByRole('region', { name: 'Site' })).toBeVisible();
     expect(scroll).toHaveBeenCalledOnce();
@@ -634,7 +792,7 @@ describe('application settings', () => {
     async (hash) => {
       window.history.replaceState(null, '', hash);
       render(<ApplicationSettings />);
-      const name = await screen.findByRole('textbox', { name: 'Product name' });
+      const name = await screen.findByLabelText('Product name');
       expect(screen.getByRole('region', { name: 'Site' })).toBeVisible();
       expect(name).not.toHaveFocus();
       expect(screen.queryByRole('alert')).not.toBeInTheDocument();
@@ -645,7 +803,7 @@ describe('application settings', () => {
     'reveals a revisited setting after navigating through %s',
     async (hash) => {
       render(<ApplicationSettings />);
-      const name = await screen.findByRole('textbox', { name: 'Product name' });
+      const name = await screen.findByLabelText('Product name');
       const token = screen.getByLabelText('Service token');
       const scroll = vi.fn();
       token.scrollIntoView = scroll;
@@ -702,20 +860,20 @@ describe('application settings', () => {
     expect(screen.getByText(/Ask the deployment administrator/)).toHaveTextContent(
       'Settings encryption root key',
     );
-    fireEvent.change(screen.getByLabelText('Product name'), { target: { value: 'Configured' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Save Product name' }));
-    await screen.findByText('Product name saved.');
+    fireEvent.change(editField('Product name'), { target: { value: 'Configured' } });
+    saveField('Product name');
+    await screen.findByText('Site settings saved.');
     expect(screen.queryByText('Administrator setup required')).not.toBeInTheDocument();
   });
 
   it('passes the in-memory recovery credential only to authenticated API calls', async () => {
     write.mockResolvedValue(snapshot());
     render(<ApplicationSettings recoveryToken="test-recovery-token" />);
-    fireEvent.change(await screen.findByLabelText('Product name'), {
+    fireEvent.change(await loadedField('Product name'), {
       target: { value: 'Configured' },
     });
     expect(read).toHaveBeenCalledWith(expect.any(AbortSignal), 'test-recovery-token');
-    fireEvent.click(screen.getByRole('button', { name: 'Save Product name' }));
+    saveField('Product name');
     await waitFor(() =>
       expect(write).toHaveBeenCalledWith(
         { title: 'Configured' },
@@ -723,12 +881,13 @@ describe('application settings', () => {
         'test-recovery-token',
       ),
     );
-    await screen.findByText('Product name saved.');
+    await screen.findByText('Site settings saved.');
     selectCategory('Connections');
-    fireEvent.change(screen.getByLabelText('Service token'), {
+    editField('Service token');
+    fireEvent.change(editField('Service token'), {
       target: { value: 'replacement-service-token' },
     });
-    fireEvent.click(screen.getByRole('button', { name: 'Save Service token' }));
+    saveField('Service token');
     await waitFor(() =>
       expect(write).toHaveBeenLastCalledWith(
         { token: 'replacement-service-token' },
@@ -736,7 +895,7 @@ describe('application settings', () => {
         'test-recovery-token',
       ),
     );
-    await screen.findByText('Service token saved.');
+    await screen.findByText('Connections settings saved.');
     expect(document.body).not.toHaveTextContent('test-recovery-token');
   });
 
@@ -787,26 +946,27 @@ describe('application settings', () => {
       definitions: current.definitions.map((field) => ({ ...field, read_only: true })),
     });
     render(<ApplicationSettings />);
-    expect(await screen.findByLabelText('Product name')).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Save Product name' })).toBeDisabled();
+    expect(await screen.findByLabelText('Product name')).toHaveTextContent('Read only');
+    expect(screen.getByRole('button', { name: 'Edit Site settings' })).toBeDisabled();
     selectCategory('Connections');
-    expect(screen.getByLabelText('Service token')).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Reset Service token' })).toBeDisabled();
+    expect(screen.getByLabelText('Service token')).toHaveTextContent('Read only');
+    expect(screen.getByRole('button', { name: 'Edit Connections settings' })).toBeDisabled();
     expect(write).not.toHaveBeenCalled();
   });
 
   it('renders typed fields, category descriptions, hidden secret status, and read-only setup', async () => {
     render(<ApplicationSettings />);
-    expect(await screen.findByLabelText('Product name')).toHaveValue('Cloud Agent');
-    expect(screen.getByLabelText('Default runtime')).toHaveValue('codex');
+    expect(await loadedField('Product name')).toHaveValue('Cloud Agent');
+    expect(editField('Default runtime')).toHaveValue('codex');
     selectCategory('Access');
-    expect(screen.getByLabelText('Registration')).toHaveValue('true');
+    expect(editField('Registration')).toHaveValue('true');
     selectCategory('Limits');
-    expect(screen.getByLabelText('Retry factor')).toHaveValue(1.5);
+    expect(editField('Retry factor')).toHaveValue(1.5);
     expect(screen.getByRole('heading', { name: 'Limits', level: 3 })).toBeInTheDocument();
     selectCategory('Connections');
-    expect(screen.getByLabelText('Service token')).toHaveValue('');
-    expect(screen.getByText('Configured. Saved values are hidden.')).toBeInTheDocument();
+    editField('Service token');
+    expect(editField('Service token')).toHaveValue('');
+    expect(screen.getByRole('button', { name: 'Review Connections changes' })).toBeDisabled();
     fireEvent.click(screen.getByText('Deployment setup'));
     expect(screen.getByText('DATABASE_URL')).toBeInTheDocument();
     expect(screen.queryByLabelText('Database connection')).not.toBeInTheDocument();
@@ -815,26 +975,26 @@ describe('application settings', () => {
   it('writes false, fractional numbers, and strings without changing unrelated settings', async () => {
     write.mockResolvedValue(snapshot({ values: { ...snapshot().values, enabled: false } }));
     render(<ApplicationSettings />);
-    await screen.findByLabelText('Product name');
+    await loadedField('Product name');
     selectCategory('Access');
-    fireEvent.change(screen.getByLabelText('Registration'), { target: { value: 'false' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Save Registration' }));
+    fireEvent.change(editField('Registration'), { target: { value: 'false' } });
+    saveField('Registration');
     await waitFor(() =>
       expect(write).toHaveBeenCalledWith({ enabled: false }, expect.any(AbortSignal)),
     );
-    expect(await screen.findByText('Registration saved.')).toBeInTheDocument();
+    expect(await screen.findByText('Access settings saved.')).toBeInTheDocument();
     selectCategory('Limits');
-    fireEvent.change(screen.getByLabelText('Retry factor'), { target: { value: '2.75' } });
+    fireEvent.change(editField('Retry factor'), { target: { value: '2.75' } });
     write.mockResolvedValue(snapshot({ values: { ...snapshot().values, ratio: 2.75 } }));
-    fireEvent.click(screen.getByRole('button', { name: 'Save Retry factor' }));
+    saveField('Retry factor');
     await waitFor(() =>
       expect(write).toHaveBeenLastCalledWith({ ratio: 2.75 }, expect.any(AbortSignal)),
     );
-    await screen.findByText('Retry factor saved.');
+    await screen.findByText('Limits settings saved.');
     selectCategory('Site');
-    fireEvent.change(screen.getByLabelText('Product name'), { target: { value: '' } });
+    fireEvent.change(editField('Product name'), { target: { value: '' } });
     write.mockResolvedValue(snapshot({ values: { ...snapshot().values, title: '' } }));
-    fireEvent.click(screen.getByRole('button', { name: 'Save Product name' }));
+    saveField('Product name');
     await waitFor(() =>
       expect(write).toHaveBeenLastCalledWith({ title: '' }, expect.any(AbortSignal)),
     );
@@ -842,9 +1002,9 @@ describe('application settings', () => {
 
   it('validates integer bounds before saving', async () => {
     render(<ApplicationSettings />);
-    await screen.findByLabelText('Product name');
+    await loadedField('Product name');
     selectCategory('Limits');
-    const input = screen.getByLabelText('Files per request');
+    const input = editField('Files per request');
     for (const [raw, error] of [
       ['1.5', 'Enter a whole number.'],
       ['0', 'Enter a value of at least 1.'],
@@ -852,7 +1012,7 @@ describe('application settings', () => {
       ['', 'Enter a number.'],
     ]) {
       fireEvent.change(input, { target: { value: raw } });
-      fireEvent.click(screen.getByRole('button', { name: 'Save Files per request' }));
+      saveField('Files per request');
       expect(screen.getByRole('alert')).toHaveTextContent(error);
     }
     expect(write).not.toHaveBeenCalled();
@@ -861,89 +1021,89 @@ describe('application settings', () => {
   it('writes multiline secrets once and clears their draft after saving', async () => {
     write.mockResolvedValue(snapshot());
     render(<ApplicationSettings />);
-    await screen.findByLabelText('Product name');
+    await loadedField('Product name');
     selectCategory('Connections');
-    fireEvent.click(screen.getByLabelText('Use multiple lines for Service token'));
-    const input = screen.getByLabelText('Service token');
+    editField('Service token');
+    fireEvent.click(editField('Use multiple lines for Service token'));
+    const input = editField('Service token');
     const secret = 'private-key-line-1\nprivate-key-line-2';
     fireEvent.change(input, { target: { value: secret } });
-    fireEvent.click(screen.getByRole('button', { name: 'Save Service token' }));
+    saveField('Service token');
     await waitFor(() =>
       expect(write).toHaveBeenCalledWith({ token: secret }, expect.any(AbortSignal)),
     );
-    await screen.findByText('Service token saved.');
-    expect(screen.getByLabelText('Service token')).toHaveValue('');
+    await screen.findByText('Connections settings saved.');
+    expect(screen.getByLabelText('Service token')).toHaveTextContent('Configured');
     expect(screen.queryByText(secret)).not.toBeInTheDocument();
   });
 
   it('preserves drafts, multiline controls, and field errors while saving another category', async () => {
     write.mockResolvedValue(snapshot({ values: { ...snapshot().values, enabled: false } }));
     render(<ApplicationSettings />);
-    fireEvent.change(await screen.findByLabelText('Product name'), {
+    fireEvent.change(await loadedField('Product name'), {
       target: { value: 'Unsaved name' },
     });
     selectCategory('Connections');
+    editField('Service token');
     fireEvent.click(screen.getByRole('checkbox', { name: 'Use multiple lines for Service token' }));
-    const secretInput = screen.getByLabelText('Service token');
+    const secretInput = editField('Service token');
     const secret = 'private-key-line-1\nprivate-key-line-2';
     fireEvent.change(secretInput, { target: { value: secret } });
     expect(secretInput.tagName).toBe('TEXTAREA');
 
     selectCategory('Limits');
-    fireEvent.change(screen.getByRole('spinbutton', { name: 'Files per request' }), {
+    fireEvent.change(editField('Files per request'), {
       target: { value: '101' },
     });
-    fireEvent.click(screen.getByRole('button', { name: 'Save Files per request' }));
+    saveField('Files per request');
     expect(screen.getByRole('alert')).toHaveTextContent('Enter a value no greater than 100.');
 
     selectCategory('Access');
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
-    fireEvent.change(screen.getByRole('combobox', { name: 'Registration' }), {
+    fireEvent.change(editField('Registration'), {
       target: { value: 'false' },
     });
-    fireEvent.click(screen.getByRole('button', { name: 'Save Registration' }));
-    await screen.findByText('Registration saved.');
+    saveField('Registration');
+    await screen.findByText('Access settings saved.');
     expect(write).toHaveBeenCalledExactlyOnceWith({ enabled: false }, expect.any(AbortSignal));
 
     selectCategory('Limits');
-    expect(screen.getByRole('spinbutton', { name: 'Files per request' })).toHaveValue(101);
-    expect(screen.getByRole('spinbutton', { name: 'Files per request' })).toHaveAttribute(
-      'aria-invalid',
-      'true',
-    );
+    expect(editField('Files per request')).toHaveValue(101);
+    expect(editField('Files per request')).toHaveAttribute('aria-invalid', 'true');
     expect(screen.getByRole('alert')).toHaveTextContent('Enter a value no greater than 100.');
     selectCategory('Site');
-    expect(screen.getByRole('textbox', { name: 'Product name' })).toHaveValue('Unsaved name');
+    expect(editField('Product name')).toHaveValue('Unsaved name');
     selectCategory('Connections');
-    expect(screen.getByLabelText('Service token')).toBe(secretInput);
+    editField('Service token');
+    expect(editField('Service token')).toBe(secretInput);
     expect(secretInput).toHaveValue(secret);
     expect(
       screen.getByRole('checkbox', { name: 'Use multiple lines for Service token' }),
     ).toBeChecked();
-    expect(screen.getByRole('button', { name: 'Save Service token' })).toBeEnabled();
+    expect(reviewButton('Service token')).toBeEnabled();
   });
 
   it('resets to the built-in default using null and preserves drafts in other rows', async () => {
     write.mockResolvedValue(snapshot());
     render(<ApplicationSettings />);
-    fireEvent.change(await screen.findByLabelText('Product name'), {
+    fireEvent.change(await loadedField('Product name'), {
       target: { value: 'Unsaved name' },
     });
     selectCategory('Limits');
-    fireEvent.change(screen.getByLabelText('Files per request'), { target: { value: '70' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Reset Files per request' }));
+    fireEvent.change(editField('Files per request'), { target: { value: '70' } });
+    resetField('Files per request');
     await waitFor(() =>
       expect(write).toHaveBeenCalledWith({ limit: null }, expect.any(AbortSignal)),
     );
-    await screen.findByText('Files per request reset to its default.');
-    expect(screen.getByLabelText('Files per request')).toHaveValue(50);
+    await screen.findByText('Files per request restored to its default.');
+    expect(editField('Files per request')).toHaveValue(50);
     selectCategory('Site');
-    expect(screen.getByLabelText('Product name')).toHaveValue('Unsaved name');
+    expect(editField('Product name')).toHaveValue('Unsaved name');
   });
 
   it('keeps edits during refresh while updating pristine fields', async () => {
     render(<ApplicationSettings />);
-    fireEvent.change(await screen.findByLabelText('Product name'), {
+    fireEvent.change(await loadedField('Product name'), {
       target: { value: 'My draft' },
     });
     selectCategory('Limits');
@@ -954,28 +1114,28 @@ describe('application settings', () => {
       }),
     );
     fireEvent.click(screen.getByRole('button', { name: 'Refresh settings' }));
-    await waitFor(() => expect(screen.getByLabelText('Files per request')).toHaveValue(80));
+    await waitFor(() => expect(editField('Files per request')).toHaveValue(80));
     expect(screen.getByRole('button', { name: 'Limits' })).toHaveAttribute('aria-pressed', 'true');
     selectCategory('Site');
-    expect(screen.getByLabelText('Product name')).toHaveValue('My draft');
+    expect(editField('Product name')).toHaveValue('My draft');
   });
 
   it('ignores a read started before a save completes', async () => {
     const pending = deferred<AgentAdminSettings>();
     render(<ApplicationSettings />);
-    await screen.findByLabelText('Product name');
+    await loadedField('Product name');
     read.mockReturnValueOnce(pending.promise);
     fireEvent.click(screen.getByRole('button', { name: 'Refresh settings' }));
     const readSignal = read.mock.calls[1][0]!;
     write.mockResolvedValue(
       snapshot({ revision: 2, values: { ...snapshot().values, title: 'Saved name' } }),
     );
-    fireEvent.change(screen.getByLabelText('Product name'), { target: { value: 'Saved name' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Save Product name' }));
-    await screen.findByText('Product name saved.');
+    fireEvent.change(editField('Product name'), { target: { value: 'Saved name' } });
+    saveField('Product name');
+    await screen.findByText('Site settings saved.');
     expect(readSignal.aborted).toBe(true);
     await act(async () => pending.resolve(snapshot()));
-    expect(screen.getByLabelText('Product name')).toHaveValue('Saved name');
+    expect(editField('Product name')).toHaveValue('Saved name');
   });
 
   it('retries an initial failure and preserves edits after a failed write', async () => {
@@ -983,13 +1143,16 @@ describe('application settings', () => {
     render(<ApplicationSettings />);
     expect(await screen.findByRole('alert')).toHaveTextContent('Settings temporarily unavailable');
     fireEvent.click(screen.getByRole('button', { name: 'Retry application settings' }));
-    fireEvent.change(await screen.findByLabelText('Product name'), {
+    fireEvent.change(await loadedField('Product name'), {
       target: { value: 'My draft' },
     });
     write.mockRejectedValue(new Error('Write failed'));
-    fireEvent.click(screen.getByRole('button', { name: 'Save Product name' }));
-    expect(await screen.findByRole('alert')).toHaveTextContent('Write failed');
-    expect(screen.getByLabelText('Product name')).toHaveValue('My draft');
+    saveField('Product name');
+    expect(await within(screen.getByRole('dialog')).findByRole('alert')).toHaveTextContent(
+      'Write failed',
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Back to editing' }));
+    expect(editField('Product name')).toHaveValue('My draft');
   });
 
   it('hides fields and stops reading after admin access is revoked', async () => {
@@ -1023,10 +1186,10 @@ describe('application settings', () => {
     const pending = deferred<AgentAdminSettings>();
     write.mockReturnValue(pending.promise);
     const view = render(<ApplicationSettings />);
-    fireEvent.change(await screen.findByLabelText('Product name'), {
+    fireEvent.change(await loadedField('Product name'), {
       target: { value: 'My draft' },
     });
-    fireEvent.click(screen.getByRole('button', { name: 'Save Product name' }));
+    saveField('Product name');
     const signal = write.mock.calls[0][1]!;
     view.unmount();
     expect(signal.aborted).toBe(true);
