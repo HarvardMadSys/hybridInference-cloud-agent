@@ -28,6 +28,12 @@ that only ever change under their conversation's lock, such as its waiting
 messages, are ordered by that lock. A lock taken with ``SKIP LOCKED`` or
 ``NOWAIT`` never waits, so it may come out of order; the locks after it may not.
 
+An owner's installation snapshots and the environment runs that build them
+have an order of their own: the owner's snapshot lock, then the snapshots, then
+the runs. A write that locks more than one snapshot, or a snapshot and its run,
+takes that lock first (``lock_environment_snapshots``): a statement over several
+snapshots locks them in whatever order its plan scans them.
+
 Known exceptions, each safe for the reason given. The idle-only submit locks
 its newest job after the group, and only once the group's newest snapshot reads
 published, so no publication can be holding that job. Turns still queued

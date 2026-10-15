@@ -84,6 +84,23 @@ def optional_setup_fingerprint(
         return None
 
 
+async def lock_environment_snapshots(conn: Any, user_id: str) -> None:
+    """Take the owner's snapshot lock, before any of their snapshot or environment-run rows.
+
+    A write that locks more than one of an owner's installation snapshots,
+    or a snapshot and its run, takes this first and holds it to the end of
+    its transaction, so no two of them take those rows in different orders.
+    A receipt takes the snapshot it makes ready and its run, then the older
+    builds it supersedes and the snapshots the owner's quota evicts; a
+    deletion takes an environment's snapshots in whatever order its one
+    statement scans them, then their runs.
+    """
+    await conn.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended('agent-environment-snapshots:' || $1, 0))",
+        user_id,
+    )
+
+
 class PostgresEnvironmentRepository:
     """Serialize configuration changes and bindings per owner over one pool."""
 

@@ -30,6 +30,11 @@ from tests.integration.storage.test_agent_job_store import (
     pool,  # noqa: F401 - pytest fixture
     store,  # noqa: F401 - pytest fixture
 )
+from tests.integration.storage.test_environment_snapshot_store import (
+    _claim as _claim_environment_run,
+    _ready_snapshot,
+    _receipt,
+)
 
 from cloud_agent.storage.repositories import (
     attempt_commands as attempt_module,
@@ -119,12 +124,20 @@ async def _run_next_turn(store: Storage, parent: dict, sandbox: dict) -> dict:
 
 async def _blocked_by(pool, pid: int) -> None:
     """Return once another backend waits on a lock that ``pid`` holds."""
+    await _waiting_on(pool, pid)
+
+
+async def _waiting_on(pool, pid: int) -> int:
+    """The backend that waits on a lock ``pid`` holds, once one does."""
     async with asyncio.timeout(10), pool.acquire() as observer:
-        while not await observer.fetchval(
-            "SELECT EXISTS (SELECT 1 FROM pg_locks "
-            "WHERE NOT granted AND $1 = ANY(pg_blocking_pids(pid)))",
-            pid,
-        ):
+        while True:
+            waiter = await observer.fetchval(
+                "SELECT pid FROM pg_locks "
+                "WHERE NOT granted AND $1 = ANY(pg_blocking_pids(pid)) LIMIT 1",
+                pid,
+            )
+            if waiter is not None:
+                return waiter
             await asyncio.sleep(0.01)
 
 
@@ -984,3 +997,71 @@ async def test_an_attempt_the_reaper_cannot_close_does_not_undo_the_others(
     assert [action["attempt_id"] for action in await store.attempt_commands.reap_expired()] == [
         stuck
     ]
+
+
+async def test_deleting_snapshots_does_not_deadlock_with_a_build_receipt(
+    pool, store: Storage, monkeypatch
+):
+    """A build's receipt and a deletion of its snapshots both take the owner's snapshot lock first.
+
+    A receipt locks the snapshot it makes ready and that build's run, then
+    the older ready build of the same installation it supersedes. Deleting an
+    environment's snapshots locked all of them in the order its one statement
+    scanned them, and then their runs. On a sequential scan -- the plan a small
+    snapshot table gets -- it took the older build first and then waited for
+    the one the receipt held, while the receipt waited for the older build. An
+    owner who deleted or rebuilt snapshots while a prebuild reported got a 500,
+    or the prebuild failed and left its uploaded object unrecorded.
+    """
+    older, binding, _older_run = await _ready_snapshot(store, pool, monkeypatch)
+    snapshots = store.environment_snapshots
+    newer = await snapshots.queue_prebuild(
+        user_id="alice", binding_id=binding, repo="org/repo", base_sha="f" * 40, requested=True
+    )
+    build = await _claim_environment_run(store, capable=True)
+    assert build is not None and build["snapshot_id"] == newer
+    assert await snapshots.capture_target(build, "environment-host")
+    environment_id = (await store.environments.list_environments("alice"))[0]["id"]
+    async with pool.acquire() as conn:
+        # Statistics that say the table is small, as production's are before it
+        # grows: the deletion then scans the rows in their order, older first.
+        await conn.execute("ANALYZE agent_environment_snapshots")
+    receipt = deletion = None
+    async with pool.acquire() as rival:
+        try:
+            async with rival.transaction():
+                # Hold the build's run, so the receipt stops after taking the
+                # rows it locks before the run.
+                await rival.execute(
+                    "SELECT id FROM agent_environment_runs WHERE id = $1 FOR KEY SHARE",
+                    build["id"],
+                )
+                receipt = asyncio.create_task(
+                    snapshots.record_capture(
+                        run_id=build["id"],
+                        host="environment-host",
+                        generation=build["lease_generation"],
+                        receipt=_receipt(newer, source_sha="f" * 40),
+                    )
+                )
+                receipt_pid = await _waiting_on(
+                    pool, await rival.fetchval("SELECT pg_backend_pid()")
+                )
+                deletion = asyncio.create_task(snapshots.discard("alice", environment_id))
+                await _blocked_by(pool, receipt_pid)
+            # The run is free: the receipt goes on to the older build.
+            outcomes = await asyncio.wait_for(
+                asyncio.gather(receipt, deletion, return_exceptions=True), timeout=20
+            )
+        finally:
+            await _settle(receipt)
+            await _settle(deletion)
+    assert outcomes == [True, 2]
+    async with pool.acquire() as conn:
+        states = dict(
+            await conn.fetch(
+                "SELECT id, state FROM agent_environment_snapshots WHERE id = ANY($1::text[])",
+                [older, newer],
+            )
+        )
+    assert states == {older: "deleting", newer: "deleting"}

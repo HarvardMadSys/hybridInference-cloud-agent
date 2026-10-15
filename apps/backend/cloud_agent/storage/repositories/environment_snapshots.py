@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 from cloud_agent.execution_profiles import default_execution_profile
 from cloud_agent.sandbox_archive_credentials import load_stored_archive_policy
 from cloud_agent.storage._sql.rows import load_json
+from cloud_agent.storage.repositories.environments import lock_environment_snapshots
 from cloud_agent_shared.environment_snapshots import (
     SNAPSHOT_MAX_AGE_DAYS,
     SNAPSHOT_OWNER_QUOTA_BYTES,
@@ -276,7 +277,8 @@ class PostgresEnvironmentSnapshotRepository:
         that snapshot may have. A host can only report the snapshot it was
         handed, and only while its run may still report at all: the run row is
         locked with the snapshot, so a cancel or an expired lease cannot slip
-        between this check and the snapshot becoming ready.
+        between this check and the snapshot becoming ready. The owner's
+        snapshot lock comes first, as for a deletion of the same snapshots.
         """
         snapshot_id = str(receipt.get("snapshot_id") or "")
         lockfiles = receipt.get("lockfiles")
@@ -289,6 +291,12 @@ class PostgresEnvironmentSnapshotRepository:
         ):
             return False
         async with self._pool.acquire() as conn, conn.transaction():
+            owner = await conn.fetchval(
+                "SELECT user_id FROM agent_environment_snapshots WHERE id=$1", snapshot_id
+            )
+            if owner is None:
+                return False
+            await lock_environment_snapshots(conn, owner)
             row = await conn.fetchrow(
                 "SELECT s.* FROM agent_environment_snapshots s JOIN agent_environment_runs r ON r.id = s.run_id "
                 "WHERE s.id=$1 AND r.id=$2 AND r.host=$3 AND r.lease_generation=$4 AND s.state='building' "
@@ -466,9 +474,12 @@ class PostgresEnvironmentSnapshotRepository:
 
         A prebuild is cancelled the way an owner cancels a test: a queued one
         is never claimed, and a running one's host is refused at its next
-        report and stops.
+        report and stops. The owner's snapshot lock comes first: the
+        statement below locks the snapshots in whatever order it scans them,
+        and a receipt holding one of them may be waiting for another.
         """
         async with self._pool.acquire() as conn, conn.transaction():
+            await lock_environment_snapshots(conn, user_id)
             rows = await conn.fetch(
                 "UPDATE agent_environment_snapshots SET state=CASE WHEN object_key IS NULL THEN 'deleted' ELSE 'deleting' END, "
                 "detail='Deleted by the owner', updated_at=NOW(), "
