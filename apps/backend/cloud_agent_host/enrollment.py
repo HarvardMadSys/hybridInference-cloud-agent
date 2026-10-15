@@ -358,7 +358,7 @@ def heartbeat(
     settings_applied: dict[str, int | float] | None = None,
     settings_local: dict[str, int | float] | None = None,
     sandbox_archive_settings_applied_revision: int | None = None,
-    runtime_downloads: dict[str, dict[str, Any]] | None = None,
+    runtime_downloads: list[dict[str, Any]] | None = None,
     on_residencies_lost: Callable[[list[dict[str, Any]]], None] | None = None,
     on_retained_sandboxes_stop: Callable[[list[dict[str, Any]]], None] | None = None,
 ) -> HostIdentity:
@@ -389,7 +389,7 @@ def heartbeat(
     ``settings`` are the values an admin set for it, kept on the identity.
 
     ``runtime_downloads`` reports how far this host has got with each agent
-    version an admin updated to; the answer's targets are kept on the identity.
+    version it was asked to hold; the answer's targets are kept on the identity.
     """
     answer = _post(
         f"{base_url.rstrip('/')}/v1/agent/host/heartbeat",
@@ -605,7 +605,7 @@ class HostHeartbeat:
         on_settings: Callable[[dict[str, int]], None] | None = None,
         sandbox_archive_settings_report: Callable[[], int | None] | None = None,
         on_sandbox_archive_settings: Callable[[dict[str, Any] | None], None] | None = None,
-        runtime_downloads_report: Callable[[], dict[str, dict[str, Any]]] | None = None,
+        runtime_downloads_report: Callable[[], list[dict[str, Any]]] | None = None,
         on_runtime_downloads: Callable[[list[dict[str, Any]]], None] | None = None,
         on_residencies_lost: Callable[[list[dict[str, Any]]], None] | None = None,
         on_retained_sandboxes_stop: Callable[[list[dict[str, Any]]], None] | None = None,

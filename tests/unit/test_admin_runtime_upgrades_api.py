@@ -39,7 +39,7 @@ class FakeHostPool:
                     "pi": "0.73.1",
                 },
                 "runtime_versions_available": {"claude-code": ["2.1.220"]},
-                "runtime_downloads": {},
+                "runtime_downloads": [],
             }
         ]
         self.requests: list[dict[str, str]] = []
@@ -125,6 +125,44 @@ async def test_each_updatable_agent_is_listed_beside_its_latest_release(api):
     }
     # pi is already on npm's latest.
     assert items["pi"]["update_available"] is False
+
+
+async def test_a_chosen_version_shows_only_once_a_host_cannot_download_it(api):
+    """Roll back keeps the version on every host; the page hears of it on failure."""
+    client, store, _audited, _registry = api
+    store.host_pool.selection = {"claude-code": "2.1.235"}
+    store.host_pool.upgrades["claude-code"] = {
+        "kind": "selection",
+        "version": "2.1.235",
+        "before": "2026-10-01T00:00:00Z",
+        "nonce": "0123456789abcdef0123456789abcdef",
+        "previous_version": None,
+        "activated_at": "2026-10-15T00:05:00+00:00",
+    }
+
+    quiet = _by_runtime((await client.get("/admin/agent/runtime-upgrades")).json())
+    assert quiet["claude-code"]["upgrade"] is None
+    assert quiet["claude-code"]["current_version"] == "2.1.235"
+    assert quiet["claude-code"]["update_available"] is True
+
+    store.host_pool.hosts[0]["runtime_downloads"] = [
+        {
+            "runtime": "claude-code",
+            "version": "2.1.235",
+            "nonce": "0123456789abcdef0123456789abcdef",
+            "state": "failed",
+            "progress": 0,
+            "error": "npm could not reach the registry",
+        }
+    ]
+    failed = _by_runtime((await client.get("/admin/agent/runtime-upgrades")).json())
+    upgrade = failed["claude-code"]["upgrade"]
+    assert (upgrade["kind"], upgrade["state"], upgrade["version"]) == (
+        "selection",
+        "failed",
+        "2.1.235",
+    )
+    assert upgrade["error"] == "runner-a: npm could not reach the registry"
 
 
 async def test_updating_records_a_target_audits_it_and_shows_it_downloading(api):

@@ -1,9 +1,10 @@
 """Download the agent CLI versions an admin updated to, and check each one.
 
-Every heartbeat answer carries the control plane's *targets*: one exact version
-per runtime (``cloud_agent_shared.runtime_downloads``). This runner keeps each
-one installed as a local image (``runtime_images``) built on the sandbox image
-it runs, and reports how far it has got on the next beat. The control plane
+Every heartbeat answer carries the control plane's *targets*: exact versions,
+at most two per runtime — the one new chats use and the one an update moves
+them to (``cloud_agent_shared.runtime_downloads``). This runner keeps each one
+installed as a local image (``runtime_images``) built on the sandbox image it
+runs, and reports how far it has got on the next beat. The control plane
 switches new chats to a version once every online host reports it ready.
 
 Installing a version is four steps, each in a container of its own with every
@@ -55,6 +56,7 @@ from cloud_agent_shared.runtime_downloads import (
     DOWNLOAD_ERROR_MAX_CHARS,
     DOWNLOADING,
     FAILED,
+    MAX_TARGETS_PER_RUNTIME,
     READY,
     DownloadReport,
     DownloadTarget,
@@ -100,6 +102,14 @@ def _tail(text: str, limit: int = 200) -> str:
     return " | ".join(lines[-3:])[-limit:]
 
 
+#: A target's identity on this host: one runtime, one version.
+_Key = tuple[str, str]
+
+
+def _key(target: DownloadTarget) -> _Key:
+    return (target.runtime, target.version)
+
+
 @dataclass
 class _Job:
     target: DownloadTarget
@@ -138,11 +148,12 @@ class RuntimeDownloads:
         self._lock = threading.Lock()
         self._wake = threading.Event()
         self._stop = threading.Event()
-        self._targets: dict[str, DownloadTarget] = {}
-        self._reports: dict[str, DownloadReport] = {}
-        #: (nonce, base) last attempted per runtime: a failure is not retried
+        #: In the control plane's order: the version new chats use comes first.
+        self._targets: dict[_Key, DownloadTarget] = {}
+        self._reports: dict[_Key, DownloadReport] = {}
+        #: (nonce, base) last attempted per target: a failure is not retried
         #: until the admin asks again or a new sandbox image arrives.
-        self._attempted: dict[str, tuple[str, str]] = {}
+        self._attempted: dict[_Key, tuple[str, str]] = {}
         self._thread: threading.Thread | None = None
 
     # ── heartbeat side ──────────────────────────────────────────────────
@@ -151,29 +162,31 @@ class RuntimeDownloads:
         """Adopt the targets from one heartbeat answer."""
         if not isinstance(targets, list):
             return
-        adopted: dict[str, DownloadTarget] = {}
+        adopted: dict[_Key, DownloadTarget] = {}
+        per_runtime: dict[str, int] = {}
         for raw in targets:
             target = DownloadTarget.from_wire(raw)
-            if target is not None and target.runtime in downloadable_runtimes():
-                adopted[target.runtime] = target
+            if target is None or target.runtime not in downloadable_runtimes():
+                continue
+            if _key(target) not in adopted:
+                if per_runtime.get(target.runtime, 0) >= MAX_TARGETS_PER_RUNTIME:
+                    continue
+                per_runtime[target.runtime] = per_runtime.get(target.runtime, 0) + 1
+            adopted[_key(target)] = target
         with self._lock:
             changed = adopted != self._targets
             self._targets = adopted
-            for runtime in list(self._reports):
-                report = self._reports[runtime]
-                current = adopted.get(runtime)
-                if current is None or (current.version, current.nonce) != (
-                    report.version,
-                    report.nonce,
-                ):
-                    del self._reports[runtime]
+            for key in list(self._reports):
+                current = adopted.get(key)
+                if current is None or current.nonce != self._reports[key].nonce:
+                    del self._reports[key]
         if changed:
             self._wake.set()
 
-    def report(self) -> dict[str, dict[str, object]]:
+    def report(self) -> list[dict[str, object]]:
         """Each target's state on this host, as the heartbeat carries it."""
         with self._lock:
-            return {runtime: report.to_wire() for runtime, report in self._reports.items()}
+            return [report.to_wire() for report in self._reports.values()]
 
     # ── lifecycle ───────────────────────────────────────────────────────
 
@@ -196,6 +209,7 @@ class RuntimeDownloads:
         self, target: DownloadTarget, state: str, progress: int, error: str | None = None
     ) -> None:
         report = DownloadReport(
+            runtime=target.runtime,
             version=target.version,
             nonce=target.nonce,
             state=state,
@@ -203,12 +217,12 @@ class RuntimeDownloads:
             error=None if error is None else error[:DOWNLOAD_ERROR_MAX_CHARS],
         )
         with self._lock:
-            current = self._targets.get(target.runtime)
+            current = self._targets.get(_key(target))
             if current != target:
                 return
-            if self._reports.get(target.runtime) == report:
+            if self._reports.get(_key(target)) == report:
                 return
-            self._reports[target.runtime] = report
+            self._reports[_key(target)] = report
         if self._on_change is not None:
             with contextlib.suppress(Exception):
                 self._on_change()
@@ -222,14 +236,12 @@ class RuntimeDownloads:
         }
         menu = self._image_menu()
         with self._lock:
-            targets = sorted(self._targets.values(), key=lambda target: target.runtime)
+            targets = list(self._targets.values())
         for target in targets:
-            if (target.runtime, target.version) in installed or target.version in menu.get(
-                target.runtime, []
-            ):
+            if _key(target) in installed or target.version in menu.get(target.runtime, []):
                 self._set(target, READY, _PROGRESS_DONE)
                 continue
-            if self._attempted.get(target.runtime) == (target.nonce, base_id):
+            if self._attempted.get(_key(target)) == (target.nonce, base_id):
                 continue
             return _Job(target, base_id)
         return None
@@ -250,7 +262,7 @@ class RuntimeDownloads:
                 else:
                     job = self._next(base_id)
                 if job is not None:
-                    self._attempted[job.target.runtime] = (job.target.nonce, job.base_id)
+                    self._attempted[_key(job.target)] = (job.target.nonce, job.base_id)
                     self._download(job)
                     continue
             except Exception:

@@ -11234,17 +11234,17 @@
           "runtime_downloads": {
             "anyOf": [
               {
-                "additionalProperties": {
+                "items": {
                   "additionalProperties": true,
                   "type": "object"
                 },
-                "type": "object"
+                "type": "array"
               },
               {
                 "type": "null"
               }
             ],
-            "description": "This host's progress on each agent version an admin updated to, keyed by runtime id: version, nonce, state (downloading, ready or failed), progress 0-100 and an error. Entries this control plane cannot read are dropped rather than refusing the heartbeat. Null means not reported and keeps what is stored.",
+            "description": "This host's progress on each agent version the control plane asked it to hold, one entry per target: runtime, version, nonce, state (downloading, ready or failed), progress 0-100 and an error. Entries this control plane cannot read are dropped rather than refusing the heartbeat. Null means not reported and keeps what is stored.",
             "title": "Runtime Downloads"
           },
           "runtime_versions": {
@@ -11447,7 +11447,7 @@
             "type": "array"
           },
           "runtime_downloads": {
-            "description": "Agent CLI versions this host should hold, one per runtime: runtime, version, before (npm dependency cutoff) and nonce. A host downloads and checks each one it lacks and reports its progress on the next heartbeat.",
+            "description": "Agent CLI versions this host should hold, at most two per runtime (the version new chats use and the one an update moves them to): runtime, version, before (npm dependency cutoff) and nonce. A host downloads and checks each one it lacks and reports its progress on the next heartbeat.",
             "items": {
               "additionalProperties": {
                 "type": "string"
@@ -14001,6 +14001,16 @@
             ],
             "description": "Which host failed, and why.",
             "title": "Error"
+          },
+          "kind": {
+            "default": "update",
+            "description": "update for one started with the Update button; selection for a version an admin chose (Roll back included) that some online host could not download. A selection is reported only when it failed.",
+            "enum": [
+              "update",
+              "selection"
+            ],
+            "title": "Kind",
+            "type": "string"
           },
           "previous_version": {
             "anyOf": [

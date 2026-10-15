@@ -1,10 +1,16 @@
 """What the control plane and a host say about agent CLIs downloaded on demand.
 
 An admin updates an agent from the Settings page. The control plane turns that
-into a *target* — one exact version per runtime — and sends every target on
-each heartbeat answer. A host downloads the version, checks it with one real
-turn (``cloud_agent_host.runtime_probe``), and reports its progress on the next
-heartbeat. Once every online host holds the version, new chats start using it.
+into *targets* — exact versions every host should hold — and sends them on each
+heartbeat answer. A host downloads each version it lacks, checks it with one
+real turn (``cloud_agent_host.runtime_probe``), and reports its progress on the
+next heartbeat. Once every online host holds an update, new chats start using
+it.
+
+A runtime has at most two targets: the downloaded version new chats use now,
+and the one an update is moving them to. Both, because a host that joins while
+an update is still downloading, or after it failed, must still be able to run
+the version every other host runs.
 
 Both images ship this module, so both sides validate the same shapes: a host
 newer or older than its control plane drops what it cannot read rather than
@@ -27,6 +33,11 @@ DEFAULT_REGISTRY_URL = "https://registry.npmjs.org"
 #: and the version stamp on every attempt must name exactly one binary.
 EXACT_VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$")
 VERSION_MAX_CHARS = 64
+
+#: Targets per runtime: the version in use and the one being updated to.
+MAX_TARGETS_PER_RUNTIME = 2
+#: The most reports one heartbeat may carry; more is not a host of this release.
+MAX_REPORTS = 32
 
 #: The host is fetching, installing or checking the version.
 DOWNLOADING = "downloading"
@@ -72,9 +83,10 @@ def reports_version(output: str, version: str) -> bool:
 class DownloadTarget:
     """One version every host should hold for one runtime.
 
-    ``before`` pins npm's dependency resolution to the instant the admin asked,
-    so a package whose dependencies are ranges (pi's are) installs the same
-    tree on a host that downloads it a week later.
+    ``before`` pins npm's dependency resolution to the instant the admin first
+    asked for this version, so a package whose dependencies are ranges (pi's
+    are) installs the same tree on a host that downloads it a week later. A
+    retry keeps it and changes only the nonce.
     """
 
     runtime: str
@@ -115,8 +127,9 @@ class DownloadTarget:
 
 @dataclass(frozen=True)
 class DownloadReport:
-    """What one host says about one runtime's current target."""
+    """What one host says about one target."""
 
+    runtime: str
     version: str
     nonce: str
     state: str
@@ -127,6 +140,7 @@ class DownloadReport:
     def to_wire(self) -> dict[str, Any]:
         """The report as a heartbeat carries it."""
         return {
+            "runtime": self.runtime,
             "version": self.version,
             "nonce": self.nonce,
             "state": self.state,
@@ -139,15 +153,21 @@ class DownloadReport:
         """The report ``value`` describes, or None if any part is unusable."""
         if not isinstance(value, dict):
             return None
+        runtime = value.get("runtime")
         version = value.get("version")
         nonce = value.get("nonce")
         state = value.get("state")
         progress = value.get("progress", 0)
         error = value.get("error")
         if not (
-            is_exact_version(version)
+            isinstance(runtime, str)
+            and 0 < len(runtime) <= 64
+            and is_exact_version(version)
             and isinstance(nonce, str)
             and _NONCE.fullmatch(nonce)
+            # Type first: an object or a list is unhashable, and the set
+            # lookup would raise instead of dropping the entry.
+            and isinstance(state, str)
             and state in DOWNLOAD_STATES
             and isinstance(progress, int)
             and not isinstance(progress, bool)
@@ -156,9 +176,34 @@ class DownloadReport:
         ):
             return None
         return cls(
+            runtime=runtime,
             version=str(version),
             nonce=nonce,
-            state=str(state),
+            state=state,
             progress=progress,
             error=None if error is None else error[:DOWNLOAD_ERROR_MAX_CHARS],
         )
+
+
+def read_reports(value: object) -> list[DownloadReport]:
+    """The usable reports in a heartbeat's ``runtime_downloads``, one per target.
+
+    Anything unreadable is dropped, never the beat: a host from another release
+    may report a runtime or a shape unknown here.
+    """
+    if not isinstance(value, list):
+        return []
+    reports: dict[tuple[str, str], DownloadReport] = {}
+    for raw in value[:MAX_REPORTS]:
+        report = DownloadReport.from_wire(raw)
+        if report is not None:
+            reports[(report.runtime, report.version)] = report
+    return list(reports.values())
+
+
+def find_report(reports: object, runtime: str, version: str) -> DownloadReport | None:
+    """One host's report on ``runtime`` ``version``, from its stored reports."""
+    for report in read_reports(reports):
+        if (report.runtime, report.version) == (runtime, version):
+            return report
+    return None

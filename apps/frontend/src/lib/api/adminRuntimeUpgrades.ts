@@ -2,7 +2,8 @@
 //
 // `GET` lists each agent's version for new chats beside npm's latest release,
 // with the progress of an update in flight; `POST` starts one. Rolling back is
-// `setAgentRuntimeVersion` in `./admin`, which also withdraws the update. See
+// `setAgentRuntimeVersion` in `./admin`, which also replaces the update and
+// keeps the chosen version on every server. See
 // `cloud_agent/runtime_upgrades.py` for how an update completes.
 
 import { config } from '@/config/env';
@@ -23,6 +24,12 @@ export interface RuntimeUpgradeProgress {
   previous_version: string | null;
   requested_at: string | null;
   activated_at: string | null;
+  /**
+   * `update` for one started with the Update button. `selection` for a
+   * version an admin chose (Roll back included) that a server could not
+   * download; a selection only appears once it failed.
+   */
+  kind: 'update' | 'selection';
 }
 
 /** One agent the page can update. */

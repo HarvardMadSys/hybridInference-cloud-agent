@@ -45,15 +45,16 @@ Settings → Agent versions 里，每个可以更新的 agent 下面会显示：
 - **已经是最新时**：显示"Up to date"。
 - **查不到 npm 时**：显示原因，同时不提供更新按钮。
 
-原来的版本下拉框保留不变。在下拉框里手动选一个版本，会撤销正在进行或已经完成的更新，以手动选择为准。
+原来的版本下拉框保留不变。在下拉框里手动选一个版本，会取代正在进行或已经完成的更新，以手动选择为准。手动选的版本（包括回退）同样会下发给每台主机：后加入的主机，或者丢了这份下载的主机，也会去下载它。如果有主机下载失败，页面会显示"Some servers could not download …"和"Try again"按钮；没有失败时，页面不显示额外信息。
 
 ## 四 一次更新怎么完成
 
 ```
 管理员点 Update ─► 控制面 POST /admin/agent/runtime-upgrades
                    校验版本在 npm 上存在，记录目标：
-                   {version, before=当前时间, nonce, previous_version}
-                          │ 每次心跳的回复里都带上所有目标
+                   {version, before=当前时间, nonce, previous_version,
+                    previous_download=新对话现在所用版本的下载记录}
+                          │ 每次心跳的回复里都带上要保留的版本（每个 runtime 最多两个）
                           ▼
 每台主机的 runner ─► RuntimeDownloads 一次处理一个版本
    1 下载    npm install --ignore-scripts --before <before>
@@ -81,7 +82,9 @@ Settings → Agent versions 里，每个可以更新的 agent 下面会显示：
 - **复制前的检查。** 只有整棵目录都归 root 所有、并且只有 root 能写时才会启用，所以成员改不了别的成员要运行的 CLI。整棵目录写完后才写标记文件，复制到一半中断的目录不会被当成完整的。
 - **新镜像发布之后。** 新的沙箱镜像发布后，主机会把每个目标重新下载、重新自测一遍，因为之前的自测是在旧镜像的 wrapper 和 Node 上做的。重新下载期间，旧镜像上的那份仍然可用，不会出现退回默认版本的空窗期。新的下载通过后，删除旧镜像上的那份。如果重新自测失败，页面显示"更新失败"，管理员可以回退。
 - **`--before` 的作用。** 它把 npm 的依赖解析固定在管理员点击的那一刻。pi 的依赖写的是版本范围，有了这个参数，一周后才下载的主机也会装出一模一样的依赖树。
-- **重试和回退。** 重试就是再提交一次请求，生成新的 nonce。旧的失败只对应旧 nonce，所以不会再被计入。还没切换就重试时，"回退到哪个版本"沿用最早那一次请求记录的版本，不会变成回退到正在重试的版本自己。
+- **每台主机要保留哪些版本。** 每个 runtime 最多两个：更新要切换到的版本；以及在切换完成之前，新对话现在所用的那个已下载版本。第二个是必须的：更新还在下载、或者已经失败时新加入的主机，也要能运行其他主机正在运行的版本，否则它会悄悄用自己的默认版本开新对话。切换完成后只下发新版本；主机上已有的旧版本不会删除，所以回退在这些主机上是即时的。
+- **重试。** 对同一个版本再点一次（Try again）就是重试，只换一个新的 nonce。旧的失败只对应旧 nonce，所以不会再被计入。`before`、"回退到哪个版本"、是否已经切换，都保持不变：已经装好的主机保留的是当时解析出的依赖树，重试的主机必须解析出同一棵；已完成的更新在新主机上重试，也不会变成"回退到它自己"。
+- **回退。** 回退就是手动选择更新前的版本。这个版本会继续下发给每台主机，并沿用它第一次下载时的 `before`，所以之后才下载它的主机装出的依赖树和其他主机一致。
 
 ## 五 安全边界
 
@@ -99,14 +102,14 @@ Settings → Agent versions 里，每个可以更新的 agent 下面会显示：
 ## 七 存储与接口
 
 - 迁移 `0075_runtime_upgrades`：
-  - `agent_runner_policy.runtime_upgrades`（JSON 对象）：每个 runtime 一个目标。
-  - `agent_runner_hosts.runtime_downloads`（JSON 对象，可以为空）：每台主机的上报。
+  - `agent_runner_policy.runtime_upgrades`（JSON 对象）：每个 runtime 一条记录。`kind` 是 `update`（点 Update 发起的）或 `selection`（手动选择或回退）。
+  - `agent_runner_hosts.runtime_downloads`（JSON 数组，可以为空）：每台主机对每个要保留的版本的上报。
 
   两列都是新增、默认为空。旧版本的控制面和主机会直接忽略它们。
-- 心跳请求加 `runtime_downloads`，读不懂的条目直接丢掉，不会因此拒绝整个心跳。心跳回复加 `runtime_downloads`，内容是全部目标，包括已经完成的，这样后加入的主机也会去下载。
+- 心跳请求加 `runtime_downloads`：每个要保留的版本一条，带 `runtime`。读不懂的条目（包括 `state` 不是字符串的）直接丢掉，不会因此拒绝整个心跳。心跳回复加 `runtime_downloads`，内容是每台主机要保留的全部版本，包括已经完成的更新，这样后加入的主机也会去下载。
 - `GET /admin/agent/runtime-upgrades`：返回每个 agent 当前给新对话用的版本、npm 最新版本、更新状态和进度。npm 的查询结果缓存 1 小时，查询失败只缓存 1 分钟。
 - `POST /admin/agent/runtime-upgrades`：发起更新，并写入审计记录 `agent.runtime_version.upgrade`。
-- 回退复用 `PUT /admin/agent/runtime-versions`。它现在还会撤销这个 runtime 的更新目标。
+- 回退复用 `PUT /admin/agent/runtime-versions`。它现在会用手动选择的版本取代这个 runtime 的更新；选的是可下载的 agent 时，这个版本继续下发给每台主机。选回"默认"时清除记录，因为镜像默认版本每台主机都有。
 - 新增环境变量（见 `ENVIRONMENT.md`）：
   - `AGENT_RUNTIME_REGISTRY_URL`：控制面和主机都会读，默认是公共 npm registry。
   - `AGENT_RUNTIME_DOWNLOAD_NETWORK`：只有主机读，默认是 `bridge`。
@@ -132,10 +135,10 @@ Settings → Agent versions 里，每个可以更新的 agent 下面会显示：
 
 - **单元测试：**
   - 版本匹配规则与 `install-runtimes.sh` 逐条对照；上报和目标的格式校验；进度汇总（平均值、失败优先、按 nonce 区分请求、已完成的更新在重新自测期间保持已完成）；npm 查询和缓存（`test_runtime_upgrades.py`）。
-  - 主机端用假的 Docker：联网和断网分别在哪一步、只保留自测通过的版本、失败后的重试规则、新镜像发布后重新下载、清理遗留容器；复制进对话（`test_runtime_downloads.py`）。
+  - 主机端用假的 Docker：联网和断网分别在哪一步、只保留自测通过的版本、失败后的重试规则、新镜像发布后重新下载、同一个 runtime 同时保留两个版本、清理遗留容器；复制进对话（`test_runtime_downloads.py`）。
   - 心跳收发（`test_host_pool_api.py`、`test_host_enrollment.py`），Admin 接口（`test_admin_runtime_upgrades_api.py`），版本上报（`test_agent_sandbox.py`）。
-- **数据库测试**：所有在线主机就绪后才切换、没有主机在线时不切换、上报的存储、重试时保留回退目标、手动选择会撤销更新（`test_host_pool_store.py`）。
-- **前端**：更新、下载中显示恐龙、完成后刷新版本菜单、失败与重试、回退、查不到 npm；恐龙进度条本身（`page.test.tsx`、`DinoProgress.test.tsx`）。
+- **数据库测试**：所有在线主机就绪后才切换、没有主机在线时不切换、上报的存储；重试只换 nonce（`before`、回退目标、切换状态都不变）；切换前主机同时保留在用的版本；回退后这个版本继续下发并沿用原来的 `before`；手动选择会取代更新、选回默认会清除（`test_host_pool_store.py`）。
+- **前端**：更新、下载中显示恐龙、完成后刷新版本菜单、失败与重试、回退、手动选择的版本下载失败、查不到 npm；恐龙进度条本身（`page.test.tsx`、`DinoProgress.test.tsx`）。
 - **真实环境**（`tests/external/test_runtime_updates_live.py`，需要已构建的沙箱镜像和 npm 网络）：在本机 Docker 上，用真实的 npm 和 CLI 跑完整条流程。Claude Code 2.1.300 和 OpenCode 1.19.0 能下载、自测、出现在可用版本里，复制进容器后成员能运行但不能修改；pi 0.73.1 走"镜像里已有"的路径；没有安装的版本自测会失败。开发过程中也用同一套代码跑通了 Codex 0.162.1 和 Claude Code 2.1.299。
 
 ## 十 后续

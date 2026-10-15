@@ -2017,6 +2017,7 @@ describe('agent updates', () => {
         previous_version: null,
         requested_at: '2026-10-15T00:00:00Z',
         activated_at: null,
+        kind: 'update',
       },
     });
 
@@ -2116,6 +2117,34 @@ describe('agent updates', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
     await waitFor(() => expect(startUpdate).toHaveBeenCalledWith('claude-code', '2.1.300'));
     expect(await screen.findByRole('progressbar')).toBeInTheDocument();
+  });
+
+  it('says when a server could not download a chosen version, and retries it', async () => {
+    listUpdates.mockResolvedValue({
+      runtimes: [
+        update({
+          current_version: '2.1.235',
+          upgrade: {
+            ...downloading(0).upgrade!,
+            version: '2.1.235',
+            state: 'failed',
+            error: 'runner-b: npm could not download claude-code 2.1.235',
+            activated_at: '2026-10-15T00:05:00Z',
+            kind: 'selection',
+          },
+        }),
+      ],
+    });
+    startUpdate.mockResolvedValue({ runtimes: [update({ current_version: '2.1.235' })] });
+    renderSettings('Agent versions');
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Some servers could not download 2.1.235; they start new chats on their own default. ' +
+        'runner-b: npm could not download',
+    );
+    // A chosen version is not an update: there is nothing to roll back to.
+    expect(screen.queryByRole('button', { name: /Roll back/ })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(startUpdate).toHaveBeenCalledWith('claude-code', '2.1.235'));
   });
 
   it('says when the agent is current, and why it could not check', async () => {

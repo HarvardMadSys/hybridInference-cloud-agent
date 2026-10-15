@@ -141,9 +141,24 @@ def _run_once(downloads: RuntimeDownloads) -> _Job | None:
     """One pass of the worker loop, on this thread."""
     job = downloads._next(BASE)
     if job is not None:
-        downloads._attempted[job.target.runtime] = (job.target.nonce, job.base_id)
+        downloads._attempted[(job.target.runtime, job.target.version)] = (
+            job.target.nonce,
+            job.base_id,
+        )
         downloads._download(job)
     return job
+
+
+def _reported(
+    downloads: RuntimeDownloads, version: str = "2.1.300", runtime: str = "claude-code"
+) -> dict[str, Any]:
+    """This host's report on one target."""
+    (report,) = (
+        report
+        for report in downloads.report()
+        if (report["runtime"], report["version"]) == (runtime, version)
+    )
+    return report
 
 
 # ── the install ───────────────────────────────────────────────────────────
@@ -153,7 +168,7 @@ def test_only_npm_has_a_network_and_only_a_checked_version_is_kept(docker):
     probe = Probe()
     changes: list[dict[str, Any]] = []
     downloads = _downloads(probe)
-    downloads._on_change = lambda: changes.append(downloads.report()["claude-code"])
+    downloads._on_change = lambda: changes.append(_reported(downloads))
     downloads.apply([_target()])
 
     assert _run_once(downloads) is not None
@@ -205,7 +220,7 @@ def test_a_failed_fetch_is_reported_and_not_retried_until_asked_again(docker):
 
     _run_once(downloads)
 
-    report = downloads.report()["claude-code"]
+    report = _reported(downloads)
     assert report["state"] == "failed"
     assert report["error"].startswith("npm could not download claude-code 2.1.300:")
     assert "ECONNRESET" in report["error"]
@@ -223,7 +238,7 @@ def test_a_binary_reporting_another_version_is_not_kept(docker):
 
     _run_once(downloads)
 
-    assert downloads.report()["claude-code"]["error"].startswith(
+    assert _reported(downloads)["error"].startswith(
         "claude-code 2.1.300 reports a different version"
     )
     assert probe.calls == []
@@ -239,13 +254,16 @@ def test_a_version_that_fails_its_check_is_removed(docker):
 
     _run_once(downloads)
 
-    assert downloads.report()["claude-code"] == {
-        "version": "2.1.300",
-        "nonce": NONCE,
-        "state": "failed",
-        "progress": 0,
-        "error": "claude-code 2.1.300 completed a turn without the model's answer",
-    }
+    assert downloads.report() == [
+        {
+            "runtime": "claude-code",
+            "version": "2.1.300",
+            "nonce": NONCE,
+            "state": "failed",
+            "progress": 0,
+            "error": "claude-code 2.1.300 completed a turn without the model's answer",
+        }
+    ]
     assert docker.ran("tag") == []
     assert discover("docker", NAMESPACE) == []
 
@@ -255,7 +273,7 @@ def test_a_version_the_image_already_holds_is_ready_at_once(docker):
     downloads.apply([_target("2.1.220")])
 
     assert _run_once(downloads) is None
-    assert downloads.report()["claude-code"]["state"] == "ready"
+    assert _reported(downloads, "2.1.220")["state"] == "ready"
     assert docker.ran("create") == []
 
 
@@ -282,12 +300,43 @@ def test_a_withdrawn_or_replaced_target_takes_its_report_with_it(docker):
     downloads = _downloads()
     downloads.apply([_target()])
     _run_once(downloads)
-    assert "claude-code" in downloads.report()
+    assert _reported(downloads)["state"] == "ready"
 
     downloads.apply([_target("2.1.301", nonce="e" * 32)])
-    assert downloads.report() == {}
+    assert downloads.report() == []
     downloads.apply([])
     assert downloads._targets == {}
+
+
+def test_the_version_in_use_is_held_beside_the_update_in_the_order_sent(docker):
+    """A host that joins mid-update must still run what every other host runs."""
+    docker.scripts_output = "2.1.235 (Claude Code)\n"
+    downloads = _downloads()
+    held = _target("2.1.235", nonce="a" * 32)
+    downloads.apply([held, _target(), _target("2.1.299", nonce="b" * 32)])
+    # Two per runtime: a third is not a control plane of this release.
+    assert sorted(version for _, version in downloads._targets) == ["2.1.235", "2.1.300"]
+
+    first = _run_once(downloads)
+    assert first is not None and first.target.version == "2.1.235"
+    docker.scripts_output = "2.1.300 (Claude Code)\n"
+    second = _run_once(downloads)
+    assert second is not None and second.target.version == "2.1.300"
+    assert _run_once(downloads) is None
+    assert {(report["version"], report["state"]) for report in downloads.report()} == {
+        ("2.1.235", "ready"),
+        ("2.1.300", "ready"),
+    }
+    assert sorted(image.version for image in discover("docker", NAMESPACE)) == [
+        "2.1.235",
+        "2.1.300",
+    ]
+
+    # The update switched new chats: the held version is no longer sent, and
+    # its report goes, but the image stays for any chat or rollback that needs it.
+    downloads.apply([_target()])
+    assert [report["version"] for report in downloads.report()] == ["2.1.300"]
+    assert "2.1.235" in {image.version for image in discover("docker", NAMESPACE)}
 
 
 def test_a_restarted_runner_removes_what_a_stopped_download_left(docker):

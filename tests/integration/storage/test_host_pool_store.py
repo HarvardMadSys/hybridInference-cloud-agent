@@ -3127,13 +3127,27 @@ async def test_physical_server_grouping_preserves_deployment_identity_and_labels
 # ── agent updates from the admin Settings page ───────────────────────────
 
 
-async def _offering(hosts: PostgresHostPoolRepository, host: str, menu: list[str], **report):
+async def _offering(
+    hosts: PostgresHostPoolRepository, host: str, menu: list[str], reports: list | None = None
+):
     await hosts.record_host_heartbeat(
         host=host,
         runtime_versions={"claude-code": "2.1.220"},
         runtime_versions_available={"claude-code": menu},
-        runtime_downloads=report or None,
+        runtime_downloads=reports,
     )
+
+
+async def _age_record(db, runtime: str, before: str) -> None:
+    """Pretend a record was made long ago, so keeping its cutoff is visible."""
+    async with db.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_runner_policy "
+            "SET runtime_upgrades = jsonb_set(runtime_upgrades, ARRAY[$1, 'before'], to_jsonb($2::text)) "
+            "WHERE id",
+            runtime,
+            before,
+        )
 
 
 async def test_an_update_waits_for_every_online_host_then_switches_new_chats(
@@ -3190,38 +3204,138 @@ async def test_with_no_host_online_nothing_switches(store, hosts: PostgresHostPo
 async def test_a_heartbeat_stores_its_download_reports(store, hosts: PostgresHostPoolRepository):
     await _enrol(store, "runner-a", hosts=hosts)
     report = {
+        "runtime": "claude-code",
         "version": "2.1.300",
         "nonce": "n" * 32,
         "state": "downloading",
         "progress": 55,
         "error": None,
     }
+    held = {**report, "version": "2.1.235", "state": "ready", "progress": 100}
 
-    await _offering(hosts, "runner-a", ["2.1.220"], **{"claude-code": report})
+    await _offering(hosts, "runner-a", ["2.1.220"], [report, held])
     await hosts.record_host_heartbeat(host="runner-a")  # reports nothing: keeps it
 
     _, _, rows = await hosts.runtime_upgrade_snapshot()
-    assert rows[0]["runtime_downloads"] == {"claude-code": report}
+    assert rows[0]["runtime_downloads"] == [report, held]
 
 
-async def test_retrying_keeps_the_rollback_and_a_hand_picked_version_withdraws_the_update(
-    store, hosts: PostgresHostPoolRepository
-):
+async def test_a_retry_changes_only_the_nonce(db, store, hosts: PostgresHostPoolRepository):
+    """Same cutoff, same rollback, same switch: only the request to try again is new."""
     await _menu_host(store, "runner-a", hosts=hosts)  # offers 2.1.220 and 2.1.235
     assert await hosts.set_runtime_version(runtime="claude-code", version="2.1.235")
 
     first = await hosts.request_runtime_upgrade(
         runtime="claude-code", version="2.1.300", requested_by="admin@test"
     )
+    await _age_record(db, "claude-code", "2026-01-01T00:00:00Z")
     retried = await hosts.request_runtime_upgrade(
         runtime="claude-code", version="2.1.300", requested_by="admin@test"
     )
-    # A retry is a new request, and still rolls back to what chats used before.
     assert retried["nonce"] != first["nonce"]
+    # Hosts that already hold it keep the tree they installed; a host retrying
+    # must resolve the same one.
+    assert retried["before"] == "2026-01-01T00:00:00Z"
     assert retried["previous_version"] == "2.1.235"
 
-    assert await hosts.set_runtime_version(runtime="claude-code", version="2.1.220")
+    await _offering(hosts, "runner-a", ["2.1.220", "2.1.235", "2.1.300"])
+    assert await hosts.activate_ready_runtime_upgrades() == ["claude-code"]
+    switched, _, _ = await hosts.runtime_upgrade_snapshot()
+
+    # A host that joined later failed, and the admin pressed Try again on a
+    # done update: it must not become its own rollback, nor switch again.
+    again = await hosts.request_runtime_upgrade(
+        runtime="claude-code", version="2.1.300", requested_by="admin@test"
+    )
+    assert again["nonce"] != retried["nonce"]
+    assert again["previous_version"] == "2.1.235"
+    assert again["before"] == "2026-01-01T00:00:00Z"
+    assert again["activated_at"] == switched["claude-code"]["activated_at"]
+    _, _, selected, _ = await hosts.runner_pool()
+    assert selected == {"claude-code": "2.1.300"}
+
+
+async def test_until_an_update_switches_hosts_also_hold_the_version_in_use(
+    db, store, hosts: PostgresHostPoolRepository
+):
+    """A host joining mid-update, or after it failed, must run what the others run."""
+    await _menu_host(store, "runner-a", menu=["2.1.220", "2.1.235"], hosts=hosts)
+    assert await hosts.set_runtime_version(runtime="claude-code", version="2.1.235")
+    await _age_record(db, "claude-code", "2026-01-01T00:00:00Z")
+    in_use = (await hosts.runtime_download_targets())[0]
+    assert (in_use["version"], in_use["before"]) == ("2.1.235", "2026-01-01T00:00:00Z")
+
+    update = await hosts.request_runtime_upgrade(
+        runtime="claude-code", version="2.1.300", requested_by="admin@test"
+    )
+    assert update["previous_version"] == "2.1.235"
+    assert await hosts.runtime_download_targets() == [
+        in_use,
+        {
+            "runtime": "claude-code",
+            "version": "2.1.300",
+            "before": update["before"],
+            "nonce": update["nonce"],
+        },
+    ]
+    # Replacing a pending update keeps holding the same version in use.
+    later = await hosts.request_runtime_upgrade(
+        runtime="claude-code", version="2.1.301", requested_by="admin@test"
+    )
+    assert later["previous_version"] == "2.1.235"
+    assert [t["version"] for t in await hosts.runtime_download_targets()] == ["2.1.235", "2.1.301"]
+
+    await _offering(hosts, "runner-a", ["2.1.220", "2.1.235", "2.1.301"])
+    assert await hosts.activate_ready_runtime_upgrades() == ["claude-code"]
+    # Switched: only the update is sent; hosts keep their copy for a rollback.
+    assert [t["version"] for t in await hosts.runtime_download_targets()] == ["2.1.301"]
+
+
+async def test_rolling_back_keeps_the_version_on_every_host(
+    db, store, hosts: PostgresHostPoolRepository
+):
+    """A host joining after a rollback downloads the rolled-back version too."""
+    await _menu_host(store, "runner-a", menu=["2.1.220", "2.1.235"], hosts=hosts)
+    assert await hosts.set_runtime_version(runtime="claude-code", version="2.1.235")
+    await _age_record(db, "claude-code", "2026-01-01T00:00:00Z")
+    await hosts.request_runtime_upgrade(
+        runtime="claude-code", version="2.1.300", requested_by="admin@test"
+    )
+    await _offering(hosts, "runner-a", ["2.1.220", "2.1.235", "2.1.300"])
+    assert await hosts.activate_ready_runtime_upgrades() == ["claude-code"]
+
+    # What Roll back sends: the version the update replaced.
+    assert await hosts.set_runtime_version(runtime="claude-code", version="2.1.235")
+
+    (target,) = await hosts.runtime_download_targets()
+    # With the cutoff it was first downloaded with, so a new host installs
+    # the tree every other host holds.
+    assert (target["version"], target["before"]) == ("2.1.235", "2026-01-01T00:00:00Z")
+    upgrades, selection, _ = await hosts.runtime_upgrade_snapshot()
+    assert selection == {"claude-code": "2.1.235"}
+    assert upgrades["claude-code"]["kind"] == "selection"
+    assert upgrades["claude-code"]["activated_at"]
+    # An update finishing late cannot switch new chats away from the choice.
+    assert await hosts.activate_ready_runtime_upgrades() == []
+
+
+async def test_a_hand_picked_version_replaces_the_update_and_the_default_clears_it(
+    store, hosts: PostgresHostPoolRepository
+):
+    await _menu_host(store, "runner-a", hosts=hosts)  # offers 2.1.220 and 2.1.235
+    await hosts.request_runtime_upgrade(
+        runtime="claude-code", version="2.1.300", requested_by="admin@test"
+    )
+
+    assert await hosts.set_runtime_version(runtime="claude-code", version="2.1.235")
+    assert [t["version"] for t in await hosts.runtime_download_targets()] == ["2.1.235"]
+    await _offering(hosts, "runner-a", ["2.1.220", "2.1.235", "2.1.300"])
+    assert await hosts.activate_ready_runtime_upgrades() == []
+    _, _, selected, _ = await hosts.runner_pool()
+    assert selected == {"claude-code": "2.1.235"}
+
+    # The image default is on every host: nothing left to hand out.
+    assert await hosts.set_runtime_version(runtime="claude-code", version=None)
     assert await hosts.runtime_download_targets() == []
     upgrades, selection, _ = await hosts.runtime_upgrade_snapshot()
-    assert upgrades == {}
-    assert selection == {"claude-code": "2.1.220"}
+    assert (upgrades, selection) == ({}, {})

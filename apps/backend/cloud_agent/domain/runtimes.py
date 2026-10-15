@@ -12,6 +12,13 @@ from cloud_agent.logging_utils import get_logger
 
 logger = get_logger(__name__)
 
+#: An agent update record (``agent_runner_policy.runtime_upgrades``) that the
+#: admin's Update button made: the Settings page follows it through.
+KIND_UPDATE = "update"
+#: One an admin's own choice of version made, Roll back included. It only keeps
+#: the chosen version on every host, so the page shows it only if that fails.
+KIND_SELECTION = "selection"
+
 
 def resolve_runtime_version(
     *,

@@ -96,6 +96,7 @@ async def _snapshot(store: _UpgradeStorage, registry: RegistryClient) -> Runtime
                     previous_version=state.previous_version,
                     requested_at=state.requested_at,
                     activated_at=state.activated_at,
+                    kind=state.kind,  # type: ignore[arg-type]
                 ),
             )
         )

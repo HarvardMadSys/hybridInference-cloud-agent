@@ -28,7 +28,9 @@ from cloud_agent_shared.runtime_downloads import (
     DOWNLOAD_ERROR_MAX_CHARS,
     DownloadReport,
     DownloadTarget,
+    find_report,
     is_exact_version,
+    read_reports,
     reports_version,
 )
 
@@ -51,13 +53,21 @@ def _host(name: str, *, available=None, report=None, status="online", enrolled=T
         "enrolled": enrolled,
         "runtime_versions": {"claude-code": "2.1.220"},
         "runtime_versions_available": {"claude-code": available or ["2.1.220"]},
-        "runtime_downloads": {} if report is None else {"claude-code": report},
+        "runtime_downloads": [] if report is None else [report],
     }
 
 
-def _report(state: str, progress: int = 0, *, nonce: str = NONCE, error: str | None = None):
+def _report(
+    state: str,
+    progress: int = 0,
+    *,
+    nonce: str = NONCE,
+    error: str | None = None,
+    version: str = "2.1.300",
+):
     return {
-        "version": "2.1.300",
+        "runtime": "claude-code",
+        "version": version,
         "nonce": nonce,
         "state": state,
         "progress": progress,
@@ -160,8 +170,26 @@ def test_a_report_is_bounded_and_validated():
         _report("downloading", -1),
         {**_report("downloading"), "progress": True},
         {**_report("downloading"), "version": "2.1"},
+        {**_report("downloading"), "runtime": None},
+        # Unhashable states are dropped like any other, not raised on.
+        {**_report("downloading"), "state": {"nested": "object"}},
+        {**_report("downloading"), "state": ["downloading"]},
     ):
         assert DownloadReport.from_wire(broken) is None
+
+
+def test_reports_are_read_one_per_target_and_bounded():
+    other = _report("ready", 100, version="2.1.235")
+    reports = read_reports([_report("downloading", 5), other, "junk", _report("teleporting")])
+    assert [(report.version, report.state) for report in reports] == [
+        ("2.1.300", "downloading"),
+        ("2.1.235", "ready"),
+    ]
+    assert read_reports({"claude-code": _report("ready")}) == []
+    assert len(read_reports([_report("ready")] * 100)) == 1
+    found = find_report([_report("downloading", 5), other], "claude-code", "2.1.235")
+    assert found is not None and found.state == "ready"
+    assert find_report([other], "codex", "2.1.235") is None
 
 
 # ── reducing the hosts' reports ───────────────────────────────────────────
@@ -227,6 +255,41 @@ def test_a_done_update_stays_done_while_a_host_checks_it_again():
     # …unless that check fails, which the admin has to hear about.
     failed = upgrade_state("claude-code", done, [_host("a", report=_report("failed", error="x"))])
     assert failed is not None and failed.state == STATE_FAILED
+
+
+def test_a_report_on_the_version_in_use_is_not_the_updates():
+    """While an update downloads, hosts also hold the version new chats use."""
+    state = upgrade_state(
+        "claude-code",
+        TARGET,
+        [_host("a", report=_report("failed", version="2.1.235", error="held copy"))],
+    )
+    assert state is not None
+    assert (state.state, state.error) == (STATE_DOWNLOADING, None)
+
+
+def test_a_chosen_version_is_shown_only_when_a_host_cannot_download_it():
+    """Roll back and a hand-picked version keep it on every host; no update to follow."""
+    chosen = {
+        **TARGET,
+        "kind": "selection",
+        "version": "2.1.235",
+        "previous_version": None,
+        "activated_at": "2026-10-15T00:05:00+00:00",
+    }
+    quiet = [_host("a", report=_report("downloading", 5, version="2.1.235"))]
+    assert upgrade_state("claude-code", chosen, quiet) is None
+    failed = upgrade_state(
+        "claude-code",
+        chosen,
+        [_host("b", report=_report("failed", version="2.1.235", error="npm is down"))],
+    )
+    assert failed is not None
+    assert (failed.state, failed.kind, failed.error) == (
+        STATE_FAILED,
+        "selection",
+        "b: npm is down",
+    )
 
 
 def test_no_target_is_no_update():

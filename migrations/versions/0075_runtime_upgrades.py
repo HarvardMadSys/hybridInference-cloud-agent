@@ -3,10 +3,11 @@
 Revision ID: 0075_runtime_upgrades
 Revises: 0074_host_removal_pending
 
-``agent_runner_policy.runtime_upgrades`` holds one target per runtime: the
+``agent_runner_policy.runtime_upgrades`` holds one record per runtime: the
 version every host should download, the instant its dependencies resolve at,
-and whether new chats have been switched to it yet. Each heartbeat answer
-carries the targets, and each host reports how far it has got in
+whether new chats have been switched to it yet, and the download of the version
+they use until then. Each heartbeat answer carries the versions to hold, and
+each host reports how far it has got with each in
 ``agent_runner_hosts.runtime_downloads``. Both are additive and empty by
 default, so a control plane or host from before this revision ignores them.
 """
@@ -30,8 +31,8 @@ def upgrade() -> None:
 
         ALTER TABLE agent_runner_hosts
             ADD COLUMN runtime_downloads JSONB,
-            ADD CONSTRAINT runner_hosts_runtime_downloads_object
-                CHECK (runtime_downloads IS NULL OR jsonb_typeof(runtime_downloads) = 'object')
+            ADD CONSTRAINT runner_hosts_runtime_downloads_array
+                CHECK (runtime_downloads IS NULL OR jsonb_typeof(runtime_downloads) = 'array')
         """
     )
 
@@ -41,7 +42,7 @@ def downgrade() -> None:
     op.execute(
         """
         ALTER TABLE agent_runner_hosts
-            DROP CONSTRAINT runner_hosts_runtime_downloads_object,
+            DROP CONSTRAINT runner_hosts_runtime_downloads_array,
             DROP COLUMN runtime_downloads;
 
         ALTER TABLE agent_runner_policy

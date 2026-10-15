@@ -78,7 +78,7 @@ def test_an_update_downloads_checks_offers_and_runs_in_a_chat(namespace, runtime
         deadline = time.monotonic() + 1200
         report: dict = {}
         while time.monotonic() < deadline:
-            report = downloads.report().get(runtime) or {}
+            report = next((item for item in downloads.report() if item["version"] == version), {})
             if report.get("state") in {"ready", "failed"}:
                 break
             time.sleep(1)

@@ -23,13 +23,14 @@ from urllib.parse import quote
 
 import httpx
 
+from cloud_agent.domain.runtimes import KIND_SELECTION, KIND_UPDATE
 from cloud_agent.host_pool import HOST_ONLINE
 from cloud_agent_shared.runtime_catalog import downloadable_runtimes
 from cloud_agent_shared.runtime_downloads import (
     DEFAULT_REGISTRY_URL,
     FAILED,
     READY,
-    DownloadReport,
+    find_report,
     is_exact_version,
 )
 
@@ -145,6 +146,9 @@ class UpgradeState:
     previous_version: str | None
     requested_at: str | None
     activated_at: str | None
+    #: ``update`` for the Update button's, ``selection`` for an admin's own
+    #: choice that some host could not download.
+    kind: str = KIND_UPDATE
 
 
 def _eligible(hosts: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -174,6 +178,10 @@ def upgrade_state(
 
     A host checking a done update again — after a new sandbox image — does not
     put the page back into "downloading": new chats already use the version.
+
+    A version the admin chose by hand, Roll back included, is shown only when
+    a host failed to download it: there is no update to follow, but a host
+    without it starts new chats on its own default.
     """
     if not isinstance(target, dict) or not is_exact_version(target.get("version")):
         return None
@@ -183,8 +191,8 @@ def upgrade_state(
     failures: list[str] = []
     progress: list[int] = []
     for host in eligible:
-        report = DownloadReport.from_wire(host["runtime_downloads"].get(runtime))
-        if report is not None and (report.version, report.nonce) != (version, nonce):
+        report = find_report(host["runtime_downloads"], runtime, version)
+        if report is not None and report.nonce != nonce:
             report = None  # about an earlier request
         if report is not None and report.state == FAILED:
             failures.append(f"{host['host']}: {report.error or 'download failed'}")
@@ -195,6 +203,9 @@ def upgrade_state(
         else:
             progress.append(0 if report is None else report.progress)
     activated = target.get("activated_at")
+    kind = KIND_SELECTION if target.get("kind") == KIND_SELECTION else KIND_UPDATE
+    if kind == KIND_SELECTION and not failures:
+        return None
     if failures:
         state, error = STATE_FAILED, "; ".join(failures)
     elif activated:
@@ -219,6 +230,7 @@ def upgrade_state(
         previous_version=target.get("previous_version"),
         requested_at=target.get("requested_at"),
         activated_at=activated,
+        kind=kind,
     )
 
 

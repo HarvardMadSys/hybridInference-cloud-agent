@@ -213,13 +213,13 @@ class FakeHostPoolStore(AllCapabilities):
         settings_local: dict[str, Any] | None = None,
         sandbox_archive_settings_applied_revision: int | None = None,
         sandbox_archive_settings_revision_reported: bool = False,
-        runtime_downloads: dict[str, Any] | None = None,
+        runtime_downloads: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any] | None:
         row = self.rows.get(host)
         if row is None:
             return None
         if runtime_downloads is not None:
-            row["runtime_downloads"] = dict(runtime_downloads)
+            row["runtime_downloads"] = [dict(report) for report in runtime_downloads]
         if row["status"] in (HOST_ENROLLING, HOST_OFFLINE):
             row["status"] = HOST_ONLINE
             row["drain_fence_epoch"] = uuid4()
@@ -1138,6 +1138,7 @@ async def test_a_heartbeat_keeps_only_download_reports_it_can_read(client):
     async_client, store = client
     credential = await _enroll(async_client, store)
     report = {
+        "runtime": "claude-code",
         "version": "2.1.300",
         "nonce": _TARGET["nonce"],
         "state": "downloading",
@@ -1147,18 +1148,22 @@ async def test_a_heartbeat_keeps_only_download_reports_it_can_read(client):
     response = await async_client.post(
         "/v1/agent/host/heartbeat",
         json={
-            "runtime_downloads": {
-                "claude-code": report,
-                # Kilo is never downloaded, and a state nobody defined is unreadable.
-                "kilo": report,
-                "codex": {**report, "state": "teleporting"},
-            }
+            "runtime_downloads": [
+                report,
+                # Kilo is never downloaded, and a state nobody defined is unreadable…
+                {**report, "runtime": "kilo"},
+                {**report, "runtime": "codex", "state": "teleporting"},
+                # …nor is one that is not even a string.
+                {**report, "runtime": "codex", "state": {"not": "a state"}},
+                {**report, "runtime": "codex", "state": ["ready"]},
+                "junk",
+            ]
         },
         headers={"Authorization": f"Bearer {credential}"},
     )
 
     assert response.status_code == 200
-    assert store.rows["runner-a"]["runtime_downloads"] == {"claude-code": {**report, "error": None}}
+    assert store.rows["runner-a"]["runtime_downloads"] == [{**report, "error": None}]
 
 
 async def test_the_last_host_to_hold_a_version_switches_new_chats_to_it(client):

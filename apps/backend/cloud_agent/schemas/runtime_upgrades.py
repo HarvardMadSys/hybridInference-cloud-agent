@@ -29,6 +29,14 @@ class RuntimeUpgradeProgress(BaseModel):
     )
     requested_at: str | None = None
     activated_at: str | None = None
+    kind: Literal["update", "selection"] = Field(
+        "update",
+        description=(
+            "update for one started with the Update button; selection for a "
+            "version an admin chose (Roll back included) that some online host "
+            "could not download. A selection is reported only when it failed."
+        ),
+    )
 
 
 class RuntimeUpgradeItem(BaseModel):

@@ -12,7 +12,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Mapping, Sequence
     from datetime import datetime
     from uuid import UUID
 
@@ -157,7 +157,7 @@ class HostPoolRepository(Protocol):
         settings_local: Mapping[str, int | float] | None = None,
         sandbox_archive_settings_applied_revision: int | None = None,
         sandbox_archive_settings_revision_reported: bool = False,
-        runtime_downloads: Mapping[str, Mapping[str, Any]] | None = None,
+        runtime_downloads: Sequence[Mapping[str, Any]] | None = None,
     ) -> dict[str, Any] | None:
         """Record a heartbeat, promoting the host to ``online`` when it may.
 
@@ -431,18 +431,27 @@ class HostPoolRepository(Protocol):
         the host rows it is checked against — so the two admin writes and the
         claim's shared read serialize with no cycle to deadlock on.
 
-        A choice made here also withdraws that runtime's update target.
+        A choice made here also replaces that runtime's update; a version an
+        agent can download stays a target, so every host keeps holding it.
         """
         ...
 
     async def runtime_download_targets(self) -> list[dict[str, str]]:
-        """The agent versions every heartbeat answer tells hosts to hold."""
+        """The agent versions every heartbeat answer tells hosts to hold.
+
+        At most two per runtime: the update's version and, until it switches
+        new chats, the downloaded version they use now.
+        """
         ...
 
     async def request_runtime_upgrade(
         self, *, runtime: str, version: str, requested_by: str
     ) -> dict[str, Any]:
-        """Ask every host to download ``version``; a new nonce each time."""
+        """Ask every host to download ``version``; asking again is a retry.
+
+        A retry changes only the nonce: the dependency cutoff, what Roll back
+        returns to and whether new chats were switched stay as they were.
+        """
         ...
 
     async def activate_ready_runtime_upgrades(self) -> list[str]:

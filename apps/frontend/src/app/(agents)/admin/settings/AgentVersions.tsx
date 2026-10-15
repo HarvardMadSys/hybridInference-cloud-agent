@@ -127,6 +127,26 @@ export function UpdateControls({
       />
     );
   }
+  if (upgrade?.state === 'failed' && upgrade.kind === 'selection') {
+    return (
+      <div className="mt-3 space-y-2">
+        <p role="alert" className="break-words text-xs leading-5 text-status-error">
+          Some servers could not download {upgrade.version}; they start new chats on their own
+          default.{upgrade.error ? ` ${upgrade.error}` : ''}
+        </p>
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => onUpdate(item.runtime, upgrade.version)}
+            className="ui-button ui-button-primary min-h-11"
+          >
+            Try again
+          </button>
+        </div>
+      </div>
+    );
+  }
   if (upgrade?.state === 'failed') {
     return (
       <div className="mt-3 space-y-2">
