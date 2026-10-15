@@ -1685,7 +1685,7 @@ class PostgresHostPoolRepository:
                 "enrolled": bool(row["enrolled"]),
                 "runtime_versions": load_json(row["runtime_versions"]) or {},
                 "runtime_versions_available": load_json(row["runtime_versions_available"]) or {},
-                "runtime_downloads": load_json(row["runtime_downloads"]) or {},
+                "runtime_downloads": load_json(row["runtime_downloads"]) or [],
             }
             for row in rows
         ]
