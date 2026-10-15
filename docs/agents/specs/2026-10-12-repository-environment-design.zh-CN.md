@@ -4,6 +4,8 @@
 
 > 2026-10-15 产品调整：允许 owner 设置 `OPENAI_API_KEY`、`OPENAI_BASE_URL`、`ANTHROPIC_API_KEY`、`ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_BASE_URL`。agent CLI 自身继续使用平台 grant，这些值只交给 CLI 运行的命令，做法见 §11。其余推理与 CLI 名字仍按 §5 保留。
 
+> 2026-10-15 产品调整：新增安装快照。新任务可以从同一环境、同一安装期配置的安装结果启动，跳过安装脚本，见 [环境安装快照设计](2026-10-15-environment-install-snapshots-design.zh-CN.md)。§12 第一行不再适用。
+
 日期：2026-10-12。状态：实现与设计在同一个功能 PR 中提交评审，合并后生效。
 
 交付方式：**一个功能 PR，目标分支 `dev`。本文列入交付范围的功能一起实现、测试和验收，不拆成多个发布阶段。**

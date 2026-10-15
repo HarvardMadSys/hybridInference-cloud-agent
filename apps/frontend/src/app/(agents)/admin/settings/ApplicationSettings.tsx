@@ -12,259 +12,14 @@ import {
 import { APIError, getErrorMessage } from '@/lib/utils/errors';
 
 import { SettingsSection } from '../SettingsSection';
+import { ApplicationSettingGroup, SettingsIcon } from './ApplicationSettingGroup';
 import {
   applicationCategory,
   applicationSettingGroup,
   applicationSettingPriority,
 } from './settingsOrganization';
 
-const INPUT_CLASS =
-  'ui-input min-h-11 w-full disabled:cursor-not-allowed disabled:opacity-50 aria-[invalid=true]:border-status-error';
 const BUTTON_CLASS = 'ui-button ui-button-secondary min-h-11';
-const ARCHIVE_BUCKET = 'sandbox_archive.bucket';
-const ARCHIVE_PREFIX = 'sandbox_archive.prefix';
-
-type ParsedValue =
-  | { value: AdminSettingValue; additionalChanges?: Record<string, AdminSettingValue> }
-  | { error: string };
-
-function parseArchiveBucket(draft: string): ParsedValue {
-  if (!draft) return { value: '' };
-  const uri = draft.startsWith('s3://');
-  // Keep raw components: URL parsers can silently normalize unsafe path segments.
-  const components = uri ? /^s3:\/\/([^/]+)(?:\/(.*))?$/.exec(draft) : null;
-  const bucket = uri ? (components?.[1] ?? '') : draft;
-  if (
-    /\s/.test(draft) ||
-    !/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(bucket) ||
-    /^\d{1,3}(?:\.\d{1,3}){3}$/.test(bucket) ||
-    /\.\.|\.-|-\./.test(bucket) ||
-    /^(?:xn--|sthree-|amzn-s3-demo-)/.test(bucket) ||
-    /(?:-s3alias|--ol-s3|\.mrap|--x-s3|--table-s3)$/.test(bucket)
-  ) {
-    return { error: 'Enter a valid S3 bucket name or an S3 URI such as s3://bucket/prefix.' };
-  }
-  if (!uri) return { value: bucket };
-  const path = components?.[2] ?? '';
-  const prefix = path.endsWith('/') ? path.slice(0, -1) : path;
-  if (
-    path.startsWith('/') ||
-    path.includes('//') ||
-    new TextEncoder().encode(prefix).length > 512 ||
-    (prefix &&
-      (!/^[a-zA-Z0-9_./-]+$/.test(prefix) ||
-        prefix.split('/').some((part) => !part || part === '.' || part === '..')))
-  ) {
-    return {
-      error:
-        'Enter an S3 URI with a prefix of at most 512 bytes using letters, numbers, underscores, dots, hyphens, and single slashes. Do not use . or .. path segments, query strings, or fragments.',
-    };
-  }
-  return { value: bucket, additionalChanges: { [ARCHIVE_PREFIX]: prefix } };
-}
-
-function displayValue(value: AdminSettingValue): string {
-  return typeof value === 'boolean' ? (value ? 'Enabled' : 'Disabled') : String(value);
-}
-
-function parseValue(definition: AdminSettingDefinition, draft: string): ParsedValue {
-  if (definition.kind === 'boolean') return { value: draft === 'true' };
-  if (definition.kind === 'string') {
-    if (definition.key === ARCHIVE_BUCKET) return parseArchiveBucket(draft);
-    if (definition.choices?.length && !definition.choices.includes(draft)) {
-      return { error: 'Choose one of the available values.' };
-    }
-    if (
-      draft &&
-      definition.minimum_bytes &&
-      new TextEncoder().encode(draft).length < definition.minimum_bytes
-    ) {
-      return { error: `Enter a value of at least ${definition.minimum_bytes} bytes.` };
-    }
-    return { value: draft };
-  }
-  const value = Number(draft);
-  if (draft.trim() === '' || !Number.isFinite(value)) return { error: 'Enter a number.' };
-  if (definition.kind === 'integer' && !Number.isInteger(value)) {
-    return { error: 'Enter a whole number.' };
-  }
-  if (definition.minimum !== undefined && value < definition.minimum) {
-    return { error: `Enter a value of at least ${definition.minimum}.` };
-  }
-  if (definition.maximum !== undefined && value > definition.maximum) {
-    return { error: `Enter a value no greater than ${definition.maximum}.` };
-  }
-  return { value };
-}
-
-function SettingField({
-  definition,
-  value,
-  configured,
-  busy,
-  onSave,
-}: {
-  definition: AdminSettingDefinition;
-  value: AdminSettingValue | null | undefined;
-  configured: boolean;
-  busy: boolean;
-  onSave: (
-    key: string,
-    value: AdminSettingValue | null,
-    additionalChanges?: Record<string, AdminSettingValue>,
-  ) => void;
-}) {
-  const incoming = definition.secret ? '' : String(value ?? definition.default);
-  const [baseline, setBaseline] = useState(incoming);
-  const [draft, setDraft] = useState(incoming);
-  const [error, setError] = useState<string | null>(null);
-  const [multiline, setMultiline] = useState(incoming.includes('\n'));
-  const dirty = draft !== baseline;
-  // Refresh pristine fields, while preserving drafts in this and other rows.
-  useEffect(() => {
-    if (incoming === baseline) return;
-    if (draft === baseline) {
-      setDraft(incoming);
-      if (incoming.includes('\n')) setMultiline(true);
-    }
-    setBaseline(incoming);
-  }, [incoming, baseline, draft]);
-
-  const id = `application-setting-${definition.key}`;
-  const helpId = `${id}-help`;
-  const errorId = `${id}-error`;
-  const inputProps = {
-    id,
-    name: definition.key,
-    value: draft,
-    disabled: busy || definition.read_only,
-    'aria-invalid': error !== null,
-    'aria-describedby': `${helpId}${error ? ` ${errorId}` : ''}`,
-    className: INPUT_CLASS,
-    onChange: (
-      event: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>,
-    ) => {
-      setDraft(event.target.value);
-      setError(null);
-    },
-  };
-
-  return (
-    <div className="border-t border-border py-5 first:border-t-0">
-      <form
-        noValidate
-        tabIndex={-1}
-        className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(240px,360px)] lg:gap-8"
-        onSubmit={(event) => {
-          event.preventDefault();
-          if (busy || !dirty || definition.read_only) return;
-          const parsed = parseValue(definition, draft);
-          if ('error' in parsed) {
-            setError(parsed.error);
-            return;
-          }
-          setError(null);
-          onSave(definition.key, parsed.value, parsed.additionalChanges);
-        }}
-      >
-        <div className="min-w-0">
-          <label htmlFor={id} className="text-sm font-medium text-foreground">
-            {definition.label}
-          </label>
-          <p id={helpId} className="mt-1.5 break-words text-sm leading-6 text-muted">
-            {definition.description}
-            {definition.key === ARCHIVE_BUCKET &&
-              ' Saving an S3 URI replaces the prefix; a bucket-root URI clears it.'}
-          </p>
-          <p className="mt-2 break-words text-xs leading-5 text-muted">
-            {definition.secret
-              ? configured
-                ? 'Configured. Saved values are hidden.'
-                : 'Not configured. Saved values are hidden.'
-              : `Default: ${displayValue(definition.default) || '(empty)'}`}
-          </p>
-        </div>
-        <div className="min-w-0">
-          {definition.kind === 'boolean' ? (
-            <select {...inputProps}>
-              <option value="true">Enabled</option>
-              <option value="false">Disabled</option>
-            </select>
-          ) : definition.choices?.length ? (
-            <select {...inputProps}>
-              {!definition.choices.includes(draft) && <option value={draft}>{draft}</option>}
-              {definition.choices.map((choice) => (
-                <option key={choice} value={choice}>
-                  {choice || '(empty)'}
-                </option>
-              ))}
-            </select>
-          ) : definition.kind === 'string' && multiline ? (
-            <textarea
-              {...inputProps}
-              className={`${INPUT_CLASS} resize-y`}
-              rows={4}
-              autoComplete="off"
-              spellCheck={false}
-            />
-          ) : (
-            <input
-              {...inputProps}
-              type={
-                definition.secret ? 'password' : definition.kind === 'string' ? 'text' : 'number'
-              }
-              autoComplete={definition.secret ? 'new-password' : 'off'}
-              step={definition.kind === 'integer' ? 1 : 'any'}
-              min={definition.minimum}
-              max={definition.maximum}
-              placeholder={
-                definition.secret ? (configured ? 'Replace saved value' : 'Enter value') : undefined
-              }
-            />
-          )}
-          {definition.kind === 'string' && !definition.choices?.length && (
-            <label className="mt-2 flex min-h-9 cursor-pointer items-center gap-2 text-xs text-muted">
-              <input
-                type="checkbox"
-                checked={multiline}
-                disabled={busy || definition.read_only}
-                onChange={(event) => setMultiline(event.target.checked)}
-                aria-label={`Use multiple lines for ${definition.label}`}
-                className="ui-focus-ring h-4 w-4 rounded accent-accent disabled:cursor-not-allowed"
-              />
-              Multiple lines
-            </label>
-          )}
-          <div className="mt-3 flex flex-wrap items-center justify-end gap-2">
-            {dirty && <span className="mr-auto text-xs text-muted">Unsaved changes</span>}
-            <button
-              type="submit"
-              disabled={busy || !dirty || definition.read_only}
-              aria-label={`Save ${definition.label}`}
-              className="ui-button ui-button-primary min-h-11 min-w-16"
-            >
-              Save
-            </button>
-            <button
-              type="button"
-              disabled={busy || definition.read_only}
-              aria-label={`Reset ${definition.label}`}
-              onClick={() => onSave(definition.key, null)}
-              className="ui-button ui-button-ghost min-h-11"
-            >
-              Reset
-            </button>
-          </div>
-          {error && (
-            <p id={errorId} role="alert" className="mt-2 text-sm text-status-error">
-              {error}
-            </p>
-          )}
-        </div>
-      </form>
-    </div>
-  );
-}
 
 export interface ApplicationSettingsOptions {
   onAccessDenied?: (cause: unknown) => void;
@@ -388,11 +143,10 @@ export function useApplicationSettings({
   }, [snapshot, onRevealCategory]);
 
   const save = async (
-    key: string,
-    value: AdminSettingValue | null,
-    additionalChanges?: Record<string, AdminSettingValue>,
-  ) => {
-    if (!enabled || writing.current || revoked.current) return;
+    changes: Record<string, AdminSettingValue | null>,
+    notice: string,
+  ): Promise<boolean> => {
+    if (!enabled || writing.current || revoked.current) return false;
     writing.current = true;
     setBusy(true);
     setError(null);
@@ -401,12 +155,12 @@ export function useApplicationSettings({
     const controller = new AbortController();
     request.current = controller;
     const current = ++sequence.current;
-    const changes = { [key]: value, ...additionalChanges };
     try {
       const next = recoveryToken
         ? await setAgentAdminSettings(changes, controller.signal, recoveryToken)
         : await setAgentAdminSettings(changes, controller.signal);
-      if (!mounted.current || controller.signal.aborted || current !== sequence.current) return;
+      if (!mounted.current || controller.signal.aborted || current !== sequence.current)
+        return false;
       setSnapshot(next);
       // Reset every saved row to its canonical value; unrelated edits stay intact.
       setSaved((previous) => {
@@ -416,17 +170,13 @@ export function useApplicationSettings({
         }
         return updated;
       });
-      const label = next.definitions.find((definition) => definition.key === key)?.label ?? key;
-      setNotice(
-        additionalChanges && ARCHIVE_PREFIX in additionalChanges
-          ? `${label} saved. Prefix set to ${additionalChanges[ARCHIVE_PREFIX] || '(empty)'}.`
-          : value === null
-            ? `${label} reset to its default.`
-            : `${label} saved.`,
-      );
+      setNotice(notice);
+      return true;
     } catch (cause) {
-      if (!mounted.current || controller.signal.aborted || current !== sequence.current) return;
+      if (!mounted.current || controller.signal.aborted || current !== sequence.current)
+        return false;
       fail(cause);
+      return false;
     } finally {
       writing.current = false;
       if (mounted.current) setBusy(false);
@@ -491,18 +241,24 @@ export function ApplicationSettingsHeader({
   return (
     <>
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <h2 className="text-lg font-semibold tracking-tight text-foreground">{title}</h2>
+        <div className="flex flex-wrap items-center gap-3">
+          <h2 className="text-lg font-semibold tracking-tight text-foreground">{title}</h2>
+          <span className="inline-flex items-center gap-1.5 rounded-full border border-border bg-surface-muted/60 px-2.5 py-1 text-[11px] font-medium text-muted">
+            <SettingsIcon kind="lock" className="h-3 w-3" />
+            Changes require review
+          </span>
+        </div>
         <button
           type="button"
           disabled={busy || loading}
           onClick={() => void load()}
-          className={`${BUTTON_CLASS} self-start sm:self-auto`}
+          className="ui-button ui-button-ghost min-h-9 self-start text-xs sm:self-auto [@media(pointer:coarse)]:min-h-11"
         >
           Refresh settings
         </button>
       </div>
       <p className="mt-2 text-sm leading-6 text-muted">
-        Saved settings apply across the deployment. Reset restores the built-in default.
+        View current values or edit a group. Saved changes apply across the deployment.
       </p>
     </>
   );
@@ -598,7 +354,7 @@ export function ApplicationSettingsCategory({
   active: boolean;
   showHeading?: boolean;
 }) {
-  const { groups, snapshot, saved, busy, save, focusField, clearFocusField } = settings;
+  const { groups, focusField, clearFocusField } = settings;
   const definitions = groups.get(category);
   const id = `application-settings-category-${encodeURIComponent(category)}`;
 
@@ -613,21 +369,7 @@ export function ApplicationSettingsCategory({
       return <p className="py-4 text-sm text-muted">No {priority} settings on this page.</p>;
     }
     return [...related].map(([group, fields]) => (
-      <div key={group} className="mt-4 first:mt-0">
-        <h4 className="border-b border-border py-3 text-sm font-semibold text-foreground">
-          {group}
-        </h4>
-        {fields.map((definition) => (
-          <SettingField
-            key={`${definition.key}:${saved[definition.key] ?? 0}`}
-            definition={definition}
-            value={snapshot?.values[definition.key]}
-            configured={snapshot?.secret_configured[definition.key] ?? false}
-            busy={busy}
-            onSave={(key, value, additionalChanges) => void save(key, value, additionalChanges)}
-          />
-        ))}
-      </div>
+      <ApplicationSettingGroup key={group} title={group} fields={fields} settings={settings} />
     ));
   };
 
@@ -636,8 +378,7 @@ export function ApplicationSettingsCategory({
     const input = document.getElementById(`application-setting-${focusField}`);
     const advanced = input?.closest('details');
     if (advanced) advanced.open = true;
-    const target = input?.matches(':disabled') ? input.closest('form') : input;
-    target?.focus();
+    input?.focus();
     input?.scrollIntoView?.({ block: 'center' });
     clearFocusField();
   }, [active, focusField, definitions, clearFocusField]);
@@ -658,9 +399,10 @@ export function ApplicationSettingsCategory({
         </h3>
       )}
       <div className={showHeading ? 'px-4 sm:px-5' : undefined}>
-        <SettingsSection title="Important" description="Main settings for this page.">
-          {renderGroups('important')}
-        </SettingsSection>
+        <div className="mt-5">
+          <h3 className="sr-only">Important</h3>
+          <div>{renderGroups('important')}</div>
+        </div>
         <SettingsSection title="Advanced" description="Connection details and operational tuning.">
           {renderGroups('advanced')}
         </SettingsSection>

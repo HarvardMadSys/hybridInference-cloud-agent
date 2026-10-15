@@ -101,6 +101,12 @@ export interface AgentJobApi {
     | 'published'
     | 'failed'
     | null;
+  /** The newest publication found nothing to publish and opened no PR. */
+  workspace_publication_unchanged?: boolean;
+  /** The pull request the workspace was last published to. */
+  workspace_pr_url?: string | null;
+  /** Turns the owner has not published, or a last publication that failed. */
+  workspace_unpublished_changes?: boolean;
   workspace_epoch?: number | null;
   duration_ms?: number | null;
   /**
@@ -197,6 +203,28 @@ export async function cancelAgentJob(
   const resp = await fetchWithAuth(API_BASE, `/v1/agent/jobs/${encodeURIComponent(jobId)}/cancel`, {
     method: 'POST',
   });
+  return jsonOrThrow(resp);
+}
+
+/** The workspace snapshot a publication request opened, or the one already on its way. */
+export interface AgentThreadPublicationApi {
+  thread_id: string;
+  snapshot_id: number;
+  state: 'pending' | 'capturing' | 'captured' | 'publishing';
+  /** False when a publication of the workspace was already on its way. */
+  requested: boolean;
+}
+
+/**
+ * Push the conversation's workspace to its branch and open or update its
+ * draft PR. The platform never publishes on its own; this is the owner asking.
+ */
+export async function publishAgentThread(threadId: string): Promise<AgentThreadPublicationApi> {
+  const resp = await fetchWithAuth(
+    API_BASE,
+    `/v1/agent/threads/${encodeURIComponent(threadId)}/publish`,
+    { method: 'POST' },
+  );
   return jsonOrThrow(resp);
 }
 

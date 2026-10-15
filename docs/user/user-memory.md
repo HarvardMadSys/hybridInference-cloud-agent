@@ -44,9 +44,9 @@ where it takes precedence over user memory.
 - **Duplicates.** Adding a memory identical to an active one in the same scope,
   ignoring case and final punctuation, returns the existing memory.
 
-In Settings you can add, edit and delete memories, restore archived ones, turn a
-scope off, or clear it. Each memory shows whether an agent saved it or you wrote
-it, and when a task last used it.
+On the Memory page of Settings (`/settings/memory`) you can add, edit and delete
+memories, restore archived ones, turn a scope off, or clear it. Each memory shows
+whether an agent saved it or you wrote it, and when a task last used it.
 
 ### Memory API
 

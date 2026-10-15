@@ -6,12 +6,14 @@ import { getAgentConfig } from '@/lib/api/agents';
 import {
   copyEnvironment,
   deleteEnvironment,
+  deleteEnvironmentSnapshot,
   listEnvironments,
+  rebuildEnvironmentSnapshot,
   setEnvironmentDefault,
 } from '@/lib/api/environments';
 import type { EnvironmentConfig } from '@/lib/api/environments';
 import { EnvironmentDialog } from './EnvironmentDialog';
-import { Badge, TestBadge } from './EnvironmentStatus';
+import { Badge, SnapshotBadge, TestBadge } from './EnvironmentStatus';
 
 export function emptyEnvironment(repo: string | null): EnvironmentConfig {
   return {
@@ -27,7 +29,7 @@ export function emptyEnvironment(repo: string | null): EnvironmentConfig {
   };
 }
 
-type RowAction = 'copy' | 'default' | 'remove';
+type RowAction = 'copy' | 'default' | 'rebuild' | 'discard' | 'remove';
 
 /** The less frequent things to do with an environment, behind one button per row. */
 function RowMenu({
@@ -150,11 +152,22 @@ export function EnvironmentManager() {
   const [copyRepo, setCopyRepo] = useState('');
   const copyRequest = useRef<{ fingerprint: string; key: string } | null>(null);
   const [removing, setRemoving] = useState<string | null>(null);
+  const [snapshotsEnabled, setSnapshotsEnabled] = useState(false);
   const load = useCallback(async () => {
     const result = await listEnvironments();
     setItems(result.environments);
     setGlobals(result.globals);
+    setSnapshotsEnabled(Boolean(result.snapshots_enabled));
   }, []);
+  // A snapshot builds on some host for a few minutes; follow it until it settles.
+  const building = (items ?? []).some(
+    (item) => item.snapshot?.state === 'queued' || item.snapshot?.state === 'building',
+  );
+  useEffect(() => {
+    if (!building) return;
+    const timer = setInterval(() => void load().catch(() => {}), 10_000);
+    return () => clearInterval(timer);
+  }, [building, load]);
   useEffect(() => {
     let active = true;
     void load().catch((e) => {
@@ -262,6 +275,9 @@ export function EnvironmentManager() {
                         </Badge>
                       ) : null}
                       <TestBadge environment={item} globalRevision={globals.revision} />
+                      {snapshotsEnabled && item.setup_script ? (
+                        <SnapshotBadge snapshot={item.snapshot} />
+                      ) : null}
                     </span>
                     <span className="mt-0.5 block text-xs text-muted">
                       {t('environment.variableCount', { count: item.variables.length })} ·{' '}
@@ -282,6 +298,12 @@ export function EnvironmentManager() {
                       ...(item.is_default
                         ? []
                         : [{ action: 'default' as const, label: t('environment.makeDefault') }]),
+                      ...(snapshotsEnabled && item.setup_script
+                        ? [{ action: 'rebuild' as const, label: t('environment.snapshot.rebuild') }]
+                        : []),
+                      ...(snapshotsEnabled && item.snapshot?.state === 'ready'
+                        ? [{ action: 'discard' as const, label: t('environment.snapshot.delete') }]
+                        : []),
                       { action: 'remove', label: t('environment.remove') },
                     ]}
                     onAction={(action) => {
@@ -296,6 +318,10 @@ export function EnvironmentManager() {
                         void perform(() =>
                           setEnvironmentDefault(item.repo!, item.id, item.default_revision ?? 0),
                         );
+                      } else if (action === 'rebuild') {
+                        void perform(() => rebuildEnvironmentSnapshot(item.id!));
+                      } else if (action === 'discard') {
+                        void perform(() => deleteEnvironmentSnapshot(item.id!));
                       } else {
                         setRemoving(item.id);
                       }
@@ -412,6 +438,7 @@ export function EnvironmentManager() {
           initial={editing}
           globals={globals}
           repos={repos}
+          snapshotsEnabled={snapshotsEnabled}
           onSaved={(next) => {
             if (next.repo === null) setGlobals(next);
             void load().catch(() => {});

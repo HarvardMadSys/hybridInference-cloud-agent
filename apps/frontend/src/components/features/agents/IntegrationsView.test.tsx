@@ -16,6 +16,8 @@ import { LOCALE_STORAGE_KEY } from '@/lib/i18n/locales';
 import { SiteConfigProvider } from '@/components/providers/SiteConfigProvider';
 import { NEUTRAL_SITE_CONFIG } from '@/config/site';
 import { IntegrationsView } from './IntegrationsView';
+import { KeyboardShortcutsSettingsView } from '../settings/KeyboardShortcutsSettingsView';
+import { MemorySettingsView } from '../settings/MemorySettingsView';
 import { MySettingsView } from '../settings/MySettingsView';
 import { PluginsSettingsView } from '../settings/PluginsSettingsView';
 import { EnvironmentsSettingsView } from '../settings/EnvironmentsSettingsView';
@@ -210,20 +212,16 @@ describe('IntegrationsView', () => {
     expect(listSkills).not.toHaveBeenCalled();
     expect(listMcpConnections).not.toHaveBeenCalled();
   });
-  it('keeps profile, notifications, keyboard shortcuts, and memory in My Settings', async () => {
+  it('keeps profile and notifications in My Settings', async () => {
     render(<MySettingsView />);
     expect(screen.getByRole('heading', { level: 1, name: 'My Settings' })).toBeInTheDocument();
     expect(screen.getByRole('region', { name: 'Profile' })).toBeInTheDocument();
     expect(screen.queryByText('Integrations & MCP')).not.toBeInTheDocument();
     expect(screen.getByRole('region', { name: 'Notifications' })).toBeInTheDocument();
-    expect(screen.getByRole('region', { name: 'Keyboard shortcuts' })).toBeInTheDocument();
     expect(screen.getByRole('checkbox', { name: 'Agent questions' })).toBeInTheDocument();
     expect(screen.getByRole('checkbox', { name: 'Turn completions' })).toBeInTheDocument();
-    expect(screen.getByRole('region', { name: 'Memory' })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { level: 2, name: 'Memory' })).toBeInTheDocument();
-    expect(screen.getByRole('tabpanel', { name: 'User memory' })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('tab', { name: 'Project memory' }));
-    expect(screen.getByRole('combobox', { name: 'Repository' })).toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: 'Keyboard shortcuts' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: 'Memory' })).not.toBeInTheDocument();
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     expect(screen.queryByRole('combobox', { name: 'Theme' })).not.toBeInTheDocument();
     expect(screen.queryByRole('combobox', { name: 'Display language' })).not.toBeInTheDocument();
@@ -231,6 +229,36 @@ describe('IntegrationsView', () => {
     expect(listSkills).not.toHaveBeenCalled();
     expect(listMcpConnections).not.toHaveBeenCalled();
     await waitFor(() => expect(getUserProfile).toHaveBeenCalled());
+    expect(getMemories).not.toHaveBeenCalled();
+  });
+
+  it('gives memory a page of its own that loads only memory', async () => {
+    render(<MemorySettingsView />);
+    expect(screen.getByRole('heading', { level: 1, name: 'Memory' })).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Memory' })).toBeInTheDocument();
+    expect(screen.getByRole('tabpanel', { name: 'User memory' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('tab', { name: 'Project memory' }));
+    expect(screen.getByRole('combobox', { name: 'Repository' })).toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: 'Profile' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: 'Keyboard shortcuts' })).not.toBeInTheDocument();
+    await waitFor(() => expect(getMemories).toHaveBeenCalled());
+    expect(getUserProfile).not.toHaveBeenCalled();
+    expect(mockedGetIntegrations).not.toHaveBeenCalled();
+    expect(listSkills).not.toHaveBeenCalled();
+    expect(listMcpConnections).not.toHaveBeenCalled();
+  });
+
+  it('gives keyboard shortcuts a page of their own that loads nothing', () => {
+    render(<KeyboardShortcutsSettingsView />);
+    expect(
+      screen.getByRole('heading', { level: 1, name: 'Keyboard shortcuts' }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Keyboard shortcuts' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Reset to defaults' })).toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: 'Memory' })).not.toBeInTheDocument();
+    expect(getUserProfile).not.toHaveBeenCalled();
+    expect(getMemories).not.toHaveBeenCalled();
+    expect(mockedGetIntegrations).not.toHaveBeenCalled();
   });
   it('groups skills with MCP servers and loads only their data', async () => {
     render(<PluginsSettingsView />);
@@ -265,7 +293,12 @@ describe('IntegrationsView', () => {
 
   it("shows the account's fixed companion in Profile, independent of memory and insights", async () => {
     mockedGetIntegrations.mockResolvedValue(integrations);
-    render(<MySettingsView />);
+    render(
+      <>
+        <MySettingsView />
+        <MemorySettingsView />
+      </>,
+    );
     const image = await within(screen.getByRole('region', { name: 'Profile' })).findByRole('img', {
       name: 'Your Pokémon companion avatar',
     });
@@ -300,9 +333,9 @@ describe('IntegrationsView', () => {
     ).not.toBeInTheDocument();
   });
 
-  it('manages memories on the Setting page while suggestions live on the homepage', async () => {
+  it('manages memories on the Memory page while suggestions live on the homepage', async () => {
     mockedGetIntegrations.mockResolvedValue(integrations);
-    render(<MySettingsView />);
+    render(<MemorySettingsView />);
 
     const section = screen.getByRole('tabpanel', { name: 'User memory' });
     expect(await within(section).findByText(memory.memories[0].content)).toBeInTheDocument();
@@ -326,17 +359,20 @@ describe('IntegrationsView', () => {
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
 
-  it('translates the Setting page and its memory card into Chinese', async () => {
+  it('translates My Settings, Memory and Keyboard shortcuts into Chinese', async () => {
     mockedGetIntegrations.mockResolvedValue(integrations);
     localStorage.setItem(LOCALE_STORAGE_KEY, 'zh-CN');
     render(
       <LocaleProvider>
         <MySettingsView />
+        <MemorySettingsView />
+        <KeyboardShortcutsSettingsView />
       </LocaleProvider>,
     );
 
     expect(await screen.findByRole('heading', { level: 1, name: '我的设置' })).toBeInTheDocument();
     expect(screen.getByRole('region', { name: '个人资料' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 1, name: '记忆' })).toBeInTheDocument();
     expect(screen.getByRole('region', { name: '记忆' })).toBeInTheDocument();
     const section = screen.getByRole('tabpanel', { name: '用户记忆' });
     await within(section).findByRole('switch', { name: '启用记忆' });
@@ -344,7 +380,8 @@ describe('IntegrationsView', () => {
     expect(within(section).getByRole('switch', { name: '启用记忆' })).toBeChecked();
     expect(within(section).queryByRole('heading', { name: '建议' })).not.toBeInTheDocument();
     expect(screen.getByRole('tab', { name: '项目记忆' })).toBeInTheDocument();
-    expect(screen.getByText('管理你的个人资料、通知、键盘快捷键和记忆。')).toBeInTheDocument();
+    expect(screen.getByText('管理你的个人资料和通知。')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 1, name: '键盘快捷键' })).toBeInTheDocument();
     expect(screen.getByRole('region', { name: '键盘快捷键' })).toBeInTheDocument();
   });
 

@@ -74,6 +74,7 @@ export function JobTranscript({
   recordedOutputs,
   onReview,
   onWatchPr,
+  onPublish,
 }: {
   panels: JobDetailPanels;
   job: AgentJob;
@@ -96,6 +97,7 @@ export function JobTranscript({
   recordedOutputs: Map<string, RecordedTurnOutputs | null>;
   onReview?: () => void;
   onWatchPr?: () => void;
+  onPublish?: () => void;
 }) {
   const t = useT();
   const { inspectTranscriptEvent, openRecordedFile, openRun, openWorkspace } = panels;
@@ -343,6 +345,7 @@ export function JobTranscript({
           onOpenDiff={() => openWorkspace('git')}
           onReview={onReview}
           onWatchPr={onWatchPr}
+          onPublish={onPublish}
         />
         {selectedAttemptIsCurrent ? <RunNotices job={job} /> : null}
         {usageFooter && lastVisibleMessageIndex < 0 && currentReplyId === undefined ? (

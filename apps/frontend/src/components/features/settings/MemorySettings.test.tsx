@@ -81,7 +81,7 @@ afterEach(cleanup);
 describe('memory settings card', () => {
   it('shows user memory first and switches scopes with the mouse or keyboard', async () => {
     render(card());
-    expect(screen.getByRole('heading', { name: 'Memory' })).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Memory' })).toBeInTheDocument();
     const userTab = screen.getByRole('tab', { name: 'User memory' });
     const projectTab = screen.getByRole('tab', { name: 'Project memory' });
     expect(userTab).toHaveAttribute('aria-selected', 'true');
@@ -130,7 +130,7 @@ describe('memory settings card', () => {
   it('translates the card and tabs into Chinese', async () => {
     localStorage.setItem(LOCALE_STORAGE_KEY, 'zh-CN');
     render(card());
-    expect(screen.getByRole('heading', { name: '记忆' })).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: '记忆' })).toBeInTheDocument();
     expect(screen.getByRole('tablist', { name: '记忆范围' })).toBeInTheDocument();
     fireEvent.click(screen.getByRole('tab', { name: '项目记忆' }));
     expect(await screen.findByRole('combobox', { name: '仓库' })).toBeInTheDocument();

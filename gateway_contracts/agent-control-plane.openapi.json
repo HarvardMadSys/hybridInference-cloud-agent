@@ -5302,6 +5302,18 @@
             ],
             "title": "Workspace Epoch"
           },
+          "workspace_pr_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The pull request the workspace was last published to. Present once the owner has published; POST /threads/{thread_id}/publish updates it.",
+            "title": "Workspace Pr Url"
+          },
           "workspace_publication_state": {
             "anyOf": [
               {
@@ -5321,9 +5333,21 @@
             ],
             "title": "Workspace Publication State"
           },
+          "workspace_publication_unchanged": {
+            "default": false,
+            "description": "Whether the workspace's newest publication found nothing to publish, so it opened no pull request.",
+            "title": "Workspace Publication Unchanged",
+            "type": "boolean"
+          },
           "workspace_shared": {
             "default": false,
             "title": "Workspace Shared",
+            "type": "boolean"
+          },
+          "workspace_unpublished_changes": {
+            "default": false,
+            "description": "Whether the workspace holds turns its owner has not published, or its last publication failed. The platform publishes only on POST /threads/{thread_id}/publish.",
+            "title": "Workspace Unpublished Changes",
             "type": "boolean"
           }
         },
@@ -7204,6 +7228,42 @@
         "title": "AgentThreadPinResponse",
         "type": "object"
       },
+      "AgentThreadPublicationResponse": {
+        "description": "The workspace snapshot an owner's publication request opened or found.",
+        "properties": {
+          "requested": {
+            "description": "True when this request opened the snapshot; false when a publication of the workspace was already on its way and is returned instead.",
+            "title": "Requested",
+            "type": "boolean"
+          },
+          "snapshot_id": {
+            "title": "Snapshot Id",
+            "type": "integer"
+          },
+          "state": {
+            "enum": [
+              "pending",
+              "capturing",
+              "captured",
+              "publishing"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "thread_id": {
+            "title": "Thread Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "thread_id",
+          "snapshot_id",
+          "state",
+          "requested"
+        ],
+        "title": "AgentThreadPublicationResponse",
+        "type": "object"
+      },
       "AgentThreadQuestionsResponse": {
         "description": "Pending native questions and the exact attempt that asked them.",
         "properties": {
@@ -8489,109 +8549,6 @@
           }
         },
         "title": "BindingsResponse",
-        "type": "object"
-      },
-      "BoundEnvironment": {
-        "additionalProperties": false,
-        "description": "A frozen execution binding sent only over protected execution channels.",
-        "properties": {
-          "actions": {
-            "items": {
-              "$ref": "#/components/schemas/EnvironmentAction"
-            },
-            "maxItems": 20,
-            "title": "Actions",
-            "type": "array"
-          },
-          "binding_id": {
-            "title": "Binding Id",
-            "type": "string"
-          },
-          "environment_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Environment Id"
-          },
-          "global_revision": {
-            "default": 0,
-            "title": "Global Revision",
-            "type": "integer"
-          },
-          "previous_secrets": {
-            "additionalProperties": {
-              "type": "string"
-            },
-            "maxProperties": 512,
-            "title": "Previous Secrets",
-            "type": "object"
-          },
-          "revision": {
-            "default": 0,
-            "title": "Revision",
-            "type": "integer"
-          },
-          "runtime_revision": {
-            "default": 0,
-            "title": "Runtime Revision",
-            "type": "integer"
-          },
-          "runtime_variables": {
-            "anyOf": [
-              {
-                "items": {
-                  "$ref": "#/components/schemas/EnvironmentVariable"
-                },
-                "maxItems": 150,
-                "type": "array"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Runtime Variables"
-          },
-          "setup_script": {
-            "default": "",
-            "maxLength": 8000,
-            "title": "Setup Script",
-            "type": "string"
-          },
-          "skip_start": {
-            "default": false,
-            "title": "Skip Start",
-            "type": "boolean"
-          },
-          "start_script": {
-            "default": "",
-            "maxLength": 8000,
-            "title": "Start Script",
-            "type": "string"
-          },
-          "variables": {
-            "items": {
-              "$ref": "#/components/schemas/EnvironmentVariable"
-            },
-            "maxItems": 150,
-            "title": "Variables",
-            "type": "array"
-          },
-          "verify_script": {
-            "default": "",
-            "maxLength": 8000,
-            "title": "Verify Script",
-            "type": "string"
-          }
-        },
-        "required": [
-          "binding_id"
-        ],
-        "title": "BoundEnvironment",
         "type": "object"
       },
       "ClaimTestInput": {
@@ -9943,57 +9900,6 @@
           "command"
         ],
         "title": "EnvironmentAction",
-        "type": "object"
-      },
-      "EnvironmentVariable": {
-        "additionalProperties": false,
-        "description": "A value-bearing variable, never suitable for request logging.",
-        "properties": {
-          "name": {
-            "title": "Name",
-            "type": "string"
-          },
-          "phase": {
-            "default": "both",
-            "enum": [
-              "setup",
-              "runtime",
-              "both"
-            ],
-            "title": "Phase",
-            "type": "string"
-          },
-          "secret": {
-            "default": true,
-            "title": "Secret",
-            "type": "boolean"
-          },
-          "source": {
-            "anyOf": [
-              {
-                "enum": [
-                  "global",
-                  "environment",
-                  "override"
-                ],
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Source"
-          },
-          "value": {
-            "title": "Value",
-            "type": "string"
-          }
-        },
-        "required": [
-          "name",
-          "value"
-        ],
-        "title": "EnvironmentVariable",
         "type": "object"
       },
       "ExecutionProfile": {
@@ -12917,6 +12823,500 @@
         "title": "OAuthConnectRequest",
         "type": "object"
       },
+      "OwnerContainer": {
+        "additionalProperties": false,
+        "description": "One container and the chats that share it.",
+        "properties": {
+          "chat_count": {
+            "minimum": 0.0,
+            "title": "Chat Count",
+            "type": "integer"
+          },
+          "chats": {
+            "items": {
+              "$ref": "#/components/schemas/OwnerContainerChat"
+            },
+            "maxItems": 20,
+            "title": "Chats",
+            "type": "array"
+          },
+          "cpu_limit_cores": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cpu Limit Cores"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "disk_limit_bytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Disk Limit Bytes"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "idle_deadline": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Idle Deadline"
+          },
+          "last_activity_at": {
+            "format": "date-time",
+            "title": "Last Activity At",
+            "type": "string"
+          },
+          "memory_limit_bytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Memory Limit Bytes"
+          },
+          "reading": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OwnerContainerReading"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "repo": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo"
+          },
+          "state": {
+            "enum": [
+              "starting",
+              "running",
+              "stopping",
+              "stopped",
+              "stored",
+              "deleting",
+              "unavailable"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "state",
+          "chats",
+          "chat_count",
+          "created_at",
+          "last_activity_at"
+        ],
+        "title": "OwnerContainer",
+        "type": "object"
+      },
+      "OwnerContainerChat": {
+        "additionalProperties": false,
+        "description": "A chat whose work runs in this container.",
+        "properties": {
+          "archived": {
+            "default": false,
+            "title": "Archived",
+            "type": "boolean"
+          },
+          "job_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Job Id"
+          },
+          "thread_id": {
+            "title": "Thread Id",
+            "type": "string"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          }
+        },
+        "required": [
+          "thread_id"
+        ],
+        "title": "OwnerContainerChat",
+        "type": "object"
+      },
+      "OwnerContainerList": {
+        "additionalProperties": false,
+        "description": "A page of the owner's containers, with counts and sums over all of them.",
+        "properties": {
+          "containers": {
+            "items": {
+              "$ref": "#/components/schemas/OwnerContainer"
+            },
+            "title": "Containers",
+            "type": "array"
+          },
+          "counts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "propertyNames": {
+              "enum": [
+                "starting",
+                "running",
+                "stopping",
+                "stopped",
+                "stored",
+                "deleting",
+                "unavailable"
+              ]
+            },
+            "title": "Counts",
+            "type": "object"
+          },
+          "current": {
+            "$ref": "#/components/schemas/OwnerCurrentUse"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          },
+          "observed_at": {
+            "format": "date-time",
+            "title": "Observed At",
+            "type": "string"
+          },
+          "total_count": {
+            "minimum": 0.0,
+            "title": "Total Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "observed_at",
+          "counts",
+          "total_count",
+          "current",
+          "containers"
+        ],
+        "title": "OwnerContainerList",
+        "type": "object"
+      },
+      "OwnerContainerReading": {
+        "additionalProperties": false,
+        "description": "The latest Docker sample of a running container, with its age.",
+        "properties": {
+          "cpu_cores": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cpu Cores"
+          },
+          "memory_bytes": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Memory Bytes"
+          },
+          "sampled_at": {
+            "format": "date-time",
+            "title": "Sampled At",
+            "type": "string"
+          },
+          "stale": {
+            "title": "Stale",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "sampled_at",
+          "stale"
+        ],
+        "title": "OwnerContainerReading",
+        "type": "object"
+      },
+      "OwnerCurrentUse": {
+        "additionalProperties": false,
+        "description": "What the owner's running containers use now, from their fresh samples.",
+        "properties": {
+          "cpu_cores": {
+            "minimum": 0.0,
+            "title": "Cpu Cores",
+            "type": "number"
+          },
+          "measured": {
+            "minimum": 0.0,
+            "title": "Measured",
+            "type": "integer"
+          },
+          "memory_bytes": {
+            "minimum": 0.0,
+            "title": "Memory Bytes",
+            "type": "integer"
+          },
+          "unmeasured": {
+            "minimum": 0.0,
+            "title": "Unmeasured",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "cpu_cores",
+          "memory_bytes",
+          "measured",
+          "unmeasured"
+        ],
+        "title": "OwnerCurrentUse",
+        "type": "object"
+      },
+      "OwnerResourceDay": {
+        "additionalProperties": false,
+        "description": "One UTC day of the window; the last one ends now.",
+        "properties": {
+          "cpu_core_seconds": {
+            "minimum": 0.0,
+            "title": "Cpu Core Seconds",
+            "type": "number"
+          },
+          "date": {
+            "title": "Date",
+            "type": "string"
+          },
+          "measured_seconds": {
+            "minimum": 0.0,
+            "title": "Measured Seconds",
+            "type": "number"
+          },
+          "memory_byte_seconds": {
+            "minimum": 0.0,
+            "title": "Memory Byte Seconds",
+            "type": "number"
+          },
+          "running_seconds": {
+            "minimum": 0.0,
+            "title": "Running Seconds",
+            "type": "number"
+          },
+          "since": {
+            "format": "date-time",
+            "title": "Since",
+            "type": "string"
+          },
+          "until": {
+            "format": "date-time",
+            "title": "Until",
+            "type": "string"
+          }
+        },
+        "required": [
+          "running_seconds",
+          "measured_seconds",
+          "cpu_core_seconds",
+          "memory_byte_seconds",
+          "date",
+          "since",
+          "until"
+        ],
+        "title": "OwnerResourceDay",
+        "type": "object"
+      },
+      "OwnerResourceHistory": {
+        "additionalProperties": false,
+        "description": "The owner's container use per UTC day, summed over every container.",
+        "properties": {
+          "day_timezone": {
+            "const": "UTC",
+            "default": "UTC",
+            "title": "Day Timezone",
+            "type": "string"
+          },
+          "days": {
+            "items": {
+              "$ref": "#/components/schemas/OwnerResourceDay"
+            },
+            "title": "Days",
+            "type": "array"
+          },
+          "generated_at": {
+            "format": "date-time",
+            "title": "Generated At",
+            "type": "string"
+          },
+          "since": {
+            "format": "date-time",
+            "title": "Since",
+            "type": "string"
+          },
+          "totals": {
+            "$ref": "#/components/schemas/OwnerResourceTotals"
+          },
+          "until": {
+            "format": "date-time",
+            "title": "Until",
+            "type": "string"
+          }
+        },
+        "required": [
+          "since",
+          "until",
+          "generated_at",
+          "totals",
+          "days"
+        ],
+        "title": "OwnerResourceHistory",
+        "type": "object"
+      },
+      "OwnerResourceTotals": {
+        "additionalProperties": false,
+        "description": "Running and measured time, and the CPU and memory used over it.",
+        "properties": {
+          "cpu_core_seconds": {
+            "minimum": 0.0,
+            "title": "Cpu Core Seconds",
+            "type": "number"
+          },
+          "measured_seconds": {
+            "minimum": 0.0,
+            "title": "Measured Seconds",
+            "type": "number"
+          },
+          "memory_byte_seconds": {
+            "minimum": 0.0,
+            "title": "Memory Byte Seconds",
+            "type": "number"
+          },
+          "running_seconds": {
+            "minimum": 0.0,
+            "title": "Running Seconds",
+            "type": "number"
+          }
+        },
+        "required": [
+          "running_seconds",
+          "measured_seconds",
+          "cpu_core_seconds",
+          "memory_byte_seconds"
+        ],
+        "title": "OwnerResourceTotals",
+        "type": "object"
+      },
+      "OwnerTokenUsage": {
+        "additionalProperties": false,
+        "description": "The owner's model usage for runs created in the window.\n\nEvery number is the admin Usage page's for the same runs: a run counts on\nthe UTC day it was created, in full, and an unknown amount stays unknown.",
+        "properties": {
+          "by_model": {
+            "$ref": "#/components/schemas/AdminUsageBreakdown"
+          },
+          "day_timezone": {
+            "const": "UTC",
+            "default": "UTC",
+            "title": "Day Timezone",
+            "type": "string"
+          },
+          "days": {
+            "items": {
+              "$ref": "#/components/schemas/AdminUsageDay"
+            },
+            "title": "Days",
+            "type": "array"
+          },
+          "generated_at": {
+            "format": "date-time",
+            "title": "Generated At",
+            "type": "string"
+          },
+          "since": {
+            "format": "date-time",
+            "title": "Since",
+            "type": "string"
+          },
+          "summary": {
+            "$ref": "#/components/schemas/AdminUsageAggregate"
+          },
+          "time_basis": {
+            "const": "job_created_at",
+            "default": "job_created_at",
+            "title": "Time Basis",
+            "type": "string"
+          },
+          "until": {
+            "format": "date-time",
+            "title": "Until",
+            "type": "string"
+          }
+        },
+        "required": [
+          "since",
+          "until",
+          "generated_at",
+          "summary",
+          "days",
+          "by_model"
+        ],
+        "title": "OwnerTokenUsage",
+        "type": "object"
+      },
       "PgAdminSetup": {
         "description": "The first administrator chooses credentials for pgAdmin's own login.",
         "properties": {
@@ -13269,6 +13669,27 @@
         "title": "PromptRewriteRequest",
         "type": "object"
       },
+      "RebuildInput": {
+        "additionalProperties": false,
+        "description": "Which branch's head to build the installation snapshot from.",
+        "properties": {
+          "ref": {
+            "anyOf": [
+              {
+                "maxLength": 255,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ref"
+          }
+        },
+        "title": "RebuildInput",
+        "type": "object"
+      },
       "RegisterConnectorRequest": {
         "additionalProperties": false,
         "description": "Register one machine as this user's connector.",
@@ -13458,7 +13879,7 @@
         "type": "object"
       },
       "RequestRuntimeUpgradeRequest": {
-        "description": "Update one agent to one exact npm release.",
+        "description": "Move one agent to one exact npm release, newer or older.",
         "properties": {
           "runtime": {
             "maxLength": 64,
@@ -13467,7 +13888,7 @@
             "type": "string"
           },
           "version": {
-            "description": "An exact npm version; the page sends the latest release.",
+            "description": "An exact npm version: the latest release, or one from the version list.",
             "maxLength": 64,
             "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]+)?$",
             "title": "Version",
@@ -14145,6 +14566,52 @@
         "title": "RuntimeUsage",
         "type": "object"
       },
+      "RuntimeVersionsResponse": {
+        "description": "The npm releases an admin can move one agent to.",
+        "properties": {
+          "deprecated": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "npm's message when the whole package is deprecated.",
+            "title": "Deprecated"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Why the list is unknown.",
+            "title": "Error"
+          },
+          "runtime": {
+            "title": "Runtime",
+            "type": "string"
+          },
+          "versions": {
+            "description": "Stable npm releases, newest first. Prereleases are left out, and so is a release npm marks deprecated unless the whole package is.",
+            "items": {
+              "type": "string"
+            },
+            "title": "Versions",
+            "type": "array"
+          }
+        },
+        "required": [
+          "runtime"
+        ],
+        "title": "RuntimeVersionsResponse",
+        "type": "object"
+      },
       "SandboxArchiveSettingsResponse": {
         "description": "The revisioned archive policy stored for every sandbox host.\n\nThe secret access key is write-only. ``aws_secret_access_key_configured``\ntells the editor whether a blank secret keeps the stored one.",
         "properties": {
@@ -14699,6 +15166,12 @@
             "default": "",
             "maxLength": 8000,
             "title": "Start Script",
+            "type": "string"
+          },
+          "update_script": {
+            "default": "",
+            "maxLength": 8000,
+            "title": "Update Script",
             "type": "string"
           },
           "variables": {
@@ -15789,6 +16262,18 @@
               }
             ],
             "title": "Image Digest"
+          },
+          "snapshot": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Snapshot"
           },
           "state": {
             "default": "running",
@@ -17123,12 +17608,26 @@
           "environment": {
             "anyOf": [
               {
-                "$ref": "#/components/schemas/BoundEnvironment"
+                "additionalProperties": true,
+                "type": "object"
               },
               {
                 "type": "null"
               }
-            ]
+            ],
+            "title": "Environment"
+          },
+          "environment_snapshot": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Environment Snapshot"
           },
           "execution_profile": {
             "$ref": "#/components/schemas/ExecutionProfile",
@@ -17343,6 +17842,52 @@
           }
         },
         "title": "WorkerContinuityRequest",
+        "type": "object"
+      },
+      "WorkerEnvironmentSnapshotReport": {
+        "description": "What a new workspace did with the installation snapshot it was handed.",
+        "properties": {
+          "base_sha": {
+            "anyOf": [
+              {
+                "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Sha"
+          },
+          "outcome": {
+            "enum": [
+              "used",
+              "absent",
+              "lockfiles_changed",
+              "image_changed",
+              "unavailable",
+              "invalid"
+            ],
+            "title": "Outcome",
+            "type": "string"
+          },
+          "snapshot_id": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{32}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Snapshot Id"
+          }
+        },
+        "required": [
+          "outcome"
+        ],
+        "title": "WorkerEnvironmentSnapshotReport",
         "type": "object"
       },
       "WorkerEventRequest": {
@@ -23460,7 +24005,7 @@
         "summary": "List Runtime Upgrades"
       },
       "post": {
-        "description": "Update one agent: every host downloads and checks the version, then new chats use it.\n\nAsking again for the same version retries it. Existing chats keep the\nversion they started on.",
+        "description": "Update one agent: every host downloads and checks the version, then new chats use it.\n\nAny published version, older ones included. Asking again for the same\nversion retries it. Existing chats keep the version they started on.",
         "operationId": "request_runtime_upgrade_admin_agent_runtime_upgrades_post",
         "parameters": [
           {
@@ -23513,6 +24058,62 @@
           }
         },
         "summary": "Request Runtime Upgrade"
+      }
+    },
+    "/admin/agent/runtime-upgrades/{runtime}/versions": {
+      "get": {
+        "description": "Every stable npm release of one agent, newest first, for the version menu.\n\nIts own request, not part of the page's poll: one package's document is\nup to about 15 MB from npm, read once an hour, and the menu needs it once.",
+        "operationId": "list_runtime_versions_admin_agent_runtime_upgrades__runtime__versions_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "runtime",
+            "required": true,
+            "schema": {
+              "title": "Runtime",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RuntimeVersionsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Runtime Versions"
       }
     },
     "/admin/agent/runtime-versions": {
@@ -26146,7 +26747,7 @@
     },
     "/v1/agent/environments": {
       "get": {
-        "description": "List owned repository configurations and their default selection.",
+        "description": "List owned repository configurations, their default selection and snapshot.",
         "operationId": "list_environments_v1_agent_environments_get",
         "parameters": [
           {
@@ -26617,6 +27218,127 @@
           }
         },
         "summary": "Restore Environment",
+        "tags": [
+          "environments"
+        ]
+      }
+    },
+    "/v1/agent/environments/{environment_id}/snapshot": {
+      "delete": {
+        "description": "Delete an environment's installation snapshots; new tasks install in full.",
+        "operationId": "delete_snapshot_v1_agent_environments__environment_id__snapshot_delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "environment_id",
+            "required": true,
+            "schema": {
+              "title": "Environment Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Snapshot",
+        "tags": [
+          "environments"
+        ]
+      },
+      "post": {
+        "description": "Queue a fresh installation snapshot of the environment as it is now.",
+        "operationId": "rebuild_snapshot_v1_agent_environments__environment_id__snapshot_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "environment_id",
+            "required": true,
+            "schema": {
+              "title": "Environment Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RebuildInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Rebuild Snapshot V1 Agent Environments  Environment Id  Snapshot Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Rebuild Snapshot",
         "tags": [
           "environments"
         ]
@@ -33562,7 +34284,7 @@
         "summary": "Get Thread Queue"
       },
       "post": {
-        "description": "Send a message: the next turn now if nothing is running, otherwise queued.\n\nEvery message goes through here. It is checked against the conversation's\nnewest turn — the same checks a follow-up always passed — and put at the end\nof the thread's queue; the queue is then settled, which on an idle\nconversation makes it the next turn before this returns (``job``). With a\nturn running it waits (``pending``) and is sent, in order, when that turn\nends. Sending on an idle conversation whose queue was paused is the owner\ncontinuing: older waiting messages go first.\n\nAn ``Idempotency-Key`` names this one submission. A resend answers with what\nthe first send made — the turn if it has become one, the waiting message if\nnot — and the same key under different content is a 409\n``idempotency_conflict``.\n\n``require_idle`` binds a fresh action to ``expected_latest_job_id`` and\nrefuses it with ``conversation_changed`` if any chat sharing the workspace\nhas a live turn or waiting message, a Fork is active, or the workspace is\nunpublished at the locked write. An accepted idle-only action creates its\nturn in that same transaction without entering the pending queue.",
+        "description": "Send a message: the next turn now if nothing is running, otherwise queued.\n\nEvery message goes through here. It is checked against the conversation's\nnewest turn — the same checks a follow-up always passed — and put at the end\nof the thread's queue; the queue is then settled, which on an idle\nconversation makes it the next turn before this returns (``job``). With a\nturn running it waits (``pending``) and is sent, in order, when that turn\nends. Sending on an idle conversation whose queue was paused is the owner\ncontinuing: older waiting messages go first.\n\nAn ``Idempotency-Key`` names this one submission. A resend answers with what\nthe first send made — the turn if it has become one, the waiting message if\nnot — and the same key under different content is a 409\n``idempotency_conflict``.\n\n``require_idle`` binds a fresh action to ``expected_latest_job_id`` and\nrefuses it with ``conversation_changed`` if any chat sharing the workspace\nhas a live turn or waiting message, a Fork is active, or a publication is\nunfinished at the locked write, and with ``unpublished_changes`` if a turn\nsettled since the workspace was last published. An accepted idle-only\naction creates its turn in that same transaction without entering the\npending queue.",
         "operationId": "submit_thread_message_v1_agent_threads__thread_id__messages_post",
         "parameters": [
           {
@@ -33866,6 +34588,62 @@
         "summary": "Send Pending Message Now"
       }
     },
+    "/v1/agent/threads/{thread_id}/publish": {
+      "post": {
+        "description": "Push the conversation's workspace to its branch and open or update its draft PR.\n\nThe platform never publishes on its own: a finished turn stays in the\nworkspace until its owner asks. This opens the workspace's next snapshot\nand returns at once; capture, the secret scan, the push and the draft PR\nfollow as the job's ``workspace_publication_state``. Every conversation\nsharing the workspace is published together, to its origin's branch. A\npublication already on its way is returned instead of a second one.",
+        "operationId": "publish_agent_thread_v1_agent_threads__thread_id__publish_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "thread_id",
+            "required": true,
+            "schema": {
+              "title": "Thread Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentThreadPublicationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Publish Agent Thread"
+      }
+    },
     "/v1/agent/threads/{thread_id}/questions": {
       "get": {
         "description": "Read the live attempt's native questions, including after a page reload.",
@@ -34154,6 +34932,209 @@
         ]
       }
     },
+    "/v1/agent/usage/containers": {
+      "get": {
+        "description": "The owner's containers, active first, with counts and current use over all.",
+        "operationId": "list_owner_containers_v1_agent_usage_containers_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 2048,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OwnerContainerList"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Owner Containers",
+        "tags": [
+          "usage"
+        ]
+      }
+    },
+    "/v1/agent/usage/resources": {
+      "get": {
+        "description": "Running time and measured CPU and memory for each of the last ``days`` UTC days.",
+        "operationId": "read_owner_resources_v1_agent_usage_resources_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "days",
+            "required": false,
+            "schema": {
+              "default": 7,
+              "maximum": 90,
+              "minimum": 1,
+              "title": "Days",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OwnerResourceHistory"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Read Owner Resources",
+        "tags": [
+          "usage"
+        ]
+      }
+    },
+    "/v1/agent/usage/tokens": {
+      "get": {
+        "description": "Model usage and cost of the owner's runs created in the last ``days`` UTC days.\n\nRaises:\n    HTTPException: 422 when the selection exceeds the aggregation's bounds,\n        503 when it cannot be read inside them. Neither returns a partial sum.",
+        "operationId": "read_owner_tokens_v1_agent_usage_tokens_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "days",
+            "required": false,
+            "schema": {
+              "default": 7,
+              "maximum": 90,
+              "minimum": 1,
+              "title": "Days",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OwnerTokenUsage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Read Owner Tokens",
+        "tags": [
+          "usage"
+        ]
+      }
+    },
     "/v1/agent/worker/claim": {
       "post": {
         "description": "Claim the next queued job and mint this attempt's capability token.\n\nReturns ``null`` (HTTP 200) when the queue is empty, and equally when an\noperator has pinned agent jobs to a different host than the one this runner\nreports. The two are deliberately the same answer on the wire: a runner\nthat has been switched away from should idle exactly as it does when there\nis no work, not treat it as an error worth retrying differently. Which host\nis active is an admin question, answered on the admin surface.\n\n**Enrolled-host only.** ``claim_job`` takes the oldest queued job across all\ntenants, and the response carries that job's repo, prompt, and metadata\nplus a working capability token for it — so ordinary API-key auth here\nwould let any customer dequeue and read another customer's job, and drain\nthe queue besides.\n\nThe per-host credential opens registration/heartbeat/claim surfaces and\nnever enters the sandbox; only the returned per-attempt tokens go in.",
@@ -34221,7 +35202,7 @@
     },
     "/v1/agent/worker/environment-runs/claim": {
       "post": {
-        "description": "Hand only an environment-capable enrolled host a test lease.",
+        "description": "Hand only an environment-capable enrolled host a test or prebuild lease.",
         "operationId": "claim_environment_test_v1_agent_worker_environment_runs_claim_post",
         "parameters": [
           {
@@ -34413,6 +35394,110 @@
         ]
       }
     },
+    "/v1/agent/worker/environment-snapshots/deletions": {
+      "get": {
+        "description": "Snapshot objects to delete from S3, and local snapshot images to drop.",
+        "operationId": "snapshot_deletions_v1_agent_worker_environment_snapshots_deletions_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Snapshot Deletions V1 Agent Worker Environment Snapshots Deletions Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Snapshot Deletions",
+        "tags": [
+          "environments"
+        ]
+      }
+    },
+    "/v1/agent/worker/environment-snapshots/{snapshot_id}/deleted": {
+      "post": {
+        "description": "Record that this host deleted a snapshot's stored object.",
+        "operationId": "snapshot_deleted_v1_agent_worker_environment_snapshots__snapshot_id__deleted_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "snapshot_id",
+            "required": true,
+            "schema": {
+              "title": "Snapshot Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Snapshot Deleted",
+        "tags": [
+          "environments"
+        ]
+      }
+    },
     "/v1/agent/worker/jobs/{job_id}/attachments": {
       "get": {
         "description": "List what this conversation's /uploads holds, so it can be rebuilt.\n\nScoped to the thread rather than the claimed turn: a retry on a fresh\ncontainer has to restore all of them, and re-importing into a retained one\nsimply overwrites the same paths. A file attached again by a later turn is\nlisted once, as its newest upload.",
@@ -34598,6 +35683,65 @@
           }
         },
         "summary": "Worker Report Continuity"
+      }
+    },
+    "/v1/agent/worker/jobs/{job_id}/environment-snapshot": {
+      "post": {
+        "description": "Record what a new workspace did with its installation snapshot.\n\nUsage keeps a snapshot from expiring; a workspace that had none, or whose\nlockfiles or image differed, queues a build for its commit.",
+        "operationId": "worker_report_environment_snapshot_v1_agent_worker_jobs__job_id__environment_snapshot_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkerEnvironmentSnapshotReport"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Worker Report Environment Snapshot"
       }
     },
     "/v1/agent/worker/jobs/{job_id}/events": {

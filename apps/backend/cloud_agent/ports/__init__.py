@@ -31,6 +31,7 @@ from cloud_agent.ports.operation_measurements import (
     MeasurementWriteResult,
     OperationMeasurements,
 )
+from cloud_agent.ports.owner_usage import OwnerUsageQueries
 from cloud_agent.ports.pending_messages import PendingMessageRepository
 from cloud_agent.ports.pr_archive import PrArchiveRepository
 from cloud_agent.ports.profiling_control import ProfilingControl
@@ -67,6 +68,7 @@ __all__ = [
     "McpConnectionRepository",
     "MeasurementWriteResult",
     "OperationMeasurements",
+    "OwnerUsageQueries",
     "PendingMessageRepository",
     "PrArchiveRepository",
     "ProfilingControl",

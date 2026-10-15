@@ -22,6 +22,15 @@ class SnapshotRepository(Protocol):
         """Read the same clock used to fence publication retry deadlines."""
         ...
 
+    async def request_snapshot_publication(self, *, thread_id: str, user_id: str) -> dict[str, Any]:
+        """Open the next snapshot of a conversation's workspace for its owner.
+
+        The only way a workspace reaches its branch: a turn boundary opens no
+        snapshot. Returns the snapshot opened, or the one already on its way,
+        as ``{"snapshot_id", "state", "requested"}``, or ``{"error": code}``.
+        """
+        ...
+
     async def claim_due_sandbox_snapshot(self) -> dict[str, Any] | None:
         """Fence one quiescent shared workspace for bounded patch capture.
 

@@ -1424,6 +1424,9 @@ function adaptJob(
     ...(job.workspace_publication_state
       ? { workspacePublicationState: job.workspace_publication_state }
       : {}),
+    ...(job.workspace_publication_unchanged ? { workspacePublicationUnchanged: true } : {}),
+    ...(job.workspace_pr_url ? { workspacePrUrl: job.workspace_pr_url } : {}),
+    ...(job.workspace_unpublished_changes ? { workspaceUnpublishedChanges: true } : {}),
     ...(typeof job.workspace_epoch === 'number' ? { workspaceEpoch: job.workspace_epoch } : {}),
     ...(typeof job.duration_ms === 'number' ? { durationMs: job.duration_ms } : {}),
     ...(job.resources ? { resources: toTurnResources(job.resources) } : {}),

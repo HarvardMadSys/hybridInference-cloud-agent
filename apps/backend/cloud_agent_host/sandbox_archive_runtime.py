@@ -66,6 +66,7 @@ if TYPE_CHECKING:
         SandboxCheckpointReceipt,
     )
     from cloud_agent_host.shared_session_supervisor import SharedMemberManifest
+    from cloud_agent_shared.environment_snapshots import EnvironmentSnapshotRef
 
 
 class _ArchiveService(Protocol):
@@ -111,6 +112,21 @@ class _ArchiveService(Protocol):
     ) -> SandboxCheckpointReceipt: ...
 
     def restore_checkpoint(self, sandbox_id: str, restore: CheckpointRestore) -> str: ...
+
+    def capture_environment_snapshot(
+        self,
+        spec: ChatSandboxSpec,
+        inspection: ChatSandboxInspection,
+        *,
+        owner: str,
+        snapshot_id: str,
+    ) -> dict[str, Any]: ...
+
+    def load_environment_snapshot(self, snapshot: EnvironmentSnapshotRef) -> str: ...
+
+    def delete_environment_snapshot(
+        self, *, owner: str, snapshot_id: str, key: str, version_id: str | None
+    ) -> None: ...
 
 
 @dataclass(eq=False)
@@ -956,6 +972,64 @@ class SandboxArchiveController:
             return slot.service.restore_checkpoint(sandbox_id, restore)
         finally:
             self._release(slot)
+
+    def _snapshot_slot(self) -> _ServiceSlot:
+        """The current service, when it may store snapshots: they ride on checkpoints."""
+        with self._condition:
+            if self._closed or not self._started:
+                raise SandboxError("sandbox archive controller is not running")
+            slot = self._current
+            if slot is None or not slot.policy.enabled or not slot.policy.checkpoints_enabled:
+                raise SandboxError("sandbox checkpoints are disabled; snapshots are unavailable")
+            slot.active += 1
+            return slot
+
+    @property
+    def snapshots_available(self) -> bool:
+        """Whether this sandbox manager can build and load installation snapshots."""
+        return self._checkpoint_capture is not None
+
+    def capture_environment_snapshot(
+        self,
+        spec: ChatSandboxSpec,
+        inspection: ChatSandboxInspection,
+        *,
+        owner: str,
+        snapshot_id: str,
+    ) -> dict[str, Any]:
+        """Save an environment run's stopped container as an installation snapshot."""
+        slot = self._snapshot_slot()
+        try:
+            return slot.service.capture_environment_snapshot(
+                spec, inspection, owner=owner, snapshot_id=snapshot_id
+            )
+        finally:
+            self._release(slot)
+
+    def load_environment_snapshot(self, snapshot: EnvironmentSnapshotRef) -> str:
+        """Load an installation snapshot's image with the currently applied policy."""
+        slot = self._snapshot_slot()
+        try:
+            return slot.service.load_environment_snapshot(snapshot)
+        finally:
+            self._release(slot)
+
+    def delete_environment_snapshot(
+        self, *, owner: str, snapshot_id: str, key: str, version_id: str | None
+    ) -> None:
+        """Delete a snapshot's stored object with the currently applied policy."""
+        slot = self._snapshot_slot()
+        try:
+            slot.service.delete_environment_snapshot(
+                owner=owner, snapshot_id=snapshot_id, key=key, version_id=version_id
+            )
+        finally:
+            self._release(slot)
+
+    def remove_environment_snapshot_image(self, owner: str, snapshot_id: str) -> None:
+        """Drop a snapshot's local image; no bucket access is needed."""
+        if self._checkpoint_capture is not None:
+            self._checkpoint_capture.remove_environment_image(owner, snapshot_id)
 
     def _acquire_final_slot(
         self,

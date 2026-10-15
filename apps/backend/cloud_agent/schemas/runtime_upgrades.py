@@ -67,13 +67,30 @@ class RuntimeUpgradesResponse(BaseModel):
     runtimes: list[RuntimeUpgradeItem]
 
 
+class RuntimeVersionsResponse(BaseModel):
+    """The npm releases an admin can move one agent to."""
+
+    runtime: str
+    versions: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Stable npm releases, newest first. Prereleases are left out, and so is "
+            "a release npm marks deprecated unless the whole package is."
+        ),
+    )
+    deprecated: str | None = Field(
+        None, description="npm's message when the whole package is deprecated."
+    )
+    error: str | None = Field(None, description="Why the list is unknown.")
+
+
 class RequestRuntimeUpgradeRequest(BaseModel):
-    """Update one agent to one exact npm release."""
+    """Move one agent to one exact npm release, newer or older."""
 
     runtime: str = Field(..., min_length=1, max_length=64)
     version: str = Field(
         ...,
         max_length=VERSION_MAX_CHARS,
         pattern=EXACT_VERSION.pattern,
-        description="An exact npm version; the page sends the latest release.",
+        description="An exact npm version: the latest release, or one from the version list.",
     )

@@ -140,6 +140,39 @@ async def _first_try_only(write: str, transaction):
     return await transaction()
 
 
+async def _request(store: Storage, job: dict) -> int:
+    """The owner's publication request: a turn boundary publishes nothing."""
+    requested = await store.snapshot.request_snapshot_publication(
+        thread_id=job["thread_id"], user_id=job["user_id"]
+    )
+    assert requested.get("requested") is True, requested
+    return int(requested["snapshot_id"])
+
+
+async def _legacy_turn_snapshot(pool, sandbox_id: str, job: dict) -> None:
+    """The pending snapshot turn settlement opened before publication was a request.
+
+    Settlement used to open one for each turn, even while an earlier snapshot of
+    the group was being captured. A deployment upgraded during such a capture
+    still holds it, and a capture handed back must fold into it.
+    """
+    async with pool.acquire() as conn, conn.transaction():
+        snapshot_id = await conn.fetchval(
+            """
+            INSERT INTO agent_sandbox_snapshots (sandbox_id, workspace_epoch, anchor_job_id, base_sha)
+            SELECT id, workspace_epoch, $2, published_base_sha FROM agent_sandboxes WHERE id = $1
+            RETURNING id
+            """,
+            sandbox_id,
+            job["id"],
+        )
+        await conn.execute(
+            "INSERT INTO agent_snapshot_jobs (snapshot_id, job_id) VALUES ($1, $2)",
+            snapshot_id,
+            job["id"],
+        )
+
+
 async def _snapshots(pool, sandbox_id: str) -> list[dict]:
     """Every snapshot of a group, oldest first, with the turns it includes."""
     async with pool.acquire() as conn:
@@ -166,19 +199,22 @@ async def test_a_capture_handed_back_folds_into_the_snapshot_a_turn_settled_mean
 ):
     """A capture handed back joins the pending snapshot of a turn settled while it was out.
 
-    A turn is not refused while its workspace is captured, so the next turn's
-    settlement opens a second, pending snapshot behind the capturing one. The
-    capture handed back by a busy host, or by the stall reaper, used to become
-    pending beside it, which the one-pending-snapshot index refuses. The claim
-    then stayed ``capturing`` and its group ``snapshotting`` for good, and the
-    reaper's single statement failed for every workspace in the deployment.
+    A turn is not refused while its workspace is captured, and settlement used
+    to open a second, pending snapshot behind the capturing one; a deployment
+    upgraded mid-capture still holds one. The capture handed back by a busy
+    host, or by the stall reaper, used to become pending beside it, which the
+    one-pending-snapshot index refuses. The claim then stayed ``capturing`` and
+    its group ``snapshotting`` for good, and the reaper's single statement
+    failed for every workspace in the deployment.
     """
     first, first_claim, sandbox = await _reserve_shared_chat(store)
     await _run_turn(store, first, first_claim, sandbox)
+    await _request(store, first)
     capture = await store.snapshot.claim_due_sandbox_snapshot()
     assert capture is not None and capture["anchor_job_id"] == first["id"]
 
     second = await _run_next_turn(store, first, sandbox)
+    await _legacy_turn_snapshot(pool, sandbox["sandbox_id"], second)
     opened = [
         row
         for row in await _snapshots(pool, sandbox["sandbox_id"])
@@ -275,9 +311,11 @@ async def test_a_capture_handed_back_does_not_wait_for_a_turn_a_follow_up_holds(
     """
     first, first_claim, sandbox = await _reserve_shared_chat(store)
     await _run_turn(store, first, first_claim, sandbox)
+    await _request(store, first)
     capture = await store.snapshot.claim_due_sandbox_snapshot()
     assert capture is not None
     second = await _run_next_turn(store, first, sandbox)
+    await _legacy_turn_snapshot(pool, sandbox["sandbox_id"], second)
     recover = None
     async with pool.acquire() as follow_up:
         try:
@@ -338,8 +376,10 @@ async def test_a_stalled_capture_the_reaper_cannot_hand_back_does_not_hold_back_
     """
     first, first_claim, first_sandbox = await _reserve_shared_chat(store)
     await _run_turn(store, first, first_claim, first_sandbox)
+    await _request(store, first)
     other, other_claim, other_sandbox = await _reserve_retained_chat(store)
     await _run_turn(store, other, other_claim, other_sandbox, container_id="container-lock-other")
+    await _request(store, other)
     captures = [await store.snapshot.claim_due_sandbox_snapshot() for _ in range(2)]
     assert [capture["sandbox_id"] for capture in captures if capture is not None] == [
         first_sandbox["sandbox_id"],
@@ -374,6 +414,7 @@ async def _claimed_for_publication(store: Storage) -> tuple[dict, dict, dict]:
     """A finished retained turn whose captured snapshot a publisher has claimed."""
     job, claim, sandbox = await _reserve_shared_chat(store)
     await _run_turn(store, job, claim, sandbox)
+    await _request(store, job)
     capture = await store.snapshot.claim_due_sandbox_snapshot()
     assert capture is not None
     patch = "diff --git a/answer.txt b/answer.txt\nnew file mode 100644\n"
@@ -492,6 +533,35 @@ async def test_an_idle_only_message_refuses_while_a_publication_holds_its_newest
             "SELECT id FROM agent_sandboxes WHERE id = $1 FOR UPDATE NOWAIT",
             sandbox["sandbox_id"],
         )
+
+
+async def test_a_publication_request_does_not_wait_under_the_group_for_a_held_turn(
+    pool, store: Storage
+):
+    """A request share-locks its turns after their group, so it never waits for them.
+
+    A follow-up holds its conversation's newest turn while it waits for the
+    group. A request that waited for that turn while holding the group would
+    close the cycle; it gives the group back and says the workspace is busy.
+    """
+    job, claim, sandbox = await _reserve_shared_chat(store)
+    await _run_turn(store, job, claim, sandbox)
+    async with pool.acquire() as holder, holder.transaction():
+        await holder.execute("SELECT id FROM agent_jobs WHERE id = $1 FOR UPDATE", job["id"])
+        refused = await asyncio.wait_for(
+            store.snapshot.request_snapshot_publication(
+                thread_id=job["thread_id"], user_id=job["user_id"]
+            ),
+            timeout=10,
+        )
+        assert refused == {"error": "workspace_busy"}
+        # The request gave the group back, and opened nothing.
+        await holder.execute(
+            "SELECT id FROM agent_sandboxes WHERE id = $1 FOR UPDATE NOWAIT",
+            sandbox["sandbox_id"],
+        )
+    assert await _snapshots(pool, sandbox["sandbox_id"]) == []
+    assert await _request(store, job)
 
 
 async def _close_a_cycle(rival, statement: str, *args) -> None:

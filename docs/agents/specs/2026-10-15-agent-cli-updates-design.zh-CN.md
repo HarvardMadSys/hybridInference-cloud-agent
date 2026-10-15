@@ -4,7 +4,7 @@
 
 设计核对基线：远端 `dev`，提交 `95be1af9`。
 
-目标：管理员在 Admin 的 Settings 页面点一下，就能把 Claude Code、Codex、OpenCode 或 pi 更新到 npm 上的最新版本，不用改代码、重建镜像或重新部署。
+目标：管理员在 Admin 的 Settings 页面点一下，就能把 Claude Code、Codex、OpenCode 或 pi 更新到 npm 上的最新版本，或者换成 npm 上的任意一个正式版本（包括更老的），不用改代码、重建镜像或重新部署。
 
 ## 一 原有行为与问题
 
@@ -32,6 +32,7 @@ agent CLI 的版本是打包在沙箱镜像里的。默认版本同时写在两�
 | 界面上的状态 | 正常只有两个："下载中"（显示一个小恐龙进度条）和"已完成更新"。下载或自测失败时，显示原因和"重试"按钮。 |
 | 什么时候切换 | 所有在线主机都下载好、并且自测通过之后，新对话才开始用新版本。已有对话一直用它开始时的版本。 |
 | 回退 | 一键回到更新前新对话所用的版本。 |
+| 任意版本 | 版本下拉框列出 npm 上的所有正式版本，可以升级也可以降级。Murphy 于 2026-10-15 决定：预发布版（alpha、beta 等）不列出。 |
 | 交付方式 | 设计、实现和测试放在同一个 PR 里。 |
 
 ## 三 用户可见行为
@@ -45,7 +46,17 @@ Settings → Agent versions 里，每个可以更新的 agent 下面会显示：
 - **已经是最新时**：显示"Up to date"。
 - **查不到 npm 时**：显示原因，同时不提供更新按钮。
 
-原来的版本下拉框保留不变。在下拉框里手动选一个版本，会取代正在进行或已经完成的更新，以手动选择为准。手动选的版本（包括回退）同样会下发给每台主机：后加入的主机，或者丢了这份下载的主机，也会去下载它。如果有主机下载失败，页面会显示"Some servers could not download …"和"Try again"按钮；没有失败时，页面不显示额外信息。
+版本下拉框分两组：**On servers** 是服务器上已经有的版本，**Download from npm** 是 npm 上其余的正式版本，新的在上面。
+
+- **选一个每台服务器都已经有的版本**：按钮是"Save"，保存后马上生效。
+- **选一个有服务器还没有的版本**：按钮变成"Download and switch"，下面写明有几台服务器要先下载并自测。点了之后和"Update"走完全一样的流程：小恐龙进度条，所有服务器都通过后新对话才切过去。所以降级到老版本，也要先通过同样的自测。
+- **不列出的版本**：预发布版（版本号带 `-`，比如 `0.162.0-alpha.1`、opencode 的 `0.0.0-snapshot-…`），以及 npm 标了废弃的版本（比如 Codex 0.54.0："bad MUSL binaries on Linux"）。例外：如果 npm 的 latest 版本本身也被标了废弃，说明废弃的是整个包而不是某个版本，这时照常列出所有版本，并在页面上显示 npm 的说明。pi 目前就是这样：npm 上旧包 `@mariozechner/pi-coding-agent` 的每个版本都写着"please use @earendil-works/pi-coding-agent instead going forward"。
+- **查不到 npm 的版本列表时**：下拉框仍然列出服务器上已有的版本，并显示原因。
+- **Kilo 不变**：只能选镜像里自带的版本。
+
+版本列表来自 npm 的精简包文档（`application/vnd.npm.install-v1+json`）。这份文档很大，opencode 的约 15 MB，所以版本列表用单独的接口 `GET /admin/agent/runtime-upgrades/{runtime}/versions` 读取，不放在页面每隔几秒的轮询里。控制面每个包每小时最多读一次，同一时间只读一次，读失败的结果只缓存 1 分钟；页面每次打开这个标签时读一次。
+
+在下拉框里手动选一个版本，会取代正在进行或已经完成的更新，以手动选择为准。手动选的版本（包括回退）同样会下发给每台主机：后加入的主机，或者丢了这份下载的主机，也会去下载它。如果有主机下载失败，页面会显示"Some servers could not download …"和"Try again"按钮；没有失败时，页面不显示额外信息。
 
 ## 四 一次更新怎么完成
 
@@ -108,7 +119,8 @@ Settings → Agent versions 里，每个可以更新的 agent 下面会显示：
   两列都是新增、默认为空。旧版本的控制面和主机会直接忽略它们。
 - 心跳请求加 `runtime_downloads`：每个要保留的版本一条，带 `runtime`。读不懂的条目（包括 `state` 不是字符串的）直接丢掉，不会因此拒绝整个心跳。心跳回复加 `runtime_downloads`，内容是每台主机要保留的全部版本，包括已经完成的更新，这样后加入的主机也会去下载。
 - `GET /admin/agent/runtime-upgrades`：返回每个 agent 当前给新对话用的版本、npm 最新版本、更新状态和进度。npm 的查询结果缓存 1 小时，查询失败只缓存 1 分钟。
-- `POST /admin/agent/runtime-upgrades`：发起更新，并写入审计记录 `agent.runtime_version.upgrade`。
+- `POST /admin/agent/runtime-upgrades`：发起更新，并写入审计记录 `agent.runtime_version.upgrade`。版本可以是 npm 上任意一个已发布的精确版本，更新或更老都可以。
+- `GET /admin/agent/runtime-upgrades/{runtime}/versions`：返回这个 agent 在 npm 上的正式版本（新的在前）、整个包被废弃时 npm 的说明，以及读取失败的原因。
 - 回退复用 `PUT /admin/agent/runtime-versions`。它现在会用手动选择的版本取代这个 runtime 的更新；选的是可下载的 agent 时，这个版本继续下发给每台主机。选回"默认"时清除记录，因为镜像默认版本每台主机都有。
 - 新增环境变量（见 `ENVIRONMENT.md`）：
   - `AGENT_RUNTIME_REGISTRY_URL`：控制面和主机都会读，默认是公共 npm registry。
@@ -134,15 +146,16 @@ Settings → Agent versions 里，每个可以更新的 agent 下面会显示：
 ## 九 验证
 
 - **单元测试：**
-  - 版本匹配规则与 `install-runtimes.sh` 逐条对照；上报和目标的格式校验；进度汇总（平均值、失败优先、按 nonce 区分请求、已完成的更新在重新自测期间保持已完成）；npm 查询和缓存（`test_runtime_upgrades.py`）。
+  - 版本匹配规则与 `install-runtimes.sh` 逐条对照；上报和目标的格式校验；进度汇总（平均值、失败优先、按 nonce 区分请求、已完成的更新在重新自测期间保持已完成）；npm 查询和缓存；版本列表只留正式版、按数字从新到旧排、去掉废弃版本，整个包被废弃时照常列出并带上说明；版本列表每小时只读一次、同时只读一次、读失败很快重试（`test_runtime_upgrades.py`）。
   - 主机端用假的 Docker：联网和断网分别在哪一步、只保留自测通过的版本、失败后的重试规则、新镜像发布后重新下载、同一个 runtime 同时保留两个版本、清理遗留容器；复制进对话（`test_runtime_downloads.py`）。
-  - 心跳收发（`test_host_pool_api.py`、`test_host_enrollment.py`），Admin 接口（`test_admin_runtime_upgrades_api.py`），版本上报（`test_agent_sandbox.py`）。
+  - 心跳收发（`test_host_pool_api.py`、`test_host_enrollment.py`），Admin 接口，包括版本列表接口和选更老的版本（`test_admin_runtime_upgrades_api.py`），版本上报（`test_agent_sandbox.py`）。
 - **数据库测试**：所有在线主机就绪后才切换、没有主机在线时不切换、上报的存储；重试只换 nonce（`before`、回退目标、切换状态都不变）；切换前主机同时保留在用的版本；回退后这个版本继续下发并沿用原来的 `before`；手动选择会取代更新、选回默认会清除（`test_host_pool_store.py`）。
-- **前端**：更新、下载中显示恐龙、完成后刷新版本菜单、失败与重试、回退、手动选择的版本下载失败、查不到 npm；恐龙进度条本身（`page.test.tsx`、`DinoProgress.test.tsx`）。
-- **真实环境**（`tests/external/test_runtime_updates_live.py`，需要已构建的沙箱镜像和 npm 网络）：在本机 Docker 上，用真实的 npm 和 CLI 跑完整条流程。Claude Code 2.1.300 和 OpenCode 1.19.0 能下载、自测、出现在可用版本里，复制进容器后成员能运行但不能修改；pi 0.73.1 走"镜像里已有"的路径；没有安装的版本自测会失败。开发过程中也用同一套代码跑通了 Codex 0.162.1 和 Claude Code 2.1.299。
+- **前端**：更新、下载中显示恐龙、完成后刷新版本菜单、失败与重试、回退、手动选择的版本下载失败、查不到 npm；下拉框分组列出 npm 版本、选服务器没有的版本走"下载并切换"、选都有的版本照常保存、整个包被废弃和读不到版本列表时的提示；恐龙进度条本身（`page.test.tsx`、`DinoProgress.test.tsx`）。
+- **真实环境**（`tests/external/test_runtime_updates_live.py`，需要已构建的沙箱镜像和 npm 网络）：在本机 Docker 上，用真实的 npm 和 CLI 跑完整条流程。Claude Code 2.1.300 和 OpenCode 1.19.0 能下载、自测、出现在可用版本里，复制进容器后成员能运行但不能修改；pi 0.73.1 走"镜像里已有"的路径；没有安装的版本自测会失败。开发过程中也用同一套代码跑通了 Codex 0.162.1 和 Claude Code 2.1.299。降级也用真实流程跑通了：Claude Code 2.1.200、Codex 0.140.0、OpenCode 1.18.0，都比镜像默认版本老。版本列表接口直接对真实 npm 调用：四个 agent 第一次共约 0.8 秒，之后走缓存；每个回复不到 9 KB。
 
 ## 十 后续
 
 - 自动清理不再被任何目标、也没有对话使用的已下载版本。
 - 给依赖具体版本行为的驱动逻辑补充自测场景，例如中途插话、权限提示。
 - Kilo 的隔离补丁合入上游后，可以把 Kilo 也加入一键更新。
+- pi 已经换到新的 npm 包 `@earendil-works/pi-coding-agent`（最新 1.2.0，要求 Node ≥ 22.19，沙箱镜像是 22.23.3）。我们的目录、镜像构建和 `pi-mcp-bridge.ts` 都还用旧包名，所以 pi 停在 0.73.1。换包需要单独改，并验证 MCP 桥。

@@ -76,6 +76,50 @@ THREAD_SANDBOX_SOURCE = f"""
             ORDER BY snapshot.workspace_epoch DESC, snapshot.id DESC
             LIMIT 1
         ) AS workspace_publication_state,
+        -- The newest snapshot was published without a pull request: its
+        -- capture found nothing to publish.
+        (
+            SELECT snapshot.state = 'published' AND snapshot.published_pr_url IS NULL
+            FROM agent_sandbox_snapshots snapshot
+            WHERE snapshot.sandbox_id = g.id
+            ORDER BY snapshot.workspace_epoch DESC, snapshot.id DESC
+            LIMIT 1
+        ) AS workspace_publication_unchanged,
+        (
+            SELECT snapshot.published_pr_url
+            FROM agent_sandbox_snapshots snapshot
+            WHERE snapshot.sandbox_id = g.id AND snapshot.published_pr_url IS NOT NULL
+            ORDER BY snapshot.workspace_epoch DESC, snapshot.id DESC
+            LIMIT 1
+        ) AS workspace_pr_url,
+        -- Something the owner has not published: a turn settled since the
+        -- last snapshot, or a last publication that failed. Turns settle in
+        -- order and a publication takes all of them, so each member's newest
+        -- settled turn answers for the ones before it. A Fork's copies of its
+        -- source's turns ran in no workspace of their own, and a temporary
+        -- workspace has nowhere to publish to.
+        EXISTS (
+            SELECT 1 FROM agent_threads published_to
+            WHERE published_to.id = m.thread_id AND published_to.repo IS NOT NULL
+        ) AND (
+            EXISTS (
+                SELECT 1 FROM agent_thread_sandbox_memberships settled
+                JOIN agent_jobs settled_job ON settled_job.id = settled.last_settled_job_id
+                WHERE settled.sandbox_id = g.id
+                  AND settled_job.fork_source_job_id IS NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM agent_snapshot_jobs held
+                      WHERE held.job_id = settled.last_settled_job_id
+                  )
+            )
+            OR COALESCE((
+                SELECT snapshot.state = 'failed'
+                FROM agent_sandbox_snapshots snapshot
+                WHERE snapshot.sandbox_id = g.id
+                ORDER BY snapshot.workspace_epoch DESC, snapshot.id DESC
+                LIMIT 1
+            ), FALSE)
+        ) AS workspace_unpublished_changes,
         g.workspace_epoch,
         {NATIVE_FORK_CAPABLE} AS native_fork_capable,
         -- The host holding this group can hand a message to a running turn of

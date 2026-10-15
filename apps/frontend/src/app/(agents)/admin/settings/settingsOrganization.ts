@@ -141,6 +141,11 @@ const SETTING_GROUPS: SettingGroup[] = [
     ],
   },
   {
+    title: 'GitHub sign-in',
+    important: ['mcp_github_client_id', 'mcp_github_client_secret'],
+    advanced: [],
+  },
+  {
     title: 'Compute services',
     important: ['compute.cloudlab_api_url', 'compute.registration_url'],
     advanced: ['compute.poll_seconds', 'compute.observation_seconds'],

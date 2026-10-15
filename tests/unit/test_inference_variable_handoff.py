@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 from types import SimpleNamespace
@@ -266,3 +267,62 @@ def test_the_runner_refuses_an_older_supervisor_before_sending_values():
     with pytest.raises(SessionSupervisorError, match="does not support"):
         client.prepare_environment("athr_owner", _bound(_OWNER_KEY))
     assert [request.url.path for request in requests] == ["/health"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("client_kind", ["control-plane", "runner"])
+@pytest.mark.parametrize("inference_capable", [False, True])
+@pytest.mark.parametrize("snapshot_capable", [False, True])
+async def test_preparation_negotiates_inference_and_snapshot_capabilities_independently(
+    client_kind, inference_capable, snapshot_capable
+):
+    bound = _bound(_OWNER_KEY).model_copy(
+        update={"update_script": "npm run generate", "setup_fingerprint": "f" * 64}
+    )
+    capabilities = ["environment-v1"]
+    if inference_capable:
+        capabilities.append("environment-inference-v1")
+    if snapshot_capable:
+        capabilities.append("environment-snapshot-v1")
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"capabilities": capabilities})
+        return httpx.Response(200, json={"status": "ready"})
+
+    if client_kind == "control-plane":
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            broker = SandboxManagerClient("http://broker", "credential", client=client)
+            if inference_capable:
+                await broker.prepare_environment("workspace", bound)
+            else:
+                with pytest.raises(SandboxManagerError, match="upgraded"):
+                    await broker.prepare_environment("workspace", bound)
+    else:
+        supervisor = SessionSupervisorClient("http://broker", "credential")
+        supervisor._client.close()
+        with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+            supervisor._client = client
+            if inference_capable:
+                supervisor.prepare_environment("workspace", bound)
+            else:
+                with pytest.raises(SessionSupervisorError, match="does not support"):
+                    supervisor.prepare_environment("workspace", bound)
+
+    if not inference_capable:
+        assert [request.url.path for request in requests] == ["/health"]
+        return
+    assert [request.url.path for request in requests] == [
+        "/health",
+        "/workspaces/workspace/environment/prepare",
+    ]
+    environment = json.loads(requests[-1].content)["environment"]
+    assert environment["variables"][0]["value"] == OWNER_OPENAI
+    if snapshot_capable:
+        assert environment["update_script"] == "npm run generate"
+        assert environment["setup_fingerprint"] == "f" * 64
+    else:
+        assert "update_script" not in environment
+        assert "setup_fingerprint" not in environment

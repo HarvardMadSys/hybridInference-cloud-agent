@@ -50,7 +50,7 @@ function ShortcutRow({
   return (
     <div className="flex flex-col gap-2 border-t border-border py-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
       <div className="min-w-0">
-        <h3 className="text-sm font-medium text-foreground">{label}</h3>
+        <h2 className="text-sm font-medium text-foreground">{label}</h2>
         <p className="mt-1 text-xs leading-5 text-muted">{t(`settings.shortcuts.${action}Help`)}</p>
       </div>
       <div className="shrink-0 sm:max-w-[60%]">
@@ -159,11 +159,14 @@ export function KeyboardShortcutsSettings() {
   const customized = JSON.stringify(shortcuts) !== JSON.stringify(DEFAULT_KEYBOARD_SHORTCUTS);
 
   return (
-    <section aria-labelledby="settings-shortcuts" className="ui-card mt-4 bg-surface p-3 sm:p-4">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <h2 id="settings-shortcuts" className="text-base font-semibold text-foreground">
-          {t('settings.shortcuts.title')}
-        </h2>
+    <section
+      aria-label={t('settings.shortcuts.title')}
+      className="ui-card mt-6 bg-surface p-3 sm:p-4"
+    >
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <p id="shortcut-recording-help" className="text-xs leading-5 text-muted">
+          {t('settings.shortcuts.recordingHelp')}
+        </p>
         <button
           type="button"
           disabled={!userId || !customized}
@@ -173,10 +176,6 @@ export function KeyboardShortcutsSettings() {
           {t('settings.shortcuts.reset')}
         </button>
       </div>
-      <p className="mt-2 text-sm leading-6 text-muted">{t('settings.shortcuts.description')}</p>
-      <p id="shortcut-recording-help" className="mb-3 mt-1 text-xs leading-5 text-muted">
-        {t('settings.shortcuts.recordingHelp')}
-      </p>
       {SHORTCUT_ACTIONS.map((action) => (
         <ShortcutRow
           key={`${userId}:${action}`}
@@ -187,7 +186,7 @@ export function KeyboardShortcutsSettings() {
         />
       ))}
       <div className="border-t border-border pt-3">
-        <h3 className="text-xs font-semibold text-foreground">{t('settings.shortcuts.builtIn')}</h3>
+        <h2 className="text-xs font-semibold text-foreground">{t('settings.shortcuts.builtIn')}</h2>
         <dl className="mt-2 grid gap-x-6 gap-y-2 text-xs sm:grid-cols-2">
           {BUILT_IN_SHORTCUTS.map(([action, keys]) => (
             <div key={action} className="flex items-start justify-between gap-3">

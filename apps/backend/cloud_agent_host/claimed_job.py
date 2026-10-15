@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from cloud_agent_shared.environment import BoundEnvironment
+from cloud_agent_shared.environment_snapshots import EnvironmentSnapshotRef
 from cloud_agent_shared.plugins import MAX_SANDBOX_PLUGINS, validate_sandbox_plugins
 
 
@@ -29,6 +30,16 @@ class ClaimUnreachable(Exception):
 
 class WorkWaitUnsupported(Exception):
     """The control plane has no wait endpoint, so an idle host polls instead."""
+
+
+def _snapshot_ref(raw: Any) -> EnvironmentSnapshotRef | None:
+    """A snapshot only saves time: one this host cannot read is simply not used."""
+    if not isinstance(raw, dict):
+        return None
+    try:
+        return EnvironmentSnapshotRef.model_validate(raw)
+    except ValueError:
+        return None
 
 
 @dataclass
@@ -65,6 +76,9 @@ class ClaimedJob:
     # pass one.
     setup_script: str | None = None
     environment: BoundEnvironment | None = field(default=None, repr=False)
+    # An installation snapshot a new workspace of this binding may start
+    # from. A follow-up turn, or a group restored from its checkpoint, ignores it.
+    environment_snapshot: EnvironmentSnapshotRef | None = None
     # Explicit CLI plugins installed in this chat's private member state.
     plugins: list[dict[str, str]] = field(default_factory=list)
     # Read-only, single-repo, short-lived: what the runner clones with. Never
@@ -119,6 +133,7 @@ class ClaimedJob:
             environment=BoundEnvironment.model_validate(body["environment"])
             if body.get("environment")
             else None,
+            environment_snapshot=_snapshot_ref(body.get("environment_snapshot")),
             plugins=plugins,
             runtime=body["runtime"],
             model=body["model"],

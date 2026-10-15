@@ -18,9 +18,6 @@ from cloud_agent.schemas._host_reports import (
     _HostReportVersion,
     _HostVersionMenu,
 )
-from cloud_agent_shared.environment import (
-    BoundEnvironment,  # noqa: TC001 — Pydantic resolves annotations at runtime.
-)
 from cloud_agent_shared.plugins import (
     SandboxPlugin,  # noqa: TC001 — Pydantic resolves annotations at runtime.
 )
@@ -237,7 +234,12 @@ class WorkerAttachmentContentResponse(BaseModel):
 class WorkerClaimResponse(BaseModel):
     """A claimed job plus the capability token scoped to this attempt."""
 
-    environment: BoundEnvironment | None = Field(None, repr=False)
+    #: The frozen ``BoundEnvironment`` as JSON, without the fields this host's
+    #: runner would refuse as unknown (``environment_payload``).
+    environment: dict[str, Any] | None = Field(None, repr=False)
+    #: An installation snapshot a new workspace of this binding may start
+    #: from (``EnvironmentSnapshotRef``). Only for a host that can.
+    environment_snapshot: dict[str, Any] | None = None
 
     #: How many uploads this whole conversation holds, not just this turn.
     #: A host with zero here skips the upload fetch entirely, which is every
@@ -370,6 +372,17 @@ class WorkerContinuityRequest(BaseModel):
     # diagnostic field into a database error.
     mode: Literal["hot", "warm_native"] | None = None
     context_status: Literal["new", "live", "restored", "lost"] | None = None
+
+
+class WorkerEnvironmentSnapshotReport(BaseModel):
+    """What a new workspace did with the installation snapshot it was handed."""
+
+    snapshot_id: str | None = Field(None, pattern=r"^[0-9a-f]{32}$")
+    outcome: Literal[
+        "used", "absent", "lockfiles_changed", "image_changed", "unavailable", "invalid"
+    ]
+    #: The commit the workspace checked out, which a queued build uses.
+    base_sha: str | None = Field(None, pattern=r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 
 
 class WorkerSandboxReserveRequest(BaseModel):

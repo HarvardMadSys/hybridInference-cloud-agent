@@ -43,6 +43,7 @@ from cloud_agent.storage.repositories import (
     PostgresMcpCatalogRepository,
     PostgresMcpConnectionRepository,
     PostgresOperationMeasurementRepository,
+    PostgresOwnerUsageRepository,
     PostgresPendingMessageRepository,
     PostgresPrArchiveRepository,
     PostgresProfilingControlRepository,
@@ -56,6 +57,9 @@ from cloud_agent.storage.repositories import (
     PostgresUserProfileRepository,
     PostgresWebSearchRepository,
     PostgresWorkInsightsRepository,
+)
+from cloud_agent.storage.repositories.environment_snapshots import (
+    PostgresEnvironmentSnapshotRepository,
 )
 from cloud_agent.storage.repositories.environments import PostgresEnvironmentRepository
 
@@ -82,6 +86,7 @@ if TYPE_CHECKING:
         McpCatalogRepository,
         McpConnectionRepository,
         OperationMeasurements,
+        OwnerUsageQueries,
         PendingMessageRepository,
         PrArchiveRepository,
         ProfilingControl,
@@ -96,6 +101,7 @@ if TYPE_CHECKING:
         WebSearchRepository,
         WorkInsightsRepository,
     )
+    from cloud_agent.ports.environment_snapshots import EnvironmentSnapshotRepository
     from cloud_agent.ports.environments import EnvironmentRepository
 
 
@@ -115,6 +121,9 @@ class Storage:
         self.admin_usage = AdminUsageQueries(pool)
 
         self.environments: EnvironmentRepository = PostgresEnvironmentRepository(pool)
+        self.environment_snapshots: EnvironmentSnapshotRepository = (
+            PostgresEnvironmentSnapshotRepository(pool)
+        )
         self.attempt_commands: AttemptCommands = PostgresAttemptCommands(pool)
         self.audit: AuditRepository = PostgresAuditRepository(pool)
         self.audit_log: AuditLogQueries = PostgresAuditLogRepository(pool)
@@ -134,6 +143,7 @@ class Storage:
             pool
         )
         self.mcp_catalog: McpCatalogRepository = PostgresMcpCatalogRepository(pool)
+        self.owner_usage: OwnerUsageQueries = PostgresOwnerUsageRepository(pool)
         self.pending_messages: PendingMessageRepository = PostgresPendingMessageRepository(pool)
         self.pr_archive: PrArchiveRepository = PostgresPrArchiveRepository(pool)
         self.profiling_control: ProfilingControl = PostgresProfilingControlRepository(pool)

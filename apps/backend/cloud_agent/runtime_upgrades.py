@@ -10,12 +10,18 @@ reports the last host ready switches new chats over
 This module holds the two parts of that with no storage of their own: asking
 the registry what is current, and reducing the hosts' reports to the one state
 and one progress number the page shows.
+
+The version menu also lists every stable release npm has, so an admin can move
+an agent to any of them, older ones included, through the same download and
+check.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import re
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -46,7 +52,16 @@ STATE_FAILED = "failed"
 #: How long a registry answer is reused. The page polls while an update runs,
 #: and npm is not asked every few seconds for something that changes daily.
 REGISTRY_CACHE_S = 3600.0
+#: How long a failed registry read is reused before npm is asked again.
+REGISTRY_FAILURE_CACHE_S = 60.0
 _REGISTRY_TIMEOUT_S = 10.0
+#: A version list is one large document — opencode's is about 15 MB — so it
+#: gets longer than the small ``/latest`` read.
+_VERSIONS_TIMEOUT_S = 30.0
+#: npm's abbreviated document: every version, without each one's readme.
+_ABBREVIATED = "application/vnd.npm.install-v1+json; q=1.0, application/json; q=0.8"
+#: A release, not ``-alpha.1`` or ``-beta``: the menu lists only these.
+_STABLE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 
 
 def registry_url() -> str:
@@ -67,6 +82,46 @@ def version_key(version: str) -> tuple[tuple[int, int, int], int, str]:
     return (major, minor, patch), 0 if pre else 1, pre
 
 
+@dataclass(frozen=True)
+class NpmVersions:
+    """What npm publishes of one package, as the version menu lists it."""
+
+    #: Stable releases, newest first.
+    versions: list[str]
+    #: npm's message when the whole package is deprecated, else None.
+    deprecated: str | None = None
+    error: str | None = None
+
+
+def stable_versions(document: object) -> tuple[list[str], str | None]:
+    """The releases worth offering from an npm package document, newest first.
+
+    Prereleases are left out, and so is a release npm marks deprecated — such
+    as Codex 0.54.0, "bad MUSL binaries on Linux". When npm's latest release
+    is itself deprecated, the message is about the package, not one release
+    (pi's says the package moved): every release is listed, and the message
+    returned so the page can say it.
+    """
+    if not isinstance(document, dict) or not isinstance(document.get("versions"), dict):
+        return [], None
+    published: dict[str, Any] = document["versions"]
+    tags = document.get("dist-tags")
+    latest = tags.get("latest") if isinstance(tags, dict) else None
+    latest_entry = published.get(latest) if isinstance(latest, str) else None
+    package_note = latest_entry.get("deprecated") if isinstance(latest_entry, dict) else None
+    package_deprecated = isinstance(package_note, str) and bool(package_note)
+    found = [
+        version
+        for version, entry in published.items()
+        if _STABLE.fullmatch(version)
+        and is_exact_version(version)
+        and isinstance(entry, dict)
+        and (package_deprecated or not entry.get("deprecated"))
+    ]
+    found.sort(key=version_key, reverse=True)
+    return found, (package_note if package_deprecated else None)
+
+
 class RegistryClient:
     """The latest version of each agent package, cached for an hour.
 
@@ -85,6 +140,10 @@ class RegistryClient:
         self._transport = transport
         self._clock = clock
         self._latest: dict[str, tuple[float, str | None, str | None]] = {}
+        self._versions: dict[str, tuple[float, NpmVersions]] = {}
+        #: One read of a package's version list at a time: it is large, and a
+        #: second caller would only fetch the same document again.
+        self._version_reads: dict[str, asyncio.Lock] = {}
         self._lock = asyncio.Lock()
 
     def _client(self) -> httpx.AsyncClient:
@@ -119,9 +178,53 @@ class RegistryClient:
         async with self._lock:
             # A failure is cached briefly, so a registry outage does not make
             # every poll of the page wait out the timeout again.
-            stamp = self._clock() if version else self._clock() - REGISTRY_CACHE_S + 60
+            stamp = (
+                self._clock()
+                if version
+                else self._clock() - REGISTRY_CACHE_S + REGISTRY_FAILURE_CACHE_S
+            )
             self._latest[package] = (stamp, version, error)
         return version, error
+
+    async def versions(self, package: str) -> NpmVersions:
+        """Every stable release of ``package`` worth offering, cached for an hour."""
+        async with self._lock:
+            read = self._version_reads.setdefault(package, asyncio.Lock())
+        async with read:
+            async with self._lock:
+                cached = self._versions.get(package)
+                if cached is not None and self._clock() - cached[0] < REGISTRY_CACHE_S:
+                    return cached[1]
+            result = await self._read_versions(package)
+            async with self._lock:
+                stamp = (
+                    self._clock()
+                    if result.error is None
+                    else self._clock() - REGISTRY_CACHE_S + REGISTRY_FAILURE_CACHE_S
+                )
+                self._versions[package] = (stamp, result)
+            return result
+
+    async def _read_versions(self, package: str) -> NpmVersions:
+        try:
+            async with self._client() as client:
+                response = await client.get(
+                    f"/{_package_path(package)}",
+                    headers={"accept": _ABBREVIATED},
+                    timeout=_VERSIONS_TIMEOUT_S,
+                )
+            if response.status_code != 200:
+                return NpmVersions([], error=f"npm answered {response.status_code} for {package}")
+            # Parsed off the event loop: the document can be many megabytes.
+            document = await asyncio.to_thread(json.loads, response.content)
+        except (httpx.HTTPError, ValueError) as exc:
+            return NpmVersions(
+                [], error=f"could not reach the npm registry: {exc.__class__.__name__}"
+            )
+        found, deprecated = stable_versions(document)
+        if not found:
+            return NpmVersions([], error=f"npm lists no stable release of {package}")
+        return NpmVersions(found, deprecated=deprecated)
 
     async def has_version(self, package: str, version: str) -> bool | None:
         """Whether npm publishes ``package@version``; None if npm cannot say."""

@@ -56,6 +56,7 @@ vi.mock('@/lib/api/compute', () => ({
 }));
 vi.mock('@/lib/api/adminRuntimeUpgrades', () => ({
   getRuntimeUpgrades: vi.fn(async () => ({ runtimes: [] })),
+  getRuntimeVersions: vi.fn(),
   requestRuntimeUpgrade: vi.fn(),
 }));
 vi.mock('@/lib/api/adminArchiveSettings', () => ({
@@ -69,7 +70,11 @@ import {
   getSandboxArchiveSettings,
   updateSandboxArchiveSettings,
 } from '@/lib/api/adminArchiveSettings';
-import { getRuntimeUpgrades, requestRuntimeUpgrade } from '@/lib/api/adminRuntimeUpgrades';
+import {
+  getRuntimeUpgrades,
+  getRuntimeVersions,
+  requestRuntimeUpgrade,
+} from '@/lib/api/adminRuntimeUpgrades';
 import { getAgentAdminSettings, setAgentAdminSettings } from '@/lib/api/adminSettings';
 import { getCloudLabDefaults, saveCloudLabDefaults } from '@/lib/api/compute';
 
@@ -341,8 +346,30 @@ function pool(over: Partial<AgentRunnerHostPool> = {}): AgentRunnerHostPool {
   };
 }
 
+function editField(label: string): HTMLElement {
+  let field = screen.getByLabelText(label);
+  if (!field.matches('input,select,textarea')) {
+    const group = field.closest('form')!.parentElement!;
+    const edit = within(group).queryByRole('button', { name: /^Edit .* settings$/ });
+    if (edit) fireEvent.click(edit);
+    const replace = within(group).queryByRole('button', {
+      name: new RegExp(`^(Replace|Set) ${label}$`),
+    });
+    if (replace) fireEvent.click(replace);
+    field = screen.getByLabelText(label);
+  }
+  return field;
+}
+async function loadedField(label: string) {
+  await screen.findByLabelText(label);
+  return editField(label);
+}
+
 function submit(control: HTMLElement) {
   fireEvent.submit(control.closest('form')!);
+  const review = screen.queryByRole('dialog', { name: 'Review changes' });
+  const apply = review && within(review).queryByRole('button', { name: 'Apply changes' });
+  if (apply) fireEvent.click(apply);
 }
 
 type SettingsTab = string;
@@ -376,6 +403,14 @@ beforeEach(() => {
   getArchiveSettings.mockReset().mockResolvedValue(archiveSettings);
   updateArchiveSettings.mockReset();
   vi.mocked(getRuntimeUpgrades).mockReset().mockResolvedValue({ runtimes: [] });
+  vi.mocked(getRuntimeVersions)
+    .mockReset()
+    .mockImplementation(async (runtime) => ({
+      runtime,
+      versions: [],
+      deprecated: null,
+      error: null,
+    }));
   vi.mocked(requestRuntimeUpgrade).mockReset();
   vi.mocked(getAgentAdminSettings).mockReset().mockResolvedValue({
     revision: 1,
@@ -556,7 +591,7 @@ describe('admin Settings', () => {
       bootstrap: [],
     });
     renderSettings();
-    fireEvent.change(await screen.findByLabelText('Application name'), {
+    fireEvent.change(await loadedField('Application name'), {
       target: { value: 'My agent' },
     });
     selectSettingsTab('Agent versions');
@@ -570,7 +605,7 @@ describe('admin Settings', () => {
 
     selectSettingsTab('Appearance');
     expect(screen.getByLabelText('Application name')).toHaveValue('My agent');
-    expect(screen.getByRole('button', { name: 'Save Application name' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Review Branding changes' })).toBeEnabled();
     selectSettingsTab('Agent versions');
     expect(screen.getByLabelText('Claude Code')).toHaveValue('2.1.235');
     selectSettingsTab('Sandbox');
@@ -651,7 +686,7 @@ describe('application category tabs', () => {
       '/admin/settings#application-setting-publish_git_timeout_s',
     );
     renderSettings();
-    const input = await screen.findByRole('textbox', { name: 'Publication Git timeout' });
+    const input = await screen.findByLabelText('Publication Git timeout');
     await waitFor(() => expect(input).toHaveFocus());
     expect(input.closest('details')).toHaveAttribute('open');
     expect(screen.getByRole('tabpanel', { name: 'Source control' })).toBeVisible();
@@ -707,7 +742,7 @@ describe('application category tabs', () => {
       `/admin/settings?tab=${encodeURIComponent(categoryTabId('Sandbox archives'))}`,
     );
     renderSettings();
-    const input = await screen.findByRole('textbox', { name: 'Sandbox archive S3 bucket' });
+    const input = await loadedField('Sandbox archive S3 bucket');
     expect(screen.queryByRole('tab', { name: 'Sandbox archives' })).not.toBeInTheDocument();
     expect(screen.getByRole('tab', { name: 'Sandbox' })).toHaveAttribute('aria-selected', 'true');
     expect(screen.getAllByRole('tabpanel')).toEqual([
@@ -737,7 +772,7 @@ describe('application category tabs', () => {
       '/admin/settings#application-setting-sandbox_archive.endpoint',
     );
     renderSettings();
-    const input = await screen.findByRole('textbox', { name: 'Sandbox archive S3 endpoint' });
+    const input = await screen.findByLabelText('Sandbox archive S3 endpoint');
     await waitFor(() => expect(input).toHaveFocus());
     expect(input.closest('details')).toHaveAttribute('open');
     expect(screen.getByRole('tabpanel', { name: 'Sandbox' })).toBeVisible();
@@ -759,7 +794,7 @@ describe('application category tabs', () => {
       'Deletion archive settings unavailable',
     );
     fireEvent.click(within(panel).getByRole('button', { name: 'Retry application settings' }));
-    expect(await screen.findByRole('textbox', { name: 'Sandbox archive S3 bucket' })).toBeVisible();
+    expect(await screen.findByLabelText('Sandbox archive S3 bucket')).toBeVisible();
     expect(screen.getByRole('tab', { name: 'Sandbox' })).toHaveAttribute('aria-selected', 'true');
     expect(within(panel).queryByRole('alert')).not.toBeInTheDocument();
     expect(getAgentAdminSettings).toHaveBeenCalledTimes(2);
@@ -861,7 +896,7 @@ describe('application category tabs', () => {
       'aria-selected',
       'true',
     );
-    expect(screen.getByRole('spinbutton', { name: 'Future limit' })).toBeVisible();
+    expect(screen.getByLabelText('Future limit')).toBeVisible();
     expect(screen.getAllByRole('tabpanel')).toHaveLength(1);
     expect(window.location.search).toBe(query);
     expect(getAgentAdminSettings).toHaveBeenCalledTimes(1);
@@ -947,7 +982,7 @@ describe('application category tabs', () => {
     );
     expect(new URLSearchParams(window.location.search).get('context')).toBe('keep');
     expect(window.location.hash).toBe('#details');
-    fireEvent.change(screen.getByLabelText('Future limit'), { target: { value: '25' } });
+    fireEvent.change(editField('Future limit'), { target: { value: '25' } });
     act(() =>
       window.history.replaceState(
         null,
@@ -963,7 +998,7 @@ describe('application category tabs', () => {
         `/admin/settings?tab=${encodeURIComponent(categoryTabId('Future / category ✓'))}`,
       ),
     );
-    expect(screen.getByRole('spinbutton', { name: 'Future limit' })).toHaveValue(25);
+    expect(screen.getByLabelText('Future limit')).toHaveValue(25);
     expect(getAgentAdminSettings).toHaveBeenCalledTimes(1);
   });
 
@@ -982,7 +1017,7 @@ describe('application category tabs', () => {
       'true',
     );
     expect(screen.getByRole('tabpanel', { name: 'General' })).toBeVisible();
-    expect(screen.getByRole('textbox', { name: 'Application name' })).toBeVisible();
+    expect(screen.getByLabelText('Application name')).toBeVisible();
   });
 
   it('reveals and focuses the category of an initial field hash after its definitions load', async () => {
@@ -991,7 +1026,7 @@ describe('application category tabs', () => {
     window.history.replaceState(null, '', '/admin/settings#application-setting-future.maximum');
     renderSettings();
     await act(async () => pending.resolve(applicationSnapshot()));
-    const field = await screen.findByRole('spinbutton', { name: 'Future limit' });
+    const field = await screen.findByLabelText('Future limit');
     await waitFor(() => expect(field).toHaveFocus());
     expect(screen.getByRole('tabpanel', { name: 'Future / category ✓' })).toBeVisible();
     expect(screen.getByRole('tab', { name: 'Future / category ✓' })).toHaveAttribute(
@@ -1026,7 +1061,7 @@ describe('application category tabs', () => {
     const link = await screen.findByRole('link', { name: 'Future limit' });
     expect(link).toHaveAttribute('href', '#application-setting-future.maximum');
     fireEvent.click(link);
-    const field = screen.getByRole('spinbutton', { name: 'Future limit' });
+    const field = screen.getByLabelText('Future limit');
     await waitFor(() => expect(field).toHaveFocus());
     expect(screen.getByRole('tabpanel', { name: 'Future / category ✓' })).toBeVisible();
     expect(screen.getAllByRole('heading', { name: 'Administrator setup required' })).toHaveLength(
@@ -1037,13 +1072,13 @@ describe('application category tabs', () => {
 
   it('keeps drafts in other categories when a setting is saved or reset', async () => {
     renderSettings();
-    fireEvent.change(await screen.findByLabelText('Application name'), {
+    fireEvent.change(await loadedField('Application name'), {
       target: { value: 'Draft application' },
     });
     selectSettingsTab('Future / category ✓');
-    fireEvent.change(screen.getByLabelText('Future limit'), { target: { value: '25' } });
+    fireEvent.change(editField('Future limit'), { target: { value: '25' } });
     selectSettingsTab('Identity & access');
-    const registration = screen.getByLabelText('Registration enabled');
+    const registration = editField('Registration enabled');
     fireEvent.change(registration, { target: { value: 'false' } });
     const current = applicationSnapshot();
     vi.mocked(setAgentAdminSettings).mockResolvedValueOnce({
@@ -1053,7 +1088,7 @@ describe('application category tabs', () => {
     });
     submit(registration);
     await waitFor(() =>
-      expect(screen.getByRole('status')).toHaveTextContent('Registration enabled saved.'),
+      expect(screen.getByRole('status')).toHaveTextContent('Identity & access settings saved.'),
     );
     expect(screen.getAllByRole('status')).toHaveLength(1);
     expect(setAgentAdminSettings).toHaveBeenNthCalledWith(
@@ -1065,15 +1100,20 @@ describe('application category tabs', () => {
     expect(screen.getByRole('textbox', { name: 'Application name' })).toHaveValue(
       'Draft application',
     );
-    expect(screen.getByRole('button', { name: 'Save Application name' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Review Branding changes' })).toBeEnabled();
     selectSettingsTab('Future / category ✓');
-    expect(screen.getByRole('spinbutton', { name: 'Future limit' })).toHaveValue(25);
+    expect(screen.getByLabelText('Future limit')).toHaveValue(25);
     selectSettingsTab('Identity & access');
     vi.mocked(setAgentAdminSettings).mockResolvedValueOnce({ ...current, revision: 3 });
-    fireEvent.click(screen.getByRole('button', { name: 'Reset Registration enabled' }));
+    editField('Registration enabled');
+    fireEvent.click(screen.getByLabelText('More actions for Registration enabled'));
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Restore default for Registration enabled' }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Restore default' }));
     await waitFor(() =>
       expect(screen.getByRole('status')).toHaveTextContent(
-        'Registration enabled reset to its default.',
+        'Registration enabled restored to its default.',
       ),
     );
     expect(setAgentAdminSettings).toHaveBeenNthCalledWith(
@@ -1087,8 +1127,10 @@ describe('application category tabs', () => {
       'Draft application',
     );
     selectSettingsTab('Future / category ✓');
-    expect(screen.getByRole('spinbutton', { name: 'Future limit' })).toHaveValue(25);
-    expect(screen.getByRole('button', { name: 'Save Future limit' })).toBeEnabled();
+    expect(screen.getByLabelText('Future limit')).toHaveValue(25);
+    expect(
+      screen.getByRole('button', { name: 'Review Future / category ✓ changes' }),
+    ).toBeEnabled();
     expect(getAgentAdminSettings).toHaveBeenCalledTimes(1);
   });
 
@@ -1098,17 +1140,24 @@ describe('application category tabs', () => {
     renderSettings();
     await screen.findByRole('tab', { name: 'Appearance' });
     selectSettingsTab('Identity & access');
-    fireEvent.change(screen.getByLabelText('Registration enabled'), {
+    fireEvent.change(editField('Registration enabled'), {
       target: { value: 'false' },
     });
     selectSettingsTab('Appearance');
-    const name = screen.getByLabelText('Application name');
+    const name = editField('Application name');
     fireEvent.change(name, { target: { value: 'Saved application' } });
     submit(name);
     selectSettingsTab('Identity & access');
-    expect(screen.getByRole('combobox', { name: 'Registration enabled' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Save Registration enabled' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Reset Registration enabled' })).toBeDisabled();
+    expect(screen.getByLabelText('Registration enabled')).toBeDisabled();
+    expect(
+      screen.getByRole('button', { name: 'Review Identity & access changes', hidden: true }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole('button', {
+        name: 'Restore default for Registration enabled',
+        hidden: true,
+      }),
+    ).toBeDisabled();
     submit(screen.getByLabelText('Registration enabled'));
     expect(setAgentAdminSettings).toHaveBeenCalledTimes(1);
     const current = applicationSnapshot();
@@ -1120,7 +1169,7 @@ describe('application category tabs', () => {
       }),
     );
     expect(screen.getByRole('combobox', { name: 'Registration enabled' })).toHaveValue('false');
-    expect(screen.getByRole('button', { name: 'Save Registration enabled' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Review Identity & access changes' })).toBeEnabled();
   });
 
   it('removes every settings panel when the application API revokes access', async () => {
@@ -1172,7 +1221,7 @@ describe('application category tabs', () => {
     vi.mocked(getCloudLabDefaults).mockReturnValueOnce(protectedRead.promise);
     renderSettings();
     await vi.waitFor(() => expect(screen.getByLabelText('Application name')).toBeVisible());
-    const name = screen.getByLabelText('Application name');
+    const name = editField('Application name');
     fireEvent.change(name, { target: { value: 'Saved application' } });
     submit(name);
     const signal = vi.mocked(setAgentAdminSettings).mock.calls[0][1]!;
@@ -1620,7 +1669,7 @@ describe('settings search', () => {
   it('selects an unfamiliar server-defined category with Enter without losing an application draft', async () => {
     vi.mocked(getAgentAdminSettings).mockResolvedValue(applicationSnapshot());
     renderSettings();
-    const applicationName = await screen.findByLabelText('Application name');
+    const applicationName = await loadedField('Application name');
     fireEvent.change(applicationName, { target: { value: 'Unsaved application name' } });
 
     const results = searchFor('future.maximum');
@@ -1629,7 +1678,7 @@ describe('settings search', () => {
       key: 'Enter',
     });
 
-    const future = screen.getByRole('spinbutton', { name: 'Future limit' });
+    const future = screen.getByLabelText('Future limit');
     await waitFor(() => expect(future).toHaveFocus());
     expect(screen.getByRole('tabpanel', { name: 'Future / category ✓' })).toBeVisible();
     expect(screen.getByRole('searchbox', { name: 'Search settings' })).toHaveValue('');
@@ -1644,7 +1693,7 @@ describe('settings search', () => {
     );
     await waitFor(() => expect(applicationName).toHaveFocus());
     expect(screen.getByRole('textbox', { name: 'Application name' })).toBe(applicationName);
-    expect(screen.getByRole('button', { name: 'Save Application name' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Review Branding changes' })).toBeEnabled();
     expect(getAgentAdminSettings).toHaveBeenCalledTimes(1);
   });
 
@@ -1832,7 +1881,7 @@ describe('settings search', () => {
     expect(target).toBeVisible();
   });
 
-  it('focuses the setting form when an application result is read-only', async () => {
+  it('focuses the current value when an application result is read-only', async () => {
     const current = applicationSnapshot();
     vi.mocked(getAgentAdminSettings).mockResolvedValue({
       ...current,
@@ -1849,9 +1898,12 @@ describe('settings search', () => {
       }),
     );
 
-    const input = screen.getByRole('spinbutton', { name: 'Future limit' });
-    expect(input).toBeDisabled();
-    await waitFor(() => expect(input.closest('form')).toHaveFocus());
+    const input = screen.getByLabelText('Future limit');
+    expect(input).toHaveTextContent('Read only');
+    await waitFor(() => expect(input).toHaveFocus());
+    expect(
+      screen.getByRole('button', { name: 'Edit Future / category ✓ settings' }),
+    ).toBeDisabled();
     expect(screen.getByRole('tabpanel', { name: 'Future / category ✓' })).toBeVisible();
   });
 
@@ -2145,6 +2197,112 @@ describe('agent updates', () => {
     expect(screen.queryByRole('button', { name: /Roll back/ })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
     await waitFor(() => expect(startUpdate).toHaveBeenCalledWith('claude-code', '2.1.235'));
+  });
+
+  describe('any npm release', () => {
+    const releases = vi.mocked(getRuntimeVersions);
+    const npm = (versions: string[], over: { deprecated?: string; error?: string } = {}) =>
+      releases.mockImplementation(async (runtime) => ({
+        runtime,
+        versions,
+        deprecated: over.deprecated ?? null,
+        error: over.error ?? null,
+      }));
+
+    it('lists releases the servers lack, and downloads one before switching to it', async () => {
+      listUpdates.mockResolvedValue({ runtimes: [update()] });
+      npm(['2.1.300', '2.1.250', '2.1.235', '2.1.220']);
+      startUpdate.mockResolvedValue({ runtimes: [downloading(5)] });
+      renderSettings('Agent versions');
+
+      const menu = await screen.findByLabelText('Claude Code');
+      await screen.findByRole('option', { name: '2.1.250' });
+      // What the servers hold, then what npm has besides, newest first.
+      const groups = within(menu).getAllByRole('group');
+      expect(groups.map((group) => group.getAttribute('label'))).toEqual([
+        'On servers',
+        'Download from npm',
+      ]);
+      expect(
+        within(groups[1])
+          .getAllByRole('option')
+          .map((option) => option.textContent),
+      ).toEqual(['2.1.300', '2.1.250']);
+      expect(releases).toHaveBeenCalledWith('claude-code', expect.anything());
+
+      fireEvent.change(menu, { target: { value: '2.1.250' } });
+      expect(
+        screen.getByText(
+          '1 server downloads and checks 2.1.250 first; new sandboxes switch once every server has it.',
+        ),
+      ).toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: 'Download and switch' }));
+
+      await waitFor(() => expect(startUpdate).toHaveBeenCalledWith('claude-code', '2.1.250'));
+      expect(setVersion).not.toHaveBeenCalled();
+      expect(await screen.findByRole('progressbar')).toBeInTheDocument();
+    });
+
+    it('saves a release every server already has, as before', async () => {
+      listUpdates.mockResolvedValue({ runtimes: [update()] });
+      npm(['2.1.300', '2.1.235', '2.1.220']);
+      setVersion.mockResolvedValue(pool({ runtime_versions: { 'claude-code': '2.1.235' } }));
+      renderSettings('Agent versions');
+
+      const menu = await screen.findByLabelText('Claude Code');
+      await screen.findByRole('option', { name: '2.1.300' });
+      fireEvent.change(menu, { target: { value: '2.1.235' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+      await waitFor(() => expect(setVersion).toHaveBeenCalledWith('claude-code', '2.1.235'));
+      expect(startUpdate).not.toHaveBeenCalled();
+    });
+
+    it('says when npm deprecates the whole package, and when it cannot list releases', async () => {
+      listUpdates.mockResolvedValue({
+        runtimes: [
+          update({ runtime: 'pi', current_version: '0.73.1', latest_version: '0.73.1' }),
+          update({ runtime: 'codex', current_version: '0.145.0', latest_version: '0.162.1' }),
+        ],
+      });
+      const moved = {
+        runtime: 'pi',
+        versions: ['0.73.1', '0.72.1'],
+        deprecated: 'please use @earendil-works/pi-coding-agent instead going forward',
+        error: null,
+      };
+      const unreachable = {
+        runtime: 'codex',
+        versions: [],
+        deprecated: null,
+        error: 'npm answered 503 for @openai/codex',
+      };
+      releases.mockImplementation(async (runtime) => (runtime === 'pi' ? moved : unreachable));
+      list.mockResolvedValue(
+        pool({
+          hosts: [
+            host({
+              runtime_versions: { pi: '0.73.1', codex: '0.145.0' },
+              runtime_versions_available: { pi: ['0.73.1'], codex: ['0.145.0'] },
+            }),
+          ],
+        }),
+      );
+      renderSettings('Agent versions');
+
+      expect(
+        await screen.findByText(
+          'npm marks this package deprecated: please use @earendil-works/pi-coding-agent instead going forward',
+        ),
+      ).toBeInTheDocument();
+      expect(
+        await screen.findByText('Could not list npm releases: npm answered 503 for @openai/codex'),
+      ).toBeInTheDocument();
+      // Codex still offers what its servers have.
+      expect(
+        within(screen.getByLabelText('Codex')).getByRole('option', { name: '0.145.0' }),
+      ).toBeInTheDocument();
+    });
   });
 
   it('says when the agent is current, and why it could not check', async () => {

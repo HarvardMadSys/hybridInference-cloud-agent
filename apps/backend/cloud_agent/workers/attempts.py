@@ -723,6 +723,9 @@ async def _run_attempt_reaper(
             environments = getattr(store, "environments", None)
             if environments is not None:
                 await environments.maintain_environments()
+            snapshots = getattr(store, "environment_snapshots", None)
+            if snapshots is not None:
+                await snapshots.maintain()
         except Exception:
             logger.warning("Environment maintenance sweep failed", exc_info=True)
         try:

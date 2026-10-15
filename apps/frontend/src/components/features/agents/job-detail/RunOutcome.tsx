@@ -7,6 +7,12 @@ import Link from 'next/link';
 import { siteMisconfiguredReason } from '../adapt';
 import { hasLostContext, ownerRunNote } from '../conversationJob';
 import type { AgentJob } from '../types';
+import { isActiveWorkspacePublicationState } from '../useAgentJobs';
+
+/** The pull request to show for this turn: its own, or the workspace's latest. */
+export function turnPullRequestUrl(job: AgentJob): string | undefined {
+  return job.prUrl ?? job.workspacePrUrl;
+}
 
 function RunGuidance({ job }: { job: AgentJob }) {
   if (hasLostContext(job)) {
@@ -74,19 +80,64 @@ export function WatchPullRequestButton({ onWatchPr }: { onWatchPr?: () => void }
   );
 }
 
+/**
+ * Create PR, then Update PR: the platform publishes the workspace only when its
+ * owner asks. Shown, disabled, while a publication is on its way.
+ */
+export function PublishButton({ job, onPublish }: { job: AgentJob; onPublish?: () => void }) {
+  const t = useT();
+  const update = Boolean(job.workspacePrUrl);
+  const publishing = isActiveWorkspacePublicationState(job.workspacePublicationState);
+  return (
+    <button
+      type="button"
+      onClick={onPublish}
+      disabled={!onPublish || publishing}
+      title={t(
+        publishing
+          ? 'publish.inProgress'
+          : !onPublish
+            ? 'publish.unavailable'
+            : update
+              ? 'publish.updateHint'
+              : 'publish.createHint',
+      )}
+      className={
+        update
+          ? 'rounded-md bg-white dark:bg-gray-900 px-3 py-1.5 text-[13px] font-medium text-gray-700 dark:text-gray-300 shadow-sm ring-1 ring-inset ring-gray-200 dark:ring-white/10 hover:bg-gray-50 dark:hover:bg-white/5 disabled:opacity-40'
+          : 'rounded-md bg-gray-900 dark:bg-gray-100 px-3 py-1.5 text-[13px] font-medium text-white dark:text-gray-900 hover:bg-gray-800 dark:hover:bg-white disabled:opacity-40'
+      }
+    >
+      {t(update ? 'publish.update' : 'publish.create')}
+    </button>
+  );
+}
+
+/** Whether this turn offers the publish control: its owner can, or one is on its way. */
+function offersPublication(job: AgentJob, onPublish?: () => void): boolean {
+  return (
+    Boolean(job.repo) &&
+    !isTemporaryWorkspace(job.repo) &&
+    (Boolean(onPublish) || isActiveWorkspacePublicationState(job.workspacePublicationState))
+  );
+}
+
 function RunActions({
   job,
   onOpenDiff,
   onReview,
   onWatchPr,
+  onPublish,
   showChanges = job.diffFiles.length > 0,
 }: {
   job: AgentJob;
   onOpenDiff: () => void;
   onReview?: () => void;
   onWatchPr?: () => void;
+  onPublish?: () => void;
   showChanges?: boolean;
 }) {
+  const prUrl = turnPullRequestUrl(job);
   return (
     <>
       {showChanges ? (
@@ -100,10 +151,11 @@ function RunActions({
       ) : null}
       {/* A temporary workspace publishes nothing: its files leave as a download. */}
       {isTemporaryWorkspace(job.repo) ? <WorkspaceDownloadButton jobId={job.id} /> : null}
-      {job.prUrl ? (
+      {offersPublication(job, onPublish) ? <PublishButton job={job} onPublish={onPublish} /> : null}
+      {prUrl ? (
         <>
           <a
-            href={job.prUrl}
+            href={prUrl}
             target="_blank"
             rel="noopener noreferrer"
             className="rounded-md bg-gray-900 dark:bg-gray-100 px-3 py-1.5 text-[13px] font-medium text-white dark:text-gray-900 hover:bg-gray-800 dark:hover:bg-white"
@@ -118,20 +170,22 @@ function RunActions({
   );
 }
 
+/** Where the workspace's publication stands; nothing is published until its owner asks. */
 export function RunNotices({ job }: { job: AgentJob }) {
-  const publicationNote =
-    job.workspacePublicationState === 'failed'
-      ? 'Could not publish changes'
-      : job.workspacePublicationState === 'publishing'
-        ? 'Publishing changes…'
-        : null;
-  return (
-    <>
-      {!job.prUrl && publicationNote ? (
-        <p className="mt-3 text-xs text-gray-500 dark:text-gray-400">{publicationNote}</p>
-      ) : null}
-    </>
-  );
+  const t = useT();
+  const state = job.workspacePublicationState;
+  const publicationNote = isActiveWorkspacePublicationState(state)
+    ? t('publish.inProgress')
+    : state === 'failed'
+      ? t('publish.failed')
+      : job.workspaceUnpublishedChanges
+        ? t('publish.unpublished')
+        : state === 'published' && job.workspacePublicationUnchanged
+          ? t('publish.unchanged')
+          : null;
+  return publicationNote ? (
+    <p className="mt-3 text-xs text-gray-500 dark:text-gray-400">{publicationNote}</p>
+  ) : null;
 }
 
 /**
@@ -143,11 +197,13 @@ function FirstRunOutcome({
   onOpenDiff,
   onReview,
   onWatchPr,
+  onPublish,
 }: {
   job: AgentJob;
   onOpenDiff: () => void;
   onReview?: () => void;
   onWatchPr?: () => void;
+  onPublish?: () => void;
 }) {
   const t = useT();
   return (
@@ -174,7 +230,13 @@ function FirstRunOutcome({
           {t('firstRun.doneBody')}
         </p>
         <div className="mt-3 flex flex-wrap items-center gap-3">
-          <RunActions job={job} onOpenDiff={onOpenDiff} onReview={onReview} onWatchPr={onWatchPr} />
+          <RunActions
+            job={job}
+            onOpenDiff={onOpenDiff}
+            onReview={onReview}
+            onWatchPr={onWatchPr}
+            onPublish={onPublish}
+          />
         </div>
       </div>
     </div>
@@ -222,19 +284,24 @@ export function OutcomeCard({
   onOpenDiff,
   onReview,
   onWatchPr,
+  onPublish,
   firstRun = false,
 }: {
   job: AgentJob;
   onOpenDiff: () => void;
   onReview?: () => void;
   onWatchPr?: () => void;
+  onPublish?: () => void;
   firstRun?: boolean;
 }) {
   if (job.state === 'running' || job.state === 'queued') return null;
   const successful = job.state === 'done' || job.state === 'needs_review';
   if (successful) {
     const hasActions =
-      job.diffFiles.length > 0 || Boolean(job.prUrl) || isTemporaryWorkspace(job.repo);
+      job.diffFiles.length > 0 ||
+      Boolean(turnPullRequestUrl(job)) ||
+      isTemporaryWorkspace(job.repo) ||
+      offersPublication(job, onPublish);
     if (!hasActions && !hasLostContext(job)) return null;
     if (firstRun && job.prUrl)
       return (
@@ -243,6 +310,7 @@ export function OutcomeCard({
           onOpenDiff={onOpenDiff}
           onReview={onReview}
           onWatchPr={onWatchPr}
+          onPublish={onPublish}
         />
       );
     return (
@@ -254,6 +322,7 @@ export function OutcomeCard({
               onOpenDiff={onOpenDiff}
               onReview={onReview}
               onWatchPr={onWatchPr}
+              onPublish={onPublish}
             />
           </div>
         ) : null}
@@ -279,7 +348,7 @@ export function OutcomeCard({
           ) : null}
           <RunGuidance job={job} />
         </div>
-        <RunActions job={job} onOpenDiff={onOpenDiff} />
+        <RunActions job={job} onOpenDiff={onOpenDiff} onPublish={onPublish} />
       </div>
     </div>
   );

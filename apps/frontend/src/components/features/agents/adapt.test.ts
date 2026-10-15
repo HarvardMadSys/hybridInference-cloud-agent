@@ -1708,3 +1708,30 @@ describe('projecting a running turn again', () => {
     expect(changed.diffStat).toEqual({ add: 2, del: 1 });
   });
 });
+
+describe('workspace publication', () => {
+  it('carries what the owner has and has not published', () => {
+    const waiting = toDisplayJob(
+      { ...JOB, state: 'succeeded', workspace_unpublished_changes: true, workspace_pr_url: null },
+      {},
+    );
+    expect(waiting.workspaceUnpublishedChanges).toBe(true);
+    expect(waiting.workspacePrUrl).toBeUndefined();
+
+    const unchanged = toDisplayJob(
+      {
+        ...JOB,
+        state: 'succeeded',
+        workspace_publication_state: 'published',
+        workspace_publication_unchanged: true,
+        workspace_pr_url: 'https://github.com/o/n/pull/4',
+        workspace_unpublished_changes: false,
+      },
+      {},
+    );
+    expect(unchanged.workspacePublicationState).toBe('published');
+    expect(unchanged.workspacePublicationUnchanged).toBe(true);
+    expect(unchanged.workspacePrUrl).toBe('https://github.com/o/n/pull/4');
+    expect(unchanged.workspaceUnpublishedChanges).toBeUndefined();
+  });
+});

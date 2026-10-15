@@ -56,11 +56,20 @@ The application API uses `GET /admin/agent/settings` and
 `PUT /admin/agent/settings`. Send a partial body such as
 `{"settings": {"max_attempts": 3}}`; omitted keys keep their current values.
 Writes use the existing administrator guard and appear in the Audit log.
-Credential fields show only whether a value is configured. To change one, enter
-and save a replacement. **Reset** restores the built-in default. If a required
-field is missing or an optional integration is only partly configured, the
-**Administrator setup required** prompt links to the fields that still need
-attention.
+Application settings are read-only until you choose **Edit** on a group.
+Change the fields, select **Review changes**, check the current and proposed
+values, then choose **Apply changes**. The group is saved in one partial request;
+**Cancel** discards its drafts. Switching categories or refreshing settings
+preserves unsaved edits.
+
+Credential fields show only whether a value is configured. Choose
+**Replace secret** (or **Set secret**) in edit mode to enter a new value; the
+review keeps it hidden. An empty replacement leaves the saved credential unchanged. In edit
+mode, each field's **More actions** menu offers **Restore default…** or
+**Clear secret…**, with a separate confirmation. An empty default clears that setting.
+If a required field is missing or an optional integration is only partly
+configured, the **Administrator setup required** prompt links to the fields
+that still need attention.
 
 Admin Settings is operator access, and `agent.admin` should be granted only to
 people trusted to operate the deployment. It edits the session and host
@@ -68,11 +77,11 @@ signing keys and the Gateway public-key URL, so an administrator can sign in as
 any user, and the GitHub API URL that the App's, the publication token's and
 users' own GitHub credentials are sent to. Saved credentials stay write-only,
 and the Gateway dispatch token is bound to the Gateway API URL's origin: moving
-that URL to another origin is refused while the token is kept. Reset the token,
+that URL to another origin is refused while the token is kept. Clear the token,
 save the URL, then enter the token again.
 
 For the first deployment of this release, run `alembic upgrade head` through
-`0076_mcp_residency_fence`. Existing hosts begin without a deployment drain
+`0078_environment_snapshots`. Existing hosts begin without a deployment drain
 owner or release receipt, and 0051 backfills each one with a non-null fence
 epoch. 0066 builds an index on `agent_jobs` concurrently: on a long job history
 it takes a while without blocking the running API, and an interrupted run can
@@ -98,6 +107,9 @@ downgrade drops it and leaves a host that was waiting to be removed draining.
 Settings page.
 0076 adds a nullable residency generation to MCP approval records; existing
 approvals keep it empty.
+0077 adds the per-day container usage table and an owner index on
+`agent_sandboxes`, built without `CONCURRENTLY`; that table holds one row per
+retained container, so the brief write lock is short.
 Rebuild the sandbox image for explicit plugin loading.
 Then start the main control-plane listener with its existing complete
 environment. It imports registered environment settings once,
@@ -136,9 +148,9 @@ refuses does not stop the listeners: each logs
 once per settings revision, and uses the built-in default in its place. The
 exception is a signing key, encryption key or service token shorter than a
 newly required minimum, which stays in use until it is replaced. The editor
-shows the value in effect; save a valid value or **Reset** to clear the
-warning. Undecryptable or unencrypted stored credentials still stop the
-listener.
+shows the value in effect; save a valid value or confirm **Restore default**
+to clear the warning. Undecryptable or unencrypted stored credentials still
+stop the listener.
 
 Automatic session archiving after a verified GitHub PR merge is enabled by
 default. Configure it under **Publication**; see
@@ -767,8 +779,30 @@ The append-only admin trajectory requires `0057_admin_sandbox_trajectory`.
 Resource persistence requires migration
 `0034_sandbox_resource_usage` and a host running the updated sandbox manager.
 Older hosts still appear in the inventory with resource usage unavailable.
-Only the latest observation is stored; this view does not provide resource
-history.
+Only the latest observation is stored on the sandbox; this view does not
+provide resource history.
+
+### The owner's Usage page
+
+Settings has a **Usage** page (`/settings/usage`) that shows each owner their
+own containers, what the running ones use now, and what their work used over
+the last 7 or 30 UTC days. It reads three owner-scoped routes, none of which names a host,
+container ID, image or generation:
+
+| Route | What it reads |
+|---|---|
+| `GET /v1/agent/usage/containers` | Containers behind chats the owner has not deleted, active first, with limits and the latest sample of a running one. Fresh samples (90 seconds) are summed into current CPU and memory. |
+| `GET /v1/agent/usage/resources?days=` | Per UTC day: running time from the lifecycle events in `agent_sandbox_events`, and measured CPU and memory from `agent_sandbox_usage_days`. |
+| `GET /v1/agent/usage/tokens?days=` | The admin Usage aggregation, filtered to the owner's runs: cost, tokens and turns by day and by model. |
+
+Running time counts the `starting`, `running` and `stopping` states and has
+history back to `0046_admin_sandbox_trajectory`. CPU and memory history starts
+with migration `0077_sandbox_usage_days`: each accepted sample adds the time
+since the previous accepted sample of the same running container (at most
+120 seconds; after a start or a longer gap, only the sample's own CPU window),
+and its CPU cores and memory bytes over that time, to the container's row for
+the sample's UTC day. The page states how much of the running time the
+measurements cover. Disk usage is not measured.
 
 ## Reading a task's recorded events
 
@@ -1993,7 +2027,9 @@ see [Restoring a removed host's sandboxes](#restoring-a-removed-hosts-sandboxes)
   mount is missing, empty, or belongs to another daemon, the broker logs
   `sandbox_checkpoint_content_unavailable` and falls back to `docker image save`,
   which streams the whole image (once per image for the base scan, then once
-  per checkpoint) and keeps the same blobs. On a CloudLab Kata host the save
+  per checkpoint). It keeps only the blobs the committed image uses: a classic
+  (overlay2) image store's save also emits metadata blobs no manifest names,
+  which a restore would refuse. On a CloudLab Kata host the save
   path took about 90 seconds per export for a 12 MiB change; the content-store
   path writes only the change.
 - The broker keeps the latest receipt per sandbox under
@@ -2059,6 +2095,56 @@ published image with `AGENT_SANDBOX_IMAGE_PULL=true` (see `ENVIRONMENT.md`).
 A host that is enrolled again after its groups moved cannot start or report
 them: their generation has moved on. Remove those old containers with the
 admin **Discard** action.
+
+#### Environment installation snapshots
+
+A new task whose environment has an install script can start from a saved
+installation instead of running the script again. A snapshot is a container
+after the environment's installation, without the repository's own files,
+stored like a checkpoint. Design: [install snapshots](../agents/specs/2026-10-15-environment-install-snapshots-design.zh-CN.md).
+
+- **On with checkpoints.** Snapshots need archives and checkpoints enabled
+  (**Save restorable checkpoints**). With either off, every task installs in
+  full, the environment list shows no snapshot state, and nothing is queued.
+- **Where.** `cloud-agent/sandbox/env/v1/<sha256(owner)>/<snapshot id>.oci.tar`,
+  under the prefix hosts already write, with the same size limit, KMS and
+  `If-None-Match` writes as checkpoints. A building host keeps the committed
+  image locally as `freeinference-environment/<owner hash>:<snapshot id>`; any
+  other host loads it on first use after the same checks as a restore.
+- **Who builds.** Snapshots are built only in disposable environment-run
+  containers, never from a chat's workspace: by a passing environment test, or
+  by a `prebuild` run the control plane queues when a new task had none, its
+  lockfiles changed, or the owner asked. Prebuilds use environment-run slots,
+  are handed only to hosts that advertise `environment-snapshot-v1`, and never
+  count as the owner's one running test. After a failed build, tasks queue no
+  new one for that installation for 6 hours; an owner's rebuild still does.
+- **Who uses.** A claim names a snapshot only for a new group on a host whose
+  sandbox image is the snapshot's base image, and only when the binding's setup
+  fingerprint (an HMAC of the install script and setup-time variables, keyed by
+  `AGENT_SOURCE_CONTROL_ENCRYPTION_KEY`) matches. The runner also compares the
+  checkout's lockfiles (Git object ids). Any mismatch or failure creates the
+  group from the sandbox image and installs in full; the turn never fails
+  because of a snapshot. Without the encryption key, bindings carry no
+  fingerprint and nothing is snapshotted.
+- **Retention.** The newest snapshot of an installation supersedes older ones,
+  which are deleted after 24 hours. A snapshot is not handed out after 25 days,
+  and is deleted after 7 days unused, when its environment is archived or
+  deleted by the owner, and beyond 20 GiB of ready snapshots per owner (least
+  recently used first).
+- **Deletion.** Hosts poll `/v1/agent/worker/environment-snapshots/deletions`
+  every 10 minutes, drop the local image and delete the object version. That
+  needs `s3:DeleteObject` and `s3:DeleteObjectVersion` on
+  `cloud-agent/sandbox/env/*`, which nothing else requires. Without them the
+  delete is logged as `environment_snapshot_delete_failed` and retried; add a
+  bucket lifecycle rule on the `cloud-agent/sandbox/env/` prefix that expires
+  current versions 30 days after creation and noncurrent versions after 1 day
+  as the backstop, which is later than the 25-day limit on use.
+- **Preparation records.** Installation writes a root-only marker,
+  `/var/lib/freeinference-broker/environment-setup-v1.json`, into the container.
+  A container this host has no record of (created from a snapshot, or restored
+  from a checkpoint) counts its installation as done when the marker's
+  fingerprint matches, so a restore no longer reruns the install script. A
+  snapshot's container then runs the environment's optional update script.
 
 #### Launch failures and queue order
 
@@ -2162,7 +2248,19 @@ runners never emit `replay`; the API accepts it only so an attempt admitted by
 the previous generation can finish during a parallel rollout, and historical
 rows remain readable in the UI.
 
-After a shared turn settles, its snapshot and draft-PR fields may still change
+A settled turn publishes nothing. The platform publishes a workspace only when
+its owner asks (`POST /v1/agent/threads/{thread_id}/publish`, the conversation's
+Create PR / Update PR button): the request advances the group's epoch and opens
+a snapshot holding every turn settled since the last one, and capture, the
+secret scan, the push, the draft PR and the base import follow as before. A
+request while a turn runs in the workspace is refused (`turn_running`); one
+while a publication is on its way returns that publication. Until the owner
+asks, a settled workspace holds nothing back: it stops when idle and its chat
+can be deleted. Its unpublished turns live in the retained sandbox, and in its
+checkpoint once it stops cleanly. See the
+[design](../agents/specs/2026-10-15-manual-publication-design.zh-CN.md).
+
+After a publication request, the snapshot and draft-PR fields change
 asynchronously. The detail view and recent-task list poll only while that
 publication state is pending/capturing/captured/publishing, and stop at
 published/failed; other terminal jobs do not acquire a background
@@ -2170,8 +2268,8 @@ polling loop.
 
 A snapshot whose patch the publisher refuses, whose capture the host refuses,
 or whose five publication retries run out stays `failed` with its reason, and
-its group is marked `dirty`. It is not retried. The group's next snapshot,
-captured when a later turn settles, supersedes it: every snapshot is the whole
+its group is marked `dirty`. It is not retried. The owner's next request opens
+the group's next snapshot, which supersedes it: every snapshot is the whole
 diff from the last published commit, so it carries the failed changes too, and
 is refused in turn if it still holds what was refused. Snapshots still publish
 in epoch order; only a failed one stops holding the later ones back. If the

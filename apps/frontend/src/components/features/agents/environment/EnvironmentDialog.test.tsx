@@ -177,3 +177,18 @@ it('edits global variables without repository sections', async () => {
   );
   expect(await screen.findByRole('status')).toHaveTextContent('environment.savedGlobal');
 });
+
+it('saves an update script for workspaces that start from a snapshot', async () => {
+  vi.mocked(saveEnvironment).mockResolvedValue({ ...config, revision: 2 });
+  open();
+  fireEvent.click(screen.getByRole('tab', { name: 'environment.tab.scripts' }));
+  fireEvent.change(screen.getByLabelText('environment.updateScript'), {
+    target: { value: 'npm run generate' },
+  });
+  fireEvent.click(screen.getByRole('button', { name: 'environment.save' }));
+  await waitFor(() =>
+    expect(vi.mocked(saveEnvironment).mock.calls[0][0]).toMatchObject({
+      update_script: 'npm run generate',
+    }),
+  );
+});

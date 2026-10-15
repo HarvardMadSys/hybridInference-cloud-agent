@@ -15,7 +15,9 @@ import { useJobRunActions } from './job-detail/useJobRunActions';
 import { useT } from '@/components/providers';
 import { WorkspaceLinkProvider } from '@/components/ui/Markdown';
 import { basePath } from '@/config/env';
+import { publishAgentThread } from '@/lib/api/agents';
 import { submitThreadMessage, type ThreadMessageResultApi } from '@/lib/api/pendingMessages';
+import { isTemporaryWorkspace } from '@/lib/temporaryWorkspace';
 import { APIError } from '@/lib/utils/errors';
 
 import type { AgentJobApi, AgentJobEventApi, AgentThreadEventApi } from '@/lib/api/agents';
@@ -47,6 +49,7 @@ import { useThreadComposerMcp } from './mcp/useThreadComposerMcp';
 import { createRecordedOutputsSelector } from './recordedTurnOutputs';
 import { useTranscriptPresentation } from './transcriptPresentation';
 import type { AgentJob } from './types';
+import { isActiveWorkspacePublicationState } from './useAgentJobs';
 import { useComposerDraft } from './useComposerDraft';
 import { usePendingMessages } from './usePendingMessages';
 import { watchPullRequestPrompt, watchPullRequestRequestId } from './watchPullRequest';
@@ -183,6 +186,7 @@ export function JobDetail({
   const sendRequestedRef = useRef(false);
   const watchPrRequestedRef = useRef(false);
   const [watchPrAcceptedJobId, setWatchPrAcceptedJobId] = useState<string | null>(null);
+  const [publishRequested, setPublishRequested] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const runActions = useJobRunActions({ job, userId, onReload, onError: setActionError });
   const { stopping, forking, stop, forkFrom, canForkWorkspace, canForkCurrent, canReview } =
@@ -588,7 +592,8 @@ export function JobDetail({
   // its own request, so wait until the queue is known to have no other work.
   const canWatchPr = Boolean(
     userId &&
-    job.prUrl &&
+    (job.prUrl ?? job.workspacePrUrl) &&
+    !job.workspaceUnpublishedChanges &&
     isSuccessful &&
     !isActive &&
     !isArchived &&
@@ -605,6 +610,38 @@ export function JobDetail({
     !queue.resuming &&
     !conversationBusy,
   );
+
+  // The platform publishes only when the owner asks: Create PR, then Update PR.
+  // The newest turn offers it once nothing runs in the workspace; a request
+  // already on its way shows as the publication state instead.
+  const canPublish = Boolean(
+    userId &&
+    job.repo &&
+    !isTemporaryWorkspace(job.repo) &&
+    !parentTurn &&
+    !isActive &&
+    !contextLost &&
+    !publishRequested &&
+    !isActiveWorkspacePublicationState(publicationState) &&
+    !conversationBusy,
+  );
+
+  // A request stays closed until the page reads the publication it started.
+  useEffect(() => setPublishRequested(false), [publicationState, job.id]);
+
+  async function publish() {
+    if (!canPublish) return;
+    setPublishRequested(true);
+    setActionError(null);
+    try {
+      await publishAgentThread(threadId);
+      onReload?.();
+    } catch (cause: unknown) {
+      if (!composerMounted.current) return;
+      setPublishRequested(false);
+      setActionError(cause instanceof Error ? cause.message : t('publish.sendFailed'));
+    }
+  }
 
   async function watchPr() {
     const latestJobId = queue.latestJobId;
@@ -765,6 +802,7 @@ export function JobDetail({
                     recordedOutputs={recordedOutputs}
                     onReview={canReview ? openReview : undefined}
                     onWatchPr={canWatchPr ? () => void watchPr() : undefined}
+                    onPublish={canPublish ? () => void publish() : undefined}
                   />
                 </SubagentLinks.Provider>
               )}

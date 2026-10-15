@@ -27,8 +27,9 @@ reached over HTTP only.
   replaying a transcript.
 - **Fork.** Branch a chat into a second chat that shares the workspace and runs
   in parallel with its own process and credentials.
-- **Pull requests.** Changes are published to one branch per workspace as a
-  draft pull request, after a secret scan and path checks. Agents can also push
+- **Pull requests.** When the owner asks, never on its own, the platform
+  publishes a workspace to its branch as a draft pull request, after a secret
+  scan and path checks; asking again updates it. Agents can also push
   and open pull requests themselves with a short-lived, repository-scoped token.
   **Review** starts an independent reviewer; **Watch PR and merge** follows
   checks and reviews until the pull request merges.

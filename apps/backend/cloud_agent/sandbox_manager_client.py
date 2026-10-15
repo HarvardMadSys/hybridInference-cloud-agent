@@ -15,6 +15,7 @@ from cloud_agent.mcp.http_body import IDENTITY_ENCODING_HEADERS, iter_response_b
 from cloud_agent_shared.environment import (
     ENVIRONMENT_CAPABILITY,
     ENVIRONMENT_INFERENCE_CAPABILITY,
+    environment_payload,
     uses_inference_names,
 )
 from cloud_agent_shared.operation_profiling import (
@@ -288,11 +289,11 @@ class SandboxManagerClient:
             invalid="The shared chat supervisor returned invalid data.",
         )
 
-    async def require_environment_capability(self, environment: Any = None) -> None:
-        """Require the capability from the actual authenticated broker replica.
+    async def require_environment_capability(self, environment: Any = None) -> list[str]:
+        """Require the capabilities from the actual authenticated broker replica.
 
-        An environment that sets an inference credential also needs a broker
-        that keeps it from the agent CLI; an older one would refuse the name.
+        Owner inference credentials need a broker that keeps them from the CLI.
+        Return all declared capabilities so callers only send supported fields.
         """
         required = {ENVIRONMENT_CAPABILITY}
         if environment is not None and uses_inference_names(environment):
@@ -303,23 +304,25 @@ class SandboxManagerClient:
                     f"{self._base_url}/health", headers=self._headers, timeout=5
                 )
                 response.raise_for_status()
-                if not required <= set(response.json().get("capabilities", [])):
-                    raise SandboxManagerError(
-                        503, "Sandbox manager must be upgraded for environment configuration"
-                    )
-        except (httpx.HTTPError, ValueError, AttributeError):
+                capabilities = [str(c) for c in response.json().get("capabilities", [])]
+        except (httpx.HTTPError, ValueError, AttributeError, TypeError):
             raise SandboxManagerError(
                 503, "Sandbox manager environment capability is unavailable"
             ) from None
+        if not required <= set(capabilities):
+            raise SandboxManagerError(
+                503, "Sandbox manager must be upgraded for environment configuration"
+            )
+        return capabilities
 
     async def prepare_environment(self, workspace_id: str, environment: Any) -> dict[str, Any]:
         """Require actual broker support before sending value-bearing configuration."""
-        await self.require_environment_capability(environment)
+        capabilities = await self.require_environment_capability(environment)
         return await self._request(
             "POST",
             workspace_id,
             "environment/prepare",
-            json={"environment": environment.model_dump(mode="json")},
+            json={"environment": environment_payload(environment, capabilities)},
             timeout=1050,
         )
 
@@ -454,8 +457,10 @@ class SandboxManagerClient:
                 "command": command,
                 "cwd": cwd,
                 "timeout_seconds": timeout_seconds,
+                # A terminal needs no snapshot fields, which an older
+                # broker would refuse.
                 **(
-                    {"environment": environment.model_dump(mode="json")}
+                    {"environment": environment_payload(environment, ())}
                     if environment is not None
                     else {}
                 ),
@@ -486,8 +491,10 @@ class SandboxManagerClient:
             json={
                 "rows": rows,
                 "cols": cols,
+                # A terminal needs no snapshot fields, which an older
+                # broker would refuse.
                 **(
-                    {"environment": environment.model_dump(mode="json")}
+                    {"environment": environment_payload(environment, ())}
                     if environment is not None
                     else {}
                 ),

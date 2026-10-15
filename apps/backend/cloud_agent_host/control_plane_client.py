@@ -202,6 +202,24 @@ class ControlPlane:
         except Exception:
             pass
 
+    def report_environment_snapshot(
+        self, *, snapshot_id: str | None, outcome: str, base_sha: str | None
+    ) -> None:
+        """Say what a new workspace did with its installation snapshot. Best-effort.
+
+        A snapshot only saves time, so neither its accounting nor the build a
+        missing one queues may fail the turn.
+        """
+        try:
+            self._post(
+                f"/v1/agent/worker/jobs/{self.job_id}/environment-snapshot",
+                {"snapshot_id": snapshot_id, "outcome": outcome, "base_sha": base_sha},
+            )
+        except LeaseLost:
+            raise
+        except Exception:
+            pass
+
     def report_context_status(self, context_status: str) -> None:
         """Record NEW/LIVE/RESTORED/LOST without inventing a continuity rung."""
         try:
