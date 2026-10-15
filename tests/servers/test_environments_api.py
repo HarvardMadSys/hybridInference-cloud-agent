@@ -52,7 +52,7 @@ async def test_import_preview_exposes_only_names_and_no_store(client):
 @pytest.mark.parametrize(
     "text",
     [
-        "TOKEN=demo-private-token\nOPENAI_API_KEY=secret",
+        "TOKEN=demo-private-token\nCODEX_API_KEY=secret",
         "TOKEN=demo-private-token\nINVALID",
         "TOKEN=demo-private-token\nTOKEN=second",
     ],

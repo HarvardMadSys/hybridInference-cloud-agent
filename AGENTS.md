@@ -225,7 +225,10 @@ requirement, and rules 4 and 5 remain permanent service boundaries.
   binary content. These controls do not prevent deliberate exfiltration or direct
   Git pushes. Same-owner Fork inherits the binding; no cross-owner sharing is
   introduced. Reserved platform/host variable names and the existing fixed
-  network and member credential boundaries still apply. See the
+  network and member credential boundaries still apply. An owner's
+  `OPENAI_*`/`ANTHROPIC_*` credentials never enter an agent CLI's own
+  environment, which keeps the platform grant; a member-private `BASH_ENV`
+  script gives them to the commands the CLI runs. See the
   [environment design](docs/agents/specs/2026-10-12-repository-environment-design.zh-CN.md).
 - Public multi-tenant use requires Kata isolation, non-root, dropped
   capabilities, seccomp, and resource limits — plain Docker containers are for

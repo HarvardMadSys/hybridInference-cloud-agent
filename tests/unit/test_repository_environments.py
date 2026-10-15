@@ -25,8 +25,8 @@ from cloud_agent_shared.secret_redaction import SecretRedactor
 @pytest.mark.parametrize(
     "name",
     [
-        "OPENAI_API_KEY",
-        "ANTHROPIC_API_KEY",
+        "CODEX_API_KEY",
+        "ANTHROPIC_MODEL",
         "GH_TOKEN",
         "PATH",
         "HOME",
@@ -85,7 +85,7 @@ def test_dotenv_is_atomic_and_never_interpolates_or_executes():
         "",
     ]
     assert all(v.secret for v in values)
-    for invalid in ("TOKEN=one\nTOKEN=two", "SAFE=x\nOPENAI_API_KEY=bad", "BROKEN='unterminated"):
+    for invalid in ("TOKEN=one\nTOKEN=two", "SAFE=x\nCODEX_API_KEY=bad", "BROKEN='unterminated"):
         with pytest.raises((ValueError, ValidationError)):
             parse_env(invalid)
 

@@ -727,3 +727,46 @@ async def test_environment_claim_requires_both_actual_runner_and_broker(monkeypa
         assert store.retry_delays == [30]
         assert grants.calls == []
         assert store.failed == []
+
+
+@pytest.mark.parametrize("inference_capable", [False, True])
+async def test_owner_inference_credentials_wait_for_a_runner_that_keeps_them_from_the_cli(
+    monkeypatch, inference_capable
+):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from cloud_agent_shared.environment import BoundEnvironment, EnvironmentVariable
+
+    store, grants = _ClaimStore(), _Grants()
+    original_claim = store.claim_job
+
+    async def bound_claim(**kwargs):
+        result = await original_claim(**kwargs)
+        return {**result, "environment_binding_id": "frozen-binding"}
+
+    monkeypatch.setattr(store, "claim_job", bound_claim)
+    owner_value = "-".join(["owner", "openai", "placeholder"])
+    bound = BoundEnvironment(
+        binding_id="frozen-binding",
+        variables=[EnvironmentVariable(name="OPENAI_API_KEY", value=owner_value)],
+    )
+    store.environment_for_claim = AsyncMock(return_value=bound)
+    broker = SimpleNamespace(require_environment_capability=AsyncMock())
+    route = AsyncMock(return_value=broker)
+    monkeypatch.setattr("cloud_agent.sandbox_manager_routing.sandbox_manager_for_job", route)
+    capabilities = ["environment-v1"] + (["environment-inference-v1"] if inference_capable else [])
+    body = {"worker_id": "w1", "attestation": {"runner_capabilities": capabilities}}
+    async with AsyncClient(
+        transport=ASGITransport(app=_app(store, grants)), base_url="http://test"
+    ) as client:
+        response = await client.post("/v1/agent/worker/claim", json=body)
+    if inference_capable:
+        assert response.status_code == 200, response.text
+        # The broker is asked for the capabilities this binding needs.
+        broker.require_environment_capability.assert_awaited_once_with(bound)
+    else:
+        assert response.status_code == 503, response.text
+        assert owner_value not in response.text
+        assert store.released == [(_JOB, _ATTEMPT)]
+        assert grants.calls == []

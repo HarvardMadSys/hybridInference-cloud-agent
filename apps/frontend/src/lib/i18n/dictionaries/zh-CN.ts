@@ -89,7 +89,9 @@ export const zhCN: Record<TranslationKey, string> = {
   'environment.addVariable': '添加变量',
   'environment.rules': '命名和 Secret 规则',
   'environment.reservedKeys':
-    'OPENAI_API_KEY、ANTHROPIC_API_KEY 等平台名称已被保留，请为你的应用使用其他名称。',
+    'CLAUDE_*、CODEX_*、PATH、HOME 等平台名称已被保留，请为你的应用使用其他名称。',
+  'environment.inferenceKeys':
+    'OPENAI_API_KEY、OPENAI_BASE_URL、ANTHROPIC_API_KEY、ANTHROPIC_AUTH_TOKEN 和 ANTHROPIC_BASE_URL 会交给你的代码和 agent 运行的命令；agent 自己调用模型仍走平台。设置了某个提供方的任一名称后，这个提供方的几项都以你的设置为准，使用自定义地址时请一并填写 base URL。',
   'environment.shortSecret': 'Secret 至少需要 8 个字符。DEBUG=1 这类非敏感配置请选「普通」。',
   'environment.importEnv': '导入 .env',
   'environment.importHint': '粘贴 .env 文件内容。默认作为 Secret 导入，可以逐个改成普通变量。',
@@ -111,7 +113,7 @@ export const zhCN: Record<TranslationKey, string> = {
   'environment.noSuggestion': '仓库根目录没有可识别的锁文件，请手动填写安装命令。',
   'environment.platformInfo': '平台环境说明',
   'environment.platformDescription':
-    'Linux 沙盒；镜像工具与资源限制由平台管理。可访问公网 IPv4 TCP 80/443 及指定 DNS；私有网络与其他出口端口保持阻止。安装 15 分钟、启动 2 分钟、验证 5 分钟超时。容器停止后运行中的进程会丢失。OPENAI_API_KEY、ANTHROPIC_API_KEY 与平台名称保留。',
+    'Linux 沙盒；镜像工具与资源限制由平台管理。可访问公网 IPv4 TCP 80/443 及指定 DNS；私有网络与其他出口端口保持阻止。安装 15 分钟、启动 2 分钟、验证 5 分钟超时。容器停止后运行中的进程会丢失。CLAUDE_*、PATH 等平台名称保留。',
   'environment.actionsHelp':
     '保存常用命令，之后在任务的「环境」面板里一键运行，例如运行测试、启动开发服务器。',
   'environment.noActions': '还没有快捷操作。',

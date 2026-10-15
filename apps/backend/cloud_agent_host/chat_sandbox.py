@@ -1759,6 +1759,48 @@ class ChatSandboxManager:
             raise ValueError("resident PID file does not match its member uid")
         return slot_id
 
+    def write_member_inference_env(
+        self,
+        spec: ChatSandboxSpec,
+        script: str,
+        *,
+        slot_id: int,
+        user_uid: int,
+        user_gid: int,
+    ) -> str:
+        """Write one member's ``BASH_ENV`` script of owner inference credentials.
+
+        The member tmpfs is private to that uid and gone with the container; the
+        values travel over stdin, never argv. Returns the path to point
+        ``BASH_ENV`` at.
+        """
+        if not 0 <= slot_id < spec.resident_slot_capacity:
+            raise ValueError("resident slot is outside this shared sandbox")
+        if user_uid != MEMBER_UID_BASE + slot_id:
+            raise ValueError("resident slot does not match its member uid")
+        path = member_inference_env_path(slot_id)
+        write_script = (
+            'set -eu; target="$1"; temporary="$target.tmp.$$"; umask 077; '
+            "trap 'rm -f -- \"$temporary\"' EXIT HUP INT TERM; "
+            'cat > "$temporary"; mv "$temporary" "$target"; '
+            "trap - EXIT HUP INT TERM"
+        )
+        result = self.exec_capture(
+            spec,
+            ["/bin/sh", "-c", write_script, "sh", path],
+            workdir="/",
+            timeout_s=20,
+            input_bytes=script.encode("utf-8"),
+            user_uid=user_uid,
+            user_gid=user_gid,
+        )
+        if result.returncode != 0:
+            raise SandboxError(
+                "member inference environment could not be written: "
+                + result.stderr.decode("utf-8", "replace")[:300]
+            )
+        return path
+
     def ensure_member_process_reaper(self, spec: ChatSandboxSpec) -> None:
         """Install the immutable helper into retained pre-upgrade containers."""
         with self._member_reaper_lock:
@@ -4887,6 +4929,11 @@ class RetainedChatBackend(SandboxBackend):
         self.manager.backend.check_gateway_reachable(base_url)
 
 
+def member_inference_env_path(slot_id: int) -> str:
+    """Where one member's owner inference credentials wait for its bash."""
+    return f"{MEMBER_TMPFS_ROOT}/{slot_id}/inference-env.sh"
+
+
 __all__ = [
     "ACTIVATION_TMPFS",
     "CHAT_CONTAINER_PREFIX",
@@ -4914,4 +4961,5 @@ __all__ = [
     "RetainedChatBackend",
     "RetainedChatFailStopped",
     "RetainedChatLost",
+    "member_inference_env_path",
 ]

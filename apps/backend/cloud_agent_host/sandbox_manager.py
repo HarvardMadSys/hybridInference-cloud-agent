@@ -313,7 +313,11 @@ from cloud_agent_host.action_receipts import ActionReceipts
 from cloud_agent_host.environment_preparation import EnvironmentPreparation
 from cloud_agent_host.environment_process import tool_environment
 from cloud_agent_host.environment_snapshot import check_snapshot_secrets
-from cloud_agent_shared.environment import ENVIRONMENT_CAPABILITY, BoundEnvironment
+from cloud_agent_shared.environment import (
+    ENVIRONMENT_CAPABILITY,
+    ENVIRONMENT_INFERENCE_CAPABILITY,
+    BoundEnvironment,
+)
 from cloud_agent_shared.secret_redaction import SecretRedactor
 
 
@@ -2452,7 +2456,7 @@ def create_app(
     def health(_: None = Depends(authenticate)) -> dict[str, Any]:
         return {
             "ok": True,
-            "capabilities": [ENVIRONMENT_CAPABILITY],
+            "capabilities": [ENVIRONMENT_CAPABILITY, ENVIRONMENT_INFERENCE_CAPABILITY],
             "sandbox_archives": (
                 {
                     **archive_service.status(),

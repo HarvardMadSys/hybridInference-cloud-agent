@@ -141,7 +141,10 @@ from cloud_agent_host.session_supervisor_client import (
 from cloud_agent_host.setup import run_setup
 from cloud_agent_host.storage_admission import new_sandbox_storage_error
 from cloud_agent_shared import operation_profiling
-from cloud_agent_shared.environment import ENVIRONMENT_CAPABILITY
+from cloud_agent_shared.environment import (
+    ENVIRONMENT_CAPABILITY,
+    ENVIRONMENT_INFERENCE_CAPABILITY,
+)
 from cloud_agent_shared.git.patch_gate import branch_name_for
 from cloud_agent_shared.git.source_archive import (
     DEFAULT_MAX_SOURCE_ARCHIVE_BYTES,
@@ -1186,7 +1189,9 @@ def _shared_live_host_capabilities(
 def _environment_host_capabilities(backend: SandboxBackend, stamp: dict[str, Any]) -> list[str]:
     """Advertise environment execution only beside proven shared-live support."""
     capabilities = _shared_live_host_capabilities(backend, stamp)
-    return [*capabilities, ENVIRONMENT_CAPABILITY] if capabilities else []
+    if not capabilities:
+        return []
+    return [*capabilities, ENVIRONMENT_CAPABILITY, ENVIRONMENT_INFERENCE_CAPABILITY]
 
 
 def _shared_live_deployment_ready(

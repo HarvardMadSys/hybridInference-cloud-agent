@@ -131,7 +131,11 @@ from cloud_agent.tokens import (
 )
 from cloud_agent.workers.work_signal import WorkSignal  # noqa: TC001 — FastAPI resolves it.
 from cloud_agent.workspace_errors import _sandbox_manager_http_error
-from cloud_agent_shared.environment import ENVIRONMENT_CAPABILITY
+from cloud_agent_shared.environment import (
+    ENVIRONMENT_CAPABILITY,
+    ENVIRONMENT_INFERENCE_CAPABILITY,
+    uses_inference_names,
+)
 from cloud_agent_shared.runtime_catalog import runtimes_supporting_mcp
 
 if TYPE_CHECKING:
@@ -991,6 +995,11 @@ async def _hand_over_claim(
             if environment.required:
                 if ENVIRONMENT_CAPABILITY not in capabilities:
                     raise SourceControlError("Host cannot execute environment configuration")
+                if (
+                    uses_inference_names(environment)
+                    and ENVIRONMENT_INFERENCE_CAPABILITY not in capabilities
+                ):
+                    raise SourceControlError("Host cannot keep inference variables from the CLI")
                 from cloud_agent.sandbox_manager_client import SandboxManagerError
                 from cloud_agent.sandbox_manager_routing import sandbox_manager_for_job
 
@@ -998,7 +1007,7 @@ async def _hand_over_claim(
                     broker = await sandbox_manager_for_job(job_store.host_pool, claim["id"])
                     if broker is None:
                         raise SourceControlError("Sandbox manager is unavailable")
-                    await broker.require_environment_capability()
+                    await broker.require_environment_capability(environment)
                 except (SandboxManagerError, httpx.HTTPError):
                     raise SourceControlError("Sandbox manager must be upgraded") from None
             else:

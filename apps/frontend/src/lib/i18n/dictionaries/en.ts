@@ -92,7 +92,9 @@ export const en = {
   'environment.addVariable': 'Add variable',
   'environment.rules': 'Naming and Secret rules',
   'environment.reservedKeys':
-    'OPENAI_API_KEY, ANTHROPIC_API_KEY and other platform names are reserved. Use a different name for your application.',
+    'CLAUDE_*, CODEX_*, PATH, HOME and other platform names are reserved. Use a different name for your application.',
+  'environment.inferenceKeys':
+    "OPENAI_API_KEY, OPENAI_BASE_URL, ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN and ANTHROPIC_BASE_URL reach your code and the commands the agent runs; the agent's own model calls still use the platform. Setting one of a provider's names replaces all of them, so add its base URL too if you use one.",
   'environment.shortSecret':
     'Secrets must contain at least 8 characters. Mark non-sensitive flags such as DEBUG=1 as Plain.',
   'environment.importEnv': 'Import .env',
@@ -119,7 +121,7 @@ export const en = {
     'No supported lockfile at the repository root. Write the install command for this project.',
   'environment.platformInfo': 'About the platform environment',
   'environment.platformDescription':
-    'Linux sandbox; image tools and resource limits are platform-managed. Public IPv4 TCP 80/443 and the named DNS resolver are available. Private networks and other outbound ports stay blocked. Installation: 15 min; startup: 2 min; verification: 5 min. Stopped containers lose running processes. OPENAI_API_KEY, ANTHROPIC_API_KEY and platform names are reserved.',
+    'Linux sandbox; image tools and resource limits are platform-managed. Public IPv4 TCP 80/443 and the named DNS resolver are available. Private networks and other outbound ports stay blocked. Installation: 15 min; startup: 2 min; verification: 5 min. Stopped containers lose running processes. Platform names such as CLAUDE_* and PATH are reserved.',
   'environment.actionsHelp':
     "Saved commands you can run with one click from a task's Environment panel, such as running tests or a dev server.",
   'environment.noActions': 'No actions yet.',

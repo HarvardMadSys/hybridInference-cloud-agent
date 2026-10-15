@@ -164,7 +164,9 @@ Relay 是固定目的地转发器，不是让 caller 自选目标的通用 HTTP 
 控制面使用独立加密 domain 保存所有值，Secret 不经 owner 配置读取接口回显；
 阶段过滤、写入平台历史前的有状态脱敏，以及对普通文件/二进制新增内容的受信
 快照和发布扫描保护已知原文。Owner 原始终端和文件查看不打码。保留名禁止
-覆盖平台 grant、MCP、GitHub、Docker 和网络配置。全局及仓库配置变化只影响
+覆盖平台 grant、MCP、GitHub、Docker 和网络配置。Owner 设置的
+`OPENAI_*`/`ANTHROPIC_*` 推理凭据不进入 agent CLI 自身环境，CLI 继续使用平台
+grant；成员私有 tmpfs 中的 `BASH_ENV` 脚本只把它们交给 CLI 运行的命令。全局及仓库配置变化只影响
 未来工作区，同 owner Fork 继承原绑定；不新增跨 owner 分享。
 
 安装、服务、验证和快捷操作使用受管 non-root 身份，各自拥有私有 HOME。

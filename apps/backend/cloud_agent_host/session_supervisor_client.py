@@ -15,6 +15,11 @@ from cloud_agent_host.bounded_output import (
     MAX_PROTOCOL_LINE_BYTES,
     protocol_lines,
 )
+from cloud_agent_shared.environment import (
+    ENVIRONMENT_CAPABILITY,
+    ENVIRONMENT_INFERENCE_CAPABILITY,
+    uses_inference_names,
+)
 
 if TYPE_CHECKING:
     import builtins
@@ -132,7 +137,10 @@ class SessionSupervisorClient:
         """Verify broker capability and prepare the exact bound workspace."""
         health = self._client.get(f"{self._base_url}/health")
         health.raise_for_status()
-        if "environment-v1" not in health.json().get("capabilities", []):
+        required = {ENVIRONMENT_CAPABILITY}
+        if uses_inference_names(environment):
+            required.add(ENVIRONMENT_INFERENCE_CAPABILITY)
+        if not required <= set(health.json().get("capabilities", [])):
             raise SessionSupervisorError(
                 503, "Sandbox manager does not support environment configuration"
             )
