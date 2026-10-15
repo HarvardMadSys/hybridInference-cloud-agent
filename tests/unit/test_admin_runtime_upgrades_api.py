@@ -21,6 +21,17 @@ LATEST = {
     "@mariozechner/pi-coding-agent": "0.73.1",
 }
 PUBLISHED = {("@anthropic-ai/claude-code", "2.1.300"), ("@openai/codex", "0.162.1")}
+MOVED = "please use @earendil-works/pi-coding-agent instead going forward"
+DOCUMENTS = {
+    "@anthropic-ai/claude-code": {
+        "dist-tags": {"latest": "2.1.300"},
+        "versions": {"2.1.220": {}, "2.1.300": {}, "2.1.250": {}, "2.2.0-beta.1": {}},
+    },
+    "@mariozechner/pi-coding-agent": {
+        "dist-tags": {"latest": "0.73.1"},
+        "versions": {"0.73.1": {"deprecated": MOVED}, "0.72.1": {"deprecated": MOVED}},
+    },
+}
 
 
 class FakeHostPool:
@@ -73,6 +84,8 @@ def _registry(*, reachable: bool = True) -> RegistryClient:
         if not reachable:
             raise httpx.ConnectError("refused", request=request)
         path = request.url.path.lstrip("/")
+        if path in DOCUMENTS:
+            return httpx.Response(200, json=DOCUMENTS[path])
         package, _, version = path.rpartition("/")
         if version == "latest":
             return httpx.Response(200, json={"version": LATEST[package]})
@@ -245,3 +258,60 @@ async def test_a_finished_update_shows_as_updated_with_its_rollback(api):
     assert item["upgrade"]["state"] == "updated"
     assert item["upgrade"]["progress"] == 100
     assert item["upgrade"]["previous_version"] is None
+
+
+async def test_the_version_menu_lists_every_stable_release_from_npm(api):
+    client, _store, _audited, _registry = api
+
+    response = await client.get("/admin/agent/runtime-upgrades/claude-code/versions")
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json() == {
+        "runtime": "claude-code",
+        "versions": ["2.1.300", "2.1.250", "2.1.220"],
+        "deprecated": None,
+        "error": None,
+    }
+    moved = (await client.get("/admin/agent/runtime-upgrades/pi/versions")).json()
+    assert (moved["versions"], moved["deprecated"]) == (["0.73.1", "0.72.1"], MOVED)
+
+
+async def test_only_an_agent_the_page_can_update_has_a_version_menu(api):
+    client, _store, _audited, _registry = api
+    response = await client.get("/admin/agent/runtime-upgrades/kilo/versions")
+    assert response.status_code == 422
+
+
+async def test_an_unreachable_registry_is_the_version_menus_message(api):
+    client, _store, _audited, registry = api
+    registry["client"] = _registry(reachable=False)
+
+    response = await client.get("/admin/agent/runtime-upgrades/codex/versions")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "runtime": "codex",
+        "versions": [],
+        "deprecated": None,
+        "error": "could not reach the npm registry: ConnectError",
+    }
+
+
+async def test_an_older_release_can_be_chosen_too(api):
+    """Moving back to a known-good release is the same download and check."""
+    client, store, audited, _registry = api
+    PUBLISHED.add(("@anthropic-ai/claude-code", "2.1.250"))
+    try:
+        response = await client.post(
+            "/admin/agent/runtime-upgrades", json={"runtime": "claude-code", "version": "2.1.250"}
+        )
+    finally:
+        PUBLISHED.discard(("@anthropic-ai/claude-code", "2.1.250"))
+
+    assert response.status_code == 200
+    assert store.host_pool.requests[-1]["version"] == "2.1.250"
+    assert audited[-1] == (
+        "agent.runtime_version.upgrade",
+        {"runtime": "claude-code", "version": "2.1.250", "previous_version": None},
+    )

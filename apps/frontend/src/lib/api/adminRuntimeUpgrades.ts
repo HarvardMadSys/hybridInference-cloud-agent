@@ -1,7 +1,8 @@
 // Admin client for updating an agent CLI from the Settings page.
 //
 // `GET` lists each agent's version for new chats beside npm's latest release,
-// with the progress of an update in flight; `POST` starts one. Rolling back is
+// with the progress of an update in flight; `POST` starts one, to the latest
+// release or any other from `getRuntimeVersions`. Rolling back is
 // `setAgentRuntimeVersion` in `./admin`, which also replaces the update and
 // keeps the chosen version on every server. See
 // `cloud_agent/runtime_upgrades.py` for how an update completes.
@@ -48,13 +49,36 @@ export interface RuntimeUpgrades {
   runtimes: RuntimeUpgradeItem[];
 }
 
+/** The npm releases one agent can move to. */
+export interface RuntimeVersions {
+  runtime: string;
+  /** Stable releases, newest first: no prereleases, no deprecated release. */
+  versions: string[];
+  /** npm's message when the whole package is deprecated. */
+  deprecated: string | null;
+  error: string | null;
+}
+
+export async function getRuntimeVersions(
+  runtime: string,
+  signal?: AbortSignal,
+): Promise<RuntimeVersions> {
+  return jsonOrThrow<RuntimeVersions>(
+    await fetchWithAuth(
+      config.apiBase,
+      `${RUNTIME_UPGRADES}/${encodeURIComponent(runtime)}/versions`,
+      { signal },
+    ),
+  );
+}
+
 export async function getRuntimeUpgrades(signal?: AbortSignal): Promise<RuntimeUpgrades> {
   return jsonOrThrow<RuntimeUpgrades>(
     await fetchWithAuth(config.apiBase, RUNTIME_UPGRADES, { signal }),
   );
 }
 
-/** Update one agent; asking again for the same version retries it. */
+/** Move one agent to a release, newer or older; asking again retries it. */
 export async function requestRuntimeUpgrade(
   runtime: string,
   version: string,

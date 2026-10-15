@@ -7,6 +7,7 @@ into the one state and one number the page shows.
 
 from __future__ import annotations
 
+import asyncio
 import subprocess
 from pathlib import Path
 
@@ -21,6 +22,7 @@ from cloud_agent.runtime_upgrades import (
     RegistryClient,
     default_version,
     is_newer,
+    stable_versions,
     upgrade_state,
 )
 from cloud_agent_shared.runtime_catalog import downloadable_runtimes
@@ -396,3 +398,99 @@ async def test_a_requested_version_is_checked_against_npm(status, expected):
     )
     assert await registry.has_version("@mariozechner/pi-coding-agent", "0.74.0") is expected
     assert paths == ["/@mariozechner/pi-coding-agent/0.74.0"]
+
+
+# ── every release, for the version menu ──────────────────────────────────
+
+
+def _document(versions: dict[str, dict], latest: str) -> dict:
+    return {"name": "pkg", "dist-tags": {"latest": latest}, "versions": versions}
+
+
+def test_the_menu_lists_stable_releases_newest_first():
+    found, note = stable_versions(
+        _document(
+            {
+                "0.9.0": {},
+                "0.10.0": {},
+                "0.162.0-alpha.1": {},
+                "0.0.0-snapshot-ui-202601010000": {},
+                "0.54.0": {"deprecated": "bad MUSL binaries on Linux"},
+                "0.162.1": {},
+                "latest": {},
+                "1.2": {},
+            },
+            "0.162.1",
+        )
+    )
+    # Numeric order, not string order; no prerelease, no deprecated release.
+    assert found == ["0.162.1", "0.10.0", "0.9.0"]
+    assert note is None
+
+
+def test_a_package_deprecated_as_a_whole_still_lists_every_release_and_says_why():
+    """pi's package moved; every release is deprecated with the same message."""
+    moved = {"deprecated": "please use @earendil-works/pi-coding-agent instead going forward"}
+    found, note = stable_versions(
+        _document({"0.72.1": moved, "0.73.1": moved, "0.73.1-rc.1": moved}, "0.73.1")
+    )
+    assert found == ["0.73.1", "0.72.1"]
+    assert note == moved["deprecated"]
+
+
+@pytest.mark.parametrize("document", [None, [], {}, {"versions": []}, {"versions": {"1.0.0": 1}}])
+def test_an_unreadable_package_document_lists_nothing(document):
+    assert stable_versions(document) == ([], None)
+
+
+async def test_the_version_list_is_read_abbreviated_once_an_hour_and_once_at_a_time():
+    asked: list[tuple[str, str]] = []
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        asked.append((request.url.path, request.headers["accept"]))
+        return httpx.Response(200, json=_document({"2.1.299": {}, "2.1.300": {}}, latest="2.1.300"))
+
+    clock = _Clock()
+    registry = RegistryClient(
+        base_url="https://registry.test", transport=httpx.MockTransport(answer), clock=clock
+    )
+    first, second = await asyncio.gather(
+        registry.versions("@anthropic-ai/claude-code"),
+        registry.versions("@anthropic-ai/claude-code"),
+    )
+    assert first == second
+    assert first.versions == ["2.1.300", "2.1.299"]
+    assert (first.deprecated, first.error) == (None, None)
+    # One read for both callers, of the document without every readme in it.
+    assert len(asked) == 1
+    path, accept = asked[0]
+    assert path == "/@anthropic-ai/claude-code"
+    assert accept.startswith("application/vnd.npm.install-v1+json")
+    clock.now += REGISTRY_CACHE_S + 1
+    await registry.versions("@anthropic-ai/claude-code")
+    assert len(asked) == 2
+
+
+async def test_an_unreadable_version_list_is_a_message_and_is_asked_again_soon():
+    answers = iter(
+        [
+            httpx.Response(503),
+            httpx.Response(200, content=b"not json"),
+            httpx.Response(200, json=_document({"1.0.0-beta.1": {}}, latest="1.0.0-beta.1")),
+        ]
+    )
+    clock = _Clock()
+    registry = RegistryClient(
+        base_url="https://registry.test",
+        transport=httpx.MockTransport(lambda _request: next(answers)),
+        clock=clock,
+    )
+    failed = await registry.versions("opencode-ai")
+    assert (failed.versions, failed.error) == ([], "npm answered 503 for opencode-ai")
+    assert (await registry.versions("opencode-ai")).error == failed.error  # cached
+    clock.now += 61
+    garbled = await registry.versions("opencode-ai")
+    assert garbled.error == "could not reach the npm registry: JSONDecodeError"
+    clock.now += 61
+    empty = await registry.versions("opencode-ai")
+    assert empty.error == "npm lists no stable release of opencode-ai"

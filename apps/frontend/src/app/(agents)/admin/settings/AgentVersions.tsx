@@ -2,7 +2,7 @@
 
 import { useState } from 'react';
 
-import type { RuntimeUpgradeItem } from '@/lib/api/adminRuntimeUpgrades';
+import type { RuntimeUpgradeItem, RuntimeVersions } from '@/lib/api/adminRuntimeUpgrades';
 
 import DinoProgress from './DinoProgress';
 import { SettingsSection } from '../SettingsSection';
@@ -211,6 +211,22 @@ export function UpdateControls({
   );
 }
 
+/**
+ * What the admin is told before choosing a release some server lacks.
+ *
+ * It is not saved as is: every server downloads and checks it first, and new
+ * sandboxes switch once all of them have it, as with Update.
+ */
+function DownloadNote({ version, missing }: { version: string; missing: number }) {
+  const where =
+    missing === 1 ? '1 server downloads and checks' : `${missing} servers download and check`;
+  return (
+    <p className="mt-2 text-xs leading-5 text-muted">
+      {where} {version} first; new sandboxes switch once every server has it.
+    </p>
+  );
+}
+
 function VersionRow({
   runtime,
   versions,
@@ -222,6 +238,7 @@ function VersionRow({
   updateBusy,
   onUpdate,
   onRollback,
+  releases,
 }: {
   runtime: string;
   versions: string[];
@@ -233,6 +250,8 @@ function VersionRow({
   updateBusy: boolean;
   onUpdate: (runtime: string, version: string) => void;
   onRollback: (runtime: string, version: string | null) => void;
+  /** npm's releases, for an agent the page can update. */
+  releases?: RuntimeVersions;
 }) {
   const [draft, setDraft] = useState(saved);
   const unavailable = saved !== '' && !versions.includes(saved);
@@ -240,12 +259,27 @@ function VersionRow({
   const shown = pending ? draft : saved;
   // A version no server has gets its own line below; a partial gap names servers.
   const missing = shown === '' || (!pending && unavailable) ? [] : lacking(servers, runtime, shown);
+  // Releases no server has yet; the saved one keeps its own disabled line.
+  const fromNpm = (releases?.versions ?? []).filter(
+    (version) => !versions.includes(version) && version !== saved,
+  );
+  // An agent the page can update downloads a release first wherever it is
+  // missing; any other agent can only pick what its servers already have.
+  const downloads = update !== undefined && pending && draft !== '' && missing.length > 0;
   return (
     <form
       className="grid gap-3 py-5 lg:grid-cols-[minmax(0,1fr)_minmax(240px,360px)] lg:items-center lg:gap-8"
       onSubmit={(event) => {
         event.preventDefault();
-        if (draft !== saved) onChange(runtime, draft);
+        if (draft === saved) return;
+        if (downloads) {
+          onUpdate(runtime, draft);
+          // The update below follows it from here; the menu shows what new
+          // sandboxes use until it switches them.
+          setDraft(saved);
+        } else {
+          onChange(runtime, draft);
+        }
       }}
     >
       <div className="min-w-0">
@@ -257,7 +291,21 @@ function VersionRow({
             The saved version is no longer available. Servers use their installed default.
           </p>
         )}
-        <LackingNote missing={missing} pending={pending} />
+        {downloads ? (
+          <DownloadNote version={draft} missing={missing.length} />
+        ) : (
+          <LackingNote missing={missing} pending={pending} />
+        )}
+        {releases?.deprecated && (
+          <p className="mt-2 break-words text-xs leading-5 text-muted">
+            npm marks this package deprecated: {releases.deprecated}
+          </p>
+        )}
+        {releases?.error && !update?.latest_error && (
+          <p className="mt-2 break-words text-xs leading-5 text-muted">
+            Could not list npm releases: {releases.error}
+          </p>
+        )}
       </div>
       <div className="min-w-0">
         <div className="flex items-center gap-2">
@@ -274,18 +322,37 @@ function VersionRow({
                 {saved} (unavailable)
               </option>
             )}
-            {versions.map((version) => (
-              <option key={version} value={version}>
-                {version}
-              </option>
-            ))}
+            {fromNpm.length === 0 ? (
+              versions.map((version) => (
+                <option key={version} value={version}>
+                  {version}
+                </option>
+              ))
+            ) : (
+              <>
+                <optgroup label="On servers">
+                  {versions.map((version) => (
+                    <option key={version} value={version}>
+                      {version}
+                    </option>
+                  ))}
+                </optgroup>
+                <optgroup label="Download from npm">
+                  {fromNpm.map((version) => (
+                    <option key={version} value={version}>
+                      {version}
+                    </option>
+                  ))}
+                </optgroup>
+              </>
+            )}
           </select>
           <button
             type="submit"
-            disabled={busy || draft === saved}
+            disabled={busy || (downloads && updateBusy) || draft === saved}
             className="ui-button ui-button-primary min-h-11 min-w-16 shrink-0"
           >
-            Save
+            {downloads ? 'Download and switch' : 'Save'}
           </button>
         </div>
         {pending && <p className="mt-2 text-xs text-muted">Unsaved change</p>}
@@ -315,6 +382,7 @@ export default function AgentVersions({
   updateError = null,
   onUpdate = () => {},
   onRollback = () => {},
+  releases = {},
 }: {
   menu: [string, string[]][];
   servers: NamedHost[];
@@ -326,6 +394,8 @@ export default function AgentVersions({
   updateError?: string | null;
   onUpdate?: (runtime: string, version: string) => void;
   onRollback?: (runtime: string, version: string | null) => void;
+  /** npm's releases per agent the page can update, as they arrive. */
+  releases?: Record<string, RuntimeVersions>;
 }) {
   const updateFor = new Map((updates ?? []).map((item) => [item.runtime, item]));
   // Keep a saved selection visible if the last server offering it goes away.
@@ -345,7 +415,7 @@ export default function AgentVersions({
       </p>
       <SettingsSection
         title="Important"
-        description="Update an agent, or pick its version for new sandboxes."
+        description="Update an agent, or pick any release for new sandboxes."
       >
         {updateError && (
           <p role="alert" className="mt-4 break-words text-sm text-status-error">
@@ -373,6 +443,7 @@ export default function AgentVersions({
                   updateBusy={updateBusy}
                   onUpdate={onUpdate}
                   onRollback={onRollback}
+                  releases={releases[runtime]}
                 />
               ))}
           </div>

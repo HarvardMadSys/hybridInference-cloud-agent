@@ -56,6 +56,7 @@ vi.mock('@/lib/api/compute', () => ({
 }));
 vi.mock('@/lib/api/adminRuntimeUpgrades', () => ({
   getRuntimeUpgrades: vi.fn(async () => ({ runtimes: [] })),
+  getRuntimeVersions: vi.fn(),
   requestRuntimeUpgrade: vi.fn(),
 }));
 vi.mock('@/lib/api/adminArchiveSettings', () => ({
@@ -69,7 +70,11 @@ import {
   getSandboxArchiveSettings,
   updateSandboxArchiveSettings,
 } from '@/lib/api/adminArchiveSettings';
-import { getRuntimeUpgrades, requestRuntimeUpgrade } from '@/lib/api/adminRuntimeUpgrades';
+import {
+  getRuntimeUpgrades,
+  getRuntimeVersions,
+  requestRuntimeUpgrade,
+} from '@/lib/api/adminRuntimeUpgrades';
 import { getAgentAdminSettings, setAgentAdminSettings } from '@/lib/api/adminSettings';
 import { getCloudLabDefaults, saveCloudLabDefaults } from '@/lib/api/compute';
 
@@ -376,6 +381,14 @@ beforeEach(() => {
   getArchiveSettings.mockReset().mockResolvedValue(archiveSettings);
   updateArchiveSettings.mockReset();
   vi.mocked(getRuntimeUpgrades).mockReset().mockResolvedValue({ runtimes: [] });
+  vi.mocked(getRuntimeVersions)
+    .mockReset()
+    .mockImplementation(async (runtime) => ({
+      runtime,
+      versions: [],
+      deprecated: null,
+      error: null,
+    }));
   vi.mocked(requestRuntimeUpgrade).mockReset();
   vi.mocked(getAgentAdminSettings).mockReset().mockResolvedValue({
     revision: 1,
@@ -2145,6 +2158,112 @@ describe('agent updates', () => {
     expect(screen.queryByRole('button', { name: /Roll back/ })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
     await waitFor(() => expect(startUpdate).toHaveBeenCalledWith('claude-code', '2.1.235'));
+  });
+
+  describe('any npm release', () => {
+    const releases = vi.mocked(getRuntimeVersions);
+    const npm = (versions: string[], over: { deprecated?: string; error?: string } = {}) =>
+      releases.mockImplementation(async (runtime) => ({
+        runtime,
+        versions,
+        deprecated: over.deprecated ?? null,
+        error: over.error ?? null,
+      }));
+
+    it('lists releases the servers lack, and downloads one before switching to it', async () => {
+      listUpdates.mockResolvedValue({ runtimes: [update()] });
+      npm(['2.1.300', '2.1.250', '2.1.235', '2.1.220']);
+      startUpdate.mockResolvedValue({ runtimes: [downloading(5)] });
+      renderSettings('Agent versions');
+
+      const menu = await screen.findByLabelText('Claude Code');
+      await screen.findByRole('option', { name: '2.1.250' });
+      // What the servers hold, then what npm has besides, newest first.
+      const groups = within(menu).getAllByRole('group');
+      expect(groups.map((group) => group.getAttribute('label'))).toEqual([
+        'On servers',
+        'Download from npm',
+      ]);
+      expect(
+        within(groups[1])
+          .getAllByRole('option')
+          .map((option) => option.textContent),
+      ).toEqual(['2.1.300', '2.1.250']);
+      expect(releases).toHaveBeenCalledWith('claude-code', expect.anything());
+
+      fireEvent.change(menu, { target: { value: '2.1.250' } });
+      expect(
+        screen.getByText(
+          '1 server downloads and checks 2.1.250 first; new sandboxes switch once every server has it.',
+        ),
+      ).toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: 'Download and switch' }));
+
+      await waitFor(() => expect(startUpdate).toHaveBeenCalledWith('claude-code', '2.1.250'));
+      expect(setVersion).not.toHaveBeenCalled();
+      expect(await screen.findByRole('progressbar')).toBeInTheDocument();
+    });
+
+    it('saves a release every server already has, as before', async () => {
+      listUpdates.mockResolvedValue({ runtimes: [update()] });
+      npm(['2.1.300', '2.1.235', '2.1.220']);
+      setVersion.mockResolvedValue(pool({ runtime_versions: { 'claude-code': '2.1.235' } }));
+      renderSettings('Agent versions');
+
+      const menu = await screen.findByLabelText('Claude Code');
+      await screen.findByRole('option', { name: '2.1.300' });
+      fireEvent.change(menu, { target: { value: '2.1.235' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+      await waitFor(() => expect(setVersion).toHaveBeenCalledWith('claude-code', '2.1.235'));
+      expect(startUpdate).not.toHaveBeenCalled();
+    });
+
+    it('says when npm deprecates the whole package, and when it cannot list releases', async () => {
+      listUpdates.mockResolvedValue({
+        runtimes: [
+          update({ runtime: 'pi', current_version: '0.73.1', latest_version: '0.73.1' }),
+          update({ runtime: 'codex', current_version: '0.145.0', latest_version: '0.162.1' }),
+        ],
+      });
+      const moved = {
+        runtime: 'pi',
+        versions: ['0.73.1', '0.72.1'],
+        deprecated: 'please use @earendil-works/pi-coding-agent instead going forward',
+        error: null,
+      };
+      const unreachable = {
+        runtime: 'codex',
+        versions: [],
+        deprecated: null,
+        error: 'npm answered 503 for @openai/codex',
+      };
+      releases.mockImplementation(async (runtime) => (runtime === 'pi' ? moved : unreachable));
+      list.mockResolvedValue(
+        pool({
+          hosts: [
+            host({
+              runtime_versions: { pi: '0.73.1', codex: '0.145.0' },
+              runtime_versions_available: { pi: ['0.73.1'], codex: ['0.145.0'] },
+            }),
+          ],
+        }),
+      );
+      renderSettings('Agent versions');
+
+      expect(
+        await screen.findByText(
+          'npm marks this package deprecated: please use @earendil-works/pi-coding-agent instead going forward',
+        ),
+      ).toBeInTheDocument();
+      expect(
+        await screen.findByText('Could not list npm releases: npm answered 503 for @openai/codex'),
+      ).toBeInTheDocument();
+      // Codex still offers what its servers have.
+      expect(
+        within(screen.getByLabelText('Codex')).getByRole('option', { name: '0.145.0' }),
+      ).toBeInTheDocument();
+    });
   });
 
   it('says when the agent is current, and why it could not check', async () => {

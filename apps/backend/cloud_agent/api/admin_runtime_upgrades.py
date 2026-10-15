@@ -1,9 +1,10 @@
 """Admin endpoints for updating an agent CLI with one button.
 
 ``GET`` shows each agent's version for new chats beside npm's latest release,
-with the progress of any update in flight; ``POST`` starts one. Rolling back is
-the existing ``PUT /admin/agent/runtime-versions``, which also withdraws the
-update. See :mod:`cloud_agent.runtime_upgrades` for how an update completes.
+with the progress of any update in flight; ``POST`` starts one, to the latest
+release or any other the version list offers. ``GET …/{runtime}/versions``
+lists those. Rolling back is the existing ``PUT /admin/agent/runtime-versions``,
+which also replaces the update. See :mod:`cloud_agent.runtime_upgrades` for how an update completes.
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ from cloud_agent.schemas import (
     RuntimeUpgradeItem,
     RuntimeUpgradeProgress,
     RuntimeUpgradesResponse,
+    RuntimeVersionsResponse,
 )
 from cloud_agent_shared.runtime_catalog import downloadable_runtimes
 
@@ -112,6 +114,28 @@ async def list_runtime_upgrades(
     return await _snapshot(_require_store(store), registry)
 
 
+@router.get("/agent/runtime-upgrades/{runtime}/versions", response_model=RuntimeVersionsResponse)
+async def list_runtime_versions(
+    runtime: str,
+    registry: RegistryClient = Depends(get_registry),
+) -> RuntimeVersionsResponse:
+    """Every stable npm release of one agent, newest first, for the version menu.
+
+    Its own request, not part of the page's poll: one package's document is
+    up to about 15 MB from npm, read once an hour, and the menu needs it once.
+    """
+    definition = downloadable_runtimes().get(runtime)
+    if definition is None:
+        raise HTTPException(status_code=422, detail=f"{runtime} cannot be updated from this page.")
+    found = await registry.versions(definition.npm_package)
+    return RuntimeVersionsResponse(
+        runtime=runtime,
+        versions=found.versions,
+        deprecated=found.deprecated,
+        error=found.error,
+    )
+
+
 @router.post("/agent/runtime-upgrades", response_model=RuntimeUpgradesResponse)
 async def request_runtime_upgrade(
     request: Request,
@@ -122,8 +146,8 @@ async def request_runtime_upgrade(
 ) -> RuntimeUpgradesResponse:
     """Update one agent: every host downloads and checks the version, then new chats use it.
 
-    Asking again for the same version retries it. Existing chats keep the
-    version they started on.
+    Any published version, older ones included. Asking again for the same
+    version retries it. Existing chats keep the version they started on.
     """
     job_store = _require_store(store)
     definition = downloadable_runtimes().get(payload.runtime)

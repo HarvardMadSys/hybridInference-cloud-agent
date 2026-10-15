@@ -13458,7 +13458,7 @@
         "type": "object"
       },
       "RequestRuntimeUpgradeRequest": {
-        "description": "Update one agent to one exact npm release.",
+        "description": "Move one agent to one exact npm release, newer or older.",
         "properties": {
           "runtime": {
             "maxLength": 64,
@@ -13467,7 +13467,7 @@
             "type": "string"
           },
           "version": {
-            "description": "An exact npm version; the page sends the latest release.",
+            "description": "An exact npm version: the latest release, or one from the version list.",
             "maxLength": 64,
             "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]+)?$",
             "title": "Version",
@@ -14143,6 +14143,52 @@
           }
         },
         "title": "RuntimeUsage",
+        "type": "object"
+      },
+      "RuntimeVersionsResponse": {
+        "description": "The npm releases an admin can move one agent to.",
+        "properties": {
+          "deprecated": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "npm's message when the whole package is deprecated.",
+            "title": "Deprecated"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Why the list is unknown.",
+            "title": "Error"
+          },
+          "runtime": {
+            "title": "Runtime",
+            "type": "string"
+          },
+          "versions": {
+            "description": "Stable npm releases, newest first. Prereleases are left out, and so is a release npm marks deprecated unless the whole package is.",
+            "items": {
+              "type": "string"
+            },
+            "title": "Versions",
+            "type": "array"
+          }
+        },
+        "required": [
+          "runtime"
+        ],
+        "title": "RuntimeVersionsResponse",
         "type": "object"
       },
       "SandboxArchiveSettingsResponse": {
@@ -23460,7 +23506,7 @@
         "summary": "List Runtime Upgrades"
       },
       "post": {
-        "description": "Update one agent: every host downloads and checks the version, then new chats use it.\n\nAsking again for the same version retries it. Existing chats keep the\nversion they started on.",
+        "description": "Update one agent: every host downloads and checks the version, then new chats use it.\n\nAny published version, older ones included. Asking again for the same\nversion retries it. Existing chats keep the version they started on.",
         "operationId": "request_runtime_upgrade_admin_agent_runtime_upgrades_post",
         "parameters": [
           {
@@ -23513,6 +23559,62 @@
           }
         },
         "summary": "Request Runtime Upgrade"
+      }
+    },
+    "/admin/agent/runtime-upgrades/{runtime}/versions": {
+      "get": {
+        "description": "Every stable npm release of one agent, newest first, for the version menu.\n\nIts own request, not part of the page's poll: one package's document is\nup to about 15 MB from npm, read once an hour, and the menu needs it once.",
+        "operationId": "list_runtime_versions_admin_agent_runtime_upgrades__runtime__versions_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "runtime",
+            "required": true,
+            "schema": {
+              "title": "Runtime",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RuntimeVersionsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Runtime Versions"
       }
     },
     "/admin/agent/runtime-versions": {

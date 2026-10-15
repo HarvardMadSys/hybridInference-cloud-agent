@@ -28,6 +28,7 @@ import CloudLabSettings from './CloudLabSettings';
 import SandboxArchiveSettingsCard from './SandboxArchiveSettings';
 import { SettingsSearch } from './SettingsSearchPanel';
 import { useRuntimeUpgrades } from './useRuntimeUpgrades';
+import { useRuntimeVersions } from './useRuntimeVersions';
 import { applicationCategoryName } from './settingsOrganization';
 import { buildSettingsSearchItems, type SettingsSearchItem } from './settingsSearchIndex';
 import { AdminNavigation } from '../AdminNavigation';
@@ -201,6 +202,11 @@ function SettingsView() {
     onAccessDenied: fail,
     // Finishing switches new chats over, which the version menu shows.
     onUpdated: () => void load(),
+  });
+  const releases = useRuntimeVersions({
+    runtimes: updates.items?.map((item) => item.runtime) ?? [],
+    enabled: !denied && selectedTab === 'versions',
+    onAccessDenied: fail,
   });
 
   useEffect(() => {
@@ -476,6 +482,7 @@ function SettingsView() {
                 updateBusy={updates.busy}
                 updateError={updates.error}
                 onUpdate={(runtime, version) => void updates.update(runtime, version)}
+                releases={releases}
                 onRollback={(runtime, version) =>
                   void save(
                     () => setAgentRuntimeVersion(runtime, version),

@@ -167,6 +167,7 @@ from cloud_agent.schemas.runtime_upgrades import (
     RuntimeUpgradeItem,
     RuntimeUpgradeProgress,
     RuntimeUpgradesResponse,
+    RuntimeVersionsResponse,
 )
 from cloud_agent.schemas.session import (
     SessionUserResponse,
@@ -341,6 +342,7 @@ __all__ = [
     "RuntimeUpgradeItem",
     "RuntimeUpgradeProgress",
     "RuntimeUpgradesResponse",
+    "RuntimeVersionsResponse",
     "SandboxArchiveSettingsResponse",
     "SandboxCheckpointBeat",
     "SandboxCheckpointMember",
