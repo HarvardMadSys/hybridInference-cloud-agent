@@ -191,8 +191,11 @@ class RuntimeDownloads:
     # ── lifecycle ───────────────────────────────────────────────────────
 
     def start(self) -> None:
-        """Clear what a stopped predecessor left, then start working."""
-        self._remove_leftovers()
+        """Start working, on a thread of its own.
+
+        The thread first clears what a stopped predecessor left, so a runner
+        does not wait on Docker before its first beat.
+        """
         self._thread = threading.Thread(target=self._run, daemon=True, name="runtime-downloads")
         self._thread.start()
 
@@ -247,8 +250,22 @@ class RuntimeDownloads:
         return None
 
     def _run(self) -> None:
+        try:
+            self._remove_leftovers()
+        except Exception:
+            logger.exception(
+                "runtime download cleanup failed",
+                extra={"event": "runtime_download_cleanup_error"},
+            )
         while not self._stop.is_set():
             self._wake.clear()
+            with self._lock:
+                idle = not self._targets
+            if idle:
+                # Nothing to hold: no reason to ask Docker anything until an
+                # answer brings a target, which wakes this thread.
+                self._wake.wait(60.0)
+                continue
             try:
                 base_id = image_id(self._docker, self._image)
                 job = None

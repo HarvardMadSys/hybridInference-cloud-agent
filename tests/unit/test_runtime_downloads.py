@@ -349,6 +349,17 @@ def test_a_restarted_runner_removes_what_a_stopped_download_left(docker):
     assert not any("-candidate:" in ref for ref in docker.images)
 
 
+def test_with_nothing_to_hold_the_worker_only_cleans_up(docker):
+    """Every host runs the worker; one never asked to download leaves Docker alone."""
+    downloads = _downloads()
+    downloads.start()
+    downloads.stop()
+
+    assert downloads._thread is not None and not downloads._thread.is_alive()
+    asked = {tuple(call[:2]) for call in docker.calls if isinstance(call, list)}
+    assert asked == {("ps", "--all"), ("image", "ls")}
+
+
 # ── naming the images ─────────────────────────────────────────────────────
 
 

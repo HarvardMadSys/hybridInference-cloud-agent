@@ -112,6 +112,25 @@ class FakeHeartbeat:
         self.wakes += 1
 
 
+class _NoRuntimeDownloads:
+    """A download worker with nothing to hold and no thread."""
+
+    def __init__(self, **_kwargs: Any) -> None:
+        pass
+
+    def start(self) -> None:
+        pass
+
+    def stop(self) -> None:
+        pass
+
+    def apply(self, _targets: object) -> None:
+        pass
+
+    def report(self) -> list[dict[str, object]]:
+        return []
+
+
 def _no_wait_endpoint(**_kwargs: Any) -> str:
     raise runner_mod.WorkWaitUnsupported("404")
 
@@ -145,6 +164,9 @@ def service(monkeypatch):
     monkeypatch.setattr(runner_mod, "HostHeartbeat", FakeHeartbeat)
     monkeypatch.setattr(runner_mod, "_session_supervisor_from_env", _SettingsSandboxManager)
     monkeypatch.setattr(runner_mod, "_start_host_capacity_collector", lambda _b: None)
+    # Its worker asks the real Docker daemon, from a thread of its own, and
+    # that would race the patched ``time.sleep`` these tests script.
+    monkeypatch.setattr(runner_mod, "RuntimeDownloads", _NoRuntimeDownloads)
     monkeypatch.setattr(
         runner_mod,
         "_shared_live_host_capabilities",
