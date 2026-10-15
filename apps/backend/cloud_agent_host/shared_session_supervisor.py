@@ -60,13 +60,14 @@ from cloud_agent_host.resident_transport import (
     ResidentTurn,
 )
 from cloud_agent_host.sandbox import KATA_RUNTIME, SandboxError
-from cloud_agent_host.sandbox_checkpoints import CheckpointRestore
+from cloud_agent_host.sandbox_checkpoints import CheckpointArchiveInvalid, CheckpointRestore
 from cloud_agent_host.session_lifecycle import (
     DEFAULT_CHAT_IDLE_TIMEOUT_S,
     DEFAULT_SWEEP_INTERVAL_S,
     SessionBusy,
     SessionLeaseLost,
 )
+from cloud_agent_shared.environment_snapshots import SNAPSHOT_LABEL, EnvironmentSnapshotRef
 from cloud_agent_shared.errors import SandboxArchiveBlocked
 from cloud_agent_shared.operation_profiling import (
     StageRecorder,
@@ -265,6 +266,12 @@ class SharedSessionLease:
     #: proof for a minute instead of repeating it. False when the same owner
     #: acquires again and is handed its existing lease untouched.
     network_verified: bool = False
+    #: The installation snapshot the group's container was created from.
+    environment_snapshot_id: str | None = None
+    #: Why a snapshot handed for this group was not used: ``unavailable``
+    #: (it could not be fetched or loaded here) or ``invalid`` (it does not
+    #: match its record). The group was created from the sandbox image instead.
+    environment_snapshot_failure: str | None = None
 
 
 @dataclass(frozen=True)
@@ -430,6 +437,8 @@ class _Group:
     terminal_tokens: dict[str, str] = field(default_factory=dict)
     operation_tokens: dict[str, str] = field(default_factory=dict)
     snapshotting: bool = False
+    #: Why the installation snapshot handed at creation was not used.
+    environment_snapshot_failure: str | None = None
     environment_cancel: threading.Event | None = field(default=None, repr=False)
     environment_owner: str | None = field(default=None, repr=False)
     # A failed initial archive observed (or could not rule out) its durable
@@ -486,6 +495,7 @@ StoppedArchivePrepareHook = Callable[
 ]
 ArchiveInspectionHook = Callable[[ChatSandboxSpec, ChatSandboxInspection], None]
 CheckpointRestoreHook = Callable[[str, CheckpointRestore], str]
+EnvironmentSnapshotHook = Callable[[EnvironmentSnapshotRef], str]
 MarkerlessFinalPrepareHook = Callable[[ChatSandboxSpec, ChatSandboxInspection], bool]
 
 #: How long a message sent into a turn that has not started here is kept for
@@ -561,6 +571,9 @@ class SharedChatSessionSupervisor:
         #: Turns a moved group's checkpoint into a local image name. Without
         #: it this sandbox manager refuses to recreate any moved group.
         self.checkpoint_restore_hook = checkpoint_restore_hook
+        #: Turns an installation snapshot into a local image name. Without it a
+        #: new group is always created from the sandbox image.
+        self.environment_snapshot_hook: EnvironmentSnapshotHook | None = None
         self._groups: dict[str, _Group] = {}
         self._members: dict[str, _Group] = {}
         #: Sandboxes a registration is creating or adopting outside the lock.
@@ -1761,12 +1774,15 @@ class SharedChatSessionSupervisor:
         observer: StageRecorder | None = None,
         start_seq: int | None = None,
         restore: CheckpointRestore | None = None,
+        environment_snapshot: EnvironmentSnapshotRef | None = None,
     ) -> builtins.list[SharedSessionDescriptor]:
         """Install the control plane's authoritative member aliases.
 
         A group with no container here is created; a moved group (one the
         control plane rehomed under a later generation) is created only from
-        ``restore``, its checkpoint, and never empty.
+        ``restore``, its checkpoint, and never empty. A new group with an
+        ``environment_snapshot`` starts from it when it can, and from the
+        sandbox image otherwise.
         """
         if not members:
             raise ValueError("a shared sandbox manifest cannot be empty")
@@ -1822,11 +1838,16 @@ class SharedChatSessionSupervisor:
             self._creating.add(spec.sandbox_id)
         # Docker create, or the exact adoption check, can take minutes. Only registrations of this sandbox wait for it; the
         # metadata lock stays free for every other group and member.
+        snapshot_failure: str | None = None
         try:
             if expected_container_id:
                 created = self._manager.require_existing(spec, container_id=expected_container_id)
             elif restore is not None:
                 created = self._restore_group(spec, restore, facts=facts, observer=observer)
+            elif environment_snapshot is not None:
+                created, snapshot_failure = self._create_from_snapshot(
+                    spec, environment_snapshot, facts=facts, observer=observer
+                )
             else:
                 created = self._manager.create(spec, facts=facts, observer=observer)
         except BaseException:
@@ -1839,7 +1860,9 @@ class SharedChatSessionSupervisor:
             self._condition.notify_all()
             group = self._groups.get(spec.sandbox_id)
             if group is None:
-                group = _Group(spec=spec, inspection=created)
+                group = _Group(
+                    spec=spec, inspection=created, environment_snapshot_failure=snapshot_failure
+                )
                 self._groups[spec.sandbox_id] = group
             self._note_start_seq_locked(group, start_seq)
             return self._install_manifest_locked(
@@ -1893,6 +1916,50 @@ class SharedChatSessionSupervisor:
             with contextlib.suppress(Exception):
                 self._manager.remove_superseded(spec)
             raise SandboxRestoreFailed(f"sandbox checkpoint could not be restored: {exc}") from exc
+
+    def _create_from_snapshot(
+        self,
+        spec: ChatSandboxSpec,
+        snapshot: EnvironmentSnapshotRef,
+        *,
+        facts: SandboxActionFacts | None,
+        observer: StageRecorder | None,
+    ) -> tuple[ChatSandboxInspection, str | None]:
+        """Create a new group from an installation snapshot, or from the image if it fails.
+
+        A snapshot only saves time: whatever goes wrong with it, the group is
+        created the ordinary way and its workspace installs in full. The
+        returned reason tells the control plane whether the snapshot itself is
+        at fault (``invalid``) or only could not be used here (``unavailable``).
+        """
+        hook = self.environment_snapshot_hook
+        failure = "unavailable"
+        if hook is not None:
+            try:
+                image = hook(snapshot)
+                return (
+                    self._manager.create(
+                        spec,
+                        image=image,
+                        environment_snapshot=(snapshot.owner, snapshot.snapshot_id),
+                        facts=facts,
+                        observer=observer,
+                    ),
+                    None,
+                )
+            except CheckpointArchiveInvalid:
+                failure = "invalid"
+            except Exception as exc:
+                logger.warning(
+                    "environment snapshot unavailable; creating from the sandbox image",
+                    extra={
+                        "event": "environment_snapshot_unavailable",
+                        "sandbox_id": spec.sandbox_id,
+                        "snapshot_id": snapshot.snapshot_id,
+                        "error_type": type(exc).__name__,
+                    },
+                )
+        return self._manager.create(spec, facts=facts, observer=observer), failure
 
     def _forget_superseded_locked(self, group: _Group) -> _Group | None:
         """Drop an older generation of a group, unless something here still uses it."""
@@ -2071,6 +2138,7 @@ class SharedChatSessionSupervisor:
         profiling: dict[str, Any] | None = None,
         start_seq: int | None = None,
         restore: CheckpointRestore | None = None,
+        environment_snapshot: EnvironmentSnapshotRef | None = None,
     ) -> SharedSessionLease:
         """Start one group if needed and lease only the addressed member."""
         # Container actions are always reported: they are a couple of string
@@ -2088,6 +2156,7 @@ class SharedChatSessionSupervisor:
             observer=recorder,
             start_seq=start_seq,
             restore=restore,
+            environment_snapshot=environment_snapshot,
         )
         with self._lock:
             group, member = self._member(thread_id)
@@ -4950,6 +5019,10 @@ class SharedChatSessionSupervisor:
             profiling_recorded=recorder is not None,
             profiling_truncated=recorder is not None and recorder.stopped_early(),
             network_verified=network_verified,
+            environment_snapshot_id=(
+                group.inspection.labels.get(SNAPSHOT_LABEL, "").partition(":")[2] or None
+            ),
+            environment_snapshot_failure=group.environment_snapshot_failure,
         )
 
     def _descriptors(self, group: _Group) -> builtins.list[SharedSessionDescriptor]:

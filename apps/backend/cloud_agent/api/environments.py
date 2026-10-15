@@ -37,8 +37,10 @@ from cloud_agent_shared.environment import (
     EnvironmentInputError,
     EnvironmentScripts,
     VariableEdit,
+    environment_payload,
     parse_env,
 )
+from cloud_agent_shared.environment_snapshots import ENVIRONMENT_SNAPSHOT_CAPABILITY
 
 
 class CredentialSafeRoute(APIRoute):
@@ -205,6 +207,13 @@ class TestUpdate(BaseModel):
     detail: str = Field(default="", max_length=1000, repr=False)
     image_digest: str | None = Field(None, max_length=512)
     cleanup_complete: bool = False
+    #: The host's receipt for the installation snapshot this run saved.
+    snapshot: dict[str, Any] | None = Field(None, repr=False)
+
+
+def _snapshots(store: Any) -> Any:
+    """The snapshot records, or ``None`` where this deployment's store has none."""
+    return getattr(store, "environment_snapshots", None)
 
 
 async def _entitled(store: Any, user_id: str, repo: str, credentials: Any) -> None:
@@ -232,12 +241,25 @@ async def list_environments(
     user: dict[str, Any] = Depends(require_agent_owner),
     store: Any = Depends(get_storage),
 ) -> dict[str, Any]:
-    """List owned repository configurations and their default selection."""
+    """List owned repository configurations, their default selection and snapshot."""
+    store = require_store(store)
+    environments = await store.environments.list_environments(user["user_id"], repo)
+    snapshots = _snapshots(store)
+    snapshots_enabled = snapshots is not None and await snapshots.enabled()
+    summaries = (
+        await snapshots.summaries(
+            user["user_id"],
+            await store.environments.current_setup_fingerprints(
+                user["user_id"], [e["id"] for e in environments]
+            ),
+        )
+        if snapshots_enabled and environments
+        else {}
+    )
     return {
-        "environments": await require_store(store).environments.list_environments(
-            user["user_id"], repo
-        ),
-        "globals": await require_store(store).environments.get_global_environment(user["user_id"]),
+        "environments": [{**e, "snapshot": summaries.get(e["id"])} for e in environments],
+        "globals": await store.environments.get_global_environment(user["user_id"]),
+        "snapshots_enabled": snapshots_enabled,
     }
 
 
@@ -268,7 +290,8 @@ async def _save(
         environment_id=environment_id,
         revision=body.revision,
         document=body.model_dump(
-            mode="json", include={"setup_script", "start_script", "verify_script", "actions"}
+            mode="json",
+            include={"setup_script", "start_script", "verify_script", "update_script", "actions"},
         ),
         edits=[v.model_dump() for v in body.variables],
     )
@@ -305,9 +328,60 @@ async def delete_environment(
     store: Any = Depends(get_storage),
 ) -> Response:
     """Archive an environment and clear a matching default."""
-    await require_store(store).environments.archive_environment(
-        user["user_id"], environment_id, revision
+    store = require_store(store)
+    await store.environments.archive_environment(user["user_id"], environment_id, revision)
+    if (snapshots := _snapshots(store)) is not None:
+        await snapshots.discard(user["user_id"], environment_id)
+    return Response(status_code=204)
+
+
+class RebuildInput(BaseModel):
+    """Which branch's head to build the installation snapshot from."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    ref: str | None = Field(None, min_length=1, max_length=255)
+
+
+@router.post("/environments/{environment_id}/snapshot", status_code=202)
+async def rebuild_snapshot(
+    environment_id: str,
+    body: RebuildInput,
+    user: dict[str, Any] = Depends(require_agent_owner),
+    store: Any = Depends(get_storage),
+    credentials: Any = Depends(get_agent_app_credentials),
+) -> dict[str, Any]:
+    """Queue a fresh installation snapshot of the environment as it is now."""
+    store = require_store(store)
+    snapshots = _snapshots(store)
+    if snapshots is None or not await snapshots.enabled():
+        raise HTTPException(409, "Snapshots need automatic sandbox snapshots to be enabled")
+    binding_id, repo = await store.environments.bind_current_environment(
+        user["user_id"], environment_id
     )
+    await _entitled(store, user["user_id"], repo, credentials)
+    from cloud_agent.environment_source import resolve_test_commit
+
+    sha = await resolve_test_commit(repo, body.ref, credentials)
+    await snapshots.discard(user["user_id"], environment_id)
+    snapshot_id = await snapshots.queue_prebuild(
+        user_id=user["user_id"], binding_id=binding_id, repo=repo, base_sha=sha, requested=True
+    )
+    if snapshot_id is None:
+        raise HTTPException(409, "This environment has no installation script to snapshot")
+    return {"snapshot_id": snapshot_id, "base_sha": sha}
+
+
+@router.delete("/environments/{environment_id}/snapshot", status_code=204)
+async def delete_snapshot(
+    environment_id: str,
+    user: dict[str, Any] = Depends(require_agent_owner),
+    store: Any = Depends(get_storage),
+) -> Response:
+    """Delete an environment's installation snapshots; new tasks install in full."""
+    store = require_store(store)
+    await store.environments.get_environment(user["user_id"], environment_id)
+    if (snapshots := _snapshots(store)) is not None:
+        await snapshots.discard(user["user_id"], environment_id)
     return Response(status_code=204)
 
 
@@ -508,7 +582,8 @@ async def import_variables(
         environment_id=current["id"],
         revision=body.revision,
         document={
-            k: current[k] for k in ("setup_script", "start_script", "verify_script", "actions")
+            k: current.get(k, "")
+            for k in ("setup_script", "start_script", "verify_script", "update_script", "actions")
         },
         edits=[
             {**v.model_dump(exclude={"source"}), "operation": "replace"}
@@ -594,12 +669,13 @@ async def claim_environment_test(
     credentials: Any = Depends(get_agent_app_credentials),
     gateway: Any = Depends(get_gateway_client),
 ) -> dict[str, Any] | None:
-    """Hand only an environment-capable enrolled host a test lease."""
+    """Hand only an environment-capable enrolled host a test or prebuild lease."""
     if ENVIRONMENT_CAPABILITY not in body.capabilities:
         return None
     store = require_store(store)
+    snapshot_capable = ENVIRONMENT_SNAPSHOT_CAPABILITY in body.capabilities
     run = await store.environments.claim_environment_run(
-        host["host"], host["credential_hash"], body.attestation
+        host["host"], host["credential_hash"], body.attestation, snapshot_capable=snapshot_capable
     )
     if run is None:
         return None
@@ -614,10 +690,25 @@ async def claim_environment_test(
         await store.environments.fail_environment_preflight(
             run["id"], host["host"], run["lease_generation"]
         )
+        if (snapshots := _snapshots(store)) is not None:
+            await snapshots.fail_capture(
+                run_id=run["id"], detail="Repository access was unavailable"
+            )
         raise HTTPException(
             503, "Environment credentials or repository access are unavailable"
         ) from None
-    return {**run, "environment": bound.model_dump(mode="json"), "clone_token": clone_token}
+    snapshots = _snapshots(store)
+    snapshot = (
+        await snapshots.capture_target(run, host["host"])
+        if snapshot_capable and snapshots is not None
+        else None
+    )
+    return {
+        **run,
+        "environment": environment_payload(bound, body.capabilities),
+        "clone_token": clone_token,
+        "snapshot": snapshot,
+    }
 
 
 @router.post("/worker/environment-runs/{run_id}")
@@ -628,12 +719,48 @@ async def report_test(
     store: Any = Depends(get_storage),
 ) -> dict[str, bool]:
     """Renew or finish only this host's currently fenced test run."""
-    accepted = await require_store(store).environments.update_environment_run(
-        run_id, host["host"], body.generation, body.model_dump(exclude={"generation"})
+    store = require_store(store)
+    snapshots = _snapshots(store)
+    if body.snapshot is not None:
+        if snapshots is None:
+            raise HTTPException(409, "Snapshot receipt does not match this run")
+        # Recorded while the lease is still live, before the final update ends it.
+        recorded = await snapshots.record_capture(
+            run_id=run_id, host=host["host"], generation=body.generation, receipt=body.snapshot
+        )
+        if not recorded:
+            raise HTTPException(409, "Snapshot receipt does not match this run")
+    accepted = await store.environments.update_environment_run(
+        run_id, host["host"], body.generation, body.model_dump(exclude={"generation", "snapshot"})
     )
     if not accepted:
         raise HTTPException(409, "Environment test was cancelled or its lease was lost")
+    if body.state in {"failed", "cancelled"} and snapshots is not None:
+        await snapshots.fail_capture(run_id=run_id, detail=body.detail or "Snapshot build failed")
     return {"accepted": True}
+
+
+@router.get("/worker/environment-snapshots/deletions")
+async def snapshot_deletions(
+    host: dict[str, str] = Depends(verify_claiming_host), store: Any = Depends(get_storage)
+) -> dict[str, Any]:
+    """Snapshot objects to delete from S3, and local snapshot images to drop."""
+    _ = host
+    snapshots = _snapshots(require_store(store))
+    return {"snapshots": await snapshots.deletions() if snapshots is not None else []}
+
+
+@router.post("/worker/environment-snapshots/{snapshot_id}/deleted", status_code=204)
+async def snapshot_deleted(
+    snapshot_id: str,
+    host: dict[str, str] = Depends(verify_claiming_host),
+    store: Any = Depends(get_storage),
+) -> Response:
+    """Record that this host deleted a snapshot's stored object."""
+    _ = host
+    if (snapshots := _snapshots(require_store(store))) is not None:
+        await snapshots.confirm_deleted(snapshot_id)
+    return Response(status_code=204)
 
 
 @router.post("/environment-script-suggestions")

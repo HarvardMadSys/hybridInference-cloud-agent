@@ -2315,7 +2315,8 @@ describe('durable new-task drafts', () => {
     fireEvent.change(screen.getByRole('textbox'), {
       target: { value: '  Review this change\ncarefully.  ' },
     });
-    fireEvent.change(screen.getByLabelText('Branch'), { target: { value: 'main' } });
+    fireEvent.click(screen.getByLabelText('Branch'));
+    fireEvent.click(screen.getByRole('option', { name: 'main' }));
     first.unmount();
     render(<TaskComposer />);
     expect(await screen.findByRole('textbox')).toHaveValue('  Review this change\ncarefully.  ');
@@ -2338,7 +2339,8 @@ describe('durable new-task drafts', () => {
   it('preserves an unsent branch while its validation read is still pending', async () => {
     const first = render(<TaskComposer />);
     await chooseRepository();
-    fireEvent.change(screen.getByLabelText('Branch'), { target: { value: 'main' } });
+    fireEvent.click(screen.getByLabelText('Branch'));
+    fireEvent.click(screen.getByRole('option', { name: 'main' }));
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Original draft' } });
     first.unmount();
     vi.mocked(listRepoBranches).mockImplementationOnce(() => new Promise(() => undefined));
@@ -2531,12 +2533,14 @@ describe('TaskComposer plugins', () => {
     const box = await screen.findByRole('textbox');
     await selectPlugin();
     fireEvent.change(box, { target: { value: 'Review' } });
-    fireEvent.change(screen.getByLabelText('Agent'), { target: { value: 'pi' } });
+    fireEvent.click(screen.getByLabelText('Agent'));
+    fireEvent.click(screen.getByRole('option', { name: 'pi' }));
     expect(screen.getByRole('alert')).toHaveTextContent('Selected plugins do not match pi');
     expect(screen.getByRole('button', { name: /Run/ })).toBeDisabled();
     fireEvent.keyDown(box, { key: 'Enter' });
     expect(createAgentJob).not.toHaveBeenCalled();
-    fireEvent.change(screen.getByLabelText('Agent'), { target: { value: 'claude-code' } });
+    fireEvent.click(screen.getByLabelText('Agent'));
+    fireEvent.click(screen.getByRole('option', { name: 'claude-code' }));
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     await runWhenReady();
     await waitFor(() => expect(createAgentJob).toHaveBeenCalledTimes(1));
@@ -2565,7 +2569,8 @@ describe('TaskComposer plugins', () => {
     const box = await screen.findByRole('textbox');
     await selectPlugin();
     fireEvent.change(box, { target: { value: '/goal Review the change' } });
-    fireEvent.change(screen.getByLabelText('Agent'), { target: { value: 'pi' } });
+    fireEvent.click(screen.getByLabelText('Agent'));
+    fireEvent.click(screen.getByRole('option', { name: 'pi' }));
     expect(screen.getByRole('alert')).toHaveTextContent('pi does not support plugins');
     expect(screen.getByRole('button', { name: /Run/ })).toBeDisabled();
     fireEvent.keyDown(box, { key: 'Enter' });
@@ -2617,7 +2622,8 @@ describe('TaskComposer reasoning effort', () => {
     render(<TaskComposer />);
 
     const picker = await screen.findByLabelText('Reasoning');
-    const offered = Array.from(picker.querySelectorAll('option')).map((o) => o.textContent);
+    fireEvent.click(picker);
+    const offered = screen.getAllByRole('option').map((o) => o.textContent);
     // `medium` although the model's entry omits it — that entry is a yes/no.
     // `xhigh` dropped although claude-code can say it — not a platform level.
     expect(offered).toEqual(['low', 'medium', 'high', 'max']);
@@ -2637,7 +2643,8 @@ describe('TaskComposer reasoning effort', () => {
     render(<TaskComposer />);
 
     const picker = await screen.findByLabelText('Reasoning');
-    const offered = Array.from(picker.querySelectorAll('option')).map((o) => o.textContent);
+    fireEvent.click(picker);
+    const offered = screen.getAllByRole('option').map((o) => o.textContent);
     expect(offered).toEqual(['low', 'medium', 'high']);
   });
 
@@ -2675,7 +2682,8 @@ describe('TaskComposer reasoning effort', () => {
     const textarea = await screen.findByRole('textbox');
     fireEvent.change(textarea, { target: { value: 'do it' } });
     if (effort) {
-      fireEvent.change(screen.getByLabelText('Reasoning'), { target: { value: effort } });
+      fireEvent.click(screen.getByLabelText('Reasoning'));
+      fireEvent.click(screen.getByRole('option', { name: effort }));
     }
     await runWhenReady();
     await waitFor(() => expect(createAgentJob).toHaveBeenCalled());
@@ -2712,10 +2720,12 @@ describe('TaskComposer reasoning effort', () => {
 
     render(<TaskComposer />);
     await chooseRepository();
-    fireEvent.change(await screen.findByLabelText('Reasoning'), { target: { value: 'low' } });
+    fireEvent.click(await screen.findByLabelText('Reasoning'));
+    fireEvent.click(screen.getByRole('option', { name: 'low' }));
     // model-plain takes no effort at all, so the control goes away entirely —
     // and the pending selection must not survive to be submitted.
-    fireEvent.change(screen.getByLabelText('Model'), { target: { value: 'model-plain' } });
+    fireEvent.click(screen.getByLabelText('Model'));
+    fireEvent.click(screen.getByRole('option', { name: 'model-plain' }));
 
     await waitFor(() => expect(screen.queryByLabelText('Reasoning')).not.toBeInTheDocument());
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'do it' } });

@@ -246,12 +246,12 @@ describe('sidebar navigation interactions', () => {
     expect(api.thread).not.toHaveBeenCalled();
   });
 
-  it('shows seven settings destinations without loading or polling chat lists', async () => {
+  it('shows eight settings destinations without loading or polling chat lists', async () => {
     api.pathname = '/settings/plugins';
     vi.useFakeTimers();
     await act(async () => render(<AgentsSidebar settingsNavigation={{ backHref: '/a' }} />));
     const navigation = screen.getByRole('navigation', { name: 'Settings' });
-    expect(within(navigation).getAllByRole('link')).toHaveLength(7);
+    expect(within(navigation).getAllByRole('link')).toHaveLength(8);
     expect(within(navigation).getByRole('link', { name: 'My Settings' })).toHaveAttribute(
       'href',
       '/settings/my-settings',
@@ -279,6 +279,10 @@ describe('sidebar navigation interactions', () => {
     expect(within(navigation).getByRole('link', { name: 'Environments' })).toHaveAttribute(
       'href',
       '/settings/environments',
+    );
+    expect(within(navigation).getByRole('link', { name: 'Teams' })).toHaveAttribute(
+      'href',
+      '/settings/teams',
     );
     expect(screen.getByRole('link', { name: 'Back to chats' })).toHaveAttribute('href', '/a');
     expect(screen.getByTestId('account-menu')).toBeInTheDocument();

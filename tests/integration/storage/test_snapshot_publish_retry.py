@@ -112,6 +112,11 @@ async def _capture_settled_workspace(store, key: str) -> tuple[dict, dict, str]:
         from_states=("running",),
         to_state="succeeded",
     )
+    # The owner publishes the finished turn; a turn boundary publishes nothing.
+    requested = await store.snapshot.request_snapshot_publication(
+        thread_id=job["thread_id"], user_id=job["user_id"]
+    )
+    assert requested.get("requested") is True, requested
     capture = await store.snapshot.claim_due_sandbox_snapshot()
     assert capture is not None and capture["anchor_job_id"] == job["id"]
     patch = f"diff --git a/answer-{key}.txt b/answer-{key}.txt\nnew file mode 100644\n"

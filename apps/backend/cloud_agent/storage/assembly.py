@@ -54,9 +54,13 @@ from cloud_agent.storage.repositories import (
     PostgresSkillRepository,
     PostgresSnapshotRepository,
     PostgresSourceControlRepository,
+    PostgresTeamRepository,
     PostgresUserProfileRepository,
     PostgresWebSearchRepository,
     PostgresWorkInsightsRepository,
+)
+from cloud_agent.storage.repositories.environment_snapshots import (
+    PostgresEnvironmentSnapshotRepository,
 )
 from cloud_agent.storage.repositories.environments import PostgresEnvironmentRepository
 
@@ -94,10 +98,12 @@ if TYPE_CHECKING:
         SkillRepository,
         SnapshotRepository,
         SourceControlRepository,
+        TeamRepository,
         UserProfileRepository,
         WebSearchRepository,
         WorkInsightsRepository,
     )
+    from cloud_agent.ports.environment_snapshots import EnvironmentSnapshotRepository
     from cloud_agent.ports.environments import EnvironmentRepository
 
 
@@ -117,6 +123,9 @@ class Storage:
         self.admin_usage = AdminUsageQueries(pool)
 
         self.environments: EnvironmentRepository = PostgresEnvironmentRepository(pool)
+        self.environment_snapshots: EnvironmentSnapshotRepository = (
+            PostgresEnvironmentSnapshotRepository(pool)
+        )
         self.attempt_commands: AttemptCommands = PostgresAttemptCommands(pool)
         self.audit: AuditRepository = PostgresAuditRepository(pool)
         self.audit_log: AuditLogQueries = PostgresAuditLogRepository(pool)
@@ -151,4 +160,5 @@ class Storage:
         self.work_insights: WorkInsightsRepository = PostgresWorkInsightsRepository(pool)
         self.agent_memory: AgentMemoryRepository = PostgresAgentMemoryRepository(pool)
         self.user_profile: UserProfileRepository = PostgresUserProfileRepository(pool)
+        self.teams: TeamRepository = PostgresTeamRepository(pool)
         self.web_search: WebSearchRepository = PostgresWebSearchRepository(pool)

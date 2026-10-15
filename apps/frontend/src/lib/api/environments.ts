@@ -49,6 +49,20 @@ export interface EnvironmentStep {
   exit_code?: number | null;
   duration_seconds?: number;
   detail?: string;
+  /** False when the step was satisfied without running, as from a snapshot. */
+  ran?: boolean;
+  /** The installation snapshot a setup step was satisfied from. */
+  snapshot_id?: string;
+}
+/** The latest installation snapshot of an environment's current setup. */
+export interface EnvironmentSnapshotSummary {
+  id: string;
+  state: 'queued' | 'building' | 'ready' | 'failed';
+  created_at: string;
+  ready_at?: string | null;
+  last_used_at?: string | null;
+  size_bytes?: number | null;
+  detail?: string | null;
 }
 export interface EnvironmentRun {
   id: string;
@@ -69,8 +83,11 @@ export interface EnvironmentConfig {
   setup_script: string;
   start_script: string;
   verify_script: string;
+  /** Runs instead of the setup script when a workspace starts from a snapshot. */
+  update_script?: string;
   actions: EnvironmentAction[];
   is_default?: boolean;
+  snapshot?: EnvironmentSnapshotSummary | null;
   default_revision?: number;
   latest_test?: { id: string; state: string; revision: number; global_revision: number } | null;
   /** When this version was saved; present on version history entries. */
@@ -113,9 +130,18 @@ async function call<T>(path: string, method = 'GET', body?: unknown, key?: strin
   return jsonOrThrow<T>(response);
 }
 export const listEnvironments = (repo?: string) =>
-  call<{ environments: EnvironmentConfig[]; globals: EnvironmentConfig }>(
-    `environments${repo ? `?repo=${encodeURIComponent(repo)}` : ''}`,
-  );
+  call<{
+    environments: EnvironmentConfig[];
+    globals: EnvironmentConfig;
+    /** Whether this deployment keeps installation snapshots at all. */
+    snapshots_enabled?: boolean;
+  }>(`environments${repo ? `?repo=${encodeURIComponent(repo)}` : ''}`);
+/** Build a fresh installation snapshot of the environment as it is now. */
+export const rebuildEnvironmentSnapshot = (id: string) =>
+  call<{ snapshot_id: string; base_sha: string }>(`environments/${id}/snapshot`, 'POST', {});
+/** Delete an environment's snapshots; new tasks then install in full. */
+export const deleteEnvironmentSnapshot = (id: string) =>
+  call<void>(`environments/${id}/snapshot`, 'DELETE');
 /** The owner's global variables alone, for a task that has no repository. */
 export const getGlobalEnvironment = () => call<EnvironmentConfig>('environment-globals');
 export const saveEnvironment = (
@@ -129,6 +155,7 @@ export const saveEnvironment = (
     setup_script,
     start_script,
     verify_script,
+    update_script,
     actions,
     variables,
   } = value;
@@ -142,6 +169,7 @@ export const saveEnvironment = (
       setup_script,
       start_script,
       verify_script,
+      update_script: update_script ?? '',
       actions,
       variables: variableEditPayload(variables),
     },

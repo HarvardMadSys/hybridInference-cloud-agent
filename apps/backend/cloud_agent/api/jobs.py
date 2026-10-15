@@ -49,6 +49,7 @@ from cloud_agent.schemas import (
     AgentJobResponse,
     AgentThreadArchiveResponse,
     AgentThreadPinResponse,
+    AgentThreadPublicationResponse,
     AgentThreadRenameRequest,
     AgentThreadRenameResponse,
     GoalClearedResponse,
@@ -74,6 +75,7 @@ if TYPE_CHECKING:
         PendingMessageRepository,
         SandboxRepository,
         SkillRepository,
+        SnapshotRepository,
         SourceControlRepository as SourceControlPort,
     )
     from cloud_agent.source_control_runtime import GitHubAppSource
@@ -117,6 +119,7 @@ class _JobsStorage(Protocol):
     pending_messages: PendingMessageRepository
     sandbox: SandboxRepository
     skills: SkillRepository
+    snapshot: SnapshotRepository
     source_control: SourceControlPort
 
 
@@ -697,6 +700,74 @@ async def unpin_agent_thread(
 ) -> AgentThreadPinResponse:
     """Unpin the entire task thread containing an owned job."""
     return await _set_agent_thread_pinned(job_id=job_id, pinned=False, user=user, store=store)
+
+
+#: Why a publication request was refused, by the store's error code: the
+#: response type and the sentence an owner reads.
+_PUBLICATION_REFUSALS = {
+    "temporary_workspace": (
+        "publication_unavailable",
+        "This workspace has no repository to publish to.",
+    ),
+    "nothing_to_publish": (
+        "nothing_to_publish",
+        "This conversation has no finished turn to publish yet.",
+    ),
+    "workspace_unavailable": (
+        "workspace_unavailable",
+        "The workspace cannot be published right now. Send a message or try again shortly.",
+    ),
+    "turn_running": ("turn_running", "Publish after the running turn finishes."),
+    "workspace_busy": ("workspace_busy", "The workspace is busy. Try again in a moment."),
+}
+
+
+@router.post(
+    "/threads/{thread_id}/publish",
+    response_model=AgentThreadPublicationResponse,
+    status_code=202,
+)
+async def publish_agent_thread(
+    thread_id: str,
+    user: dict[str, Any] = Depends(require_agent_owner),
+    store: _JobsStorage | None = Depends(get_storage),
+) -> AgentThreadPublicationResponse:
+    """Push the conversation's workspace to its branch and open or update its draft PR.
+
+    The platform never publishes on its own: a finished turn stays in the
+    workspace until its owner asks. This opens the workspace's next snapshot
+    and returns at once; capture, the secret scan, the push and the draft PR
+    follow as the job's ``workspace_publication_state``. Every conversation
+    sharing the workspace is published together, to its origin's branch. A
+    publication already on its way is returned instead of a second one.
+    """
+    job_store = _require_store(store)
+    result = await job_store.snapshot.request_snapshot_publication(
+        thread_id=thread_id, user_id=user["user_id"]
+    )
+    error = result.get("error")
+    if error == "not_found":
+        raise _no_such_thread_error(thread_id)
+    if error is not None:
+        error_type, message = _PUBLICATION_REFUSALS[error]
+        raise HTTPException(
+            status_code=409, detail={"error": {"type": error_type, "message": message}}
+        )
+    logger.info(
+        "agent_thread_publication_requested",
+        extra={
+            "event": "agent_thread_publication_requested",
+            "thread_id": thread_id,
+            "snapshot_id": result["snapshot_id"],
+            "requested": result["requested"],
+        },
+    )
+    return AgentThreadPublicationResponse(
+        thread_id=thread_id,
+        snapshot_id=int(result["snapshot_id"]),
+        state=result["state"],
+        requested=bool(result["requested"]),
+    )
 
 
 router.add_api_route(

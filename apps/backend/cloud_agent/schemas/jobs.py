@@ -383,6 +383,28 @@ class AgentJobResponse(BaseModel):
     workspace_publication_state: (
         Literal["pending", "capturing", "captured", "publishing", "published", "failed"] | None
     ) = None
+    workspace_publication_unchanged: bool = Field(
+        False,
+        description=(
+            "Whether the workspace's newest publication found nothing to publish, "
+            "so it opened no pull request."
+        ),
+    )
+    workspace_pr_url: str | None = Field(
+        None,
+        description=(
+            "The pull request the workspace was last published to. Present once the "
+            "owner has published; POST /threads/{thread_id}/publish updates it."
+        ),
+    )
+    workspace_unpublished_changes: bool = Field(
+        False,
+        description=(
+            "Whether the workspace holds turns its owner has not published, or its "
+            "last publication failed. The platform publishes only on "
+            "POST /threads/{thread_id}/publish."
+        ),
+    )
     workspace_epoch: int | None = None
     # These clocks and duration describe the newest execution attempt, not
     # queue time or a sum across historical attempts. They are populated from

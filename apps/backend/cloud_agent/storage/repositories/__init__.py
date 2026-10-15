@@ -42,6 +42,7 @@ from cloud_agent.storage.repositories.settings import PostgresSettingsRepository
 from cloud_agent.storage.repositories.skills import PostgresSkillRepository
 from cloud_agent.storage.repositories.snapshot import PostgresSnapshotRepository
 from cloud_agent.storage.repositories.source_control import PostgresSourceControlRepository
+from cloud_agent.storage.repositories.teams import PostgresTeamRepository
 from cloud_agent.storage.repositories.user_profile import PostgresUserProfileRepository
 from cloud_agent.storage.repositories.web_search import PostgresWebSearchRepository
 from cloud_agent.storage.repositories.work_insights import PostgresWorkInsightsRepository
@@ -77,6 +78,7 @@ __all__ = [
     "PostgresSkillRepository",
     "PostgresSnapshotRepository",
     "PostgresSourceControlRepository",
+    "PostgresTeamRepository",
     "PostgresUserProfileRepository",
     "PostgresWebSearchRepository",
     "PostgresWorkInsightsRepository",

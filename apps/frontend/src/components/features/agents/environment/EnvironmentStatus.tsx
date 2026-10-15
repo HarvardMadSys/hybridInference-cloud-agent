@@ -3,7 +3,11 @@
 import type { ReactNode } from 'react';
 import { useT } from '@/components/providers';
 import type { TranslationKey } from '@/lib/i18n/translate';
-import type { EnvironmentConfig, EnvironmentStep } from '@/lib/api/environments';
+import type {
+  EnvironmentConfig,
+  EnvironmentSnapshotSummary,
+  EnvironmentStep,
+} from '@/lib/api/environments';
 
 // One vocabulary for every state an environment surface shows. Tests, setup
 // steps and actions report overlapping lowercase states from the server; the
@@ -29,6 +33,7 @@ const STATES: Record<string, { key: TranslationKey; tone: Tone }> = {
 
 const PHASES: Record<string, TranslationKey> = {
   setup: 'environment.phase.setup',
+  update: 'environment.phase.update',
   start: 'environment.phase.start',
   verify: 'environment.phase.verify',
 };
@@ -98,6 +103,31 @@ export function TestBadge({
   return <Badge tone="neutral">{t('environment.test.cancelled')}</Badge>;
 }
 
+/** Whether new tasks of an environment skip its installation. */
+export function SnapshotBadge({ snapshot }: { snapshot?: EnvironmentSnapshotSummary | null }) {
+  const t = useT();
+  if (!snapshot) return <Badge tone="neutral">{t('environment.snapshot.none')}</Badge>;
+  if (snapshot.state === 'ready')
+    return (
+      <span title={snapshot.ready_at ? new Date(snapshot.ready_at).toLocaleString() : undefined}>
+        <Badge tone="success">{t('environment.snapshot.ready')}</Badge>
+      </span>
+    );
+  if (snapshot.state === 'failed')
+    return (
+      <span title={snapshot.detail ?? undefined}>
+        <Badge tone="error">{t('environment.snapshot.failed')}</Badge>
+      </span>
+    );
+  return <Badge tone="progress">{t('environment.snapshot.building')}</Badge>;
+}
+
+/** A step satisfied without running: installed from a snapshot, or before a restore. */
+function satisfiedLabel(step: EnvironmentStep): TranslationKey | null {
+  if (step.state !== 'succeeded' || step.ran !== false || step.phase !== 'setup') return null;
+  return step.snapshot_id ? 'environment.fromSnapshot' : 'environment.keptAfterRestore';
+}
+
 export function formatDuration(seconds: number): string {
   if (seconds < 60) return `${seconds.toFixed(1)}s`;
   const whole = Math.round(seconds);
@@ -116,7 +146,11 @@ export function EnvironmentSteps({ steps }: { steps: EnvironmentStep[] }) {
           <details open={step.state === 'failed'} className="group">
             <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2 text-sm hover:bg-surface-hover">
               <span className="font-medium text-foreground">{phase(step.phase)}</span>
-              <StateBadge state={step.state} />
+              {satisfiedLabel(step) ? (
+                <Badge tone="success">{t(satisfiedLabel(step)!)}</Badge>
+              ) : (
+                <StateBadge state={step.state} />
+              )}
               <span className="ml-auto flex shrink-0 items-center gap-2 text-xs tabular-nums text-muted">
                 {step.exit_code !== undefined && step.exit_code !== null && step.exit_code !== 0 ? (
                   <span>{t('environment.exitCode', { code: step.exit_code })}</span>
@@ -137,7 +171,9 @@ export function EnvironmentSteps({ steps }: { steps: EnvironmentStep[] }) {
               </span>
             </summary>
             <div className="space-y-2 border-t border-border px-3 py-2">
-              {step.detail ? <p className="text-xs text-status-error">{step.detail}</p> : null}
+              {step.detail && !satisfiedLabel(step) ? (
+                <p className="text-xs text-status-error">{step.detail}</p>
+              ) : null}
               {step.output ? (
                 <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-md bg-surface-muted p-2 font-mono text-xs text-foreground">
                   {step.output}

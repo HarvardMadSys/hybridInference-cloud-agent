@@ -6,7 +6,9 @@ import { getAgentConfig } from '@/lib/api/agents';
 import {
   copyEnvironment,
   deleteEnvironment,
+  deleteEnvironmentSnapshot,
   listEnvironments,
+  rebuildEnvironmentSnapshot,
   setEnvironmentDefault,
 } from '@/lib/api/environments';
 import type { EnvironmentConfig } from '@/lib/api/environments';
@@ -16,7 +18,9 @@ vi.mock('@/lib/api/agents', () => ({ getAgentConfig: vi.fn() }));
 vi.mock('@/lib/api/environments', () => ({
   copyEnvironment: vi.fn(),
   deleteEnvironment: vi.fn(),
+  deleteEnvironmentSnapshot: vi.fn(),
   listEnvironments: vi.fn(),
+  rebuildEnvironmentSnapshot: vi.fn(),
   setEnvironmentDefault: vi.fn(),
 }));
 vi.mock('./EnvironmentDialog', () => ({
@@ -116,4 +120,40 @@ it('copies with one idempotency key per request and opens the copy', async () =>
   const [first, second] = vi.mocked(copyEnvironment).mock.calls;
   expect(first[4]).toBe(second[4]);
   expect(first.slice(0, 4)).toEqual(['env', 3, 'org/web', 'environment.copyName']);
+});
+
+it('shows which environments skip installation and lets the owner rebuild or delete', async () => {
+  vi.mocked(listEnvironments).mockResolvedValue({
+    globals: environment({ id: 'global', repo: null, name: 'Global', revision: 2 }),
+    snapshots_enabled: true,
+    environments: [
+      environment({
+        setup_script: 'npm ci',
+        snapshot: { id: 's', state: 'ready', created_at: '2026-10-15T00:00:00Z' },
+      }),
+      environment({ id: 'ci', name: 'Integration', setup_script: 'npm ci', snapshot: null }),
+      environment({ id: 'plain', name: 'Plain' }),
+    ],
+  });
+  vi.mocked(rebuildEnvironmentSnapshot).mockResolvedValue({ snapshot_id: 's2', base_sha: 'c' });
+  vi.mocked(deleteEnvironmentSnapshot).mockResolvedValue(undefined);
+  render(<EnvironmentManager />);
+  const web = (await screen.findByText('org/web')).parentElement!;
+  expect(within(web).getByText('environment.snapshot.ready')).toBeInTheDocument();
+  expect(within(web).getByText('environment.snapshot.none')).toBeInTheDocument();
+  // An environment with nothing to install has nothing to prebuild.
+  expect(within(web).getAllByText(/environment.snapshot/)).toHaveLength(2);
+  fireEvent.click(screen.getAllByRole('button', { name: 'environment.manageItem' })[0]);
+  fireEvent.click(screen.getByRole('menuitem', { name: 'environment.snapshot.delete' }));
+  await waitFor(() => expect(deleteEnvironmentSnapshot).toHaveBeenCalledWith('env'));
+  fireEvent.click(screen.getAllByRole('button', { name: 'environment.manageItem' })[1]);
+  expect(screen.queryByRole('menuitem', { name: 'environment.snapshot.delete' })).toBeNull();
+  fireEvent.click(screen.getByRole('menuitem', { name: 'environment.snapshot.rebuild' }));
+  await waitFor(() => expect(rebuildEnvironmentSnapshot).toHaveBeenCalledWith('ci'));
+});
+
+it('says nothing about snapshots where the deployment keeps none', async () => {
+  render(<EnvironmentManager />);
+  await screen.findByText('org/web');
+  expect(screen.queryByText(/environment.snapshot/)).toBeNull();
 });

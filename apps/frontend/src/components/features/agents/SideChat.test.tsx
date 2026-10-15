@@ -495,9 +495,8 @@ describe('Side Chat', () => {
     const push = vi.spyOn(window.history, 'pushState');
     render(<SideChat {...props()} />);
     await ready();
-    fireEvent.change(screen.getByRole('combobox', { name: 'Side chat model' }), {
-      target: { value: 'model-b' },
-    });
+    fireEvent.click(screen.getByRole('button', { name: 'Side chat model' }));
+    fireEvent.click(screen.getByRole('option', { name: 'model-b' }));
     fireEvent.click(screen.getByRole('button', { name: 'Send side chat message' }));
     await screen.findByRole('button', { name: 'Stop side chat' });
     // Addressed to the side chat's own conversation, never to the main one.
@@ -652,12 +651,10 @@ describe('Side Chat review regressions', () => {
       />,
     );
     await waitFor(() => expect(forkAgentJob).toHaveBeenCalledTimes(1));
-    fireEvent.change(screen.getByRole('combobox', { name: 'Side chat model' }), {
-      target: { value: 'model-b' },
-    });
-    fireEvent.change(screen.getByRole('combobox', { name: 'Side chat reasoning' }), {
-      target: { value: 'low' },
-    });
+    fireEvent.click(screen.getByRole('button', { name: 'Side chat model' }));
+    fireEvent.click(screen.getByRole('option', { name: 'model-b' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Side chat reasoning' }));
+    fireEvent.click(screen.getByRole('option', { name: 'low' }));
     await act(async () => {
       resolve(copied);
     });
@@ -825,9 +822,8 @@ describe('fixing completed side chat reviews', () => {
     await waitFor(() =>
       expect(screen.getByRole('button', { name: 'Send side chat message' })).toBeEnabled(),
     );
-    fireEvent.change(screen.getByRole('combobox', { name: 'Side chat model' }), {
-      target: { value: 'model-b' },
-    });
+    fireEvent.click(screen.getByRole('button', { name: 'Side chat model' }));
+    fireEvent.click(screen.getByRole('option', { name: 'model-b' }));
     let finishFix!: (result: { pending: null; job: AgentJobApi }) => void;
     vi.mocked(submitThreadMessage).mockReturnValueOnce(
       new Promise((resolve) => (finishFix = resolve)),
@@ -857,7 +853,7 @@ describe('fixing completed side chat reviews', () => {
       'Unsent follow-up question',
     );
     expect(screen.getByText(file.name)).toBeVisible();
-    expect(screen.getByRole('combobox', { name: 'Side chat model' })).toHaveValue('model-b');
+    expect(screen.getByRole('button', { name: 'Side chat model' })).toHaveValue('model-b');
   });
 
   it('restores a completed review after refresh without creating a child or resending the review', async () => {

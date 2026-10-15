@@ -436,8 +436,9 @@ async def test_publication_progress_tells_every_conversation_in_the_workspace_an
         await background.connection.close()
 
 
-async def _ended_shared_turn(store) -> dict:
-    """A shared workspace whose one turn has ended, with its snapshot due."""
+async def _ended_shared_turn(store, *, requested: bool = True) -> dict:
+    """A shared workspace whose one turn has ended and, if ``requested``, whose owner
+    asked for its publication, so its snapshot is due."""
     job, claim, sandbox = await _reserve_shared_chat(store)
     fence = {
         "thread_id": job["thread_id"],
@@ -468,7 +469,30 @@ async def _ended_shared_turn(store) -> dict:
         from_states=("running",),
         to_state="succeeded",
     )
-    return sandbox
+    if requested:
+        requested_snapshot = await store.snapshot.request_snapshot_publication(
+            thread_id=job["thread_id"], user_id=job["user_id"]
+        )
+        assert requested_snapshot.get("requested") is True, requested_snapshot
+    return {**sandbox, "job": job}
+
+
+async def test_an_ended_turn_waits_and_the_owners_request_wakes_the_coordinator(store, pool):
+    """A turn boundary leaves nothing due; the owner's request is what wakes capture."""
+    sandbox = await _ended_shared_turn(store, requested=False)
+    assert await store.snapshot.claim_due_sandbox_snapshot() is None, "nothing was requested"
+    background = await _listen(BACKGROUND)
+    try:
+        job = sandbox["job"]
+        requested = await store.snapshot.request_snapshot_publication(
+            thread_id=job["thread_id"], user_id=job["user_id"]
+        )
+        assert requested.get("requested") is True, requested
+        assert "snapshot" in await background.until_quiet(pool)
+        capture = await store.snapshot.claim_due_sandbox_snapshot()
+        assert capture is not None and capture["snapshot_id"] == requested["snapshot_id"]
+    finally:
+        await background.connection.close()
 
 
 async def _retry_now(pool, snapshot_id: int) -> None:

@@ -26,6 +26,7 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, BinaryIO, Final, Literal, Protocol, cast
 
+from cloud_agent_shared.environment_snapshots import snapshot_object_key
 from cloud_agent_shared.sandbox_archive_settings import (
     DEFAULT_MAX_ARCHIVE_BYTES,
     DEFAULT_MULTIPART_PART_BYTES,
@@ -127,6 +128,9 @@ class S3ArchiveClient(Protocol):
 
     def abort_multipart_upload(self, **kwargs: Any) -> Mapping[str, Any]:
         """Discard a multipart upload that did not complete."""
+
+    def delete_object(self, **kwargs: Any) -> Mapping[str, Any]:
+        """Delete one exact object version, as snapshot cleanup does."""
 
 
 @dataclass(frozen=True)
@@ -463,17 +467,43 @@ class SandboxArchiveS3Uploader:
         _validate_deadline(deadline)
         self._check_deadline(deadline)
         _validate_upload_size(size, maximum=self.config.max_archive_bytes)
-        digest = _validate_sha256(sha256)
+        _validate_sha256(sha256)
         matched = _CHECKPOINT_KEY_RE.fullmatch(key)
         if matched is None or matched.group(1) != _identity_hash("sandbox id", sandbox_id):
             raise SandboxArchiveDownloadError("sandbox checkpoint key does not name this sandbox")
+        self._download_exact(
+            key=key,
+            version_id=version_id,
+            size=size,
+            sha256=sha256,
+            output=output,
+            deadline=deadline,
+            what="sandbox checkpoint",
+        )
+
+    def _download_exact(
+        self,
+        *,
+        key: str,
+        version_id: str | None,
+        size: int,
+        sha256: str,
+        output: BinaryIO,
+        deadline: float | None,
+        what: str,
+    ) -> None:
+        """Stream one object version, refusing any size or digest its record does not give."""
+        _validate_deadline(deadline)
+        self._check_deadline(deadline)
+        _validate_upload_size(size, maximum=self.config.max_archive_bytes)
+        digest = _validate_sha256(sha256)
         arguments: dict[str, Any] = {"Bucket": self.config.bucket, "Key": key}
         if version_id:
             arguments["VersionId"] = version_id
         response = self._get_client().get_object(**arguments, **self._owner_arguments())
         body = response.get("Body")
         if body is None or response.get("ContentLength") not in (None, size):
-            raise SandboxArchiveDownloadError("sandbox checkpoint object has the wrong size")
+            raise SandboxArchiveDownloadError(f"{what} object has the wrong size")
         hasher = hashlib.sha256()
         copied = 0
         try:
@@ -484,9 +514,7 @@ class SandboxArchiveS3Uploader:
                     break
                 copied += len(chunk)
                 if copied > size:
-                    raise SandboxArchiveDownloadError(
-                        "sandbox checkpoint object is larger than its receipt"
-                    )
+                    raise SandboxArchiveDownloadError(f"{what} object is larger than its receipt")
                 hasher.update(chunk)
                 output.write(chunk)
         finally:
@@ -494,11 +522,108 @@ class SandboxArchiveS3Uploader:
             if callable(close):
                 close()
         if copied != size:
-            raise SandboxArchiveDownloadError(
-                "sandbox checkpoint object is shorter than its receipt"
-            )
+            raise SandboxArchiveDownloadError(f"{what} object is shorter than its receipt")
         if hasher.hexdigest() != digest:
-            raise SandboxArchiveDownloadError("sandbox checkpoint object does not match its digest")
+            raise SandboxArchiveDownloadError(f"{what} object does not match its digest")
+
+    def upload_environment_snapshot(
+        self,
+        *,
+        owner: str,
+        snapshot_id: str,
+        body: BinaryIO,
+        size: int,
+        sha256: str,
+        deadline: float | None = None,
+    ) -> SandboxArchiveReceipt:
+        """Write one immutable installation snapshot under its owner's key.
+
+        Like a checkpoint, the key names a fresh id, so an existing object can
+        only be this capture's own earlier write; it must match exactly.
+        """
+        _validate_deadline(deadline)
+        self._check_deadline(deadline)
+        _validate_upload_size(size, maximum=self.config.max_archive_bytes)
+        digest = _validate_sha256(sha256)
+        try:
+            key = snapshot_object_key(owner, snapshot_id)
+        except ValueError as exc:
+            raise SandboxArchiveUploadError(str(exc)) from None
+        try:
+            return self._upload_object(
+                key=key,
+                phase="checkpoint",
+                body=body,
+                size=size,
+                sha256=digest,
+                deadline=deadline,
+            )
+        except SandboxArchiveAlreadyExists:
+            self._check_deadline(deadline)
+            existing = self._get_client().head_object(
+                Bucket=self.config.bucket, Key=key, **self._owner_arguments()
+            )
+            if not self._matching_initial_head(
+                existing, size=size, digest=digest, phase="checkpoint"
+            ):
+                raise SandboxArchiveUploadError(
+                    "existing environment snapshot does not match this retry"
+                ) from None
+            return SandboxArchiveReceipt(
+                phase="checkpoint",
+                bucket=self.config.bucket,
+                key=key,
+                size=size,
+                sha256=digest,
+                etag=_required_response_string(existing, "ETag"),
+                version_id=_required_version_id(existing),
+                s3_checksum_sha256=_optional_response_string(existing, "ChecksumSHA256"),
+                multipart=False,
+            )
+
+    def download_environment_snapshot(
+        self,
+        *,
+        owner: str,
+        snapshot_id: str,
+        key: str,
+        version_id: str | None,
+        size: int,
+        sha256: str,
+        output: BinaryIO,
+        deadline: float | None = None,
+    ) -> None:
+        """Copy one snapshot object into ``output``, exactly as its record describes it."""
+        try:
+            expected = snapshot_object_key(owner, snapshot_id)
+        except ValueError:
+            expected = None
+        if key != expected:
+            raise SandboxArchiveDownloadError("environment snapshot key does not name its owner")
+        self._download_exact(
+            key=key,
+            version_id=version_id,
+            size=size,
+            sha256=sha256,
+            output=output,
+            deadline=deadline,
+            what="environment snapshot",
+        )
+
+    def delete_environment_snapshot(
+        self, *, owner: str, snapshot_id: str, key: str, version_id: str | None
+    ) -> None:
+        """Delete one snapshot object, its exact version when the record names one."""
+        try:
+            expected = snapshot_object_key(owner, snapshot_id)
+        except ValueError:
+            expected = None
+        if key != expected:
+            raise SandboxArchiveUploadError("environment snapshot key does not name its owner")
+        arguments: dict[str, Any] = {"Bucket": self.config.bucket, "Key": key}
+        if version_id:
+            arguments["VersionId"] = version_id
+        self._get_client().delete_object(**arguments, **self._owner_arguments())
 
     def _upload_object(
         self,

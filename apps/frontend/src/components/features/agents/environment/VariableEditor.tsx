@@ -265,6 +265,7 @@ export function VariableEditor({
             {t('environment.rules')}
           </summary>
           <ul className="mt-2 max-w-md list-disc space-y-1 pl-4">
+            <li>{t('environment.inferenceKeys')}</li>
             <li>{t('environment.reservedKeys')}</li>
             <li>{t('environment.shortSecret')}</li>
           </ul>

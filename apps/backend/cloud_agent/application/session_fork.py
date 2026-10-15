@@ -37,6 +37,7 @@ from cloud_agent.sandbox_manager_client import (
 )
 from cloud_agent.sandbox_manager_routing import sandbox_manager_for_job
 from cloud_agent.workspace_errors import _sandbox_manager_http_error
+from cloud_agent_shared.environment import environment_payload
 
 if TYPE_CHECKING:
     from cloud_agent.ports import (
@@ -160,7 +161,9 @@ async def materialize_session_fork(
             source_job["user_id"], source_job["environment_binding_id"]
         )
         if environment.required:
-            launch_common["environment"] = environment.model_dump(mode="json")
+            # The forked launch needs no snapshot fields; an older broker
+            # would refuse them.
+            launch_common["environment"] = environment_payload(environment, ())
             await sandbox_manager.prepare_environment(source_thread_id, environment)
     coordinator_token = secrets.token_urlsafe(32)
     claimed = await job_store.session_fork.claim_session_fork_materialization(

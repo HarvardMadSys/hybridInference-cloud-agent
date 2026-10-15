@@ -153,9 +153,24 @@ class EnvironmentRepository(Protocol):
         ...
 
     async def claim_environment_run(
-        self, host: str, credential_hash: str, attestation: dict[str, Any]
+        self,
+        host: str,
+        credential_hash: str,
+        attestation: dict[str, Any],
+        *,
+        snapshot_capable: bool = False,
     ) -> dict[str, Any] | None:
-        """Claim a queued test or reap expired execution leases."""
+        """Claim a queued test, or a prebuild for a snapshot-capable host."""
+        ...
+
+    async def bind_current_environment(self, user_id: str, environment_id: str) -> tuple[str, str]:
+        """Freeze an environment's current configuration; return the binding and repository."""
+        ...
+
+    async def current_setup_fingerprints(
+        self, user_id: str, environment_ids: builtins.list[str]
+    ) -> dict[str, str | None]:
+        """Each environment's current installation fingerprint, or ``None`` without setup."""
         ...
 
     async def update_environment_run(

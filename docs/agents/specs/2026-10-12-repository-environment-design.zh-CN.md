@@ -2,6 +2,10 @@
 
 > 2026-10-14 产品调整：移除「本次任务覆盖」（仅这个工作区使用的变量）。创建任务的 API 不再接受 `environment_overrides`：非空列表返回 422，空列表视为未提供；新绑定不再写入 `agent_environment_bindings.overrides`。调整前创建的绑定继续读取并注入已保存的覆盖，脱敏和发布扫描也继续覆盖这些值；确认没有绑定再引用非空覆盖后，再用独立迁移删除该列。下文涉及本次任务覆盖的描述是原设计的历史记录，变量来源以「个人全局 → 所选环境」为准。
 
+> 2026-10-15 产品调整：允许 owner 设置 `OPENAI_API_KEY`、`OPENAI_BASE_URL`、`ANTHROPIC_API_KEY`、`ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_BASE_URL`。agent CLI 自身继续使用平台 grant，这些值只交给 CLI 运行的命令，做法见 §11。其余推理与 CLI 名字仍按 §5 保留。
+
+> 2026-10-15 产品调整：新增安装快照。新任务可以从同一环境、同一安装期配置的安装结果启动，跳过安装脚本，见 [环境安装快照设计](2026-10-15-environment-install-snapshots-design.zh-CN.md)。§12 第一行不再适用。
+
 日期：2026-10-12。状态：实现与设计在同一个功能 PR 中提交评审，合并后生效。
 
 交付方式：**一个功能 PR，目标分支 `dev`。本文列入交付范围的功能一起实现、测试和验收，不拆成多个发布阶段。**
@@ -122,7 +126,7 @@
 
 ### 3.4 明确的产品限制
 
-- `OPENAI_API_KEY`、`ANTHROPIC_API_KEY` 等平台占用的变量名拒绝保存，并解释原因（§11）；不能宣传“任意 API key 名称都能直接使用”。
+- `OPENAI_API_KEY`、`OPENAI_BASE_URL`、`ANTHROPIC_API_KEY`、`ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_BASE_URL` 只交给用户代码和 agent 运行的命令，agent 自己调用模型仍走平台（§11）。`CLAUDE_*`、`CODEX_*` 等配置 CLI 本身的名字继续拒绝保存并解释原因。
 - 环境配置不保存正在运行的进程；容器停止后由启动脚本重新拉起服务。容器被删除或丢失后的会话恢复能力仍按现有原生会话设计处理。
 - 复制环境复用的是配置，不复制原工作区文件、数据库数据或已安装的容器层。
 - 网络仍只允许既定出口，填入远端数据库地址不会放行 5432 等端口；同一容器内本地服务按现有规则使用。
@@ -185,7 +189,7 @@ API 保留显式 `setup_script` 覆盖：字段未提供时用环境脚本，显
 
 | 类别 | 保留名字 |
 | --- | --- |
-| 推理与 Agent CLI | `OPENAI_API_KEY`、`OPENAI_BASE_URL`；`ANTHROPIC_`、`CLAUDE_`、`CODEX_`、`OPENCODE_`、`KILO_`、`PI_` 前缀；`MCP_TOOL_TIMEOUT`、`DISABLE_TELEMETRY`、`DISABLE_AUTOUPDATER`、`DISABLE_ERROR_REPORTING` |
+| 推理与 Agent CLI | `ANTHROPIC_`（§11 的三个名字除外）、`CLAUDE_`、`CODEX_`、`OPENCODE_`、`KILO_`、`PI_` 前缀；`MCP_TOOL_TIMEOUT`、`DISABLE_TELEMETRY`、`DISABLE_AUTOUPDATER`、`DISABLE_ERROR_REPORTING` |
 | GitHub 与 Git | `GH_TOKEN`、`GITHUB_TOKEN`、`GH_HOST`、`GH_REPO`、`GH_PROMPT_DISABLED`、`GIT_TERMINAL_PROMPT`、`GIT_CONFIG_NOSYSTEM`；`GIT_CONFIG_` 前缀 |
 | 平台自用 | `AGENT_`、`FREEINFERENCE_` 前缀；`WORKSPACE_COMMAND`、`WORKSPACE_CWD` |
 | 进程基础 | `HOME`、`PATH`、`USER`、`LOGNAME`、`SHELL`、`PWD`、`TERM`、`BASH_ENV`、`ENV` |
@@ -378,13 +382,27 @@ Secret 集合来自实际绑定及该工作区曾注入的版本引用，包含�
 
 实现 PR 同步更新 AGENTS.md §7，明确平台凭据与用户主动注入凭据的区别，并更新沙盒安全模型及统一公网出口设计的凭据描述。该例外随同一个实现 PR 写入 AGENTS.md 与安全文档，仍需在 PR 评审中确认。
 
-## 11. 平台推理变量的限制
+## 11. 平台推理变量与用户推理凭据
 
-当前 runtime 适配器用 `OPENAI_API_KEY`、`ANTHROPIC_API_KEY` 等标准名字保存平台推理 grant，用相关 base URL 指向网关，工具子进程还可能继承它们。直接允许同名用户变量会改变 agent 认证，或让用户应用读到错误的凭据。
+runtime 适配器用 `OPENAI_API_KEY`、`ANTHROPIC_API_KEY` 等标准名字把平台推理 grant 交给 agent CLI，用相关 base URL 指向网关；CLI 运行的命令继承 CLI 的环境。把同名用户变量直接放进 CLI 环境，会改变 agent 认证，或被平台值盖掉后让用户代码读到平台 grant。
 
-本 PR 因此保留 §5 的拒绝规则，在变量输入时解释冲突。应用能够自行选择变量名时可使用其他名字；依赖必须读取这些标准名字的应用，在本范围内不能通过同名环境变量配置。不能悄悄覆盖后宣称支持。
+因此只开放下面两组名字，并把它们和 CLI 分开：
 
-本设计不改五种 runtime 的认证体系，也不包含用用户自己的 key 为 coding agent 付费。解除保留名需要验证每个适配器能将平台凭据与用户程序环境分开，是独立的认证设计，不是本功能漏交付的阶段。
+| 组 | 名字 |
+| --- | --- |
+| OpenAI | `OPENAI_API_KEY`、`OPENAI_BASE_URL` |
+| Anthropic | `ANTHROPIC_API_KEY`、`ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_BASE_URL` |
+
+- 启动 CLI 时，这些值不进入 CLI 自己的环境；CLI 照旧用平台 grant 认证。
+- host 把它们写成一个脚本，放在该成员私有的 tmpfs（`/run/agent-members/<slot>/inference-env.sh`，0600，只属于该成员 uid，经 stdin 写入，不进 argv），并让 CLI 环境里的 `BASH_ENV` 指向它。CLI 运行命令时启动的每个 bash 都会先读这个脚本，因此命令、它启动的服务和子进程拿到的是用户的值。
+- 用户设置了某组中任一名字，这一组就完全以用户为准：脚本先 `unset` 整组，再导出用户设置的名字。只设 `OPENAI_API_KEY` 时 `OPENAI_BASE_URL` 被清空，用户的 key 不会发往网关地址。用户没设置的组保持原状，命令仍像以前一样看到平台值。
+- 安装、启动、验证脚本、终端和快捷操作不经过 CLI，直接按阶段注入用户的值。
+
+这依赖每个 CLI 用 bash 执行命令。已对固定版本实测：Claude Code 2.1.220、Codex 0.145.0（`bash -lc`）、OpenCode 1.18.9、Kilo 7.4.17 和 pi 0.73.1 都通过 bash 运行 shell 工具；CLI 本身经 `/bin/sh`（dash）或 Python 包装脚本启动，不读 `BASH_ENV`。`tests/external/test_cli_inference_variables.py` 用真实 CLI 和假网关验证两点：CLI 发往网关的请求只带平台 grant，命令看到的是用户的值。升级 CLI 时需要重跑这个测试。
+
+执行这样的绑定需要 `environment-inference-v1` 能力。旧 host 的校验会拒绝这些名字，所以领取任务、控制面直连 Sandbox Manager、runner 向 Sandbox Manager 准备环境之前都检查该能力。缺少能力时按 §7.1 退回和等待，不把带值的配置发给旧版本。
+
+用户的值照常参与输出脱敏和发布扫描，风险接受同 §10。本设计不包含用用户自己的 key 为 coding agent 付费，也不开放 `CLAUDE_*`、`CODEX_*`、`ANTHROPIC_MODEL` 等配置 CLI 本身的名字。
 
 ## 12. 明确不在本 PR 的范围
 
@@ -399,7 +417,7 @@ Secret 集合来自实际绑定及该工作区曾注入的版本引用，包含�
 | 团队共享环境、跨 owner 共享容器 | 个人环境只归属于个人；已有同 owner Fork 保持原义 |
 | 无仓库任务、端口预览、用户资源总览 | 独立功能；快捷操作不以这些能力为前提 |
 | 文件型 Secret 挂载、任意秘密保险库 | 本次提供环境变量；代码自行落盘仍有 §10 的风险 |
-| 解除推理保留名、用户自己的 agent 账号 | 按 §11 的认证边界处理 |
+| 用户自己的 agent 账号、配置 CLI 本身的名字 | 按 §11 的认证边界处理 |
 
 这里是本功能的边界，不是把 §1 已承诺的启动脚本、测试、操作、临时变量或历史移到后续。
 

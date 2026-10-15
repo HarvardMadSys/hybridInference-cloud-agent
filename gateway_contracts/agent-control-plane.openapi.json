@@ -5302,6 +5302,18 @@
             ],
             "title": "Workspace Epoch"
           },
+          "workspace_pr_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The pull request the workspace was last published to. Present once the owner has published; POST /threads/{thread_id}/publish updates it.",
+            "title": "Workspace Pr Url"
+          },
           "workspace_publication_state": {
             "anyOf": [
               {
@@ -5321,9 +5333,21 @@
             ],
             "title": "Workspace Publication State"
           },
+          "workspace_publication_unchanged": {
+            "default": false,
+            "description": "Whether the workspace's newest publication found nothing to publish, so it opened no pull request.",
+            "title": "Workspace Publication Unchanged",
+            "type": "boolean"
+          },
           "workspace_shared": {
             "default": false,
             "title": "Workspace Shared",
+            "type": "boolean"
+          },
+          "workspace_unpublished_changes": {
+            "default": false,
+            "description": "Whether the workspace holds turns its owner has not published, or its last publication failed. The platform publishes only on POST /threads/{thread_id}/publish.",
+            "title": "Workspace Unpublished Changes",
             "type": "boolean"
           }
         },
@@ -7204,6 +7228,42 @@
         "title": "AgentThreadPinResponse",
         "type": "object"
       },
+      "AgentThreadPublicationResponse": {
+        "description": "The workspace snapshot an owner's publication request opened or found.",
+        "properties": {
+          "requested": {
+            "description": "True when this request opened the snapshot; false when a publication of the workspace was already on its way and is returned instead.",
+            "title": "Requested",
+            "type": "boolean"
+          },
+          "snapshot_id": {
+            "title": "Snapshot Id",
+            "type": "integer"
+          },
+          "state": {
+            "enum": [
+              "pending",
+              "capturing",
+              "captured",
+              "publishing"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "thread_id": {
+            "title": "Thread Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "thread_id",
+          "snapshot_id",
+          "state",
+          "requested"
+        ],
+        "title": "AgentThreadPublicationResponse",
+        "type": "object"
+      },
       "AgentThreadQuestionsResponse": {
         "description": "Pending native questions and the exact attempt that asked them.",
         "properties": {
@@ -8491,107 +8551,20 @@
         "title": "BindingsResponse",
         "type": "object"
       },
-      "BoundEnvironment": {
+      "ClaimInvitationRequest": {
         "additionalProperties": false,
-        "description": "A frozen execution binding sent only over protected execution channels.",
+        "description": "Turn a link's token into the caller's join request.",
         "properties": {
-          "actions": {
-            "items": {
-              "$ref": "#/components/schemas/EnvironmentAction"
-            },
-            "maxItems": 20,
-            "title": "Actions",
-            "type": "array"
-          },
-          "binding_id": {
-            "title": "Binding Id",
-            "type": "string"
-          },
-          "environment_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Environment Id"
-          },
-          "global_revision": {
-            "default": 0,
-            "title": "Global Revision",
-            "type": "integer"
-          },
-          "previous_secrets": {
-            "additionalProperties": {
-              "type": "string"
-            },
-            "maxProperties": 512,
-            "title": "Previous Secrets",
-            "type": "object"
-          },
-          "revision": {
-            "default": 0,
-            "title": "Revision",
-            "type": "integer"
-          },
-          "runtime_revision": {
-            "default": 0,
-            "title": "Runtime Revision",
-            "type": "integer"
-          },
-          "runtime_variables": {
-            "anyOf": [
-              {
-                "items": {
-                  "$ref": "#/components/schemas/EnvironmentVariable"
-                },
-                "maxItems": 150,
-                "type": "array"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Runtime Variables"
-          },
-          "setup_script": {
-            "default": "",
-            "maxLength": 8000,
-            "title": "Setup Script",
-            "type": "string"
-          },
-          "skip_start": {
-            "default": false,
-            "title": "Skip Start",
-            "type": "boolean"
-          },
-          "start_script": {
-            "default": "",
-            "maxLength": 8000,
-            "title": "Start Script",
-            "type": "string"
-          },
-          "variables": {
-            "items": {
-              "$ref": "#/components/schemas/EnvironmentVariable"
-            },
-            "maxItems": 150,
-            "title": "Variables",
-            "type": "array"
-          },
-          "verify_script": {
-            "default": "",
-            "maxLength": 8000,
-            "title": "Verify Script",
+          "token": {
+            "pattern": "^[A-Za-z0-9_-]{43}$",
+            "title": "Token",
             "type": "string"
           }
         },
         "required": [
-          "binding_id"
+          "token"
         ],
-        "title": "BoundEnvironment",
+        "title": "ClaimInvitationRequest",
         "type": "object"
       },
       "ClaimTestInput": {
@@ -9502,6 +9475,22 @@
         "title": "CreateGitHubRepositoryResponse",
         "type": "object"
       },
+      "CreateInvitationRequest": {
+        "additionalProperties": false,
+        "description": "Create one single-use link; resending the same key never makes a second.",
+        "properties": {
+          "request_key": {
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "title": "Request Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_key"
+        ],
+        "title": "CreateInvitationRequest",
+        "type": "object"
+      },
       "CreateSkill": {
         "additionalProperties": false,
         "description": "Create instructions directly or after reviewing an uploaded Markdown file.",
@@ -9545,6 +9534,28 @@
           "instructions"
         ],
         "title": "CreateSkill",
+        "type": "object"
+      },
+      "CreateTeamRequest": {
+        "additionalProperties": false,
+        "description": "Create a team owned by the caller; ``request_key`` makes a retry safe.",
+        "properties": {
+          "name": {
+            "maxLength": 160,
+            "title": "Name",
+            "type": "string"
+          },
+          "request_key": {
+            "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+            "title": "Request Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "request_key"
+        ],
+        "title": "CreateTeamRequest",
         "type": "object"
       },
       "CreateUpload": {
@@ -9846,6 +9857,21 @@
         "title": "DatabaseTools",
         "type": "object"
       },
+      "DecideJoinRequest": {
+        "additionalProperties": false,
+        "description": "An owner or admin's decision on one join request.",
+        "properties": {
+          "approve": {
+            "title": "Approve",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "approve"
+        ],
+        "title": "DecideJoinRequest",
+        "type": "object"
+      },
       "DecisionRequest": {
         "additionalProperties": false,
         "description": "Approve or deny one pending call.",
@@ -9943,57 +9969,6 @@
           "command"
         ],
         "title": "EnvironmentAction",
-        "type": "object"
-      },
-      "EnvironmentVariable": {
-        "additionalProperties": false,
-        "description": "A value-bearing variable, never suitable for request logging.",
-        "properties": {
-          "name": {
-            "title": "Name",
-            "type": "string"
-          },
-          "phase": {
-            "default": "both",
-            "enum": [
-              "setup",
-              "runtime",
-              "both"
-            ],
-            "title": "Phase",
-            "type": "string"
-          },
-          "secret": {
-            "default": true,
-            "title": "Secret",
-            "type": "boolean"
-          },
-          "source": {
-            "anyOf": [
-              {
-                "enum": [
-                  "global",
-                  "environment",
-                  "override"
-                ],
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Source"
-          },
-          "value": {
-            "title": "Value",
-            "type": "string"
-          }
-        },
-        "required": [
-          "name",
-          "value"
-        ],
-        "title": "EnvironmentVariable",
         "type": "object"
       },
       "ExecutionProfile": {
@@ -12073,6 +12048,121 @@
         "title": "ImportRequest",
         "type": "object"
       },
+      "InvitationCreatedResponse": {
+        "description": "The new invitation and its token.\n\n``token`` is ``None`` when the request key was already used: the stored\nhash cannot give the link back, so the client revokes and creates anew.",
+        "properties": {
+          "invitation": {
+            "$ref": "#/components/schemas/InvitationResponse"
+          },
+          "token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Token"
+          }
+        },
+        "required": [
+          "invitation",
+          "token"
+        ],
+        "title": "InvitationCreatedResponse",
+        "type": "object"
+      },
+      "InvitationListResponse": {
+        "description": "The team's newest invitations.",
+        "properties": {
+          "invitations": {
+            "items": {
+              "$ref": "#/components/schemas/InvitationResponse"
+            },
+            "title": "Invitations",
+            "type": "array"
+          }
+        },
+        "required": [
+          "invitations"
+        ],
+        "title": "InvitationListResponse",
+        "type": "object"
+      },
+      "InvitationResponse": {
+        "description": "An invitation's metadata; the link itself is shown once, on creation.",
+        "properties": {
+          "claimed_by_user_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Claimed By User Id"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "created_by_user_id": {
+            "title": "Created By User Id",
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "request_state": {
+            "anyOf": [
+              {
+                "enum": [
+                  "pending",
+                  "approved",
+                  "declined",
+                  "cancelled",
+                  "expired"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Request State"
+          },
+          "status": {
+            "enum": [
+              "open",
+              "claimed",
+              "revoked",
+              "expired"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "status",
+          "created_by_user_id",
+          "created_at",
+          "expires_at",
+          "claimed_by_user_id",
+          "request_state"
+        ],
+        "title": "InvitationResponse",
+        "type": "object"
+      },
       "InvocationView": {
         "description": "One call that needed a decision.",
         "properties": {
@@ -12470,6 +12560,88 @@
           "runtime"
         ],
         "title": "JobUsageResponse",
+        "type": "object"
+      },
+      "JoinRequestListResponse": {
+        "description": "Requests waiting for an owner or admin.",
+        "properties": {
+          "requests": {
+            "items": {
+              "$ref": "#/components/schemas/JoinRequestResponse"
+            },
+            "title": "Requests",
+            "type": "array"
+          }
+        },
+        "required": [
+          "requests"
+        ],
+        "title": "JoinRequestListResponse",
+        "type": "object"
+      },
+      "JoinRequestResponse": {
+        "description": "A join request as an owner or admin reviews it.",
+        "properties": {
+          "avatar_data_url": {
+            "title": "Avatar Data Url",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "display_name": {
+            "title": "Display Name",
+            "type": "string"
+          },
+          "email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Email"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "pending",
+              "approved",
+              "declined",
+              "cancelled",
+              "expired"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "user_id": {
+            "title": "User Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "user_id",
+          "display_name",
+          "email",
+          "avatar_data_url",
+          "id",
+          "state",
+          "created_at",
+          "expires_at"
+        ],
+        "title": "JoinRequestResponse",
         "type": "object"
       },
       "ListAgentRunnerHostsResponse": {
@@ -12915,6 +13087,76 @@
           "state"
         ],
         "title": "OAuthConnectRequest",
+        "type": "object"
+      },
+      "OwnJoinRequestListResponse": {
+        "description": "The caller's recent join requests.",
+        "properties": {
+          "requests": {
+            "items": {
+              "$ref": "#/components/schemas/OwnJoinRequestResponse"
+            },
+            "title": "Requests",
+            "type": "array"
+          }
+        },
+        "required": [
+          "requests"
+        ],
+        "title": "OwnJoinRequestListResponse",
+        "type": "object"
+      },
+      "OwnJoinRequestResponse": {
+        "description": "The applicant's view: which team, who invited them, and where it stands.",
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "inviter_display_name": {
+            "title": "Inviter Display Name",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "pending",
+              "approved",
+              "declined",
+              "cancelled",
+              "expired"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "team_id": {
+            "title": "Team Id",
+            "type": "string"
+          },
+          "team_name": {
+            "title": "Team Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "team_id",
+          "team_name",
+          "inviter_display_name",
+          "state",
+          "created_at",
+          "expires_at"
+        ],
+        "title": "OwnJoinRequestResponse",
         "type": "object"
       },
       "OwnerContainer": {
@@ -13763,6 +14005,27 @@
         "title": "PromptRewriteRequest",
         "type": "object"
       },
+      "RebuildInput": {
+        "additionalProperties": false,
+        "description": "Which branch's head to build the installation snapshot from.",
+        "properties": {
+          "ref": {
+            "anyOf": [
+              {
+                "maxLength": 255,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ref"
+          }
+        },
+        "title": "RebuildInput",
+        "type": "object"
+      },
       "RegisterConnectorRequest": {
         "additionalProperties": false,
         "description": "Register one machine as this user's connector.",
@@ -13835,6 +14098,28 @@
           "expected_revision"
         ],
         "title": "RemoveComputeRequest",
+        "type": "object"
+      },
+      "RenameTeamRequest": {
+        "additionalProperties": false,
+        "description": "Rename at the revision the owner or admin read.",
+        "properties": {
+          "expected_revision": {
+            "minimum": 1.0,
+            "title": "Expected Revision",
+            "type": "integer"
+          },
+          "name": {
+            "maxLength": 160,
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "expected_revision"
+        ],
+        "title": "RenameTeamRequest",
         "type": "object"
       },
       "RenewalPolicy": {
@@ -15241,6 +15526,12 @@
             "title": "Start Script",
             "type": "string"
           },
+          "update_script": {
+            "default": "",
+            "maxLength": 8000,
+            "title": "Update Script",
+            "type": "string"
+          },
           "variables": {
             "items": {
               "$ref": "#/components/schemas/VariableEdit"
@@ -15595,6 +15886,31 @@
           "revision"
         ],
         "title": "SetSandboxArchiveSettingsRequest",
+        "type": "object"
+      },
+      "SetTeamMemberRoleRequest": {
+        "additionalProperties": false,
+        "description": "An owner may grant or revoke admin at the team's read revision.",
+        "properties": {
+          "expected_revision": {
+            "minimum": 1.0,
+            "title": "Expected Revision",
+            "type": "integer"
+          },
+          "role": {
+            "enum": [
+              "admin",
+              "member"
+            ],
+            "title": "Role",
+            "type": "string"
+          }
+        },
+        "required": [
+          "role",
+          "expected_revision"
+        ],
+        "title": "SetTeamMemberRoleRequest",
         "type": "object"
       },
       "SetupMachine": {
@@ -16173,6 +16489,244 @@
         "title": "SuggestInput",
         "type": "object"
       },
+      "TeamAuditEventListResponse": {
+        "description": "A page of audit events, newest first; pass ``next_before`` for the next.",
+        "properties": {
+          "events": {
+            "items": {
+              "$ref": "#/components/schemas/TeamAuditEventResponse"
+            },
+            "title": "Events",
+            "type": "array"
+          },
+          "next_before": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Before"
+          }
+        },
+        "required": [
+          "events",
+          "next_before"
+        ],
+        "title": "TeamAuditEventListResponse",
+        "type": "object"
+      },
+      "TeamAuditEventResponse": {
+        "description": "One administrative action, without tokens or secrets.",
+        "properties": {
+          "action": {
+            "enum": [
+              "team_created",
+              "team_renamed",
+              "team_deleted",
+              "invitation_created",
+              "invitation_revoked",
+              "join_requested",
+              "join_approved",
+              "join_declined",
+              "member_left",
+              "member_removed",
+              "member_role_changed",
+              "ownership_transferred"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "actor_user_id": {
+            "title": "Actor User Id",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "target_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Id"
+          },
+          "target_user_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target User Id"
+          }
+        },
+        "required": [
+          "id",
+          "actor_user_id",
+          "action",
+          "target_user_id",
+          "target_id",
+          "created_at"
+        ],
+        "title": "TeamAuditEventResponse",
+        "type": "object"
+      },
+      "TeamListResponse": {
+        "description": "The caller's active teams.",
+        "properties": {
+          "teams": {
+            "items": {
+              "$ref": "#/components/schemas/TeamResponse"
+            },
+            "title": "Teams",
+            "type": "array"
+          }
+        },
+        "required": [
+          "teams"
+        ],
+        "title": "TeamListResponse",
+        "type": "object"
+      },
+      "TeamMemberListResponse": {
+        "description": "The roster, owner first.",
+        "properties": {
+          "members": {
+            "items": {
+              "$ref": "#/components/schemas/TeamMemberResponse"
+            },
+            "title": "Members",
+            "type": "array"
+          }
+        },
+        "required": [
+          "members"
+        ],
+        "title": "TeamMemberListResponse",
+        "type": "object"
+      },
+      "TeamMemberResponse": {
+        "description": "One active member.",
+        "properties": {
+          "avatar_data_url": {
+            "title": "Avatar Data Url",
+            "type": "string"
+          },
+          "display_name": {
+            "title": "Display Name",
+            "type": "string"
+          },
+          "email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Email"
+          },
+          "joined_at": {
+            "format": "date-time",
+            "title": "Joined At",
+            "type": "string"
+          },
+          "role": {
+            "enum": [
+              "owner",
+              "admin",
+              "member"
+            ],
+            "title": "Role",
+            "type": "string"
+          },
+          "user_id": {
+            "title": "User Id",
+            "type": "string"
+          },
+          "you": {
+            "title": "You",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "user_id",
+          "display_name",
+          "email",
+          "avatar_data_url",
+          "role",
+          "joined_at",
+          "you"
+        ],
+        "title": "TeamMemberResponse",
+        "type": "object"
+      },
+      "TeamResponse": {
+        "description": "A team as one of its members sees it.",
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "member_count": {
+            "title": "Member Count",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "owner_user_id": {
+            "title": "Owner User Id",
+            "type": "string"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "role": {
+            "enum": [
+              "owner",
+              "admin",
+              "member"
+            ],
+            "title": "Role",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "owner_user_id",
+          "role",
+          "revision",
+          "member_count",
+          "created_at"
+        ],
+        "title": "TeamResponse",
+        "type": "object"
+      },
       "TestInput": {
         "additionalProperties": false,
         "description": "Fixed inputs to a disposable preparation test.",
@@ -16329,6 +16883,18 @@
               }
             ],
             "title": "Image Digest"
+          },
+          "snapshot": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Snapshot"
           },
           "state": {
             "default": "running",
@@ -16514,6 +17080,29 @@
           "tool_name"
         ],
         "title": "ToolCallResources",
+        "type": "object"
+      },
+      "TransferOwnershipRequest": {
+        "additionalProperties": false,
+        "description": "Hand the team to an active member at the revision the owner read.",
+        "properties": {
+          "expected_revision": {
+            "minimum": 1.0,
+            "title": "Expected Revision",
+            "type": "integer"
+          },
+          "user_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "User Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "user_id",
+          "expected_revision"
+        ],
+        "title": "TransferOwnershipRequest",
         "type": "object"
       },
       "TurnCpuResources": {
@@ -17663,12 +18252,26 @@
           "environment": {
             "anyOf": [
               {
-                "$ref": "#/components/schemas/BoundEnvironment"
+                "additionalProperties": true,
+                "type": "object"
               },
               {
                 "type": "null"
               }
-            ]
+            ],
+            "title": "Environment"
+          },
+          "environment_snapshot": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Environment Snapshot"
           },
           "execution_profile": {
             "$ref": "#/components/schemas/ExecutionProfile",
@@ -17883,6 +18486,52 @@
           }
         },
         "title": "WorkerContinuityRequest",
+        "type": "object"
+      },
+      "WorkerEnvironmentSnapshotReport": {
+        "description": "What a new workspace did with the installation snapshot it was handed.",
+        "properties": {
+          "base_sha": {
+            "anyOf": [
+              {
+                "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Sha"
+          },
+          "outcome": {
+            "enum": [
+              "used",
+              "absent",
+              "lockfiles_changed",
+              "image_changed",
+              "unavailable",
+              "invalid"
+            ],
+            "title": "Outcome",
+            "type": "string"
+          },
+          "snapshot_id": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{32}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Snapshot Id"
+          }
+        },
+        "required": [
+          "outcome"
+        ],
+        "title": "WorkerEnvironmentSnapshotReport",
         "type": "object"
       },
       "WorkerEventRequest": {
@@ -26742,7 +27391,7 @@
     },
     "/v1/agent/environments": {
       "get": {
-        "description": "List owned repository configurations and their default selection.",
+        "description": "List owned repository configurations, their default selection and snapshot.",
         "operationId": "list_environments_v1_agent_environments_get",
         "parameters": [
           {
@@ -27213,6 +27862,127 @@
           }
         },
         "summary": "Restore Environment",
+        "tags": [
+          "environments"
+        ]
+      }
+    },
+    "/v1/agent/environments/{environment_id}/snapshot": {
+      "delete": {
+        "description": "Delete an environment's installation snapshots; new tasks install in full.",
+        "operationId": "delete_snapshot_v1_agent_environments__environment_id__snapshot_delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "environment_id",
+            "required": true,
+            "schema": {
+              "title": "Environment Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Snapshot",
+        "tags": [
+          "environments"
+        ]
+      },
+      "post": {
+        "description": "Queue a fresh installation snapshot of the environment as it is now.",
+        "operationId": "rebuild_snapshot_v1_agent_environments__environment_id__snapshot_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "environment_id",
+            "required": true,
+            "schema": {
+              "title": "Environment Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RebuildInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Rebuild Snapshot V1 Agent Environments  Environment Id  Snapshot Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Rebuild Snapshot",
         "tags": [
           "environments"
         ]
@@ -33782,6 +34552,1141 @@
         ]
       }
     },
+    "/v1/agent/team-invitations/claim": {
+      "post": {
+        "description": "Ask to join with a link; the owner or an admin still has to approve.\n\nHolding the link grants nothing by itself. Claiming makes it this\naccount's: another account presenting it afterwards is refused.",
+        "operationId": "claim_invitation_v1_agent_team_invitations_claim_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ClaimInvitationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OwnJoinRequestResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Claim Invitation",
+        "tags": [
+          "teams"
+        ]
+      }
+    },
+    "/v1/agent/team-join-requests": {
+      "get": {
+        "description": "The caller's own recent requests and where each stands.",
+        "operationId": "list_own_join_requests_v1_agent_team_join_requests_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OwnJoinRequestListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Own Join Requests",
+        "tags": [
+          "teams"
+        ]
+      }
+    },
+    "/v1/agent/teams": {
+      "get": {
+        "description": "List only the teams the caller is an active member of.",
+        "operationId": "list_teams_v1_agent_teams_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TeamListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Teams",
+        "tags": [
+          "teams"
+        ]
+      },
+      "post": {
+        "description": "Create a team owned by the caller; the same ``request_key`` returns the same team.",
+        "operationId": "create_team_v1_agent_teams_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateTeamRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TeamResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Team",
+        "tags": [
+          "teams"
+        ]
+      }
+    },
+    "/v1/agent/teams/{team_id}": {
+      "delete": {
+        "description": "Delete the team and close its outstanding invitations; owner only.",
+        "operationId": "delete_team_v1_agent_teams__team_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "title": "Team Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "expected_revision",
+            "required": true,
+            "schema": {
+              "minimum": 1,
+              "title": "Expected Revision",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Team",
+        "tags": [
+          "teams"
+        ]
+      },
+      "get": {
+        "description": "Read one team the caller belongs to.",
+        "operationId": "get_team_v1_agent_teams__team_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "title": "Team Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TeamResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Team",
+        "tags": [
+          "teams"
+        ]
+      },
+      "patch": {
+        "description": "Rename as an owner or admin at the revision the caller read.",
+        "operationId": "rename_team_v1_agent_teams__team_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "title": "Team Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RenameTeamRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TeamResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Rename Team",
+        "tags": [
+          "teams"
+        ]
+      }
+    },
+    "/v1/agent/teams/{team_id}/audit-events": {
+      "get": {
+        "description": "The team's administrative history, newest first; owner only.",
+        "operationId": "list_audit_events_v1_agent_teams__team_id__audit_events_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "title": "Team Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Before"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TeamAuditEventListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Audit Events",
+        "tags": [
+          "teams"
+        ]
+      }
+    },
+    "/v1/agent/teams/{team_id}/invitations": {
+      "get": {
+        "description": "List actionable invitations and recent history; owner or admin.",
+        "operationId": "list_invitations_v1_agent_teams__team_id__invitations_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "title": "Team Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvitationListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Invitations",
+        "tags": [
+          "teams"
+        ]
+      },
+      "post": {
+        "description": "Create a single-use, 24-hour link; its token is returned only here, once.",
+        "operationId": "create_invitation_v1_agent_teams__team_id__invitations_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "title": "Team Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateInvitationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvitationCreatedResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Invitation",
+        "tags": [
+          "teams"
+        ]
+      }
+    },
+    "/v1/agent/teams/{team_id}/invitations/{invitation_id}": {
+      "delete": {
+        "description": "Revoke an invitation and any undecided request made with it.",
+        "operationId": "revoke_invitation_v1_agent_teams__team_id__invitations__invitation_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "title": "Team Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "invitation_id",
+            "required": true,
+            "schema": {
+              "title": "Invitation Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Revoke Invitation",
+        "tags": [
+          "teams"
+        ]
+      }
+    },
+    "/v1/agent/teams/{team_id}/join-requests": {
+      "get": {
+        "description": "List pending requests for an owner or admin to decide.",
+        "operationId": "list_join_requests_v1_agent_teams__team_id__join_requests_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "title": "Team Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JoinRequestListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Join Requests",
+        "tags": [
+          "teams"
+        ]
+      }
+    },
+    "/v1/agent/teams/{team_id}/join-requests/{request_id}/decision": {
+      "post": {
+        "description": "Approve or decline; repeating the same decision returns its result.",
+        "operationId": "decide_join_request_v1_agent_teams__team_id__join_requests__request_id__decision_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "title": "Team Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "request_id",
+            "required": true,
+            "schema": {
+              "title": "Request Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DecideJoinRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JoinRequestResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Decide Join Request",
+        "tags": [
+          "teams"
+        ]
+      }
+    },
+    "/v1/agent/teams/{team_id}/leave": {
+      "post": {
+        "description": "Leave the team; the owner must transfer ownership or delete it first.",
+        "operationId": "leave_team_v1_agent_teams__team_id__leave_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "title": "Team Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Leave Team",
+        "tags": [
+          "teams"
+        ]
+      }
+    },
+    "/v1/agent/teams/{team_id}/members": {
+      "get": {
+        "description": "List active members, owner first, with display names and account emails.",
+        "operationId": "list_members_v1_agent_teams__team_id__members_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "title": "Team Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TeamMemberListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Members",
+        "tags": [
+          "teams"
+        ]
+      }
+    },
+    "/v1/agent/teams/{team_id}/members/{member_user_id}": {
+      "delete": {
+        "description": "Remove a non-owner; admins may only remove ordinary members.",
+        "operationId": "remove_member_v1_agent_teams__team_id__members__member_user_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "title": "Team Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "member_user_id",
+            "required": true,
+            "schema": {
+              "title": "Member User Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Remove Member",
+        "tags": [
+          "teams"
+        ]
+      }
+    },
+    "/v1/agent/teams/{team_id}/members/{member_user_id}/role": {
+      "patch": {
+        "description": "Grant or revoke admin; only the team owner may change roles.",
+        "operationId": "set_member_role_v1_agent_teams__team_id__members__member_user_id__role_patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "title": "Team Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "member_user_id",
+            "required": true,
+            "schema": {
+              "title": "Member User Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetTeamMemberRoleRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TeamResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set Member Role",
+        "tags": [
+          "teams"
+        ]
+      }
+    },
+    "/v1/agent/teams/{team_id}/transfer-ownership": {
+      "post": {
+        "description": "Make an admitted active member the owner; the caller stays as a member.",
+        "operationId": "transfer_ownership_v1_agent_teams__team_id__transfer_ownership_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "title": "Team Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TransferOwnershipRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TeamResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Transfer Ownership",
+        "tags": [
+          "teams"
+        ]
+      }
+    },
     "/v1/agent/threads/{thread_id}/goal": {
       "delete": {
         "description": "Remove the goal, and every automatic round that was queued for it.\n\nThe revision moves and the identity is cleared, so a report written about\nthe removed objective can never match whatever the owner sets next.",
@@ -34158,7 +36063,7 @@
         "summary": "Get Thread Queue"
       },
       "post": {
-        "description": "Send a message: the next turn now if nothing is running, otherwise queued.\n\nEvery message goes through here. It is checked against the conversation's\nnewest turn — the same checks a follow-up always passed — and put at the end\nof the thread's queue; the queue is then settled, which on an idle\nconversation makes it the next turn before this returns (``job``). With a\nturn running it waits (``pending``) and is sent, in order, when that turn\nends. Sending on an idle conversation whose queue was paused is the owner\ncontinuing: older waiting messages go first.\n\nAn ``Idempotency-Key`` names this one submission. A resend answers with what\nthe first send made — the turn if it has become one, the waiting message if\nnot — and the same key under different content is a 409\n``idempotency_conflict``.\n\n``require_idle`` binds a fresh action to ``expected_latest_job_id`` and\nrefuses it with ``conversation_changed`` if any chat sharing the workspace\nhas a live turn or waiting message, a Fork is active, or the workspace is\nunpublished at the locked write. An accepted idle-only action creates its\nturn in that same transaction without entering the pending queue.",
+        "description": "Send a message: the next turn now if nothing is running, otherwise queued.\n\nEvery message goes through here. It is checked against the conversation's\nnewest turn — the same checks a follow-up always passed — and put at the end\nof the thread's queue; the queue is then settled, which on an idle\nconversation makes it the next turn before this returns (``job``). With a\nturn running it waits (``pending``) and is sent, in order, when that turn\nends. Sending on an idle conversation whose queue was paused is the owner\ncontinuing: older waiting messages go first.\n\nAn ``Idempotency-Key`` names this one submission. A resend answers with what\nthe first send made — the turn if it has become one, the waiting message if\nnot — and the same key under different content is a 409\n``idempotency_conflict``.\n\n``require_idle`` binds a fresh action to ``expected_latest_job_id`` and\nrefuses it with ``conversation_changed`` if any chat sharing the workspace\nhas a live turn or waiting message, a Fork is active, or a publication is\nunfinished at the locked write, and with ``unpublished_changes`` if a turn\nsettled since the workspace was last published. An accepted idle-only\naction creates its turn in that same transaction without entering the\npending queue.",
         "operationId": "submit_thread_message_v1_agent_threads__thread_id__messages_post",
         "parameters": [
           {
@@ -34460,6 +36365,62 @@
           }
         },
         "summary": "Send Pending Message Now"
+      }
+    },
+    "/v1/agent/threads/{thread_id}/publish": {
+      "post": {
+        "description": "Push the conversation's workspace to its branch and open or update its draft PR.\n\nThe platform never publishes on its own: a finished turn stays in the\nworkspace until its owner asks. This opens the workspace's next snapshot\nand returns at once; capture, the secret scan, the push and the draft PR\nfollow as the job's ``workspace_publication_state``. Every conversation\nsharing the workspace is published together, to its origin's branch. A\npublication already on its way is returned instead of a second one.",
+        "operationId": "publish_agent_thread_v1_agent_threads__thread_id__publish_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "thread_id",
+            "required": true,
+            "schema": {
+              "title": "Thread Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentThreadPublicationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Publish Agent Thread"
       }
     },
     "/v1/agent/threads/{thread_id}/questions": {
@@ -35020,7 +36981,7 @@
     },
     "/v1/agent/worker/environment-runs/claim": {
       "post": {
-        "description": "Hand only an environment-capable enrolled host a test lease.",
+        "description": "Hand only an environment-capable enrolled host a test or prebuild lease.",
         "operationId": "claim_environment_test_v1_agent_worker_environment_runs_claim_post",
         "parameters": [
           {
@@ -35212,6 +37173,110 @@
         ]
       }
     },
+    "/v1/agent/worker/environment-snapshots/deletions": {
+      "get": {
+        "description": "Snapshot objects to delete from S3, and local snapshot images to drop.",
+        "operationId": "snapshot_deletions_v1_agent_worker_environment_snapshots_deletions_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Snapshot Deletions V1 Agent Worker Environment Snapshots Deletions Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Snapshot Deletions",
+        "tags": [
+          "environments"
+        ]
+      }
+    },
+    "/v1/agent/worker/environment-snapshots/{snapshot_id}/deleted": {
+      "post": {
+        "description": "Record that this host deleted a snapshot's stored object.",
+        "operationId": "snapshot_deleted_v1_agent_worker_environment_snapshots__snapshot_id__deleted_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "snapshot_id",
+            "required": true,
+            "schema": {
+              "title": "Snapshot Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Snapshot Deleted",
+        "tags": [
+          "environments"
+        ]
+      }
+    },
     "/v1/agent/worker/jobs/{job_id}/attachments": {
       "get": {
         "description": "List what this conversation's /uploads holds, so it can be rebuilt.\n\nScoped to the thread rather than the claimed turn: a retry on a fresh\ncontainer has to restore all of them, and re-importing into a retained one\nsimply overwrites the same paths. A file attached again by a later turn is\nlisted once, as its newest upload.",
@@ -35397,6 +37462,65 @@
           }
         },
         "summary": "Worker Report Continuity"
+      }
+    },
+    "/v1/agent/worker/jobs/{job_id}/environment-snapshot": {
+      "post": {
+        "description": "Record what a new workspace did with its installation snapshot.\n\nUsage keeps a snapshot from expiring; a workspace that had none, or whose\nlockfiles or image differed, queues a build for its commit.",
+        "operationId": "worker_report_environment_snapshot_v1_agent_worker_jobs__job_id__environment_snapshot_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkerEnvironmentSnapshotReport"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Worker Report Environment Snapshot"
       }
     },
     "/v1/agent/worker/jobs/{job_id}/events": {

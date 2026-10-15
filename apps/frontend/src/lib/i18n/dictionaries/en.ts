@@ -92,7 +92,9 @@ export const en = {
   'environment.addVariable': 'Add variable',
   'environment.rules': 'Naming and Secret rules',
   'environment.reservedKeys':
-    'OPENAI_API_KEY, ANTHROPIC_API_KEY and other platform names are reserved. Use a different name for your application.',
+    'CLAUDE_*, CODEX_*, PATH, HOME and other platform names are reserved. Use a different name for your application.',
+  'environment.inferenceKeys':
+    "OPENAI_API_KEY, OPENAI_BASE_URL, ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN and ANTHROPIC_BASE_URL reach your code and the commands the agent runs; the agent's own model calls still use the platform. Setting one of a provider's names replaces all of them, so add its base URL too if you use one.",
   'environment.shortSecret':
     'Secrets must contain at least 8 characters. Mark non-sensitive flags such as DEBUG=1 as Plain.',
   'environment.importEnv': 'Import .env',
@@ -106,7 +108,10 @@ export const en = {
   'environment.confirmImport': 'Import {count} variables',
   'environment.installScript': 'Install script',
   'environment.installHelp':
-    'Runs once in each new workspace to install dependencies, for example npm ci. Up to 15 minutes.',
+    'Runs once in each new workspace to install dependencies, for example npm ci. Skipped when the workspace starts from a saved installation. Up to 15 minutes.',
+  'environment.updateScript': 'Update script (optional)',
+  'environment.updateHelp':
+    'Runs instead of the install script when a new workspace starts from a saved installation, for steps that follow the source such as code generation or migrations. A saved installation is used only while the lockfiles are unchanged. Up to 15 minutes.',
   'environment.startScript': 'Start script',
   'environment.startHelp':
     'Runs after installation and whenever the container restarts. Start background services, wait until they are ready, then exit. Up to 2 minutes.',
@@ -119,7 +124,7 @@ export const en = {
     'No supported lockfile at the repository root. Write the install command for this project.',
   'environment.platformInfo': 'About the platform environment',
   'environment.platformDescription':
-    'Linux sandbox; image tools and resource limits are platform-managed. Public IPv4 TCP 80/443 and the named DNS resolver are available. Private networks and other outbound ports stay blocked. Installation: 15 min; startup: 2 min; verification: 5 min. Stopped containers lose running processes. OPENAI_API_KEY, ANTHROPIC_API_KEY and platform names are reserved.',
+    'Linux sandbox; image tools and resource limits are platform-managed. Public IPv4 TCP 80/443 and the named DNS resolver are available. Private networks and other outbound ports stay blocked. Installation: 15 min; startup: 2 min; verification: 5 min. Stopped containers lose running processes. Platform names such as CLAUDE_* and PATH are reserved.',
   'environment.actionsHelp':
     "Saved commands you can run with one click from a task's Environment panel, such as running tests or a dev server.",
   'environment.noActions': 'No actions yet.',
@@ -158,6 +163,17 @@ export const en = {
   'environment.phase.setup': 'Install',
   'environment.phase.start': 'Start',
   'environment.phase.verify': 'Verify',
+  'environment.phase.update': 'Update',
+  'environment.fromSnapshot': 'From saved installation',
+  'environment.keptAfterRestore': 'Kept after restore',
+  'environment.snapshot.none': 'Not prebuilt',
+  'environment.snapshot.ready': 'Prebuilt',
+  'environment.snapshot.building': 'Prebuilding',
+  'environment.snapshot.failed': 'Prebuild failed',
+  'environment.snapshot.rebuild': 'Prebuild again',
+  'environment.snapshot.delete': 'Delete saved installation',
+  'environment.snapshot.savedByTest':
+    'A passing test saves its installation. New tasks start from it while the lockfiles are unchanged.',
   'environment.choose': 'Choose environment',
   'environment.automaticHint':
     'The repository default is selected. Change it only when this task needs a different environment.',
@@ -313,8 +329,18 @@ export const en = {
   'watchPr.start':
     'Ask the agent to watch tests and reviews, then merge. Requires source-control tools with merge access.',
   'watchPr.unavailable':
-    'This chat must be able to continue and its latest changes must finish publishing before starting a PR watch.',
+    'This chat must be able to continue, and its latest changes must be in the PR, before starting a PR watch.',
   'watchPr.sendFailed': 'Could not start watching this PR.',
+  'publish.create': 'Create PR',
+  'publish.update': 'Update PR',
+  'publish.createHint': 'Push this workspace to an agent/… branch and open a draft PR.',
+  'publish.updateHint': 'Push the workspace’s latest changes to its draft PR.',
+  'publish.unavailable': 'Available once the running turn finishes.',
+  'publish.inProgress': 'Publishing changes…',
+  'publish.failed': 'Could not publish changes. Try again.',
+  'publish.unchanged': 'No changes to publish.',
+  'publish.unpublished': 'Changes not in the PR yet.',
+  'publish.sendFailed': 'Could not publish this workspace.',
   'sideChat.new': 'New Side Chat',
   'sideChat.close': 'Close {name}',
   'sideChat.region': 'Side chat',
@@ -670,6 +696,7 @@ export const en = {
   'settings.usage.period': 'Period',
   'settings.usage.days': '{count} days',
   'settings.usage.cost': 'Model cost',
+  'settings.usage.costEstimate': 'Estimate, not a bill',
   'settings.usage.tokens': 'Tokens',
   'settings.usage.tokensInOut': '{in} in · {out} out',
   'settings.usage.runningTime': 'Container running time',
@@ -700,7 +727,9 @@ export const en = {
   'settings.usage.otherModels': 'Other models',
   'settings.usage.noData': 'No turns in this period.',
   'settings.usage.utcNote':
-    'Days are in UTC. A turn counts on the day it started; CPU and memory count when they were used.',
+    'Days start at 00:00 UTC, when the daily limit resets. A turn counts on the day it started; CPU and memory count when they were used.',
+  'settings.usage.utcNoteLocal':
+    'Days start at 00:00 UTC ({time} your time), when the daily limit resets. A turn counts on the day it started; CPU and memory count when they were used.',
   'settings.usage.dashboardLink': 'Daily limit and account usage',
   'notifications.question': 'Agent needs your answer',
   'notifications.succeeded': 'Agent turn finished',
@@ -888,6 +917,8 @@ export const en = {
   'composer.chooseRepository': 'Choose a repository first',
   'composer.branch': 'Branch',
   'composer.agent': 'Agent',
+  'picker.search': 'Search…',
+  'picker.noResults': 'No matching options',
   'composer.model': 'Model',
   'composer.reasoning': 'Reasoning',
   'composer.run': 'Run',
@@ -1096,7 +1127,7 @@ export const en = {
   'firstRun.publishing': 'Pushing the changes to an agent/… branch and opening a draft PR.',
   'firstRun.doneTitle': 'Your first draft PR is ready',
   'firstRun.doneBody':
-    'Review it on GitHub; merging is up to you. Want changes? Reply below and the same PR is updated.',
+    'Review it on GitHub; merging is up to you. Want changes? Reply below, then Update PR.',
 
   // ── Pending message queue ───────────────────────────────────────────────
   'queue.region': 'Queued messages',
@@ -1142,6 +1173,139 @@ export const en = {
   'queue.removed': 'Message removed',
   'queue.attachmentsOne': '1 attachment',
   'queue.attachmentsMany': '{count} attachments',
+  // ── Teams ───────────────────────────────────────────────────────────────
+  'teams.title': 'Teams',
+  'teams.description':
+    'Invite the people you work with. An owner or admin reviews each request to join.',
+  'teams.signIn': 'Sign in to see your teams.',
+  'teams.pendingTitle': 'Waiting for approval',
+  'teams.pendingItem': '{team} — awaiting approval until {expires}',
+  'teams.loadFailed': 'Teams could not be loaded.',
+  'teams.retry': 'Retry',
+  'teams.loading': 'Loading…',
+  'teams.empty':
+    'You are not in any team yet. Create one, or open an invitation link someone sent you.',
+  'teams.listLabel': 'Your teams',
+  'teams.role.owner': 'Owner',
+  'teams.role.admin': 'Admin',
+  'teams.role.member': 'Member',
+  'teams.memberCount': '{count} members',
+  'teams.cancel': 'Cancel',
+  'teams.create.label': 'New team',
+  'teams.create.placeholder': 'Team name',
+  'teams.create.submit': 'Create team',
+  'teams.create.saving': 'Creating…',
+  'teams.rename.label': 'Team name',
+  'teams.rename.save': 'Save name',
+  'teams.members.title': 'Members',
+  'teams.members.you': '(you)',
+  'teams.members.makeOwner': 'Make owner',
+  'teams.members.makeAdmin': 'Make admin',
+  'teams.members.revokeAdmin': 'Remove admin role',
+  'teams.members.confirmAdmin': 'Make {name} an admin?',
+  'teams.members.adminHelp':
+    'Admins can rename the team, manage invitations, review requests and remove ordinary members. Only the owner can change roles, transfer ownership or delete the team.',
+  'teams.members.confirmRevokeAdmin': 'Remove admin role from {name}?',
+  'teams.members.revokeAdminHelp':
+    'They remain a member. Their open invitation links and pending requests will be closed.',
+  'teams.members.remove': 'Remove',
+  'teams.members.confirmTransfer': 'Make {name} the owner?',
+  'teams.members.confirmTransferHelp':
+    'You stay in the team as a member. Open invitation links and pending requests are closed; the new owner sends new ones.',
+  'teams.members.confirmRemove': 'Remove {name} from the team?',
+  'teams.members.confirmRemoveHelp':
+    'They lose access right away. To come back they need a new invitation and your approval.',
+  'teams.requests.title': 'Join requests',
+  'teams.requests.empty': 'No one is waiting to join.',
+  'teams.requests.approve': 'Approve',
+  'teams.requests.decline': 'Decline',
+  'teams.invitations.title': 'Invitation links',
+  'teams.invitations.create': 'Create invitation link',
+  'teams.invitations.help':
+    'Each link works once, for 24 hours. Opening it only asks to join; you still approve each request here.',
+  'teams.invitations.linkLabel': 'New invitation link',
+  'teams.invitations.linkHelp':
+    'Copy it now and send it yourself — it is shown only once. Anyone who has it can ask to join until someone uses it.',
+  'teams.invitations.copy': 'Copy link',
+  'teams.invitations.copied': 'Copied',
+  'teams.invitations.done': 'Done',
+  'teams.invitations.lost':
+    'That link was already created but cannot be shown again. Revoke it below and create a new one.',
+  'teams.invitations.created': 'Created {created}',
+  'teams.invitations.expires': 'expires {expires}',
+  'teams.invitations.revoke': 'Revoke',
+  'teams.invitations.status.open': 'Not used yet',
+  'teams.invitations.status.claimed': 'Used',
+  'teams.invitations.status.revoked': 'Revoked',
+  'teams.invitations.status.expired': 'Expired',
+  'teams.invitations.status.pending': 'Waiting for your approval',
+  'teams.invitations.status.approved': 'Accepted',
+  'teams.invitations.status.declined': 'Declined',
+  'teams.invitations.status.cancelled': 'Cancelled',
+  'teams.leave.action': 'Leave team',
+  'teams.leave.confirm': 'Leave {team}?',
+  'teams.leave.help': 'You lose access right away. To come back you need a new invitation.',
+  'teams.leave.ownerHelp': 'To leave a team you own, make another member the owner first.',
+  'teams.delete.action': 'Delete team',
+  'teams.delete.confirm': 'Delete {team}?',
+  'teams.delete.help':
+    'Every member loses access and open invitation links stop working. This cannot be undone.',
+  'teams.error.alreadyMember': 'You are already a member of this team.',
+  'teams.error.alreadyOwner': 'You already own this team.',
+  'teams.error.applicantNotAdmitted': 'This account cannot use Agent right now, so it cannot join.',
+  'teams.error.forbidden': 'Your team role does not allow this action.',
+  'teams.error.invitationClosed': 'This invitation has already been used.',
+  'teams.error.invitationLimit':
+    'This team has too many open invitation links. Revoke one before creating another.',
+  'teams.error.invitationUnavailable':
+    'This invitation link is no longer valid. Ask an owner or admin for a new one.',
+  'teams.error.notFound': 'This team or member no longer exists, or you are no longer in it.',
+  'teams.error.ownerCannotLeave': 'Make another member the owner, or delete the team, first.',
+  'teams.error.ownerNotAdmitted':
+    'This member cannot use Agent right now, so they cannot own the team.',
+  'teams.error.requestClosed': 'This request was already decided or withdrawn.',
+  'teams.error.requestExpired': 'This request expired with its link. Send a new invitation.',
+  'teams.error.requestPending':
+    'You already asked to join this team. Wait for an owner or admin to review it.',
+  'teams.error.revisionConflict': 'This team changed in the meantime. Check it and try again.',
+  'teams.error.teamFull': 'This team has reached its member limit.',
+  'teams.error.teamLimit': 'You already own the maximum number of teams.',
+  'teams.error.unavailable': 'Account access cannot be confirmed right now. Try again shortly.',
+  'teams.error.generic': 'Something went wrong. Try again.',
+  'teams.join.title': 'Join a team',
+  'teams.join.eyebrow': 'TEAM INVITATION',
+  'teams.join.heading.pending': 'Request sent',
+  'teams.join.heading.approved': 'Welcome to the team',
+  'teams.join.heading.declined': 'Request not approved',
+  'teams.join.heading.cancelled': 'Invitation withdrawn',
+  'teams.join.heading.expired': 'Invitation expired',
+  'teams.join.invitedBy': 'Invited by {inviter}',
+  'teams.join.pendingBadge': 'Awaiting approval',
+  'teams.join.expires': 'Valid until {expires}',
+  'teams.join.closeHint': 'You can close this page. Your request stays active.',
+  'teams.join.checking': 'Checking…',
+  'teams.join.explain':
+    'Send a request to join. An owner or admin will review it before you become a member.',
+  'teams.join.request': 'Ask to join',
+  'teams.join.requesting': 'Sending…',
+  'teams.join.signInFirst': 'Sign in first. You will come back here to finish.',
+  'teams.join.signIn': 'Sign in',
+  'teams.join.noLink':
+    'This page needs an invitation link. Open the full link you were sent, in this browser tab.',
+  'teams.join.noAccess': 'Your account cannot use Agent yet, so it cannot join a team.',
+  'teams.join.theOwner': 'a team manager',
+  'teams.join.state.pending':
+    'An owner or admin will review your request. Once approved, this team will appear in your team list.',
+  'teams.join.state.approved':
+    'Your request was approved. You can now find this team in your team list.',
+  'teams.join.state.declined':
+    'Your request was declined. Contact the person who invited you if you think this was a mistake.',
+  'teams.join.state.cancelled':
+    'This invitation is no longer active. Ask an owner or admin for a new link.',
+  'teams.join.state.expired':
+    'This invitation expired before your request was approved. Ask for a new link to try again.',
+  'teams.join.checkAgain': 'Refresh status',
+  'teams.join.openTeams': 'Go to Teams',
   // ── Shared ──────────────────────────────────────────────────────────────
   'common.loading': 'Loading…',
   'common.retry': 'Retry',

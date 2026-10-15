@@ -164,7 +164,8 @@ class EnvironmentProcess(SandboxProcess):
         self, backend: RetainedChatBackend, *, phase: str, script: str, env: dict[str, str]
     ) -> None:
         self.backend = backend
-        self.uid = {"setup": 30000, "start": 30001, "verify": 30002}[phase]
+        # An update script amends the installation, so it runs as the installer.
+        self.uid = {"setup": 30000, "update": 30000, "start": 30001, "verify": 30002}[phase]
         kill_identity(backend, self.uid)
         directory = prepare_home(backend.manager, backend.spec, self.uid)
         self.status_path = directory + "/status"

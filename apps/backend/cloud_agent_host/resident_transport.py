@@ -26,6 +26,7 @@ from cloud_agent_host.chat_sandbox import (
     ChatSandboxManager,
     ChatSandboxSpec,
     claude_member_config_dir,
+    member_inference_env_path,
 )
 from cloud_agent_host.codex_plugins import install_codex_plugins
 from cloud_agent_host.drivers import (
@@ -43,6 +44,7 @@ from cloud_agent_host.other_plugins import install_other_runtime_plugins
 from cloud_agent_host.plugins import install_claude_plugins
 from cloud_agent_host.runtimes import RuntimeMCPConfig
 from cloud_agent_host.sandbox import SANDBOX_PATH, SandboxProcess, runtime_bin_dir
+from cloud_agent_shared.environment import inference_handoff
 from cloud_agent_shared.plugins import validate_sandbox_plugins
 from cloud_agent_shared.shared_protocol import is_residency_mcp_credential
 
@@ -760,11 +762,20 @@ class ResidentTransportFactory:
         activation_dir = f"{MEMBER_TMPFS_ROOT}/{launch.slot_id}/{runtime_id}"
         home = f"/home/agent-member-{launch.slot_id}"
         base_env = dict(self._manager.backend.base_env())
+        inference_script = ""
         if launch.environment is not None:
             from cloud_agent_host.environment_process import tool_environment
 
             base_env.update(tool_environment())
-            base_env.update(launch.environment.values("runtime"))
+            # The CLI reads its platform credential under the same names as the
+            # owner's inference credentials, so those reach only the commands
+            # it runs: every bash it starts sources them from BASH_ENV.
+            runtime_values, inference_script = inference_handoff(
+                launch.environment.values("runtime")
+            )
+            base_env.update(runtime_values)
+            if inference_script:
+                base_env["BASH_ENV"] = member_inference_env_path(launch.slot_id)
         base_env.update(
             {
                 "HOME": home,
@@ -813,6 +824,14 @@ class ResidentTransportFactory:
                 if not member_processes_reaped:
                     self._manager.reap_member_processes(
                         spec,
+                        slot_id=launch.slot_id,
+                        user_uid=uid,
+                        user_gid=self._manager.backend.gid,
+                    )
+                if inference_script:
+                    self._manager.write_member_inference_env(
+                        spec,
+                        inference_script,
                         slot_id=launch.slot_id,
                         user_uid=uid,
                         user_gid=self._manager.backend.gid,

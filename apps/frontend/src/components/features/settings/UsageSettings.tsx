@@ -35,6 +35,7 @@ import {
   tickIndexes,
   tokenTotal,
   unrecordedTurns,
+  utcMidnightLocal,
   type ChartDay,
   type ChartMetric,
   type UsagePeriod,
@@ -381,6 +382,10 @@ function History() {
     return t(DURATION_UNIT[unit], { value });
   };
   const summary = tokens?.summary;
+  // Only after a history loads: the server's render has no reader time zone,
+  // and the first browser render has to match it.
+  const generatedAt = resources?.generated_at ?? tokens?.generated_at;
+  const dayStart = generatedAt ? utcMidnightLocal(Date.parse(generatedAt), locale) : null;
   const unrecorded = summary ? unrecordedTurns(summary) : 0;
   let tokenDetail: string | undefined;
   if (summary?.totals) {
@@ -427,6 +432,7 @@ function History() {
         <Tile
           label={t('settings.usage.cost')}
           value={summary ? formatCost(summary.totals?.spent_usd) : '—'}
+          detail={t('settings.usage.costEstimate')}
         />
         <Tile
           label={t('settings.usage.tokens')}
@@ -466,7 +472,9 @@ function History() {
       ) : null}
       {tokens ? <ByModel usage={tokens} /> : null}
       <p className="mt-4 text-xs text-muted">
-        {t('settings.usage.utcNote')}
+        {dayStart
+          ? t('settings.usage.utcNoteLocal', { time: dayStart })
+          : t('settings.usage.utcNote')}
         {branding.gatewayUrl ? (
           <>
             {' '}

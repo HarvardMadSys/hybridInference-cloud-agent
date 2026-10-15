@@ -41,15 +41,15 @@ async def _fold_into_pending_snapshot(
 ) -> int | None:
     """Give a capture's turns to its group's pending snapshot; ``None`` if there is none.
 
-    A turn is not refused while its workspace is captured, so a turn that
-    settles meanwhile opens a pending snapshot of its own: settlement only ever
-    extends a *pending* one. A group may hold one pending snapshot, so a capture
-    handed back cannot become pending beside it. It is folded in instead: the
-    pending snapshot takes the capture's turns and keeps its own boundary,
-    anchor and base -- what settlement would have left had the capture never
-    been claimed -- and the capture's row goes. A capture is the whole diff
-    from the published base, so the pending snapshot, captured later, covers
-    every turn of both.
+    A publication request is refused while a capture is on its way, so a
+    pending snapshot beside a capture is one that turn settlement opened before
+    publication became an owner's request. A group may hold one pending
+    snapshot, so a capture handed back cannot become pending beside it. It is
+    folded in instead: the pending snapshot takes the capture's turns and keeps
+    its own boundary, anchor and base -- what settlement would have left had
+    the capture never been claimed -- and the capture's row goes. A capture is
+    the whole diff from the published base, so the pending snapshot, captured
+    later, covers every turn of both.
 
     Called with the capture and its group locked; the pending snapshot is taken
     after the group, as settlement takes it. The turns' rows are moved, not
@@ -95,6 +95,219 @@ class PostgresSnapshotRepository:
         """Use the database clock for deadlines written by database transactions."""
         async with self._pool.acquire() as conn:
             return await conn.fetchval("SELECT clock_timestamp()")
+
+    async def request_snapshot_publication(self, *, thread_id: str, user_id: str) -> dict[str, Any]:
+        """Open the next snapshot of a conversation's workspace for its owner.
+
+        The platform never publishes on its own: a turn boundary opens no
+        snapshot, and this is the one way a workspace reaches its branch. The
+        group's epoch advances and a ``pending`` snapshot opens at it, holding
+        every turn settled in the group since the last snapshot -- or, when
+        there is none, the group's newest settled turn, so that a retry after a
+        failure, or a file changed from the terminal, can still be published.
+        Capture, publication and base import then run as they always have; the
+        insert wakes the capture coordinator.
+
+        A snapshot already on its way is returned rather than doubled, so a
+        repeated request is harmless. Every request opens a fresh epoch rather
+        than reopening a failed snapshot: the failed one keeps the commit it may
+        have pushed, which the new one's publication builds on (``own_pushes``).
+
+        Locks follow :mod:`cloud_agent.storage`: the conversation, then the
+        group, then the snapshot it opens. The included turns are share-locked
+        with ``NOWAIT`` after the group, out of order, so a follow-up holding
+        its newest turn while it waits for the group fails this request
+        (``workspace_busy``) instead of deadlocking with it.
+
+        Returns:
+            ``{"snapshot_id", "state", "requested"}``, where ``requested`` says
+            whether this call opened the snapshot, or ``{"error": code}`` with
+            ``not_found``, ``temporary_workspace``, ``nothing_to_publish``,
+            ``workspace_unavailable``, ``turn_running`` or ``workspace_busy``.
+        """
+        async with self._pool.acquire() as conn, conn.transaction():
+            thread = await conn.fetchrow(
+                """
+                SELECT id, repo FROM agent_threads
+                WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
+                FOR UPDATE
+                """,
+                thread_id,
+                user_id,
+            )
+            if thread is None:
+                return {"error": "not_found"}
+            if thread["repo"] is None:
+                return {"error": "temporary_workspace"}
+            sandbox_id = await conn.fetchval(
+                "SELECT sandbox_id FROM agent_thread_sandbox_memberships WHERE thread_id = $1",
+                thread_id,
+            )
+            if sandbox_id is None:
+                return {"error": "nothing_to_publish"}
+            group = await conn.fetchrow(
+                """
+                SELECT id, state, deletion_state, published_base_sha
+                FROM agent_sandboxes WHERE id = $1
+                FOR UPDATE
+                """,
+                sandbox_id,
+            )
+            if group is None:
+                return {"error": "nothing_to_publish"}
+            in_flight = await conn.fetchrow(
+                """
+                SELECT id, state FROM agent_sandbox_snapshots
+                WHERE sandbox_id = $1
+                  AND state IN ('pending', 'capturing', 'captured', 'publishing')
+                ORDER BY workspace_epoch DESC, id DESC
+                LIMIT 1
+                """,
+                sandbox_id,
+            )
+            if in_flight is not None:
+                return {
+                    "snapshot_id": int(in_flight["id"]),
+                    "state": in_flight["state"],
+                    "requested": False,
+                }
+            if await conn.fetchval(
+                """
+                SELECT EXISTS (
+                    SELECT 1 FROM agent_thread_sandbox_memberships m
+                    WHERE m.sandbox_id = $1
+                      AND (
+                          m.active_attempt_id IS NOT NULL
+                          OR m.fork_operation_id IS NOT NULL
+                          OR EXISTS (
+                              SELECT 1 FROM agent_jobs j
+                              WHERE j.thread_id = m.thread_id AND j.state = 'running'
+                          )
+                      )
+                )
+                """,
+                sandbox_id,
+            ):
+                return {"error": "turn_running"}
+            if (
+                group["deletion_state"] in ("pending", "archived", "deleted")
+                or group["state"] not in ("running", "stopped")
+                or not group["published_base_sha"]
+            ):
+                return {"error": "workspace_unavailable"}
+            # Settled turns no snapshot holds yet. A conversation's turns
+            # settle in order and each request takes all of them, so only the
+            # ones after its newest snapshotted turn can be missing; the bound
+            # keeps turns from before publication was snapshotted out of it. A
+            # Fork's copies of its source's turns ran in no workspace and are
+            # never included.
+            included = [
+                row["id"]
+                for row in await conn.fetch(
+                    """
+                    SELECT j.id
+                    FROM agent_thread_sandbox_memberships m
+                    JOIN agent_jobs j ON j.thread_id = m.thread_id
+                    WHERE m.sandbox_id = $1
+                      AND j.native_turn_no IS NOT NULL
+                      AND j.fork_source_job_id IS NULL
+                      AND j.state IN ('succeeded', 'failed', 'cancelled')
+                      AND NOT EXISTS (
+                          SELECT 1 FROM agent_snapshot_jobs held WHERE held.job_id = j.id
+                      )
+                      AND j.turn_no > COALESCE((
+                          SELECT MAX(snapshotted.turn_no)
+                          FROM agent_jobs snapshotted
+                          JOIN agent_snapshot_jobs held ON held.job_id = snapshotted.id
+                          WHERE snapshotted.thread_id = j.thread_id
+                      ), 0)
+                    ORDER BY j.created_at, j.id
+                    """,
+                    sandbox_id,
+                )
+            ]
+            if not included:
+                newest = await conn.fetchval(
+                    """
+                    SELECT j.id
+                    FROM agent_thread_sandbox_memberships m
+                    JOIN agent_jobs j ON j.id = m.last_settled_job_id
+                    WHERE m.sandbox_id = $1
+                      AND j.fork_source_job_id IS NULL
+                      AND j.state IN ('succeeded', 'failed', 'cancelled')
+                    ORDER BY j.created_at DESC, j.id DESC
+                    LIMIT 1
+                    """,
+                    sandbox_id,
+                )
+                if newest is None:
+                    return {"error": "nothing_to_publish"}
+                included = [newest]
+            try:
+                await conn.execute(
+                    """
+                    SELECT id FROM agent_jobs
+                    WHERE id = ANY($1::text[])
+                    ORDER BY id
+                    FOR KEY SHARE NOWAIT
+                    """,
+                    included,
+                )
+            except asyncpg.exceptions.LockNotAvailableError:
+                return {"error": "workspace_busy"}
+            epoch = await conn.fetchval(
+                """
+                UPDATE agent_sandboxes
+                SET workspace_epoch = workspace_epoch + 1,
+                    snapshot_state = CASE
+                        WHEN snapshot_state IN ('snapshotting', 'importing') THEN snapshot_state
+                        ELSE 'pending'
+                    END,
+                    updated_at = NOW()
+                WHERE id = $1
+                RETURNING workspace_epoch
+                """,
+                sandbox_id,
+            )
+            # The anchor must be one of the included turns; a deferred foreign
+            # key checks that at commit.
+            anchor = included[-1]
+            snapshot_id = await conn.fetchval(
+                """
+                INSERT INTO agent_sandbox_snapshots (
+                    sandbox_id, workspace_epoch, anchor_job_id, base_sha
+                )
+                VALUES ($1, $2, $3, $4)
+                RETURNING id
+                """,
+                sandbox_id,
+                epoch,
+                anchor,
+                group["published_base_sha"],
+            )
+            # In settlement order: the publication reads its turns, their
+            # summaries and their messages by this timestamp.
+            await conn.execute(
+                """
+                INSERT INTO agent_snapshot_jobs (snapshot_id, job_id, created_at)
+                SELECT $1, included.job_id,
+                       NOW() + included.position * INTERVAL '1 microsecond'
+                FROM unnest($2::text[]) WITH ORDINALITY AS included(job_id, position)
+                """,
+                snapshot_id,
+                included,
+            )
+        logger.info(
+            "agent_snapshot_publication_requested",
+            extra={
+                "event": "agent_snapshot_publication_requested",
+                "thread_id": thread_id,
+                "snapshot_id": snapshot_id,
+                "workspace_epoch": epoch,
+                "turns": len(included),
+            },
+        )
+        return {"snapshot_id": int(snapshot_id), "state": "pending", "requested": True}
 
     async def claim_due_sandbox_snapshot(self) -> dict[str, Any] | None:
         """Fence one quiescent shared workspace for bounded patch capture.
@@ -976,7 +1189,7 @@ class PostgresSnapshotRepository:
         """Retain a rejected group artifact without failing included turns.
 
         The snapshot stays ``failed`` with the reason, and its group ``dirty``
-        until a later turn settles or a later snapshot is captured. That
+        until its owner publishes again and a later snapshot is captured. That
         capture, cut from the same published base, supersedes this one and is
         refused in turn if it still carries what was rejected.
         """

@@ -4,15 +4,25 @@ from __future__ import annotations
 
 import io
 import re
+import shlex
+from collections.abc import Mapping
 from pathlib import PurePosixPath
-from typing import Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from dotenv.parser import parse_stream
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from cloud_agent_shared.environment_snapshots import ENVIRONMENT_SNAPSHOT_CAPABILITY
 from cloud_agent_shared.secret_redaction import MIN_SECRET_CHARS
 
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+
 ENVIRONMENT_CAPABILITY = "environment-v1"
+#: A host that hands the owner's inference credentials to the commands an agent
+#: CLI runs, while the CLI keeps the platform's. Required by any binding that
+#: sets an :data:`INFERENCE_NAMES` variable.
+ENVIRONMENT_INFERENCE_CAPABILITY = "environment-inference-v1"
 MAX_VARIABLES = 100
 MAX_EFFECTIVE_VARIABLES = 150
 MAX_VALUE_BYTES = 32768
@@ -39,8 +49,6 @@ DOCKER_CLIENT_PREFIXES = ("DOCKER_", "BUILDKIT_", "BUILDX_", "COMPOSE_", "LD_", 
 PROXY_ENV = frozenset({"http_proxy", "https_proxy", "no_proxy", "all_proxy", "ftp_proxy"})
 RESERVED_NAMES = frozenset(
     {
-        "OPENAI_API_KEY",
-        "OPENAI_BASE_URL",
         "MCP_TOOL_TIMEOUT",
         "DISABLE_TELEMETRY",
         "DISABLE_AUTOUPDATER",
@@ -77,6 +85,15 @@ RESERVED_PREFIXES = (
     "FREEINFERENCE_",
     *DOCKER_CLIENT_PREFIXES,
 )
+#: Inference credentials an owner may set for their own code, in families that
+#: configure one client. Agent CLIs read the platform credential under these
+#: same names, so a CLI launch keeps them out of the CLI's own environment and
+#: gives them back to every bash the CLI starts (:func:`inference_handoff`).
+INFERENCE_FAMILIES = (
+    ("OPENAI_API_KEY", "OPENAI_BASE_URL"),
+    ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"),
+)
+INFERENCE_NAMES = frozenset(name for family in INFERENCE_FAMILIES for name in family)
 Phase = Literal["setup", "runtime", "both"]
 
 
@@ -97,6 +114,8 @@ def validate_name(name: str) -> str:
     """Refuse names that affect platform credentials or host executables."""
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,127}", name):
         raise EnvironmentInputError("Invalid variable name")
+    if name in INFERENCE_NAMES:
+        return name
     if name in RESERVED_NAMES | DOCKER_CLIENT_ENV or name.startswith(RESERVED_PREFIXES):
         raise EnvironmentInputError(f"Variable {name} is reserved by the platform")
     if name.lower() in PROXY_ENV:
@@ -191,6 +210,10 @@ class EnvironmentScripts(BaseModel):
     setup_script: str = Field(default="", max_length=MAX_SCRIPT_CHARS)
     start_script: str = Field(default="", max_length=MAX_SCRIPT_CHARS)
     verify_script: str = Field(default="", max_length=MAX_SCRIPT_CHARS)
+    #: Runs instead of the setup script when a workspace starts from an
+    #: installation snapshot, for steps that follow the source (code generation,
+    #: migrations). Never run otherwise.
+    update_script: str = Field(default="", max_length=MAX_SCRIPT_CHARS)
     actions: list[EnvironmentAction] = Field(default_factory=list, max_length=20)
 
     @model_validator(mode="after")
@@ -198,7 +221,8 @@ class EnvironmentScripts(BaseModel):
         """Refuse duplicate operation identities and invalid shell text."""
         if len({a.id for a in self.actions}) != len(self.actions):
             raise EnvironmentInputError("Duplicate action id")
-        if any("\0" in v for v in (self.setup_script, self.start_script, self.verify_script)):
+        scripts = (self.setup_script, self.start_script, self.verify_script, self.update_script)
+        if any("\0" in v for v in scripts):
             raise EnvironmentInputError("Scripts cannot contain NUL")
         return self
 
@@ -218,6 +242,10 @@ class BoundEnvironment(EnvironmentScripts):
     )
     previous_secrets: dict[str, str] = Field(default_factory=dict, repr=False, max_length=512)
     skip_start: bool = False
+    #: The control plane's HMAC of the setup script and setup-time variables.
+    #: Equal fingerprints install the same thing, so a container marked done
+    #: for one needs no installation for the other. Empty means unknown.
+    setup_fingerprint: str = Field(default="", pattern=r"^(|[0-9a-f]{64})$")
 
     @model_validator(mode="after")
     def bound_variables(self) -> BoundEnvironment:
@@ -264,6 +292,60 @@ class BoundEnvironment(EnvironmentScripts):
             or self.start_script
             or self.actions
         )
+
+
+def uses_inference_names(environment: BoundEnvironment | Mapping[str, Any]) -> bool:
+    """Whether a binding, or its JSON form, sets an agent CLI's credential name.
+
+    Executing one needs :data:`ENVIRONMENT_INFERENCE_CAPABILITY`: an older host
+    refuses the name.
+    """
+    if isinstance(environment, BoundEnvironment):
+        variables = [*environment.variables, *(environment.runtime_variables or [])]
+        return any(v.name in INFERENCE_NAMES for v in variables)
+    return any(
+        isinstance(v, Mapping) and v.get("name") in INFERENCE_NAMES
+        for key in ("variables", "runtime_variables")
+        for v in environment.get(key) or []
+    )
+
+
+def inference_handoff(values: dict[str, str]) -> tuple[dict[str, str], str]:
+    """Split the owner's inference credentials out of an agent CLI's environment.
+
+    Returns the environment without them, and a script for ``BASH_ENV`` that
+    sets them again in every bash the CLI starts — the shell each pinned CLI
+    runs its commands in — so the CLI authenticates to the gateway with the
+    platform's credential and the owner's code gets the owner's. The script is
+    empty when the owner set none of them.
+
+    A family the owner set any name of is the owner's alone: its other names
+    are unset rather than left at the platform's, so an owner's key is never
+    sent to the platform gateway's address.
+    """
+    lines: list[str] = []
+    for family in INFERENCE_FAMILIES:
+        owned = [name for name in family if name in values]
+        if owned:
+            lines.append("unset " + " ".join(family))
+            lines += [f"export {name}={shlex.quote(values[name])}" for name in owned]
+    rest = {name: value for name, value in values.items() if name not in INFERENCE_NAMES}
+    return rest, "".join(line + "\n" for line in lines)
+
+
+#: Binding fields a host older than :data:`ENVIRONMENT_SNAPSHOT_CAPABILITY`
+#: would refuse as unknown; they only matter to a host that builds or starts
+#: from snapshots.
+SNAPSHOT_BINDING_FIELDS = frozenset({"update_script", "setup_fingerprint"})
+
+
+def environment_payload(
+    environment: BoundEnvironment, capabilities: Iterable[str]
+) -> dict[str, Any]:
+    """The binding as JSON for one host, with snapshot fields only if it reads them."""
+    if ENVIRONMENT_SNAPSHOT_CAPABILITY in capabilities:
+        return environment.model_dump(mode="json")
+    return environment.model_dump(mode="json", exclude=set(SNAPSHOT_BINDING_FIELDS))
 
 
 def validate_effective(variables: list[EnvironmentVariable]) -> None:
@@ -339,5 +421,7 @@ def environment_limits() -> dict[str, int | str | list[str]]:
         "test_timeout_seconds": 1800,
         "reserved_names": sorted(RESERVED_NAMES | DOCKER_CLIENT_ENV),
         "reserved_prefixes": list(RESERVED_PREFIXES),
+        # Allowed although a reserved prefix covers them.
+        "inference_names": sorted(INFERENCE_NAMES),
         "proxy_names": sorted(PROXY_ENV),
     }
