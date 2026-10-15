@@ -28,6 +28,7 @@ class WebSearchRepository(Protocol):
         job_id: str,
         attempt_id: int,
         lease_generation: int,
+        residency_generation: int | None = None,
     ) -> WebSearchAdmission:
         """Admit one call under its current attempt fence and shared limits.
 

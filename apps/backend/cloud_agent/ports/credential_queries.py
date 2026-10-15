@@ -16,16 +16,24 @@ class CredentialQueries(Protocol):
     """Port: resolving the model credential an attempt runs with."""
 
     async def resolve_model_credential(
-        self, *, job_id: str, attempt_id: int, lease_generation: int
+        self,
+        *,
+        job_id: str,
+        attempt_id: int,
+        lease_generation: int,
+        residency_generation: int | None = None,
     ) -> dict[str, Any] | None:
         """Resolve Agent-owned job metadata for the MCP relay's live fence.
 
+        When supplied, the residency must still be hot, unexpired and serving
+        this exact attempt. Revalidation must never move a request to a later turn.
+
         Return the job's owner, model and MCP binding scope only while its
-        current attempt has a live lease and the job is running or publishing.
+        current attempt has a live lease and the job is running and not stopped.
         The relay uses that owner to resolve stored MCP connections and checks
         the admitted binding before forwarding a request.
 
-        Only Agent job and attempt tables participate. Gateway account roles
+        Only Agent-owned execution and connection state participates. Gateway account roles
         and status do not belong to this database. Inference authorization
         uses Gateway-issued grants separately from this MCP lookup.
 

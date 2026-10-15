@@ -189,7 +189,8 @@ async def test_direct_connection_route_lists_and_reads_templates(client, store, 
 
     forwarded = []
 
-    async def proxy(request, *, server, job_id, method, body=b""):
+    async def proxy(request, *, authorized, store, method, body=b""):
+        server = authorized.server
         payload = json.loads(body)
         forwarded.append(payload)
         if payload["method"] == "resources/templates/list":

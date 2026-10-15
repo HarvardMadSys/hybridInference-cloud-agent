@@ -10,6 +10,7 @@ from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp.errors import McpConnectionCreateConflict
 from cloud_agent.mcp.models import Capability, CapabilityKind
 from cloud_agent.storage._sql.mcp import ensure_mcp_bindings, mcp_binding_row
+from cloud_agent.storage._sql.mcp_residency import lock_mcp_residency, residency_fence_sql
 from cloud_agent.storage._sql.rows import load_json as _load_json
 
 if TYPE_CHECKING:
@@ -1325,6 +1326,7 @@ class PostgresMcpConnectionRepository:
         policy_revision: int,
         expires_at: Any,
         capability_kind: str = "tool",
+        residency_generation: int | None = None,
     ) -> dict[str, Any]:
         """Record a call that is waiting for its owner."""
         async with self._pool.acquire() as conn:
@@ -1334,8 +1336,8 @@ class PostgresMcpConnectionRepository:
                     (job_id, attempt_id, lease_generation, thread_id, connection_id,
                      capability_name, capability_kind, arguments_digest,
                      arguments_ciphertext, config_revision, authorization_epoch,
-                     capability_revision, policy_revision, expires_at)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                     capability_revision, policy_revision, expires_at, residency_generation)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
                 RETURNING *
                 """,
                 job_id,
@@ -1352,6 +1354,7 @@ class PostgresMcpConnectionRepository:
                 capability_revision,
                 policy_revision,
                 expires_at,
+                residency_generation,
             )
         return dict(row)
 
@@ -1483,6 +1486,7 @@ class PostgresMcpConnectionRepository:
         policy_revision: int | None = None,
         attempt_id: int | None = None,
         lease_generation: int | None = None,
+        residency_generation: int | None = None,
     ) -> dict[str, Any] | None:
         """Take exclusive ownership of dispatching one approved call.
 
@@ -1513,7 +1517,7 @@ class PostgresMcpConnectionRepository:
         live_fence = (
             ""
             if attempt_id is None
-            else """
+            else f"""
             AND EXISTS (
                 SELECT 1 FROM agent_jobs j
                 JOIN agent_attempts a ON a.id = j.current_attempt_id
@@ -1524,6 +1528,7 @@ class PostgresMcpConnectionRepository:
                   AND a.id = agent_mcp_invocations.attempt_id
                   AND a.lease_generation = agent_mcp_invocations.lease_generation
                   AND a.lease_expires_at > clock_timestamp()
+                  AND {residency_fence_sql("agent_mcp_invocations.residency_generation")}
                   AND b.connection_id = agent_mcp_invocations.connection_id AND b.enabled
                   AND b.policy_revision = agent_mcp_invocations.policy_revision
                   AND c.user_id = j.user_id AND c.deleted_at IS NULL AND c.enabled
@@ -1536,12 +1541,15 @@ class PostgresMcpConnectionRepository:
         async with self._pool.acquire() as conn, conn.transaction():
             target = await conn.fetchrow(
                 """
-                SELECT job_id, attempt_id, lease_generation, thread_id, connection_id
+                SELECT job_id, attempt_id, lease_generation, thread_id, connection_id,
+                       residency_generation
                 FROM agent_mcp_invocations WHERE id = $1
                 """,
                 invocation_id,
             )
-            if target is None:
+            if target is None or target["residency_generation"] != residency_generation:
+                return None
+            if residency_generation is not None and attempt_id is None:
                 return None
             if attempt_id is not None:
                 if target["attempt_id"] != attempt_id or (
@@ -1567,6 +1575,13 @@ class PostgresMcpConnectionRepository:
                     target["job_id"],
                 ):
                     return None
+                if not await lock_mcp_residency(
+                    conn,
+                    job_id=target["job_id"],
+                    attempt_id=attempt_id,
+                    generation=residency_generation,
+                ):
+                    return None
                 if not await conn.fetchval(
                     "SELECT id FROM agent_mcp_connections WHERE id = $1 FOR SHARE",
                     target["connection_id"],
@@ -1581,7 +1596,8 @@ class PostgresMcpConnectionRepository:
                     return None
             locked_target = await conn.fetchrow(
                 """
-                SELECT job_id, attempt_id, lease_generation, thread_id, connection_id
+                SELECT job_id, attempt_id, lease_generation, thread_id, connection_id,
+                       residency_generation
                 FROM agent_mcp_invocations WHERE id = $1 FOR UPDATE
                 """,
                 invocation_id,
@@ -1594,6 +1610,7 @@ class PostgresMcpConnectionRepository:
                     "lease_generation",
                     "thread_id",
                     "connection_id",
+                    "residency_generation",
                 )
             ):
                 return None
@@ -1806,6 +1823,7 @@ class PostgresMcpConnectionRepository:
         policy_revision: int | None = None,
         attempt_id: int | None = None,
         lease_generation: int | None = None,
+        residency_generation: int | None = None,
     ) -> dict[str, Any] | None:
         """The oldest approval of one call that is still valid for it.
 
@@ -1827,7 +1845,7 @@ class PostgresMcpConnectionRepository:
             policy_revision=policy_revision,
             attempt_id=attempt_id,
             lease_generation=lease_generation,
-            first_index=6,
+            first_index=7,
         )
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -1835,6 +1853,7 @@ class PostgresMcpConnectionRepository:
                 SELECT * FROM agent_mcp_invocations
                 WHERE job_id = $1 AND connection_id = $2 AND capability_name = $3
                   AND arguments_digest = $4 AND capability_kind = $5
+                  AND residency_generation IS NOT DISTINCT FROM $6::bigint
                   AND status = 'approved' AND expires_at > clock_timestamp(){fence}
                 ORDER BY id
                 LIMIT 1
@@ -1844,6 +1863,7 @@ class PostgresMcpConnectionRepository:
                 capability_name,
                 arguments_digest,
                 capability_kind,
+                residency_generation,
                 *fence_params(
                     config_revision=config_revision,
                     authorization_epoch=authorization_epoch,

@@ -5219,6 +5219,15 @@ async def test_model_credential_uses_only_agent_owned_metadata(
             await conn.execute(
                 "CREATE TEMP VIEW agent_threads AS SELECT * FROM public.agent_threads"
             )
+            # Residency credentials add the Agent-owned membership and sandbox
+            # to the same fence; neither is a gateway account surface.
+            await conn.execute(
+                "CREATE TEMP VIEW agent_thread_sandbox_memberships "
+                "AS SELECT * FROM public.agent_thread_sandbox_memberships"
+            )
+            await conn.execute(
+                "CREATE TEMP VIEW agent_sandboxes AS SELECT * FROM public.agent_sandboxes"
+            )
             # The bindings and their connections are joined on every fenced
             # resolution, so they are exposed the same way rather than read
             # through a second code path this test would not be checking.

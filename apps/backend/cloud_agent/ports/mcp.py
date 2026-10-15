@@ -390,6 +390,7 @@ class McpConnectionRepository(Protocol):
         policy_revision: int,
         expires_at: Any,
         capability_kind: str = "tool",
+        residency_generation: int | None = None,
     ) -> dict[str, Any]:
         """Record a call that is waiting for its owner."""
         ...
@@ -458,6 +459,7 @@ class McpConnectionRepository(Protocol):
         policy_revision: int | None = None,
         attempt_id: int | None = None,
         lease_generation: int | None = None,
+        residency_generation: int | None = None,
     ) -> dict[str, Any] | None:
         """Take exclusive ownership of dispatching one approved call.
 
@@ -501,6 +503,7 @@ class McpConnectionRepository(Protocol):
         policy_revision: int | None = None,
         attempt_id: int | None = None,
         lease_generation: int | None = None,
+        residency_generation: int | None = None,
     ) -> dict[str, Any] | None:
         """The oldest approval of one call that is still valid for it.
 

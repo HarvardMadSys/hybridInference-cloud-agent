@@ -232,9 +232,19 @@ class FakeStore(AllCapabilities):
         return {"job_id": job_id, "attempt_id": attempt_id, "lease_generation": lease_generation}
 
     async def resolve_model_credential(
-        self, *, job_id: str, attempt_id: int, lease_generation: int
+        self,
+        *,
+        job_id: str,
+        attempt_id: int,
+        lease_generation: int,
+        residency_generation: int | None = None,
     ) -> dict[str, Any] | None:
         if not (self.live and (job_id, attempt_id, lease_generation) in self.live_turns):
+            return None
+        if residency_generation is not None and (
+            residency_generation != _RESIDENCY
+            or self.residency_turn != (job_id, attempt_id, lease_generation)
+        ):
             return None
         return {
             "user_id": _OWNER,
@@ -257,12 +267,18 @@ class FakeStore(AllCapabilities):
         return dict(row) if row is not None else None
 
     async def find_approved_mcp_invocation(self, **kwargs: Any) -> dict[str, Any] | None:
+        if self.approved is not None and self.approved.get("residency_generation") != kwargs.get(
+            "residency_generation"
+        ):
+            return None
         return self.approved
 
     async def claim_mcp_invocation(
         self, *, invocation_id: int, **fence: Any
     ) -> dict[str, Any] | None:
         if self.approved is None or int(self.approved["id"]) != int(invocation_id):
+            return None
+        if self.approved.get("residency_generation") != fence.get("residency_generation"):
             return None
         self.claimed.append(invocation_id)
         return {**self.approved, "status": "dispatching", "dispatch_generation": 1}
@@ -289,7 +305,12 @@ class FakeStore(AllCapabilities):
         return True
 
     async def acquire_web_search(
-        self, *, job_id: str, attempt_id: int, lease_generation: int
+        self,
+        *,
+        job_id: str,
+        attempt_id: int,
+        lease_generation: int,
+        residency_generation: int | None = None,
     ) -> WebSearchAdmission:
         if self.search_admission_error:
             raise RuntimeError("web search admission storage unavailable")
@@ -298,6 +319,11 @@ class FakeStore(AllCapabilities):
                 "job_id": job_id,
                 "attempt_id": attempt_id,
                 "lease_generation": lease_generation,
+                **(
+                    {"residency_generation": residency_generation}
+                    if residency_generation is not None
+                    else {}
+                ),
             }
         )
         return self.search_admission

@@ -356,7 +356,14 @@ async def test_approved_dispatch_records_unknown_outcome_after_sse_limit(monkeyp
             transport=transport,
             handshake=protocol.Handshake(protocol_version="2025-11-25"),
         )
-        authorized = SimpleNamespace(job_id="job", alias="example", dispatches=[(7, 2)])
+        authorized = SimpleNamespace(
+            job_id="job",
+            alias="example",
+            dispatches=[(7, 2)],
+            attempt_id=1,
+            lease_generation=1,
+            residency_generation=None,
+        )
         capability = SimpleNamespace(name="search")
         entry = (authorized, capability)
         monkeypatch.setattr(mcp_relay, "_host_catalogue", AsyncMock(return_value={"tool": entry}))
@@ -365,17 +372,25 @@ async def test_approved_dispatch_records_unknown_outcome_after_sse_limit(monkeyp
         monkeypatch.setattr(mcp_relay, "_host_session", AsyncMock(return_value=session))
         built = host.McpHost()
         monkeypatch.setattr(mcp_relay, "_host", lambda: built)
-        store = SimpleNamespace(mcp=AsyncMock())
+        store = SimpleNamespace(
+            mcp=AsyncMock(),
+            credential_queries=SimpleNamespace(
+                resolve_model_credential=AsyncMock(return_value={"job_id": "job"})
+            ),
+        )
         reply = await mcp_relay._host_call(
             {"params": {"name": "tool"}},
             request_id="request",
-            identity={"attempt_id": None, "lease_generation": 0},
+            identity={"attempt_id": 1, "lease_generation": 1},
             store=store,
             authorization=None,
             stateless=True,
         )
     assert "error" in reply
     assert "oversized SSE event" in reply["error"]["message"]
+    store.credential_queries.resolve_model_credential.assert_awaited_once_with(
+        job_id="job", attempt_id=1, lease_generation=1
+    )
     store.mcp.finish_mcp_invocation.assert_awaited_once_with(
         invocation_id=7, dispatch_generation=2, status="outcome_unknown"
     )
@@ -409,7 +424,14 @@ async def test_approved_dispatch_records_unknown_outcome_after_a_malformed_reply
             transport=transport,
             handshake=protocol.Handshake(protocol_version="2025-11-25"),
         )
-        authorized = SimpleNamespace(job_id="job", alias="example", dispatches=[(7, 2)])
+        authorized = SimpleNamespace(
+            job_id="job",
+            alias="example",
+            dispatches=[(7, 2)],
+            attempt_id=1,
+            lease_generation=1,
+            residency_generation=None,
+        )
         capability = SimpleNamespace(name="search")
         entry = (authorized, capability)
         monkeypatch.setattr(mcp_relay, "_host_catalogue", AsyncMock(return_value={"tool": entry}))
@@ -418,16 +440,24 @@ async def test_approved_dispatch_records_unknown_outcome_after_a_malformed_reply
         monkeypatch.setattr(mcp_relay, "_host_session", AsyncMock(return_value=session))
         built = host.McpHost()
         monkeypatch.setattr(mcp_relay, "_host", lambda: built)
-        store = SimpleNamespace(mcp=AsyncMock())
+        store = SimpleNamespace(
+            mcp=AsyncMock(),
+            credential_queries=SimpleNamespace(
+                resolve_model_credential=AsyncMock(return_value={"job_id": "job"})
+            ),
+        )
         reply = await mcp_relay._host_call(
             {"params": {"name": "tool"}},
             request_id="request",
-            identity={"attempt_id": None, "lease_generation": 0},
+            identity={"attempt_id": 1, "lease_generation": 1},
             store=store,
             authorization=None,
             stateless=True,
         )
     assert "error" in reply
+    store.credential_queries.resolve_model_credential.assert_awaited_once_with(
+        job_id="job", attempt_id=1, lease_generation=1
+    )
     store.mcp.finish_mcp_invocation.assert_awaited_once_with(
         invocation_id=7, dispatch_generation=2, status="outcome_unknown"
     )
@@ -473,13 +503,23 @@ async def test_raw_relay_rejects_compression_before_returning_a_stream(monkeypat
     with pytest.raises(HTTPException) as raised:
         await mcp_relay._proxy(
             request,
-            server=McpServer(
-                name="example",
-                connection_id="1",
-                transport=Transport.STREAMABLE_HTTP,
-                url="https://example.invalid/mcp",
+            authorized=SimpleNamespace(
+                server=McpServer(
+                    name="example",
+                    connection_id="1",
+                    transport=Transport.STREAMABLE_HTTP,
+                    url="https://example.invalid/mcp",
+                ),
+                job_id="job",
+                attempt_id=1,
+                lease_generation=1,
+                residency_generation=None,
             ),
-            job_id="job",
+            store=SimpleNamespace(
+                credential_queries=SimpleNamespace(
+                    resolve_model_credential=AsyncMock(return_value={"job_id": "job"})
+                )
+            ),
             method="POST",
         )
     assert raised.value.status_code == 502

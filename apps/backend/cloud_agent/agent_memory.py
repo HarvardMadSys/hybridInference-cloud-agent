@@ -80,6 +80,7 @@ class MemoryTask:
     job_id: str
     attempt_id: int
     lease_generation: int
+    residency_generation: int | None = None
 
 
 def describe(content: str) -> str:

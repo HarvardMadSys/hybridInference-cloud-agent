@@ -14,6 +14,7 @@ from tests.servers.test_mcp_relay_host import (
     _JOB,
     _LEASE,
     _OWNER,
+    _RESIDENCY,
     FakeStore,
     _auth,
     _residency_auth,
@@ -107,8 +108,20 @@ async def test_a_resident_process_saves_for_the_turn_running_now(
     memory_store.residency_turn = ("ajob_next", 9, 1)
     await api.post(_HOST_URL, json=save, headers=_residency_auth())
     assert [entry[0] for entry in memory_store.saved] == [
-        MemoryTask(user_id=_OWNER, job_id=_JOB, attempt_id=_ATTEMPT, lease_generation=_LEASE),
-        MemoryTask(user_id=_OWNER, job_id="ajob_next", attempt_id=9, lease_generation=1),
+        MemoryTask(
+            user_id=_OWNER,
+            job_id=_JOB,
+            attempt_id=_ATTEMPT,
+            lease_generation=_LEASE,
+            residency_generation=_RESIDENCY,
+        ),
+        MemoryTask(
+            user_id=_OWNER,
+            job_id="ajob_next",
+            attempt_id=9,
+            lease_generation=1,
+            residency_generation=_RESIDENCY,
+        ),
     ]
 
 

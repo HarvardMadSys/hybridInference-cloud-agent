@@ -20,6 +20,7 @@ from cloud_agent.agent_memory import (
     normalize_memory,
 )
 from cloud_agent.storage._sql.hosts import LIVE_ATTEMPT_HOST
+from cloud_agent.storage._sql.mcp_residency import lock_mcp_residency
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -156,7 +157,12 @@ async def _live_task_repo(conn: Any, task: MemoryTask) -> str | None:
         task.attempt_id,
         task.lease_generation,
     )
-    if row is None:
+    if row is None or not await lock_mcp_residency(
+        conn,
+        job_id=task.job_id,
+        attempt_id=task.attempt_id,
+        generation=task.residency_generation,
+    ):
         raise AgentMemoryTaskEnded("This task is no longer running.")
     return row["repo"]
 

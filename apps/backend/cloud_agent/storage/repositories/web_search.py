@@ -6,6 +6,7 @@ import uuid
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent.ports.web_search import WebSearchAdmission, WebSearchAdmissionReason
+from cloud_agent.storage._sql.mcp_residency import lock_mcp_residency
 
 if TYPE_CHECKING:
     import asyncpg
@@ -36,6 +37,7 @@ class PostgresWebSearchRepository:
         job_id: str,
         attempt_id: int,
         lease_generation: int,
+        residency_generation: int | None = None,
     ) -> WebSearchAdmission:
         """Admit one search under a fresh attempt fence and shared limits.
 
@@ -93,7 +95,12 @@ class PostgresWebSearchRepository:
                 job_id,
                 attempt_id,
             )
-            if job is None:
+            if job is None or not await lock_mcp_residency(
+                conn,
+                job_id=job_id,
+                attempt_id=attempt_id,
+                generation=residency_generation,
+            ):
                 return WebSearchAdmission(call_id=None, reason="stale_fence")
 
             counts = await conn.fetchrow(

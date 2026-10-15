@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 from cloud_agent.storage._sql.hosts import LIVE_ATTEMPT_HOST
 from cloud_agent.storage._sql.mcp import mcp_binding_row
+from cloud_agent.storage._sql.mcp_residency import residency_fence_sql
 
 if TYPE_CHECKING:
     from typing import Any
@@ -67,6 +68,7 @@ class PostgresCredentialQueries:
         job_id: str,
         attempt_id: int,
         lease_generation: int,
+        residency_generation: int | None = None,
     ) -> dict[str, Any] | None:
         """Resolve Agent-owned job metadata for the MCP relay's live fence.
 
@@ -113,10 +115,12 @@ class PostgresCredentialQueries:
                   AND j.state = 'running'
                   AND NOT j.cancel_requested
                   AND {LIVE_ATTEMPT_HOST}
+                  AND {residency_fence_sql("$4")}
                 """,
                 attempt_id,
                 lease_generation,
                 job_id,
+                residency_generation,
             )
             if row is None:
                 return None
