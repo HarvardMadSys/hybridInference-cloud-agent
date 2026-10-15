@@ -175,6 +175,20 @@ export function tickIndexes(days: number, most = 8): number[] {
   return Array.from({ length: count }, (_, index) => Math.round(index * step));
 }
 
+/**
+ * The reader's clock time at the 00:00 UTC that starts ``atMs``'s day, such as
+ * `8:00` in Beijing; null when the reader's clock already reads UTC there.
+ */
+export function utcMidnightLocal(atMs: number, locale: string, timeZone?: string): string | null {
+  const at = new Date(atMs);
+  if (!Number.isFinite(at.getTime())) return null;
+  const midnight = Date.UTC(at.getUTCFullYear(), at.getUTCMonth(), at.getUTCDate());
+  const options: Intl.DateTimeFormatOptions = { hour: 'numeric', minute: '2-digit' };
+  const local = new Intl.DateTimeFormat(locale, { ...options, timeZone }).format(midnight);
+  const utc = new Intl.DateTimeFormat(locale, { ...options, timeZone: 'UTC' }).format(midnight);
+  return local === utc ? null : local;
+}
+
 /** `in 18 minutes`, `3 hours ago`, in the reader's language. */
 export function relativeTime(iso: string, nowMs: number, locale: string): string {
   const seconds = (Date.parse(iso) - nowMs) / 1000;

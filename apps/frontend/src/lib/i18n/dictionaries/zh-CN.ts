@@ -642,6 +642,7 @@ export const zhCN: Record<TranslationKey, string> = {
   'settings.usage.period': '时间范围',
   'settings.usage.days': '{count} 天',
   'settings.usage.cost': '模型费用',
+  'settings.usage.costEstimate': '估算，不是账单',
   'settings.usage.tokens': 'Token',
   'settings.usage.tokensInOut': '输入 {in} · 输出 {out}',
   'settings.usage.runningTime': '容器运行时长',
@@ -672,7 +673,9 @@ export const zhCN: Record<TranslationKey, string> = {
   'settings.usage.otherModels': '其他模型',
   'settings.usage.noData': '这段时间没有对话轮次。',
   'settings.usage.utcNote':
-    '日期按 UTC 计算。一轮对话计入它开始的那一天；CPU 和内存计入实际使用的那一天。',
+    '每天从 UTC 零点开始算，和每日额度重置的时间一致。一轮对话计入它开始的那一天；CPU 和内存计入实际使用的那一天。',
+  'settings.usage.utcNoteLocal':
+    '每天从 UTC 零点开始算（你这里的 {time}），和每日额度重置的时间一致。一轮对话计入它开始的那一天；CPU 和内存计入实际使用的那一天。',
   'settings.usage.dashboardLink': '每日额度和账户用量',
   'notifications.question': 'Agent 需要你的回答',
   'notifications.succeeded': 'Agent 已完成本轮任务',

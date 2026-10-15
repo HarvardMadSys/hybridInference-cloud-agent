@@ -19,6 +19,7 @@ import {
   tickIndexes,
   tokenTotal,
   unrecordedTurns,
+  utcMidnightLocal,
 } from './usagePresent';
 
 const GIB = 1024 ** 3;
@@ -188,5 +189,16 @@ describe('relative time', () => {
     expect(relativeTime('2026-10-13T12:00:00Z', now, 'en')).toBe('2 days ago');
     expect(relativeTime('2026-10-15T09:00:00Z', now, 'zh-CN')).toBe('3小时前');
     expect(relativeTime('not a time', now, 'en')).toBe('—');
+  });
+});
+
+describe('the start of a UTC day on the reader’s clock', () => {
+  const at = Date.parse('2026-10-15T12:00:00Z');
+  it('reads 00:00 UTC in the reader’s time zone, or nothing on UTC', () => {
+    expect(utcMidnightLocal(at, 'zh-CN', 'Asia/Shanghai')).toBe('8:00');
+    expect(utcMidnightLocal(at, 'en-US', 'America/New_York')).toBe('8:00 PM');
+    expect(utcMidnightLocal(at, 'en-US', 'Asia/Kolkata')).toBe('5:30 AM');
+    expect(utcMidnightLocal(at, 'en-US', 'UTC')).toBeNull();
+    expect(utcMidnightLocal(Number.NaN, 'en-US', 'Asia/Shanghai')).toBeNull();
   });
 });

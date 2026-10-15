@@ -243,6 +243,10 @@ describe('UsageSettings', () => {
   it('shows the period’s cost, tokens and container time, and how much was measured', async () => {
     section();
     await waitFor(async () => expect(await tile('Model cost')).toBe('$12.35'));
+    expect(screen.getByText('Estimate, not a bill')).toBeInTheDocument();
+    expect(
+      screen.getByText(/^Days start at 00:00 UTC.*when the daily limit resets/),
+    ).toBeInTheDocument();
     expect(await tile('Tokens')).toBe('150K');
     expect(screen.getByText('120K in · 30K out')).toBeInTheDocument();
     expect(screen.getByText('10 h')).toBeInTheDocument();
@@ -288,5 +292,9 @@ describe('UsageSettings', () => {
     expect(screen.getByRole('heading', { name: '历史用量' })).toBeInTheDocument();
     expect(await screen.findByText('1 个运行中 · 1 个已停止')).toBeInTheDocument();
     expect(screen.getByText('最后使用：3小时前')).toBeInTheDocument();
+    expect(await screen.findByText('估算，不是账单')).toBeInTheDocument();
+    expect(
+      await screen.findByText(/^每天从 UTC 零点开始算.*和每日额度重置的时间一致/),
+    ).toBeInTheDocument();
   });
 });

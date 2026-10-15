@@ -680,6 +680,7 @@ export const en = {
   'settings.usage.period': 'Period',
   'settings.usage.days': '{count} days',
   'settings.usage.cost': 'Model cost',
+  'settings.usage.costEstimate': 'Estimate, not a bill',
   'settings.usage.tokens': 'Tokens',
   'settings.usage.tokensInOut': '{in} in · {out} out',
   'settings.usage.runningTime': 'Container running time',
@@ -710,7 +711,9 @@ export const en = {
   'settings.usage.otherModels': 'Other models',
   'settings.usage.noData': 'No turns in this period.',
   'settings.usage.utcNote':
-    'Days are in UTC. A turn counts on the day it started; CPU and memory count when they were used.',
+    'Days start at 00:00 UTC, when the daily limit resets. A turn counts on the day it started; CPU and memory count when they were used.',
+  'settings.usage.utcNoteLocal':
+    'Days start at 00:00 UTC ({time} your time), when the daily limit resets. A turn counts on the day it started; CPU and memory count when they were used.',
   'settings.usage.dashboardLink': 'Daily limit and account usage',
   'notifications.question': 'Agent needs your answer',
   'notifications.succeeded': 'Agent turn finished',
