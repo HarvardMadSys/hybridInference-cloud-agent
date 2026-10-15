@@ -389,6 +389,7 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         self.attempt_grants: dict[int, str] = {}
         self.terminal_readiness: dict[int, bool] = {}
         self.thread_workspace_readiness: dict[str, bool] = {}
+        self.workspace_start_fences: list[str] = []
         self.sandbox_processes: list[dict[str, Any]] = []
         self.sandbox_admissions: list[dict[str, Any]] = []
         self.sandbox_settlements: list[dict[str, Any]] = []
@@ -1682,6 +1683,14 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
 
     async def thread_workspace_ready(self, *, thread_id: str) -> bool:
         return self.thread_workspace_readiness.get(thread_id, True)
+
+    async def fence_workspace_start(self, *, thread_id: str) -> str | None:
+        self.workspace_start_fences.append(thread_id)
+        for job in self.jobs.values():
+            sandbox = job.get("thread_sandbox")
+            if job.get("thread_id") == thread_id and isinstance(sandbox, dict):
+                return sandbox.get("state")
+        return None
 
     async def fence_terminal_workspace(self, *, attempt_id: int, lease_generation: int) -> bool:
         if not self._fenced(attempt_id, lease_generation):
@@ -3830,6 +3839,8 @@ async def test_live_workspace_routes_use_the_job_sandbox_manager(store: FakeStor
         ("terminal", workspace_id, "pwd", "/workspace"),
         ("git", workspace_id, store.jobs[job_id].get("base_sha")),
     ]
+    # Each request may start the stopped container, so each fences it first.
+    assert store.workspace_start_fences == [workspace_id] * 4
 
 
 async def test_binary_workspace_payload_preserves_owner_and_path_checks(

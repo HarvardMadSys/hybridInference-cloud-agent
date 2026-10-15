@@ -16,6 +16,7 @@ import asyncpg
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.storage._sql.events import insert_event
 from cloud_agent.storage._sql.rows import load_json
+from cloud_agent.storage._sql.sandbox import FENCE_START_SQL
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -184,11 +185,12 @@ class PostgresSnapshotRepository:
             )
             if captured is None:
                 return None
+            # Capturing starts the container if it is stopped.
             await conn.execute(
-                """
+                f"""
                 UPDATE agent_sandboxes
                 SET snapshot_state = 'snapshotting', idle_deadline = NULL,
-                    updated_at = NOW()
+                    {FENCE_START_SQL}, updated_at = NOW()
                 WHERE id = $1 AND snapshot_state IN ('pending', 'dirty')
                 """,
                 row["sandbox_id"],
@@ -916,11 +918,12 @@ class PostgresSnapshotRepository:
                 """,
                 snapshot_id,
             )
+            # Importing the published base starts the container if stopped.
             await conn.execute(
-                """
+                f"""
                 UPDATE agent_sandboxes
                 SET published_base_sha = $2, snapshot_state = 'importing',
-                    idle_deadline = NULL, updated_at = NOW()
+                    idle_deadline = NULL, {FENCE_START_SQL}, updated_at = NOW()
                 WHERE id = $1
                 """,
                 row["sandbox_id"],

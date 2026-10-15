@@ -45,7 +45,6 @@ import type {
 } from '@/lib/api/admin';
 import { MAX_HOST_SLOTS, MIN_HOST_SLOTS } from '@/lib/api/admin';
 import {
-  drainAgentRunnerHost,
   forgetAgentRunnerHost,
   getAgentRunnerHostCapacityHistory,
   getAgentRunnerHosts,
@@ -76,7 +75,13 @@ import {
   reasonLabel,
   storageCell,
 } from './capacity';
-import { curveSource, curveSourceHosts, formatAge, serverInventory } from './format';
+import {
+  curveSource,
+  curveSourceHosts,
+  formatAge,
+  hostStatusLabel,
+  serverInventory,
+} from './format';
 import { AdminNavigation } from '../AdminNavigation';
 import { ADMIN_PAGE, AdminPageHeader } from '../AdminPageHeader';
 
@@ -106,13 +111,13 @@ const STATUS_STYLES: Record<string, string> = {
     'bg-gray-100 dark:bg-white/5 text-gray-600 dark:text-gray-400 ring-gray-500/20 dark:ring-white/15',
 };
 
-function StatusBadge({ status }: { status: string }) {
-  const style = STATUS_STYLES[status] ?? STATUS_STYLES.disabled;
+function StatusBadge({ host }: { host: AgentRunnerHost }) {
+  const style = STATUS_STYLES[host.status] ?? STATUS_STYLES.disabled;
   return (
     <span
       className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium ring-1 ring-inset ${style}`}
     >
-      {status}
+      {hostStatusLabel(host)}
     </span>
   );
 }
@@ -624,18 +629,26 @@ function HostsView() {
   const handleServerSetting = (host: string, key: string, value: number | null) =>
     void run(() => setAgentRunnerHostSettings(host, { [key]: value }), null);
 
-  const handleRemove = (host: string, slotsUsed: number) => {
-    // The unforced call 409s on a busy host, and the operator would then have
-    // to decide anyway — with the consequence stated, before the request.
-    if (slotsUsed > 0) {
-      const ok = window.confirm(
-        `${host} is still running ${slotsUsed} attempt(s). Removing it ends them: their leases ` +
-          'expire now, and the work is requeued once, or a chat whose turn may already have run ' +
-          'is marked lost. Remove anyway?',
-      );
-      if (!ok) return;
-    }
-    void run(() => removeAgentRunnerHost(host, slotsUsed > 0), `Removed ${host} from the pool.`);
+  // A busy host is not cut off: it stops taking new work, and the control
+  // plane removes it once its running turns end. The row says "removing" until
+  // then, so only the idle case needs a notice.
+  const handleRemove = (host: string, slotsUsed: number) =>
+    void run(
+      () => removeAgentRunnerHost(host, false),
+      slotsUsed > 0
+        ? `${host} stops taking new work and is removed when its ${slotsUsed} running turn(s) finish.`
+        : `Removed ${host} from the pool.`,
+    );
+
+  // The way out of waiting, with the consequence stated before the request.
+  const handleRemoveNow = (host: string, slotsUsed: number) => {
+    const ok = window.confirm(
+      `${host} is still running ${slotsUsed} attempt(s). Removing it now ends them: their ` +
+        'leases expire now, and the work is requeued once, or a chat whose turn may already ' +
+        'have run is marked lost. Remove now?',
+    );
+    if (!ok) return;
+    void run(() => removeAgentRunnerHost(host, true), `Removed ${host} from the pool.`);
   };
 
   const handleForget = (host: string) => {
@@ -764,7 +777,7 @@ function HostsView() {
                         onClick={(event) => {
                           // Buttons inside the row keep their own meaning; a
                           // row click is a convenience for the toggle, not a
-                          // second way to press Drain.
+                          // second way to press Remove.
                           if ((event.target as HTMLElement).closest('button, a, select, input')) {
                             return;
                           }
@@ -791,7 +804,12 @@ function HostsView() {
                           </div>
                         </th>
                         <td data-label="Status" className="px-3 py-4">
-                          <StatusBadge status={host.status} />
+                          <StatusBadge host={host} />
+                          {host.removal_pending && (
+                            <span className="mt-1 block whitespace-nowrap text-[11px] text-gray-500 dark:text-gray-400">
+                              {host.slots_used} running turn(s) left
+                            </span>
+                          )}
                           {facts.stale && (
                             <span className="mt-1 block whitespace-nowrap text-[11px] font-medium text-amber-700 dark:text-amber-300">
                               Capacity stale
@@ -931,31 +949,37 @@ function HostsView() {
                         </td>
                         <td className={`${hostStyles.actions} px-6 py-4`}>
                           <div className="flex flex-wrap items-center justify-end gap-2">
+                            {/* Draining is not offered as an action of its
+                                own: Remove drains a busy host by itself. Only
+                                a host already held back without a deployment
+                                owning it — a pending removal, or a drain made
+                                through the API — gets the way back. */}
+                            {host.status === 'draining' && !host.drain_fence_active && (
+                              <button
+                                type="button"
+                                disabled={busy}
+                                onClick={() =>
+                                  void run(
+                                    () => undrainAgentRunnerHost(host.host),
+                                    `${name} is taking work again.`,
+                                  )
+                                }
+                                className="ui-button ui-button-secondary min-h-9 px-3 py-1.5 text-xs [@media(pointer:coarse)]:min-h-11"
+                              >
+                                {host.removal_pending ? 'Cancel removal' : 'Resume new work'}
+                              </button>
+                            )}
                             <button
                               type="button"
                               disabled={busy}
                               onClick={() =>
-                                void run(
-                                  () =>
-                                    host.status === 'draining'
-                                      ? undrainAgentRunnerHost(host.host)
-                                      : drainAgentRunnerHost(host.host),
-                                  host.status === 'draining'
-                                    ? `${name} is taking work again.`
-                                    : `${name} stops taking new work; running attempts finish.`,
-                                )
+                                host.removal_pending && host.slots_used > 0
+                                  ? handleRemoveNow(host.host, host.slots_used)
+                                  : handleRemove(host.host, host.slots_used)
                               }
-                              className="ui-button ui-button-secondary min-h-9 px-3 py-1.5 text-xs [@media(pointer:coarse)]:min-h-11"
-                            >
-                              {host.status === 'draining' ? 'Resume new work' : 'Pause new work'}
-                            </button>
-                            <button
-                              type="button"
-                              disabled={busy}
-                              onClick={() => handleRemove(host.host, host.slots_used)}
                               className="ui-button min-h-9 border border-status-error/20 px-3 py-1.5 text-xs text-status-error hover:bg-status-error/10 [@media(pointer:coarse)]:min-h-11"
                             >
-                              Remove from pool
+                              {host.removal_pending ? 'Remove now' : 'Remove from pool'}
                             </button>
                           </div>
                         </td>

@@ -340,6 +340,10 @@ class SandboxRepository(Protocol):
         """Record one host-reported checkpoint receipt for its current group."""
         ...
 
+    async def fence_workspace_start(self, *, thread_id: str) -> str | None:
+        """Count a start a workspace request may cause; return the group's state."""
+        ...
+
     async def due_thread_sandbox_stop(
         self,
         *,

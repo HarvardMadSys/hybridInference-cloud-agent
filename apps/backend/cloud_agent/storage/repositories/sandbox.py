@@ -19,8 +19,13 @@ from cloud_agent.logging_utils import get_logger
 from cloud_agent.storage._sql.compute_admission import lock_compute_entry
 from cloud_agent.storage._sql.jobs import fail_unrunnable_follow_ups
 from cloud_agent.storage._sql.rows import load_json, sandbox_row_to_dict
-from cloud_agent.storage._sql.sandbox import THREAD_SANDBOX_SOURCE
+from cloud_agent.storage._sql.sandbox import (
+    FENCE_START_SQL,
+    THREAD_SANDBOX_SOURCE,
+    fence_sandbox_start,
+)
 from cloud_agent_shared.sandbox_resources import parse_sandbox_resource_sample
+from cloud_agent_shared.sandbox_restore import MAX_RESTORE_ATTEMPTS
 
 if TYPE_CHECKING:
     import asyncpg
@@ -1254,9 +1259,9 @@ class PostgresSandboxRepository:
             )
             if locked_membership is None:
                 return None
-            locked_group = await conn.fetchval(
+            locked_group = await conn.fetchrow(
                 """
-                SELECT g.id
+                SELECT g.id, g.state, g.restore_checkpoint_id
                 FROM agent_sandboxes g
                 JOIN agent_thread_sandbox_memberships m ON m.sandbox_id = g.id
                 WHERE m.thread_id = $1 AND g.generation = $2
@@ -1276,6 +1281,8 @@ class PostgresSandboxRepository:
                 WITH updated_group AS (
                     UPDATE agent_sandboxes g
                     SET state = 'running', container_id = $6, archived_at = NULL,
+                        restore_checkpoint_id = NULL, restore_attempts = 0,
+                        restore_attempt_id = NULL,
                         last_activity_at = NOW(), updated_at = NOW()
                     FROM agent_thread_sandbox_memberships m
                     JOIN agent_attempts a ON a.id = m.active_attempt_id
@@ -1310,6 +1317,14 @@ class PostgresSandboxRepository:
             )
             if shared is None:
                 return None
+            if locked_group["state"] == "restoring" and locked_group["restore_checkpoint_id"]:
+                # A host recreated this exact container from the checkpoint and
+                # Docker started it: the object was there, whole, and loadable.
+                await conn.execute(
+                    "UPDATE agent_sandbox_checkpoints SET state = 'verified' "
+                    "WHERE id = $1 AND state = 'reported'",
+                    locked_group["restore_checkpoint_id"],
+                )
             row = await conn.fetchrow(
                 f"SELECT s.* FROM {THREAD_SANDBOX_SOURCE} WHERE s.thread_id = $1",
                 thread_id,
@@ -1887,24 +1902,51 @@ class PostgresSandboxRepository:
 
         The receipt must name the group's current host, generation and exact
         container; anything else is a stale or foreign report and is ignored.
-        Hosts repeat the latest receipt on every heartbeat, so an existing id
-        is a no-op. Returns whether a new receipt was stored. The object is
-        not verified here: restore will check it before trusting it.
+        Hosts repeat the latest receipt on every beat, so an existing id is a
+        no-op. Returns whether a new receipt was stored.
+
+        A new receipt becomes the group's restore point only if nothing could
+        have started the container since it was captured: the group is still
+        stopped and its ``start_seq`` is the one the receipt carries. Every
+        path that may start the container advances the sequence and clears the
+        restore point first, so a receipt repeated by a later beat, or first
+        delivered after such a start, never covers the group again. A receipt
+        without a sequence (an older sandbox manager) never covers it. The
+        object is not verified here: the restoring host checks size and digest
+        against this receipt.
         """
         captured_at = checkpoint["created_at"]
         if isinstance(captured_at, str):
             captured_at = datetime.fromisoformat(captured_at)
-        async with self._pool.acquire() as conn:
+        start_seq = checkpoint.get("start_seq")
+        if isinstance(start_seq, bool) or not isinstance(start_seq, int) or start_seq < 0:
+            start_seq = None
+        async with self._pool.acquire() as conn, conn.transaction():
+            group = await conn.fetchrow(
+                """
+                SELECT state, start_seq FROM agent_sandboxes
+                WHERE id = $1 AND origin_thread_id = $2 AND host = $3
+                  AND generation = $4 AND container_id = $5
+                FOR UPDATE
+                """,
+                checkpoint["sandbox_id"],
+                thread_id,
+                host,
+                int(checkpoint["generation"]),
+                checkpoint["container_id"],
+            )
+            if group is None:
+                return False
             inserted = await conn.fetchval(
                 """
                 INSERT INTO agent_sandbox_checkpoints (
                     id, sandbox_id, generation, host, container_id, base_image,
                     runtime_id, runtime_version, object_key, object_version_id,
                     sha256, size_bytes, new_layer_bytes, layer_count, members,
-                    durations_ms, format_version, captured_at
+                    durations_ms, format_version, captured_at, start_seq
                 )
                 SELECT $1, g.id, $3, $4, $5, $6, $7, $8, $9, $10,
-                       $11, $12, $13, $14, $15::jsonb, $16::jsonb, $17, $18
+                       $11, $12, $13, $14, $15::jsonb, $16::jsonb, $17, $18, $20
                 FROM agent_sandboxes g
                 WHERE g.id = $2 AND g.origin_thread_id = $19 AND g.host = $4
                   AND g.generation = $3 AND g.container_id = $5
@@ -1930,8 +1972,38 @@ class PostgresSandboxRepository:
                 int(checkpoint.get("format_version") or 1),
                 captured_at,
                 thread_id,
+                start_seq,
             )
+            if inserted and start_seq is not None:
+                await conn.execute(
+                    """
+                    UPDATE agent_sandboxes
+                    SET restore_checkpoint_id = $2, updated_at = NOW()
+                    WHERE id = $1 AND state = 'stopped' AND start_seq = $3
+                    """,
+                    checkpoint["sandbox_id"],
+                    checkpoint["checkpoint_id"],
+                    start_seq,
+                )
         return bool(inserted)
+
+    async def fence_workspace_start(self, *, thread_id: str) -> str | None:
+        """Count a start a workspace request may cause; return the group's state.
+
+        Opening a file, a terminal or a Git view of a stopped group starts its
+        container through the sandbox manager, which records nothing here. The
+        fence is taken before the request is forwarded, so the checkpoint of
+        the last stop stops covering the group from that moment on. ``None``
+        when the chat has no group.
+        """
+        async with self._pool.acquire() as conn, conn.transaction():
+            sandbox_id = await conn.fetchval(
+                "SELECT sandbox_id FROM agent_thread_sandbox_memberships WHERE thread_id = $1",
+                thread_id,
+            )
+            if sandbox_id is None:
+                return None
+            return await fence_sandbox_start(conn, str(sandbox_id))
 
     async def due_thread_sandbox_stop(
         self,
@@ -2053,10 +2125,15 @@ class PostgresSandboxRepository:
             )
             if shared is None:
                 return None
-            await conn.execute(
-                """
+            group_state = await conn.fetchval(
+                f"""
                 UPDATE agent_sandboxes g
                 SET state = CASE
+                        -- A failed restore leaves the group in its checkpoint,
+                        -- for another claim, until the attempts run out.
+                        WHEN g.state = 'restoring'
+                         AND ($3 OR g.restore_attempts >= {MAX_RESTORE_ATTEMPTS}) THEN 'lost'
+                        WHEN g.state = 'restoring' THEN 'cold'
                         WHEN $3 AND g.container_id IS NULL THEN 'lost'
                         WHEN g.container_id IS NULL THEN 'provisioning'
                         WHEN g.active_operation_count > 0 OR EXISTS (
@@ -2097,9 +2174,15 @@ class PostgresSandboxRepository:
                         THEN clock_timestamp() + make_interval(secs => $2)
                         ELSE NULL
                     END,
-                    last_error = CASE WHEN $3 THEN $4 ELSE g.last_error END,
+                    restore_attempt_id = CASE
+                        WHEN g.state = 'restoring' THEN NULL ELSE g.restore_attempt_id
+                    END,
+                    last_error = CASE
+                        WHEN $3 OR g.state = 'restoring' THEN $4 ELSE g.last_error
+                    END,
                     updated_at = NOW()
                 WHERE g.id = $1
+                RETURNING g.state
                 """,
                 shared["sandbox_id"],
                 idle_timeout_seconds,
@@ -2107,6 +2190,10 @@ class PostgresSandboxRepository:
                 detail,
                 thread_id,
             )
+            if group_state == "lost" and not lost:
+                # Restore attempts ran out. The queued turns behind this one
+                # can never run; answer them now instead of leaving them queued.
+                await fail_unrunnable_follow_ups(conn, thread_id=thread_id)
             if lost:
                 await conn.execute(
                     "UPDATE agent_attempts SET context_status = 'lost' "
@@ -2267,7 +2354,9 @@ class PostgresSandboxRepository:
         if any(group[key] != value for key, value in immutable.items()):
             raise ValueError("shared sandbox immutable identity or runtime changed")
         if (
-            group["state"] in {"lost", "stopped_dirty", "stopping"}
+            # A cold group has no container anywhere. Only the claim that
+            # rehomes it (cold -> restoring) may reserve it.
+            group["state"] in {"lost", "stopped_dirty", "stopping", "cold"}
             or group["stop_requested_at"] is not None
             or group["deletion_state"] in {"pending", "archived", "deleted"}
             or membership["native_state"] == "lost"
@@ -2315,10 +2404,15 @@ class PostgresSandboxRepository:
         # Activation starts this member's process, not the group's container:
         # an idle retained group is already running until Docker says otherwise.
         # Newly created and stopped groups still await the startup confirmation.
+        # A restoring group stays restoring until its recreated container is
+        # confirmed, and keeps the checkpoint it is recreated from.
         await conn.execute(
-            """
+            f"""
             UPDATE agent_sandboxes
-            SET state = CASE WHEN state = 'running' THEN 'running' ELSE 'starting' END,
+            SET state = CASE
+                    WHEN state IN ('running', 'restoring') THEN state ELSE 'starting'
+                END,
+                {FENCE_START_SQL},
                 idle_deadline = NULL, archived_at = NULL,
                 last_activity_at = NOW(), updated_at = NOW()
             WHERE id = $1
@@ -2414,6 +2508,11 @@ class PostgresSandboxRepository:
             if group["deletion_state"] in {"pending", "archived", "deleted"}:
                 # Host samples predate this transaction. They cannot reopen
                 # admission or resurrect a container fenced for deletion.
+                return None
+            if group["state"] in {"cold", "restoring"}:
+                # Only a checkpoint holds this group until the restore that
+                # claimed it confirms the recreated container. A container the
+                # restoring host reports before then is not yet the group's.
                 return None
             await conn.execute(
                 """
@@ -2567,11 +2666,14 @@ class PostgresSandboxRepository:
                         "COALESCE(idle_deadline, "
                         "clock_timestamp() + make_interval(secs => idle_timeout_seconds))"
                     )
+                # A running container has moved past any checkpoint of its
+                # last stop. Paths that start it fence first; this catches
+                # one that did not.
                 row = await conn.fetchrow(
                     f"""
                     UPDATE agent_sandboxes
                     SET state = 'running', idle_deadline = {deadline_sql},
-                        updated_at = NOW()
+                        restore_checkpoint_id = NULL, updated_at = NOW()
                     WHERE id = $1
                     RETURNING state
                     """,

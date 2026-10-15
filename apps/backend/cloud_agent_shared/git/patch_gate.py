@@ -68,6 +68,8 @@ _BLOCKED_PREFIXES = (".github/",)
 SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("github_token", re.compile(r"\bgh[pousr]_[A-Za-z0-9]{16,}")),
     ("openai_key", re.compile(r"\bsk-[A-Za-z0-9]{20,}")),
+    ("openai_project_key", re.compile(r"\bsk-proj-[A-Za-z0-9_-]{40,}")),
+    ("openrouter_key", re.compile(r"\bsk-or-v1-[A-Za-z0-9]{32,}")),
     ("anthropic_key", re.compile(r"\bsk-ant-[A-Za-z0-9\-_]{20,}")),
     ("gateway_key", re.compile(r"\bhyi-[A-Za-z0-9\-_]{20,}")),
     ("agent_worker_token", re.compile(r"\bajt\.[A-Za-z0-9\-_]{10,}\.[A-Za-z0-9\-_]{10,}")),

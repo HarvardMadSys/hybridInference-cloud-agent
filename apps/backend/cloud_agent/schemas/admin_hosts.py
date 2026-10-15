@@ -125,6 +125,13 @@ class AgentRunnerHost(_SandboxManagerWireNames):
             "whenever host lifecycle, credential, placement, or drain ownership changes."
         ),
     )
+    removal_pending: bool = Field(
+        False,
+        description=(
+            "True while an operator's Remove waits for this draining host's running "
+            "attempts to end; the host is revoked once they have."
+        ),
+    )
     sandbox_runtime: str | None = Field(
         None,
         description=(

@@ -851,7 +851,8 @@ class PostgresComputeResourceRepository:
             ]
             hosts = [
                 dict(r)
-                for r in await conn.fetch("""SELECT h.host,h.status,h.compute_node_id,
+                for r in await conn.fetch("""SELECT h.host,h.status,h.drain_fence_active,
+                (h.removal_requested_at IS NOT NULL) AS removal_pending,h.compute_node_id,
                 n.allocation_id,(h.slots_used+(SELECT COUNT(*) FROM agent_environment_runs r WHERE r.host=h.host AND NOT r.cleanup_complete AND r.lease_expires_at>NOW() AND r.started_at>NOW()-INTERVAL '30 minutes')) AS slots_used,h.slots_total,h.slots_desired,h.last_heartbeat_at,
                 h.labels->>'physical_host' AS physical_host,h.broker_url AS sandbox_manager_url,
                 (SELECT count(*) FROM agent_sandboxes g

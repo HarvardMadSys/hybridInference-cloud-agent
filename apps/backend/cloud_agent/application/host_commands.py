@@ -171,15 +171,19 @@ class HostCommands:
             raise HostCommandError(409, f"The deployment drain epoch for {host!r} is invalid.")
         return drain_fence_epoch
 
-    async def remove(self, *, host: str, force: bool = False) -> None:
-        """Revoke Host access without releasing any underlying machine."""
+    async def remove(self, *, host: str, force: bool = False) -> bool:
+        """Revoke Host access without releasing any underlying machine.
+
+        Returns whether the removal was deferred: a busy Host stops taking
+        work now and is revoked once its running attempts end.
+        """
         outcome = await self.repository.remove_host(host=host, force=force)
         if outcome == "unknown":
             raise HostCommandError(404, f"Unknown runner host: {host}")
         if outcome == "busy":
             raise HostCommandError(
                 409,
-                f"{host!r} is still running attempts. Drain it first, or repeat with "
+                f"{host!r} is still running attempts and cannot stop taking work. Repeat with "
                 "force=true to expire their leases now under the retained-context fail-closed policy.",
             )
         if outcome == "fenced":
@@ -187,6 +191,7 @@ class HostCommands:
                 409,
                 f"{host!r} is held by an automated deployment drain; release it first or repeat with force=true.",
             )
+        return outcome == "draining"
 
     async def global_settings(self, changes: Mapping[str, int | None]) -> dict[str, Any]:
         """Change runtime settings for every server; return the old values for audit."""

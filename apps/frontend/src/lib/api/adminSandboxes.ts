@@ -77,7 +77,9 @@ export type AdminSandboxState =
   | 'stopping'
   | 'stopped'
   | 'stopped_dirty'
-  | 'lost';
+  | 'lost'
+  | 'cold'
+  | 'restoring';
 
 export type AdminSandboxDeletionState = 'none' | 'pending' | 'archived' | 'deleted' | 'failed';
 

@@ -480,7 +480,7 @@ async def _renew_live_grants(
 
 
 async def _reap_offline_hosts(store: HostPoolRepository) -> None:
-    """Move hosts that stopped heartbeating to ``offline``.
+    """Move hosts that stopped heartbeating to ``offline``; finish pending removals.
 
     Runs on the same loop as the attempt reaper rather than on its own, because
     the two are one recovery story told in order: a host disappears, it stops
@@ -496,6 +496,14 @@ async def _reap_offline_hosts(store: HostPoolRepository) -> None:
         logger.warning(
             "agent_hosts_offline",
             extra={"event": "agent_hosts_offline", "hosts": offline},
+        )
+    # A removal the operator asked for while the host was busy completes here,
+    # once the pass that ended its last attempt has given the slot back.
+    removed = await store.finish_host_removals()
+    if removed:
+        logger.info(
+            "agent_hosts_removed",
+            extra={"event": "agent_hosts_removed", "hosts": removed},
         )
 
 

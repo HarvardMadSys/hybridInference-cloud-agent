@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from dotenv import dotenv_values
 
 from cloud_agent import settings
 from cloud_agent.application.compute_resources import ComputeCommands
@@ -198,6 +199,11 @@ class Harness:
     configuration: ComputeConfiguration
     tunnels: FakeTunnels
     release_directory: Path
+    #: What the registry answers for the release's published sandbox image.
+    published_image: str | None = None
+
+    async def _published_image(self, _commit: str) -> str | None:
+        return self.published_image
 
     def restart(self) -> AutomaticComputeSetup:
         return AutomaticComputeSetup(
@@ -208,6 +214,7 @@ class Harness:
             tunnels=self.tunnels,
             validate_bundle=ComputeCommands._validate_bundle,
             release_directory=self.release_directory,
+            published_sandbox_image=self._published_image,
         )
 
     def commands(self) -> ComputeCommands:
@@ -701,3 +708,34 @@ async def test_concurrent_different_requests_do_not_share_a_colliding_route(
         )
         == 2
     )
+
+
+_PUBLISHED = "ghcr.io/harvardmadsys/cloud-agent-sandbox@sha256:" + "a" * 64
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("published", [_PUBLISHED, None])
+async def test_hosts_pull_the_release_s_published_sandbox_image_when_there_is_one(
+    harness: Harness, published: str | None
+) -> None:
+    harness.published_image = published
+
+    result = await harness.commands().create_automatic_setup(request())
+
+    for profile in result["profiles"]:
+        environment = dotenv_values(
+            stream=io.StringIO(harness.assets(profile["id"])["environment"])
+        )
+        metadata = harness.repository.profiles[profile["id"]]["configuration"]["automatic_setup"]
+        if published:
+            # Filled in by the bootstrap from the profile's current revision,
+            # which advances with each release.
+            assert environment["AGENT_SANDBOX_IMAGE"] == (
+                "ghcr.io/harvardmadsys/cloud-agent-sandbox:sandbox-{deployment_sha}"
+            )
+            assert environment["AGENT_SANDBOX_IMAGE_PULL"] == "true"
+            assert metadata["sandbox_image"] == "published"
+        else:
+            assert environment["AGENT_SANDBOX_IMAGE"] == "cloud-agent-sandbox:" + profile["id"]
+            assert "AGENT_SANDBOX_IMAGE_PULL" not in environment
+            assert metadata["sandbox_image"] == "built"

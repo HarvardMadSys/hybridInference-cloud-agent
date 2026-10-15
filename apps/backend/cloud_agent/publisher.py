@@ -313,7 +313,7 @@ def _staged_change_set(repo: Path) -> _StagedChangeSet:
     quoting git applies in a *diff header* is exactly what a hostile patch used
     to hide a path from the pre-apply gate.
     """
-    raw = _run_git(["diff", "--cached", "--raw", "-z", "--no-renames", "--abbrev=64"], cwd=repo)
+    raw = _run_git(["diff", "--cached", "--raw", "-z", "--find-renames", "--abbrev=64"], cwd=repo)
     paths: list[str] = []
     symlinks: list[str] = []
     gitlinks: list[str] = []
@@ -328,24 +328,35 @@ def _staged_change_set(repo: Path) -> _StagedChangeSet:
             continue
         if index + 1 >= len(fields):
             break
-        path = fields[index + 1]
         parts = meta[1:].split()
+        status = parts[4] if len(parts) > 4 else ""
+        path_count = 2 if status.startswith("R") else 1
+        if index + path_count >= len(fields):
+            raise PublishError("git returned an incomplete staged path record")
+        source_path = fields[index + 1]
+        path = fields[index + 2] if path_count == 2 else source_path
         dst_mode = parts[1] if len(parts) > 1 else ""
         if path:
-            paths.append(path)
+            paths.extend((source_path, path) if path_count == 2 else (path,))
             if dst_mode == "120000":
                 symlinks.append(path)
             if dst_mode == "160000":
                 gitlinks.append(path)
             if dst_mode in ("100644", "100755"):
+                unchanged_rename = status.startswith("R") and parts[2] == parts[3]
                 blobs.append(
                     _StagedBlob(
                         path=path,
                         sha=parts[3],
-                        base_sha=parts[2] if parts[0] in ("100644", "100755") else None,
+                        base_sha=(
+                            parts[2]
+                            if parts[0] in ("100644", "100755")
+                            and (status.startswith("M") or unchanged_rename)
+                            else None
+                        ),
                     )
                 )
-        index += 2
+        index += path_count + 1
     return _StagedChangeSet(paths=paths, symlinks=symlinks, gitlinks=gitlinks, blobs=blobs)
 
 

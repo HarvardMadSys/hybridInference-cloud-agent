@@ -224,6 +224,8 @@ class _SharedSupervisor:
     def __init__(self, *, events: list[str] | None = None) -> None:
         self.workspace_backend = _WorkspaceBackend()
         self.calls: list[tuple] = []
+        self.start_seqs: list[int | None] = []
+        self.restores: list[object] = []
         self.imports = self.workspace_backend.imports
         self.started = False
         self.closed = False
@@ -298,8 +300,9 @@ class _SharedSupervisor:
             raise SandboxError("unknown member")
         return [_descriptor("athr_source"), _descriptor("athr_child")]
 
-    def register_manifest(self, spec, members, *, expected_container_id=None):
+    def register_manifest(self, spec, members, *, expected_container_id=None, start_seq=None):
         self.calls.append(("manifest", spec, members, expected_container_id))
+        self.start_seqs.append(start_seq)
         self.threads.update(member.thread_id for member in members)
         return []
 
@@ -318,8 +321,12 @@ class _SharedSupervisor:
         manifest,
         expected_container_id=None,
         profiling=None,
+        start_seq=None,
+        restore=None,
     ):
         self.calls.append(("acquire", thread_id, profiling))
+        self.start_seqs.append(start_seq)
+        self.restores.append(restore)
         return SharedSessionLease(
             thread_id=thread_id,
             origin_thread_id=spec.thread_id,

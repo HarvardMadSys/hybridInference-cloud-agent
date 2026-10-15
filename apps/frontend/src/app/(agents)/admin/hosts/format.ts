@@ -9,6 +9,25 @@
 
 import type { AgentRunnerHost } from '@/lib/api/admin';
 
+/**
+ * A host's status as an operator reads it.
+ *
+ * `draining` is never something an operator chooses on this page: it is the
+ * step a Remove or a deployment takes while running turns finish. So it is
+ * named by what it is on the way to — a removal, an update — and only a drain
+ * started outside the page, through the API, reads as plainly paused.
+ */
+export function hostStatusLabel(host: {
+  status: string;
+  drain_fence_active?: boolean;
+  removal_pending?: boolean;
+}): string {
+  if (host.status !== 'draining') return host.status;
+  if (host.removal_pending) return 'removing';
+  if (host.drain_fence_active) return 'updating';
+  return 'paused';
+}
+
 export function formatAge(seconds: number): string {
   if (seconds < 60) return `${Math.max(0, Math.round(seconds))}s ago`;
   const minutes = Math.floor(seconds / 60);

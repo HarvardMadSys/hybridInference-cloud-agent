@@ -22,6 +22,7 @@ from dotenv import dotenv_values
 
 from cloud_agent.domain.compute import ComputeRefusal, fingerprint
 from cloud_agent.ports.external.compute_provider import SshConnection
+from cloud_agent.providers.compute.sandbox_image import find_published_sandbox_image
 from cloud_agent.providers.compute.setup_tunnels import (
     ControlPlaneEndpoint,
     generate_tunnel_key,
@@ -31,7 +32,7 @@ from cloud_agent.settings import text_setting
 from cloud_agent_shared.sandbox_manager_compat import manager_environment
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
 
     from cloud_agent.compute_config import ComputeConfiguration, ComputeSecretResolver
     from cloud_agent.compute_secrets import ComputeSecretStore
@@ -159,8 +160,12 @@ class AutomaticComputeSetup:
         tunnels: SshTunnelSetup,
         validate_bundle: Callable[[bytes], None],
         release_directory: Path = Path("/app/compute-host-release"),
+        published_sandbox_image: Callable[[str], Awaitable[str | None]] = (
+            find_published_sandbox_image
+        ),
     ) -> None:
         self.repository = repository
+        self.published_sandbox_image = published_sandbox_image
         self.secrets = secrets
         self.resolver = resolver
         self.configuration = configuration
@@ -313,9 +318,15 @@ class AutomaticComputeSetup:
         reverse_port: int,
         gateway_hosts: str,
         control_hosts: str,
+        sandbox_image: str | None = None,
     ) -> dict[str, Any]:
         environment = {
-            "AGENT_SANDBOX_IMAGE": "cloud-agent-sandbox:" + profile_id,
+            # The published image when the release has one: its registry
+            # digest is what lets another Host restore these chats from their
+            # checkpoints. Otherwise the Host builds its own, as before, and
+            # its chats stay on it.
+            "AGENT_SANDBOX_IMAGE": sandbox_image or "cloud-agent-sandbox:" + profile_id,
+            **({"AGENT_SANDBOX_IMAGE_PULL": "true"} if sandbox_image else {}),
             "AGENT_SANDBOX_MANAGER_TOKEN": text_setting("sandbox_manager_token"),
             "AGENT_SANDBOX_MANAGER_REVERSE_BIND": endpoint.gateway_ip,
             "AGENT_SANDBOX_MANAGER_REVERSE_PORT": str(reverse_port),
@@ -392,6 +403,7 @@ class AutomaticComputeSetup:
         reserved: set[int],
         gateway_hosts: str,
         control_hosts: str,
+        sandbox_image: str | None = None,
     ) -> dict[str, Any]:
         first = int(hashlib.sha256(request.request_id.encode()).hexdigest()[:8], 16) % 30000
         for offset in range(30000):
@@ -415,7 +427,13 @@ class AutomaticComputeSetup:
             }:
                 continue
             assets = self._assets(
-                request, endpoint, profile_id, reverse_port, gateway_hosts, control_hosts
+                request,
+                endpoint,
+                profile_id,
+                reverse_port,
+                gateway_hosts,
+                control_hosts,
+                sandbox_image,
             )
             configuration = {
                 "deployment_sha": release.sha,
@@ -431,6 +449,9 @@ class AutomaticComputeSetup:
                     "ready": False,
                     "endpoint": endpoint.model_dump(mode="json"),
                     "reverse_port": reverse_port,
+                    # Whether chats on this Host can move: only a pulled,
+                    # published image can be fetched by another Host.
+                    "sandbox_image": "published" if sandbox_image else "built",
                 },
             }
             try:
@@ -547,6 +568,18 @@ class AutomaticComputeSetup:
         control_hosts = await self.resolver.resolve(control.known_hosts_ref or "")
         reserved = await self._reserved_ports(endpoint.gateway_ip)
         reserved.update({endpoint.main_port, endpoint.mcp_port})
+        # A release that was published has its sandbox image in the registry.
+        # Name it by the commit placeholder the bootstrap fills in, not by
+        # this commit's digest: stored profiles advance with each release and
+        # must pull that release's image, never this one's.
+        published = (
+            None
+            if len(checkpoints) == request.slots
+            else await self.published_sandbox_image(release.sha)
+        )
+        sandbox_image = (
+            None if published is None else published.split("@", 1)[0] + ":sandbox-{deployment_sha}"
+        )
         rows = []
         for slot in range(request.slots):
             saved = checkpoints.get(slot)
@@ -560,6 +593,7 @@ class AutomaticComputeSetup:
                     reserved,
                     gateway_hosts,
                     control_hosts,
+                    sandbox_image,
                 )
             else:
                 self._validate_endpoint(saved["configuration"]["automatic_setup"], endpoint)

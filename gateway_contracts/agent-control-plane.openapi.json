@@ -1969,7 +1969,9 @@
               "stopping",
               "stopped",
               "stopped_dirty",
-              "lost"
+              "lost",
+              "cold",
+              "restoring"
             ],
             "title": "State",
             "type": "string"
@@ -6217,6 +6219,12 @@
             ],
             "description": "Why this host is claiming nothing despite having room — it could not start the process a turn runs in, repeatedly. Empty means nothing is wrong; null means this host does not report it.",
             "title": "Launch Error"
+          },
+          "removal_pending": {
+            "default": false,
+            "description": "True while an operator's Remove waits for this draining host's running attempts to end; the host is revoked once they have.",
+            "title": "Removal Pending",
+            "type": "boolean"
           },
           "runner_version": {
             "anyOf": [
@@ -14306,6 +14314,18 @@
             "title": "Size Bytes",
             "type": "integer"
           },
+          "start_seq": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Start Seq"
+          },
           "version_id": {
             "anyOf": [
               {
@@ -18329,6 +18349,65 @@
         "title": "WorkerSandboxResidencyRequest",
         "type": "object"
       },
+      "WorkerSandboxRestore": {
+        "description": "The checkpoint a claimed cold group is recreated from.",
+        "properties": {
+          "base_image": {
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Base Image",
+            "type": "string"
+          },
+          "checkpoint_id": {
+            "pattern": "^[0-9a-f]{32}$",
+            "title": "Checkpoint Id",
+            "type": "string"
+          },
+          "format_version": {
+            "minimum": 1.0,
+            "title": "Format Version",
+            "type": "integer"
+          },
+          "object_key": {
+            "maxLength": 1024,
+            "minLength": 1,
+            "title": "Object Key",
+            "type": "string"
+          },
+          "sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Sha256",
+            "type": "string"
+          },
+          "size_bytes": {
+            "exclusiveMinimum": 0.0,
+            "title": "Size Bytes",
+            "type": "integer"
+          },
+          "version_id": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version Id"
+          }
+        },
+        "required": [
+          "checkpoint_id",
+          "object_key",
+          "sha256",
+          "size_bytes",
+          "base_image",
+          "format_version"
+        ],
+        "title": "WorkerSandboxRestore",
+        "type": "object"
+      },
       "WorkerSandboxRunningRequest": {
         "description": "Docker start result fenced by sandbox and activation generations.",
         "properties": {
@@ -18640,6 +18719,16 @@
             "title": "Resident State",
             "type": "string"
           },
+          "restore": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkerSandboxRestore"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "runtime_id": {
             "title": "Runtime Id",
             "type": "string"
@@ -18676,6 +18765,12 @@
             "title": "Shared Live",
             "type": "boolean"
           },
+          "start_seq": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Start Seq",
+            "type": "integer"
+          },
           "state": {
             "enum": [
               "provisioning",
@@ -18684,7 +18779,9 @@
               "stopping",
               "stopped",
               "stopped_dirty",
-              "lost"
+              "lost",
+              "cold",
+              "restoring"
             ],
             "title": "State",
             "type": "string"
@@ -22307,7 +22404,7 @@
     },
     "/admin/agent/runner-hosts/{host}/remove": {
       "post": {
-        "description": "Revoke this host's credential and take it out of the pool.\n\nRefused while the host still holds slots, unless forced. The refusal is not\nbureaucracy: the running attempts belong to a machine the platform has just\ndeclared gone, and nobody would learn that until their leases lapsed\nminutes later. Being told \"it is still busy\" is the difference between\ndraining first and finding out afterwards.\n\nForced removal is the deliberate version of the same thing, and it ends\nthat work rather than waiting for it: the revocation expires the host's\nattempt and residency leases in the same transaction. The attempts' worker\ntokens name no host, so a lease left to run would be one the removed\nmachine could keep renewing. Lease fencing then rejects every later write\nfrom it, and the reaper supersedes the attempts and revokes their grants\non its next pass. A retained activation is not replayed because the\nplatform cannot know whether its prompt ran, so that chat is marked LOST.\n\nThe row survives, disabled. ``agent_attempts.host_id`` points at it, and\n\"where did this job run\" should not become unanswerable because the machine\nwas retired. ``DELETE`` forgets that administrative row; neither action is\nevidence that the retained container or Docker data-root was deleted.",
+        "description": "Revoke this host's credential and take it out of the pool.\n\nA host still holding slots is not revoked on the spot: its running attempts\nbelong to a machine the platform would have just declared gone, and nobody\nwould learn that until their leases lapsed minutes later. It drains\ninstead — no new claims, ``removal_pending`` set — and the reaper revokes\nit once its last running attempt ends. Putting it back to work\n(``undrain``) cancels the request.\n\nForced removal is the deliberate version of the same thing, and it ends\nthat work rather than waiting for it: the revocation expires the host's\nattempt and residency leases in the same transaction. The attempts' worker\ntokens name no host, so a lease left to run would be one the removed\nmachine could keep renewing. Lease fencing then rejects every later write\nfrom it, and the reaper supersedes the attempts and revokes their grants\non its next pass. A retained activation is not replayed because the\nplatform cannot know whether its prompt ran, so that chat is marked LOST.\n\nThe row survives, disabled. ``agent_attempts.host_id`` points at it, and\n\"where did this job run\" should not become unanswerable because the machine\nwas retired. ``DELETE`` forgets that administrative row; neither action is\nevidence that the retained container or Docker data-root was deleted.",
         "operationId": "remove_agent_runner_host_admin_agent_runner_hosts__host__remove_post",
         "parameters": [
           {
@@ -23609,7 +23706,9 @@
                 "stopping",
                 "stopped",
                 "stopped_dirty",
-                "lost"
+                "lost",
+                "cold",
+                "restoring"
               ],
               "title": "State",
               "type": "string"

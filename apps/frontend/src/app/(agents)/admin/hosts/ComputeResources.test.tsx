@@ -1146,7 +1146,8 @@ describe('resource dashboard', () => {
     render(<ComputeResources onHostsChanged={vi.fn()} />);
     const oldServer = await screen.findByRole('listitem', { name: /old-host/ });
     expect(within(oldServer).getByText('3 sandboxes')).toBeInTheDocument();
-    expect(within(oldServer).getByText('draining')).toBeInTheDocument();
+    // A drain nobody owns on this page reads as paused, never as `draining`.
+    expect(within(oldServer).getByText('paused')).toBeInTheDocument();
     fireEvent.click(await screen.findByRole('button', { name: 'Activity' }));
     expect(screen.getByText('No active operations.')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Show recent operations' }));

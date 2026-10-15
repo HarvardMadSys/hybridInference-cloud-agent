@@ -1967,15 +1967,105 @@ async def test_removing_keeps_the_row_and_forgetting_drops_it(
     assert await hosts.get_host(host="runner-a") is None
 
 
-async def test_removing_a_busy_host_is_refused_unless_forced(
+async def test_removing_a_busy_host_drains_it_and_the_reaper_finishes_the_job(
+    db, store, hosts: PostgresHostPoolRepository
+):
+    """No new claims at once; revoked only after the running turn has ended."""
+    await _enrol(store, "runner-a", slots_total=2, hosts=hosts)
+    await _create_job(store)
+    claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60, host="runner-a")
+    await _create_job(store)
+
+    assert await hosts.remove_host(host="runner-a") == "draining"
+
+    row = await hosts.get_host(host="runner-a")
+    assert row["status"] == HOST_DRAINING
+    assert row["removal_requested_at"] is not None
+    # A second Remove while waiting keeps the original request time.
+    assert await hosts.remove_host(host="runner-a") == "draining"
+    assert (await hosts.get_host(host="runner-a"))["removal_requested_at"] == row[
+        "removal_requested_at"
+    ]
+    # The queued job is not handed to a host on its way out.
+    assert await _claim(store, worker_id="w2", lease_ttl_seconds=60, host="runner-a") is None
+    # Nor do heartbeats or the offline reaper undo it.
+    await hosts.record_host_heartbeat(host="runner-a")
+    assert await hosts.reap_offline_hosts(interval_seconds=0, missed_intervals=0) == []
+    assert (await hosts.get_host(host="runner-a"))["status"] == HOST_DRAINING
+    # Still busy: the finishing pass leaves it alone.
+    assert await hosts.finish_host_removals() == []
+
+    await _settled(db, store, claim["id"])
+    await store.attempt_commands.transition(
+        job_id=claim["id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        from_states=("running",),
+        to_state="succeeded",
+    )
+
+    assert await hosts.finish_host_removals() == ["runner-a"]
+    row = await hosts.get_host(host="runner-a")
+    assert row["status"] == HOST_DISABLED
+    assert row["enrolled"] is False
+    assert row["removal_requested_at"] is None
+    assert await hosts.finish_host_removals() == []
+
+
+async def test_forcing_a_busy_removal_revokes_at_once(store, hosts: PostgresHostPoolRepository):
+    await _enrol(store, "runner-a", slots_total=2, hosts=hosts)
+    await _create_job(store)
+    await _claim(store, worker_id="w1", lease_ttl_seconds=60, host="runner-a")
+    assert await hosts.remove_host(host="runner-a") == "draining"
+
+    assert await hosts.remove_host(host="runner-a", force=True) == "ok"
+
+    row = await hosts.get_host(host="runner-a")
+    assert row["status"] == HOST_DISABLED
+    assert row["removal_requested_at"] is None
+
+
+async def test_putting_a_removing_host_back_to_work_cancels_the_removal(
     store, hosts: PostgresHostPoolRepository
 ):
     await _enrol(store, "runner-a", slots_total=2, hosts=hosts)
     await _create_job(store)
     await _claim(store, worker_id="w1", lease_ttl_seconds=60, host="runner-a")
+    assert await hosts.remove_host(host="runner-a") == "draining"
 
-    assert await hosts.remove_host(host="runner-a") == "busy"
-    assert await hosts.remove_host(host="runner-a", force=True) == "ok"
+    assert await hosts.set_host_status(host="runner-a", status=HOST_ONLINE) == "ok"
+
+    row = await hosts.get_host(host="runner-a")
+    assert row["status"] == HOST_ONLINE
+    assert row["removal_requested_at"] is None
+
+
+async def test_re_enrolling_a_removing_host_starts_it_afresh(
+    store, hosts: PostgresHostPoolRepository
+):
+    await _enrol(store, "runner-a", slots_total=2, hosts=hosts)
+    await _create_job(store)
+    await _claim(store, worker_id="w1", lease_ttl_seconds=60, host="runner-a")
+    assert await hosts.remove_host(host="runner-a") == "draining"
+
+    row = await hosts.register_host(host="runner-a", credential_hash=hash_secret("cred-new"))
+
+    assert row["status"] == HOST_ENROLLING
+    assert row["removal_requested_at"] is None
+
+
+async def test_only_a_draining_host_can_be_waiting_for_removal(
+    db, store, hosts: PostgresHostPoolRepository
+):
+    import asyncpg
+
+    await _enrol(store, "runner-a", hosts=hosts)
+
+    async with db.acquire() as conn:
+        with pytest.raises(asyncpg.CheckViolationError):
+            await conn.execute(
+                "UPDATE agent_runner_hosts SET removal_requested_at = NOW() WHERE host = 'runner-a'"
+            )
 
 
 async def test_a_forced_removal_ends_the_work_the_host_was_holding(

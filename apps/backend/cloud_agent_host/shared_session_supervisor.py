@@ -36,6 +36,7 @@ from cloud_agent_host.chat_sandbox import (
     RetainedChatFailStopped,
     RetainedChatLost,
     SandboxActionFacts,
+    SandboxRestoreFailed,
 )
 from cloud_agent_host.drivers import DialectRuntime, InputOutcome, PendingInput
 from cloud_agent_host.guest_observer import (
@@ -59,6 +60,7 @@ from cloud_agent_host.resident_transport import (
     ResidentTurn,
 )
 from cloud_agent_host.sandbox import KATA_RUNTIME, SandboxError
+from cloud_agent_host.sandbox_checkpoints import CheckpointRestore
 from cloud_agent_host.session_lifecycle import (
     DEFAULT_CHAT_IDLE_TIMEOUT_S,
     DEFAULT_SWEEP_INTERVAL_S,
@@ -449,6 +451,14 @@ class _Group:
     lifecycle_check: _LifecycleCheck | None = field(default=None, repr=False)
     idle_deadline: float | None = None
     fork_mutex: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    # The control plane's start fence. A request names the fence it took
+    # (``start_seq_pending``); it becomes the group's (``start_seq``) only when
+    # the container is actually started or reused for it, so a checkpoint of a
+    # stop that came first still names the earlier run. ``None`` until a
+    # request names one, as after a sandbox manager restart: a checkpoint then
+    # carries no fence and never covers the group.
+    start_seq: int | None = None
+    start_seq_pending: int | None = None
 
 
 @dataclass(frozen=True, eq=False)
@@ -475,6 +485,7 @@ StoppedArchivePrepareHook = Callable[
     None,
 ]
 ArchiveInspectionHook = Callable[[ChatSandboxSpec, ChatSandboxInspection], None]
+CheckpointRestoreHook = Callable[[str, CheckpointRestore], str]
 MarkerlessFinalPrepareHook = Callable[[ChatSandboxSpec, ChatSandboxInspection], bool]
 
 #: How long a message sent into a turn that has not started here is kept for
@@ -516,6 +527,7 @@ class SharedChatSessionSupervisor:
         started_archive_hook: ArchiveInspectionHook | None = None,
         markerless_final_prepare_hook: MarkerlessFinalPrepareHook | None = None,
         stopped_archive_hook: StoppedArchiveHook | None = None,
+        checkpoint_restore_hook: CheckpointRestoreHook | None = None,
     ) -> None:
         if idle_timeout_s <= 0 or sweep_interval_s <= 0:
             raise ValueError("shared sandbox timeout values must be positive")
@@ -546,6 +558,9 @@ class SharedChatSessionSupervisor:
         self._started_archive_hook = started_archive_hook
         self._markerless_final_prepare_hook = markerless_final_prepare_hook
         self._stopped_archive_hook = stopped_archive_hook
+        #: Turns a moved group's checkpoint into a local image name. Without
+        #: it this sandbox manager refuses to recreate any moved group.
+        self.checkpoint_restore_hook = checkpoint_restore_hook
         self._groups: dict[str, _Group] = {}
         self._members: dict[str, _Group] = {}
         #: Sandboxes a registration is creating or adopting outside the lock.
@@ -1207,6 +1222,9 @@ class SharedChatSessionSupervisor:
             if group.orphan_finalization_pending:
                 raise SessionBusy("shared workspace orphan finalization is pending")
             group.starting = True
+            # Whatever runs from here on belongs to the newest fenced start.
+            if group.start_seq_pending is not None:
+                group.start_seq = group.start_seq_pending
             members = self._archive_members_locked(group)
             expected_container_id = group.inspection.container_id
         start_fence_prepared = False
@@ -1741,8 +1759,15 @@ class SharedChatSessionSupervisor:
         expected_container_id: str | None = None,
         facts: SandboxActionFacts | None = None,
         observer: StageRecorder | None = None,
+        start_seq: int | None = None,
+        restore: CheckpointRestore | None = None,
     ) -> builtins.list[SharedSessionDescriptor]:
-        """Install the control plane's authoritative member aliases."""
+        """Install the control plane's authoritative member aliases.
+
+        A group with no container here is created; a moved group (one the
+        control plane rehomed under a later generation) is created only from
+        ``restore``, its checkpoint, and never empty.
+        """
         if not members:
             raise ValueError("a shared sandbox manifest cannot be empty")
         seen_slots: set[int] = set()
@@ -1762,6 +1787,10 @@ class SharedChatSessionSupervisor:
         with self._lock:
             deadline = time.monotonic() + 30.0
             group = self._groups.get(spec.sandbox_id)
+            if group is not None and group.spec.generation < spec.generation:
+                # The control plane moved this group under a newer generation;
+                # whatever this host remembers of the old one is fenced out.
+                group = self._forget_superseded_locked(group)
             while group is None and spec.sandbox_id in self._creating:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -1778,6 +1807,7 @@ class SharedChatSessionSupervisor:
                         raise SessionLeaseLost(
                             "shared sandbox lifecycle changed during manifest admission"
                         )
+                self._note_start_seq_locked(group, start_seq)
                 return self._install_manifest_locked(
                     group,
                     spec,
@@ -1785,15 +1815,20 @@ class SharedChatSessionSupervisor:
                     validated_members,
                     expected_container_id=expected_container_id,
                 )
+            if not expected_container_id and restore is None and spec.generation > 1:
+                raise SandboxError(
+                    "a moved shared sandbox can only be recreated from its checkpoint"
+                )
             self._creating.add(spec.sandbox_id)
         # Docker create, or the exact adoption check, can take minutes. Only registrations of this sandbox wait for it; the
         # metadata lock stays free for every other group and member.
         try:
-            created = (
-                self._manager.require_existing(spec, container_id=expected_container_id)
-                if expected_container_id
-                else self._manager.create(spec, facts=facts, observer=observer)
-            )
+            if expected_container_id:
+                created = self._manager.require_existing(spec, container_id=expected_container_id)
+            elif restore is not None:
+                created = self._restore_group(spec, restore, facts=facts, observer=observer)
+            else:
+                created = self._manager.create(spec, facts=facts, observer=observer)
         except BaseException:
             with self._lock:
                 self._creating.discard(spec.sandbox_id)
@@ -1806,6 +1841,7 @@ class SharedChatSessionSupervisor:
             if group is None:
                 group = _Group(spec=spec, inspection=created)
                 self._groups[spec.sandbox_id] = group
+            self._note_start_seq_locked(group, start_seq)
             return self._install_manifest_locked(
                 group,
                 spec,
@@ -1813,6 +1849,77 @@ class SharedChatSessionSupervisor:
                 validated_members,
                 expected_container_id=expected_container_id,
             )
+
+    def _restore_group(
+        self,
+        spec: ChatSandboxSpec,
+        restore: CheckpointRestore,
+        *,
+        facts: SandboxActionFacts | None,
+        observer: StageRecorder | None,
+    ) -> ChatSandboxInspection:
+        """Recreate a moved group's container from its checkpoint, stopped.
+
+        Any failure leaves nothing behind that could be taken for the group and
+        is reported as :class:`SandboxRestoreFailed`, which hands the turn back
+        rather than marking the chat lost: the checkpoint is unchanged.
+        """
+        hook = self.checkpoint_restore_hook
+        if hook is None:
+            raise SandboxRestoreFailed("this sandbox manager cannot restore checkpoints")
+        try:
+            self._manager.remove_superseded(spec)
+            image = hook(spec.sandbox_id, restore)
+            return self._manager.create(
+                spec,
+                image=image,
+                checkpoint_id=restore.checkpoint_id,
+                facts=facts,
+                observer=observer,
+            )
+        except SandboxRestoreFailed:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "sandbox checkpoint restore failed",
+                extra={
+                    "event": "sandbox_restore_failed",
+                    "sandbox_id": spec.sandbox_id,
+                    "generation": spec.generation,
+                    "checkpoint_id": restore.checkpoint_id,
+                    "error_type": type(exc).__name__,
+                },
+            )
+            with contextlib.suppress(Exception):
+                self._manager.remove_superseded(spec)
+            raise SandboxRestoreFailed(f"sandbox checkpoint could not be restored: {exc}") from exc
+
+    def _forget_superseded_locked(self, group: _Group) -> _Group | None:
+        """Drop an older generation of a group, unless something here still uses it."""
+        if any(
+            member.lease_token or member.current_turn is not None or member.transport
+            for member in group.members.values()
+        ):
+            raise SessionBusy("an older generation of this shared sandbox is still in use")
+        self._groups.pop(group.spec.sandbox_id, None)
+        for thread_id in list(group.members):
+            if self._members.get(thread_id) is group:
+                self._members.pop(thread_id, None)
+        self._condition.notify_all()
+        return None
+
+    @staticmethod
+    def _note_start_seq_locked(group: _Group, start_seq: int | None) -> None:
+        if start_seq is not None and (
+            group.start_seq_pending is None or start_seq > group.start_seq_pending
+        ):
+            group.start_seq_pending = start_seq
+
+    def start_seq_for(self, sandbox_id: str) -> int | None:
+        """The start fence of the run a stop of this group ends, if known."""
+        with self._lock:
+            group = self._groups.get(sandbox_id)
+            return None if group is None else group.start_seq
 
     def _install_manifest_locked(
         self,
@@ -1962,6 +2069,8 @@ class SharedChatSessionSupervisor:
         manifest: builtins.list[SharedMemberManifest],
         expected_container_id: str | None = None,
         profiling: dict[str, Any] | None = None,
+        start_seq: int | None = None,
+        restore: CheckpointRestore | None = None,
     ) -> SharedSessionLease:
         """Start one group if needed and lease only the addressed member."""
         # Container actions are always reported: they are a couple of string
@@ -1977,6 +2086,8 @@ class SharedChatSessionSupervisor:
             expected_container_id=expected_container_id,
             facts=facts,
             observer=recorder,
+            start_seq=start_seq,
+            restore=restore,
         )
         with self._lock:
             group, member = self._member(thread_id)

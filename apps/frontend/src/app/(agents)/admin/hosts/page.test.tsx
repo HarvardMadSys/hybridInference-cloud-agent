@@ -50,7 +50,6 @@ vi.mock('@/lib/api/admin', () => ({
   getAgentRunnerHostCapacityHistory: vi.fn(),
   setActiveAgentRunnerHost: vi.fn(),
   forgetAgentRunnerHost: vi.fn(),
-  drainAgentRunnerHost: vi.fn(),
   undrainAgentRunnerHost: vi.fn(),
   removeAgentRunnerHost: vi.fn(),
   setAgentRunnerHostSlots: vi.fn(),
@@ -62,7 +61,6 @@ vi.mock('@/lib/api/admin', () => ({
 }));
 
 import {
-  drainAgentRunnerHost,
   forgetAgentRunnerHost,
   getAgentRunnerHostCapacityHistory,
   getAgentRunnerHosts,
@@ -70,6 +68,7 @@ import {
   setActiveAgentRunnerHost,
   setAgentRunnerHostSettings,
   setAgentRunnerHostSlots,
+  undrainAgentRunnerHost,
 } from '@/lib/api/admin';
 
 import { reasonLabel } from './capacity';
@@ -113,7 +112,7 @@ const mocked = {
   list: getAgentRunnerHosts as unknown as ReturnType<typeof vi.fn>,
   history: getAgentRunnerHostCapacityHistory as unknown as ReturnType<typeof vi.fn>,
   pin: setActiveAgentRunnerHost as unknown as ReturnType<typeof vi.fn>,
-  drain: drainAgentRunnerHost as unknown as ReturnType<typeof vi.fn>,
+  undrain: undrainAgentRunnerHost as unknown as ReturnType<typeof vi.fn>,
   forget: forgetAgentRunnerHost as unknown as ReturnType<typeof vi.fn>,
   remove: removeAgentRunnerHost as unknown as ReturnType<typeof vi.fn>,
   slots: setAgentRunnerHostSlots as unknown as ReturnType<typeof vi.fn>,
@@ -387,13 +386,10 @@ describe('AdminHostsPage', () => {
     expect(screen.queryByRole('button', { name: 'Any host' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Pin' })).not.toBeInTheDocument();
     expect(screen.getByLabelText('New sandbox location')).toBeInTheDocument();
-    mocked.drain.mockResolvedValue(
-      pool([
-        host({ host: 'gpu-box-kata', labels: { physical_host: 'gpu-box' }, status: 'draining' }),
-      ]),
-    );
-    fireEvent.click(within(row).getByRole('button', { name: 'Pause new work' }));
-    await waitFor(() => expect(mocked.drain).toHaveBeenCalledWith('gpu-box-kata'));
+    expect(within(row).queryByRole('button', { name: 'Pause new work' })).not.toBeInTheDocument();
+    mocked.remove.mockResolvedValue(pool([]));
+    fireEvent.click(within(row).getByRole('button', { name: 'Remove from pool' }));
+    await waitFor(() => expect(mocked.remove).toHaveBeenCalledWith('gpu-box-kata', false));
   });
 
   it('keeps the multi-server selector visible after choosing Automatic', async () => {
@@ -478,15 +474,48 @@ describe('AdminHostsPage', () => {
     expect(within(select).queryByRole('option', { name: 'disabled' })).not.toBeInTheDocument();
   });
 
-  it('drains without touching the pin', async () => {
-    mocked.drain.mockResolvedValue(pool([host({ status: 'draining' })]));
+  it('removes a busy host once its turns finish, without asking or touching the pin', async () => {
+    mocked.list.mockResolvedValue(pool([host({ slots_used: 2 })]));
+    mocked.remove.mockResolvedValue(
+      pool([host({ status: 'draining', removal_pending: true, slots_used: 2 })]),
+    );
+    const confirm = vi.fn();
+    vi.stubGlobal('confirm', confirm);
     renderPage();
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Pause new work' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Remove from pool' }));
 
-    await waitFor(() => expect(mocked.drain).toHaveBeenCalledWith('runner-a'));
+    await waitFor(() => expect(mocked.remove).toHaveBeenCalledWith('runner-a', false));
+    expect(confirm).not.toHaveBeenCalled();
     expect(mocked.pin).not.toHaveBeenCalled();
-    expect(await screen.findByRole('button', { name: 'Resume new work' })).toBeInTheDocument();
+    expect(await screen.findByText('removing')).toBeInTheDocument();
+    expect(screen.getByText('2 running turn(s) left')).toBeInTheDocument();
+    expect(screen.getByRole('status')).toHaveTextContent('is removed when its 2 running turn(s)');
+    expect(screen.queryByText('draining')).not.toBeInTheDocument();
+  });
+
+  it('cancels a pending removal by putting the host back to work', async () => {
+    mocked.list.mockResolvedValue(
+      pool([host({ status: 'draining', removal_pending: true, slots_used: 1 })]),
+    );
+    mocked.undrain.mockResolvedValue(pool([host()]));
+    renderPage();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Cancel removal' }));
+
+    await waitFor(() => expect(mocked.undrain).toHaveBeenCalledWith('runner-a'));
+    expect(await screen.findByRole('button', { name: 'Remove from pool' })).toBeInTheDocument();
+  });
+
+  it('names a deployment drain as an update and offers no way to undo it', async () => {
+    mocked.list.mockResolvedValue(
+      pool([host({ status: 'draining', drain_fence_active: true, slots_used: 1 })]),
+    );
+    renderPage();
+
+    expect(await screen.findByText('updating')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Resume new work' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Cancel removal' })).not.toBeInTheDocument();
   });
 
   it('forgets only a disabled Host record after explaining the scope', async () => {
@@ -529,23 +558,25 @@ describe('AdminHostsPage', () => {
     await waitFor(() => expect(mocked.remove).toHaveBeenCalledWith('runner-a', false));
   });
 
-  it('makes the operator confirm before forcing a busy host out, and says why', async () => {
-    mocked.list.mockResolvedValue(pool([host({ slots_used: 2 })]));
+  it('makes the operator confirm before forcing a removing host out, and says why', async () => {
+    mocked.list.mockResolvedValue(
+      pool([host({ status: 'draining', removal_pending: true, slots_used: 2 })]),
+    );
     const confirm = vi.fn().mockReturnValue(false);
     vi.stubGlobal('confirm', confirm);
     renderPage();
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Remove from pool' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Remove now' }));
 
     expect(confirm).toHaveBeenCalledTimes(1);
     // The consequence has to be in the prompt: force ends the host's running
     // attempts now, requeueing them or marking a chat lost.
-    expect(confirm.mock.calls[0][0]).toMatch(/Removing it ends them/);
+    expect(confirm.mock.calls[0][0]).toMatch(/Removing it now ends them/);
     expect(mocked.remove).not.toHaveBeenCalled();
 
     confirm.mockReturnValue(true);
     mocked.remove.mockResolvedValue(pool([]));
-    fireEvent.click(screen.getByRole('button', { name: 'Remove from pool' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Remove now' }));
     await waitFor(() => expect(mocked.remove).toHaveBeenCalledWith('runner-a', true));
   });
 
@@ -920,7 +951,7 @@ describe('capacity columns', () => {
     expect(within(row).queryByText('0%')).not.toBeInTheDocument();
     // The rest of the row is untouched: slots and actions still work.
     expect(within(row).getByText('0 / 4 in use')).toBeInTheDocument();
-    expect(within(row).getByRole('button', { name: 'Pause new work' })).toBeEnabled();
+    expect(within(row).getByRole('button', { name: 'Remove from pool' })).toBeEnabled();
   });
 
   it('counts a renamed machine once, not as a partial of two records', async () => {
@@ -1562,16 +1593,18 @@ describe('polling and actions', () => {
     await vi.advanceTimersByTimeAsync(30_000);
 
     // The action answers first.
-    mocked.drain.mockResolvedValue(pool([host({ status: 'draining' })]));
-    fireEvent.click(screen.getByRole('button', { name: 'Pause new work' }));
+    mocked.remove.mockResolvedValue(
+      pool([host({ status: 'draining', removal_pending: true, slots_used: 1 })]),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Remove from pool' }));
     await vi.waitFor(() =>
-      expect(screen.getByRole('button', { name: 'Resume new work' })).toBeInTheDocument(),
+      expect(screen.getByRole('button', { name: 'Cancel removal' })).toBeInTheDocument(),
     );
 
     // The older read lands afterwards and must be discarded.
     landPoll(pool([host()]));
     await vi.advanceTimersByTimeAsync(0);
-    expect(screen.getByRole('button', { name: 'Resume new work' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Cancel removal' })).toBeInTheDocument();
   });
 });
 

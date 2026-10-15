@@ -171,6 +171,21 @@ them, advance together so a later node replacement still sees one revision.
 A rollout that takes the running generation down and then fails restores the
 previous stored bundle. File-backed profile files are not rewritten.
 
+When the registry named by `AGENT_COMPUTE_SANDBOX_IMAGE_REPOSITORY` (default
+`ghcr.io/harvardmadsys/cloud-agent-sandbox`) holds `sandbox-<commit>` for this
+release, the generated Host configuration pulls
+`<repository>:sandbox-{deployment_sha}` instead of building the sandbox image.
+The bootstrap fills in the profile's current revision, so a profile that
+advances with a release pulls that release's image. A pulled image is recorded
+by its registry digest, which is what lets another Host restore the node's
+chats from their checkpoints (see
+[Restoring a removed host's sandboxes](operations.md#restoring-a-removed-hosts-sandboxes)).
+Without a published image the Host builds its own, as before, and its chats
+stay on it; the profile's `automatic_setup.sandbox_image` says which
+(`published` or `built`). Stored setups keep the environment they were created
+with: use **Start new setup** to give existing slots the published image. A
+setup that pulls fails on a later release whose image was never published.
+
 Automatic setup requires a control-plane image built with its full release
 revision, the compute encryption key and the existing sandbox manager token. The form
 shows missing prerequisites. Rebuild or update older images to include the
@@ -450,9 +465,15 @@ Pool and resource actions have different effects:
 
 | Action | Effect |
 | --- | --- |
-| `Remove from pool` | Revokes the Host credential; leaves the machine intact. |
+| `Remove from pool` | Revokes the Host credential; leaves the machine intact. A Host still running turns stops taking new work and shows `removing` until they finish, and the reaper then revokes it. |
+| `Cancel removal` | Puts a `removing` Host back to work. |
+| `Remove now` | Revokes a `removing` Host at once and ends its running turns: they are requeued once, or a chat whose turn may already have run is marked lost. |
 | `Forget` | Removes an eligible history record. |
 | `Retire/release` | Releases the complete allocation; for CloudLab, the whole experiment. Existing SSH has no cloud-destruction capability. |
+
+The page has no separate pause action. A Host held by a deployment drain shows
+`updating`; one drained through the `/drain` API shows `paused` and offers
+`Resume new work`.
 
 Release requires complete scope, no global placement reference, no running,
 in-flight or retained dependencies, and fresh sandbox manager and machine inventory.

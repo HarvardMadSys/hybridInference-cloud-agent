@@ -231,6 +231,182 @@ def _run(env: dict[str, str], *command: str) -> subprocess.CompletedProcess[str]
     )
 
 
+def _run_relay_probe(
+    tmp_path: Path,
+    *,
+    relay_ids: str,
+    status: str = "200",
+    second_status: str | None = None,
+    deadline: int = 5,
+) -> subprocess.CompletedProcess[str]:
+    """Run the real relay probe with only its Docker boundary stubbed."""
+    source = SANDBOX_HOST.read_text()
+    probe = source[
+        source.index("probe_sandbox_relay() {") : source.index("\n}\n\n# Per-replica attestation")
+        + 2
+    ]
+    state_file = tmp_path / "relay-probe-count"
+    inspect_count_file = tmp_path / "relay-inspect-count"
+    run_count_file = tmp_path / "relay-run-count"
+    ready_marker = tmp_path / "ready-marker"
+    harness = tmp_path / "relay-probe.sh"
+    harness.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "SECONDS=0\n"
+        "KATA_RUNTIME=runc\n"
+        "SANDBOX_IMAGE=relay-probe-image\n"
+        "env_or_dotenv() { printf '%s' 'kata'; }\n"
+        "log() { printf '%s\\n' \"$*\"; }\n"
+        "die() { printf '%s\\n' \"$*\" >&2; exit 1; }\n"
+        "sleep() { SECONDS=$((SECONDS + ${1:-1})); }\n"
+        "compose() {\n"
+        "  local count=0\n"
+        f"  [[ ! -f {str(state_file)!r} ]] || read -r count < {str(state_file)!r}\n"
+        "  count=$((count + 1))\n"
+        f"  printf '%s\\n' \"$count\" > {str(state_file)!r}\n"
+        '  case "$RELAY_IDS" in\n'
+        "    recover) (( count == 1 )) || printf '%s' 'relay-id' ;;\n"
+        "    address-recover|no-address|inspect-recover|inspect-persistent|stale-address) printf '%s' 'relay-id' ;;\n"
+        "    missing) return 0 ;;\n"
+        "    ready) printf '%s' 'relay-id' ;;\n"
+        "  esac\n"
+        "}\n"
+        "docker() {\n"
+        '  case "$1" in\n'
+        "    inspect)\n"
+        '      [[ -n "${2:-}" ]] || return 1\n'
+        f"      local count=0; [[ ! -f {str(inspect_count_file)!r} ]] || read -r count < {str(inspect_count_file)!r}\n"
+        "      count=$((count + 1))\n"
+        f"      printf '%s\\n' \"$count\" > {str(inspect_count_file)!r}\n"
+        '      if [[ "$RELAY_IDS" == inspect-persistent || ( "$RELAY_IDS" == inspect-recover && $count == 1 ) ]]; then return 1; fi\n'
+        '      if [[ "$RELAY_IDS" == no-address || ( "$RELAY_IDS" == address-recover && $count == 1 ) || ( "$RELAY_IDS" == stale-address && $count == 2 ) ]]; then\n'
+        '        printf \'%s\' \'[{"NetworkSettings":{"Networks":{"agent-relays":{"IPAddress":""}}}}]\'\n'
+        "      else\n"
+        '        printf \'%s\' \'[{"NetworkSettings":{"Networks":{"agent-relays":{"IPAddress":"172.24.0.2"}}}}]\'\n'
+        "      fi\n"
+        "      ;;\n"
+        "    run)\n"
+        f"      local count=0; [[ ! -f {str(run_count_file)!r} ]] || read -r count < {str(run_count_file)!r}\n"
+        "      count=$((count + 1))\n"
+        f"      printf '%s\\n' \"$count\" > {str(run_count_file)!r}\n"
+        '      if [[ "$count" == 1 ]]; then printf \'%s\' "$HTTP_STATUS"; else printf \'%s\' "$HTTP_STATUS_SECOND"; fi\n'
+        "      ;;\n"
+        "    *) return 0 ;;\n"
+        "  esac\n"
+        "}\n"
+        + probe
+        + f"\nprobe_sandbox_relay agent-relays http://agent-gateway:8080/health 'inference gateway' {deadline} diagnostic gateway-tunnel && printf '%s\\n' ready > {str(ready_marker)!r}\n"
+    )
+    env = {
+        **os.environ,
+        "RELAY_IDS": relay_ids,
+        "HTTP_STATUS": status,
+        "HTTP_STATUS_SECOND": second_status or status,
+    }
+    return subprocess.run(
+        ["bash", str(harness)],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_sandbox_relay_probe_retries_until_compose_creates_relay(tmp_path: Path) -> None:
+    result = _run_relay_probe(tmp_path, relay_ids="recover", deadline=8)
+
+    assert result.returncode == 0, result.stderr
+    assert "can reach the healthy inference gateway" in result.stdout
+    assert (tmp_path / "relay-probe-count").read_text().strip() == "2"
+
+
+def test_sandbox_relay_probe_retries_until_compose_assigns_relay_address(tmp_path: Path) -> None:
+    result = _run_relay_probe(tmp_path, relay_ids="address-recover", deadline=8)
+
+    assert result.returncode == 0, result.stderr
+    assert "can reach the healthy inference gateway" in result.stdout
+    assert (tmp_path / "relay-probe-count").read_text().strip() == "2"
+
+
+def test_sandbox_relay_probe_recovers_from_transient_http_failure(tmp_path: Path) -> None:
+    result = _run_relay_probe(
+        tmp_path, relay_ids="ready", status="503", second_status="200", deadline=8
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "relay-inspect-count").read_text().strip() == "2"
+    assert (tmp_path / "relay-run-count").read_text().strip() == "2"
+    assert (tmp_path / "ready-marker").read_text().strip() == "ready"
+
+
+def test_sandbox_relay_probe_does_not_reuse_a_stale_relay_address(tmp_path: Path) -> None:
+    result = _run_relay_probe(
+        tmp_path, relay_ids="stale-address", status="503", second_status="200", deadline=3
+    )
+
+    assert result.returncode != 0
+    assert "has no address on agent-relays" in result.stderr
+    assert (tmp_path / "relay-inspect-count").read_text().strip() == "2"
+    assert (tmp_path / "relay-run-count").read_text().strip() == "1"
+    assert not (tmp_path / "ready-marker").exists()
+
+
+def test_sandbox_relay_probe_retries_when_container_disappears_before_inspect(
+    tmp_path: Path,
+) -> None:
+    result = _run_relay_probe(tmp_path, relay_ids="inspect-recover", deadline=8)
+
+    assert result.returncode == 0, result.stderr
+    assert "can reach the healthy inference gateway" in result.stdout
+    assert (tmp_path / "relay-inspect-count").read_text().strip() == "2"
+    assert (tmp_path / "relay-run-count").read_text().strip() == "1"
+    assert (tmp_path / "ready-marker").read_text().strip() == "ready"
+
+
+def test_sandbox_relay_probe_fails_closed_when_relay_never_appears(tmp_path: Path) -> None:
+    result = _run_relay_probe(tmp_path, relay_ids="missing", deadline=3)
+
+    assert result.returncode != 0
+    assert "is not available on agent-relays" in result.stderr
+    assert "compose service has no container ID" in result.stderr
+    assert (tmp_path / "relay-probe-count").read_text().strip() == "2"
+    assert not (tmp_path / "ready-marker").exists()
+
+
+def test_sandbox_relay_probe_fails_closed_when_relay_never_gets_an_address(tmp_path: Path) -> None:
+    result = _run_relay_probe(tmp_path, relay_ids="no-address", deadline=3)
+
+    assert result.returncode != 0
+    assert "is not available on agent-relays" in result.stderr
+    assert "container has no address on agent-relays" in result.stderr
+    assert (tmp_path / "relay-probe-count").read_text().strip() == "2"
+    assert not (tmp_path / "ready-marker").exists()
+
+
+def test_sandbox_relay_probe_fails_closed_when_inspect_never_finds_container(
+    tmp_path: Path,
+) -> None:
+    result = _run_relay_probe(tmp_path, relay_ids="inspect-persistent", deadline=3)
+
+    assert result.returncode != 0
+    assert "is not available on agent-relays" in result.stderr
+    assert "container has no address on agent-relays" in result.stderr
+    assert (tmp_path / "relay-inspect-count").read_text().strip() == "2"
+    assert not (tmp_path / "relay-run-count").exists()
+    assert not (tmp_path / "ready-marker").exists()
+
+
+def test_sandbox_relay_probe_fails_closed_when_relay_stays_unhealthy(tmp_path: Path) -> None:
+    result = _run_relay_probe(tmp_path, relay_ids="ready", status="503", deadline=3)
+
+    assert result.returncode != 0
+    assert "last HTTP status: 503" in result.stderr
+    assert (tmp_path / "relay-probe-count").read_text().strip() == "2"
+    assert not (tmp_path / "ready-marker").exists()
+
+
 def test_shared_live_is_the_only_deployment_mode() -> None:
     """No configuration can route a job back to one-shot execution."""
     sources = "\n".join(

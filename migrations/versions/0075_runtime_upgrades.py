@@ -1,7 +1,7 @@
 """Store agent CLI updates an admin asked for, and each host's progress.
 
-Revision ID: 0073_runtime_upgrades
-Revises: 0072_drop_old_memory_tables
+Revision ID: 0075_runtime_upgrades
+Revises: 0074_host_removal_pending
 
 ``agent_runner_policy.runtime_upgrades`` holds one target per runtime: the
 version every host should download, the instant its dependencies resolve at,
@@ -13,8 +13,8 @@ default, so a control plane or host from before this revision ignores them.
 
 from alembic import op
 
-revision = "0073_runtime_upgrades"
-down_revision = "0072_drop_old_memory_tables"
+revision = "0075_runtime_upgrades"
+down_revision = "0074_host_removal_pending"
 branch_labels = None
 depends_on = None
 

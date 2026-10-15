@@ -14,10 +14,27 @@ SANDBOX_CURSOR_SCOPE = cursor_scope(["sandboxes", "running"])
 SANDBOX_TRAJECTORY_MEMBER_LIMIT = 128
 RESOURCE_STALE_SECONDS = 90.0
 SandboxState = Literal[
-    "provisioning", "starting", "running", "stopping", "stopped", "stopped_dirty", "lost"
+    "provisioning",
+    "starting",
+    "running",
+    "stopping",
+    "stopped",
+    "stopped_dirty",
+    "lost",
+    "cold",
+    "restoring",
 ]
 SandboxStateFilter = Literal[
-    "all", "provisioning", "starting", "running", "stopping", "stopped", "stopped_dirty", "lost"
+    "all",
+    "provisioning",
+    "starting",
+    "running",
+    "stopping",
+    "stopped",
+    "stopped_dirty",
+    "lost",
+    "cold",
+    "restoring",
 ]
 
 

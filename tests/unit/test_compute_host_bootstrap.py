@@ -707,3 +707,25 @@ async def test_deployment_environment_rejects_unrelated_and_control_plane_author
     with pytest.raises(ProviderError, match="security boundary"):
         await bootstrap.deploy(NODE, profile, INTENT, SecretStr("enrollment"))
     assert transport.run.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_a_template_can_name_the_sandbox_image_published_for_the_deployed_commit(tmp_path):
+    bootstrap, profile, transport, secrets = setup(tmp_path)
+    secrets["deployment:env"] += (
+        "\nAGENT_SANDBOX_IMAGE=ghcr.io/harvardmadsys/cloud-agent-sandbox:sandbox-{deployment_sha}"
+        "\nAGENT_SANDBOX_IMAGE_PULL=true"
+    )
+
+    result = await bootstrap.deploy(NODE, profile, INTENT, SecretStr("one-time-enrollment"))
+
+    assert result.ready
+    stdin = transport.run.call_args.kwargs["stdin"]
+    with tarfile.open(fileobj=io.BytesIO(stdin), mode="r:gz") as archive:
+        env = dotenv_values(
+            stream=io.StringIO(archive.extractfile(".env").read().decode()), interpolate=False
+        )
+    assert env["AGENT_SANDBOX_IMAGE"] == (
+        "ghcr.io/harvardmadsys/cloud-agent-sandbox:sandbox-" + profile.deployment_sha
+    )
+    assert env["AGENT_SANDBOX_IMAGE_PULL"] == "true"

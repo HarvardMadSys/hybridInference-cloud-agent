@@ -386,6 +386,11 @@ async def hydrate_shared_sandbox_manager(
     sandbox = job.get("thread_sandbox")
     if not isinstance(sandbox, dict) or sandbox.get("shared_live") is not True:
         return None
+    if sandbox.get("state") in {"cold", "restoring"}:
+        # No container to alias yet. Registering would describe a group with
+        # no container, which a sandbox manager may only recreate from the
+        # checkpoint the restoring turn carries.
+        return sandbox_manager
     if sandbox_manager is not None:
         await sandbox_manager.register_shared_sandbox(sandbox)
     return sandbox_manager

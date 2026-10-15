@@ -739,6 +739,7 @@ class SandboxManagerClient:
                 "runtime_version": sandbox.get("runtime_version"),
                 "sandbox_image_digest": sandbox.get("sandbox_image_digest"),
                 "expected_container_id": sandbox.get("container_id"),
+                "start_seq": sandbox.get("start_seq"),
                 "resident_slot_capacity": sandbox["resident_slot_capacity"],
                 "memory_limit": sandbox["memory_limit"],
                 "cpu_limit": sandbox["cpu_limit"],

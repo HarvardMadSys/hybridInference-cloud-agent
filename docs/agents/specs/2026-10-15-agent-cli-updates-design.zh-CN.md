@@ -98,7 +98,7 @@ Settings → Agent versions 里，每个可以更新的 agent 下面会显示：
 
 ## 七 存储与接口
 
-- 迁移 `0073_runtime_upgrades`：
+- 迁移 `0075_runtime_upgrades`：
   - `agent_runner_policy.runtime_upgrades`（JSON 对象）：每个 runtime 一个目标。
   - `agent_runner_hosts.runtime_downloads`（JSON 对象，可以为空）：每台主机的上报。
 

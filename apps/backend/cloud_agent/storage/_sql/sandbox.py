@@ -8,7 +8,9 @@ that reads these can import them without importing everything else.
 from __future__ import annotations
 
 import json
+from typing import Any
 
+from cloud_agent_shared.sandbox_restore import MAX_RESTORE_ATTEMPTS
 from cloud_agent_shared.shared_protocol import (
     FORK_HELPER,
     MID_TURN_INPUT_CAPABILITY_PREFIX,
@@ -118,8 +120,98 @@ THREAD_SANDBOX_SOURCE = f"""
               -- rows but release their slots. Only current slot owners belong
               -- in the host manifest.
               AND peer.resident_slot_id IS NOT NULL
-        ), '[]'::jsonb) AS group_members
+        ), '[]'::jsonb) AS group_members,
+        g.start_seq,
+        g.restore_attempts,
+        -- What the claiming host recreates the group from. Only a group that
+        -- a restore-capable host has claimed carries it: every other group
+        -- either has its container or must not be created empty.
+        (
+            SELECT jsonb_build_object(
+                'checkpoint_id', c.id,
+                'object_key', c.object_key,
+                'version_id', c.object_version_id,
+                'sha256', c.sha256,
+                'size_bytes', c.size_bytes,
+                'base_image', c.base_image,
+                'format_version', c.format_version
+            )
+            FROM agent_sandbox_checkpoints c
+            WHERE g.state = 'restoring' AND c.id = g.restore_checkpoint_id
+        ) AS restore
     FROM agent_thread_sandbox_memberships m
     JOIN agent_sandboxes g ON g.id = m.sandbox_id
 ) AS s
 """
+
+# SET-clause fragment for ``agent_sandboxes``: count one more start the
+# control plane let through and drop the restore point a start would make
+# stale. A checkpoint receipt covers the group only while the sequence it
+# carries is still current, so every path that may start the container takes
+# this before it reaches the sandbox manager. A cold or restoring group keeps
+# the checkpoint it is recreated from.
+FENCE_START_SQL = (
+    "start_seq = start_seq + 1, "
+    "restore_checkpoint_id = CASE WHEN state IN ('cold', 'restoring') "
+    "THEN restore_checkpoint_id ELSE NULL END"
+)
+
+
+async def fence_sandbox_start(conn: Any, sandbox_id: str) -> str | None:
+    """Fence one group against starts and return its state.
+
+    For callers that are about to ask a sandbox manager for something that may
+    start a stopped container: a workspace request, a fork, a snapshot. The
+    returned state lets them refuse a group that only a checkpoint holds.
+    """
+    return await conn.fetchval(
+        f"""
+        UPDATE agent_sandboxes
+        SET {FENCE_START_SQL}, updated_at = NOW()
+        WHERE id = $1
+        RETURNING state
+        """,
+        sandbox_id,
+    )
+
+
+async def release_failed_restore(conn: Any, attempt_id: int, detail: str) -> str | None:
+    """Return a group this attempt was recreating to its checkpoint.
+
+    The claim that rehomes a cold group records its attempt. However that
+    attempt ends before Docker confirmed the recreated container (handed back,
+    finished, abandoned, or its lease expired), nothing was admitted and the
+    checkpoint is untouched, so the group goes back to ``cold`` for another
+    claim; a container the attempt may have left is fenced by the generation
+    the next claim advances. Once the attempts run out it is ``lost`` instead.
+    Returns the group's new state, or ``None`` when the attempt restored
+    nothing.
+    """
+    # Memberships before their group, the order every writer keeps. The
+    # restoring member may already hold the attempt from its reservation.
+    await conn.execute(
+        """
+        UPDATE agent_thread_sandbox_memberships
+        SET active_attempt_id = NULL, updated_at = NOW()
+        WHERE active_attempt_id = $1
+          AND sandbox_id IN (
+              SELECT id FROM agent_sandboxes
+              WHERE restore_attempt_id = $1 AND state = 'restoring'
+          )
+        """,
+        attempt_id,
+    )
+    return await conn.fetchval(
+        f"""
+        UPDATE agent_sandboxes
+        SET state = CASE
+                WHEN restore_attempts >= {MAX_RESTORE_ATTEMPTS} THEN 'lost' ELSE 'cold'
+            END,
+            container_id = NULL, restore_attempt_id = NULL,
+            last_error = $2, updated_at = NOW()
+        WHERE restore_attempt_id = $1 AND state = 'restoring'
+        RETURNING state
+        """,
+        attempt_id,
+        detail,
+    )

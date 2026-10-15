@@ -230,6 +230,17 @@ export function SandboxManagement({
               The host reports this sandbox as {sandbox.state.replaceAll('_', ' ')}.
             </p>
           )}
+          {sandbox.state === 'cold' && (
+            <p role="status" className="mt-2 text-sm text-gray-700 dark:text-gray-200">
+              Its host was removed. Only the latest checkpoint holds this sandbox; the next message
+              to any of its chats restores it on another host.
+            </p>
+          )}
+          {sandbox.state === 'restoring' && (
+            <p role="status" className="mt-2 text-sm text-amber-700 dark:text-amber-400">
+              {sandbox.host} is recreating this sandbox from its checkpoint.
+            </p>
+          )}
           {sandbox.archived_at && (
             <p role="status" className="mt-2 text-sm text-gray-700 dark:text-gray-200">
               Removed from the admin inventory.{' '}
