@@ -9,6 +9,7 @@ const SECTIONS = [
   { key: 'sandboxes', label: 'Sandboxes', href: '/admin/sandboxes' },
   { key: 'activity', label: 'Activity', href: '/admin/activity' },
   { key: 'usage', label: 'Usage', href: '/admin/usage' },
+  { key: 'teams', label: 'Teams', href: '/admin/teams' },
   { key: 'measurements', label: 'Measurements', href: '/admin/measurements' },
   { key: 'settings', label: 'Settings', href: '/admin/settings' },
   { key: 'database', label: 'Database', href: '/admin/database' },
@@ -24,6 +25,7 @@ export function AdminNavigation({
     | 'runs'
     | 'activity'
     | 'usage'
+    | 'teams'
     | 'measurements'
     | 'settings'
     | 'database'

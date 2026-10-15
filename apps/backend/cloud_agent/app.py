@@ -160,6 +160,7 @@ def create_app() -> FastAPI:
         admin_sandboxes,
         admin_settings,
         admin_steps,
+        admin_teams,
         admin_usage,
         agent_memory,
         compute_registration,
@@ -277,6 +278,7 @@ def create_app() -> FastAPI:
     # Read-only, and its own module: the audit trail is written by every admin
     # handler and read by this one page.
     app.include_router(admin_audit.router)
+    app.include_router(admin_teams.router)
     install_admin_no_store(
         app,
         prefixes=(

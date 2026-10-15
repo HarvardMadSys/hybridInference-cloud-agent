@@ -3009,6 +3009,338 @@
         "title": "AdminStepsPage",
         "type": "object"
       },
+      "AdminTeamAuditEvent": {
+        "description": "One audit event with the people it names.",
+        "properties": {
+          "action": {
+            "enum": [
+              "team_created",
+              "team_renamed",
+              "team_deleted",
+              "invitation_created",
+              "invitation_revoked",
+              "join_requested",
+              "join_approved",
+              "join_declined",
+              "member_left",
+              "member_removed",
+              "member_role_changed",
+              "ownership_transferred",
+              "environment_created",
+              "environment_updated",
+              "environment_archived"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "actor": {
+            "$ref": "#/components/schemas/TeamPerson"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "target_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Id"
+          },
+          "target_user": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TeamPerson"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "action",
+          "actor",
+          "target_user",
+          "target_id",
+          "created_at"
+        ],
+        "title": "AdminTeamAuditEvent",
+        "type": "object"
+      },
+      "AdminTeamAuditListResponse": {
+        "description": "A page of audit events, newest first; pass ``next_before`` for the next.",
+        "properties": {
+          "events": {
+            "items": {
+              "$ref": "#/components/schemas/AdminTeamAuditEvent"
+            },
+            "title": "Events",
+            "type": "array"
+          },
+          "next_before": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Before"
+          }
+        },
+        "required": [
+          "events",
+          "next_before"
+        ],
+        "title": "AdminTeamAuditListResponse",
+        "type": "object"
+      },
+      "AdminTeamDetailResponse": {
+        "description": "One team as the administrator sees it.",
+        "properties": {
+          "invitations": {
+            "$ref": "#/components/schemas/AdminTeamInvitationCounts"
+          },
+          "join_requests": {
+            "items": {
+              "$ref": "#/components/schemas/JoinRequestResponse"
+            },
+            "title": "Join Requests",
+            "type": "array"
+          },
+          "members": {
+            "items": {
+              "$ref": "#/components/schemas/AdminTeamMember"
+            },
+            "title": "Members",
+            "type": "array"
+          },
+          "team": {
+            "$ref": "#/components/schemas/AdminTeamSummary"
+          }
+        },
+        "required": [
+          "team",
+          "members",
+          "join_requests",
+          "invitations"
+        ],
+        "title": "AdminTeamDetailResponse",
+        "type": "object"
+      },
+      "AdminTeamInvitationCounts": {
+        "description": "How many of the team's invitation links are in each state.",
+        "properties": {
+          "claimed": {
+            "title": "Claimed",
+            "type": "integer"
+          },
+          "expired": {
+            "title": "Expired",
+            "type": "integer"
+          },
+          "open": {
+            "title": "Open",
+            "type": "integer"
+          },
+          "revoked": {
+            "title": "Revoked",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "open",
+          "expired",
+          "claimed",
+          "revoked"
+        ],
+        "title": "AdminTeamInvitationCounts",
+        "type": "object"
+      },
+      "AdminTeamListResponse": {
+        "description": "A page of teams, newest first; pass ``next_offset`` for the next.",
+        "properties": {
+          "next_offset": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Offset"
+          },
+          "teams": {
+            "items": {
+              "$ref": "#/components/schemas/AdminTeamSummary"
+            },
+            "title": "Teams",
+            "type": "array"
+          }
+        },
+        "required": [
+          "teams",
+          "next_offset"
+        ],
+        "title": "AdminTeamListResponse",
+        "type": "object"
+      },
+      "AdminTeamMember": {
+        "description": "A membership in any state: who is in the team, and who left or was removed.",
+        "properties": {
+          "avatar_data_url": {
+            "title": "Avatar Data Url",
+            "type": "string"
+          },
+          "departed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Departed At"
+          },
+          "display_name": {
+            "title": "Display Name",
+            "type": "string"
+          },
+          "email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Email"
+          },
+          "joined_at": {
+            "format": "date-time",
+            "title": "Joined At",
+            "type": "string"
+          },
+          "role": {
+            "enum": [
+              "owner",
+              "admin",
+              "member"
+            ],
+            "title": "Role",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "active",
+              "left",
+              "removed"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "user_id": {
+            "title": "User Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "user_id",
+          "display_name",
+          "email",
+          "avatar_data_url",
+          "role",
+          "state",
+          "joined_at",
+          "departed_at"
+        ],
+        "title": "AdminTeamMember",
+        "type": "object"
+      },
+      "AdminTeamSummary": {
+        "description": "One team in the administrator's list; deleted teams included.",
+        "properties": {
+          "admin_count": {
+            "description": "Active admins, not counting the owner.",
+            "title": "Admin Count",
+            "type": "integer"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "deleted_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deleted At"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "member_count": {
+            "title": "Member Count",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "owner": {
+            "$ref": "#/components/schemas/TeamPerson"
+          },
+          "pending_request_count": {
+            "description": "Join requests waiting for a decision.",
+            "title": "Pending Request Count",
+            "type": "integer"
+          },
+          "state": {
+            "enum": [
+              "active",
+              "deleted"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "state",
+          "owner",
+          "member_count",
+          "admin_count",
+          "pending_request_count",
+          "created_at",
+          "deleted_at"
+        ],
+        "title": "AdminTeamSummary",
+        "type": "object"
+      },
       "AdminUsageAggregate": {
         "additionalProperties": false,
         "description": "Counts, sums and coverage for one cohort of runs and its executions.",
@@ -17311,6 +17643,42 @@
         "title": "TeamMemberResponse",
         "type": "object"
       },
+      "TeamPerson": {
+        "description": "How a member or applicant is shown: names they chose, never their settings.",
+        "properties": {
+          "avatar_data_url": {
+            "title": "Avatar Data Url",
+            "type": "string"
+          },
+          "display_name": {
+            "title": "Display Name",
+            "type": "string"
+          },
+          "email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Email"
+          },
+          "user_id": {
+            "title": "User Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "user_id",
+          "display_name",
+          "email",
+          "avatar_data_url"
+        ],
+        "title": "TeamPerson",
+        "type": "object"
+      },
       "TeamResponse": {
         "description": "A team as one of its members sees it.",
         "properties": {
@@ -26670,6 +27038,249 @@
           }
         },
         "summary": "List Admin Steps"
+      }
+    },
+    "/admin/agent/teams": {
+      "get": {
+        "description": "Teams newest first.\n\n``q`` matches part of a team's name, a team id, or the user id of anyone\nwho has been a member.",
+        "operationId": "list_teams_admin_agent_teams_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 256,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Q"
+            }
+          },
+          {
+            "in": "query",
+            "name": "state",
+            "required": false,
+            "schema": {
+              "default": "active",
+              "enum": [
+                "active",
+                "deleted",
+                "all"
+              ],
+              "title": "State",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminTeamListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Teams"
+      }
+    },
+    "/admin/agent/teams/{team_id}": {
+      "get": {
+        "description": "One team in any state: members past and present, open requests, links.",
+        "operationId": "get_team_admin_agent_teams__team_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "title": "Team Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminTeamDetailResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Team"
+      }
+    },
+    "/admin/agent/teams/{team_id}/audit-events": {
+      "get": {
+        "description": "A team's audit events, newest first, a page at a time.",
+        "operationId": "list_team_audit_events_admin_agent_teams__team_id__audit_events_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "title": "Team Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Before"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminTeamAuditListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Team Audit Events"
       }
     },
     "/admin/agent/usage": {

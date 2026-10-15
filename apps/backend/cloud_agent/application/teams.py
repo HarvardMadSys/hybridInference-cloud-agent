@@ -30,11 +30,17 @@ from cloud_agent.domain.teams import INVITATION_TTL, TeamConflict, TeamForbidden
 from cloud_agent.gateway import GatewayError
 from cloud_agent.owner_access import owner_may_use_agent
 from cloud_agent.schemas import (
+    AdminTeamAuditEvent,
+    AdminTeamDetailResponse,
+    AdminTeamInvitationCounts,
+    AdminTeamMember,
+    AdminTeamSummary,
     InvitationCreatedResponse,
     InvitationResponse,
     JoinRequestResponse,
     OwnJoinRequestResponse,
     TeamMemberResponse,
+    TeamPerson,
 )
 from cloud_agent.user_avatar import generate_user_avatar
 
@@ -43,6 +49,9 @@ if TYPE_CHECKING:
     from typing import Any
 
     from cloud_agent.domain.teams import (
+        AdminAuditRecord,
+        AdminTeamDetail,
+        AdminTeamRecord,
         ApplicantRecord,
         InvitationRecord,
         MemberRecord,
@@ -241,3 +250,110 @@ async def transfer_ownership(
     return await teams.transfer_ownership(
         actor, team_id, user_id=user_id, expected_revision=expected_revision
     )
+
+
+# ── The platform administrator's read-only view ─────────────────────────────
+
+
+def _person(
+    user_id: str, first_name: str, last_name: str, emails: dict[str, str | None]
+) -> TeamPerson:
+    email = emails.get(user_id)
+    return TeamPerson(
+        user_id=user_id,
+        display_name=_display_name(first_name, last_name, email),
+        email=email,
+        avatar_data_url=generate_user_avatar(user_id).data_url,
+    )
+
+
+def _summary(team: AdminTeamRecord, emails: dict[str, str | None]) -> AdminTeamSummary:
+    return AdminTeamSummary(
+        id=team.id,
+        name=team.name,
+        state=team.state,
+        owner=_person(team.owner_user_id, team.owner_first_name, team.owner_last_name, emails),
+        member_count=team.member_count,
+        admin_count=team.admin_count,
+        pending_request_count=team.pending_request_count,
+        created_at=team.created_at,
+        deleted_at=team.deleted_at,
+    )
+
+
+async def admin_team_summaries(
+    gateway: Any, teams: list[AdminTeamRecord]
+) -> list[AdminTeamSummary]:
+    """Name each team's owner; an email the Gateway cannot read is left out."""
+    emails = await _emails(gateway, (team.owner_user_id for team in teams))
+    return [_summary(team, emails) for team in teams]
+
+
+async def admin_team_detail(gateway: Any, detail: AdminTeamDetail) -> AdminTeamDetailResponse:
+    """The roster in every membership state, open requests and link counts."""
+    emails = await _emails(
+        gateway,
+        [
+            detail.team.owner_user_id,
+            *(member.user_id for member in detail.members),
+            *(request.user_id for request in detail.join_requests),
+        ],
+    )
+    return AdminTeamDetailResponse(
+        team=_summary(detail.team, emails),
+        members=[
+            AdminTeamMember(
+                **_person(member.user_id, member.first_name, member.last_name, emails).model_dump(),
+                role=member.role,
+                state=member.state,
+                joined_at=member.joined_at,
+                departed_at=member.departed_at,
+            )
+            for member in detail.members
+        ],
+        join_requests=[
+            JoinRequestResponse(
+                **_person(
+                    request.user_id, request.first_name, request.last_name, emails
+                ).model_dump(),
+                id=request.id,
+                state=request.state,
+                created_at=request.created_at,
+                expires_at=request.expires_at,
+            )
+            for request in detail.join_requests
+        ],
+        invitations=AdminTeamInvitationCounts(**detail.invitations),
+    )
+
+
+async def admin_audit_events(
+    gateway: Any, events: list[AdminAuditRecord]
+) -> list[AdminTeamAuditEvent]:
+    """Name each event's actor and target the way the roster names them."""
+    emails = await _emails(
+        gateway,
+        [
+            *(event.actor_user_id for event in events),
+            *(event.target_user_id for event in events if event.target_user_id),
+        ],
+    )
+    return [
+        AdminTeamAuditEvent(
+            id=event.id,
+            action=event.action,  # type: ignore[arg-type]
+            actor=_person(
+                event.actor_user_id, event.actor_first_name, event.actor_last_name, emails
+            ),
+            target_user=(
+                _person(
+                    event.target_user_id, event.target_first_name, event.target_last_name, emails
+                )
+                if event.target_user_id
+                else None
+            ),
+            target_id=event.target_id,
+            created_at=event.created_at,
+        )
+        for event in events
+    ]

@@ -55,6 +55,7 @@ from cloud_agent.storage.repositories import (
     PostgresSnapshotRepository,
     PostgresSourceControlRepository,
     PostgresSshServerRepository,
+    PostgresTeamAdminQueries,
     PostgresTeamRepository,
     PostgresUserProfileRepository,
     PostgresWebSearchRepository,
@@ -100,6 +101,7 @@ if TYPE_CHECKING:
         SnapshotRepository,
         SourceControlRepository,
         SshServerRepository,
+        TeamAdminQueries,
         TeamRepository,
         UserProfileRepository,
         WebSearchRepository,
@@ -164,4 +166,5 @@ class Storage:
         self.agent_memory: AgentMemoryRepository = PostgresAgentMemoryRepository(pool)
         self.user_profile: UserProfileRepository = PostgresUserProfileRepository(pool)
         self.teams: TeamRepository = PostgresTeamRepository(pool)
+        self.team_admin: TeamAdminQueries = PostgresTeamAdminQueries(pool)
         self.web_search: WebSearchRepository = PostgresWebSearchRepository(pool)

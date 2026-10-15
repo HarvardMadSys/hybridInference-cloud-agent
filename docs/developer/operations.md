@@ -864,6 +864,27 @@ reads are not recorded; rows they left before that changed stay in
 `agent_admin_audit_log` and are never listed. The page names an administrator
 by user id only, because identity tokens carry no display name.
 
+## Teams
+
+Owners and admins manage their own teams from **Settings → Teams**. Platform
+administrators see every team under **Admin → Teams**, read-only:
+
+- The list (`GET /admin/agent/teams`) shows teams newest first, with the owner,
+  active members, admins besides the owner, and join requests waiting for a
+  decision. `state` is `active` (default), `deleted` or `all`; `q` matches part
+  of a team name, a team id, or the user id of anyone who has been a member.
+  It pages with `offset`; the response's `next_offset` is the next page.
+- A team's page (`GET /admin/agent/teams/{team_id}`) lists members in every
+  state, including those who left or were removed and when, plus open join
+  requests and how many invitation links are open, expired, claimed or revoked.
+  `GET /admin/agent/teams/{team_id}/audit-events` pages the team's own audit
+  history with `before`.
+
+People are named by their profile name and Gateway account email, read on each
+request and never stored; an email the Gateway cannot read is left out. Nothing
+on these pages changes a team, so they leave no admin audit record. Moving
+ownership of a team whose owner lost access is not available yet.
+
 ## MCP servers
 
 MCP calls pass through the control plane. The sandbox holds a scoped relay

@@ -34,10 +34,13 @@ INVITATION_TTL = timedelta(hours=24)
 LISTING_LIMIT = 50
 #: Audit entries one page returns.
 AUDIT_PAGE_LIMIT = 100
+#: Teams one page of the administrator's list returns.
+ADMIN_TEAM_PAGE_LIMIT = 100
 
 TeamRole = Literal["owner", "admin", "member"]
 MemberRole = Literal["admin", "member"]
 MembershipState = Literal["active", "left", "removed"]
+TeamState = Literal["active", "deleted"]
 InvitationStatus = Literal["open", "claimed", "revoked", "expired"]
 JoinRequestState = Literal["pending", "approved", "declined", "cancelled", "expired"]
 
@@ -162,3 +165,63 @@ class AuditRecord:
     target_user_id: str | None
     target_id: str | None
     created_at: datetime
+
+
+# ── The platform administrator's read-only view ─────────────────────────────
+
+
+@dataclass(frozen=True)
+class AdminTeamRecord:
+    """One team as the platform administrator sees it, deleted ones included."""
+
+    id: str
+    name: str
+    state: TeamState
+    owner_user_id: str
+    owner_first_name: str
+    owner_last_name: str
+    member_count: int
+    admin_count: int
+    pending_request_count: int
+    created_at: datetime
+    deleted_at: datetime | None
+
+
+@dataclass(frozen=True)
+class AdminMemberRecord:
+    """A membership in any state, so departures stay visible to the administrator."""
+
+    user_id: str
+    first_name: str
+    last_name: str
+    role: TeamRole
+    state: MembershipState
+    joined_at: datetime
+    departed_at: datetime | None
+
+
+@dataclass(frozen=True)
+class AdminAuditRecord:
+    """An audit event with the names the actor's and target's profiles give."""
+
+    id: int
+    actor_user_id: str
+    actor_first_name: str
+    actor_last_name: str
+    action: str
+    target_user_id: str | None
+    target_first_name: str
+    target_last_name: str
+    target_id: str | None
+    created_at: datetime
+
+
+@dataclass(frozen=True)
+class AdminTeamDetail:
+    """Everything the administrator's team page shows, read in one snapshot."""
+
+    team: AdminTeamRecord
+    members: list[AdminMemberRecord]
+    join_requests: list[ApplicantRecord]
+    #: Invitations by status: open, expired, claimed and revoked.
+    invitations: dict[str, int]
