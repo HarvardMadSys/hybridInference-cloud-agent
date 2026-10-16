@@ -128,7 +128,10 @@ def provider_resource_absent(allocation: dict[str, Any] | None) -> bool:
     """Report whether no provider identity, node, or Host was ever recorded.
 
     A create that failed before CloudLab returned an experiment leaves this
-    shape. There is no machine to scan and no observation that can become fresh.
+    shape. So does one whose experiment was never observed: only its
+    acquisition keeps the identity, and release deletes it by that. No Host
+    of ours ran on either, so there is no machine to scan and no observation
+    that must become fresh.
     """
     if not allocation:
         return False

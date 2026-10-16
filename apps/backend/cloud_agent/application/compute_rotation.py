@@ -1210,7 +1210,10 @@ class ComputeRotation:
                 )
                 return
             allocation = await self.reconciler._allocation(allocation["id"])
-        if not allocation.get("external_id"):
+        # Abandoning the node cancelled its acquisition, which may hold the
+        # only record of the experiment the provider created for it.
+        ref = await self.reconciler._provider_resource(allocation)
+        if ref is None:
             # The provider never created it, or definitely refused to.
             await self.repository.observe_allocation(
                 allocation_id=allocation["id"],
@@ -1231,15 +1234,7 @@ class ComputeRotation:
             return
         # It never ran its Host, so its node scope needs no review: a failed
         # experiment has no nodes at all. Delete by its exact identity.
-        provider = self.commands.registry.get(allocation["provider_id"]).provider
-        ref = self.reconciler._ref(allocation)
-        observation = await provider.inspect(ref)
-        if observation.state != "terminated":
-            await self.reconciler._checkpoint(
-                operation, "releasing", {"release_requested": True, "external_pending": True}
-            )
-            receipt = await provider.release(ref, self.reconciler._intent(operation, allocation))
-            observation = receipt.observation or await provider.inspect(ref)
+        observation = await self.reconciler._delete_by_identity(operation, allocation, ref)
         if observation.state != "terminated":
             await self.reconciler._finish(
                 operation,

@@ -31,7 +31,7 @@ from cloud_agent.ports.external.host_bootstrap import (
     DeploymentProfile,
     HostInventory,
 )
-from cloud_agent.schemas_compute import RenewalPolicy
+from cloud_agent.schemas_compute import RenewalPolicy, RetireComputeRequest
 from cloud_agent.storage._sql.compute_admission import host_compute_admission
 from cloud_agent.workers.compute_resources import ComputeResourceWorker
 
@@ -219,6 +219,51 @@ async def test_receipt_survives_failed_observation_and_retry_never_creates_twice
     assert completed["state"] == "succeeded", completed
     r.provider.acquire.assert_awaited_once()
     r.provider.recover_acquire.assert_not_awaited()
+
+
+async def test_retiring_a_server_whose_experiment_was_never_observed_deletes_it(
+    db, store, hosts, monkeypatch
+):
+    """The provider answered the create, then the observation after it failed.
+
+    Only the acquisition knows the experiment. Releasing the server deletes
+    that experiment rather than recording that none was ever created.
+    """
+    from cloud_agent.ports.external.compute_provider import ProviderError
+
+    r = await rig(store, hosts, monkeypatch)
+    experiment = r.observation.ref
+    r.provider.acquire.return_value = ProviderReceipt(outcome="pending", resource=experiment)
+    r.provider.inspect.side_effect = ProviderError(
+        "temporarily_unavailable", "unavailable", retryable=True
+    )
+    waiting = await run_next(r)
+    assert waiting["result"]["resource_ref"]["external_id"] == experiment.external_id
+    allocation = await r.repo.get_allocation(r.op["allocation_id"])
+    assert allocation["external_id"] is None
+    r.provider.inspect.side_effect = None
+    gone = r.observation.model_copy(
+        update={"state": "terminated", "raw_state": "terminated", "nodes": ()}
+    )
+    r.provider.release.return_value = ProviderReceipt(
+        outcome="confirmed", resource=experiment, observation=gone
+    )
+
+    await r.commands.retire(
+        allocation["id"],
+        RetireComputeRequest(request_id="retire", expected_revision=allocation["revision"]),
+        actor="admin",
+    )
+    retired = await run_next(r)
+
+    assert (retired["kind"], retired["state"]) == ("retire", "succeeded"), retired
+    r.provider.release.assert_awaited_once()
+    assert r.provider.release.await_args.args[0].external_id == experiment.external_id
+    released = await r.repo.get_allocation(allocation["id"])
+    assert (released["external_id"], released["observed_state"]) == (
+        experiment.external_id,
+        "terminated",
+    )
 
 
 async def test_a_pool_member_is_not_replaced_while_its_renewal_may_be_granted(db, store):
