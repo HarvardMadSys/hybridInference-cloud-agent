@@ -223,13 +223,14 @@ class PostgresAttemptCommands:
                 "sandbox_archive_settings_applied_revision, "
                 "(credential_hash IS NOT NULL AND credential_hash = $2) "
                 "AS credential_matches "
-                "FROM agent_runner_hosts WHERE host = $1 FOR UPDATE",
+                "FROM agent_runner_hosts WHERE host = $1",
                 host,
                 host_credential_hash,
             )
-            # This read only chooses which profile may be considered. The slot
-            # UPDATE below is the decision point and closes concurrent drain,
-            # revocation, and re-enrollment races.
+            # This read only chooses which profile may be considered, so it
+            # locks nothing: the row is locked after the turn's group, below.
+            # The slot UPDATE there is the decision point and closes concurrent
+            # drain, revocation, and re-enrollment races.
             if host_row is None or host_row["status"] not in CLAIMABLE_STATUSES:
                 return None
             if host_slots_exhausted(host_row):
@@ -410,6 +411,16 @@ class PostgresAttemptCommands:
                 )
                 if not claimable:
                     return None
+            # The host row after the group, as finishing or reaping a member
+            # takes them: that writes the group and then gives its slot back,
+            # so a claim holding the row while it waited for the group
+            # deadlocked with it. Locked in a statement of its own, before the
+            # slot UPDATE counts this host's environment runs: claiming one
+            # locks this row without writing it, and a count that began while
+            # it waited would miss the run.
+            await conn.execute(
+                "SELECT host FROM agent_runner_hosts WHERE host = $1 FOR UPDATE", host
+            )
             # The atomic half of the slot claim. Under READ COMMITTED two
             # claims hitting the same host row serialize and the loser
             # re-evaluates capacity against the winner's committed value.
