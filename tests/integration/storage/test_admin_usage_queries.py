@@ -194,6 +194,45 @@ async def test_a_missing_snapshot_keeps_the_run_detail_status(db, store, admin_t
     assert body["summary"]["missing_attempts"] == 1
 
 
+async def test_a_forks_copied_turns_are_not_counted_as_runs(db, store, admin_token):
+    """A Fork's copies of its source's turns are history to display, not runs.
+
+    Finalizing a Fork copies the source's settled turns into the new chat, each
+    naming the turn it copies. A copy has no attempt and no ledger reference
+    because it ran nowhere, so counting it added a run whose usage could only be
+    unavailable: the source's one run read as two here and on the owner's Usage
+    page, which reads the same selection for one owner.
+    """
+    source = await _create_job(store, user_id="owner-one", model="model-a")
+    _, _, ledger_id = await _seed_attempt(db, store, job=source)
+    copy = await _create_job(store, user_id="owner-one", model="model-a")
+    await _backdate(db, store, [source["id"], copy["id"]], START, state="succeeded")
+    await _seed_snapshot(db, store, ledger_id, amount="1.00", calls=2)
+    async with db.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_jobs SET fork_source_job_id = $2 WHERE id = $1", copy["id"], source["id"]
+        )
+
+    async with _client(store) as client:
+        response = await client.get("/admin/agent/usage", params=WINDOW, headers=admin_token)
+    summary = response.json()["summary"]
+    assert (summary["run_count"], summary["attempt_count"]) == (1, 1)
+    assert summary["status_counts"]["unavailable"] == 0
+    assert summary["totals"]["calls"] == 2
+    cohort, _ = await store.admin_usage.selection(
+        since=datetime(2026, 9, 9, tzinfo=UTC),
+        until=datetime(2026, 9, 11, tzinfo=UTC),
+        user_id="owner-one",
+        model=None,
+        runtime=None,
+        repo=None,
+        max_runs=MAX_USAGE_RUNS,
+        max_rows=MAX_USAGE_LEDGER_ROWS,
+        max_snapshot_bytes=MAX_USAGE_SNAPSHOT_BYTES,
+    )
+    assert [row["id"] for row in cohort] == [source["id"]]
+
+
 async def test_the_window_is_half_open_on_job_creation_time(db, store, admin_token):
     at_since = await _create_job(store, user_id="owner-one", model="model-a")
     at_until = await _create_job(store, user_id="owner-one", model="model-a")

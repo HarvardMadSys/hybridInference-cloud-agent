@@ -95,10 +95,14 @@ _FILTERS_SQL = """
       AND ($6::text IS NULL OR t.repo = $6)
 """
 
+#: A Fork's copies of its source's turns are left out. They are history copied
+#: for display, with no attempt and no ledger reference: counted, each was one
+#: more run, its usage unavailable, beside the run it copies.
 _COHORT_SQL = f"""
     SELECT {_JOB_COLUMNS}
     FROM agent_jobs j JOIN agent_threads t ON t.id = j.thread_id
     WHERE j.created_at >= $1 AND j.created_at < $2
+      AND j.fork_source_job_id IS NULL
     {_FILTERS_SQL}
     ORDER BY j.created_at, j.id
     LIMIT $7
