@@ -342,7 +342,15 @@ async def test_access_recovery_resumes_a_terminal_skipped_check(pool, store):
         )
         assert row["state"] == "archived"
         assert row["completed_at"] is not None
-        assert await conn.fetchval("SELECT archived_at FROM agent_threads") is not None
+        archived_at = await conn.fetchval("SELECT archived_at FROM agent_threads")
+        assert archived_at is not None
+
+    # The durable receipt prevents a later poll from reseeding the same
+    # already-merged PR after access has been restored.
+    assert await _recover(store) == []
+    assert await store.pr_archive.claim_pr_archive_checks() == []
+    async with pool.acquire() as conn:
+        assert await conn.fetchval("SELECT archived_at FROM agent_threads") == archived_at
 
 
 async def test_access_recovery_stops_once_its_attempts_are_spent(pool, store):
