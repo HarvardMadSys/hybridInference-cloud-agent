@@ -181,8 +181,7 @@ class HostCommands:
         """Revoke Host access without releasing any underlying machine.
 
         Returns whether the removal was deferred: a busy Host stops taking
-        work now and is revoked once its running attempts end and its running
-        sandboxes have stopped.
+        work now and is revoked once its running attempts end.
         """
         outcome = await self.repository.remove_host(host=host, force=force)
         if outcome == "unknown":

@@ -129,8 +129,7 @@ class AgentRunnerHost(_SandboxManagerWireNames):
         False,
         description=(
             "True while an operator's Remove waits for this draining host's running "
-            "attempts to end and its running sandboxes to stop; the host is revoked "
-            "once they have, or once it stops heartbeating or has waited 30 minutes."
+            "attempts to end; the host is revoked once they have."
         ),
     )
     sandbox_runtime: str | None = Field(

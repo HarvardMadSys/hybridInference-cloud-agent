@@ -207,19 +207,11 @@ async def fence_sandbox_start(conn: Any, sandbox_id: str) -> str | None:
     For callers that are about to ask a sandbox manager for something that may
     start a stopped container: a workspace request, a fork, a snapshot. The
     returned state lets them refuse a group that only a checkpoint holds.
-
-    A stopped group's activity is stamped too. The sandbox manager starts the
-    container without telling the database, and the host reports it running
-    only on a later heartbeat; until then this stamp is what tells a host
-    removal that the group may be starting (``_groups_left_by_removal``).
     """
     return await conn.fetchval(
         f"""
         UPDATE agent_sandboxes
-        SET {FENCE_START_SQL},
-            last_activity_at = CASE WHEN state = 'stopped' THEN NOW()
-                                    ELSE last_activity_at END,
-            updated_at = NOW()
+        SET {FENCE_START_SQL}, updated_at = NOW()
         WHERE id = $1
         RETURNING state
         """,

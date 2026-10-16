@@ -76,16 +76,6 @@ MISSED_HEARTBEATS_BEFORE_OFFLINE = 3
 #: right now. Long enough to survive walking to the rack; short enough that a
 #: token left in a terminal scrollback is worthless by morning.
 ENROLL_TOKEN_TTL_S = 900.0
-#: How long a requested removal waits for the host's running sandbox groups to
-#: stop, counted from the later of the request and the end of the host's last
-#: turn. A group stopped cleanly leaves a checkpoint that carries it to another
-#: host; one still running when the credential goes stays bound to the removed
-#: host. Thirty minutes is the default idle timeout of a group and of a
-#: terminal, and the time a host gives one stop to finish its archive and
-#: checkpoint. A group still running after that is kept open by someone working
-#: in it, or by a stop that is not finishing, and the removal goes ahead as it
-#: did before it waited.
-HOST_REMOVAL_STOP_WAIT_S = 1800.0
 
 
 def transition_allowed(current: str, target: str) -> bool:

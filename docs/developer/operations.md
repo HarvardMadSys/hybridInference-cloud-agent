@@ -2071,25 +2071,6 @@ pull by digest. Every other group stays bound to the removed host, as before,
 and continues only if that host is enrolled again; the admin sandbox page shows
 which is which.
 
-**Remove** first stops the groups the host is still running, so that they have
-such a checkpoint. A host with a running turn or a running group shows
-`removing` and claims nothing. Each heartbeat offers the stop of every idle
-running group at once, without waiting for its idle deadline. The host still
-refuses it while a terminal or a workspace operation is open in the group, and
-the next heartbeat offers it again. While the host is being removed, a group
-counts as stopped only once a heartbeat reports its stop finished, final
-archive and checkpoint included, or first brings that stop's checkpoint, which
-the host can list one heartbeat earlier. A stopped group counts as running for
-up to 90 seconds after a workspace request (Files, Terminal or Git) fenced its
-checkpoint, until the host reports the container that request started. The
-reaper revokes the host once no turn and no group is running. It stops
-waiting, revokes the host as before, and logs the groups
-left on it (`agent_host_removed_with_live_sandboxes`) when the host stops
-heartbeating, or 30 minutes after the later of the request and the host's last
-turn. **Remove now** revokes at once and does not wait for any group. A
-checkpoint carried by a heartbeat still in flight when the credential was
-revoked is handed on by the reaper's next pass.
-
 Two other paths turn covered stopped groups `cold` without revoking the host:
 a provider that confirms the node terminated hands over all of them, and a
 host [moving out before its lease ends](operations-compute.md#moving-sandboxes-out-before-a-lease-ends)

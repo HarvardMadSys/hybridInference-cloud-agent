@@ -362,9 +362,6 @@ async def heartbeat_host(
             diagnostics["resource_usage"] = retained.resource_usage.model_dump(mode="json")
         if retained.terminal_count is not None:
             diagnostics["terminal_count"] = retained.terminal_count
-        checkpoint = (
-            None if retained.checkpoint is None else retained.checkpoint.model_dump(mode="json")
-        )
         await job_store.sandbox.reconcile_thread_sandbox_observation(
             thread_id=retained.thread_id,
             host=updated["host"],
@@ -375,21 +372,17 @@ async def heartbeat_host(
             activity_active=retained.activity_active,
             idle_remaining_seconds=retained.idle_remaining_seconds,
             members=[member.model_dump() for member in retained.members],
-            checkpoint=checkpoint,
             **diagnostics,
         )
-        if checkpoint is not None:
+        if retained.checkpoint is not None:
             # Repeated on every beat until the group is gone; recording is
             # idempotent and fenced to this host's current generation. A
             # bookkeeping failure must not cost the host its liveness beat.
-            # It follows the observation, which may record the stop this
-            # checkpoint is of: only a stopped group takes it as its restore
-            # point.
             try:
                 await job_store.sandbox.record_sandbox_checkpoint(
                     host=updated["host"],
                     thread_id=retained.thread_id,
-                    checkpoint=checkpoint,
+                    checkpoint=retained.checkpoint.model_dump(mode="json"),
                 )
             except Exception:
                 logger.warning(

@@ -19,7 +19,6 @@ from cloud_agent.logging_utils import get_logger
 from cloud_agent.owner_usage import measured_interval, utc_day_shares
 from cloud_agent.storage._sql.compute_admission import lock_compute_entry
 from cloud_agent.storage._sql.hosts import (
-    HOST_REMOVAL_REQUESTED,
     MOVING_OUT_HOST_SQL,
     moving_out_hosts,
     release_covered_sandboxes,
@@ -1904,13 +1903,8 @@ class PostgresSandboxRepository:
         members: list[dict[str, Any]] | None = None,
         resource_usage: dict[str, Any] | None = None,
         terminal_count: int | None = None,
-        checkpoint: dict[str, Any] | None = None,
     ) -> str | None:
-        """Reconcile one authenticated shared-group Docker observation.
-
-        ``checkpoint`` is the receipt the same beat carries, which the caller
-        records next with :meth:`record_sandbox_checkpoint`.
-        """
+        """Reconcile one authenticated shared-group Docker observation."""
         return await self._reconcile_shared_sandbox_observation(
             thread_id=thread_id,
             host=host,
@@ -1923,7 +1917,6 @@ class PostgresSandboxRepository:
             members=members or [],
             resource_usage=resource_usage,
             terminal_count=terminal_count,
-            checkpoint=checkpoint,
         )
 
     async def record_sandbox_checkpoint(
@@ -2057,17 +2050,10 @@ class PostgresSandboxRepository:
         container_id: str,
         sandbox_generation: int,
     ) -> dict[str, Any] | None:
-        """Return the exact shared-group fence for a due retained stop.
-
-        A running group is due at its idle deadline, or at once when its host
-        is being removed: the removal waits for it to stop, and only a clean
-        stop leaves the checkpoint that lets the group continue on another
-        host. Either way it must be idle here, and the host still refuses the
-        stop while a terminal or operation is open there.
-        """
+        """Return the exact shared-group fence for a due retained stop."""
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
-                f"""
+                """
                 SELECT origin_thread_id AS thread_id, generation,
                        0::bigint AS activation_generation,
                        CASE
@@ -2079,7 +2065,7 @@ class PostgresSandboxRepository:
                        TRUE AS shared_live,
                        CASE WHEN stop_requested_at IS NOT NULL THEN (
                            SELECT COALESCE(jsonb_object_agg(m.thread_id, m.activation_generation),
-                                           '{{}}'::jsonb)
+                                           '{}'::jsonb)
                            FROM agent_thread_sandbox_memberships m
                            WHERE m.sandbox_id = g.id AND m.resident_slot_id IS NOT NULL
                        ) END AS member_activation_generations
@@ -2093,10 +2079,8 @@ class PostgresSandboxRepository:
                       WHERE m.sandbox_id = g.id AND m.active_attempt_id IS NOT NULL
                   )
                   AND (
-                        (state = 'running' AND (
-                            (idle_deadline IS NOT NULL AND idle_deadline <= clock_timestamp())
-                            OR {HOST_REMOVAL_REQUESTED}
-                        ))
+                        (state = 'running' AND idle_deadline IS NOT NULL
+                            AND idle_deadline <= clock_timestamp())
                         OR state IN ('stopping', 'stopped_dirty', 'lost')
                   )
                 """,
@@ -2522,7 +2506,6 @@ class PostgresSandboxRepository:
         members: list[dict[str, Any]],
         resource_usage: dict[str, Any] | None,
         terminal_count: int | None,
-        checkpoint: dict[str, Any] | None,
     ) -> str | None:
         """Join one Docker group observation with independently fenced members."""
         async with self._pool.acquire() as conn, conn.transaction():
@@ -2736,35 +2719,6 @@ class PostgresSandboxRepository:
 
             if active_member:
                 return None
-            removing = bool(
-                await conn.fetchval(
-                    "SELECT removal_requested_at IS NOT NULL FROM agent_runner_hosts "
-                    "WHERE host = $1",
-                    host,
-                )
-            )
-            if (
-                removing
-                and activity_active is True
-                and group["state"] in {"running", "stopping"}
-                and not await self._first_report_of_run_checkpoint(
-                    conn, group, container_id, checkpoint
-                )
-            ):
-                # The container is down, but the host is still archiving it
-                # and taking the checkpoint that carries the group to another
-                # host. The removal waits while the group is in one of these
-                # states, so it stays there until that checkpoint arrives.
-                # The host lists it once saved, which can be a beat before it
-                # reports the stop finished. A receipt covers the group only
-                # when first recorded while the group is stopped, so the beat
-                # that first brings it records the stop here, before its
-                # caller records the receipt.
-                return None
-            # A running group is taken as stopped only when a stop was due:
-            # its idle deadline passed, or its host is being removed and the
-            # group was idle (see ``due_thread_sandbox_stop``). Any other
-            # stopped sample may predate a start this row already admitted.
             row = await conn.fetchrow(
                 """
                 UPDATE agent_sandboxes
@@ -2772,16 +2726,12 @@ class PostgresSandboxRepository:
                     stop_requested_at = NULL, updated_at = NOW()
                 WHERE id = $1 AND (
                     state IN ('stopped', 'stopping', 'stopped_dirty', 'lost')
-                    OR (state = 'running' AND (
-                        (idle_deadline IS NOT NULL AND idle_deadline <= clock_timestamp())
-                        OR ($2 AND active_operation_count = 0
-                            AND snapshot_state <> 'snapshotting')
-                    ))
+                    OR (state = 'running' AND idle_deadline IS NOT NULL
+                        AND idle_deadline <= clock_timestamp())
                 )
                 RETURNING state
                 """,
                 sandbox_id,
-                removing,
             )
             if row is None:
                 return None
@@ -2801,35 +2751,6 @@ class PostgresSandboxRepository:
             # A repeated stopped observation may still repair stale member
             # state, but it does not ask the host to perform another stop.
             return None if group["state"] == "stopped" else str(row["state"])
-
-    @staticmethod
-    async def _first_report_of_run_checkpoint(
-        conn: asyncpg.Connection,
-        group: asyncpg.Record,
-        container_id: str,
-        checkpoint: dict[str, Any] | None,
-    ) -> bool:
-        """Whether a beat's receipt is the current run's checkpoint, not yet recorded.
-
-        A receipt already recorded is the host repeating its latest one, which
-        may predate a start this group's row cannot see (one that did not
-        fence first), so it ends no wait.
-        """
-        if checkpoint is None:
-            return False
-        start_seq = checkpoint.get("start_seq")
-        if (
-            isinstance(start_seq, bool)
-            or start_seq != group["start_seq"]
-            or checkpoint.get("sandbox_id") != group["id"]
-            or checkpoint.get("generation") != group["generation"]
-            or checkpoint.get("container_id") != container_id
-        ):
-            return False
-        return not await conn.fetchval(
-            "SELECT EXISTS (SELECT 1 FROM agent_sandbox_checkpoints WHERE id = $1)",
-            checkpoint.get("checkpoint_id"),
-        )
 
     @staticmethod
     async def _record_terminal_observation(

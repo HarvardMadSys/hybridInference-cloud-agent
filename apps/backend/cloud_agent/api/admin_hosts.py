@@ -727,12 +727,11 @@ async def remove_agent_runner_host(
     force: bool = Query(
         False,
         description=(
-            "Remove a host that is still running attempts or sandboxes. Their "
-            "leases expire at once, so the removed machine can no longer heartbeat, "
-            "renew grants, establish residencies or call tools for them; the next "
+            "Remove a host that is still running attempts. Their leases expire "
+            "at once, so the removed machine can no longer heartbeat, renew "
+            "grants, establish residencies or call tools for them; the next "
             "reaper pass requeues them or, for an indeterminate retained-chat "
-            "activation, marks the chat LOST instead of replaying it. A sandbox "
-            "still running stays on the removed host."
+            "activation, marks the chat LOST instead of replaying it."
         ),
     ),
     _admin_id: str = Depends(verify_admin_access),
@@ -746,13 +745,6 @@ async def remove_agent_runner_host(
     instead — no new claims, ``removal_pending`` set — and the reaper revokes
     it once its last running attempt ends. Putting it back to work
     (``undrain``) cancels the request.
-
-    A host still running a sandbox waits the same way, with no turn running.
-    Its heartbeats stop each idle sandbox, and a clean stop leaves the
-    checkpoint that lets the sandbox's chats continue on another host. The wait
-    ends once none is running, once the host stops heartbeating, or 30
-    minutes after its last turn; the reaper then revokes the host and logs any
-    sandbox still left on it.
 
     Forced removal is the deliberate version of the same thing, and it ends
     that work rather than waiting for it: the revocation expires the host's

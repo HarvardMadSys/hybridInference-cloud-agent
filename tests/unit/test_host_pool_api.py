@@ -2743,7 +2743,6 @@ async def test_host_heartbeat_reconciles_exact_retained_docker_observations(resi
             "activity_active": False,
             "idle_remaining_seconds": 1799.5,
             "members": [],
-            "checkpoint": None,
         }
     ]
 
@@ -3315,9 +3314,6 @@ async def test_a_heartbeat_records_the_latest_checkpoint_for_its_host(client):
     assert recorded["thread_id"] == "athr_source"
     assert recorded["checkpoint"]["checkpoint_id"] == "c" * 32
     assert recorded["checkpoint"]["object_key"] == _CHECKPOINT["object_key"]
-    # The observation sees the receipt first: it may record the stop the
-    # checkpoint is of, which the receipt needs to cover the group.
-    assert store.sandbox_observations[0]["checkpoint"] == recorded["checkpoint"]
 
 
 @pytest.mark.parametrize(
@@ -3342,7 +3338,6 @@ async def test_an_unusable_checkpoint_never_costs_the_host_its_heartbeat(client,
     assert response.status_code == 200
     assert store.checkpoints == []
     assert len(store.sandbox_observations) == 1
-    assert store.sandbox_observations[0]["checkpoint"] is None
 
 
 async def test_a_checkpoint_bookkeeping_failure_keeps_the_heartbeat(client):

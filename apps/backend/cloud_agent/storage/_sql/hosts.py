@@ -111,17 +111,6 @@ LIVE_ATTEMPT_HOST = """EXISTS (
 )"""
 
 
-#: Group states in which the host may still be running the group's container.
-#: A requested removal waits for a group in one of them to stop: a clean stop
-#: leaves the checkpoint that carries the group to another host, and a group
-#: still running when the credential goes stays bound to the removed host.
-#: ``restoring`` is not one of them. Until the restore confirms it the
-#: container is not the group's, the restoring turn holds a slot of its own,
-#: and a restore that ends unconfirmed returns the group to its checkpoint,
-#: which any host may claim.
-LIVE_GROUP_STATES = ("provisioning", "starting", "running", "stopping")
-
-
 #: Whether group ``g`` still needs the host it names, so that forgetting the
 #: host must wait. Binds the group as ``g``; the caller supplies that alias.
 #:
@@ -132,27 +121,6 @@ LIVE_GROUP_STATES = ("provisioning", "starting", "running", "stopping")
 #: the host row, and the cold claim, the restore it hands out and the
 #: confirmation of the restored container do not look at either.
 HOST_RETAINED_GROUP = "g.deletion_state <> 'deleted' AND g.state <> 'cold'"
-
-
-#: Whether the host holding group ``g`` is being removed. Binds the group as
-#: ``g``; the caller supplies that alias.
-#:
-#: The removal waits for the host's running groups to stop, so an idle one is
-#: due to stop now rather than at its idle deadline, and the stop the host then
-#: reports is taken as one. Read without a lock: a removal cancelled meanwhile
-#: costs at most the stop of a group nobody was using.
-HOST_REMOVAL_REQUESTED = """EXISTS (
-    SELECT 1 FROM agent_runner_hosts removing
-    WHERE removing.host = g.host AND removing.removal_requested_at IS NOT NULL
-)"""
-
-
-class RemovalRaced(Exception):
-    """A sandbox group may have started while a host's removal was being decided.
-
-    Raised inside the removal's transaction to roll its revocation back; the
-    removal then waits for that group like any other.
-    """
 
 
 def host_claim_ceiling(slots_total: int | None, slots_desired: int | None) -> int | None:
@@ -316,34 +284,6 @@ async def release_covered_sandboxes(
         live_host,
     )
     return [str(row["id"]) for row in rows]
-
-
-async def release_late_covered_sandboxes(conn: Any) -> list[str]:
-    """Hand on the covered groups of hosts that were already revoked.
-
-    A heartbeat authenticated just before its host was revoked can still be
-    writing when the revocation commits. A checkpoint it carries then lands
-    after :func:`release_covered_sandboxes` looked, and covers a stopped group
-    bound to a host that will never beat again. The same rule moves that group
-    on now. A revoked host has no other way to gain a covered group, so this
-    moves only what the revocation would have moved had the beat been earlier.
-    """
-    hosts = [
-        str(row["host"])
-        for row in await conn.fetch(
-            """
-            SELECT h.host FROM agent_runner_hosts h
-            WHERE h.credential_hash IS NULL AND h.status = 'disabled'
-              AND EXISTS (
-                  SELECT 1 FROM agent_sandboxes g
-                  WHERE g.host = h.host AND g.state = 'stopped'
-                    AND g.restore_checkpoint_id IS NOT NULL
-              )
-            ORDER BY h.host
-            """
-        )
-    ]
-    return await release_covered_sandboxes(conn, hosts) if hosts else []
 
 
 # A Host in its move-out window: no claims, and each group stopped and handed

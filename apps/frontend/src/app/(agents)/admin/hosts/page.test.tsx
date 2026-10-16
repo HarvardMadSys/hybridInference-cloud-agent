@@ -558,40 +558,6 @@ describe('AdminHostsPage', () => {
     await waitFor(() => expect(mocked.remove).toHaveBeenCalledWith('runner-a', false));
   });
 
-  it('says a host with no turns left is still stopping its sandboxes', async () => {
-    mocked.remove.mockResolvedValue(
-      pool([host({ status: 'draining', removal_pending: true, slots_used: 0 })]),
-    );
-    renderPage();
-
-    fireEvent.click(await screen.findByRole('button', { name: 'Remove from pool' }));
-
-    await waitFor(() => expect(mocked.remove).toHaveBeenCalledWith('runner-a', false));
-    expect(await screen.findByText('removing')).toBeInTheDocument();
-    expect(screen.getByText('Stopping sandboxes')).toBeInTheDocument();
-    expect(screen.queryByText('0 running turn(s) left')).not.toBeInTheDocument();
-    expect(screen.getByRole('status')).toHaveTextContent(
-      'is removed once its running sandboxes have stopped',
-    );
-  });
-
-  it('lets the operator stop waiting for a removing host to stop its sandboxes', async () => {
-    mocked.list.mockResolvedValue(
-      pool([host({ status: 'draining', removal_pending: true, slots_used: 0 })]),
-    );
-    const confirm = vi.fn().mockReturnValue(true);
-    vi.stubGlobal('confirm', confirm);
-    mocked.remove.mockResolvedValue(pool([host({ status: 'disabled' })]));
-    renderPage();
-
-    fireEvent.click(await screen.findByRole('button', { name: 'Remove now' }));
-
-    expect(confirm).toHaveBeenCalledTimes(1);
-    // What forcing costs here: a sandbox not yet stopped stays on this server.
-    expect(confirm.mock.calls[0][0]).toMatch(/leaves any sandbox that has not stopped/);
-    await waitFor(() => expect(mocked.remove).toHaveBeenCalledWith('runner-a', true));
-  });
-
   it('makes the operator confirm before forcing a removing host out, and says why', async () => {
     mocked.list.mockResolvedValue(
       pool([host({ status: 'draining', removal_pending: true, slots_used: 2 })]),

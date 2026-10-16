@@ -6263,7 +6263,7 @@
           },
           "removal_pending": {
             "default": false,
-            "description": "True while an operator's Remove waits for this draining host's running attempts to end and its running sandboxes to stop; the host is revoked once they have, or once it stops heartbeating or has waited 30 minutes.",
+            "description": "True while an operator's Remove waits for this draining host's running attempts to end; the host is revoked once they have.",
             "title": "Removal Pending",
             "type": "boolean"
           },
@@ -24271,7 +24271,7 @@
     },
     "/admin/agent/runner-hosts/{host}/remove": {
       "post": {
-        "description": "Revoke this host's credential and take it out of the pool.\n\nA host still holding slots is not revoked on the spot: its running attempts\nbelong to a machine the platform would have just declared gone, and nobody\nwould learn that until their leases lapsed minutes later. It drains\ninstead — no new claims, ``removal_pending`` set — and the reaper revokes\nit once its last running attempt ends. Putting it back to work\n(``undrain``) cancels the request.\n\nA host still running a sandbox waits the same way, with no turn running.\nIts heartbeats stop each idle sandbox, and a clean stop leaves the\ncheckpoint that lets the sandbox's chats continue on another host. The wait\nends once none is running, once the host stops heartbeating, or 30\nminutes after its last turn; the reaper then revokes the host and logs any\nsandbox still left on it.\n\nForced removal is the deliberate version of the same thing, and it ends\nthat work rather than waiting for it: the revocation expires the host's\nattempt and residency leases in the same transaction. The attempts' worker\ntokens name no host, so a lease left to run would be one the removed\nmachine could keep renewing. Lease fencing then rejects every later write\nfrom it, and the reaper supersedes the attempts and revokes their grants\non its next pass. A retained activation is not replayed because the\nplatform cannot know whether its prompt ran, so that chat is marked LOST.\n\nThe row survives, disabled. ``agent_attempts.host_id`` points at it, and\n\"where did this job run\" should not become unanswerable because the machine\nwas retired. ``DELETE`` forgets that administrative row; neither action is\nevidence that the retained container or Docker data-root was deleted.",
+        "description": "Revoke this host's credential and take it out of the pool.\n\nA host still holding slots is not revoked on the spot: its running attempts\nbelong to a machine the platform would have just declared gone, and nobody\nwould learn that until their leases lapsed minutes later. It drains\ninstead — no new claims, ``removal_pending`` set — and the reaper revokes\nit once its last running attempt ends. Putting it back to work\n(``undrain``) cancels the request.\n\nForced removal is the deliberate version of the same thing, and it ends\nthat work rather than waiting for it: the revocation expires the host's\nattempt and residency leases in the same transaction. The attempts' worker\ntokens name no host, so a lease left to run would be one the removed\nmachine could keep renewing. Lease fencing then rejects every later write\nfrom it, and the reaper supersedes the attempts and revokes their grants\non its next pass. A retained activation is not replayed because the\nplatform cannot know whether its prompt ran, so that chat is marked LOST.\n\nThe row survives, disabled. ``agent_attempts.host_id`` points at it, and\n\"where did this job run\" should not become unanswerable because the machine\nwas retired. ``DELETE`` forgets that administrative row; neither action is\nevidence that the retained container or Docker data-root was deleted.",
         "operationId": "remove_agent_runner_host_admin_agent_runner_hosts__host__remove_post",
         "parameters": [
           {
@@ -24284,13 +24284,13 @@
             }
           },
           {
-            "description": "Remove a host that is still running attempts or sandboxes. Their leases expire at once, so the removed machine can no longer heartbeat, renew grants, establish residencies or call tools for them; the next reaper pass requeues them or, for an indeterminate retained-chat activation, marks the chat LOST instead of replaying it. A sandbox still running stays on the removed host.",
+            "description": "Remove a host that is still running attempts. Their leases expire at once, so the removed machine can no longer heartbeat, renew grants, establish residencies or call tools for them; the next reaper pass requeues them or, for an indeterminate retained-chat activation, marks the chat LOST instead of replaying it.",
             "in": "query",
             "name": "force",
             "required": false,
             "schema": {
               "default": false,
-              "description": "Remove a host that is still running attempts or sandboxes. Their leases expire at once, so the removed machine can no longer heartbeat, renew grants, establish residencies or call tools for them; the next reaper pass requeues them or, for an indeterminate retained-chat activation, marks the chat LOST instead of replaying it. A sandbox still running stays on the removed host.",
+              "description": "Remove a host that is still running attempts. Their leases expire at once, so the removed machine can no longer heartbeat, renew grants, establish residencies or call tools for them; the next reaper pass requeues them or, for an indeterminate retained-chat activation, marks the chat LOST instead of replaying it.",
               "title": "Force",
               "type": "boolean"
             }

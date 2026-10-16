@@ -469,9 +469,9 @@ Pool and resource actions have different effects:
 
 | Action | Effect |
 | --- | --- |
-| `Remove from pool` | Revokes the Host credential; leaves the machine intact. A Host still running turns or sandboxes stops taking new work and shows `removing`. Its heartbeats stop each idle sandbox, whose checkpoint then lets its chats continue on another Host. The reaper revokes the Host once no turn or sandbox is running, once it stops heartbeating, or 30 minutes after its last turn, and logs any sandbox it left behind. |
+| `Remove from pool` | Revokes the Host credential; leaves the machine intact. A Host still running turns stops taking new work and shows `removing` until they finish, and the reaper then revokes it. |
 | `Cancel removal` | Puts a `removing` Host back to work. |
-| `Remove now` | Revokes a `removing` Host at once and ends its running turns: they are requeued once, or a chat whose turn may already have run is marked lost. A sandbox that has not stopped stays on the removed Host. |
+| `Remove now` | Revokes a `removing` Host at once and ends its running turns: they are requeued once, or a chat whose turn may already have run is marked lost. |
 | `Forget` | Removes an eligible history record. A `cold` sandbox, which waits in its checkpoint for any Host, does not block it. |
 | `Retire/release` | Releases the complete allocation; for CloudLab, the whole experiment. Existing SSH has no cloud-destruction capability. |
 

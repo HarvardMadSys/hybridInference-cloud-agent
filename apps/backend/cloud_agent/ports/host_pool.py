@@ -300,10 +300,9 @@ class HostPoolRepository(Protocol):
         """Revoke a host's credential and take it out of the pool.
 
         Returns ``"ok"``, ``"unknown"``, ``"fenced"``, ``"draining"`` or
-        ``"busy"``. A host still holding slots, or still running a sandbox
-        group, is drained instead of revoked: it claims nothing more, the
-        request is recorded, and :meth:`finish_host_removals` revokes it once
-        its running attempts end and its heartbeats have stopped its groups.
+        ``"busy"``. A host still holding slots is drained instead of revoked:
+        it claims nothing more, the request is recorded, and
+        :meth:`finish_host_removals` revokes it once its running attempts end.
         ``"busy"`` is the busy host whose status cannot move to ``draining``.
         ``force`` revokes now and ends that work — the lease expiry *is* the
         recovery path. A retained activation cannot be replayed safely after
@@ -320,12 +319,7 @@ class HostPoolRepository(Protocol):
         ...
 
     async def finish_host_removals(self) -> list[str]:
-        """Revoke every host whose requested removal has nothing left to wait for.
-
-        No running attempt, and no sandbox group the host may still be
-        running. The wait for groups ends anyway once the host stops
-        heartbeating or has waited ``HOST_REMOVAL_STOP_WAIT_S``; the groups
-        left are logged.
+        """Revoke every host whose requested removal has no running work left.
 
         Returns the hosts it revoked.
         """

@@ -134,7 +134,7 @@ SSH 是访问和部署通道；Provider 是资源取得与管理来源。CloudLa
 | 改并发、Drain | 原 HostCommands | 原有规则继续生效 |
 | 改自动续期配置 | ComputeCommands 更新策略与 revision | 配置保存成功，执行结果另外展示 |
 | 立即续期 | ComputeCommands 创建 extend 操作 | 读回实际到期时间满足该操作的固定目标 |
-| 移出任务池 | 原 Remove 用例；还有回合在跑或沙箱在运行时先排空，等回合结束、沙箱停下后再撤销（2026-10-16，见[跨机器恢复设计](2026-10-13-sandbox-cross-host-restore-design.zh-CN.md) 6.3） | 凭证撤销、Host disabled，机器继续存在 |
+| 移出任务池 | 原 Remove 用例 | 凭证撤销、Host disabled，机器继续存在 |
 | 释放计算资源 | 资源退出流程 | 保护检查通过，Provider 确认资源已终止 |
 | 清理历史记录 | Forget 用例与依赖保护 | 无活动绑定、保留状态或未决操作依赖；已转成 `cold` 的沙箱不算保留状态（2026-10-16） |
 

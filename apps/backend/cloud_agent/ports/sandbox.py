@@ -340,7 +340,6 @@ class SandboxRepository(Protocol):
         members: list[dict[str, Any]] | None = None,
         resource_usage: dict[str, Any] | None = None,
         terminal_count: int | None = None,
-        checkpoint: dict[str, Any] | None = None,
     ) -> str | None:
         """Reconcile one authenticated shared-group Docker observation."""
         ...
