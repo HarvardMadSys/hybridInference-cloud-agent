@@ -127,7 +127,7 @@ CloudLab 机器有租期，续期常被拒绝。到期时机器被收回，机�
 
 已经停下的 group 不会再补拍检查点，所以"搬不走"的 group 不会自己变好。
 
-1. **能搬就先搬。** 有"还能搬"的 group，并且 `move_out_possible` 成立（检查点能产生、有别的 Host 会接手，在同一把排他拓扑锁里判断），机器进入 `draining`，同时置 `removal_moves_out`，返回 `moving_out`。之后和到期腾空完全一样：不接任务，闲着的 group 停下、打包、交出去，正在跑的一轮不打断。
+1. **能搬就先搬。** 有"还能搬"的 group，并且 `move_out_possible` 成立（检查点能产生、有别的 Host 会接手，在同一把排他拓扑锁里判断），机器进入 `draining`，同时置 `removal_moves_out`，返回 `moving_out`。之后和到期腾空完全一样：不接任务，闲着的 group 停下、打包、交出去，正在跑的一轮不打断。机器上还有运行中的任务时，即使此刻没有要停的 group，只要 `move_out_possible` 成立也照样腾空（2026-10-16 修订）：正在恢复的 group，或者移除前已领取、移除后才启动的已覆盖 group，在这一轮结束后都在这台机器上运行，而撤销要等这一轮结束，那时它们已经交不出去了。
 2. **会有 group 留下时先问管理员。** 有"还能搬"的 group 但没地方搬，返回 409 `no_move_target`；有"搬不走"的 group，返回 409 `cannot_move`。页面弹窗说明原因和"移除后这些会话留在原机器上，回来之前不能继续"，管理员确认后带 `allow_unmoved=true` 再发一次：能搬的照样先搬，搬完按原来的规则撤销。同意记在 `removal_leaves_unmoved`。只有"已覆盖"的 group 时不问，因为撤销时它们照样会被交出（#658）。
 3. **搬完才撤销。** `finish_host_removals` 对带 `removal_moves_out` 的移除，除了等运行中的任务结束，还要等这台机器上没有"还能搬"的 group；有"搬不走"的 group 而管理员没同意时，也继续等。
 4. **搬的过程中检查点失败。** 这个 group 从"还能搬"变成"搬不走"，移除停在那里，不会自己撤销，也不会一直卡着没有提示：主机行显示"N cannot move, remove again to leave them"。管理员再点一次移除，确认后带 `allow_unmoved=true`，移除继续；也可以点"恢复使用"取消移除，会话回到原机器上继续。

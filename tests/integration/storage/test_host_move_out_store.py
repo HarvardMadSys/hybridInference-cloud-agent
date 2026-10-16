@@ -10,6 +10,7 @@ from tests.integration.storage.test_sandbox_restore_store import (
     _RESTORE_HOST,
     _claim,
     _covered,
+    _fence,
     _host,
     _receipt,
     _reserve,
@@ -352,3 +353,118 @@ async def test_a_checkpoint_failing_during_the_move_holds_the_removal_for_consen
     assert await store.host_pool.remove_host(host="runner-a", allow_unmoved=True) == "moving_out"
     assert await store.host_pool.finish_host_removals() == ["runner-a"]
     assert (await _state(pool))["host"] == "runner-a"
+
+
+async def _run_claimed_turn(
+    store: Storage, job: dict, claim: dict, host: str, container_id: str, base_sha: str
+) -> None:
+    """The claimed turn starts its group, runs and settles; the group stays up."""
+    sandbox = await _reserve(store, job, claim, host)
+    residency = await store.residency.establish_residency(
+        thread_id=job["thread_id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        host=host,
+        sandbox_id=sandbox["sandbox_id"],
+        runtime_id="claude-code",
+        runtime_version=sandbox["runtime_version"],
+        ttl_seconds=1800,
+    )
+    assert residency is not None
+    fence = _fence(job, claim, sandbox)
+    assert await store.sandbox.mark_thread_sandbox_running(
+        **fence, container_id=container_id, context_status="restored"
+    )
+    assert await store.sandbox.admit_thread_sandbox_turn(
+        **fence, residency_generation=residency["generation"], job_id=job["id"]
+    )
+    assert await store.sandbox.settle_thread_sandbox(
+        **fence,
+        residency_generation=residency["generation"],
+        job_id=job["id"],
+        context_status="live",
+        native_session_id="native-restore",
+        idle_timeout_seconds=15,
+        base_sha=base_sha,
+    )
+    assert await store.attempt_commands.transition(
+        job_id=job["id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        from_states=("running",),
+        to_state="succeeded",
+    )
+
+
+async def test_a_turn_claimed_before_the_removal_moves_out_the_group_it_starts(
+    pool, store: Storage
+):
+    """The group's checkpoint covers it now, but the turn starts it before any revocation."""
+    job, _ = await _covered(pool, store)
+    follow_up = await store.conversation_commands.create_follow_up(
+        parent_job_id=job["id"], user_id="user-1", prompt="continue"
+    )
+    assert follow_up is not None
+    claim = await _claim(store, "runner-a", _ARCHIVE_HOST)
+    assert claim is not None and claim["id"] == follow_up["id"]
+    await _captures(pool)
+    await _host(store, "runner-c", _RESTORE_HOST)
+
+    removal = await store.host_pool.remove_host(host="runner-a")
+    await _run_claimed_turn(store, follow_up, claim, "runner-a", "container-a", job["base_sha"])
+
+    # The group runs on the host now; revoking it would leave the group there.
+    assert await store.host_pool.finish_host_removals() == []
+    assert removal == "moving_out"
+    [row] = await store.sandbox.sandboxes_moving_out()
+    assert row["sandbox_id"] == "asbx_restore"
+    assert (
+        await store.sandbox.request_move_out_stop(
+            sandbox_id=row["sandbox_id"],
+            generation=row["generation"],
+            container_id=row["container_id"],
+            actor_id="host-move-out",
+        )
+        == "accepted"
+    )
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_sandboxes SET state = 'stopped', stop_requested_at = NULL WHERE id = $1",
+            row["sandbox_id"],
+        )
+    stopped = await store.sandbox.thread_sandbox(thread_id=follow_up["thread_id"])
+    assert stopped is not None
+    assert await store.sandbox.record_sandbox_checkpoint(
+        host="runner-a",
+        thread_id=follow_up["thread_id"],
+        checkpoint=_receipt(stopped, follow_up, checkpoint_id="f" * 32),
+    )
+    assert (await _state(pool))["state"] == "cold"
+    assert await store.host_pool.finish_host_removals() == ["runner-a"]
+
+
+async def test_removing_a_host_while_it_restores_a_group_moves_that_group_out(pool, store: Storage):
+    """A restoring group is not counted, yet it runs on the host once its turn ends."""
+    job, _ = await _covered(pool, store)
+    follow_up = await store.conversation_commands.create_follow_up(
+        parent_job_id=job["id"], user_id="user-1", prompt="continue"
+    )
+    assert follow_up is not None
+    assert await store.host_pool.remove_host(host="runner-a") == "ok"
+    await _host(store, "runner-c", _RESTORE_HOST)
+    await _captures(pool, "runner-c")
+    claim = await _claim(store, "runner-c", _RESTORE_HOST)
+    assert claim is not None and claim["id"] == follow_up["id"]
+    assert (await _state(pool))["state"] == "restoring"
+    await _host(store, "runner-d", _RESTORE_HOST)
+
+    removal = await store.host_pool.remove_host(host="runner-c")
+    await _run_claimed_turn(store, follow_up, claim, "runner-c", "container-c", job["base_sha"])
+
+    restored = await _state(pool)
+    assert restored["state"] == "running" and restored["host"] == "runner-c"
+    # Revoking runner-c now would leave the restored group on it.
+    assert await store.host_pool.finish_host_removals() == []
+    assert removal == "moving_out"
+    [row] = await store.sandbox.sandboxes_moving_out()
+    assert row["sandbox_id"] == "asbx_restore" and row["host"] == "runner-c"

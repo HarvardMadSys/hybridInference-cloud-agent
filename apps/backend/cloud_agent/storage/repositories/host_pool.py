@@ -891,7 +891,10 @@ class PostgresHostPoolRepository:
         claims nothing, its idle groups stop into checkpoints and are handed
         over one at a time, and :meth:`finish_host_removals` revokes it once
         none is left and its last running turn has ended. Nothing running is
-        interrupted.
+        interrupted. A host still running turns moves out whenever it can,
+        even with no group to stop yet: a turn restoring a group, or one that
+        claimed a covered group before the removal, leaves that group running
+        here once it ends.
 
         A removal that would leave groups bound to the host needs
         ``allow_unmoved``: ``"no_move_target"`` when groups could move but no
@@ -972,7 +975,12 @@ class PostgresHostPoolRepository:
                     leaves_unmoved,
                 )
                 return "moving_out"
-            moving = bool(groups["to_stop"]) and await move_out_possible(
+            # A running turn may leave a group running here that this count
+            # did not see: one it is restoring, or a covered one it claimed
+            # before the removal and starts after it. The revocation, which
+            # waits for the turn, would leave that group behind, so a host
+            # still running turns moves out whenever it can.
+            moving = bool(groups["to_stop"] or row["slots_used"]) and await move_out_possible(
                 conn, [host], need_target=True
             )
             if not allow_unmoved:
