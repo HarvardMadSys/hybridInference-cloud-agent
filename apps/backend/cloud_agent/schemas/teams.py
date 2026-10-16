@@ -16,6 +16,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from cloud_agent.domain.teams import (
+    LISTING_LIMIT,
     MAX_TEAM_NAME_CHARS,
     InvitationStatus,
     JoinRequestState,
@@ -288,9 +289,16 @@ class AdminTeamDetailResponse(BaseModel):
     """One team as the administrator sees it."""
 
     team: AdminTeamSummary
-    members: list[AdminTeamMember]
+    members: list[AdminTeamMember] = Field(
+        description=(
+            f"Every active member, and the {LISTING_LIMIT} who left or were removed most recently."
+        )
+    )
     join_requests: list[JoinRequestResponse]
     invitations: AdminTeamInvitationCounts
+    departed_member_count: int = Field(
+        description="Everyone who left or was removed, including those not listed."
+    )
 
 
 class AdminTeamAuditEvent(BaseModel):

@@ -196,6 +196,12 @@ export default function AdminTeamPage() {
                     ))}
                   </tbody>
                 </table>
+                {detail.departed_member_count > departed.length && (
+                  <p className="px-4 py-3 text-xs text-muted">
+                    Showing the latest {departed.length} of {detail.departed_member_count} people
+                    who left or were removed.
+                  </p>
+                )}
               </section>
 
               <section aria-labelledby="team-history" className={CARD}>

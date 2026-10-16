@@ -852,6 +852,9 @@ administrators see every team under **Admin → Teams**, read-only:
 - A team's page (`GET /admin/agent/teams/{team_id}`) lists members in every
   state, including those who left or were removed and when, plus open join
   requests and how many invitation links are open, expired, claimed or revoked.
+  Departures are kept for good, so it lists every active member and the 50 who
+  left or were removed most recently; `departed_member_count` counts them all.
+  That bounds the Gateway email lookups one view makes.
   `GET /admin/agent/teams/{team_id}/audit-events` pages the team's own audit
   history with `before`.
 

@@ -107,7 +107,13 @@ class PostgresTeamAdminQueries:
         return [_admin_team(row) for row in rows[:limit]], len(rows) > limit
 
     async def get_team_for_admin(self, team_id: str) -> AdminTeamDetail:
-        """Read the team, its roster, open requests and link counts in one snapshot."""
+        """Read the team, its roster, open requests and link counts in one snapshot.
+
+        Active members are bounded by ``MAX_TEAM_MEMBERS``; departures are kept
+        for good and are not, so only the latest :data:`LISTING_LIMIT` are
+        listed and the rest are counted. The page asks the Gateway for the
+        email of everyone listed, so the roster has to stay bounded.
+        """
         async with self._pool.acquire() as conn, conn.transaction(isolation="repeatable_read"):
             row = await conn.fetchrow(_ADMIN_TEAM_VIEW + " WHERE t.id = $1", team_id)
             if row is None:
@@ -121,11 +127,24 @@ class PostgresTeamAdminQueries:
                   FROM agent_team_members AS m
                   LEFT JOIN agent_user_profiles AS p ON p.user_id = m.user_id
                  WHERE m.team_id = $1
+                   AND (m.state = 'active'
+                        OR m.user_id IN (SELECT departed.user_id
+                                           FROM agent_team_members AS departed
+                                          WHERE departed.team_id = $1
+                                            AND departed.state <> 'active'
+                                          ORDER BY departed.departed_at DESC,
+                                                   departed.user_id
+                                          LIMIT $3))
                  ORDER BY (m.state = 'active') DESC, (m.user_id = $2) DESC,
                           (m.role = 'admin') DESC, m.joined_at, m.user_id
                 """,
                 team_id,
                 team.owner_user_id,
+                LISTING_LIMIT,
+            )
+            departed_count = await conn.fetchval(
+                "SELECT count(*) FROM agent_team_members WHERE team_id = $1 AND state <> 'active'",
+                team_id,
             )
             requests = await conn.fetch(
                 _APPLICANT_VIEW
@@ -168,6 +187,7 @@ class PostgresTeamAdminQueries:
             ],
             join_requests=[_applicant(request) for request in requests],
             invitations=invitations,
+            departed_count=departed_count,
         )
 
     async def list_team_audit_for_admin(

@@ -17,7 +17,7 @@ from tests.integration.storage.test_team_store import (
     token_hash,
 )
 
-from cloud_agent.domain.teams import TeamNotFound
+from cloud_agent.domain.teams import LISTING_LIMIT, TeamNotFound
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
@@ -167,6 +167,34 @@ async def test_a_team_shows_departed_members_requests_and_link_counts(store, poo
     expired = await store.team_admin.get_team_for_admin(team.id)
     assert expired.join_requests == []
     assert expired.invitations["expired"] == 1 and expired.invitations["open"] == 0
+
+
+async def test_a_team_lists_its_latest_departures_and_counts_the_rest(store, pool):
+    team = await new_team(store)
+    await join(store, team.id, "bob")
+    # Departures are kept for good, so a long-lived team piles them up; every
+    # one listed is also one Gateway lookup when the page names it.
+    async with pool.acquire() as conn:
+        await conn.executemany(
+            "INSERT INTO agent_team_members (team_id, user_id, state, joined_at, departed_at) "
+            "VALUES ($1, $2, $3, NOW() - INTERVAL '1 year', "
+            "NOW() - make_interval(days => $4::int))",
+            [
+                (team.id, f"former-{n:02}", "left" if n % 2 else "removed", 100 - n)
+                for n in range(LISTING_LIMIT + 5)
+            ],
+        )
+
+    detail = await store.team_admin.get_team_for_admin(team.id)
+
+    active = [m.user_id for m in detail.members if m.state == "active"]
+    departed = [m.user_id for m in detail.members if m.state != "active"]
+    assert active == ["alice", "bob"]
+    # The most recent departures are listed; the five oldest are only counted.
+    assert len(departed) == LISTING_LIMIT
+    assert set(departed) == {f"former-{n:02}" for n in range(5, LISTING_LIMIT + 5)}
+    assert detail.departed_count == LISTING_LIMIT + 5
+    assert detail.team.member_count == 2
 
 
 async def test_a_deleted_team_stays_readable_and_an_unknown_one_is_not_found(store):

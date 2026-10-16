@@ -3110,6 +3110,11 @@
       "AdminTeamDetailResponse": {
         "description": "One team as the administrator sees it.",
         "properties": {
+          "departed_member_count": {
+            "description": "Everyone who left or was removed, including those not listed.",
+            "title": "Departed Member Count",
+            "type": "integer"
+          },
           "invitations": {
             "$ref": "#/components/schemas/AdminTeamInvitationCounts"
           },
@@ -3121,6 +3126,7 @@
             "type": "array"
           },
           "members": {
+            "description": "Every active member, and the 50 who left or were removed most recently.",
             "items": {
               "$ref": "#/components/schemas/AdminTeamMember"
             },
@@ -3135,7 +3141,8 @@
           "team",
           "members",
           "join_requests",
-          "invitations"
+          "invitations",
+          "departed_member_count"
         ],
         "title": "AdminTeamDetailResponse",
         "type": "object"

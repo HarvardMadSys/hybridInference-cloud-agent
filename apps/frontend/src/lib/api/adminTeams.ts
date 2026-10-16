@@ -47,9 +47,12 @@ export interface AdminTeamJoinRequest extends AdminTeamPerson {
 
 export interface AdminTeamDetail {
   team: AdminTeamSummary;
+  /** Every active member, and only the latest of those who left or were removed. */
   members: AdminTeamMember[];
   join_requests: AdminTeamJoinRequest[];
   invitations: { open: number; expired: number; claimed: number; revoked: number };
+  /** Everyone who left or was removed, including those `members` leaves out. */
+  departed_member_count: number;
 }
 
 export interface AdminTeamAuditEvent {
