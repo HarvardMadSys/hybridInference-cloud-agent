@@ -4814,13 +4814,27 @@ class SharedChatSessionSupervisor:
             ]
         stopped: builtins.list[SharedSessionDescriptor] = []
         for thread_id, generation in candidates:
-            with contextlib.suppress(SessionBusy, SessionLeaseLost):
-                stopped.append(
-                    self.stop_if_idle(
-                        thread_id,
-                        generation=generation,
-                        require_expired_deadline=True,
+            try:
+                with contextlib.suppress(SessionBusy, SessionLeaseLost):
+                    stopped.append(
+                        self.stop_if_idle(
+                            thread_id,
+                            generation=generation,
+                            require_expired_deadline=True,
+                        )
                     )
+            except Exception as exc:
+                # One group that cannot be stopped must not keep the groups
+                # after it running. Only the error type is logged: an archive
+                # provider's message can carry what a log must not.
+                logger.error(
+                    "idle shared sandbox could not be stopped",
+                    extra={
+                        "event": "shared_chat_idle_stop_failed",
+                        "thread_id": thread_id,
+                        "generation": generation,
+                        "error_type": _safe_error_type(exc),
+                    },
                 )
         return stopped
 
@@ -4946,9 +4960,12 @@ class SharedChatSessionSupervisor:
             self._start_group(group)
 
     def _arm_idle_if_quiescent(self, group: _Group, *, allow_lifecycle_check: bool = False) -> None:
+        # A lost group's last observation may still say running, but nothing
+        # stops it again: armed, the sweep would pick it on every pass.
         if (
             self._is_quiescent(group, allow_lifecycle_check=allow_lifecycle_check)
             and group.inspection.running
+            and not group.container_lost
             and not group.stop_archive_pending
             and not group.stop_archive_blocked
             and not group.orphan_finalization_pending

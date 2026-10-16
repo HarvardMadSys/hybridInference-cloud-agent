@@ -3745,6 +3745,75 @@ def test_a_failed_stop_docker_cannot_inspect_leaves_the_group_unlost():
     assert manager.items[_spec().container_name].running is False
 
 
+def test_a_group_lost_in_a_failed_stop_is_never_armed_to_stop_again():
+    """A container that really went away during its stop leaves a lost group, not an idle one.
+
+    Its last observation still says running, but a lost group is never stopped
+    again. Armed, it was the sweep's candidate on every pass, and the loss it
+    raised ended each pass before the groups after it.
+    """
+    now = 100.0
+
+    class VanishOnStop(_Manager):
+        def stop(self, spec, **kwargs):
+            if spec.sandbox_id == _spec().sandbox_id:
+                # Docker now answers "no such container" for it.
+                self.items.pop(spec.container_name)
+                raise SandboxError("docker stop failed")
+            return super().stop(spec, **kwargs)
+
+    manager = VanishOnStop()
+    supervisor = SharedChatSessionSupervisor(manager, idle_timeout_s=30, clock=lambda: now)
+    other = replace(_spec(), thread_id="athr_other", sandbox_id="asbx_other")
+    supervisor.register_manifest(_spec(), _members())
+    supervisor.register_manifest(other, [replace(_members()[0], thread_id=other.thread_id)])
+    with pytest.raises(SandboxError, match="docker stop failed"):
+        supervisor.stop_if_idle("athr_source", generation=1)
+    lost = supervisor._members["athr_source"]
+    assert lost.container_lost is True
+    assert lost.idle_deadline is None
+    token, _ = supervisor.operation_opened(other.thread_id)
+    supervisor.operation_closed(other.thread_id, token)
+    now = 1000.0
+
+    assert [row.thread_id for row in supervisor.sweep()] == [other.thread_id]
+    assert manager.items[other.container_name].running is False
+
+
+def test_one_group_the_sweep_cannot_stop_does_not_hold_up_the_others(caplog):
+    now = 100.0
+    unsafe = "https://daemon.invalid/stop?token=sweep-secret"
+
+    class StopFails(_Manager):
+        def stop(self, spec, **kwargs):
+            if spec.sandbox_id == _spec().sandbox_id:
+                raise SandboxError(f"docker stop failed: {unsafe}")
+            return super().stop(spec, **kwargs)
+
+    manager = StopFails()
+    supervisor = SharedChatSessionSupervisor(manager, idle_timeout_s=30, clock=lambda: now)
+    other = replace(_spec(), thread_id="athr_other", sandbox_id="asbx_other")
+    supervisor.register_manifest(_spec(), _members())
+    supervisor.register_manifest(other, [replace(_members()[0], thread_id=other.thread_id)])
+    for thread_id in ("athr_source", other.thread_id):
+        token, _ = supervisor.operation_opened(thread_id)
+        supervisor.operation_closed(thread_id, token)
+    now = 1000.0
+
+    with caplog.at_level(logging.WARNING):
+        stopped = supervisor.sweep()
+
+    assert [row.thread_id for row in stopped] == [other.thread_id]
+    assert manager.items[_spec().container_name].running is True
+    assert manager.items[other.container_name].running is False
+    assert any(
+        getattr(record, "event", None) == "shared_chat_idle_stop_failed"
+        and getattr(record, "error_type", None) == "SandboxError"
+        for record in caplog.records
+    )
+    assert unsafe not in caplog.text
+
+
 def _archive_shutdown_group(
     *,
     events: list[str],
