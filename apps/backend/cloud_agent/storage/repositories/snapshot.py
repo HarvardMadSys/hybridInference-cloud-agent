@@ -30,6 +30,11 @@ logger = get_logger(__name__)
 CAPTURE_RETRY_S = 5.0
 #: How long a published base whose import failed waits before it is retried.
 BASE_IMPORT_RETRY_S = 15.0
+#: The longest a publication waits on its group's base import while that import
+#: keeps failing. Past it the publication fails visibly rather than holding the
+#: group in ``importing`` for good: a commit GitHub no longer serves, or a
+#: bundle the workspace cannot take, never imports however often it is retried.
+BASE_IMPORT_WAIT_LIMIT_S = 3600.0
 #: A publication whose entitlement preflight failed waits before retrying.
 PUBLISH_RETRY_S = 30.0
 #: How many transient failures may return a publication to the durable queue.
@@ -629,6 +634,121 @@ class PostgresSnapshotRepository:
                 sandbox_generation,
                 container_id,
             )
+        return True
+
+    async def reimport_snapshot_base(
+        self,
+        *,
+        snapshot_id: int,
+        sandbox_id: str,
+        sandbox_generation: int,
+        container_id: str,
+        base_sha: str,
+    ) -> bool:
+        """Hand back a capture whose workspace lost its published base, and import it again.
+
+        The host imports a published commit as objects no ref names, so Git's
+        own housekeeping prunes them once their pack is old enough, and the
+        next capture of that base finds it missing. Every later capture is cut
+        from the same base, so failing the snapshot left the workspace
+        unpublishable for good. Instead the group goes back to ``importing``
+        for the same ``published_base_sha``, as publication leaves it: the
+        start is fenced, the idle deadline cleared, and the base-import worker
+        woken by the trigger on that state. The capture goes back to
+        ``pending`` with no retry delay; a group that is importing is not
+        claimed, so it waits, and the import's completion makes it due again.
+        A pending snapshot beside it takes its turns, as a deferred capture's.
+
+        Returns ``False``, changing nothing, unless this exact capture is still
+        claimed, its group still has the lifecycle identity it was claimed
+        under and ``base_sha`` as its published base, and one of the group's
+        snapshots published that commit, which is what the import fetches
+        again. A base no snapshot published, such as the one a workspace
+        usually started from, has nothing for the import to fetch; the caller
+        then fails the capture as before.
+
+        Locks follow :mod:`cloud_agent.storage`: the claimed capture, its
+        group, then the group's pending snapshot. The published snapshot is
+        only read: it is terminal, and the group's lock keeps the base still.
+        """
+        detail = (
+            f"the workspace no longer holds published base {base_sha[:12]}; "
+            "it is being imported again before this snapshot is captured"
+        )
+        async with self._pool.acquire() as conn, conn.transaction():
+            claimed_sandbox_id = await conn.fetchval(
+                """
+                SELECT sandbox_id FROM agent_sandbox_snapshots
+                WHERE id = $1 AND state = 'capturing' AND base_sha = $2
+                FOR UPDATE
+                """,
+                snapshot_id,
+                base_sha,
+            )
+            if claimed_sandbox_id is None:
+                return False
+            if str(claimed_sandbox_id) != sandbox_id:
+                raise ValueError("snapshot claim belongs to a different sandbox")
+            group = await conn.fetchval(
+                """
+                SELECT id FROM agent_sandboxes
+                WHERE id = $1 AND generation = $2 AND container_id = $3
+                  AND snapshot_state = 'snapshotting' AND published_base_sha = $4
+                FOR UPDATE
+                """,
+                sandbox_id,
+                sandbox_generation,
+                container_id,
+                base_sha,
+            )
+            if group is None:
+                return False
+            if not await conn.fetchval(
+                """
+                SELECT EXISTS (
+                    SELECT 1 FROM agent_sandbox_snapshots
+                    WHERE sandbox_id = $1 AND state = 'published'
+                      AND published_commit_sha = $2
+                )
+                """,
+                sandbox_id,
+                base_sha,
+            ):
+                return False
+            retried = (
+                await _fold_into_pending_snapshot(
+                    conn, snapshot_id=snapshot_id, sandbox_id=sandbox_id
+                )
+                or snapshot_id
+            )
+            await conn.execute(
+                """
+                UPDATE agent_sandbox_snapshots
+                SET state = 'pending', last_error = $2, retry_at = NULL, updated_at = NOW()
+                WHERE id = $1 AND state IN ('capturing', 'pending')
+                """,
+                retried,
+                detail,
+            )
+            # Importing the published base starts the container if stopped.
+            await conn.execute(
+                f"""
+                UPDATE agent_sandboxes
+                SET snapshot_state = 'importing', idle_deadline = NULL,
+                    {FENCE_START_SQL}, updated_at = NOW()
+                WHERE id = $1 AND snapshot_state = 'snapshotting'
+                """,
+                sandbox_id,
+            )
+        logger.warning(
+            "agent_snapshot_base_reimport",
+            extra={
+                "event": "agent_snapshot_base_reimport",
+                "snapshot_id": retried,
+                "sandbox_id": sandbox_id,
+                "base_sha": base_sha,
+            },
+        )
         return True
 
     async def reap_stalled_sandbox_snapshot_captures(
@@ -1273,12 +1393,26 @@ class PostgresSnapshotRepository:
                 )
 
     async def pending_snapshot_base_import(self) -> dict[str, Any] | None:
-        """Return one published group commit whose object import is pending."""
+        """Return one published group commit whose object import is pending.
+
+        ``origin_base_sha`` is the base the group's first snapshot was cut
+        from: the commit its workspace was checked out at, which the
+        workspace's own history keeps. Every published commit descends from
+        it. The published ones are kept by nothing, so Git prunes them
+        together, and a bundle that needs only the previous one in the
+        workspace cannot import their successor again.
+        """
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
                 SELECT latest.id AS snapshot_id, latest.sandbox_id,
                        latest.anchor_job_id, latest.published_commit_sha, latest.base_sha,
+                       COALESCE((
+                           SELECT origin.base_sha FROM agent_sandbox_snapshots origin
+                           WHERE origin.sandbox_id = g.id
+                           ORDER BY origin.workspace_epoch, origin.id
+                           LIMIT 1
+                       ), latest.base_sha) AS origin_base_sha,
                        g.origin_thread_id, g.generation, g.container_id,
                        g.runtime_id, g.runtime_version, g.sandbox_image_digest,
                        g.memory_limit, g.cpu_limit, g.disk_limit_mib, g.stop_timeout_seconds,
@@ -1392,19 +1526,96 @@ class PostgresSnapshotRepository:
         The import is not retried before the snapshot's ``retry_at``: the usual
         interval, or longer when GitHub asked to wait out a rate limit
         (``delay_s``).
+
+        A publication waiting on the import does not wait for good. Once the
+        import has kept failing for ``BASE_IMPORT_WAIT_LIMIT_S`` since the
+        group's pending snapshot began waiting, that snapshot fails with the
+        import's reason and the group goes ``dirty``, which also ends the
+        retries. The owner's next request captures again, and a capture that
+        still finds the base missing imports it again.
+
+        Locks follow :mod:`cloud_agent.storage`: the published snapshot, then
+        its group, then the group's pending snapshot.
         """
-        async with self._pool.acquire() as conn:
-            await conn.execute(
+        async with self._pool.acquire() as conn, conn.transaction():
+            published = await conn.fetchrow(
                 """
                 UPDATE agent_sandbox_snapshots
                 SET last_error = $2, updated_at = NOW(),
                     retry_at = clock_timestamp() + make_interval(secs => $3)
                 WHERE id = $1 AND state = 'published'
+                RETURNING sandbox_id, published_commit_sha
                 """,
                 snapshot_id,
                 detail[:2000],
                 _retry_wait_s(delay_s, floor=BASE_IMPORT_RETRY_S),
             )
+            if published is None:
+                return
+            group = await conn.fetchval(
+                """
+                SELECT id FROM agent_sandboxes
+                WHERE id = $1 AND snapshot_state = 'importing'
+                  AND published_base_sha = $2
+                FOR UPDATE
+                """,
+                published["sandbox_id"],
+                published["published_commit_sha"],
+            )
+            if group is None:
+                return
+            waiting = await conn.fetchval(
+                """
+                SELECT id FROM agent_sandbox_snapshots
+                WHERE sandbox_id = $1 AND state = 'pending'
+                  AND updated_at < clock_timestamp() - make_interval(secs => $2)
+                FOR UPDATE
+                """,
+                group,
+                BASE_IMPORT_WAIT_LIMIT_S,
+            )
+            if waiting is None:
+                return
+            reason = (
+                f"the workspace's published base {str(published['published_commit_sha'])[:12]} "
+                f"could not be imported: {detail}"
+            )[:2000]
+            await conn.execute(
+                """
+                UPDATE agent_sandbox_snapshots
+                SET state = 'failed', last_error = $2, retry_at = NULL, updated_at = NOW()
+                WHERE id = $1 AND state = 'pending'
+                """,
+                waiting,
+                reason,
+            )
+            await conn.execute(
+                """
+                UPDATE agent_sandboxes
+                SET snapshot_state = 'dirty', last_error = $2,
+                    idle_deadline = CASE
+                        WHEN active_operation_count = 0
+                         AND NOT EXISTS (
+                            SELECT 1 FROM agent_thread_sandbox_memberships active
+                            WHERE active.sandbox_id = agent_sandboxes.id
+                              AND active.active_attempt_id IS NOT NULL
+                         )
+                        THEN clock_timestamp() + make_interval(secs => idle_timeout_seconds)
+                        ELSE NULL END,
+                    updated_at = NOW()
+                WHERE id = $1
+                """,
+                group,
+                reason,
+            )
+        logger.warning(
+            "agent_snapshot_base_import_abandoned",
+            extra={
+                "event": "agent_snapshot_base_import_abandoned",
+                "snapshot_id": waiting,
+                "sandbox_id": group,
+            },
+        )
 
     async def next_snapshot_retry_due(self) -> datetime | None:
         """When the earliest capture handed back for a retry may be claimed again.

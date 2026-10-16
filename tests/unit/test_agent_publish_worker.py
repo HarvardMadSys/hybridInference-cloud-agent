@@ -622,6 +622,59 @@ async def test_shared_snapshot_publishes_group_lineage_and_imports_the_new_base(
     assert "ajob_1" in captured_pr["body"] and "ajob_2" in captured_pr["body"]
 
 
+async def test_a_retried_base_import_bundles_against_the_workspaces_first_base(monkeypatch):
+    """The workspace keeps the commit it started from; Git prunes published ones together.
+
+    A published commit is imported as objects no ref names, and Git prunes
+    the commits published before it in the same pass. A bundle that needs the
+    previous published base can then never be unbundled again; one cut from
+    the base the group's first snapshot started from can, because the
+    workspace's own history holds that commit.
+    """
+    from cloud_agent import sandbox_manager_routing
+
+    store = FakeStore()
+    fetched: dict[str, Any] = {}
+
+    def fetch(**kwargs: Any) -> bytes:
+        fetched.update(kwargs)
+        return b"bundle"
+
+    class SandboxManager:
+        imported: tuple[str, bytes] | None = None
+
+        async def import_shared_base(self, row, *, commit_sha: str, bundle: bytes):
+            self.imported = (commit_sha, bundle)
+
+    sandbox_manager = SandboxManager()
+
+    async def route(_store, job_id: str):
+        assert job_id == "ajob_1"
+        return sandbox_manager
+
+    monkeypatch.setattr(publish_worker, "fetch_base_bundle", fetch)
+    monkeypatch.setattr(sandbox_manager_routing, "sandbox_manager_for_job", route)
+    pending = {
+        "snapshot_id": 9,
+        "anchor_job_id": "ajob_1",
+        "repo": "o/n",
+        "user_id": "u1",
+        "published_commit_sha": "c" * 40,
+        "base_sha": "b" * 40,
+        "origin_base_sha": "a" * 40,
+    }
+
+    assert await publish_worker._retry_base_import(
+        store, pending, credential=GitHubCredential("t"), app_credentials=None
+    )
+
+    assert fetched["commit_sha"] == "c" * 40
+    assert fetched["base_sha"] == "a" * 40
+    assert sandbox_manager.imported == ("c" * 40, b"bundle")
+    assert store.import_completed == (9, "c" * 40)
+    assert store.import_failed is None
+
+
 async def test_shared_snapshot_rejection_does_not_fail_its_successful_turn(monkeypatch):
     snapshot = {
         **_JOB,

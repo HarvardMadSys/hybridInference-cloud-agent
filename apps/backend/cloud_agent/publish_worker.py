@@ -613,7 +613,14 @@ async def _retry_base_import(
     credential: GitHubCredential | None,
     app_credentials: Any | None,
 ) -> bool:
-    """Import one published base again; a failure is recorded on its snapshot."""
+    """Import one published base again; a failure is recorded on its snapshot.
+
+    The bundle is cut from the base the group's first snapshot started from
+    (``origin_base_sha``), not from the previous published base. A published
+    commit is imported as objects no ref names, so Git prunes it together with
+    the commits published before it; the workspace's own history keeps the
+    commit it started from, and every published commit descends from that.
+    """
     try:
         await require_entitled_repo(
             snapshot["repo"],
@@ -638,7 +645,7 @@ async def _retry_base_import(
             clone_url=credential.clone_url(snapshot["repo"]),
             commit_sha=commit_sha,
             auth_env=credential.git_auth_env(),
-            base_sha=snapshot.get("base_sha") or None,
+            base_sha=snapshot.get("origin_base_sha") or snapshot.get("base_sha") or None,
         )
         return await _import_snapshot_base(
             store,

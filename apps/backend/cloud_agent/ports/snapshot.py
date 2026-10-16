@@ -82,6 +82,25 @@ class SnapshotRepository(Protocol):
         """
         ...
 
+    async def reimport_snapshot_base(
+        self,
+        *,
+        snapshot_id: int,
+        sandbox_id: str,
+        sandbox_generation: int,
+        container_id: str,
+        base_sha: str,
+    ) -> bool:
+        """Hand back a capture whose workspace lost its published base, and import it again.
+
+        The group returns to ``importing`` for the same published base and the
+        capture to ``pending``, claimed again once the import completes.
+        ``False``, changing nothing, unless the claim, the group's lifecycle
+        identity and published base still match and one of the group's
+        snapshots published that commit; the caller then fails the capture.
+        """
+        ...
+
     async def reap_stalled_sandbox_snapshot_captures(
         self, *, stall_seconds: float = 300.0
     ) -> list[int]:
@@ -186,7 +205,8 @@ class SnapshotRepository(Protocol):
 
         The import is not retried before the snapshot's ``retry_at``: the usual
         interval, or longer when GitHub asked to wait out a rate limit
-        (``delay_s``).
+        (``delay_s``). A pending snapshot that has waited on the failing import
+        past its limit fails, and its group goes ``dirty``.
         """
         ...
 

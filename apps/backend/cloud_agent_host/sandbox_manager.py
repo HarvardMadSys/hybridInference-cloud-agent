@@ -121,6 +121,7 @@ from cloud_agent_shared.operation_profiling import PROFILING_CONTEXT_HEADER
 from cloud_agent_shared.plugins import MAX_SANDBOX_PLUGINS, SandboxPlugin
 from cloud_agent_shared.sandbox_archive_settings import SandboxArchivePolicyError
 from cloud_agent_shared.sandbox_manager_compat import manager_env
+from cloud_agent_shared.shared_protocol import SNAPSHOT_BASE_MISSING
 from cloud_agent_shared.workspace_browser import (
     WorkspacePathError,
     normalize_workspace_path,
@@ -1911,6 +1912,56 @@ def _run_terminal(
     return {"output": stdout, "stderr": stderr, "exit_code": status, "cwd": cwd}
 
 
+class SnapshotBaseMissing(HTTPException):
+    """A capture's refusal when the workspace lacks the commit its diff is cut from.
+
+    A published base reaches the workspace only as objects no ref names
+    (:meth:`ChatSandboxManager.import_base_bundle` leaves refs, HEAD and the
+    index to their owner), so Git's own housekeeping prunes it once its pack
+    is old enough. ``read-tree`` then fails with the same 502 as a refused
+    patch, which fails the snapshot, and every later capture of that base the
+    same way. This answer is told apart instead: 409 with exactly
+    :data:`SNAPSHOT_BASE_MISSING`, on which the control plane imports the base
+    again and retries the capture.
+    """
+
+    def __init__(self) -> None:
+        """Answer with the one status and detail the control plane matches."""
+        super().__init__(status_code=409, detail=SNAPSHOT_BASE_MISSING)
+
+
+def _commit_missing(
+    backend: SandboxBackend,
+    workdir: Path | str,
+    sha: str,
+    *,
+    timeout_s: float = DEFAULT_COMMAND_TIMEOUT_S,
+) -> bool:
+    """Whether the workspace's object store lacks commit ``sha`` or its root tree.
+
+    Only a definite answer counts: ``rev-parse --quiet --verify`` exits 1 when
+    the name resolves to no object the store holds, and ``cat-file -e`` when
+    the tree is gone. Anything else, such as a directory that is not a
+    repository, is left to the capture, which reports its own failure. The
+    environment is the Git view's, so the workspace's configuration starts no
+    program and no lazy fetch.
+    """
+    if not _COMMIT_SHA.fullmatch(sha):
+        raise HTTPException(status_code=400, detail="base SHA is not a commit hash")
+    status, _stdout, _stderr = _run_sandbox(
+        backend,
+        workdir=workdir,
+        script=(
+            f'tree=$(git rev-parse --quiet --verify "{sha}^{{tree}}"); status=$?; '
+            '[ "$status" -eq 0 ] || exit "$status"; '
+            'git cat-file -e "$tree"'
+        ),
+        env={**_GIT_VIEW_ENV, "GIT_OPTIONAL_LOCKS": "0"},
+        timeout_s=timeout_s,
+    )
+    return status == 1
+
+
 def _run_git(
     backend: SandboxBackend,
     workdir: Path | str,
@@ -3411,6 +3462,15 @@ def create_app(
     def _capture_environment_snapshot(
         backend: RetainedChatBackend, body: SharedSnapshotCaptureRequest
     ) -> dict[str, Any]:
+        # Asked first: a missing base fails read-tree with the same 502 as a
+        # refused patch, which would fail the snapshot instead of re-importing.
+        if _commit_missing(
+            backend,
+            CHAT_WORKDIR,
+            body.base_sha,
+            timeout_s=applied_settings["workspace_command_timeout_s"],
+        ):
+            raise SnapshotBaseMissing()
         result = _run_git(
             backend,
             CHAT_WORKDIR,
@@ -3430,6 +3490,11 @@ def create_app(
     ) -> dict[str, Any]:
         try:
             return _capture_environment_snapshot(backend, body)
+        except SnapshotBaseMissing:
+            # Platform words the control plane matches exactly; nothing in
+            # them came from the workspace, so redaction has nothing to mask
+            # and must not rewrite them.
+            raise
         except Exception as exc:
             redactor = SecretRedactor(body.environment.secrets() if body.environment else {})
             if isinstance(exc, HTTPException):

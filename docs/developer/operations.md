@@ -2313,6 +2313,21 @@ whose credential hit one. A draft-PR refusal that names only its head branch
 pushed, is retried within the same five-attempt budget; an invalid base branch
 is refused for good.
 
+The base import adds a published commit's objects to the workspace and writes
+no ref, HEAD or index, so Git's own housekeeping prunes them once their pack is
+old enough (two weeks for a default `git gc`). A capture that then finds the
+published base missing is not failed: the sandbox manager refuses it with a
+409 of its own, the group returns to `importing` for the same published base,
+the publisher fetches that commit from GitHub again and imports it, and the
+capture runs once the import completes. That bundle is cut from the commit the
+workspace started from, which its own history keeps, because Git prunes the
+published commits together. A missing base that no snapshot published has
+nothing to fetch, and its capture fails as before. A publication waiting on a
+base import that keeps failing (GitHub no longer serves the commit, access was
+withdrawn, or the workspace cannot take the bundle) fails after an hour and
+leaves its group `dirty`; the owner's next request captures, and imports,
+again.
+
 Disk-pressure admission and alerting and a non-mutating pre-prompt context
 fingerprint remain deferred. Local functional checks do not establish production
 Kata, live-provider, or operational acceptance.

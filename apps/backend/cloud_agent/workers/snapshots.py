@@ -17,6 +17,7 @@ from cloud_agent.settings import number_setting
 from cloud_agent.workers.background_wake import SNAPSHOT
 from cloud_agent_shared.environment import environment_payload
 from cloud_agent_shared.host_settings import HOST_SETTINGS_BY_KEY
+from cloud_agent_shared.shared_protocol import SNAPSHOT_BASE_MISSING
 
 if TYPE_CHECKING:
     from cloud_agent.ports import HostPoolRepository, SnapshotRepository
@@ -50,6 +51,13 @@ MAX_SNAPSHOT_PATCH_BYTES = (
 #: sooner for a notification or the earliest capture retry; this is for what
 #: announces nothing, such as a capture the reaper found stalled.
 SNAPSHOT_IDLE_S = 30.0
+#: Why a capture whose base is missing still fails: only a commit one of the
+#: group's snapshots published can be fetched again, which the base a
+#: workspace started from usually is not.
+_BASE_LOST = (
+    "the workspace no longer holds the base commit this snapshot is cut from, "
+    "and it is not a published commit that can be imported again"
+)
 
 
 async def _capture_due_shared_snapshot(store: _SnapshotCapture) -> bool:
@@ -113,13 +121,28 @@ async def _capture_due_shared_snapshot(store: _SnapshotCapture) -> bool:
         if recorded is None:
             raise ValueError("shared snapshot receipt lost its durable generation fence")
     except SandboxManagerError as exc:
+        detail, dirty = str(exc), exc.status_code in {410, 422, 502}
+        if exc.status_code == 409 and exc.message == SNAPSHOT_BASE_MISSING:
+            # Git pruned the published base, which no ref names. Every later
+            # capture is cut from it, so it is imported again instead, and
+            # this capture waits for it rather than failing.
+            if await store.snapshot.reimport_snapshot_base(
+                snapshot_id=int(snapshot["snapshot_id"]),
+                sandbox_id=str(snapshot["sandbox_id"]),
+                sandbox_generation=int(snapshot["generation"]),
+                container_id=str(snapshot["container_id"]),
+                base_sha=str(snapshot["base_sha"]),
+            ):
+                return True
+            detail = _BASE_LOST
+            dirty = True
         await store.snapshot.defer_sandbox_snapshot_capture(
             snapshot_id=int(snapshot["snapshot_id"]),
             sandbox_id=str(snapshot["sandbox_id"]),
             sandbox_generation=int(snapshot["generation"]),
             container_id=str(snapshot["container_id"]),
-            detail=str(exc),
-            dirty=exc.status_code in {410, 422, 502},
+            detail=detail,
+            dirty=dirty,
         )
     except ValueError as exc:
         await store.snapshot.defer_sandbox_snapshot_capture(

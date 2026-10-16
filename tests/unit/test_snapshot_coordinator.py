@@ -155,3 +155,92 @@ async def test_a_receipt_patch_past_the_capture_limit_is_never_recorded(monkeypa
     else:
         assert [row["patch"] for row in port.recorded] == [patch]
         assert port.deferred == []
+
+
+class _ReimportPort(_CapturePort):
+    """A capture port that can also hand a capture back for a base re-import."""
+
+    def __init__(self, *, importable: bool) -> None:
+        super().__init__()
+        self.importable = importable
+        self.reimports: list[dict[str, Any]] = []
+
+    async def reimport_snapshot_base(self, **kwargs: Any) -> bool:
+        self.reimports.append(kwargs)
+        return self.importable
+
+
+def _refusing_sandbox_manager(monkeypatch, status_code: int, detail: str) -> None:
+    from cloud_agent import sandbox_manager_routing
+    from cloud_agent.sandbox_manager_client import SandboxManagerError
+
+    class _Refusing:
+        async def capture_shared_snapshot(self, snapshot: dict[str, Any]) -> dict[str, Any]:
+            raise SandboxManagerError(status_code, detail)
+
+    async def sandbox_manager_for_job(_store: Any, _job_id: str) -> _Refusing:
+        return _Refusing()
+
+    monkeypatch.setattr(sandbox_manager_routing, "sandbox_manager_for_job", sandbox_manager_for_job)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("importable", [True, False], ids=["published", "never-published"])
+async def test_a_capture_whose_base_git_pruned_imports_it_again_instead_of_failing(
+    monkeypatch, importable
+):
+    """The base a capture is cut from is imported again rather than failing the snapshot.
+
+    Git prunes a published base the host imported without a ref, and every
+    later capture is cut from that base, so failing it made the workspace
+    unpublishable for good. A base no publication made cannot be fetched
+    again; that capture still fails, now saying why.
+    """
+    from cloud_agent_shared.shared_protocol import SNAPSHOT_BASE_MISSING
+
+    _refusing_sandbox_manager(monkeypatch, 409, SNAPSHOT_BASE_MISSING)
+    port = _ReimportPort(importable=importable)
+    store = type("Store", (), {"snapshot": port, "host_pool": None})()
+
+    assert await control_plane._capture_due_shared_snapshot(store) is True
+
+    claimed = _claimed_snapshot()
+    assert port.reimports == [
+        {
+            "snapshot_id": claimed["snapshot_id"],
+            "sandbox_id": claimed["sandbox_id"],
+            "sandbox_generation": claimed["generation"],
+            "container_id": claimed["container_id"],
+            "base_sha": claimed["base_sha"],
+        }
+    ]
+    assert port.recorded == []
+    if importable:
+        assert port.deferred == []
+    else:
+        [deferred] = port.deferred
+        assert deferred["dirty"] is True
+        assert "base commit" in deferred["detail"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status_code", "detail", "dirty"),
+    [
+        (409, "shared workspace still has active mutations", False),
+        (502, "fatal: failed to unpack tree object", True),
+    ],
+    ids=["busy", "refused"],
+)
+async def test_other_capture_refusals_keep_their_meaning(monkeypatch, status_code, detail, dirty):
+    """Only the exact missing-base answer imports again; a busy host still retries."""
+    _refusing_sandbox_manager(monkeypatch, status_code, detail)
+    port = _ReimportPort(importable=True)
+    store = type("Store", (), {"snapshot": port, "host_pool": None})()
+
+    assert await control_plane._capture_due_shared_snapshot(store) is True
+
+    assert port.reimports == []
+    [deferred] = port.deferred
+    assert deferred["dirty"] is dirty
+    assert deferred["detail"] == detail

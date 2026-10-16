@@ -88,6 +88,13 @@ INPUT_REFUSALS = frozenset(
         INPUT_UNREACHABLE,
     }
 )
+#: A shared-workspace snapshot capture's refusal when the workspace no longer
+#: holds the commit its diff is cut from. A published base reaches the
+#: workspace as objects no ref names, so Git's own housekeeping prunes it once
+#: its pack is old enough. The sandbox manager answers 409 with exactly this
+#: detail, and the control plane imports that base again and retries the
+#: capture instead of failing the snapshot.
+SNAPSHOT_BASE_MISSING = "the workspace no longer holds the snapshot's base commit"
 #: Header the runner uses when it hands its sandbox manager the profiling policy
 #: a control plane sent it. The sandbox manager has no host credential and never will --
 #: the design forbids widening that -- so the policy travels over the existing
