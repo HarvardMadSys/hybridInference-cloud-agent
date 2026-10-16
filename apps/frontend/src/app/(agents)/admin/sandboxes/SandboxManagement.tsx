@@ -295,6 +295,48 @@ export function SandboxManagement({
               )}
             </div>
           )}
+          {(detail.deletion_attempts?.length ?? 0) > 0 && (
+            <section aria-label="Deletion attempts" className="mt-3 space-y-2">
+              <h3 className="text-sm font-semibold text-gray-800 dark:text-gray-100">
+                Deletion attempts
+              </h3>
+              {detail.deletion_attempts?.map((attempt) => (
+                <article
+                  key={attempt.correlation_id}
+                  className="rounded border border-gray-200 p-2 text-xs text-gray-600 dark:border-white/10 dark:text-gray-300"
+                >
+                  <p>
+                    Attempt {attempt.attempt_number} · {attempt.outcome.replaceAll('_', ' ')} ·{' '}
+                    {attempt.stage.replaceAll('_', ' ')} · {dateTime(attempt.started_at)}
+                  </p>
+                  <p>
+                    Correlation: <code>{attempt.correlation_id}</code>
+                  </p>
+                  {(attempt.failure_code || attempt.sandbox_manager_status != null) && (
+                    <p>
+                      {attempt.failure_code && (
+                        <>
+                          Failure: <code>{attempt.failure_code}</code>
+                        </>
+                      )}
+                      {attempt.failure_code && attempt.sandbox_manager_status != null && ' · '}
+                      {attempt.sandbox_manager_status != null &&
+                        `Sandbox manager HTTP ${attempt.sandbox_manager_status}`}
+                    </p>
+                  )}
+                  <p>
+                    Retry class: {attempt.retry_class ?? 'none'} · Retry scheduled:{' '}
+                    {attempt.retry_scheduled == null
+                      ? 'unknown'
+                      : attempt.retry_scheduled
+                        ? 'yes'
+                        : 'no'}
+                    {' · '}Cleanup: {attempt.cleanup_outcome.replaceAll('_', ' ')}
+                  </p>
+                </article>
+              ))}
+            </section>
+          )}
           <ul
             aria-label="Sandbox sessions"
             className="mt-3 divide-y divide-gray-200 dark:divide-white/10"

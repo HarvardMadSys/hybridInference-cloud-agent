@@ -461,6 +461,100 @@ async def test_safe_prearchive_failure_preserves_native_resume(db, store):
     assert replacement.sandbox.deletion_request_id != claim["deletion_request_id"]
 
 
+async def test_deletion_attempt_ledger_records_sanitized_failure_details(db, store):
+    await seed(db, store, "asbx_attempt_ledger", state="stopped")
+    assert await request_delete(store, "asbx_attempt_ledger") == "accepted"
+    claim = await store.sandbox.claim_due_admin_sandbox_deletion(ttl_seconds=3600)
+    assert claim is not None
+    correlation_id = claim["deletion_attempt_correlation_id"]
+    assert claim["deletion_attempt_number"] == 1
+    assert await store.sandbox.update_admin_sandbox_deletion_attempt_stage(
+        correlation_id=correlation_id,
+        stage="archive_upload",
+        sandbox_manager_status=503,
+        cleanup_outcome="unconfirmed",
+    )
+    assert await store.sandbox.fail_admin_sandbox_deletion(
+        **worker_fence(claim), error="The container is retained.", retain_pending=True
+    )
+    assert await store.sandbox.finish_admin_sandbox_deletion_attempt(
+        correlation_id=correlation_id,
+        outcome="retrying",
+        failure_code="sandbox_manager_unavailable",
+        sandbox_manager_status=503,
+        retry_class="transient",
+        retry_scheduled=True,
+        cleanup_outcome="unconfirmed",
+    )
+    detail = await store.admin_sandboxes.detail("asbx_attempt_ledger")
+    assert detail is not None and detail.sandbox.deletion_state == "pending"
+    assert len(detail.deletion_attempts) == 1
+    attempt = detail.deletion_attempts[0]
+    assert attempt.correlation_id == correlation_id
+    assert attempt.request_id == claim["deletion_request_id"]
+    assert attempt.host_id == claim["host"]
+    assert attempt.stage == "archive_upload"
+    assert attempt.outcome == "retrying"
+    assert attempt.failure_code == "sandbox_manager_unavailable"
+    assert attempt.sandbox_manager_status == 503
+    assert attempt.retry_class == "transient"
+    assert attempt.retry_scheduled is True
+    assert attempt.cleanup_outcome == "unconfirmed"
+
+
+async def test_attempt_ledger_insert_failure_does_not_block_deletion_claim(db, store):
+    """A diagnostics write failure must not roll back the existing work claim."""
+    sandbox_id = "asbx_attempt_telemetry_failure"
+    await seed(db, store, sandbox_id, state="stopped")
+    assert await request_delete(store, sandbox_id) == "accepted"
+    async with db.acquire() as conn:
+        await conn.execute(
+            """
+            CREATE OR REPLACE FUNCTION reject_deletion_attempt_ledger_insert()
+            RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN
+                IF NEW.sandbox_id = 'asbx_attempt_telemetry_failure' THEN
+                    RAISE EXCEPTION 'injected telemetry write failure';
+                END IF;
+                RETURN NEW;
+            END;
+            $$
+            """
+        )
+        await conn.execute(
+            """
+            CREATE TRIGGER reject_deletion_attempt_ledger_insert
+            BEFORE INSERT ON agent_sandbox_deletion_attempts
+            FOR EACH ROW EXECUTE FUNCTION reject_deletion_attempt_ledger_insert()
+            """
+        )
+    try:
+        claim = await store.sandbox.claim_due_admin_sandbox_deletion(ttl_seconds=3600)
+        assert claim is not None and claim["id"] == sandbox_id
+        assert claim["deletion_attempt_number"] == 1
+        async with db.acquire() as conn:
+            assert (
+                await conn.fetchval(
+                    "SELECT COUNT(*) FROM agent_sandbox_deletion_attempts WHERE sandbox_id=$1",
+                    sandbox_id,
+                )
+                == 0
+            )
+            assert (
+                await conn.fetchval(
+                    "SELECT deletion_claim_token FROM agent_sandboxes WHERE id=$1", sandbox_id
+                )
+                == claim["deletion_claim_token"]
+            )
+    finally:
+        async with db.acquire() as conn:
+            await conn.execute(
+                "DROP TRIGGER IF EXISTS reject_deletion_attempt_ledger_insert "
+                "ON agent_sandbox_deletion_attempts"
+            )
+            await conn.execute("DROP FUNCTION IF EXISTS reject_deletion_attempt_ledger_insert()")
+
+
 async def test_uncertain_host_abort_retries_cleanup_only_and_keeps_original_key(db, store):
     origin = await seed(db, store, "asbx_cleanup", state="stopped")
     await member(db, "asbx_cleanup", origin, 0)

@@ -110,12 +110,42 @@ export interface AdminSandboxCheckpoint {
   durations_ms?: Record<string, number>;
 }
 
+export interface AdminSandboxDeletionAttempt {
+  correlation_id: string;
+  request_id: string;
+  host_id: string;
+  attempt_number: number;
+  stage:
+    | 'sandbox_manager_resolution'
+    | 'archive_prepare'
+    | 'upload_authorization'
+    | 'archive_upload'
+    | 'archive_verification'
+    | 'durable_receipt'
+    | 'container_removal'
+    | 'database_finalization'
+    | 'discard_container_removal'
+    | 'discard_receipt_validation'
+    | 'cleanup_claim_renewal'
+    | 'cleanup_abort';
+  outcome: 'running' | 'retrying' | 'succeeded' | 'failed' | 'lease_expired';
+  failure_code: string | null;
+  sandbox_manager_status: number | null;
+  retry_class: 'transient' | 'permanent' | 'operator_action' | null;
+  retry_scheduled: boolean | null;
+  cleanup_outcome: 'not_required' | 'pending' | 'acknowledged' | 'unconfirmed';
+  started_at: string;
+  updated_at: string;
+  finished_at: string | null;
+}
+
 export interface AdminSandboxDetail {
   sandbox: AdminSandbox;
   members: AdminSandboxMember[];
   observed_at: string;
   terminal_activity_error?: string | null;
   latest_checkpoint?: AdminSandboxCheckpoint | null;
+  deletion_attempts?: AdminSandboxDeletionAttempt[];
 }
 
 export interface AdminSandboxStopRequest {

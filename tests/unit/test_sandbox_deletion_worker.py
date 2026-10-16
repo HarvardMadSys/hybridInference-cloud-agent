@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -30,6 +31,8 @@ def setup(monkeypatch, *, state="pending"):
         "container_id": "container-one",
         "deletion_request_id": "request",
         "deletion_claim_token": "claim-token",
+        "deletion_attempt_correlation_id": "00000000-0000-0000-0000-000000000001",
+        "deletion_attempt_number": 1,
         "deletion_state": state,
         "deletion_archive_key": URI if state == "archived" else None,
         "deletion_sha256": SHA256 if state == "archived" else None,
@@ -58,6 +61,8 @@ def setup(monkeypatch, *, state="pending"):
         complete_admin_sandbox_deletion=AsyncMock(side_effect=event("complete", True)),
         fail_admin_sandbox_deletion=AsyncMock(return_value=True),
         renew_admin_sandbox_deletion_claim=AsyncMock(return_value=True),
+        update_admin_sandbox_deletion_attempt_stage=AsyncMock(return_value=True),
+        finish_admin_sandbox_deletion_attempt=AsyncMock(return_value=True),
     )
     sandbox_manager = SimpleNamespace(
         prepare_sandbox_deletion=AsyncMock(side_effect=event("prepare", receipt)),
@@ -330,6 +335,103 @@ async def test_deletion_waits_for_verified_s3_object_and_committed_receipt(monke
         archive_version_id="version",
     )
     sandbox_manager.abort_sandbox_deletion.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_attempt_ledger_records_each_archive_stage(monkeypatch):
+    store, _sandbox_manager, archives, _events = setup(monkeypatch)
+    assert await run(store, archives)
+    stages = [
+        call.kwargs["stage"]
+        for call in store.sandbox.update_admin_sandbox_deletion_attempt_stage.await_args_list
+    ]
+    assert stages == [
+        "sandbox_manager_resolution",
+        "archive_prepare",
+        "upload_authorization",
+        "archive_upload",
+        "archive_verification",
+        "durable_receipt",
+        "container_removal",
+        "database_finalization",
+    ]
+    store.sandbox.finish_admin_sandbox_deletion_attempt.assert_awaited_once_with(
+        correlation_id="00000000-0000-0000-0000-000000000001",
+        outcome="succeeded",
+        failure_code=None,
+        sandbox_manager_status=None,
+        retry_class=None,
+        retry_scheduled=False,
+        cleanup_outcome="not_required",
+    )
+
+
+@pytest.mark.asyncio
+async def test_telemetry_failure_does_not_gate_deletion(monkeypatch):
+    store, sandbox_manager, archives, _events = setup(monkeypatch)
+    store.sandbox.update_admin_sandbox_deletion_attempt_stage.side_effect = RuntimeError(
+        "telemetry unavailable"
+    )
+    store.sandbox.finish_admin_sandbox_deletion_attempt.side_effect = RuntimeError(
+        "telemetry unavailable"
+    )
+    assert await run(store, archives)
+    sandbox_manager.commit_sandbox_deletion.assert_awaited_once()
+    store.sandbox.complete_admin_sandbox_deletion.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_stalled_telemetry_is_bounded_and_does_not_gate_deletion(monkeypatch):
+    store, sandbox_manager, archives, _events = setup(monkeypatch)
+    stalled_stage = False
+
+    async def update_stage(**_kwargs):
+        nonlocal stalled_stage
+        if not stalled_stage:
+            stalled_stage = True
+            await asyncio.get_running_loop().create_future()
+        return True
+
+    async def finish_attempt(**_kwargs):
+        await asyncio.get_running_loop().create_future()
+
+    store.sandbox.update_admin_sandbox_deletion_attempt_stage.side_effect = update_stage
+    store.sandbox.finish_admin_sandbox_deletion_attempt.side_effect = finish_attempt
+
+    assert await asyncio.wait_for(run(store, archives), timeout=1.5)
+    sandbox_manager.commit_sandbox_deletion.assert_awaited_once()
+    store.sandbox.complete_admin_sandbox_deletion.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_failure_diagnostics_do_not_change_retry_or_cleanup_policy(monkeypatch, caplog):
+    store, sandbox_manager, archives, _events = setup(monkeypatch)
+    sandbox_manager.upload_sandbox_deletion_archive.side_effect = SandboxManagerError(
+        503, "private https://signed.invalid/token"
+    )
+    assert await run(store, archives)
+    assert store.sandbox.fail_admin_sandbox_deletion.call_args.kwargs["retain_pending"] is False
+    result = store.sandbox.finish_admin_sandbox_deletion_attempt.call_args.kwargs
+    assert result["failure_code"] == "sandbox_manager_unavailable"
+    assert result["sandbox_manager_status"] == 503
+    assert result["retry_class"] == "transient"
+    assert result["retry_scheduled"] is False
+    assert result["cleanup_outcome"] == "acknowledged"
+    assert "signed.invalid" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_unknown_failure_state_write_does_not_claim_lease_expired(monkeypatch):
+    store, sandbox_manager, archives, _events = setup(monkeypatch)
+    sandbox_manager.upload_sandbox_deletion_archive.side_effect = SandboxManagerError(
+        503, "sandbox manager unavailable"
+    )
+    store.sandbox.fail_admin_sandbox_deletion.side_effect = RuntimeError("database unavailable")
+
+    assert await run(store, archives)
+
+    store.sandbox.fail_admin_sandbox_deletion.assert_awaited_once()
+    store.sandbox.finish_admin_sandbox_deletion_attempt.assert_not_awaited()
 
 
 @pytest.mark.asyncio

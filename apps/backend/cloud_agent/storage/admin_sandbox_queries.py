@@ -9,6 +9,7 @@ from cloud_agent.admin_sandboxes import (
     SANDBOX_TRAJECTORY_MEMBER_LIMIT,
     AdminSandbox,
     AdminSandboxCheckpoint,
+    AdminSandboxDeletionAttempt,
     AdminSandboxDetail,
     AdminSandboxList,
     AdminSandboxMember,
@@ -190,6 +191,18 @@ class AdminSandboxQueries:
                 """,
                 sandbox_id,
             )
+            deletion_attempt_rows = await conn.fetch(
+                """
+                SELECT correlation_id, request_id, host_id, attempt_number, stage, outcome,
+                       failure_code, sandbox_manager_status, retry_class, retry_scheduled,
+                       cleanup_outcome, started_at, updated_at, finished_at
+                FROM agent_sandbox_deletion_attempts
+                WHERE sandbox_id=$1
+                ORDER BY started_at DESC, attempt_number DESC
+                LIMIT 50
+                """,
+                sandbox_id,
+            )
             latest_checkpoint = await _latest_checkpoint(conn, sandbox_id)
         item = dict(row)
         item["resource_usage"] = resource_usage_view(
@@ -203,6 +216,12 @@ class AdminSandboxQueries:
             members=[AdminSandboxMember.model_validate(dict(member)) for member in member_rows],
             observed_at=observed_at,
             latest_checkpoint=latest_checkpoint,
+            deletion_attempts=[
+                AdminSandboxDeletionAttempt.model_validate(
+                    {**dict(attempt), "correlation_id": str(attempt["correlation_id"])}
+                )
+                for attempt in deletion_attempt_rows
+            ],
         )
 
     async def trajectory(

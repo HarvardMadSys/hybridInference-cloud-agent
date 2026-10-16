@@ -677,6 +677,11 @@ One deletion worker handles requests one at a time, in the order they became
 due. A failed attempt shows its error and is retried a minute later, behind any
 request already waiting. Requests whose hosts keep timing out therefore delay a
 newer request by one attempt each at most, instead of holding it back forever.
+The admin sandbox details also show a durable attempt history for each request:
+attempt number, host, last confirmed stage, outcome, and a bounded failure code.
+Provider response bodies and credential-bearing diagnostics are not stored.
+When a claim expires, its unfinished attempt is recorded as lease-expired before
+the same fenced deletion request can be claimed again.
 
 **Sandboxes of deleted chats are removed automatically.** When an owner
 permanently deletes the last chat in a sandbox, the deletion worker asks the
