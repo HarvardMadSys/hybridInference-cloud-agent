@@ -15,6 +15,7 @@ import {
   type RenewalPolicy,
   type RetirementImpact,
 } from '@/lib/api/compute';
+import { DEFAULT_MOVE_OUT_BEFORE_SECONDS } from '@/lib/computeDefaults';
 import { getErrorMessage } from '@/lib/utils/errors';
 
 import {
@@ -342,6 +343,24 @@ export default function ComputeResourcePanel({
                 policy={policy}
                 onChange={setPolicy}
               />
+              {!policy.rotation_enabled && (
+                <Field label="Move sandboxes to other servers before expiry (minutes, 0 = never)">
+                  <input
+                    className={inputClass}
+                    type="number"
+                    min={0}
+                    step={1}
+                    required
+                    value={(policy.move_out_before_seconds ?? DEFAULT_MOVE_OUT_BEFORE_SECONDS) / 60}
+                    onChange={(event) =>
+                      setPolicy({
+                        ...policy,
+                        move_out_before_seconds: Number(event.target.value) * 60,
+                      })
+                    }
+                  />
+                </Field>
+              )}
               <Field label="Node type parameter of the provider profile">
                 <input
                   className={inputClass}

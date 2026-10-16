@@ -181,6 +181,20 @@ class SandboxRepository(Protocol):
         """Ask the host to stop a running sandbox whose every chat was deleted."""
         ...
 
+    async def sandboxes_moving_out(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        """List running groups on Hosts moving out, oldest activity first."""
+        ...
+
+    async def request_move_out_stop(
+        self, *, sandbox_id: str, generation: int, container_id: str, actor_id: str
+    ) -> str:
+        """Ask a Host moving out to stop one idle group so its checkpoint can move it."""
+        ...
+
+    async def release_moving_out_groups(self) -> list[str]:
+        """Hand every covered stopped group on a Host moving out to another Host."""
+        ...
+
     async def thread_workspace_ready(self, *, thread_id: str) -> bool:
         """Return whether a retained thread permits owner workspace mutation.
 

@@ -439,6 +439,14 @@ class ComputeResourceRepository(Protocol):
         """Controller-owned restrictions never mutate Host status or sibling holds."""
         ...
 
+    async def move_out_can_proceed(self, *, allocation_id: str) -> bool:
+        """Whether this allocation's Host may hold its claims and move its groups out."""
+        ...
+
+    async def unmoved_groups(self, *, allocation_id: str) -> int:
+        """Count the groups still held only by this allocation's Hosts."""
+        ...
+
     async def running_attempts(self, *, host: str) -> int:
         """Count the turns a Host is executing now."""
         ...

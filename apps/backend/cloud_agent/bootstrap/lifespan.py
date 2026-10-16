@@ -25,6 +25,7 @@ from cloud_agent.workers.mcp_decision_signal import McpDecisionSignal
 from cloud_agent.workers.notifications import listen
 from cloud_agent.workers.owner_change_signal import OwnerChangeSignal
 from cloud_agent.workers.sandbox_deletion import coordinate_sandbox_deletions
+from cloud_agent.workers.sandbox_move_out import coordinate_move_out
 from cloud_agent.workers.snapshots import coordinate_shared_snapshots
 from cloud_agent.workers.work_signal import WorkSignal
 
@@ -88,6 +89,7 @@ _SHUTDOWN_TASK_ATTRS: tuple[str, ...] = (
     "reaper_task",
     "snapshot_task",
     "sandbox_deletion_task",
+    "sandbox_move_out_task",
     "ledger_task",
     "capacity_task",
     "agent_memory_task",
@@ -451,6 +453,7 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
                 coordinate_shared_snapshots(storage, wake=app.state.background_wake)
             )
             sandbox_deletions = asyncio.create_task(coordinate_sandbox_deletions(storage))
+            sandbox_move_out = asyncio.create_task(coordinate_move_out(storage))
             ledger_collector = asyncio.create_task(
                 collect_usage_snapshots(
                     storage.ledger, app.state.grants, wake=app.state.background_wake
@@ -469,18 +472,21 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
             _BACKGROUND_TASKS.add(reaper)
             _BACKGROUND_TASKS.add(snapshot_coordinator)
             _BACKGROUND_TASKS.add(sandbox_deletions)
+            _BACKGROUND_TASKS.add(sandbox_move_out)
             _BACKGROUND_TASKS.add(ledger_collector)
             _BACKGROUND_TASKS.add(capacity_history)
             _BACKGROUND_TASKS.add(agent_memories)
             reaper.add_done_callback(_forget_background_task)
             snapshot_coordinator.add_done_callback(_forget_background_task)
             sandbox_deletions.add_done_callback(_forget_background_task)
+            sandbox_move_out.add_done_callback(_forget_background_task)
             ledger_collector.add_done_callback(_forget_background_task)
             capacity_history.add_done_callback(_forget_background_task)
             agent_memories.add_done_callback(_forget_background_task)
             app.state.reaper_task = reaper
             app.state.snapshot_task = snapshot_coordinator
             app.state.sandbox_deletion_task = sandbox_deletions
+            app.state.sandbox_move_out_task = sandbox_move_out
             app.state.ledger_task = ledger_collector
             app.state.capacity_task = capacity_history
             app.state.agent_memory_task = agent_memories
@@ -540,6 +546,7 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
             app.state.reaper_task = None
             app.state.snapshot_task = None
             app.state.sandbox_deletion_task = None
+            app.state.sandbox_move_out_task = None
             app.state.ledger_task = None
             app.state.capacity_task = None
             app.state.agent_memory_task = None

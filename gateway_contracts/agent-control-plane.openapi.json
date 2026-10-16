@@ -14174,7 +14174,7 @@
       },
       "RenewalPolicy": {
         "additionalProperties": false,
-        "description": "Independent resource deadlines, expressed in seconds.\n\nWith rotation, ``renew_before_seconds`` is also when a node is replaced:\nan extension is tried first; a refused one, or a node at its maximum age,\nstarts a move of the whole Host to a newly allocated node instead.",
+        "description": "Independent resource deadlines, expressed in seconds.\n\nWith rotation, ``renew_before_seconds`` is also when a node is replaced:\nan extension is tried first; a refused one, or a node at its maximum age,\nstarts a move of the whole Host to a newly allocated node instead.\n\nWithout rotation, ``move_out_before_seconds`` is when the Host starts\nmoving its groups out one at a time, through their checkpoints, to\nanother Host; 0 turns that off. An extension is tried before it starts.",
         "properties": {
           "enabled": {
             "default": false,
@@ -14193,6 +14193,13 @@
             "maximum": 2592000.0,
             "minimum": 3600.0,
             "title": "Max Node Age Seconds",
+            "type": "integer"
+          },
+          "move_out_before_seconds": {
+            "default": 7200,
+            "maximum": 604800.0,
+            "minimum": 0.0,
+            "title": "Move Out Before Seconds",
             "type": "integer"
           },
           "node_type_binding": {

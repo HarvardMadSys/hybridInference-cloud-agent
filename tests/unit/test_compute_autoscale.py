@@ -878,3 +878,35 @@ async def test_disabled_policy_leaves_the_bootstrap_slot_hold_unchanged() -> Non
 
     assert pool.slot_writes == []
     assert repository.slot_target_writes == []
+
+
+@pytest.mark.asyncio
+async def test_a_member_moving_out_is_replaced_while_it_still_serves() -> None:
+    """Its groups need somewhere to go before its lease ends, not after."""
+    leaving = {**member("a"), "moving_out": True}
+    repository = Repository(
+        configured_policy=policy(min_hosts=1, max_hosts=2),
+        configured_runtime=runtime(),
+        members=[leaving],
+    )
+
+    await autoscaler(repository, HostPool(hosts=[host("a")])).reconcile()
+
+    assert len(repository.scale_ups) == 1
+    assert repository.scale_ups[0]["decision"] == {"action": "scale_up_minimum"}
+
+
+@pytest.mark.asyncio
+async def test_a_replacement_at_the_maximum_waits_for_the_member_to_leave() -> None:
+    """Without room under the maximum it would be refused on every pass."""
+    leaving = {**member("a"), "moving_out": True}
+    repository = Repository(
+        configured_policy=policy(min_hosts=1, max_hosts=1),
+        configured_runtime=runtime(),
+        members=[leaving],
+    )
+
+    await autoscaler(repository, HostPool(hosts=[host("a")])).reconcile()
+
+    assert repository.scale_ups == []
+    assert repository.state["runtime"]["blocker_code"] is None

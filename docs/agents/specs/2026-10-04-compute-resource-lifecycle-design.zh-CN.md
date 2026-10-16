@@ -388,7 +388,7 @@ Claim 的最终事务在扣 slots 的同一决策点检查这些限制；Fork、
 
 对有硬到期时间的受管资源，claim 还根据已持久化的期限与服务器时钟计算准入，即使定时 worker 停止也不能超过已知截止时间继续接单。正常运行时定时刷新观测；超过 freshness 阈值的受管资源暂停新的放置，旧会话仍受最后已知的硬期限约束。
 
-建议满足 `renew_before > stop_new_groups_before > stop_claims_before >= 0`，具体值按机器租期与任务时长配置。提前停止接单只减少中断风险；现有任务没有统一的完成时间上限，因此它不能证明任务一定能在到期前完成。
+建议满足 `renew_before > stop_new_groups_before > stop_claims_before >= 0`，具体值按机器租期与任务时长配置。不轮换的分配另有 `move_out_before`（默认 2 小时）：进入这个窗口后 Host 停止领取任务，把会话逐个经检查点搬到别的 Host，见[计划内腾空设计](2026-10-16-host-move-out-design.zh-CN.md)。提前停止接单只减少中断风险；现有任务没有统一的完成时间上限，因此它不能证明任务一定能在到期前完成。
 
 机器租期、attempt lease 和 API Token 有效期使用独立字段和策略。若未来供应商有付费续费，需独立定义费用与授权约束，不能因子类声明了 extend capability 就自动进行购买。
 

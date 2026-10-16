@@ -159,6 +159,8 @@ def harness(monkeypatch, *, kind="acquire", identified=False):
         assert_autoscale_acquire_connections_verified=AsyncMock(),
         record_observation_error=AsyncMock(),
         set_admission_hold=AsyncMock(),
+        move_out_can_proceed=AsyncMock(return_value=True),
+        unmoved_groups=AsyncMock(return_value=0),
         prepare_bootstrap_binding=AsyncMock(),
         clear_bootstrap_hold=AsyncMock(return_value=True),
         renew_operation_lease=AsyncMock(return_value=True),
@@ -247,8 +249,11 @@ async def test_ready_host_uses_public_enrolled_fact_and_opens_only_its_bootstrap
         generation=1,
         worker_id="worker-a",
     )
+    # Four hours from expiry nothing restricts the Host: the move-out hold,
+    # which closes every claim, stays clear.
     assert all(
         call.kwargs["purpose"] == "lease_deadline"
+        or (call.kwargs["purpose"] == "move_out" and call.kwargs["scope"] is None)
         for call in h.repository.set_admission_hold.await_args_list
     )
 
@@ -1391,3 +1396,91 @@ async def test_a_finished_upgrade_lets_an_old_node_rotate(monkeypatch):
     await h.reconciler.schedule()
     h.commands.extend.assert_not_awaited()
     assert h.repository.create_operation.await_args.kwargs["kind"] == "rotate"
+
+
+def _move_out_hold(h):
+    calls = [
+        call.kwargs
+        for call in h.repository.set_admission_hold.await_args_list
+        if call.kwargs["purpose"] == "move_out"
+    ]
+    assert len(calls) == 1
+    return calls[0]
+
+
+@pytest.mark.asyncio
+async def test_a_host_in_its_move_out_window_holds_every_claim(monkeypatch):
+    """Each chat's next turn is then claimed elsewhere, from its group's checkpoint."""
+    h = harness(monkeypatch, kind="inspect", identified=True)
+    h.provider.inspect.return_value = observed(expires=NOW + timedelta(minutes=90))
+
+    await h.reconciler.execute(h.operation)
+
+    hold = _move_out_hold(h)
+    assert (hold["source_id"], hold["scope"]) == ("allocation-a", "all_claims")
+    h.repository.move_out_can_proceed.assert_awaited_once_with(allocation_id="allocation-a")
+
+
+@pytest.mark.asyncio
+async def test_a_host_with_nowhere_to_move_keeps_serving_its_chats(monkeypatch):
+    """Holding claims with no other Host to restore on would only stall them."""
+    h = harness(monkeypatch, kind="inspect", identified=True)
+    h.provider.inspect.return_value = observed(expires=NOW + timedelta(minutes=90))
+    h.repository.move_out_can_proceed.return_value = False
+
+    await h.reconciler.execute(h.operation)
+
+    assert _move_out_hold(h)["scope"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "policy",
+    [
+        RenewalPolicy(move_out_before_seconds=0),
+        RenewalPolicy(
+            enabled=True, reason="Keep the sandboxes", rotation_enabled=True, node_types=["m510"]
+        ),
+    ],
+)
+async def test_a_host_that_does_not_move_out_never_holds_its_claims(monkeypatch, policy):
+    h = harness(monkeypatch, kind="inspect", identified=True)
+    h.allocation["policy"] = policy.model_dump()
+    h.provider.inspect.return_value = observed(expires=NOW + timedelta(minutes=30))
+
+    await h.reconciler.execute(h.operation)
+
+    assert _move_out_hold(h)["scope"] is None
+    h.repository.move_out_can_proceed.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_renewal_is_tried_before_the_move_out_window_opens(monkeypatch):
+    """A granted extension keeps the groups where they are."""
+    h = harness(monkeypatch, kind="inspect", identified=True)
+    h.allocation.update(
+        expires_at=NOW + timedelta(minutes=110),
+        policy=RenewalPolicy(enabled=True, reason="Keep the sandboxes").model_dump(),
+    )
+
+    await h.reconciler.schedule()
+
+    h.commands.extend.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_groups_still_unmoved_near_the_lease_end_alert_once(monkeypatch):
+    h = harness(monkeypatch, kind="inspect", identified=True)
+    h.allocation["expires_at"] = NOW + timedelta(minutes=4)
+    h.repository.unmoved_groups.return_value = 2
+    events = []
+
+    async def notify(event, *, host, reason):
+        events.append((event, host, reason))
+
+    monkeypatch.setattr(h.reconciler.rotation, "_notify", notify)
+
+    await h.reconciler.schedule()
+    await h.reconciler.schedule()
+
+    assert events == [("compute_move_out_unfinished", "compute-nodeid", "2 groups not moved")]

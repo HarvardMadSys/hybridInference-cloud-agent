@@ -14,6 +14,7 @@ import {
   type ComputeConnection,
   type RenewalPolicy,
 } from '@/lib/api/compute';
+import { DEFAULT_MOVE_OUT_BEFORE_SECONDS } from '@/lib/computeDefaults';
 import { APIError, getErrorMessage } from '@/lib/utils/errors';
 
 import {
@@ -338,7 +339,8 @@ export default function CloudLabAutoscaling({
       | 'renew_before_seconds'
       | 'extend_to_horizon_seconds'
       | 'stop_new_groups_before_seconds'
-      | 'stop_claims_before_seconds',
+      | 'stop_claims_before_seconds'
+      | 'move_out_before_seconds',
     minutes: number,
   ) => changeRenewalPolicy((renewal) => ({ ...renewal, [field]: minutes * 60 }));
 
@@ -624,7 +626,7 @@ export default function CloudLabAutoscaling({
                 <li key={member.allocation_id} className="px-3 py-3 text-sm">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <span className="font-medium">{member.host ?? member.allocation_id}</span>
-                    <span>{member.state}</span>
+                    <span>{member.moving_out ? `${member.state}, moving out` : member.state}</span>
                   </div>
                   <p className="mt-1 text-xs text-muted">
                     {member.deployment_profile} · {memberSlots(member, snapshot)}
@@ -1070,6 +1072,17 @@ export default function CloudLabAutoscaling({
               max={10080}
               step={1}
               onChange={(value) => changeRenewalMinutes('stop_claims_before_seconds', value)}
+            />
+            <NumericField
+              label="Move sandboxes to other servers before expiry (minutes, 0 = never)"
+              value={
+                (policy.renewal_policy.move_out_before_seconds ?? DEFAULT_MOVE_OUT_BEFORE_SECONDS) /
+                60
+              }
+              min={0}
+              max={10080}
+              step={1}
+              onChange={(value) => changeRenewalMinutes('move_out_before_seconds', value)}
             />
           </div>
           <p className="text-xs text-muted">

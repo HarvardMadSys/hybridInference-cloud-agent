@@ -537,6 +537,12 @@ describe('CloudLab auto-scaling panel', () => {
     fireEvent.change(screen.getByLabelText('Stop all new turns before expiry (minutes)'), {
       target: { value: '30' },
     });
+    const moveOut = screen.getByLabelText(
+      'Move sandboxes to other servers before expiry (minutes, 0 = never)',
+    );
+    // A stored policy that predates the setting shows the server's default.
+    expect(moveOut).toHaveValue(120);
+    fireEvent.change(moveOut, { target: { value: '90' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save auto-scaling' }));
 
     await waitFor(() => expect(api.updateCloudLabAutoscaling).toHaveBeenCalledTimes(1));
@@ -549,6 +555,7 @@ describe('CloudLab auto-scaling panel', () => {
       extend_to_horizon_seconds: 21600,
       stop_new_groups_before_seconds: 3600,
       stop_claims_before_seconds: 1800,
+      move_out_before_seconds: 5400,
       rotation_enabled: false,
     });
   });

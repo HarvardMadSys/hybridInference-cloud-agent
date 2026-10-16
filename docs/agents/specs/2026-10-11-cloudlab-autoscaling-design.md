@@ -55,6 +55,12 @@ rather than accepting a policy it cannot execute safely. A future rotation
 version will require a compatible spare profile in addition to serving
 capacity.
 
+Instead, a member whose lease enters its move-out window moves its groups out
+one at a time through their checkpoints, and stops counting toward
+`min_hosts` so its replacement is acquired while it still serves. The
+replacement needs room under `max_hosts` and a free reserved profile. See the
+[host move-out design](2026-10-16-host-move-out-design.zh-CN.md).
+
 An autoscaler member does not expose the individual server's policy or rotate
 actions. Both commands fail closed against the durable membership record, and
 the worker refuses any stale rotation operation that predates this ownership

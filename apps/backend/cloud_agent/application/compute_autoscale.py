@@ -261,15 +261,20 @@ class CloudLabAutoscaler:
             return
 
         live_members = [member for member in members if member.get("state") in _LIVE_MEMBER_STATES]
+        # A member whose groups are moving out is leaving: its replacement is
+        # acquired now, while it still serves, not after its lease has ended.
         capacity_members = [
-            member for member in members if member.get("state") in _CAPACITY_MEMBER_STATES
+            member
+            for member in members
+            if member.get("state") in _CAPACITY_MEMBER_STATES and not member.get("moving_out")
         ]
         minimum = max(0, int(policy.get("min_hosts") or 0))
         maximum = max(minimum, int(policy.get("max_hosts") or minimum))
 
         # Minimum capacity bypasses demand sustain and cooldown, but never the
-        # placement/circuit/in-flight gates above.
-        if len(capacity_members) < minimum:
+        # placement/circuit/in-flight gates above. A replacement for a member
+        # moving out waits for room under the maximum: that member is still live.
+        if len(capacity_members) < minimum and len(live_members) < maximum:
             await self._queue_scale_up(
                 policy=policy,
                 runtime=runtime,

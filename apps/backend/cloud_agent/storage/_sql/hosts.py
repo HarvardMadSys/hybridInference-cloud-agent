@@ -195,7 +195,9 @@ async def revoke_host_credentials(conn: Any, hosts: list[str]) -> None:
     await release_covered_sandboxes(conn, hosts)
 
 
-async def release_covered_sandboxes(conn: Any, hosts: list[str]) -> list[str]:
+async def release_covered_sandboxes(
+    conn: Any, hosts: list[str], *, sandbox_ids: list[str] | None = None
+) -> list[str]:
     """Hand every stopped group a checkpoint covers to whichever host claims it.
 
     The machine is leaving the pool, and with it the only Docker copy of its
@@ -205,6 +207,9 @@ async def release_covered_sandboxes(conn: Any, hosts: list[str]) -> list[str]:
     turn -- becomes ``cold``: the next turn of any of its chats is claimed by
     a restore-capable host and recreated there. Everything else stays bound to
     this host, as before, and continues only if the same host returns.
+
+    ``sandbox_ids`` limits the hand-over to those groups, as a Host moving out
+    does once each checkpoint arrives.
     """
     rows = await conn.fetch(
         f"""
@@ -213,6 +218,7 @@ async def release_covered_sandboxes(conn: Any, hosts: list[str]) -> list[str]:
             idle_deadline = NULL, updated_at = NOW()
         FROM agent_sandbox_checkpoints c
         WHERE g.host = ANY($1::text[])
+          AND ($2::text[] IS NULL OR g.id = ANY($2::text[]))
           AND g.state = 'stopped'
           AND g.deletion_state = 'none'
           AND g.stop_requested_at IS NULL
@@ -243,5 +249,25 @@ async def release_covered_sandboxes(conn: Any, hosts: list[str]) -> list[str]:
         RETURNING g.id
         """,
         hosts,
+        sandbox_ids,
     )
     return [str(row["id"]) for row in rows]
+
+
+# A Host in its move-out window: no claims, and each group stopped and handed
+# to another Host through its checkpoint. ``{host}`` names the Host column.
+MOVING_OUT_HOST_SQL = """EXISTS (
+    SELECT 1 FROM agent_host_admission_holds move_out
+    WHERE move_out.host = {host} AND move_out.purpose = 'move_out'
+)"""
+
+
+async def moving_out_hosts(conn: Any) -> list[str]:
+    """Every enrolled Host now moving its groups out."""
+    rows = await conn.fetch(
+        "SELECT h.host FROM agent_runner_hosts h "
+        "WHERE h.credential_hash IS NOT NULL AND "
+        + MOVING_OUT_HOST_SQL.format(host="h.host")
+        + " ORDER BY h.host"
+    )
+    return [str(row["host"]) for row in rows]

@@ -21,7 +21,7 @@ from pydantic import (
 )
 
 from cloud_agent.domain.cloudlab import DEFAULT_CLOUDLAB_NODE_TYPES
-from cloud_agent.domain.compute import normalize_user_public_key
+from cloud_agent.domain.compute import DEFAULT_MOVE_OUT_BEFORE_SECONDS, normalize_user_public_key
 from cloud_agent.ports.external.host_bootstrap import validate_sandbox_storage_path
 
 
@@ -70,6 +70,10 @@ class RenewalPolicy(ComputeRequest):
     With rotation, ``renew_before_seconds`` is also when a node is replaced:
     an extension is tried first; a refused one, or a node at its maximum age,
     starts a move of the whole Host to a newly allocated node instead.
+
+    Without rotation, ``move_out_before_seconds`` is when the Host starts
+    moving its groups out one at a time, through their checkpoints, to
+    another Host; 0 turns that off. An extension is tried before it starts.
     """
 
     enabled: bool = False
@@ -77,6 +81,7 @@ class RenewalPolicy(ComputeRequest):
     extend_to_horizon_seconds: int = Field(default=14400, ge=120, le=2592000)
     stop_new_groups_before_seconds: int = Field(default=1800, ge=0, le=604800)
     stop_claims_before_seconds: int = Field(default=300, ge=0, le=604800)
+    move_out_before_seconds: int = Field(default=DEFAULT_MOVE_OUT_BEFORE_SECONDS, ge=0, le=604800)
     reason: str = Field(default="", max_length=2000)
     rotation_enabled: bool = False
     max_node_age_seconds: int = Field(default=604800, ge=3600, le=2592000)

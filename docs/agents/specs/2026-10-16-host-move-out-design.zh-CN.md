@@ -1,0 +1,109 @@
+# 计划内腾空：租期将尽的 Host 把会话逐个搬走
+
+**状态：** 已实现。依赖 [跨机器恢复](2026-10-13-sandbox-cross-host-restore-design.zh-CN.md)（#658）。
+
+## 1 要解决的问题
+
+CloudLab 机器有租期，续期常被拒绝。到期时机器被收回，机器上的会话也一起没了。
+
+#658 让一台**被移除**的 Host 上**已停止、且有检查点覆盖**的 group 变成 `cold`，下一轮由别的 Host 从检查点恢复。但到期前后还有三个缺口：
+
+1. 到期前 30 分钟到 5 分钟之间，老会话的后续轮次仍在这台 Host 上运行。group 要闲置满 20 分钟才停，所以到期时很多 group 还开着。撤销凭证时它们不满足"已停止、有检查点"，搬不走。
+2. 自动扩缩容池把快到期的成员仍算作可用容量，等它真没了才补新的。
+3. 手动添加的服务器到期后，provider 确认机器已终止，但它的 Host 一直不撤销，group 一直绑在一台已经不存在的机器上（2026-10-15 staging 上的 ms1125 就是这样）。
+
+## 2 做法
+
+到期前一段时间（默认 2 小时），Host 进入**腾空**：
+
+- 这台 Host 不再领取任何任务；
+- 正在运行的一轮不打断，跑完为止；
+- 每个闲置的 group 立即停下，停止时照常捕获检查点；
+- 检查点一到，这个 group 单独转成 `cold`，不必等整台 Host 撤销；
+- 这些会话的下一轮由别的 Host 领取，按 #658 从检查点恢复。
+
+用户感知到的只是这条消息多等了几秒到一分钟。
+
+整机轮换（#378）不变：开启 `rotation_enabled` 的分配仍整机迁移，不进入腾空。
+
+## 3 设计
+
+### 3.1 什么时候开始
+
+`RenewalPolicy` 新增 `move_out_before_seconds`，默认 7200，0 表示关闭。生效窗口由 `move_out_window_seconds` 计算：
+
+- `rotation_enabled` 时为 0；
+- 开启续期时，窗口不超过 `extend_to_horizon_seconds - 600`，保证续期成功后剩余时间一定在窗口之外，不会刚续完又开始腾空。
+
+续期在窗口打开前尝试：调度器的续期触发时间取 `renew_before_seconds` 与窗口的较大者。续期成功，到期时间后移，腾空不会开始；已经开始的会自动结束。
+
+### 3.2 腾空标记：`move_out` admission hold
+
+迁移 `0083_host_move_out` 给 `agent_host_admission_holds.purpose` 增加 `move_out`。
+
+每次 inspection，reconciler 按观测到的到期时间设置或清除这条 hold（`scope='all_claims'`，`source_id` 为 allocation ID）。`all_claims` 沿用现有语义：Host 不能领取任何任务，已运行的 attempt 照常结束。
+
+**只有有地方可去时才开始。** `move_out_can_proceed` 要求另有一台已注册、在线、声明 `sandbox-restore-v1`、自己不在腾空、也没有 `all_claims` 限制的 Host。否则单机部署会提前 2 小时卡住所有后续轮次。一旦开始就不回退：hold 已存在时，即使目标暂时消失也继续。
+
+### 3.3 停下闲置的 group
+
+后台任务 `coordinate_move_out`（每 15 秒）做两件事：
+
+1. `release_moving_out_groups`：对所有腾空中的 Host 调用 `release_covered_sandboxes`，把已停止且检查点覆盖的 group 转成 `cold`。
+2. `sandboxes_moving_out` + `request_move_out_stop`：对腾空 Host 上 `running` 的 group 写入与管理员停止相同的 `stop_requested_at` 标记。group 有运行中的一轮、操作或快照时返回 `busy`，下一轮再试；Host 侧在终端打开时也会拒绝。
+
+停止由 Host 下一次心跳执行，最终归档产生检查点回执。
+
+### 3.4 检查点到达即交出
+
+`record_sandbox_checkpoint` 在把回执绑定为 `restore_checkpoint_id` 后，如果这台 Host 正在腾空，立即对这个 group 调用 `release_covered_sandboxes(..., sandbox_ids=[id])`。覆盖条件与 #658 第 6.2 节完全相同，不放宽。
+
+### 3.5 旧 Host 不能领回自己的 `cold` group
+
+容器名由 `(thread_id, sandbox_id)` 决定，不含 generation。仍在线的腾空 Host（或撤销后以同名重新注册的 Host）本地还留着旧容器，如果它领取了这个 `cold` group，恢复时会撞名并耗尽重试次数。
+
+因此 claim 的 `cold` 分支要求：`s.container_id IS NULL OR s.host <> 领取方`。
+
+- 刚转成 `cold` 的 group 仍记着旧容器，旧 Host 领不到；
+- 一次恢复失败退回 `cold` 时，容器已清空（领取时置空），原恢复方可以重试。
+
+这一条也修正了 #658 的一个隐患：撤销后同名重新注册的 Host 会领回自己的组。
+
+### 3.6 Provider 确认终止
+
+观测到 `terminated` 时，除了池成员原有的释放流程，所有分配都对其 Host 调用 `release_covered_sandboxes`。
+
+这里**不撤销**凭证：Host 行、凭证和部署的 drain fence 留给管理员移除流程处理。机器已经不存在，group 不可能再在那里启动；3.5 保证旧 Host 不会领回。
+
+### 3.7 自动扩缩容池
+
+- 成员快照增加 `moving_out`（成员租期进入窗口）。腾空中的成员不计入 `min_hosts` 所需的容量，替换机在它仍在服务时就开始申请。
+- 腾空成员仍计入 `max_hosts`。达到上限时最小容量补机静默等待，不在每轮记录拒绝。
+- **建议：** `max_hosts` 至少比 `min_hosts` 大 1，并多预留一个部署配置，替换机才能与即将离开的成员重叠。
+- 腾空完的成员仍等租期结束，由已有的终止释放流程收尾。提前释放需要放宽释放前的容器清点（旧 Host 上还留着已搬走 group 的停止容器），这一版不做。
+
+### 3.8 告警
+
+到期前 `max(stop_claims_before_seconds, 300)` 秒，如果分配的 Host 上仍有未搬走的 group（不是 `cold`、`restoring`、`lost`、已删除），发送一次 `compute_move_out_unfinished`。可能的原因：一轮任务还没跑完、没有检查点，或者没有可去的 Host。
+
+## 4 失败方向
+
+| 情况 | 结果 |
+|---|---|
+| 没有其他可恢复的 Host | 不开始腾空，行为与以前相同 |
+| 检查点上传失败或被跳过 | group 留在原 Host，告警；到期后与以前相同 |
+| 很长的一轮跑过到期 | 不打断；到期后按现有规则处理，可能 `LOST`，告警 |
+| 腾空期间续期成功 | hold 清除，未搬走的继续在原 Host；已 `cold` 的在别处恢复 |
+| 恢复失败 | 按 #658：回到 `cold`，最多 3 次，之后 `lost` |
+
+## 5 不在本版范围
+
+- 管理员"移除"不进入腾空：没有运行中任务时它会立即撤销凭证。
+- 腾空完的池成员提前释放（见 3.7）。
+- 心跳超时自动判定 Host 失联。
+
+## 6 验证
+
+- 单元：窗口计算、inspection 设置 hold、续期提前、告警只发一次、池容量计算、清扫任务。
+- PostgreSQL：检查点到达即交出、清扫停止闲置 group 后交出、忙碌 group 不停、旧 Host 领不回自己的 group、provider 终止交出 group。
+- 检查命令：`make check`、`make test-db`（独立测试库）、`make ci-database`、`make docs`。

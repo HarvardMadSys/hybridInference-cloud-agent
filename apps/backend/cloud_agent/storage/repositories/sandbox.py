@@ -18,6 +18,11 @@ from cloud_agent.domain.execution import TERMINAL_STATES
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.owner_usage import measured_interval
 from cloud_agent.storage._sql.compute_admission import lock_compute_entry
+from cloud_agent.storage._sql.hosts import (
+    MOVING_OUT_HOST_SQL,
+    moving_out_hosts,
+    release_covered_sandboxes,
+)
 from cloud_agent.storage._sql.jobs import fail_unrunnable_follow_ups
 from cloud_agent.storage._sql.rows import load_json, sandbox_row_to_dict
 from cloud_agent.storage._sql.sandbox import (
@@ -1045,6 +1050,92 @@ class PostgresSandboxRepository:
             )
         return "accepted"
 
+    async def sandboxes_moving_out(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        """List running groups on Hosts moving out, oldest activity first.
+
+        Read without locks: :meth:`request_move_out_stop` locks the group and
+        checks every fence again.
+        """
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"""
+                SELECT g.id AS sandbox_id, g.host, g.generation, g.container_id
+                FROM agent_sandboxes g
+                WHERE g.state = 'running' AND g.deletion_state = 'none'
+                  AND g.container_id IS NOT NULL AND g.stop_requested_at IS NULL
+                  AND {MOVING_OUT_HOST_SQL.format(host="g.host")}
+                ORDER BY g.last_activity_at NULLS FIRST, g.id
+                LIMIT $1
+                """,
+                limit,
+            )
+        return [dict(row) for row in rows]
+
+    async def request_move_out_stop(
+        self, *, sandbox_id: str, generation: int, container_id: str, actor_id: str
+    ) -> str:
+        """Ask a Host moving out to stop one idle group so its checkpoint can move it.
+
+        The durable marker the other stops write, so the Host's next heartbeat
+        receives it. A turn, operation or snapshot still running leaves the
+        group to a later pass; nothing running is ever interrupted, and the
+        Host refuses while a terminal is open there.
+        """
+        async with self._pool.acquire() as conn, conn.transaction():
+            await conn.execute("SET LOCAL statement_timeout = '5s'")
+            await conn.fetch(
+                "SELECT thread_id FROM agent_thread_sandbox_memberships "
+                "WHERE sandbox_id = $1 ORDER BY thread_id FOR UPDATE",
+                sandbox_id,
+            )
+            group = await conn.fetchrow(
+                f"""
+                SELECT g.*, {MOVING_OUT_HOST_SQL.format(host="g.host")} AS moving_out
+                FROM agent_sandboxes g WHERE g.id = $1 FOR UPDATE
+                """,
+                sandbox_id,
+            )
+            if group is None:
+                return "not_found"
+            if group["generation"] != generation or group["container_id"] != container_id:
+                return "stale"
+            if not group["moving_out"] or group["deletion_state"] != "none":
+                return "stale"
+            if group["state"] == "stopping" and group["stop_requested_at"] is not None:
+                return "accepted"
+            if group["state"] != "running":
+                return "not_running"
+            busy = await conn.fetchval(_GROUP_WORK_PENDING_SQL, sandbox_id)
+            if (
+                busy
+                or group["active_operation_count"]
+                or group["snapshot_state"] in {"pending", "snapshotting", "importing"}
+            ):
+                return "busy"
+            await self._record_trajectory_event(
+                conn,
+                group=group,
+                event_type="move_out_stop_requested",
+                source="system",
+                actor_id=actor_id,
+                from_state="running",
+                to_state="stopping",
+            )
+            await conn.execute(
+                "UPDATE agent_sandboxes SET state = 'stopping', "
+                "stop_requested_at = NOW(), idle_deadline = NULL, updated_at = NOW() WHERE id = $1",
+                sandbox_id,
+            )
+        return "accepted"
+
+    async def release_moving_out_groups(self) -> list[str]:
+        """Hand every covered stopped group on a Host moving out to another Host."""
+        async with self._pool.acquire() as conn, conn.transaction():
+            hosts = await moving_out_hosts(conn)
+            if not hosts:
+                return []
+            return await release_covered_sandboxes(conn, hosts)
+
     async def thread_workspace_ready(self, *, thread_id: str) -> bool:
         """Return whether a retained thread permits owner workspace mutation.
 
@@ -1912,6 +2003,11 @@ class PostgresSandboxRepository:
                     checkpoint["checkpoint_id"],
                     start_seq,
                 )
+                if await conn.fetchval("SELECT " + MOVING_OUT_HOST_SQL.format(host="$1"), host):
+                    # The group's chats are waiting for it on another Host.
+                    await release_covered_sandboxes(
+                        conn, [host], sandbox_ids=[checkpoint["sandbox_id"]]
+                    )
         return bool(inserted)
 
     async def fence_workspace_start(self, *, thread_id: str) -> str | None:

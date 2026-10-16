@@ -20,11 +20,13 @@ from cloud_agent.domain.compute import (
     autoscaling_retirement_needs_settlement,
     discard_request_id,
     fingerprint as operation_fingerprint,
+    move_out_window_seconds,
     provider_resource_absent,
 )
 from cloud_agent.storage._sql.compute_admission import host_compute_admission, lock_compute_entry
-from cloud_agent.storage._sql.hosts import revoke_host_credentials
+from cloud_agent.storage._sql.hosts import release_covered_sandboxes, revoke_host_credentials
 from cloud_agent.storage._sql.rows import load_json
+from cloud_agent_shared.sandbox_restore import SANDBOX_RESTORE_CAPABILITY
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -42,6 +44,16 @@ _JSON_FIELDS = {
     "last_decision",
 }
 _JSON_ARRAY_FIELDS = {"slot_status"}
+
+
+def _in_move_out_window(member: dict[str, Any]) -> bool:
+    """Whether a member's lease has entered the window in which its groups move out."""
+    expires = member.get("expires_at")
+    if expires is None or not member.get("expiration_known"):
+        return False
+    window = move_out_window_seconds(load_json(member.get("renewal_policy")) or {})
+    remaining = (expires - member["observed_now"]).total_seconds()
+    return window > 0 and remaining <= window
 
 
 def _row(row: Any) -> dict[str, Any]:
@@ -944,7 +956,9 @@ class PostgresComputeResourceRepository:
         member_rows = await conn.fetch(
             """SELECT m.allocation_id,m.deployment_profile,m.state AS persisted_state,
                       m.created_at,m.updated_at,a.desired_state,a.observed_state,
-                      a.release_committed_at,h.host,h.slots_total,h.slots_desired,
+                      a.release_committed_at,a.expires_at,a.expiration_known,
+                      a.policy AS renewal_policy,NOW() AS observed_now,
+                      h.host,h.slots_total,h.slots_desired,
                       latest.id AS latest_operation_id,latest.kind AS latest_operation_kind,
                       latest.state AS latest_operation_state,
                       latest.message AS latest_operation_message,
@@ -1017,6 +1031,7 @@ class PostgresComputeResourceRepository:
                     "latest_acquire_message": member["latest_acquire_message"],
                     "created_at": member["created_at"],
                     "updated_at": member["updated_at"],
+                    "moving_out": _in_move_out_window(member),
                 }
             )
         reservations = [
@@ -1902,10 +1917,33 @@ class PostgresComputeResourceRepository:
                 raise ValueError("allocation_not_found")
             if row["observed_state"] in {"terminated", "absent"}:
                 await self._release_terminal_autoscaling_reservation(conn, allocation_id)
+                if row["observed_state"] == "terminated":
+                    await self._release_terminated_groups(conn, allocation_id)
                 row = await conn.fetchrow(
                     "SELECT * FROM agent_compute_allocations WHERE id=$1", allocation_id
                 )
             return _row(row)
+
+    @staticmethod
+    async def _release_terminated_groups(conn: Any, allocation_id: str) -> None:
+        """The provider ended this machine: hand each covered stopped group elsewhere.
+
+        Its Hosts keep their rows, credentials and any deployment fence for
+        the administrator's removal. Only the groups move: a group can never
+        start again on a machine that is gone, and the claim of a ``cold``
+        group refuses the Host that still names its container.
+        """
+        hosts = [
+            row["host"]
+            for row in await conn.fetch(
+                """SELECT h.host FROM agent_compute_nodes n
+                   JOIN agent_runner_hosts h ON h.compute_node_id=n.id
+                   WHERE n.allocation_id=$1 ORDER BY h.host""",
+                allocation_id,
+            )
+        ]
+        if hosts:
+            await release_covered_sandboxes(conn, hosts)
 
     async def upsert_node(
         self,
@@ -2539,6 +2577,51 @@ class PostgresComputeResourceRepository:
                     source_id,
                     scope,
                 )
+
+    async def move_out_can_proceed(self, *, allocation_id: str) -> bool:
+        """Whether this allocation's Host may hold its claims and move its groups out.
+
+        Once started, a move continues. Otherwise it starts only when another
+        enrolled, restore-capable Host that is not itself moving out could take
+        the groups: with nowhere to go, holding claims would only stall chats
+        until the lease ends.
+        """
+        async with self._pool.acquire() as conn:
+            return bool(
+                await conn.fetchval(
+                    """SELECT EXISTS (
+                           SELECT 1 FROM agent_host_admission_holds
+                           WHERE allocation_id=$1 AND purpose='move_out'
+                       ) OR EXISTS (
+                           SELECT 1 FROM agent_runner_hosts h
+                           LEFT JOIN agent_compute_nodes n ON n.id=h.compute_node_id
+                           WHERE h.status='online' AND h.credential_hash IS NOT NULL
+                             AND h.capabilities @> $2::jsonb
+                             AND n.allocation_id IS DISTINCT FROM $1
+                             AND NOT EXISTS (
+                                 SELECT 1 FROM agent_host_admission_holds x
+                                 WHERE x.host=h.host
+                                   AND (x.scope='all_claims' OR x.purpose='move_out')
+                             )
+                       )""",
+                    allocation_id,
+                    json.dumps([SANDBOX_RESTORE_CAPABILITY]),
+                )
+            )
+
+    async def unmoved_groups(self, *, allocation_id: str) -> int:
+        """Count the groups still held only by this allocation's Hosts."""
+        async with self._pool.acquire() as conn:
+            return int(
+                await conn.fetchval(
+                    """SELECT count(*) FROM agent_sandboxes g
+                       JOIN agent_runner_hosts h ON h.host=g.host
+                       JOIN agent_compute_nodes n ON n.id=h.compute_node_id
+                       WHERE n.allocation_id=$1 AND g.deletion_state='none'
+                         AND g.state NOT IN ('cold','restoring','lost')""",
+                    allocation_id,
+                )
+            )
 
     async def running_attempts(self, *, host: str) -> int:
         """Count the turns a Host is executing now."""

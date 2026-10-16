@@ -18,7 +18,12 @@ from cloud_agent.application.compute_setup import HostRelease, load_control_plan
 from cloud_agent.application.host_commands import HostCommands
 from cloud_agent.compute_config import current_observation_seconds, current_registration_url
 from cloud_agent.compute_secrets import ComputeSecretError
-from cloud_agent.domain.compute import ComputeRefusal, fingerprint, provider_resource_absent
+from cloud_agent.domain.compute import (
+    ComputeRefusal,
+    fingerprint,
+    move_out_window_seconds,
+    provider_resource_absent,
+)
 from cloud_agent.host_pool import hash_secret
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.ports.external.compute_provider import (
@@ -147,6 +152,7 @@ class ComputeReconciler:
         self.host_pool = host_pool
         self.bootstrap = bootstrap
         self.rotation = ComputeRotation(self)
+        self._move_out_reminded: set[str] = set()
 
     async def schedule(self) -> None:
         """Observe leases and submit renewals even while retirement is blocked."""
@@ -177,10 +183,18 @@ class ComputeReconciler:
                 await self._queue_host_release(row, operations, release)
             policy = RenewalPolicy.model_validate(row.get("policy") or {})
             expires = _moment(row.get("expires_at"))
+            if expires is not None and row.get("expiration_known"):
+                await self._remind_unfinished_move_out(row, policy, now, expires)
             if not policy.enabled or expires is None or not row.get("expiration_known"):
                 continue
+            # An extension is tried before the move-out window opens, so a
+            # granted one keeps the groups where they are.
+            renew_before = max(
+                policy.renew_before_seconds,
+                move_out_window_seconds(policy.model_dump()),
+            )
             if row["management_mode"] != "manage" or expires - now > timedelta(
-                seconds=policy.renew_before_seconds
+                seconds=renew_before
             ):
                 continue
             lifecycle = await self.repository.list_operations(
@@ -222,6 +236,34 @@ class ComputeReconciler:
             except (ComputeRefusal, ValueError):
                 # Concurrent schedulers may have already persisted a fixed target.
                 logger.warning("compute_renewal_not_submitted", extra={"allocation_id": row["id"]})
+
+    async def _remind_unfinished_move_out(
+        self, row: dict[str, Any], policy: RenewalPolicy, now: datetime, expires: datetime
+    ) -> None:
+        """Alert once when groups are still on a Host this close to its lease end.
+
+        They are still running a turn, have no checkpoint, or had nowhere to
+        go. Whatever has not moved when the lease ends stays with the machine.
+        """
+        if (
+            move_out_window_seconds(policy.model_dump()) == 0
+            or expires - now > timedelta(seconds=max(policy.stop_claims_before_seconds, 300))
+            or expires <= now
+        ):
+            return
+        key = f"{row['id']}:{int(expires.timestamp())}"
+        if key in self._move_out_reminded:
+            return
+        remaining = await self.repository.unmoved_groups(allocation_id=row["id"])
+        if remaining == 0:
+            return
+        self._move_out_reminded.add(key)
+        hosts = row.get("hosts") or []
+        await self.rotation._notify(
+            "compute_move_out_unfinished",
+            host=hosts[0]["host"] if hosts else row["name"],
+            reason=f"{remaining} groups not moved",
+        )
 
     async def execute(self, operation: dict[str, Any]) -> None:
         """Execute one claimed operation; public diagnostics contain no remote output."""
@@ -1463,6 +1505,23 @@ class ComputeReconciler:
             purpose="lease_deadline",
             source_id=allocation["id"],
             scope=scope,
+            **self._fence(operation),
+        )
+        # Within the move-out window every claim stops here, so each chat's
+        # next turn is taken by another Host from its group's checkpoint, and
+        # the move-out sweep stops and hands over the idle groups.
+        window = move_out_window_seconds(policy.model_dump())
+        moving = (
+            window > 0
+            and observation.expires_at is not None
+            and (observation.expires_at - _now()).total_seconds() <= window
+            and await self.repository.move_out_can_proceed(allocation_id=allocation["id"])
+        )
+        await self.repository.set_admission_hold(
+            allocation_id=allocation["id"],
+            purpose="move_out",
+            source_id=allocation["id"],
+            scope="all_claims" if moving else None,
             **self._fence(operation),
         )
 

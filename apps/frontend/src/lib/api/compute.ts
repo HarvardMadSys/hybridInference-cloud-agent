@@ -74,6 +74,11 @@ export interface RenewalPolicy {
   extend_to_horizon_seconds: number;
   stop_new_groups_before_seconds: number;
   stop_claims_before_seconds: number;
+  /**
+   * Without rotation, when the Host starts moving its sandboxes to other Hosts
+   * one at a time through their checkpoints; 0 never. Older policies omit it.
+   */
+  move_out_before_seconds?: number;
   reason: string;
   /** Move the Host to a new node when an extension is refused or the node is old. */
   rotation_enabled: boolean;
@@ -449,6 +454,8 @@ export interface CloudLabAutoscalingMember {
   latest_acquire_operation_id: string | null;
   latest_acquire_state: CloudLabAutoscalingMember['latest_operation_state'];
   latest_acquire_message: string | null;
+  /** Its lease is in the move-out window: its sandboxes are moving to other servers. */
+  moving_out?: boolean;
 }
 
 export interface CloudLabProfileReservation {

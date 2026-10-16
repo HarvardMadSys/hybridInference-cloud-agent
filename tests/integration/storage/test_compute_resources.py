@@ -3268,3 +3268,28 @@ async def test_host_release_moves_shared_profiles_and_live_snapshots(store):
     retried = await repo.retry_operation(upgrade["id"])
     assert retried["state"] == "pending"
     assert retried["result"] == {"kept": True}
+
+
+async def test_a_host_moves_out_only_when_another_host_can_restore_its_groups(store, hosts, db):
+    repo = store.compute_resources
+    allocation_id, _, _ = await resource(store, hosts, name="leaving")
+    assert not await repo.move_out_can_proceed(allocation_id=allocation_id)
+
+    await hosts.register_host(
+        host="target",
+        credential_hash=hash_secret("cred-target"),
+        capabilities=["sandbox-restore-v1"],
+        slots_total=2,
+    )
+    await hosts.record_host_heartbeat(host="target")
+    assert await repo.move_out_can_proceed(allocation_id=allocation_id)
+
+    # A started move continues even if its target goes away.
+    async with db.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO agent_host_admission_holds (host,allocation_id,purpose,source_id,scope) "
+            "VALUES ('leaving',$1,'move_out',$1,'all_claims')",
+            allocation_id,
+        )
+        await conn.execute("DELETE FROM agent_runner_hosts WHERE host='target'")
+    assert await repo.move_out_can_proceed(allocation_id=allocation_id)
