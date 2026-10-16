@@ -116,6 +116,11 @@ async def _apply(command: Awaitable[_Result]) -> _Result:
     try:
         return await command
     except HostCommandError as exc:
+        if exc.code is not None:
+            raise HTTPException(
+                status_code=exc.status,
+                detail={"error": {"type": exc.code, "message": str(exc)}},
+            ) from None
         raise HTTPException(status_code=exc.status, detail=str(exc)) from None
 
 
@@ -150,6 +155,7 @@ def _to_item(row: dict[str, Any], *, now: datetime | None = None) -> AgentRunner
     if last_seen.tzinfo is None:
         last_seen = last_seen.replace(tzinfo=UTC)
     epoch = row.get("capacity_epoch")
+    moving_out = row.get("removal_requested_at") is not None and bool(row.get("removal_moves_out"))
     return AgentRunnerHost(
         host=row["host"],
         active=bool(row["is_active"]),
@@ -180,6 +186,10 @@ def _to_item(row: dict[str, Any], *, now: datetime | None = None) -> AgentRunner
         # silently defaulting it would make a partial CAS contract look usable.
         drain_fence_epoch=row["drain_fence_epoch"],
         removal_pending=row.get("removal_requested_at") is not None,
+        removal_moves_out=moving_out,
+        sandboxes_left=int(row.get("sandboxes_left") or 0) if moving_out else None,
+        sandboxes_unmovable=int(row.get("sandboxes_unmovable") or 0) if moving_out else None,
+        removal_leaves_unmoved=moving_out and bool(row.get("removal_leaves_unmoved")),
         sandbox_runtime=row.get("sandbox_runtime"),
         sandbox_image_digest=row.get("sandbox_image_digest"),
         runtime_versions=row.get("runtime_versions"),
@@ -734,10 +744,31 @@ async def remove_agent_runner_host(
             "activation, marks the chat LOST instead of replaying it."
         ),
     ),
+    allow_unmoved: bool = Query(
+        False,
+        description=(
+            "Remove a host even though some of its sandboxes will stay on it. "
+            "Without it the request is refused with 409 no_move_target when no "
+            "other host or no checkpoint can take them now, or 409 cannot_move "
+            "when some can never move (a stopped sandbox whose checkpoint "
+            "failed, say): those sandboxes stay on the removed host and their "
+            "chats cannot continue until it returns. Whatever can move still "
+            "moves first."
+        ),
+    ),
     _admin_id: str = Depends(verify_admin_access),
     store: _AdminHostsStorage | None = Depends(get_storage),
 ) -> ListAgentRunnerHostsResponse:
     """Revoke this host's credential and take it out of the pool.
+
+    When its sandboxes can move -- checkpoints are on and another host would
+    restore them -- the host first moves them out: it drains, each idle
+    sandbox stops into a checkpoint and is handed to another host, and the
+    reaper revokes it once none is left and its running turns end. Nothing
+    running is interrupted. A removal that would leave sandboxes on the host
+    is refused unless ``allow_unmoved``, and then keeps the meaning below once
+    whatever can move has moved. A sandbox whose checkpoint fails during the
+    move holds the removal until it is repeated with ``allow_unmoved``.
 
     A host still holding slots is not revoked on the spot: its running attempts
     belong to a machine the platform would have just declared gone, and nobody
@@ -761,13 +792,17 @@ async def remove_agent_runner_host(
     evidence that the retained container or Docker data-root was deleted.
     """
     job_store = _require_store(store)
-    deferred = await _apply(HostCommands(job_store.host_pool).remove(host=host, force=force))
+    deferred = await _apply(
+        HostCommands(job_store.host_pool).remove(
+            host=host, force=force, allow_unmoved=allow_unmoved
+        )
+    )
     await log_admin_action(
         job_store,
         get_client_ip(request),
         "agent.runner_host.remove",
         None,
-        {"host": host, "force": force, "deferred": deferred},
+        {"host": host, "force": force, "allow_unmoved": allow_unmoved, "deferred": deferred},
         actor_id=_admin_id,
     )
     return await _snapshot(job_store.host_pool)

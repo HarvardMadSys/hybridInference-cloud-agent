@@ -111,13 +111,37 @@ CloudLab 机器有租期，续期常被拒绝。到期时机器被收回，机�
 | 腾空期间续期成功 | hold 清除，未搬走的继续在原 Host；已 `cold` 的在别处恢复 |
 | 恢复失败 | 按 #658：回到 `cold`，最多 3 次，之后 `lost` |
 
-## 5 不在本版范围
+## 5 管理员移除
 
-- 管理员"移除"不进入腾空：没有运行中任务时它会立即撤销凭证。
+管理员在 Admin → Servers 点"移除"，原来的做法是：有运行中的任务就等它结束，没有就立即撤销凭证。闲着、但容器还开着的 group 不会先停下打包，撤销后只能留在原机器上。
+
+现在"移除"默认也先腾空（迁移 `0084_host_removal_move_out` 新增 `agent_runner_hosts.removal_moves_out` 和 `removal_leaves_unmoved`）。
+
+机器上每个还没交出去的 group 分成三类，判断条件写在共享 SQL 里，和真正交出时用的是同一个：
+
+| 类别 | 条件 | 去向 |
+|---|---|---|
+| 已覆盖 | 已停止，且检查点覆盖它（`COVERED_GROUP_SQL`，就是 `release_covered_sandboxes` 的条件：同一容器、generation、启动序号，镜像可拉取，记录了每个成员最后结束的一轮，没有进行中的 fork 或任务） | 撤销时直接交出 |
+| 还能搬 | 还没停（`provisioning`、`starting`、`running`、`stopping`），镜像可拉取 | 停下时生成检查点，然后交出 |
+| 搬不走 | 其余全部：已停止但没有覆盖它的检查点（比如当时上传失败）、脏停止、本地镜像 | 留在原机器上 |
+
+已经停下的 group 不会再补拍检查点，所以"搬不走"的 group 不会自己变好。
+
+1. **能搬就先搬。** 有"还能搬"的 group，并且 `move_out_possible` 成立（检查点能产生、有别的 Host 会接手，在同一把排他拓扑锁里判断），机器进入 `draining`，同时置 `removal_moves_out`，返回 `moving_out`。之后和到期腾空完全一样：不接任务，闲着的 group 停下、打包、交出去，正在跑的一轮不打断。
+2. **会有 group 留下时先问管理员。** 有"还能搬"的 group 但没地方搬，返回 409 `no_move_target`；有"搬不走"的 group，返回 409 `cannot_move`。页面弹窗说明原因和"移除后这些会话留在原机器上，回来之前不能继续"，管理员确认后带 `allow_unmoved=true` 再发一次：能搬的照样先搬，搬完按原来的规则撤销。同意记在 `removal_leaves_unmoved`。只有"已覆盖"的 group 时不问，因为撤销时它们照样会被交出（#658）。
+3. **搬完才撤销。** `finish_host_removals` 对带 `removal_moves_out` 的移除，除了等运行中的任务结束，还要等这台机器上没有"还能搬"的 group；有"搬不走"的 group 而管理员没同意时，也继续等。
+4. **搬的过程中检查点失败。** 这个 group 从"还能搬"变成"搬不走"，移除停在那里，不会自己撤销，也不会一直卡着没有提示：主机行显示"N cannot move, remove again to leave them"。管理员再点一次移除，确认后带 `allow_unmoved=true`，移除继续；也可以点"恢复使用"取消移除，会话回到原机器上继续。
+5. **页面显示进度。** 主机行显示"Moving out: N sandbox(es), M running turn(s) left"（来自 `sandboxes_left`，只数"已覆盖"和"还能搬"的），有搬不走的再加上数量（`sandboxes_unmovable`）。还有任务或 group 在搬时，管理员可以点"Remove now"，也就是原来的强制移除：运行中的任务立即结束，没搬走的 group 留在原机器上。
+6. **"恢复使用"即取消。** undrain 清除 `removal_requested_at`，腾空随之停止。已经交出去的 group 留在新机器上。
+
+已经在等待中的旧移除请求（`removal_moves_out=false`）保持原来的含义。
+
+## 6 不在本版范围
+
 - 腾空完的池成员提前释放（见 3.7）。
 - 心跳超时自动判定 Host 失联。
 
-## 6 验证
+## 7 验证
 
 - 单元：窗口计算、inspection 按窗口请求 hold、续期提前、告警只发一次、池容量计算、清扫任务。
 - PostgreSQL：检查点未开启或原 Host 不捕获时不腾空、目标有 `new_groups` 限制时不算目标、两台同时进入窗口最多一台腾空、开始后目标消失仍继续；检查点到达即交出、清扫停止闲置 group 后交出、忙碌 group 不停、旧 Host 领不回自己的 group、provider 终止交出 group。

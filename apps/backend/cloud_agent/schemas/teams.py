@@ -20,8 +20,28 @@ from cloud_agent.domain.teams import (
     InvitationStatus,
     JoinRequestState,
     MemberRole,
+    MembershipState,
     TeamRole,
+    TeamState,
 )
+
+TeamAuditAction = Literal[
+    "team_created",
+    "team_renamed",
+    "team_deleted",
+    "invitation_created",
+    "invitation_revoked",
+    "join_requested",
+    "join_approved",
+    "join_declined",
+    "member_left",
+    "member_removed",
+    "member_role_changed",
+    "ownership_transferred",
+    "environment_created",
+    "environment_updated",
+    "environment_archived",
+]
 
 #: Characters a link token can contain: ``secrets.token_urlsafe(32)`` output.
 INVITATION_TOKEN_PATTERN = r"^[A-Za-z0-9_-]{43}$"
@@ -207,23 +227,7 @@ class TeamAuditEventResponse(BaseModel):
 
     id: int
     actor_user_id: str
-    action: Literal[
-        "team_created",
-        "team_renamed",
-        "team_deleted",
-        "invitation_created",
-        "invitation_revoked",
-        "join_requested",
-        "join_approved",
-        "join_declined",
-        "member_left",
-        "member_removed",
-        "member_role_changed",
-        "ownership_transferred",
-        "environment_created",
-        "environment_updated",
-        "environment_archived",
-    ]
+    action: TeamAuditAction
     target_user_id: str | None
     target_id: str | None
     created_at: datetime
@@ -233,4 +237,73 @@ class TeamAuditEventListResponse(BaseModel):
     """A page of audit events, newest first; pass ``next_before`` for the next."""
 
     events: list[TeamAuditEventResponse]
+    next_before: int | None
+
+
+# ── The platform administrator's read-only view ─────────────────────────────
+
+
+class AdminTeamSummary(BaseModel):
+    """One team in the administrator's list; deleted teams included."""
+
+    id: str
+    name: str
+    state: TeamState
+    owner: TeamPerson
+    member_count: int
+    admin_count: int = Field(description="Active admins, not counting the owner.")
+    pending_request_count: int = Field(description="Join requests waiting for a decision.")
+    created_at: datetime
+    deleted_at: datetime | None
+
+
+class AdminTeamListResponse(BaseModel):
+    """A page of teams, newest first; pass ``next_offset`` for the next."""
+
+    teams: list[AdminTeamSummary]
+    next_offset: int | None
+
+
+class AdminTeamMember(TeamPerson):
+    """A membership in any state: who is in the team, and who left or was removed."""
+
+    role: TeamRole
+    state: MembershipState
+    joined_at: datetime
+    departed_at: datetime | None
+
+
+class AdminTeamInvitationCounts(BaseModel):
+    """How many of the team's invitation links are in each state."""
+
+    open: int
+    expired: int
+    claimed: int
+    revoked: int
+
+
+class AdminTeamDetailResponse(BaseModel):
+    """One team as the administrator sees it."""
+
+    team: AdminTeamSummary
+    members: list[AdminTeamMember]
+    join_requests: list[JoinRequestResponse]
+    invitations: AdminTeamInvitationCounts
+
+
+class AdminTeamAuditEvent(BaseModel):
+    """One audit event with the people it names."""
+
+    id: int
+    action: TeamAuditAction
+    actor: TeamPerson
+    target_user: TeamPerson | None
+    target_id: str | None
+    created_at: datetime
+
+
+class AdminTeamAuditListResponse(BaseModel):
+    """A page of audit events, newest first; pass ``next_before`` for the next."""
+
+    events: list[AdminTeamAuditEvent]
     next_before: int | None

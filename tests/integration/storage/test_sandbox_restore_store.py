@@ -941,7 +941,8 @@ async def test_a_group_its_checkpoint_does_not_cover_stays_on_its_host(
         # Opening the workspace starts the container after the checkpoint.
         assert await store.sandbox.fence_workspace_start(thread_id=job["thread_id"]) == "stopped"
 
-    assert await store.host_pool.remove_host(host="runner-a") == "ok"
+    # Nowhere to move it, so the administrator removes the host anyway.
+    assert await store.host_pool.remove_host(host="runner-a", allow_unmoved=True) == "ok"
 
     state = await _state(pool)
     assert state["state"] == "stopped"
@@ -1024,7 +1025,9 @@ async def test_a_removed_hosts_uncovered_group_still_keeps_it_from_being_forgott
 ):
     """A stopped group with no covering checkpoint continues only on that host."""
     await _settled_stopped_group(pool, store)
-    assert await store.host_pool.remove_host(host="runner-a") == "ok"
+    # It cannot move, so the administrator is asked before it is left there.
+    assert await store.host_pool.remove_host(host="runner-a") == "cannot_move"
+    assert await store.host_pool.remove_host(host="runner-a", allow_unmoved=True) == "ok"
     assert (await _state(pool))["state"] == "stopped"
 
     assert await store.host_pool.forget_runner_host(host="runner-a") == "retained_groups_present"

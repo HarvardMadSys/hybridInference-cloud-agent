@@ -132,6 +132,34 @@ class AgentRunnerHost(_SandboxManagerWireNames):
             "attempts to end; the host is revoked once they have."
         ),
     )
+    removal_moves_out: bool = Field(
+        False,
+        description=(
+            "True while that Remove also moves this host's sandboxes to other hosts "
+            "through their checkpoints; the host is revoked once none is left."
+        ),
+    )
+    sandboxes_left: int | None = Field(
+        None,
+        description=(
+            "Sandboxes this host can still move out while its removal moves them; null otherwise."
+        ),
+    )
+    sandboxes_unmovable: int | None = Field(
+        None,
+        description=(
+            "Sandboxes on this host that can never move, such as a stopped one whose "
+            "checkpoint failed, while its removal moves the others; null otherwise. "
+            "They stay on the removed host."
+        ),
+    )
+    removal_leaves_unmoved: bool = Field(
+        False,
+        description=(
+            "True when the administrator agreed that sandboxes which cannot move stay "
+            "on the removed host. Without it they hold the removal."
+        ),
+    )
     sandbox_runtime: str | None = Field(
         None,
         description=(

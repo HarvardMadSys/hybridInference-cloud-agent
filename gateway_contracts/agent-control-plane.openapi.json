@@ -3009,6 +3009,338 @@
         "title": "AdminStepsPage",
         "type": "object"
       },
+      "AdminTeamAuditEvent": {
+        "description": "One audit event with the people it names.",
+        "properties": {
+          "action": {
+            "enum": [
+              "team_created",
+              "team_renamed",
+              "team_deleted",
+              "invitation_created",
+              "invitation_revoked",
+              "join_requested",
+              "join_approved",
+              "join_declined",
+              "member_left",
+              "member_removed",
+              "member_role_changed",
+              "ownership_transferred",
+              "environment_created",
+              "environment_updated",
+              "environment_archived"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "actor": {
+            "$ref": "#/components/schemas/TeamPerson"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "target_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Id"
+          },
+          "target_user": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TeamPerson"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "action",
+          "actor",
+          "target_user",
+          "target_id",
+          "created_at"
+        ],
+        "title": "AdminTeamAuditEvent",
+        "type": "object"
+      },
+      "AdminTeamAuditListResponse": {
+        "description": "A page of audit events, newest first; pass ``next_before`` for the next.",
+        "properties": {
+          "events": {
+            "items": {
+              "$ref": "#/components/schemas/AdminTeamAuditEvent"
+            },
+            "title": "Events",
+            "type": "array"
+          },
+          "next_before": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Before"
+          }
+        },
+        "required": [
+          "events",
+          "next_before"
+        ],
+        "title": "AdminTeamAuditListResponse",
+        "type": "object"
+      },
+      "AdminTeamDetailResponse": {
+        "description": "One team as the administrator sees it.",
+        "properties": {
+          "invitations": {
+            "$ref": "#/components/schemas/AdminTeamInvitationCounts"
+          },
+          "join_requests": {
+            "items": {
+              "$ref": "#/components/schemas/JoinRequestResponse"
+            },
+            "title": "Join Requests",
+            "type": "array"
+          },
+          "members": {
+            "items": {
+              "$ref": "#/components/schemas/AdminTeamMember"
+            },
+            "title": "Members",
+            "type": "array"
+          },
+          "team": {
+            "$ref": "#/components/schemas/AdminTeamSummary"
+          }
+        },
+        "required": [
+          "team",
+          "members",
+          "join_requests",
+          "invitations"
+        ],
+        "title": "AdminTeamDetailResponse",
+        "type": "object"
+      },
+      "AdminTeamInvitationCounts": {
+        "description": "How many of the team's invitation links are in each state.",
+        "properties": {
+          "claimed": {
+            "title": "Claimed",
+            "type": "integer"
+          },
+          "expired": {
+            "title": "Expired",
+            "type": "integer"
+          },
+          "open": {
+            "title": "Open",
+            "type": "integer"
+          },
+          "revoked": {
+            "title": "Revoked",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "open",
+          "expired",
+          "claimed",
+          "revoked"
+        ],
+        "title": "AdminTeamInvitationCounts",
+        "type": "object"
+      },
+      "AdminTeamListResponse": {
+        "description": "A page of teams, newest first; pass ``next_offset`` for the next.",
+        "properties": {
+          "next_offset": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Offset"
+          },
+          "teams": {
+            "items": {
+              "$ref": "#/components/schemas/AdminTeamSummary"
+            },
+            "title": "Teams",
+            "type": "array"
+          }
+        },
+        "required": [
+          "teams",
+          "next_offset"
+        ],
+        "title": "AdminTeamListResponse",
+        "type": "object"
+      },
+      "AdminTeamMember": {
+        "description": "A membership in any state: who is in the team, and who left or was removed.",
+        "properties": {
+          "avatar_data_url": {
+            "title": "Avatar Data Url",
+            "type": "string"
+          },
+          "departed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Departed At"
+          },
+          "display_name": {
+            "title": "Display Name",
+            "type": "string"
+          },
+          "email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Email"
+          },
+          "joined_at": {
+            "format": "date-time",
+            "title": "Joined At",
+            "type": "string"
+          },
+          "role": {
+            "enum": [
+              "owner",
+              "admin",
+              "member"
+            ],
+            "title": "Role",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "active",
+              "left",
+              "removed"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "user_id": {
+            "title": "User Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "user_id",
+          "display_name",
+          "email",
+          "avatar_data_url",
+          "role",
+          "state",
+          "joined_at",
+          "departed_at"
+        ],
+        "title": "AdminTeamMember",
+        "type": "object"
+      },
+      "AdminTeamSummary": {
+        "description": "One team in the administrator's list; deleted teams included.",
+        "properties": {
+          "admin_count": {
+            "description": "Active admins, not counting the owner.",
+            "title": "Admin Count",
+            "type": "integer"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "deleted_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deleted At"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "member_count": {
+            "title": "Member Count",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "owner": {
+            "$ref": "#/components/schemas/TeamPerson"
+          },
+          "pending_request_count": {
+            "description": "Join requests waiting for a decision.",
+            "title": "Pending Request Count",
+            "type": "integer"
+          },
+          "state": {
+            "enum": [
+              "active",
+              "deleted"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "state",
+          "owner",
+          "member_count",
+          "admin_count",
+          "pending_request_count",
+          "created_at",
+          "deleted_at"
+        ],
+        "title": "AdminTeamSummary",
+        "type": "object"
+      },
       "AdminUsageAggregate": {
         "additionalProperties": false,
         "description": "Counts, sums and coverage for one cohort of runs and its executions.",
@@ -6261,6 +6593,18 @@
             "description": "Why this host is claiming nothing despite having room — it could not start the process a turn runs in, repeatedly. Empty means nothing is wrong; null means this host does not report it.",
             "title": "Launch Error"
           },
+          "removal_leaves_unmoved": {
+            "default": false,
+            "description": "True when the administrator agreed that sandboxes which cannot move stay on the removed host. Without it they hold the removal.",
+            "title": "Removal Leaves Unmoved",
+            "type": "boolean"
+          },
+          "removal_moves_out": {
+            "default": false,
+            "description": "True while that Remove also moves this host's sandboxes to other hosts through their checkpoints; the host is revoked once none is left.",
+            "title": "Removal Moves Out",
+            "type": "boolean"
+          },
           "removal_pending": {
             "default": false,
             "description": "True while an operator's Remove waits for this draining host's running attempts to end; the host is revoked once they have.",
@@ -6359,6 +6703,30 @@
             ],
             "description": "Attested container runtime for this host's jobs. '' = shared-kernel runc; null = the host has never reported one.",
             "title": "Sandbox Runtime"
+          },
+          "sandboxes_left": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Sandboxes this host can still move out while its removal moves them; null otherwise.",
+            "title": "Sandboxes Left"
+          },
+          "sandboxes_unmovable": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Sandboxes on this host that can never move, such as a stopped one whose checkpoint failed, while its removal moves the others; null otherwise. They stay on the removed host.",
+            "title": "Sandboxes Unmovable"
           },
           "seconds_since_seen": {
             "description": "Age of the last claim poll, by the server's clock. A runner polls only between jobs, so a busy machine can look quiet for as long as its longest job.",
@@ -17318,6 +17686,42 @@
         "title": "TeamMemberResponse",
         "type": "object"
       },
+      "TeamPerson": {
+        "description": "How a member or applicant is shown: names they chose, never their settings.",
+        "properties": {
+          "avatar_data_url": {
+            "title": "Avatar Data Url",
+            "type": "string"
+          },
+          "display_name": {
+            "title": "Display Name",
+            "type": "string"
+          },
+          "email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Email"
+          },
+          "user_id": {
+            "title": "User Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "user_id",
+          "display_name",
+          "email",
+          "avatar_data_url"
+        ],
+        "title": "TeamPerson",
+        "type": "object"
+      },
       "TeamResponse": {
         "description": "A team as one of its members sees it.",
         "properties": {
@@ -24271,7 +24675,7 @@
     },
     "/admin/agent/runner-hosts/{host}/remove": {
       "post": {
-        "description": "Revoke this host's credential and take it out of the pool.\n\nA host still holding slots is not revoked on the spot: its running attempts\nbelong to a machine the platform would have just declared gone, and nobody\nwould learn that until their leases lapsed minutes later. It drains\ninstead — no new claims, ``removal_pending`` set — and the reaper revokes\nit once its last running attempt ends. Putting it back to work\n(``undrain``) cancels the request.\n\nForced removal is the deliberate version of the same thing, and it ends\nthat work rather than waiting for it: the revocation expires the host's\nattempt and residency leases in the same transaction. The attempts' worker\ntokens name no host, so a lease left to run would be one the removed\nmachine could keep renewing. Lease fencing then rejects every later write\nfrom it, and the reaper supersedes the attempts and revokes their grants\non its next pass. A retained activation is not replayed because the\nplatform cannot know whether its prompt ran, so that chat is marked LOST.\n\nThe row survives, disabled. ``agent_attempts.host_id`` points at it, and\n\"where did this job run\" should not become unanswerable because the machine\nwas retired. ``DELETE`` forgets that administrative row; neither action is\nevidence that the retained container or Docker data-root was deleted.",
+        "description": "Revoke this host's credential and take it out of the pool.\n\nWhen its sandboxes can move -- checkpoints are on and another host would\nrestore them -- the host first moves them out: it drains, each idle\nsandbox stops into a checkpoint and is handed to another host, and the\nreaper revokes it once none is left and its running turns end. Nothing\nrunning is interrupted. A removal that would leave sandboxes on the host\nis refused unless ``allow_unmoved``, and then keeps the meaning below once\nwhatever can move has moved. A sandbox whose checkpoint fails during the\nmove holds the removal until it is repeated with ``allow_unmoved``.\n\nA host still holding slots is not revoked on the spot: its running attempts\nbelong to a machine the platform would have just declared gone, and nobody\nwould learn that until their leases lapsed minutes later. It drains\ninstead — no new claims, ``removal_pending`` set — and the reaper revokes\nit once its last running attempt ends. Putting it back to work\n(``undrain``) cancels the request.\n\nForced removal is the deliberate version of the same thing, and it ends\nthat work rather than waiting for it: the revocation expires the host's\nattempt and residency leases in the same transaction. The attempts' worker\ntokens name no host, so a lease left to run would be one the removed\nmachine could keep renewing. Lease fencing then rejects every later write\nfrom it, and the reaper supersedes the attempts and revokes their grants\non its next pass. A retained activation is not replayed because the\nplatform cannot know whether its prompt ran, so that chat is marked LOST.\n\nThe row survives, disabled. ``agent_attempts.host_id`` points at it, and\n\"where did this job run\" should not become unanswerable because the machine\nwas retired. ``DELETE`` forgets that administrative row; neither action is\nevidence that the retained container or Docker data-root was deleted.",
         "operationId": "remove_agent_runner_host_admin_agent_runner_hosts__host__remove_post",
         "parameters": [
           {
@@ -24292,6 +24696,18 @@
               "default": false,
               "description": "Remove a host that is still running attempts. Their leases expire at once, so the removed machine can no longer heartbeat, renew grants, establish residencies or call tools for them; the next reaper pass requeues them or, for an indeterminate retained-chat activation, marks the chat LOST instead of replaying it.",
               "title": "Force",
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "Remove a host even though some of its sandboxes will stay on it. Without it the request is refused with 409 no_move_target when no other host or no checkpoint can take them now, or 409 cannot_move when some can never move (a stopped sandbox whose checkpoint failed, say): those sandboxes stay on the removed host and their chats cannot continue until it returns. Whatever can move still moves first.",
+            "in": "query",
+            "name": "allow_unmoved",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Remove a host even though some of its sandboxes will stay on it. Without it the request is refused with 409 no_move_target when no other host or no checkpoint can take them now, or 409 cannot_move when some can never move (a stopped sandbox whose checkpoint failed, say): those sandboxes stay on the removed host and their chats cannot continue until it returns. Whatever can move still moves first.",
+              "title": "Allow Unmoved",
               "type": "boolean"
             }
           },
@@ -26677,6 +27093,249 @@
           }
         },
         "summary": "List Admin Steps"
+      }
+    },
+    "/admin/agent/teams": {
+      "get": {
+        "description": "Teams newest first.\n\n``q`` matches part of a team's name, a team id, or the user id of anyone\nwho has been a member.",
+        "operationId": "list_teams_admin_agent_teams_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 256,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Q"
+            }
+          },
+          {
+            "in": "query",
+            "name": "state",
+            "required": false,
+            "schema": {
+              "default": "active",
+              "enum": [
+                "active",
+                "deleted",
+                "all"
+              ],
+              "title": "State",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminTeamListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Teams"
+      }
+    },
+    "/admin/agent/teams/{team_id}": {
+      "get": {
+        "description": "One team in any state: members past and present, open requests, links.",
+        "operationId": "get_team_admin_agent_teams__team_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "title": "Team Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminTeamDetailResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Team"
+      }
+    },
+    "/admin/agent/teams/{team_id}/audit-events": {
+      "get": {
+        "description": "A team's audit events, newest first, a page at a time.",
+        "operationId": "list_team_audit_events_admin_agent_teams__team_id__audit_events_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "team_id",
+            "required": true,
+            "schema": {
+              "title": "Team Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Before"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminTeamAuditListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Team Audit Events"
       }
     },
     "/admin/agent/usage": {
