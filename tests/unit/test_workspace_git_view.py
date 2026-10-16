@@ -325,6 +325,49 @@ def test_a_snapshot_captured_under_a_prefix_config_publishes_the_file_it_changed
     assert published == {"a.txt": "one\n", "src/a.txt": "one\n", edited: "two\n"}
 
 
+@pytest.mark.parametrize("key", ["color.ui", "color.diff"])
+@pytest.mark.parametrize("capture", ["view", "snapshot"])
+def test_git_patch_carries_no_colour_whatever_the_colour_config(backend, tmp_path, key, capture):
+    repo = _repo(tmp_path / "ws")
+    base = _git("rev-parse", "HEAD", cwd=repo).strip()
+    _git("config", key, "always", cwd=repo)
+    (repo / "a.txt").write_text("two\n")
+
+    view = (
+        _run_git(backend, repo, base, exact_patch=True)
+        if capture == "snapshot"
+        else _run_git(backend, repo)
+    )
+
+    assert view["patch"].startswith("diff --git a/a.txt b/a.txt\nindex ")
+    assert view["patch"].endswith("\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-one\n+two\n")
+
+
+def test_a_snapshot_captured_under_a_colour_config_publishes(backend, tmp_path):
+    from cloud_agent.publisher import publish_patch
+
+    workspace = _repo(tmp_path / "ws")
+    base = _git("rev-parse", "HEAD", cwd=workspace).strip()
+    origin = tmp_path / "origin.git"
+    _git("clone", "-q", "--bare", str(workspace), str(origin), cwd=tmp_path)
+    _git("config", "uploadpack.allowAnySHA1InWant", "true", cwd=origin)
+    _git("config", "color.ui", "always", cwd=workspace)
+    (workspace / "a.txt").write_text("two\n")
+
+    captured = _run_git(backend, workspace, base, exact_patch=True)
+    result = publish_patch(
+        job_id="ajob_colour",
+        branch_id="athr_colour",
+        patch=captured["patch"],
+        clone_url=f"file://{origin}",
+        base_sha=base,
+        commit_message="agent: edit",
+    )
+
+    assert result.changed_files == ["a.txt"]
+    assert _git("show", f"{result.commit_sha}:a.txt", cwd=origin) == "two\n"
+
+
 def test_base_bundle_import_never_lazily_fetches_a_missing_prerequisite(tmp_path, monkeypatch):
     source = _repo(tmp_path / "source")
     base = _git("rev-parse", "HEAD", cwd=source).strip()

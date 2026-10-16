@@ -2058,7 +2058,8 @@ def _run_git(
     # and the publisher applies a snapshot at ``-p1``, so the prefixes are
     # named too: ``diff.noPrefix`` would leave a name with nothing to strip,
     # and ``diff.mnemonicPrefix`` writes ``c/`` and ``w/``. Options on the
-    # command line outrank either, on every Git version.
+    # command line outrank either, on every Git version. ``--no-color`` keeps
+    # the escape codes ``color.ui=always`` would write out of the same text.
     script = _NEUTRALIZE_GIT_FILTERS + (
         "git --no-pager status --porcelain=v1 --branch --ignore-submodules=dirty; "
         "status_status=$?; "
@@ -2071,7 +2072,7 @@ def _run_git(
         'GIT_INDEX_FILE="$index_path" git add -A -N --pathspec-from-file=- '
         "--pathspec-file-nul >/dev/null 2>&1 && "
         f'GIT_INDEX_FILE="$index_path" git --no-pager diff --no-ext-diff --no-textconv '
-        "--src-prefix=a/ --dst-prefix=b/ "
+        "--no-color --src-prefix=a/ --dst-prefix=b/ "
         f"--ignore-submodules=dirty --submodule=short --binary {target}; diff_status=$?; "
         f"printf '\n{commits_tag}\n'; "
         "git --no-pager log -20 --pretty=format:'%H%x09%h%x09%s%x09%an%x09%aI'; "
