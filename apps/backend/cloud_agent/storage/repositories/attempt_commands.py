@@ -56,8 +56,7 @@ from cloud_agent.storage._sql.pending_messages import PAUSE_QUEUE_SQL
 from cloud_agent.storage._sql.rows import job_row_to_dict, load_json
 from cloud_agent.storage._sql.sandbox import (
     THREAD_SANDBOX_SOURCE,
-    release_failed_restore,
-    release_unstarted_restore,
+    release_restore,
     restore_claim_due,
 )
 from cloud_agent.storage.deadlocks import retry_deadlock_victim
@@ -542,7 +541,7 @@ class PostgresAttemptCommands:
             )
             if restore:
                 # However this attempt ends before the recreated container is
-                # confirmed, ``release_failed_restore`` finds the group by it.
+                # confirmed, ``release_restore`` finds the group by it.
                 await conn.execute(
                     "UPDATE agent_sandboxes SET restore_attempt_id = $2 WHERE id = $1",
                     thread_sandbox["sandbox_id"],
@@ -727,13 +726,12 @@ class PostgresAttemptCommands:
             # the group's attempts only if it may have begun: its host reserved
             # the group, or says the restore failed. A claim handed back before
             # that never reached the checkpoint, and counts as no failure.
-            restored_state = None
-            if reason == RESTORE_FAILED_RELEASE_REASON or not await release_unstarted_restore(
-                conn, attempt_id
-            ):
-                restored_state = await release_failed_restore(
-                    conn, attempt_id, f"sandbox restore released: {reason}"
-                )
+            restored_state = await release_restore(
+                conn,
+                attempt_id,
+                f"sandbox restore released: {reason}",
+                reported_failed=reason == RESTORE_FAILED_RELEASE_REASON,
+            )
             if restored_state == "lost":
                 # The attempts ran out: this turn and those queued behind it
                 # can never run, including the one just put back.
@@ -907,9 +905,12 @@ class PostgresAttemptCommands:
                 # A turn that ends while its attempt was still recreating the
                 # group admitted nothing. Hand the group back to its checkpoint
                 # first, so the backstop below does not read the missing
-                # container as lost context.
+                # container as lost context. A turn failed before its host
+                # reserved the group -- the hand-over refused it, or the host
+                # could not start it -- read no checkpoint and spends none of
+                # the group's attempts.
                 if (
-                    await release_failed_restore(
+                    await release_restore(
                         conn, attempt_id, detail or "turn ended during sandbox restore"
                     )
                     == "lost"
@@ -1709,10 +1710,10 @@ class PostgresAttemptCommands:
         # An attempt that died while recreating a cold group from its
         # checkpoint admitted nothing: admission waits for the recreated
         # container. The group goes back to its checkpoint and the turn back
-        # to the queue, until the restore attempts run out.
-        restored_state = await release_failed_restore(
-            conn, attempt_id, "sandbox restore lease expired"
-        )
+        # to the queue, until the restore attempts run out. One that died
+        # before its host reserved the group never began the restore, and
+        # spends none of them.
+        restored_state = await release_restore(conn, attempt_id, "sandbox restore lease expired")
         restore_exhausted = restored_state == "lost"
         if restored_state is not None:
             retained_activation_expired = False

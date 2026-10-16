@@ -2136,9 +2136,12 @@ and the turn to the queue without spending an attempt. The group is not
 claimed again until 30 seconds after its first failure, 5 minutes after its
 second and 30 minutes after its third, so the attempts outlast a short
 registry or S3 outage; the fourth failed restore marks the group lost and fails
-its queued turns. A claim handed back before its host reserved the group,
-because the control plane could not mint the turn's credentials or the host
-could not launch the turn, never reached the checkpoint: it is not a failed
+its queued turns. A claim that ends before its host reserved the group never
+reached the checkpoint, however it ends: handed back because the control plane
+could not mint the turn's credentials or the host could not launch the turn,
+failed because the hand-over refused the turn (its owner lost Agent access, or
+its model or repository is no longer allowed) or the host could not start it,
+or reaped because the host died right after claiming. It is not a failed
 restore and starts no wait. The checkpoint is never changed. Workspace
 requests to a `cold` or `restoring` group return `workspace_restoring` (409)
 until a turn has restored it. Restore reads with

@@ -237,6 +237,25 @@ def restore_claim_due(attempts: str, failed_at: str) -> str:
     )
 
 
+async def release_restore(
+    conn: Any, attempt_id: int, detail: str, *, reported_failed: bool = False
+) -> str | None:
+    """Return a group this attempt was restoring to its checkpoint, however it ended.
+
+    A restore counts as failed only once it may have begun: its host reserved
+    the group, or reports the restore failed (``reported_failed``). An attempt
+    that ends before its host reserved the group -- handed back, failed by the
+    hand-over or by its host before the reservation, or reaped when its lease
+    lapsed -- never reached the checkpoint and gives the group its attempt back
+    (:func:`release_unstarted_restore`); every other end is a failed restore
+    (:func:`release_failed_restore`). Returns the group's new state, or
+    ``None`` when the attempt restored nothing.
+    """
+    if not reported_failed and await release_unstarted_restore(conn, attempt_id):
+        return "cold"
+    return await release_failed_restore(conn, attempt_id, detail)
+
+
 async def release_failed_restore(conn: Any, attempt_id: int, detail: str) -> str | None:
     """Return a group this attempt was recreating to its checkpoint.
 
@@ -248,7 +267,9 @@ async def release_failed_restore(conn: Any, attempt_id: int, detail: str) -> str
     the next claim advances. Once the attempts run out it is ``lost`` instead.
     The failure's time is the group's last activity, which the next claim
     waits from (:func:`restore_claim_due`). Returns the group's new state, or
-    ``None`` when the attempt restored nothing.
+    ``None`` when the attempt restored nothing. Callers go through
+    :func:`release_restore`, which first gives back an attempt whose restore
+    never began.
     """
     # Memberships before their group, the order every writer keeps. The
     # restoring member may already hold the attempt from its reservation.
@@ -283,14 +304,15 @@ async def release_failed_restore(conn: Any, attempt_id: int, detail: str) -> str
 async def release_unstarted_restore(conn: Any, attempt_id: int) -> bool:
     """Return a group this attempt never began to restore, uncounted.
 
-    The claim that rehomes a cold group counts one restore attempt. Handed back
+    The claim that rehomes a cold group counts one restore attempt. Ended
     before its host reserved the group -- the hand-over could not mint the
-    turn's credentials, or the host could not launch the turn -- the claim
-    never reached the checkpoint. The group goes back to ``cold`` with that
-    attempt given back and its last failure's time unchanged, so the next
-    claim waits only as long as a real failure asks (:func:`restore_claim_due`).
-    Returns whether the attempt held such a group; one its host reserved is
-    left to :func:`release_failed_restore`.
+    turn's credentials or refused the turn, the host could not launch or
+    start it, or the host died and the lease lapsed -- the claim never reached
+    the checkpoint. The group goes back to ``cold`` with that attempt given
+    back and its last failure's time unchanged, so the next claim waits only
+    as long as a real failure asks (:func:`restore_claim_due`). Returns
+    whether the attempt held such a group; one its host reserved is left to
+    :func:`release_failed_restore`.
     """
     return (
         await conn.fetchval(
