@@ -176,6 +176,7 @@ from cloud_agent_shared.sandbox_archive_settings import (
 )
 from cloud_agent_shared.sandbox_resources import parse_sandbox_resource_sample
 from cloud_agent_shared.sandbox_restore import (
+    RESTORE_FAILED_RELEASE_REASON,
     SANDBOX_RESTORE_CAPABILITY,
 )
 from cloud_agent_shared.secret_redaction import SecretRedactor
@@ -3162,7 +3163,7 @@ def _run_shared_live_attempt(
         if isinstance(group, dict) and group.get("state") == "lost":
             report_failure()
             return 2
-        return 0 if control.release_turn("sandbox_restore_failed") else 2
+        return 0 if control.release_turn(RESTORE_FAILED_RELEASE_REASON) else 2
     except (DriverError, SandboxError, SessionSupervisorError, WorktreeError) as exc:
         failure_detail = str(exc)
         _log_control_failure(stage, job.job_id, exc)

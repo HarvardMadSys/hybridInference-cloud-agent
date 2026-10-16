@@ -31,6 +31,12 @@ RESTORE_RETRY_DELAYS_S: Final = (30.0, 300.0, 1800.0)
 #: be retried forever.
 MAX_RESTORE_ATTEMPTS: Final = len(RESTORE_RETRY_DELAYS_S) + 1
 
+#: Why a host hands a turn back when its sandbox manager could not recreate the
+#: group. It counts as a failed restore. A claim handed back for any other reason
+#: before its host reserved the group never reached the checkpoint, and counts
+#: as none.
+RESTORE_FAILED_RELEASE_REASON: Final = "sandbox_restore_failed"
+
 #: A base image another host can fetch by itself: a registry host with a dot,
 #: a repository, and a digest. A locally built image has no such name, and a
 #: group created from one cannot leave its host. The same text is used as a
@@ -50,6 +56,7 @@ def pullable_image(reference: str | None) -> bool:
 __all__ = [
     "MAX_RESTORE_ATTEMPTS",
     "PULLABLE_IMAGE_PATTERN",
+    "RESTORE_FAILED_RELEASE_REASON",
     "RESTORE_RETRY_DELAYS_S",
     "SANDBOX_RESTORE_CAPABILITY",
     "pullable_image",

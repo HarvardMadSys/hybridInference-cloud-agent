@@ -57,6 +57,7 @@ from cloud_agent.storage._sql.rows import job_row_to_dict, load_json
 from cloud_agent.storage._sql.sandbox import (
     THREAD_SANDBOX_SOURCE,
     release_failed_restore,
+    release_unstarted_restore,
     restore_claim_due,
 )
 from cloud_agent.storage.deadlocks import retry_deadlock_victim
@@ -65,7 +66,11 @@ from cloud_agent_shared.sandbox_archive_settings import (
     SANDBOX_ARCHIVE_CAPABILITY,
     SandboxArchivePolicyError,
 )
-from cloud_agent_shared.sandbox_restore import MAX_RESTORE_ATTEMPTS, SANDBOX_RESTORE_CAPABILITY
+from cloud_agent_shared.sandbox_restore import (
+    MAX_RESTORE_ATTEMPTS,
+    RESTORE_FAILED_RELEASE_REASON,
+    SANDBOX_RESTORE_CAPABILITY,
+)
 
 if TYPE_CHECKING:
     from cloud_agent.goals.report import GoalReportEnvelope
@@ -684,10 +689,17 @@ class PostgresAttemptCommands:
             # when the job UPDATE changed no row.
             await release_host_slot(conn, released_row["host_id"])
             # A restore handed back before its container was confirmed leaves
-            # the group to its checkpoint for the next claim.
-            restored_state = await release_failed_restore(
-                conn, attempt_id, f"sandbox restore released: {reason}"
-            )
+            # the group to its checkpoint for the next claim. It spends one of
+            # the group's attempts only if it may have begun: its host reserved
+            # the group, or says the restore failed. A claim handed back before
+            # that never reached the checkpoint, and counts as no failure.
+            restored_state = None
+            if reason == RESTORE_FAILED_RELEASE_REASON or not await release_unstarted_restore(
+                conn, attempt_id
+            ):
+                restored_state = await release_failed_restore(
+                    conn, attempt_id, f"sandbox restore released: {reason}"
+                )
             if restored_state == "lost":
                 # The attempts ran out: this turn and those queued behind it
                 # can never run, including the one just put back.

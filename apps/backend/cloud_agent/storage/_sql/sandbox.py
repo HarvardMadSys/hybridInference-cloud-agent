@@ -286,3 +286,34 @@ async def release_failed_restore(conn: Any, attempt_id: int, detail: str) -> str
         attempt_id,
         detail,
     )
+
+
+async def release_unstarted_restore(conn: Any, attempt_id: int) -> bool:
+    """Return a group this attempt never began to restore, uncounted.
+
+    The claim that rehomes a cold group counts one restore attempt. Handed back
+    before its host reserved the group -- the hand-over could not mint the
+    turn's credentials, or the host could not launch the turn -- the claim
+    never reached the checkpoint. The group goes back to ``cold`` with that
+    attempt given back and its last failure's time unchanged, so the next
+    claim waits only as long as a real failure asks (:func:`restore_claim_due`).
+    Returns whether the attempt held such a group; one its host reserved is
+    left to :func:`release_failed_restore`.
+    """
+    return (
+        await conn.fetchval(
+            """
+            UPDATE agent_sandboxes g
+            SET state = 'cold', restore_attempt_id = NULL,
+                restore_attempts = g.restore_attempts - 1, updated_at = NOW()
+            WHERE g.restore_attempt_id = $1 AND g.state = 'restoring'
+              AND NOT EXISTS (
+                  SELECT 1 FROM agent_thread_sandbox_memberships m
+                  WHERE m.sandbox_id = g.id AND m.active_attempt_id = $1
+              )
+            RETURNING g.id
+            """,
+            attempt_id,
+        )
+        is not None
+    )

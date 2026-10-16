@@ -788,6 +788,103 @@ async def test_restore_failures_during_a_short_outage_do_not_lose_the_chat(pool,
     assert restored["restore_attempts"] == 0
 
 
+async def test_claims_handed_back_before_the_restore_began_spend_no_attempt(pool, store: Storage):
+    """A claim given back before its host reserved the group never reached the checkpoint.
+
+    The hand-over gives a claim back when it cannot mint the turn's credentials
+    or the host lacks something the turn needs, and a host gives one back when
+    it cannot launch the turn. Each of them counted as a failed restore: it
+    started the next wait, and the fourth lost the chat for good though nothing
+    had read its checkpoint.
+    """
+    job, _ = await _covered(pool, store)
+    follow_up = await store.conversation_commands.create_follow_up(
+        parent_job_id=job["id"], user_id="user-1", prompt="continue"
+    )
+    assert follow_up is not None
+    assert await store.host_pool.remove_host(host="runner-a") == "ok"
+    await _host(store, "runner-c", _RESTORE_HOST)
+    # One restore did fail, and its wait has passed.
+    claim = await _claim(store, "runner-c", _RESTORE_HOST)
+    assert claim is not None
+    assert await store.attempt_commands.release_claim(
+        job_id=follow_up["id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        reason="sandbox_restore_failed",
+    )
+    await _age_restore_failure(pool, RESTORE_RETRY_DELAYS_S[0])
+
+    # The hand-over's reasons, then the host's.
+    for reason in ("credential_unavailable", "claim_failed", "launch_failed", "storage_pressure"):
+        claim = await _claim(store, "runner-c", _RESTORE_HOST)
+        assert claim is not None and claim["id"] == follow_up["id"]
+        assert await store.attempt_commands.release_claim(
+            job_id=follow_up["id"],
+            attempt_id=claim["attempt_id"],
+            lease_generation=claim["lease_generation"],
+            reason=reason,
+            retry_after_seconds=30,
+        )
+        state = await _state(pool)
+        assert (state["state"], state["restore_attempts"], state["restore_attempt_id"]) == (
+            "cold",
+            1,
+            None,
+        )
+        waiting = await store.conversation_queries.get_job(follow_up["id"])
+        assert waiting is not None and waiting["state"] == "queued"
+        # Only the queue's own delay holds the turn back: no new wait starts.
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE agent_jobs SET claim_retry_at = NULL WHERE id = $1", follow_up["id"]
+            )
+
+    claim = await _claim(store, "runner-c", _RESTORE_HOST)
+    assert claim is not None and claim["id"] == follow_up["id"]
+    reserved = await _reserve(store, follow_up, claim, "runner-c")
+    assert await store.sandbox.mark_thread_sandbox_running(
+        **_fence(follow_up, claim, reserved),
+        container_id="container-c",
+        context_status="restored",
+    )
+    assert (await _state(pool))["state"] == "running"
+
+
+async def test_a_claim_handed_back_after_its_host_reserved_the_group_counts(pool, store: Storage):
+    """Once its host reserved the group, a restore may have begun, whatever ended it."""
+    job, _ = await _covered(pool, store)
+    follow_up = await store.conversation_commands.create_follow_up(
+        parent_job_id=job["id"], user_id="user-1", prompt="continue"
+    )
+    assert follow_up is not None
+    assert await store.host_pool.remove_host(host="runner-a") == "ok"
+    await _host(store, "runner-c", _RESTORE_HOST)
+    claim = await _claim(store, "runner-c", _RESTORE_HOST)
+    assert claim is not None
+    await _reserve(store, follow_up, claim, "runner-c")
+
+    # Grant renewal gives up on the attempt while the host restores.
+    assert await store.attempt_commands.release_claim(
+        job_id=follow_up["id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+    )
+
+    state = await _state(pool)
+    assert (state["state"], state["restore_attempts"], state["restore_attempt_id"]) == (
+        "cold",
+        1,
+        None,
+    )
+    member = await store.sandbox.thread_sandbox(thread_id=job["thread_id"])
+    assert member is not None and member["active_attempt_id"] is None
+    assert await _claim(store, "runner-c", _RESTORE_HOST) is None
+    await _age_restore_failure(pool, RESTORE_RETRY_DELAYS_S[0])
+    retry = await _claim(store, "runner-c", _RESTORE_HOST)
+    assert retry is not None and retry["id"] == follow_up["id"]
+
+
 async def test_an_expired_restore_returns_the_group_and_requeues_the_turn(pool, store: Storage):
     job, _ = await _covered(pool, store)
     follow_up = await store.conversation_commands.create_follow_up(
