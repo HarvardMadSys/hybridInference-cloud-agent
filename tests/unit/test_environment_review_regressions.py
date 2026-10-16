@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import os
 import subprocess
 import sys
@@ -10,7 +11,12 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
-from tests.unit.test_agent_sandbox_manager import _Spawner, _TerminalProcess, _wait_for
+from tests.unit.test_agent_sandbox_manager import (
+    _SlowSpawner,
+    _Spawner,
+    _TerminalProcess,
+    _wait_for,
+)
 
 from cloud_agent.sandbox_manager_client import SandboxManagerClient, SandboxManagerError
 from cloud_agent_host import environment_tests
@@ -246,6 +252,73 @@ def test_stop_before_delayed_action_launch_persists_a_tombstone(tmp_path):
     receipts = ActionReceipts(tmp_path)
     receipts.stop("w", "term_run")
     assert ActionReceipts(tmp_path).reserve("w", "term_run", "bound", "deploy")["state"] == "closed"
+
+
+class _RecordingSlowSpawner(_SlowSpawner):
+    def __init__(self) -> None:
+        super().__init__()
+        self.processes: list = []
+
+    def spawn_terminal(self, spec, *, rows: int, cols: int):
+        process = super().spawn_terminal(spec, rows=rows, cols=cols)
+        self.processes.append(process)
+        return process
+
+
+def test_stopping_an_action_while_its_terminal_spawns_stops_it(tmp_path):
+    """A Stop that lands while an action's terminal spawns closes that terminal.
+
+    Creating an action's terminal reserves its receipt and then spawns the PTY
+    under the workspace's own lock only. A delete in between found no
+    terminal, and its tombstone leaves a reserved receipt alone, so the
+    command the owner had stopped started once its terminal was listed.
+    """
+    receipts = ActionReceipts(tmp_path)
+    manager = _TerminalManager(
+        idle_ttl_s=30, hard_ttl_s=60, max_sessions=4, action_receipts=receipts
+    )
+    bound = BoundEnvironment(
+        binding_id="b", actions=[EnvironmentAction(id="deploy", name="Deploy", command="deploy")]
+    )
+    run_id = "8f2c2a54-0b8e-4e1c-9a51-3f5d2c7b9e10"
+    spawner = _RecordingSlowSpawner()
+    creation = threading.Thread(
+        target=functools.partial(
+            manager.create,
+            "workspace",
+            "/workspace",
+            rows=24,
+            cols=80,
+            backend=spawner,
+            environment=bound,
+            action_id="deploy",
+            run_id=run_id,
+        ),
+        daemon=True,
+    )
+    creation.start()
+    assert spawner.spawning.wait(2)
+    stopped: list[dict] = []
+    stop = threading.Thread(
+        target=lambda: stopped.append(manager.delete("workspace", "term_" + run_id)),
+        daemon=True,
+    )
+    try:
+        stop.start()
+        stop.join(0.3)
+        stopped_mid_spawn = not stop.is_alive()
+    finally:
+        spawner.release.set()
+        creation.join(5)
+        stop.join(5)
+
+    assert not stopped_mid_spawn, "the Stop waits for the terminal it stops"
+    assert [descriptor["state"] for descriptor in stopped] == ["closed"]
+    [process] = spawner.processes
+    assert process.killed
+    assert manager.list("workspace") == []
+    assert receipts.read("workspace", "term_" + run_id)["state"] == "closed"
+    manager.close()
 
 
 def test_environment_test_poll_does_not_block_and_can_be_cancelled(monkeypatch):

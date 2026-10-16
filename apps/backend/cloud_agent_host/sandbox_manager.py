@@ -1351,6 +1351,8 @@ class _TerminalManager:
         creation spawns one, which can take seconds each, so they hold this
         workspace's own lock across those calls and ``_lock`` only for
         bookkeeping: no other workspace's terminal request waits behind them.
+        A delete that finds no terminal waits here too, for a creation that
+        may be spawning it.
         """
         with self._lock:
             lock, holders = self._workspace_locks.get(workspace_id) or (threading.Lock(), 0)
@@ -1512,6 +1514,10 @@ class _TerminalManager:
                         else None,
                     )
                     session.operation_uid = int(spec.env["AGENT_ACTION_UID"]) if action else None
+                    # Draining before it is listed: whoever finds it listed, a
+                    # delete waiting on this workspace among them, may close
+                    # it, and closing joins the pump.
+                    session.start()
                     with self._lock:
                         self._spawning -= 1
                         spawning = False
@@ -1530,7 +1536,6 @@ class _TerminalManager:
                     stale.close(mark_activity=False)
                 except (SandboxError, OSError):
                     logger.exception("workspace_terminal_eviction_cleanup_failed")
-        session.start()
         return session.descriptor()
 
     def _unlist_exited_locked(self, workspace_id: str) -> list[_TerminalSession]:
@@ -1750,23 +1755,32 @@ class _TerminalManager:
     def delete(self, workspace_id: str, terminal_id: str) -> dict[str, Any]:
         """Close a terminal, retaining it when cleanup needs to be retried."""
         with self._lock:
-            group = self._sessions.get(workspace_id, {})
-            session = group.get(terminal_id)
+            session = self._sessions.get(workspace_id, {}).get(terminal_id)
         if session is None:
-            # Action run ids are UUIDs; ephemeral interactive terminal ids are not.
-            if re.fullmatch(
-                r"term_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", terminal_id
-            ):
-                self._action_receipts.stop(workspace_id, terminal_id)
-            return {
-                "id": terminal_id,
-                "shell": "sh",
-                "state": "closed",
-                "cwd": "/workspace",
-                "rows": 24,
-                "cols": 80,
-                "last_seq": 0,
-            }
+            # A creation in this workspace may have reserved this action's
+            # receipt and still be spawning its terminal, holding the
+            # workspace's own lock. The tombstone below leaves a reserved
+            # receipt alone, so the stopped command would start once that
+            # terminal is listed: wait for the creation, then look again.
+            with self._serialized(workspace_id):
+                with self._lock:
+                    session = self._sessions.get(workspace_id, {}).get(terminal_id)
+                if session is None:
+                    # Action run ids are UUIDs; ephemeral interactive terminal ids are not.
+                    if re.fullmatch(
+                        r"term_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+                        terminal_id,
+                    ):
+                        self._action_receipts.stop(workspace_id, terminal_id)
+                    return {
+                        "id": terminal_id,
+                        "shell": "sh",
+                        "state": "closed",
+                        "cwd": "/workspace",
+                        "rows": 24,
+                        "cols": 80,
+                        "last_seq": 0,
+                    }
         try:
             descriptor = session.close()
         except (SandboxError, OSError) as exc:
