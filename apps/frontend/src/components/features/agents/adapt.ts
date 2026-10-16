@@ -406,15 +406,26 @@ export function toDiffFileDetails(patch: string): AgentDiffFile[] {
   return files;
 }
 
-function diffStat(
-  patch: string,
-  files: readonly AgentDiffFile[],
-): { add: number; del: number } | undefined {
+/**
+ * The lines a patch adds and removes, counted from its hunks.
+ *
+ * Not from the files its headers name: a repository's diff.noPrefix or
+ * diff.mnemonicPrefix writes headers `toDiffFileDetails` does not read, and the
+ * count must not drop to nothing for them. A line is read as there: by its first
+ * character inside a hunk, with `---` and `+++` headers only before one.
+ */
+function diffStat(patch: string): { add: number; del: number } | undefined {
   if (!patch) return undefined;
-  return files.reduce((total, file) => ({ add: total.add + file.add, del: total.del + file.del }), {
-    add: 0,
-    del: 0,
-  });
+  let add = 0;
+  let del = 0;
+  let inHunk = false;
+  for (const line of patch.split('\n')) {
+    if (line.startsWith('diff --git ')) inHunk = false;
+    else if (line.startsWith('@@')) inHunk = true;
+    else if (inHunk && line.startsWith('+')) add += 1;
+    else if (inHunk && line.startsWith('-')) del += 1;
+  }
+  return { add, del };
 }
 
 /**
@@ -441,7 +452,7 @@ function parsePatch(patch: string): NonNullable<typeof lastPatch> {
       patch,
       files: toDiffFiles(patch),
       details,
-      stat: diffStat(patch, details),
+      stat: diffStat(patch),
     };
   }
   return lastPatch;

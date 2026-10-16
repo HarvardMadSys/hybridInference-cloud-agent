@@ -1528,6 +1528,29 @@ describe('patch parsing', () => {
     expect(toDisplayJob(JOB, { patch }).diffStat).toEqual({ add: 1, del: 1 });
   });
 
+  it('counts a patch whose headers a repository writes without the a/ and b/ prefixes', () => {
+    // diff.noPrefix drops them and diff.mnemonicPrefix swaps them for i/ and w/.
+    // The file list cannot name such a file, but the count must still see it.
+    for (const [from, to] of [
+      ['tick.c', 'tick.c'],
+      ['i/tick.c', 'w/tick.c'],
+    ]) {
+      const patch = [
+        `diff --git ${from} ${to}`,
+        'index 15c5242..04c18dc 100644',
+        `--- ${from}`,
+        `+++ ${to}`,
+        '@@ -1,3 +1,3 @@',
+        ' void tick(void) {',
+        '---count;',
+        '+++count;',
+        '+  ready();',
+        ' }',
+      ].join('\n');
+      expect(toDisplayJob(JOB, { patch }).diffStat).toEqual({ add: 2, del: 1 });
+    }
+  });
+
   it('handles a job that produced no patch', () => {
     const job = toDisplayJob(JOB, { patch: null });
     expect(job.diffFiles).toEqual([]);
