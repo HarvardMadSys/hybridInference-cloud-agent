@@ -190,7 +190,16 @@ def _duplicate_pull_request_422(response: httpx.Response) -> bool:
 
 
 def _invalid_pr_request_error(response: httpx.Response) -> PublishError:
-    """Return a safe, actionable diagnostic for a permanent PR validation error."""
+    """Return a safe, actionable diagnostic for a PR validation error.
+
+    The draft is opened right after the publisher pushed its branch, and GitHub
+    can answer ``head invalid`` until that branch reaches its pull-request API.
+    That refusal alone is transient: the snapshot goes back to the durable
+    retry budget, whose replay finds the commit already pushed. An invalid base
+    is the branch the owner chose, which no retry changes, so it stays
+    permanent, also when GitHub names the head beside it, as does every other
+    validation failure.
+    """
     fields: set[str] = set()
     try:
         payload = response.json()
@@ -206,6 +215,10 @@ def _invalid_pr_request_error(response: httpx.Response) -> PublishError:
                 field = item.get("field") if isinstance(item, dict) else None
                 if isinstance(field, str) and field in {"head", "base"}:
                     fields.add(field)
+    if fields == {"head"}:
+        return TransientPublishError(
+            "GitHub rejected the draft PR (422): the head branch is invalid or unavailable"
+        )
     if fields:
         field = sorted(fields)[0]
         return PublishError(
@@ -318,9 +331,10 @@ async def create_draft_pull_request(
         )
     if response.status_code == 422:
         # An earlier create can have committed while its response was lost,
-        # then remain briefly absent from the lookup. Only that known duplicate
-        # response is uncertain and should re-enter bounded reconciliation;
-        # other 422s are permanent validation failures.
+        # then remain briefly absent from the lookup. That known duplicate
+        # response is uncertain and re-enters bounded reconciliation, as does a
+        # head GitHub has not seen yet (see `_invalid_pr_request_error`); other
+        # 422s are permanent validation failures.
         if _duplicate_pull_request_422(response):
             raise TransientPublishError(
                 "GitHub reports that a pull request already exists; publication will reconcile"

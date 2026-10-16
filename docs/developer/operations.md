@@ -2308,7 +2308,10 @@ the branch is still refused as a moved branch until that branch is deleted;
 the platform never force-pushes. A GitHub rate limit, answered with a 403 or a
 429, is retried after the wait GitHub names (`Retry-After`, or the reset time
 of an exhausted limit), up to an hour, and so is a published base's import
-whose credential hit one.
+whose credential hit one. A draft-PR refusal that names only its head branch
+(`head invalid`), which GitHub can answer until it has seen the branch just
+pushed, is retried within the same five-attempt budget; an invalid base branch
+is refused for good.
 
 Disk-pressure admission and alerting and a non-mutating pre-prompt context
 fingerprint remain deferred. Local functional checks do not establish production

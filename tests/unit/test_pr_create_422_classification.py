@@ -79,14 +79,36 @@ def _credential(api_base: str) -> GitHubCredential:
     return GitHubCredential("local-test-token", api_base=api_base)
 
 
-async def test_invalid_target_422_is_permanent_and_names_the_bad_ref() -> None:
+@pytest.mark.parametrize(
+    ("fields", "named", "retryable"),
+    [
+        (["head"], "head", True),
+        (["base"], "base", False),
+        (["head", "base"], "base", False),
+    ],
+    ids=["head-retried", "base-permanent", "both-permanent"],
+)
+async def test_invalid_target_422_names_the_bad_ref_and_retries_only_the_head(
+    fields: list[str], named: str, retryable: bool
+) -> None:
+    """GitHub may not see a branch pushed a moment ago; a bad base stays bad.
+
+    The publisher opens the draft right after its own push, and GitHub can
+    answer ``head invalid`` until the new branch reaches its pull-request API,
+    so that refusal goes back to the durable retry budget. An invalid base is
+    the branch the owner chose, which no retry changes, so it stays permanent,
+    also when GitHub names the head beside it.
+    """
+
     async def respond(method: str, _target: str, _body: bytes):
         if method == "GET":
             return 200, []
         assert method == "POST"
         return 422, {
             "message": "Validation Failed",
-            "errors": [{"resource": "PullRequest", "field": "head", "code": "invalid"}],
+            "errors": [
+                {"resource": "PullRequest", "field": field, "code": "invalid"} for field in fields
+            ],
         }
 
     async with _github_api(respond) as (api, requests):
@@ -100,9 +122,9 @@ async def test_invalid_target_422_is_permanent_and_names_the_bad_ref() -> None:
                 credential=_credential(api),
             )
 
-    assert not isinstance(raised.value, TransientPublishError)
-    assert _is_retryable_publication_failure(raised.value) is False
-    assert "head branch" in str(raised.value)
+    assert isinstance(raised.value, TransientPublishError) is retryable
+    assert _is_retryable_publication_failure(raised.value) is retryable
+    assert f"{named} branch" in str(raised.value)
     assert [method for method, _target, _body in requests] == ["GET", "POST"]
 
 

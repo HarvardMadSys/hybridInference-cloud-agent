@@ -1219,6 +1219,60 @@ async def test_github_error_becomes_a_publish_error():
         httpx.AsyncClient = original
 
 
+@pytest.mark.parametrize(("field", "retried"), [("head", True), ("base", False)])
+async def test_a_head_the_pr_api_cannot_see_yet_is_retried_after_the_push(
+    monkeypatch, field, retried
+):
+    """The draft is opened right after the push, which GitHub may not have seen yet.
+
+    Its ``head invalid`` returns the snapshot to the durable retry budget, with
+    the pushed commit still recorded for the retry to build on. A ``base
+    invalid`` names the owner's branch, which a retry cannot change, and still
+    fails the snapshot.
+    """
+    store = FakeStore(dict(_JOB))
+
+    def publish(**kwargs):
+        kwargs["before_push"]("pushed")
+        return PublishResult(branch="agent/athr_1", commit_sha="pushed", changed_files=["x"])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(200, json=[])
+        assert request.method == "POST"
+        return httpx.Response(
+            422,
+            json={
+                "message": "Validation Failed",
+                "errors": [{"resource": "PullRequest", "field": field, "code": "invalid"}],
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    original = httpx.AsyncClient
+
+    class PatchedClient(original):
+        def __init__(self, *args, **kwargs):
+            kwargs["transport"] = transport
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(publish_worker, "publish_patch", publish)
+    monkeypatch.setattr(httpx, "AsyncClient", PatchedClient)
+
+    assert await publish_one(store, credential=GitHubCredential("t")) is None
+
+    assert store.pushes == [(9, 0, "pushed")]
+    assert store.snapshot_recorded is None
+    if retried:
+        assert store.snapshot_failed is None
+        assert store.snapshot_deferred is not None
+        assert "head branch" in store.snapshot_deferred[1]
+    else:
+        assert store.snapshot_deferred is None
+        assert store.snapshot_failed is not None
+        assert "base branch" in store.snapshot_failed[1]
+
+
 async def test_credential_never_appears_in_the_pr_body(monkeypatch):
     """The GitHub token must not leak into anything the PR renders."""
     store = FakeStore(dict(_JOB))
