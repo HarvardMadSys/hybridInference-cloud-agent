@@ -48,7 +48,9 @@ from cloud_agent_host.chat_sandbox import (
     RetainedChatFailStopped,
     RetainedChatLost,
 )
+from cloud_agent_host.environment_tests import environment_run_spec
 from cloud_agent_host.sandbox import KATA_RUNTIME, ContainerBackend, SandboxError
+from cloud_agent_host.shared_session_supervisor import SharedChatSessionSupervisor
 from cloud_agent_shared.egress import SandboxNetwork, network_from_env
 
 _NAMESPACE = "this-stack"
@@ -1345,6 +1347,52 @@ def test_prune_reports_but_never_touches_legacy_or_foreign_networks(monkeypatch,
     assert docker.network(legacy["Id"]) is not None
     assert docker.network(foreign["Id"]) is not None
     assert "chat_legacy_network_found" in caplog.text
+
+
+def test_a_running_environment_runs_bridge_is_not_an_orphan(monkeypatch, caplog):
+    """An environment test or prebuild runs in a group of its own, never a retained chat.
+
+    Discovery skips its container, so reconciliation names no group for its
+    bridge, and a run outlives the five-minute grace. The run's own container
+    on the bridge says whose it is: the run removes it when it ends, and until
+    then the host listing and a supervisor start go on as usual.
+    """
+    manager, docker, _ = _world(monkeypatch)
+    spec = environment_run_spec("run-1", 1, "sha256:image-pinned")
+    name, network = _group_bridge(manager, docker, spec, age_s=360)
+    manager._attach_relays(name)
+    docker.add_sandbox(spec, running=True)
+    docker.connect(network["Id"], "sandbox-container", [])
+    # What ChatSandboxManager.list() finds: it never adopts an environment run.
+    monkeypatch.setattr(manager, "list", lambda: [])
+    supervisor = SharedChatSessionSupervisor(manager)
+
+    with caplog.at_level(logging.WARNING):
+        assert supervisor.list() == []
+        supervisor.start()
+        supervisor.close()
+
+    assert docker.names_on(name) == {"relay-gateway", "relay-mcp", "sandbox-container"}
+    assert "chat_network_prune_failed" not in caplog.text
+
+
+def test_one_bridge_that_cannot_be_pruned_leaves_the_others_to_be_pruned(monkeypatch, caplog):
+    manager, docker, _ = _world(monkeypatch)
+    held = _spec(thread="athr_held", sandbox="asbx_held")
+    held_name, held_network = _group_bridge(manager, docker, held, age_s=3600)
+    manager._attach_relays(held_name)
+    docker.add_container("stranger", running=True)
+    docker.connect(held_network["Id"], "stranger", ["something-else"])
+    orphan = _spec(thread="athr_gone", sandbox="asbx_gone")
+    orphan_name, _ = _group_bridge(manager, docker, orphan, age_s=3600, subnet="10.240.10.0/29")
+    manager._attach_relays(orphan_name)
+
+    with caplog.at_level(logging.WARNING):
+        manager.prune_orphan_networks([])
+
+    assert docker.names_on(held_name) == {"relay-gateway", "relay-mcp", "stranger"}
+    assert docker.network(orphan_name) is None
+    assert "chat_network_prune_failed" in caplog.text
 
 
 def test_opportunistic_cleanup_never_detaches_a_sandbox_that_attached_meanwhile(monkeypatch):

@@ -1189,7 +1189,11 @@ idle or lost stop while Docker keeps the container writable layer, and wake
 creates it again. Sandbox Manager reconciliation also removes labelled bridges left by an
 interrupted create after a five-minute grace period. The grace prevents status
 reconciliation from deleting a bridge between creation and sandbox attachment
-while still reclaiming bridge interfaces and IPAM.
+while still reclaiming bridge interfaces and IPAM. A bridge that an environment
+test or prebuild still runs on is that run's, and the run removes it when it
+ends. A bridge reconciliation cannot remove, such as one with an unknown
+container attached, is logged as `chat_network_prune_failed` and left for the
+next pass; it does not fail the host's sandbox listing.
 
 ### 1. Only enrolled sandbox hosts run jobs
 

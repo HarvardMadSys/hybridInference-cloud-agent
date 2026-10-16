@@ -18,12 +18,15 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol
 
 from cloud_agent_host.chat_sandbox_models import (
+    CHAT_GENERATION_LABEL,
     CHAT_NAMESPACE_LABEL,
     CHAT_NETWORK_GENERATION_LABEL,
     CHAT_NETWORK_LABEL,
     CHAT_NETWORK_POOL_LABEL,
     CHAT_NETWORK_SANDBOX_ID_LABEL,
     CHAT_NETWORK_SERVICES_LABEL,
+    CHAT_SANDBOX_ID_LABEL,
+    ENVIRONMENT_TEST_LABEL,
     ChatSandboxInspection,
     ChatSandboxSpec,
     ChatSandboxStatus,
@@ -1186,8 +1189,37 @@ class ChatSandboxNetwork:
         age = (datetime.now(UTC) - created.astimezone(UTC)).total_seconds()
         return age >= CHAT_NETWORK_PRUNE_GRACE_S
 
+    def _environment_run_attached(self, network: dict[str, Any], identity: tuple[str, str]) -> bool:
+        """Whether the environment test or prebuild this bridge was made for is on it.
+
+        Such a run's container carries the bridge's sandbox id and generation and
+        an environment-test label, and discovery never adopts it, so no retained
+        group names its bridge. The run removes that bridge itself when it ends.
+        """
+        containers = network.get("Containers") or {}
+        if not isinstance(containers, dict):
+            return False
+        for raw in self._inspect_containers(sorted(map(str, containers))).values():
+            labels = (raw.get("Config") or {}).get("Labels") or {}
+            if (
+                labels.get(ENVIRONMENT_TEST_LABEL)
+                and labels.get(CHAT_NAMESPACE_LABEL) == self.backend.sandbox_namespace
+                and (
+                    str(labels.get(CHAT_SANDBOX_ID_LABEL) or ""),
+                    str(labels.get(CHAT_GENERATION_LABEL) or ""),
+                )
+                == identity
+            ):
+                return True
+        return False
+
     def prune_orphan_networks(self, specs: builtins.list[ChatSandboxSpec]) -> None:
-        """Remove stale owned bridges without racing a create or activation."""
+        """Remove stale owned bridges without racing a create or activation.
+
+        A bridge that cannot be examined or removed is logged and left for the
+        next pass; it never keeps the others, or the caller's reconciliation,
+        from going on.
+        """
         result = self._containers._run(
             [
                 self.backend.docker_binary,
@@ -1204,60 +1236,69 @@ class ChatSandboxNetwork:
         by_identity = {(spec.sandbox_id, str(spec.generation)): spec for spec in specs}
         prefix = self._network().interface_prefix
         for network_id in result.stdout.split():
-            network = self._inspect_network(network_id)
-            if network is None:
-                continue
-            labels = network.get("Labels") or {}
-            namespace = labels.get(CHAT_NAMESPACE_LABEL)
-            if namespace != self.backend.sandbox_namespace:
-                continue
-            bridge = str((network.get("Options") or {}).get(CHAT_NETWORK_BRIDGE_OPTION) or "")
-            if (
-                network.get("Driver") != "bridge"
-                or network.get("Internal") is not False
-                or not bridge.startswith(prefix)
-                or not str(network.get("Name") or "").startswith(f"{CHAT_NETWORK_PREFIX}-")
-            ):
-                # The per-phase topology this deployment replaced. It is
-                # reported for the one-time cleanup, never adopted or repaired.
-                logger.warning(
-                    "chat_legacy_network_found",
-                    extra={"network": str(network.get("Name") or network_id)},
-                )
-                continue
-            identity = (
-                str(labels.get(CHAT_NETWORK_SANDBOX_ID_LABEL) or ""),
-                str(labels.get(CHAT_NETWORK_GENERATION_LABEL) or ""),
-            )
-            spec = by_identity.get(identity)
-            if spec is not None:
-                sandbox = self._containers.inspect(spec.container_name)
-                if sandbox is not None and str(network["Name"]) in sandbox.networks:
-                    # This is the live bridge of a retained container, not an
-                    # orphan. reconcile() also runs for status polling, so
-                    # pruning it here would silently disconnect an active turn
-                    # from both relays and the internet.
+            try:
+                network = self._inspect_network(network_id)
+                if network is None:
                     continue
-                if not self._network_is_stale_for_prune(network):
-                    # Runner and sandbox manager use separate Docker clients. During
-                    # create or wake the bridge exists briefly before the
-                    # sandbox endpoint is attached.
+                labels = network.get("Labels") or {}
+                namespace = labels.get(CHAT_NAMESPACE_LABEL)
+                if namespace != self.backend.sandbox_namespace:
                     continue
-                self._release_owned_network(
-                    str(network["Name"]),
-                    spec,
-                    only_if_sandbox_unattached=True,
-                    expected_network_id=str(network.get("Id") or "") or None,
+                bridge = str((network.get("Options") or {}).get(CHAT_NETWORK_BRIDGE_OPTION) or "")
+                if (
+                    network.get("Driver") != "bridge"
+                    or network.get("Internal") is not False
+                    or not bridge.startswith(prefix)
+                    or not str(network.get("Name") or "").startswith(f"{CHAT_NETWORK_PREFIX}-")
+                ):
+                    # The per-phase topology this deployment replaced. It is
+                    # reported for the one-time cleanup, never adopted or repaired.
+                    logger.warning(
+                        "chat_legacy_network_found",
+                        extra={"network": str(network.get("Name") or network_id)},
+                    )
+                    continue
+                identity = (
+                    str(labels.get(CHAT_NETWORK_SANDBOX_ID_LABEL) or ""),
+                    str(labels.get(CHAT_NETWORK_GENERATION_LABEL) or ""),
                 )
-                continue
+                spec = by_identity.get(identity)
+                if spec is not None:
+                    sandbox = self._containers.inspect(spec.container_name)
+                    if sandbox is not None and str(network["Name"]) in sandbox.networks:
+                        # This is the live bridge of a retained container, not an
+                        # orphan. reconcile() also runs for status polling, so
+                        # pruning it here would silently disconnect an active turn
+                        # from both relays and the internet.
+                        continue
+                    if not self._network_is_stale_for_prune(network):
+                        # Runner and sandbox manager use separate Docker clients. During
+                        # create or wake the bridge exists briefly before the
+                        # sandbox endpoint is attached.
+                        continue
+                    self._release_owned_network(
+                        str(network["Name"]),
+                        spec,
+                        only_if_sandbox_unattached=True,
+                        expected_network_id=str(network.get("Id") or "") or None,
+                    )
+                    continue
 
-            # No retained container on this sandbox manager owns the labelled bridge.
-            # A runner can create the bridge just before its new container
-            # appears in the daemon-wide list, so absence alone is not enough
-            # proof that the bridge is orphaned.
-            if not self._network_is_stale_for_prune(network):
-                continue
-            self._release_orphan_network(network)
+                # No retained container on this sandbox manager owns the labelled bridge.
+                # A runner can create the bridge just before its new container
+                # appears in the daemon-wide list, so absence alone is not enough
+                # proof that the bridge is orphaned.
+                if not self._network_is_stale_for_prune(network):
+                    continue
+                if self._environment_run_attached(network, identity):
+                    # An environment test or prebuild still runs on it.
+                    continue
+                self._release_orphan_network(network)
+            except SandboxError as exc:
+                logger.warning(
+                    "chat_network_prune_failed",
+                    extra={"network": network_id, "detail": str(exc)[:300]},
+                )
 
     def _endpoint_is_current(
         self,
