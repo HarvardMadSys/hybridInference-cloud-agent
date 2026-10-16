@@ -954,6 +954,14 @@ The relay enforces these rules:
 - **A connection is not a job.** Bindings are read fresh on every tool call
   rather than copied onto a job, so narrowing a session takes effect on its
   next call instead of at its next turn.
+- **A stream is checked while it runs.** The server-to-client stream that
+  `GET /v1/agent/mcp/<alias>` opens is one request lasting as long as the
+  server keeps it open. Every 5 seconds, whether or not the server is sending,
+  the relay checks it again as it checks a held call before dispatch: the
+  turn's fence, then the binding and connection, which must be the ones it was
+  opened under. The first check that fails ends the stream and closes the
+  upstream socket, so a stopped turn, a disconnected or retargeted connection,
+  or a binding turned off stops it within that interval.
 - **Two endpoints share one authorization function.**
   `/v1/agent/mcp/<alias>` passes one connection's protocol through to the CLI.
   `/v1/agent/mcp` is the merged host: it answers `initialize`, lists the job's
