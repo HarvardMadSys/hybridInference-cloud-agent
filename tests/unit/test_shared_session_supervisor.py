@@ -6326,6 +6326,41 @@ def test_turn_boundary_preserves_reviewed_resident_tree_and_reaps_new_processes(
     assert supervisor.status("athr_source").resident_state == "live"
 
 
+def test_successful_turn_boundary_retains_the_member_before_broker_settlement():
+    """The member remains resident and settled context survives local cleanup."""
+    manager = _Manager()
+    factory = _TransportFactory()
+    supervisor = SharedChatSessionSupervisor(manager, transport_factory=factory)
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+    supervisor.ensure_resident(
+        "athr_source",
+        lease.token,
+        _launch("athr_source", native_session_id="native-source", slot=0),
+    )
+    turn = supervisor.start_turn(
+        "athr_source",
+        lease.token,
+        prompt="work",
+        model="glm-5.1",
+        reasoning_effort=None,
+    )
+    supervisor.complete_turn("athr_source", lease.token, turn)
+
+    descriptor = supervisor.status("athr_source")
+
+    assert descriptor.resident_state == "live"
+    assert descriptor.last_settled_job_id == "ajob_source"
+    assert descriptor.context_status == "restored"
+    assert descriptor.native_session_id == "native-source"
+
+
 def test_kata_turn_observation_is_uid_scoped_and_closes_before_platform_cleanup():
     class Manager(_Manager):
         def finish_guest_observation(self, spec, cursor):
