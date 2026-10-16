@@ -39,7 +39,9 @@ A team environment's snapshots belong to whichever members built them: a write
 over several of them takes every one of those owners' snapshot locks, ordered
 by account (``lock_team_environment_snapshots``), before any of the rows.
 Maintenance retires snapshots an owner at a time under that owner's snapshot
-lock alone, which every publish takes before it commits.
+lock alone, which every publish takes before it commits. A runner's report of
+what a new workspace did with its snapshot share-locks the reporting attempt,
+then writes that one snapshot.
 
 Known exceptions, each safe for the reason given. The idle-only submit locks
 its newest job after the group, and only once the group's newest snapshot reads

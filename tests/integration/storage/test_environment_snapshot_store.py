@@ -8,6 +8,8 @@ import secrets
 import pytest
 from tests.integration.storage.test_agent_job_store import (  # noqa: F401
     _SHARED_HOST_CAPABILITIES,
+    _claim as _claim_job,
+    _expire_attempt,
     _shared_claim_attestation,
     pool,
     store,
@@ -20,6 +22,7 @@ from cloud_agent.storage.repositories import (
 )
 from cloud_agent_shared.environment import EnvironmentScripts
 from cloud_agent_shared.environment_snapshots import owner_hash, snapshot_object_key
+from cloud_agent_shared.sandbox_archive_settings import SANDBOX_ARCHIVE_CAPABILITY
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
@@ -118,6 +121,56 @@ async def _ready_snapshot(store, pool, monkeypatch, env=None):
         receipt=_receipt(snapshot_id),
     )
     return snapshot_id, binding, run
+
+
+async def _claim_task(store, pool, worker_id: str):
+    """Claim the oldest queued task on ``runner-a``, which applied the archive settings."""
+    async with pool.acquire() as conn:
+        revision = await conn.fetchval(
+            "SELECT sandbox_archive_revision FROM agent_runner_policy WHERE id"
+        )
+    capabilities = [*_SHARED_HOST_CAPABILITIES, SANDBOX_ARCHIVE_CAPABILITY]
+    if await store.host_pool.get_host(host="runner-a") is None:
+        await store.host_pool.register_host(
+            host="runner-a",
+            credential_hash="runner-a-credential-hash",
+            capabilities=capabilities,
+            slots_total=8,
+        )
+    await store.host_pool.record_host_heartbeat(
+        host="runner-a",
+        credential_hash="runner-a-credential-hash",
+        capabilities=capabilities,
+        sandbox_image_digest="sha256:shared-image",
+        sandbox_archive_settings_applied_revision=revision,
+        sandbox_archive_settings_revision_reported=True,
+    )
+    return await _claim_job(
+        store,
+        worker_id=worker_id,
+        lease_ttl_seconds=60,
+        claim_attestation={
+            **_shared_claim_attestation(),
+            "runner_capabilities": capabilities,
+            "sandbox_archive_settings_applied_revision": revision,
+        },
+    )
+
+
+async def _running(store, pool, binding):
+    """Claim the task bound to ``binding``; return it and the fence its token names."""
+    async with pool.acquire() as conn:
+        job_id = await conn.fetchval(
+            "SELECT j.id FROM agent_jobs j JOIN agent_threads t ON t.id=j.thread_id "
+            "WHERE t.environment_binding_id=$1",
+            binding,
+        )
+    claim = await _claim_task(store, pool, "w1")
+    assert claim is not None and claim["id"] == job_id
+    return job_id, {
+        "attempt_id": claim["attempt_id"],
+        "lease_generation": claim["lease_generation"],
+    }
 
 
 async def test_a_prebuild_needs_a_capable_host_and_never_takes_the_owners_test(
@@ -284,14 +337,9 @@ async def test_a_summary_shows_only_a_snapshot_of_that_environments_installation
 async def test_use_keeps_a_snapshot_and_shortfalls_queue_a_build(store, pool, monkeypatch):
     snapshot_id, binding, _run = await _ready_snapshot(store, pool, monkeypatch)
     snapshots = store.environment_snapshots
-    async with pool.acquire() as conn:
-        job_id = await conn.fetchval(
-            "SELECT j.id FROM agent_jobs j JOIN agent_threads t ON t.id=j.thread_id "
-            "WHERE t.environment_binding_id=$1",
-            binding,
-        )
+    job_id, fence = await _running(store, pool, binding)
     assert await snapshots.record_use(
-        job_id=job_id, snapshot_id=snapshot_id, outcome="used", base_sha=SOURCE
+        job_id=job_id, **fence, snapshot_id=snapshot_id, outcome="used", base_sha=SOURCE
     )
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -300,7 +348,11 @@ async def test_use_keeps_a_snapshot_and_shortfalls_queue_a_build(store, pool, mo
         )
     assert row["use_count"] == 1 and row["last_used_at"] is not None
     await snapshots.record_use(
-        job_id=job_id, snapshot_id=snapshot_id, outcome="lockfiles_changed", base_sha="f" * 40
+        job_id=job_id,
+        **fence,
+        snapshot_id=snapshot_id,
+        outcome="lockfiles_changed",
+        base_sha="f" * 40,
     )
     async with pool.acquire() as conn:
         queued = await conn.fetchrow(
@@ -309,7 +361,7 @@ async def test_use_keeps_a_snapshot_and_shortfalls_queue_a_build(store, pool, mo
         )
     assert queued["base_sha"] == "f" * 40
     await snapshots.record_use(
-        job_id=job_id, snapshot_id=snapshot_id, outcome="invalid", base_sha=None
+        job_id=job_id, **fence, snapshot_id=snapshot_id, outcome="invalid", base_sha=None
     )
     async with pool.acquire() as conn:
         state = await conn.fetchval(
@@ -317,7 +369,71 @@ async def test_use_keeps_a_snapshot_and_shortfalls_queue_a_build(store, pool, mo
         )
     assert state == "deleting"
     with pytest.raises(ValueError):
-        await snapshots.record_use(job_id=job_id, snapshot_id=None, outcome="used", base_sha=None)
+        await snapshots.record_use(
+            job_id=job_id, **fence, snapshot_id=None, outcome="used", base_sha=None
+        )
+
+
+async def _snapshot_and_builds(pool, snapshot_id) -> tuple[str, int, int]:
+    """A snapshot's state and use count, and how many builds are queued."""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT state, use_count FROM agent_environment_snapshots WHERE id=$1", snapshot_id
+        )
+        queued = await conn.fetchval(
+            "SELECT count(*) FROM agent_environment_snapshots WHERE state='queued'"
+        )
+    return row["state"], row["use_count"], queued
+
+
+async def test_only_the_attempt_holding_the_lease_reports_on_a_snapshot(store, pool, monkeypatch):
+    """A worker token is a signature over its attempt's fence: no host, no expiry.
+
+    Without asking whether that attempt still holds the task's lease, any
+    token ever minted for the task could delete a snapshot every workspace of
+    its environment starts from, or queue a build at a commit of its choosing,
+    at any later time.
+    """
+    snapshot_id, binding, _run = await _ready_snapshot(store, pool, monkeypatch)
+    job_id, old = await _running(store, pool, binding)
+
+    def report(fence, outcome, *, snapshot=snapshot_id, base_sha=None):
+        return store.environment_snapshots.record_use(
+            job_id=job_id, **fence, snapshot_id=snapshot, outcome=outcome, base_sha=base_sha
+        )
+
+    assert not await report({**old, "lease_generation": old["lease_generation"] + 1}, "invalid")
+    await _expire_attempt(pool, store, old["attempt_id"])
+    assert not await report(old, "invalid")
+    # Superseded: the task runs again, under a new attempt.
+    await store.attempt_commands.reap_expired(max_attempts=3)
+    claim = await _claim_task(store, pool, "w2")
+    assert claim is not None and claim["id"] == job_id
+    new = {"attempt_id": claim["attempt_id"], "lease_generation": claim["lease_generation"]}
+    assert not await report(old, "invalid")
+    assert not await report(old, "absent", snapshot=None, base_sha="f" * 40)
+    assert await _snapshot_and_builds(pool, snapshot_id) == ("ready", 0, 0)
+
+    assert await report(new, "used")
+    assert await _snapshot_and_builds(pool, snapshot_id) == ("ready", 1, 0)
+    # A finished turn reports nothing more.
+    assert await store.attempt_commands.transition(
+        job_id=job_id, **new, from_states=("running",), to_state="failed", detail="setup failed"
+    )
+    assert not await report(new, "invalid")
+    assert await _snapshot_and_builds(pool, snapshot_id) == ("ready", 1, 0)
+
+
+async def test_a_removed_hosts_attempt_reports_nothing_on_a_snapshot(store, pool, monkeypatch):
+    """Disabling the machine changes neither the attempt nor the task: the host fence refuses."""
+    snapshot_id, binding, _run = await _ready_snapshot(store, pool, monkeypatch)
+    job_id, fence = await _running(store, pool, binding)
+    assert await store.host_pool.set_host_status(host="runner-a", status="disabled") == "ok"
+
+    assert not await store.environment_snapshots.record_use(
+        job_id=job_id, **fence, snapshot_id=snapshot_id, outcome="invalid", base_sha=None
+    )
+    assert await _snapshot_and_builds(pool, snapshot_id) == ("ready", 0, 0)
 
 
 async def test_a_passing_test_queues_the_build_that_supersedes(store, pool, monkeypatch):

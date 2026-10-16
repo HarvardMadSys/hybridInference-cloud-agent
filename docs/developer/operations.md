@@ -2168,7 +2168,11 @@ stored like a checkpoint. Design: [install snapshots](../agents/specs/2026-10-15
   checkout's lockfiles (Git object ids). Any mismatch or failure creates the
   group from the sandbox image and installs in full; the turn never fails
   because of a snapshot. Without the encryption key, bindings carry no
-  fingerprint and nothing is snapshotted.
+  fingerprint and nothing is snapshotted. The runner's report of what the new
+  group did with its snapshot, which keeps a used one alive, deletes one that
+  failed its checks and queues the builds above, is accepted only from the
+  attempt holding the task's live lease on a host still enrolled; any other
+  worker token gets `409 lease_lost` and changes nothing.
 - **Retention.** The newest snapshot of an installation supersedes older ones.
   Changing an installation — its install script, or a setup-time variable or
   Secret, a global one included — supersedes the snapshots of the earlier

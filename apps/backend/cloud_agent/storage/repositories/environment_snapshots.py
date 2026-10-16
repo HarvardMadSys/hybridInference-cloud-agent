@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 from cloud_agent.execution_profiles import default_execution_profile
 from cloud_agent.sandbox_archive_credentials import load_stored_archive_policy
+from cloud_agent.storage._sql.hosts import LIVE_ATTEMPT_HOST
 from cloud_agent.storage._sql.rows import load_json
 from cloud_agent.storage.repositories.environments import (
     lock_environment_snapshots,
@@ -415,25 +416,53 @@ class PostgresEnvironmentSnapshotRepository:
             )
 
     async def record_use(
-        self, *, job_id: str, snapshot_id: str | None, outcome: str, base_sha: str | None
+        self,
+        *,
+        job_id: str,
+        attempt_id: int,
+        lease_generation: int,
+        snapshot_id: str | None,
+        outcome: str,
+        base_sha: str | None,
     ) -> bool:
         """Account for a new workspace's snapshot, and queue a build when it had none to use.
 
         ``base_sha`` is the commit the workspace checked out; a build is queued
         for it, so the next task on that commit finds a snapshot.
+
+        Only the attempt that holds the job's live lease, on a host still
+        enrolled, is heard: a worker token names its attempt's fence and
+        outlives both its turn and its host, and an invalid report deletes a
+        snapshot every workspace of the environment starts from. Any other
+        report changes nothing and returns ``False``.
         """
         if outcome not in SNAPSHOT_OUTCOMES:
             raise ValueError("unknown snapshot outcome")
         if (snapshot_id is None) != (outcome == "absent"):
             raise ValueError("only an absent snapshot has no id")
-        async with self._pool.acquire() as conn:
+        async with self._pool.acquire() as conn, conn.transaction():
+            # The attempt share-locked: a supersession or finish, which
+            # updates its row, waits for the write below or is seen here.
             job = await conn.fetchrow(
-                "SELECT t.user_id, t.environment_binding_id, t.repo FROM agent_jobs j "
-                "JOIN agent_threads t ON t.id = j.thread_id WHERE j.id = $1",
+                f"""
+                SELECT t.user_id, t.environment_binding_id, t.repo
+                FROM agent_attempts a
+                JOIN agent_jobs j ON j.id = a.job_id
+                JOIN agent_threads t ON t.id = j.thread_id
+                WHERE a.id = $2 AND a.lease_generation = $3 AND a.status = 'running'
+                  AND a.lease_expires_at > clock_timestamp()
+                  AND j.id = $1 AND j.current_attempt_id = a.id AND j.state = 'running'
+                  AND {LIVE_ATTEMPT_HOST}
+                FOR SHARE OF a
+                """,
                 job_id,
+                attempt_id,
+                lease_generation,
             )
-            if job is None or not job["environment_binding_id"]:
+            if job is None:
                 return False
+            if not job["environment_binding_id"]:
+                return True
             if outcome == "used":
                 await conn.execute(
                     "UPDATE agent_environment_snapshots SET last_used_at=NOW(), use_count=use_count+1 "

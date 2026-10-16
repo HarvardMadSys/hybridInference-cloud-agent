@@ -1637,20 +1637,26 @@ async def worker_report_environment_snapshot(
     """Record what a new workspace did with its installation snapshot.
 
     Usage keeps a snapshot from expiring; a workspace that had none, or whose
-    lockfiles or image differed, queues a build for its commit.
+    lockfiles or image differed, queues a build for its commit. Fenced like
+    every other worker write: only the attempt holding the job's live lease,
+    on a host still enrolled, is heard.
     """
     job_store = _require_store(store)
     claims = _worker_claims(authorization)
     _match_job(claims, job_id)
     try:
-        await job_store.environment_snapshots.record_use(
+        recorded = await job_store.environment_snapshots.record_use(
             job_id=job_id,
+            attempt_id=claims["attempt_id"],
+            lease_generation=claims["lease_generation"],
             snapshot_id=body.snapshot_id,
             outcome=body.outcome,
             base_sha=body.base_sha,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if not recorded:
+        raise _lease_lost()
     return Response(status_code=204)
 
 

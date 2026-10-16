@@ -38750,7 +38750,7 @@
     },
     "/v1/agent/worker/jobs/{job_id}/environment-snapshot": {
       "post": {
-        "description": "Record what a new workspace did with its installation snapshot.\n\nUsage keeps a snapshot from expiring; a workspace that had none, or whose\nlockfiles or image differed, queues a build for its commit.",
+        "description": "Record what a new workspace did with its installation snapshot.\n\nUsage keeps a snapshot from expiring; a workspace that had none, or whose\nlockfiles or image differed, queues a build for its commit. Fenced like\nevery other worker write: only the attempt holding the job's live lease,\non a host still enrolled, is heard.",
         "operationId": "worker_report_environment_snapshot_v1_agent_worker_jobs__job_id__environment_snapshot_post",
         "parameters": [
           {
