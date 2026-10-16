@@ -469,9 +469,9 @@ Pool and resource actions have different effects:
 
 | Action | Effect |
 | --- | --- |
-| `Remove from pool` | Revokes the Host credential; leaves the machine intact. A Host still running turns stops taking new work and shows `removing` until they finish, and the reaper then revokes it. |
-| `Cancel removal` | Puts a `removing` Host back to work. |
-| `Remove now` | Revokes a `removing` Host at once and ends its running turns: they are requeued once, or a chat whose turn may already have run is marked lost. |
+| `Remove from pool` | Revokes the Host credential; leaves the machine intact. A Host still running sandboxes that can move to another Host moves them out first, as one does before its lease ends (below): it takes no new work and shows `removing`, each idle sandbox stops into a checkpoint and is handed over, and the reaper revokes the Host once none is left and its running turns have finished. A stopped sandbox its checkpoint covers moves when the Host is revoked. Before leaving any sandbox behind, because no other Host can take it or it can never move (its checkpoint failed, say), the page asks; removing anyway leaves it on the Host until the Host returns. |
+| `Cancel removal` | Puts a `removing` Host back to work. Sandboxes already moved stay on their new Hosts. |
+| `Remove now` | Revokes a `removing` Host at once and ends its running turns: they are requeued once, or a chat whose turn may already have run is marked lost. Sandboxes not yet moved stay on the removed Host. |
 | `Forget` | Removes an eligible history record. A `cold` sandbox, which waits in its checkpoint for any Host, does not block it. |
 | `Retire/release` | Releases the complete allocation; for CloudLab, the whole experiment. Existing SSH has no cloud-destruction capability. |
 
