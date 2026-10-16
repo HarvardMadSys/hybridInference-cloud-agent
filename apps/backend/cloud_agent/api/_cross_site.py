@@ -131,9 +131,18 @@ def _session_cookie_is_secure() -> bool:
 
 
 def _carries_session(headers: Headers) -> bool:
-    """Whether the request sends the session cookie under either of its names."""
+    """Whether the request sends the session cookie under either of its names.
+
+    Either, whichever one this deployment reads: refusing a write whose cookie
+    would sign nobody in costs nothing.
+    """
     raw = "; ".join(headers.getlist("cookie"))
-    return bool(raw) and identity.session_from_cookies(cookie_parser(raw)) is not None
+    if not raw:
+        return False
+    cookies = cookie_parser(raw)
+    return any(
+        cookies.get(name) for name in (identity.SESSION_COOKIE, identity.LEGACY_SESSION_COOKIE)
+    )
 
 
 class CrossSiteWriteGuard:

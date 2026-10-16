@@ -78,7 +78,7 @@ router = APIRouter(prefix="/v1/session")
 #: sent over plaintext is a session cookie anyone on the path can take; a
 #: developer running the whole stack on ``http://localhost`` is the one case
 #: where that is not true, and they have to say so out loud.
-ENV_COOKIE_SECURE = "AGENT_SESSION_COOKIE_SECURE"
+ENV_COOKIE_SECURE = identity.ENV_SESSION_COOKIE_SECURE
 
 #: The gateway's consent page, server-side. The web app had its own
 #: ``NEXT_PUBLIC_`` copy while it built the authorize URL itself; the flow is
@@ -103,8 +103,7 @@ OAUTH_CLIENT_ID = "cloud-agent"
 
 def _cookie_is_secure() -> bool:
     """Whether the session cookie carries ``Secure``."""
-    raw = (setting_env(ENV_COOKIE_SECURE) or "").strip().lower()
-    return raw not in ("0", "false", "no")
+    return identity.session_cookie_is_secure()
 
 
 def _env(name: str) -> str:
@@ -220,12 +219,13 @@ def _callback_error_response(
         params["return_to"] = safe_return_to(return_to)
     query = urlencode(params)
     response = RedirectResponse(f"{_web_destination('/login')}?{query}", status_code=303)
+    secure = _cookie_is_secure()
     response.delete_cookie(
-        identity.LOGIN_FLOW_COOKIE,
+        identity.login_flow_cookie_name(secure=secure),
         path="/",
         httponly=True,
         samesite="lax",
-        secure=_cookie_is_secure(),
+        secure=secure,
     )
     return response
 
@@ -299,8 +299,9 @@ async def session_login(
     # that is itself not the destination, and 303 is unambiguous about the
     # browser issuing a GET.
     response = RedirectResponse(f"{authorize_url}{separator}{query}", status_code=303)
+    secure = _cookie_is_secure()
     response.set_cookie(
-        identity.LOGIN_FLOW_COOKIE,
+        identity.login_flow_cookie_name(secure=secure),
         flow,
         max_age=identity.LOGIN_FLOW_TTL_S,
         httponly=True,
@@ -308,7 +309,7 @@ async def session_login(
         # the gateway, and Strict would drop the cookie on exactly that
         # request — the one it exists for.
         samesite="lax",
-        secure=_cookie_is_secure(),
+        secure=secure,
         path="/",
     )
     return response
@@ -342,8 +343,11 @@ async def session_callback(
     if not redirect_uri:
         return _unavailable_response(f"{ENV_REDIRECT_URI} must be set to sign anyone in.")
 
+    secure = _cookie_is_secure()
     try:
-        flow = identity.verify_login_flow(request.cookies.get(identity.LOGIN_FLOW_COOKIE) or "")
+        flow = identity.verify_login_flow(
+            request.cookies.get(identity.login_flow_cookie_name(secure=secure)) or ""
+        )
     except identity.IdentityNotConfigured as exc:
         return _unavailable_response(str(exc))
     except identity.IdentityError:
@@ -425,11 +429,11 @@ async def session_callback(
     # Consumed on use: a replayed callback finds nothing parked, so a code that
     # failed to exchange cannot be retried against the same verifier.
     response.delete_cookie(
-        identity.LOGIN_FLOW_COOKIE,
+        identity.login_flow_cookie_name(secure=secure),
         path="/",
         httponly=True,
         samesite="lax",
-        secure=_cookie_is_secure(),
+        secure=secure,
     )
     logger.info(
         "agent_session_established",
@@ -502,9 +506,9 @@ async def _establish_session(identity_token: str, gateway: Any) -> tuple[str, di
 def _set_session_cookie(response: Response, session: str) -> None:
     """Attach the session cookie to a response.
 
-    With ``Secure`` the cookie is set under its ``__Host-`` name and the plain
-    name a browser may still hold from before the rename is expired, so the
-    two can never disagree about who is signed in.
+    With ``Secure`` the cookie is set under its ``__Host-`` name, and the plain
+    name a browser may still hold from before the rename, which is no longer
+    read, is expired.
 
     Args:
         response: The response to set the cookie on.
