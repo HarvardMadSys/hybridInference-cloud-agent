@@ -73,6 +73,13 @@ _GIT_ENV = {
     "GIT_ASKPASS": "/bin/true",
 }
 
+# No command starts git's automatic maintenance. Each repository here is thrown
+# away after one publication, so housekeeping buys nothing. Since git 2.54 the
+# maintenance a fetch leaves running repacks, which in a shallow repository
+# rewrites .git/shallow under the next fetch and fails it. Set on the command
+# line, where the credential's own GIT_CONFIG_COUNT entries cannot replace it.
+_NO_AUTO_MAINTENANCE = ("-c", "maintenance.auto=false")
+
 
 class PublishError(Exception):
     """Raised when publication fails; the message is safe to store as detail."""
@@ -137,7 +144,7 @@ def _run_git(
     timeout_s = number_setting("publish_git_timeout_s", _GIT_TIMEOUT_S)
     try:
         completed = subprocess.run(
-            ["git", *args],
+            ["git", *_NO_AUTO_MAINTENANCE, *args],
             cwd=str(cwd) if cwd else None,
             env=_git_env(env_extra),
             capture_output=True,
