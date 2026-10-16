@@ -505,17 +505,10 @@ class CloudLabProvider(ComputeProvider):
                 },
             )
         if status >= 500:
-            # A finished HTTP 500 on create is not a lost request: the portal
-            # answered. Acquire looks up the experiment name and, when it is
-            # absent, reports a rejection that can be corrected and retried.
-            # Timeouts stay result_unknown and are never posted again.
-            code = (
-                "temporarily_unavailable"
-                if method == "GET"
-                else "server_error"
-                if method == "POST" and path.split("?", 1)[0].rstrip("/") == "/experiments"
-                else "result_unknown"
-            )
+            # A server error after a mutation may follow a committed create.
+            # Without a provider idempotency key, a name match cannot prove
+            # that the returned experiment belongs to this operation.
+            code = "temporarily_unavailable" if method == "GET" else "result_unknown"
             detail = _error_text(response)
             raise ProviderError(
                 code,
@@ -686,52 +679,6 @@ class CloudLabProvider(ComputeProvider):
             ),
         )
 
-    async def _created_experiment(self, name: str, config: CloudLabConfig) -> str | None:
-        """Return the id of the experiment this create would have named, if it exists."""
-        query = urlencode({"project": config.project})
-        path = "/experiments/?" + query
-        context = _diagnostic_context(config)
-        response = await self._request(
-            "GET", path, config.credential_ref, diagnostic_context=context
-        )
-        data = self._json(response, method="GET", path=path, diagnostic_context=context)
-        experiments = data.get("experiments")
-        if not isinstance(experiments, list):
-            raise ProviderError(
-                "invalid_response",
-                "CloudLab API endpoint did not return an experiment list",
-                diagnostics=self._response_diagnostics(
-                    response,
-                    "GET",
-                    path,
-                    context,
-                    reason_code="invalid_response_shape",
-                ),
-            )
-        matches = [
-            item.get("id")
-            for item in experiments
-            if isinstance(item, dict)
-            and item.get("name") == name
-            and item.get("project") == config.project
-            and item.get("id")
-        ]
-        if len(matches) > 1:
-            raise ProviderError(
-                "result_unknown",
-                "CloudLab returned more than one experiment with this name",
-                diagnostics=self._response_diagnostics(
-                    response,
-                    "GET",
-                    path,
-                    context,
-                    reason_code="resource_identity_mismatch",
-                ),
-            )
-        if not matches:
-            return None
-        return str(UUID(str(matches[0])))
-
     async def acquire(self, request: AcquireRequest, intent: OperationIntent) -> ProviderReceipt:
         """Execute the persisted acquisition intent and return its acknowledgement."""
         validated = self.validate_config(request.mode, request.config)
@@ -809,39 +756,13 @@ class CloudLabProvider(ComputeProvider):
                     reason_code="request_accepted",
                 )
             except ProviderError as exc:
-                if exc.code == "server_error":
-                    try:
-                        created = await self._created_experiment(name, config)
-                    except ProviderError as lookup_error:
-                        return ProviderReceipt(
-                            outcome="unknown",
-                            diagnostics=lookup_error.diagnostics or exc.diagnostics,
-                        )
-                    if created is None:
-                        if not _capacity_rejection(str(exc)):
-                            raise ProviderError(
-                                "request_rejected",
-                                "CloudLab did not create the experiment. "
-                                "Check the profile name and its parameters.",
-                                diagnostics=exc.diagnostics,
-                            ) from None
-                        exc = ProviderError(
-                            "capacity_unavailable",
-                            "CloudLab has no matching node capacity",
-                            retryable=True,
-                            diagnostics=exc.diagnostics,
-                        )
-                    else:
-                        external_id = created
-                        receipt_diagnostics = exc.diagnostics
-                elif exc.code in {"result_unknown", "invalid_response"}:
+                if exc.code in {"result_unknown", "invalid_response"}:
                     return ProviderReceipt(outcome="unknown", diagnostics=exc.diagnostics)
                 if exc.code == "capacity_unavailable":
                     if index + 1 < len(candidates):
                         continue
                     raise exc from None
-                if exc.code != "server_error":
-                    raise
+                raise
             except (KeyError, ValueError):
                 diagnostics = (
                     self._response_diagnostics(
