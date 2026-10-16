@@ -502,8 +502,8 @@ async def test_deletion_attempt_ledger_records_sanitized_failure_details(db, sto
     assert attempt.cleanup_outcome == "unconfirmed"
 
 
-async def test_attempt_ledger_insert_failure_does_not_block_deletion_claim(db, store):
-    """A diagnostics write failure must not roll back the existing work claim."""
+async def test_attempt_ledger_insert_failure_rolls_back_deletion_claim(db, store):
+    """A claimed operation cannot proceed without its durable attempt record."""
     sandbox_id = "asbx_attempt_telemetry_failure"
     await seed(db, store, sandbox_id, state="stopped")
     assert await request_delete(store, sandbox_id) == "accepted"
@@ -529,9 +529,8 @@ async def test_attempt_ledger_insert_failure_does_not_block_deletion_claim(db, s
             """
         )
     try:
-        claim = await store.sandbox.claim_due_admin_sandbox_deletion(ttl_seconds=3600)
-        assert claim is not None and claim["id"] == sandbox_id
-        assert claim["deletion_attempt_number"] == 1
+        with pytest.raises(asyncpg.PostgresError):
+            await store.sandbox.claim_due_admin_sandbox_deletion(ttl_seconds=3600)
         async with db.acquire() as conn:
             assert (
                 await conn.fetchval(
@@ -544,7 +543,13 @@ async def test_attempt_ledger_insert_failure_does_not_block_deletion_claim(db, s
                 await conn.fetchval(
                     "SELECT deletion_claim_token FROM agent_sandboxes WHERE id=$1", sandbox_id
                 )
-                == claim["deletion_claim_token"]
+                is None
+            )
+            assert (
+                await conn.fetchval(
+                    "SELECT deletion_retry_count FROM agent_sandboxes WHERE id=$1", sandbox_id
+                )
+                == 0
             )
     finally:
         async with db.acquire() as conn:
@@ -590,6 +595,102 @@ async def test_uncertain_host_abort_retries_cleanup_only_and_keeps_original_key(
     assert not await store.sandbox.renew_admin_sandbox_deletion_claim(
         **worker_fence(replacement), for_cleanup=True, cleanup_archive_key="new/request.tar"
     )
+
+
+async def test_automatic_retry_budget_exhaustion_preserves_receipt_and_resumes_same_request(
+    db, store
+):
+    origin = await seed(db, store, "asbx_retry_budget", state="stopped")
+    await member(db, "asbx_retry_budget", origin, 0)
+    assert await request_delete(store, "asbx_retry_budget") == "accepted"
+    request_id = None
+    for attempt_number in range(1, 9):
+        if attempt_number > 1:
+            async with db.acquire() as conn:
+                await conn.execute(
+                    "UPDATE agent_sandboxes SET deletion_retry_at=NOW() WHERE id=$1",
+                    "asbx_retry_budget",
+                )
+        claim = await store.sandbox.claim_due_admin_sandbox_deletion(ttl_seconds=3600)
+        assert claim is not None
+        request_id = request_id or claim["deletion_request_id"]
+        assert claim["deletion_request_id"] == request_id
+        assert claim["deletion_retry_count"] == attempt_number
+        if attempt_number == 1:
+            assert await checkpoint_archive(store, claim)
+        assert await store.sandbox.fail_admin_sandbox_deletion(
+            **worker_fence(claim),
+            error="The host timed out.",
+            retain_pending=True,
+            attempt_correlation_id=claim["deletion_attempt_correlation_id"],
+            failure_code="sandbox_manager_unavailable",
+            retry_class="transient",
+        )
+
+    detail = await store.admin_sandboxes.detail("asbx_retry_budget")
+    assert detail is not None
+    assert detail.sandbox.deletion_state == "archived"
+    assert detail.sandbox.deletion_retry_exhausted_at is not None
+    assert detail.sandbox.deletion_request_id == request_id
+    assert detail.sandbox.deletion_archive_key == ARCHIVE_URI
+    # Detail returns attempts newest first.
+    assert detail.deletion_attempts[0].outcome == "failed"
+    assert detail.deletion_attempts[0].failure_code == "retry_budget_exhausted"
+    assert await store.sandbox.claim_due_admin_sandbox_deletion(ttl_seconds=3600) is None
+
+    assert await request_delete(store, "asbx_retry_budget") == "accepted"
+    resumed = await store.admin_sandboxes.detail("asbx_retry_budget")
+    assert resumed is not None
+    assert resumed.sandbox.deletion_request_id == request_id
+    assert resumed.sandbox.deletion_archive_key == ARCHIVE_URI
+    assert resumed.sandbox.deletion_retry_exhausted_at is None
+    claim = await store.sandbox.claim_due_admin_sandbox_deletion(ttl_seconds=3600)
+    assert claim is not None
+    assert claim["deletion_request_id"] == request_id
+    assert claim["deletion_retry_count"] == 1
+    assert claim["deletion_attempt_number"] == 9
+    assert claim["deletion_archive_key"] == ARCHIVE_URI
+
+
+async def test_expired_final_attempt_marks_budget_exhausted_without_reclaiming(db, store):
+    await seed(db, store, "asbx_crashed_final_attempt", state="stopped")
+    assert await request_delete(store, "asbx_crashed_final_attempt") == "accepted"
+    claim = await store.sandbox.claim_due_admin_sandbox_deletion(ttl_seconds=3600)
+    assert claim is not None
+    async with db.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_sandboxes SET deletion_retry_count=8, "
+            "deletion_claim_expires_at=NOW()-INTERVAL '1 second' WHERE id=$1",
+            claim["id"],
+        )
+    assert await store.sandbox.claim_due_admin_sandbox_deletion(ttl_seconds=3600) is None
+    detail = await store.admin_sandboxes.detail(claim["id"])
+    assert detail is not None
+    assert detail.sandbox.deletion_state == "pending"
+    assert detail.sandbox.deletion_retry_exhausted_at is not None
+    assert detail.deletion_attempts[0].outcome == "failed"
+    assert detail.deletion_attempts[0].failure_code == "retry_budget_exhausted"
+
+
+async def test_retry_window_expiry_is_durable_and_keeps_archive_receipt(db, store):
+    await seed(db, store, "asbx_retry_window", state="stopped")
+    assert await request_delete(store, "asbx_retry_window") == "accepted"
+    claim = await store.sandbox.claim_due_admin_sandbox_deletion(ttl_seconds=3600)
+    assert claim is not None
+    assert await checkpoint_archive(store, claim)
+    async with db.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_sandboxes SET deletion_claim_expires_at=NULL, "
+            "deletion_retry_started_at=NOW()-INTERVAL '25 hours' WHERE id=$1",
+            claim["id"],
+        )
+    assert await store.sandbox.claim_due_admin_sandbox_deletion(ttl_seconds=3600) is None
+    detail = await store.admin_sandboxes.detail(claim["id"])
+    assert detail is not None
+    assert detail.sandbox.deletion_state == "archived"
+    assert detail.sandbox.deletion_retry_exhausted_at is not None
+    assert detail.sandbox.deletion_request_id == claim["deletion_request_id"]
+    assert detail.sandbox.deletion_archive_key == ARCHIVE_URI
 
 
 @pytest.mark.parametrize("transition", ["requested", "archived", "completed"])

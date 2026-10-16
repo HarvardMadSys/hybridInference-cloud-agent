@@ -660,6 +660,9 @@ sandbox manager prepares the archive. The archive contains `manifest.json` and
 files. Archives larger than 5 GiB are refused before deletion. An immutable S3
 object must match both SHA-256 and byte length, and its receipt must commit to
 the database before the host may remove the exact reviewed stopped container.
+If the host reports that this container is missing or changed before archive
+verification, the request fails for operator review; that response never counts
+as a successful deletion.
 Upload failures retain the container. Once an archive is verified, uncertain
 deletion acknowledgements keep admission blocked and retry the same request.
 The sandbox manager stores its deletion receipts on its own persistent volume so an
@@ -674,11 +677,15 @@ from. An archive deletion that is already pending or verified is left unchanged;
 wait for it to finish or fail before choosing this action.
 
 One deletion worker handles requests one at a time, in the order they became
-due. A failed attempt shows its error and is retried a minute later, behind any
-request already waiting. Requests whose hosts keep timing out therefore delay a
-newer request by one attempt each at most, instead of holding it back forever.
+due. Automatic retries use exponential backoff from one minute to one hour and
+stop after eight claims or 24 hours from the request. An exhausted request stays
+fenced in its pending or archived state; the admin view offers **Resume deletion**
+to start a new retry window for the same request. It preserves the original
+archive/discard choice, request identity, and any verified archive receipt.
 The admin sandbox details also show a durable attempt history for each request:
 attempt number, host, last confirmed stage, outcome, and a bounded failure code.
+Claim creation and final outcomes commit with their corresponding database state
+changes; a ledger write failure prevents the deletion claim or final transition.
 Provider response bodies and credential-bearing diagnostics are not stored.
 When a claim expires, its unfinished attempt is recorded as lease-expired before
 the same fenced deletion request can be claimed again.

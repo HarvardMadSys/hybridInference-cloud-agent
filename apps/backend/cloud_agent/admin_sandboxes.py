@@ -130,6 +130,7 @@ class AdminSandbox(BaseModel):
     deletion_sha256: str | None = None
     deletion_size_bytes: int | None = Field(None, gt=0)
     deletion_error: str | None = None
+    deletion_retry_exhausted_at: datetime | None = None
     deleted_at: datetime | None = None
     memory_limit: str
     cpu_limit: str

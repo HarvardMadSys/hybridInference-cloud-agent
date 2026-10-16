@@ -99,6 +99,7 @@ class SandboxRepository(Protocol):
         claim_token: str,
         generation: int,
         container_id: str,
+        attempt_correlation_id: str | None = None,
     ) -> bool:
         """Retain the archive and ledger after an exact host deletion acknowledgement."""
         ...
@@ -111,6 +112,7 @@ class SandboxRepository(Protocol):
         claim_token: str,
         generation: int,
         container_id: str,
+        attempt_correlation_id: str | None = None,
     ) -> bool:
         """Mark native context lost after the host removes a container with no archive."""
         ...
@@ -125,6 +127,11 @@ class SandboxRepository(Protocol):
         container_id: str,
         error: str,
         retain_pending: bool = False,
+        attempt_correlation_id: str | None = None,
+        failure_code: str | None = None,
+        sandbox_manager_status: int | None = None,
+        retry_class: str | None = None,
+        cleanup_outcome: str = "not_required",
     ) -> bool:
         """Release safe pre-archive failures but keep ambiguous deletion fenced."""
         ...
