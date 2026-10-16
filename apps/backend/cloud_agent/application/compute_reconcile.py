@@ -19,6 +19,7 @@ from cloud_agent.application.host_commands import HostCommands
 from cloud_agent.compute_config import current_observation_seconds, current_registration_url
 from cloud_agent.compute_secrets import ComputeSecretError
 from cloud_agent.domain.compute import (
+    MOVE_OUT_RENEWAL_LEAD_SECONDS,
     ComputeRefusal,
     fingerprint,
     move_out_window_seconds,
@@ -187,11 +188,13 @@ class ComputeReconciler:
                 await self._remind_unfinished_move_out(row, policy, now, expires)
             if not policy.enabled or expires is None or not row.get("expiration_known"):
                 continue
-            # An extension is tried before the move-out window opens, so a
-            # granted one keeps the groups where they are.
+            # An extension is tried, and granted or given up, before the
+            # move-out window opens, so a granted one keeps the groups where
+            # they are.
+            window = move_out_window_seconds(policy.model_dump())
             renew_before = max(
                 policy.renew_before_seconds,
-                move_out_window_seconds(policy.model_dump()),
+                window + MOVE_OUT_RENEWAL_LEAD_SECONDS if window else 0,
             )
             if row["management_mode"] != "manage" or expires - now > timedelta(
                 seconds=renew_before

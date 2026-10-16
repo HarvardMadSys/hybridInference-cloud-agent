@@ -40,21 +40,26 @@ def discard_request_id(allocation_id: str) -> str:
 
 #: How long before its lease ends a Host starts moving its groups out.
 DEFAULT_MOVE_OUT_BEFORE_SECONDS = 7200
+#: How long before that window opens its lease is renewed. An extension the
+#: provider neither applies nor refuses is awaited ten minutes, so the renewal
+#: has been granted or given up by the time the window opens.
+MOVE_OUT_RENEWAL_LEAD_SECONDS = 900
 
 
 def move_out_window_seconds(policy: dict[str, Any]) -> int:
     """How long before expiry this allocation's Host moves its groups out; 0 never.
 
-    A Host that rotates moves as a whole instead. With renewal, the window is
-    kept shorter than the horizon an extension reaches, so a granted extension
-    always ends the move rather than starting it again.
+    A Host that rotates moves as a whole instead. With renewal, the window and
+    the renewal lead before it are kept ten minutes shorter than the horizon an
+    extension reaches, so a granted extension always ends the move rather than
+    starting it again.
     """
     if policy.get("rotation_enabled"):
         return 0
     window = int(policy.get("move_out_before_seconds", DEFAULT_MOVE_OUT_BEFORE_SECONDS))
     if policy.get("enabled"):
         horizon = int(policy.get("extend_to_horizon_seconds", 14400))
-        window = min(window, max(0, horizon - 600))
+        window = min(window, max(0, horizon - 600 - MOVE_OUT_RENEWAL_LEAD_SECONDS))
     return max(0, window)
 
 

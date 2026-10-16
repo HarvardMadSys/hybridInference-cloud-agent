@@ -33,9 +33,9 @@ CloudLab 机器有租期，续期常被拒绝。到期时机器被收回，机�
 `RenewalPolicy` 新增 `move_out_before_seconds`，默认 7200，0 表示关闭。生效窗口由 `move_out_window_seconds` 计算：
 
 - `rotation_enabled` 时为 0；
-- 开启续期时，窗口不超过 `extend_to_horizon_seconds - 600`，保证续期成功后剩余时间一定在窗口之外，不会刚续完又开始腾空。
+- 开启续期时，窗口不超过 `extend_to_horizon_seconds - 600 - 900`，保证续期成功后剩余时间一定在窗口和下一次续期之外，不会刚续完又开始腾空。
 
-续期在窗口打开前尝试：调度器的续期触发时间取 `renew_before_seconds` 与窗口的较大者。续期成功，到期时间后移，腾空不会开始；已经开始的会自动结束。
+续期在窗口打开前尝试：调度器的续期触发时间取 `renew_before_seconds` 与“窗口 + 900 秒”的较大者（`MOVE_OUT_RENEWAL_LEAD_SECONDS`）。提前的 15 分钟长于既未生效也未被拒绝的续期的等待时间（10 分钟，之后记为 `extension_unconfirmed`），所以窗口打开时续期已经有了结果：续期成功，到期时间后移，腾空不会开始，Host 也不会提前停止领取任务，自动扩缩容池也不会为它补机；续期失败，窗口才打开。如果续期在窗口打开后才成功（例如调度器停过），已经开始的腾空会自动结束。
 
 ### 3.2 腾空标记：`move_out` admission hold
 

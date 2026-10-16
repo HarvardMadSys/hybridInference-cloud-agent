@@ -1454,6 +1454,43 @@ async def test_renewal_is_tried_before_the_move_out_window_opens(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("granted", [True, False])
+async def test_a_renewal_has_ended_before_the_move_out_window_opens(monkeypatch, granted):
+    """The first renewal is granted or given up while the Host still serves.
+
+    A granted extension never starts a move: no claim is held and no idle
+    group is stopped. One the provider neither applies nor refuses stops
+    being awaited before the window opens.
+    """
+    h = harness(monkeypatch, kind="extend", identified=True)
+    policy = RenewalPolicy(enabled=True, reason="Keep the sandboxes")
+    h.allocation["policy"] = policy.model_dump()
+    # A lease just extended to the horizon runs down; the scheduler polls
+    # every 30 seconds.
+    remaining = timedelta(seconds=policy.extend_to_horizon_seconds)
+    while not h.commands.extend.await_count:
+        remaining -= timedelta(seconds=30)
+        h.allocation["expires_at"] = NOW + remaining
+        await h.reconciler.schedule()
+    h.provider.inspect.return_value = observed(expires=NOW + remaining)
+    if not granted:
+        h.provider.extend.return_value = ProviderReceipt(outcome="unknown", resource=REF)
+
+    await h.reconciler.execute(h.operation)
+    if not granted:
+        # Its last check, one poll after the confirmation wait.
+        later = NOW + compute_reconcile._EXTENSION_CONFIRMATION + timedelta(seconds=30)
+        monkeypatch.setattr(compute_reconcile, "_now", lambda: later)
+        await h.reconciler.execute(h.operation)
+
+    assert (h.operation["state"], h.operation["step"]) == (
+        ("succeeded", "extended") if granted else ("blocked", "extension_unconfirmed")
+    )
+    due = [call.kwargs["due"] for call in h.repository.set_move_out_hold.await_args_list]
+    assert due == [False] * len(due)
+
+
+@pytest.mark.asyncio
 async def test_groups_still_unmoved_near_the_lease_end_alert_once(monkeypatch):
     h = harness(monkeypatch, kind="inspect", identified=True)
     h.allocation["expires_at"] = NOW + timedelta(minutes=4)

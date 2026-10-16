@@ -494,9 +494,11 @@ groups to other Hosts one at a time before its lease ends, through their
 The lead is **Move sandboxes to other servers before expiry** in the
 allocation's renewal settings: 120 minutes by default, 0 to turn it off.
 Replacement moves the whole Host instead, so the setting is not offered there.
-With renewal enabled, extension is tried before the window opens, and the
-window is capped ten minutes short of the extension horizon: an extension that
-succeeds ends a move rather than starting one.
+With renewal enabled, extension is tried 15 minutes before the window opens:
+longer than an extension the provider neither applies nor refuses is awaited,
+so by then it has been granted or given up, and only a lease it could not
+extend starts a move. The window is capped 25 minutes short of the extension
+horizon, so an extension that succeeds ends a move rather than starting one.
 
 Inside the window the Host gets a `move_out` admission hold only when its
 groups can really move:
