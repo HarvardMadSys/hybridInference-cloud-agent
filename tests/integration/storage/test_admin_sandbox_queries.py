@@ -627,7 +627,7 @@ async def test_admin_stop_survives_running_heartbeats_and_clears_on_confirmation
             == "stopping"
         )
         command = await store.sandbox.due_thread_sandbox_stop(**observed)
-        assert command is not None and command["reason"] == "idle"
+        assert command is not None and command["reason"] == "orphaned_attempt"
         assert command["member_activation_generations"] == {origin["thread_id"]: 0}
     detail = await store.admin_sandboxes.detail("asbx_stop")
     assert detail is not None and detail.sandbox.stop_requested_at is not None
