@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from cloud_agent.ports import HostPoolRepository, SandboxRepository
+    from cloud_agent.ports.sandbox import DeletionFailureDecision
 
 logger = get_logger(__name__)
 CLAIM_TTL_SECONDS = 3900
@@ -531,12 +532,12 @@ async def delete_one_archived_sandbox(
                     else "The container has not been deleted. Refresh details before retrying."
                 )
             )
-        failure_recorded: bool | None = None
+        failure_decision: DeletionFailureDecision | None = None
         # A failed database response leaves the business transition uncertain.
         # Keep the attempt open so a later claim can classify an actually
         # expired lease instead of reporting one speculatively.
         with contextlib.suppress(Exception):
-            failure_recorded = await store.sandbox.fail_admin_sandbox_deletion(
+            failure_decision = await store.sandbox.fail_admin_sandbox_deletion(
                 **fence,
                 error=error,
                 retain_pending=retain_pending,
@@ -546,8 +547,7 @@ async def delete_one_archived_sandbox(
                 retry_class=retry_class,
                 cleanup_outcome=cleanup_outcome,
             )
-        retry_requested = archive_verified or retain_pending
-        if failure_recorded is False:
+        if failure_decision is not None and not failure_decision.recorded:
             await _finish_attempt(
                 store,
                 correlation_id=correlation_id,
@@ -573,8 +573,20 @@ async def delete_one_archived_sandbox(
                 "stage": failure_stage,
                 "failure_code": failure_code,
                 "retry_class": retry_class,
-                "retry_requested": retry_requested,
-                "failure_transition_recorded": failure_recorded,
+                "retry_scheduled": (
+                    failure_decision.retry_scheduled if failure_decision is not None else None
+                ),
+                "retry_at": (
+                    failure_decision.retry_at.isoformat()
+                    if failure_decision is not None and failure_decision.retry_at is not None
+                    else None
+                ),
+                "terminal_reason": (
+                    failure_decision.terminal_reason if failure_decision is not None else None
+                ),
+                "failure_transition_recorded": (
+                    failure_decision.recorded if failure_decision is not None else None
+                ),
                 "cleanup_outcome": cleanup_outcome,
                 "sandbox_manager_status": sandbox_manager_status,
             },

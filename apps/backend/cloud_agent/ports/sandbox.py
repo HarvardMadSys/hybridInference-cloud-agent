@@ -9,10 +9,25 @@ operations it needs rather than on the whole persistence surface.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
     from datetime import datetime
+
+
+@dataclass(frozen=True, slots=True)
+class DeletionFailureDecision:
+    """Database-authoritative result of a fenced deletion failure transition."""
+
+    recorded: bool
+    retry_scheduled: bool
+    retry_at: datetime | None
+    terminal_reason: str | None
+
+    def __bool__(self) -> bool:
+        """Keep existing truth tests aligned with whether the fence was recorded."""
+        return self.recorded
 
 
 class SandboxRepository(Protocol):
@@ -132,8 +147,8 @@ class SandboxRepository(Protocol):
         sandbox_manager_status: int | None = None,
         retry_class: str | None = None,
         cleanup_outcome: str = "not_required",
-    ) -> bool:
-        """Release safe pre-archive failures but keep ambiguous deletion fenced."""
+    ) -> DeletionFailureDecision:
+        """Apply a fenced failure transition and return its persisted retry decision."""
         ...
 
     async def renew_admin_sandbox_deletion_claim(

@@ -435,12 +435,16 @@ async def test_failure_keeps_verified_or_uncertain_archives_fenced(db, store, ch
     assert claim is not None
     if checkpoint == "archived":
         assert await checkpoint_archive(store, claim)
-    assert await store.sandbox.fail_admin_sandbox_deletion(
+    decision = await store.sandbox.fail_admin_sandbox_deletion(
         **worker_fence(claim),
         error="Archive operation will retry.",
         retain_pending=True,
         retry_class="transient",
     )
+    assert decision.recorded is True
+    assert decision.retry_scheduled is True
+    assert decision.retry_at is not None
+    assert decision.terminal_reason is None
     detail = await store.admin_sandboxes.detail("asbx_retry")
     assert detail is not None and detail.sandbox.deletion_state == checkpoint
     assert not await store.sandbox.thread_workspace_ready(thread_id=origin["thread_id"])
@@ -458,16 +462,22 @@ async def test_safe_prearchive_failure_preserves_native_resume(db, store):
     assert await request_delete(store, "asbx_failed") == "accepted"
     claim = await store.sandbox.claim_due_admin_sandbox_deletion(ttl_seconds=3600)
     assert claim is not None
-    assert await store.sandbox.fail_admin_sandbox_deletion(
+    decision = await store.sandbox.fail_admin_sandbox_deletion(
         **worker_fence(claim), error="Host confirmed archive preparation was aborted."
     )
+    assert decision.recorded is True
+    assert decision.retry_scheduled is False
+    assert decision.retry_at is None
+    assert decision.terminal_reason == "operator_action_required"
     detail = await store.admin_sandboxes.detail("asbx_failed")
     assert detail is not None and detail.sandbox.deletion_state == "failed"
+    assert detail.sandbox.deletion_retry_exhausted_at is None
     assert await store.sandbox.thread_workspace_ready(thread_id=origin["thread_id"])
     assert await request_delete(store, "asbx_failed") == "accepted"
     replacement = await store.admin_sandboxes.detail("asbx_failed")
     assert replacement is not None
     assert replacement.sandbox.deletion_request_id != claim["deletion_request_id"]
+    assert replacement.sandbox.deletion_retry_exhausted_at is None
 
 
 async def test_deletion_attempt_ledger_records_sanitized_failure_details(db, store):
@@ -514,8 +524,8 @@ async def test_deletion_attempt_ledger_records_sanitized_failure_details(db, sto
     assert attempt.cleanup_outcome == "unconfirmed"
 
 
-async def test_attempt_ledger_insert_failure_rolls_back_deletion_claim(db, store):
-    """A claimed operation cannot proceed without its durable attempt record."""
+async def test_attempt_ledger_insert_failure_does_not_rollback_deletion_claim(db, store):
+    """A telemetry outage cannot undo a properly fenced deletion claim."""
     sandbox_id = "asbx_attempt_telemetry_failure"
     await seed(db, store, sandbox_id, state="stopped")
     assert await request_delete(store, sandbox_id) == "accepted"
@@ -541,8 +551,10 @@ async def test_attempt_ledger_insert_failure_rolls_back_deletion_claim(db, store
             """
         )
     try:
-        with pytest.raises(asyncpg.PostgresError):
-            await store.sandbox.claim_due_admin_sandbox_deletion(ttl_seconds=3600)
+        claim = await store.sandbox.claim_due_admin_sandbox_deletion(ttl_seconds=3600)
+        assert claim is not None
+        assert claim["deletion_attempt_correlation_id"] is None
+        assert claim["deletion_attempt_number"] is None
         async with db.acquire() as conn:
             assert (
                 await conn.fetchval(
@@ -555,14 +567,18 @@ async def test_attempt_ledger_insert_failure_rolls_back_deletion_claim(db, store
                 await conn.fetchval(
                     "SELECT deletion_claim_token FROM agent_sandboxes WHERE id=$1", sandbox_id
                 )
-                is None
+                == claim["deletion_claim_token"]
             )
             assert (
                 await conn.fetchval(
                     "SELECT deletion_retry_count FROM agent_sandboxes WHERE id=$1", sandbox_id
                 )
-                == 0
+                == 1
             )
+        assert await checkpoint_archive(store, claim)
+        assert await store.sandbox.complete_admin_sandbox_deletion(**worker_fence(claim))
+        detail = await store.admin_sandboxes.detail(sandbox_id)
+        assert detail is not None and detail.sandbox.deletion_state == "deleted"
     finally:
         async with db.acquire() as conn:
             await conn.execute(
@@ -570,6 +586,56 @@ async def test_attempt_ledger_insert_failure_rolls_back_deletion_claim(db, store
                 "ON agent_sandbox_deletion_attempts"
             )
             await conn.execute("DROP FUNCTION IF EXISTS reject_deletion_attempt_ledger_insert()")
+
+
+async def test_attempt_ledger_finish_failure_does_not_rollback_deletion(db, store):
+    """A diagnostic write cannot undo an externally confirmed deletion."""
+    sandbox_id = "asbx_attempt_finish_telemetry_failure"
+    await seed(db, store, sandbox_id, state="stopped")
+    assert await request_delete(store, sandbox_id) == "accepted"
+    claim = await store.sandbox.claim_due_admin_sandbox_deletion(ttl_seconds=3600)
+    assert claim is not None
+    assert await checkpoint_archive(store, claim)
+    async with db.acquire() as conn:
+        await conn.execute(
+            """
+            CREATE OR REPLACE FUNCTION reject_deletion_attempt_ledger_finish()
+            RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN
+                IF OLD.sandbox_id = 'asbx_attempt_finish_telemetry_failure'
+                   AND NEW.outcome <> 'running' THEN
+                    RAISE EXCEPTION 'injected telemetry finish failure';
+                END IF;
+                RETURN NEW;
+            END;
+            $$
+            """
+        )
+        await conn.execute(
+            """
+            CREATE TRIGGER reject_deletion_attempt_ledger_finish
+            BEFORE UPDATE ON agent_sandbox_deletion_attempts
+            FOR EACH ROW EXECUTE FUNCTION reject_deletion_attempt_ledger_finish()
+            """
+        )
+    try:
+        assert await store.sandbox.complete_admin_sandbox_deletion(
+            **worker_fence(claim),
+            attempt_correlation_id=claim["deletion_attempt_correlation_id"],
+        )
+        detail = await store.admin_sandboxes.detail(sandbox_id)
+        assert detail is not None and detail.sandbox.deletion_state == "deleted"
+        assert detail.sandbox.deletion_archive_key == ARCHIVE_URI
+        assert detail.sandbox.deletion_sha256 == DIGEST
+        assert detail.sandbox.deletion_size_bytes == 4096
+        assert detail.deletion_attempts[0].outcome == "running"
+    finally:
+        async with db.acquire() as conn:
+            await conn.execute(
+                "DROP TRIGGER IF EXISTS reject_deletion_attempt_ledger_finish "
+                "ON agent_sandbox_deletion_attempts"
+            )
+            await conn.execute("DROP FUNCTION IF EXISTS reject_deletion_attempt_ledger_finish()")
 
 
 async def test_uncertain_host_abort_retries_cleanup_only_and_keeps_original_key(db, store):
@@ -598,13 +664,20 @@ async def test_uncertain_host_abort_retries_cleanup_only_and_keeps_original_key(
     assert not await store.sandbox.renew_admin_sandbox_deletion_claim(
         **worker_fence(retry), for_cleanup=True, cleanup_archive_key="changed-prefix/request.tar"
     )
-    assert await store.sandbox.fail_admin_sandbox_deletion(
-        **worker_fence(retry), error="Host confirmed the original archive operation was aborted."
+    decision = await store.sandbox.fail_admin_sandbox_deletion(
+        **worker_fence(retry),
+        error="Host confirmed the original archive operation was aborted.",
+        cleanup_outcome="acknowledged",
     )
+    assert decision.recorded is True
+    assert decision.retry_scheduled is False
+    assert decision.retry_at is None
+    assert decision.terminal_reason == "operator_action_required"
     assert await store.sandbox.thread_workspace_ready(thread_id=origin["thread_id"])
     assert await request_delete(store, "asbx_cleanup") == "accepted"
     replacement = await store.sandbox.claim_due_admin_sandbox_deletion(ttl_seconds=3600)
     assert replacement is not None and not replacement["deletion_cleanup_required"]
+    assert replacement["deletion_request_id"] != claim["deletion_request_id"]
     assert replacement["deletion_cleanup_archive_key"] is None
     assert await checkpoint_archive(store, replacement)
     assert not await store.sandbox.renew_admin_sandbox_deletion_claim(
@@ -628,13 +701,19 @@ async def test_nontransient_failure_stops_retries_and_preserves_archive(
     assert claim is not None
     assert await checkpoint_archive(store, claim)
 
-    assert await store.sandbox.fail_admin_sandbox_deletion(
+    decision = await store.sandbox.fail_admin_sandbox_deletion(
         **worker_fence(claim),
         error="The host rejected this deletion request.",
         retain_pending=True,
         attempt_correlation_id=claim["deletion_attempt_correlation_id"],
         failure_code=failure_code,
         retry_class=retry_class,
+    )
+    assert decision.recorded is True
+    assert decision.retry_scheduled is False
+    assert decision.retry_at is None
+    assert decision.terminal_reason == (
+        "permanent_failure" if retry_class == "permanent" else "operator_action_required"
     )
 
     detail = await store.admin_sandboxes.detail("asbx_nontransient")

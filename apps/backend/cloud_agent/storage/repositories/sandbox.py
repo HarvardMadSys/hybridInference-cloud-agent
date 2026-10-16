@@ -18,6 +18,7 @@ from cloud_agent.capacity_protocol import FRESH_AFTER_SECONDS
 from cloud_agent.domain.execution import TERMINAL_STATES
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.owner_usage import measured_interval
+from cloud_agent.ports.sandbox import DeletionFailureDecision
 from cloud_agent.storage._sql.compute_admission import lock_compute_entry
 from cloud_agent.storage._sql.hosts import (
     MOVING_OUT_HOST_SQL,
@@ -263,11 +264,19 @@ class PostgresSandboxRepository:
                 or group["last_activity_at"] != last_activity_at
             ):
                 return "stale"
-            if group["deletion_state"] in {"pending", "archived"}:
-                if group["deletion_retry_exhausted_at"] is None:
+            resumable_failed = (
+                group["deletion_state"] == "failed"
+                and group["deletion_request_id"] is not None
+                and group["deletion_archive_key"] is not None
+            )
+            if group["deletion_state"] in {"pending", "archived"} or resumable_failed:
+                if not resumable_failed and group["deletion_retry_exhausted_at"] is None:
                     return "accepted"
                 state = str(group["deletion_state"])
                 request_id = str(group["deletion_request_id"])
+                resumed_state = (
+                    "archived" if group["deletion_archive_key"] is not None else "pending"
+                )
                 await self._record_trajectory_event(
                     conn,
                     group=group,
@@ -275,19 +284,21 @@ class PostgresSandboxRepository:
                     source=source,
                     actor_id=actor_id,
                     from_state=state,
-                    to_state=state,
+                    to_state=resumed_state,
                     details={"request_id": request_id},
                 )
                 await conn.execute(
                     """
                     UPDATE agent_sandboxes
-                    SET deletion_retry_started_at = NOW(), deletion_retry_count = 0,
+                    SET deletion_state = $2, deletion_retry_started_at = NOW(),
+                        deletion_retry_count = 0,
                         deletion_retry_exhausted_at = NULL, deletion_retry_at = NOW(),
                         deletion_error = NULL, deletion_claim_token = NULL,
                         deletion_claim_expires_at = NULL, updated_at = NOW()
                     WHERE id = $1
                     """,
                     sandbox_id,
+                    resumed_state,
                 )
                 await self._audit_admin_deletion(
                     conn,
@@ -482,40 +493,54 @@ class PostgresSandboxRepository:
             )
             if row is None:
                 return None
-            correlation_id = str(uuid4())
-            async with asyncio.timeout(_DELETION_ATTEMPT_TELEMETRY_TIMEOUT_SECONDS):
-                attempt_number = int(
-                    await conn.fetchval(
-                        """
-                        SELECT COALESCE(MAX(attempt_number), 0) + 1
-                        FROM agent_sandbox_deletion_attempts WHERE request_id=$1
-                        """,
-                        row["deletion_request_id"],
-                    )
+            correlation_id: str | None = None
+            attempt_number: int | None = None
+            try:
+                async with asyncio.timeout(_DELETION_ATTEMPT_TELEMETRY_TIMEOUT_SECONDS):
+                    # A savepoint keeps optional diagnostics from rolling back the
+                    # already-fenced business claim when the ledger is unavailable.
+                    async with conn.transaction():
+                        correlation_id = str(uuid4())
+                        attempt_number = int(
+                            await conn.fetchval(
+                                """
+                                SELECT COALESCE(MAX(attempt_number), 0) + 1
+                                FROM agent_sandbox_deletion_attempts WHERE request_id=$1
+                                """,
+                                row["deletion_request_id"],
+                            )
+                        )
+                        await conn.execute(
+                            """
+                            UPDATE agent_sandbox_deletion_attempts
+                            SET outcome='lease_expired', failure_code='claim_lease_expired',
+                                retry_class='transient', retry_scheduled=TRUE,
+                                finished_at=NOW(), updated_at=NOW()
+                            WHERE request_id=$1 AND outcome='running'
+                            """,
+                            row["deletion_request_id"],
+                        )
+                        await conn.execute(
+                            """
+                            INSERT INTO agent_sandbox_deletion_attempts
+                                (correlation_id, sandbox_id, request_id, host_id, attempt_number,
+                                 stage, outcome)
+                            VALUES ($1, $2, $3, $4, $5, 'sandbox_manager_resolution', 'running')
+                            """,
+                            correlation_id,
+                            row["id"],
+                            row["deletion_request_id"],
+                            row["host"],
+                            attempt_number,
+                        )
+            except Exception:
+                logger.warning(
+                    "Sandbox deletion attempt telemetry insert failed",
+                    extra={"request_id": row["deletion_request_id"]},
                 )
-                await conn.execute(
-                    """
-                    UPDATE agent_sandbox_deletion_attempts
-                    SET outcome='lease_expired', failure_code='claim_lease_expired',
-                        retry_class='transient', retry_scheduled=TRUE,
-                        finished_at=NOW(), updated_at=NOW()
-                    WHERE request_id=$1 AND outcome='running'
-                    """,
-                    row["deletion_request_id"],
-                )
-                await conn.execute(
-                    """
-                    INSERT INTO agent_sandbox_deletion_attempts
-                        (correlation_id, sandbox_id, request_id, host_id, attempt_number,
-                         stage, outcome)
-                    VALUES ($1, $2, $3, $4, $5, 'sandbox_manager_resolution', 'running')
-                    """,
-                    correlation_id,
-                    row["id"],
-                    row["deletion_request_id"],
-                    row["host"],
-                    attempt_number,
-                )
+                # Neither value describes a persisted attempt after savepoint rollback.
+                correlation_id = None
+                attempt_number = None
         return {
             **dict(row),
             "deletion_attempt_correlation_id": correlation_id,
@@ -769,25 +794,36 @@ class PostgresSandboxRepository:
             retry_scheduled = True
         elif outcome in {"succeeded", "failed"}:
             retry_scheduled = False
-        result = await conn.execute(
-            """
-            UPDATE agent_sandbox_deletion_attempts
-            SET outcome=$2, failure_code=$3,
-                sandbox_manager_status=COALESCE($4, sandbox_manager_status),
-                retry_class=$5, retry_scheduled=$6, cleanup_outcome=$7,
-                finished_at=NOW(), updated_at=NOW()
-            WHERE correlation_id=$1 AND outcome='running'
-            """,
-            correlation_id,
-            outcome,
-            failure_code,
-            sandbox_manager_status,
-            retry_class,
-            retry_scheduled,
-            cleanup_outcome,
-        )
-        if not result.endswith(" 1"):
-            raise RuntimeError("sandbox deletion attempt outcome lost its transaction fence")
+        try:
+            # Attempt telemetry is ancillary. A failed ledger write must not
+            # undo a deletion receipt or the fenced lifecycle transition.
+            async with conn.transaction():
+                result = await conn.execute(
+                    """
+                    UPDATE agent_sandbox_deletion_attempts
+                    SET outcome=$2, failure_code=$3,
+                        sandbox_manager_status=COALESCE($4, sandbox_manager_status),
+                        retry_class=$5, retry_scheduled=$6, cleanup_outcome=$7,
+                        finished_at=NOW(), updated_at=NOW()
+                    WHERE correlation_id=$1 AND outcome='running'
+                    """,
+                    correlation_id,
+                    outcome,
+                    failure_code,
+                    sandbox_manager_status,
+                    retry_class,
+                    retry_scheduled,
+                    cleanup_outcome,
+                )
+                if not result.endswith(" 1"):
+                    raise RuntimeError(
+                        "sandbox deletion attempt outcome lost its transaction fence"
+                    )
+        except Exception:
+            logger.warning(
+                "Sandbox deletion attempt outcome write failed",
+                extra={"correlation_id": correlation_id},
+            )
 
     async def complete_admin_sandbox_deletion(
         self,
@@ -980,14 +1016,19 @@ class PostgresSandboxRepository:
         sandbox_manager_status: int | None = None,
         retry_class: str | None = None,
         cleanup_outcome: str = "not_required",
-    ) -> bool:
-        """Retry transient failures within budget and retain ambiguous host effects."""
+    ) -> DeletionFailureDecision:
+        """Apply a fenced failure and return the database's retry disposition."""
         async with self._pool.acquire() as conn, conn.transaction():
             group = await self._locked_admin_deletion(
                 conn, sandbox_id, request_id, claim_token, generation, container_id
             )
             if group is None or group["deletion_state"] not in {"pending", "archived"}:
-                return False
+                return DeletionFailureDecision(
+                    recorded=False,
+                    retry_scheduled=False,
+                    retry_at=None,
+                    terminal_reason="fence_lost",
+                )
             retry_requested = group["deletion_state"] == "archived" or retain_pending
             retry_count = int(group["deletion_retry_count"])
             effective_retry_class = (
@@ -1054,7 +1095,7 @@ class PostgresSandboxRepository:
                     "error": final_error[:500],
                 },
             )
-            await conn.execute(
+            updated = await conn.fetchrow(
                 """
                 UPDATE agent_sandboxes
                 SET deletion_state = CASE WHEN $2 OR $5 THEN deletion_state ELSE 'failed' END,
@@ -1065,6 +1106,7 @@ class PostgresSandboxRepository:
                         THEN clock_timestamp() + make_interval(secs => $4) END,
                     updated_at = NOW()
                 WHERE id = $1
+                RETURNING deletion_retry_at
                 """,
                 sandbox_id,
                 retry_scheduled,
@@ -1092,7 +1134,23 @@ class PostgresSandboxRepository:
                 action="agent.sandbox.delete.failed",
                 archive_key=group["deletion_archive_key"],
             )
-        return True
+            if updated is None:
+                raise RuntimeError("sandbox deletion failure transition lost its row")
+            terminal_reason = None
+            if retry_budget_exhausted:
+                terminal_reason = "retry_budget_exhausted"
+            elif not retry_scheduled:
+                terminal_reason = {
+                    "permanent": "permanent_failure",
+                    "operator_action": "operator_action_required",
+                    "transient": "retry_not_retained",
+                }[effective_retry_class]
+            return DeletionFailureDecision(
+                recorded=True,
+                retry_scheduled=retry_scheduled,
+                retry_at=updated["deletion_retry_at"],
+                terminal_reason=terminal_reason,
+            )
 
     @staticmethod
     async def _locked_admin_deletion(

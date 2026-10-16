@@ -11,6 +11,7 @@ import pytest
 
 from cloud_agent import sandbox_manager_routing
 from cloud_agent.logging_utils import JsonLogFormatter
+from cloud_agent.ports.sandbox import DeletionFailureDecision
 from cloud_agent.sandbox_archive import ArchiveReceipt, ArchiveUpload
 from cloud_agent.sandbox_manager_client import SandboxManagerError
 from cloud_agent.workers import sandbox_deletion as worker
@@ -59,7 +60,14 @@ def setup(monkeypatch, *, state="pending"):
         claim_due_admin_sandbox_deletion=AsyncMock(return_value=claim),
         record_admin_sandbox_archive=AsyncMock(side_effect=event("record", True)),
         complete_admin_sandbox_deletion=AsyncMock(side_effect=event("complete", True)),
-        fail_admin_sandbox_deletion=AsyncMock(return_value=True),
+        fail_admin_sandbox_deletion=AsyncMock(
+            return_value=DeletionFailureDecision(
+                recorded=True,
+                retry_scheduled=True,
+                retry_at=None,
+                terminal_reason=None,
+            )
+        ),
         renew_admin_sandbox_deletion_claim=AsyncMock(return_value=True),
         update_admin_sandbox_deletion_attempt_stage=AsyncMock(return_value=True),
         finish_admin_sandbox_deletion_attempt=AsyncMock(return_value=True),
@@ -153,6 +161,25 @@ async def test_discard_removes_the_container_without_an_archive(monkeypatch):
             "sandbox_id": "group",
         },
     )
+
+
+@pytest.mark.asyncio
+async def test_attempt_stage_telemetry_failure_does_not_block_deletion(monkeypatch, caplog):
+    store, sandbox_manager, archives, events = setup(monkeypatch)
+    store.sandbox.update_admin_sandbox_deletion_attempt_stage = AsyncMock(
+        side_effect=RuntimeError("ledger unavailable")
+    )
+
+    assert await run(store, archives)
+
+    assert "delete" in events
+    store.sandbox.complete_admin_sandbox_deletion.assert_awaited_once()
+    store.sandbox.fail_admin_sandbox_deletion.assert_not_awaited()
+    assert any(
+        record.message == "Sandbox deletion attempt telemetry update failed"
+        for record in caplog.records
+    )
+    sandbox_manager.commit_sandbox_deletion.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -518,6 +545,32 @@ async def test_unknown_failure_state_write_does_not_claim_lease_expired(monkeypa
 
     store.sandbox.fail_admin_sandbox_deletion.assert_awaited_once()
     store.sandbox.finish_admin_sandbox_deletion_attempt.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_failure_log_uses_database_retry_decision(monkeypatch, caplog):
+    store, sandbox_manager, archives, _events = setup(monkeypatch)
+    sandbox_manager.upload_sandbox_deletion_archive.side_effect = SandboxManagerError(
+        503, "sandbox manager unavailable"
+    )
+    store.sandbox.fail_admin_sandbox_deletion.return_value = DeletionFailureDecision(
+        recorded=True,
+        retry_scheduled=False,
+        retry_at=None,
+        terminal_reason="retry_budget_exhausted",
+    )
+
+    assert await run(store, archives)
+
+    warning = next(
+        record
+        for record in caplog.records
+        if record.getMessage() == "Sandbox archive/delete request did not complete"
+    )
+    assert warning.retry_scheduled is False
+    assert warning.retry_at is None
+    assert warning.terminal_reason == "retry_budget_exhausted"
+    assert warning.failure_transition_recorded is True
 
 
 @pytest.mark.asyncio
