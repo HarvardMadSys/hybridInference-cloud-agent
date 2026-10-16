@@ -848,8 +848,9 @@ async def test_cloudlab_preserves_safe_actionable_http_400_diagnostics():
             "bindings": {"cluster": "utah", "phystype": "r6615"},
         },
     )
+    operation = intent(request)
     with pytest.raises(ProviderError) as error:
-        await provider(respond).acquire(request, intent(request))
+        await provider(respond).acquire(request, operation)
 
     assert error.value.code == "request_rejected"
     assert error.value.retryable is False
@@ -858,6 +859,8 @@ async def test_cloudlab_preserves_safe_actionable_http_400_diagnostics():
         "http_status": 400,
         "provider_reason_code": "invalid_profile_binding",
         "provider_request_id": EXPERIMENT,
+        "operation_id": operation.operation_id,
+        "allocation_id": operation.allocation_id,
         "requested_project": "research",
         "requested_profile": "cloud-agent-node",
         "requested_profile_project": "FAST25-AE",
@@ -948,7 +951,8 @@ async def test_cloudlab_successful_create_receipt_keeps_request_correlation():
         },
     )
 
-    receipt = await adapter.acquire(request, intent(request))
+    operation = intent(request)
+    receipt = await adapter.acquire(request, operation)
 
     assert receipt.outcome == "pending"
     assert receipt.resource is not None and receipt.resource.external_id == EXPERIMENT
@@ -957,11 +961,53 @@ async def test_cloudlab_successful_create_receipt_keeps_request_correlation():
         "http_status": 201,
         "provider_reason_code": "request_accepted",
         "provider_request_id": EXPERIMENT,
+        "operation_id": operation.operation_id,
+        "allocation_id": operation.allocation_id,
         "external_id": EXPERIMENT,
         "requested_project": "research",
         "requested_profile": "one-node",
         "requested_profile_project": "PortalProfiles",
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("matching_resources", [1, 2])
+async def test_cloudlab_ambiguous_create_never_adopts_matching_names(matching_resources):
+    requests = []
+    created = []
+
+    def respond(request):
+        requests.append((request.method, request.url.path))
+        if request.method == "GET" and request.url.path.endswith("/profiles/"):
+            return _profile_list()
+        if request.method == "POST":
+            created.extend(
+                {"id": str(uuid4()), "name": "same-name", "project": "research"}
+                for _ in range(matching_resources)
+            )
+            return httpx.Response(
+                500,
+                json={"error": "The experiment may have been created"},
+                headers={"X-Request-ID": EXPERIMENT},
+            )
+        return httpx.Response(200, json={"experiments": created})
+
+    request = AcquireRequest(
+        mode="provision",
+        config={**_provision("same-name"), "node_types": ["r6615", "c6620"]},
+    )
+    operation = intent(request)
+    receipt = await provider(respond).acquire(request, operation)
+
+    assert len(created) == matching_resources
+    assert requests == [("GET", "/v1/profiles/"), ("POST", "/v1/experiments/")]
+    assert receipt.outcome == "unknown"
+    assert receipt.resource is None
+    assert receipt.diagnostics["provider_request_id"] == EXPERIMENT
+    assert receipt.diagnostics["operation_id"] == operation.operation_id
+    assert receipt.diagnostics["allocation_id"] == operation.allocation_id
+    assert receipt.diagnostics["requested_project"] == "research"
+    assert receipt.diagnostics["requested_profile"] == "one-node"
 
 
 @pytest.mark.asyncio

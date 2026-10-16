@@ -1531,9 +1531,6 @@ async def test_definite_create_rejection_reports_original_stage_after_retry_rese
     h.provider.acquire.assert_awaited_once()
 
 
-    assert events == [("compute_move_out_unfinished", "compute-nodeid", "2 groups not moved")]
-
-
 def _recorded_events(monkeypatch, h) -> list:
     events = []
 
@@ -1679,6 +1676,8 @@ async def test_a_fenced_host_already_on_the_release_is_not_reported(monkeypatch)
     await h.reconciler._queue_host_release(row, [], RELEASE, NOW + timedelta(hours=2))
 
     assert events == []
+
+
 @pytest.mark.asyncio
 async def test_incomplete_ready_cloudlab_scope_is_not_reported_as_usable(monkeypatch):
     h = harness(monkeypatch)
@@ -1828,8 +1827,14 @@ async def test_unknown_acquisition_receipt_keeps_safe_provider_diagnostics(monke
     assert diagnostic["requested_profile"] == "one-node"
     assert diagnostic["operation_outcome"] == "unknown"
     assert public_operation(h.operation)["result"]["provider_diagnostic"] == diagnostic
+    h.repository.prepare_bootstrap_binding.assert_not_awaited()
+    h.bootstrap.deploy.assert_not_awaited()
+    h.host_pool.issue_enroll_token.assert_not_awaited()
     await h.reconciler.execute(h.operation)
     h.provider.acquire.assert_awaited_once()
+    h.repository.prepare_bootstrap_binding.assert_not_awaited()
+    h.bootstrap.deploy.assert_not_awaited()
+    h.host_pool.issue_enroll_token.assert_not_awaited()
     assert h.operation["state"] == "unknown"
 
 

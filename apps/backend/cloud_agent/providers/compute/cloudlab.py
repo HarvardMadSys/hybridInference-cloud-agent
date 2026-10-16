@@ -257,6 +257,8 @@ def _safe_diagnostic_context(context: dict[str, Any] | None) -> dict[str, str]:
         return {}
     safe: dict[str, str] = {}
     for key in (
+        "operation_id",
+        "allocation_id",
         "external_id",
         "requested_project",
         "requested_profile",
@@ -267,11 +269,12 @@ def _safe_diagnostic_context(context: dict[str, Any] | None) -> dict[str, str]:
         value = context.get(key)
         if not isinstance(value, str):
             continue
-        if key == "external_id":
+        if key in {"external_id", "operation_id", "allocation_id"}:
             try:
                 safe[key] = str(UUID(value))
             except ValueError:
-                continue
+                if key != "external_id" and _safe_diagnostic_value(value):
+                    safe[key] = value
         elif _safe_diagnostic_value(value):
             safe[key] = value
     return safe
@@ -302,10 +305,18 @@ def _connection_failure_reason(error: BaseException) -> str:
 
 
 def _diagnostic_context(
-    config: CloudLabConfig, *, external_id: str | None = None
+    config: CloudLabConfig,
+    *,
+    external_id: str | None = None,
+    operation_id: str | None = None,
+    allocation_id: str | None = None,
 ) -> dict[str, str]:
     """Extract only known-safe labels from a validated CloudLab configuration."""
     context: dict[str, str] = {"requested_project": config.project}
+    if operation_id:
+        context["operation_id"] = operation_id
+    if allocation_id:
+        context["allocation_id"] = allocation_id
     if config.profile_name:
         context["requested_profile"] = config.profile_name
     if config.profile_project:
@@ -640,13 +651,18 @@ class CloudLabProvider(ComputeProvider):
         )
         raise ProviderError("invalid_response", message, diagnostics=diagnostics)
 
-    async def _require_profile(self, config: CloudLabConfig) -> None:
+    async def _require_profile(
+        self,
+        config: CloudLabConfig,
+        *,
+        diagnostic_context: dict[str, str] | None = None,
+    ) -> None:
         """Reject a missing profile before create. A 500 from that create is not recoverable."""
         query = urlencode(
             {"project": config.profile_project or "", "profile_name": config.profile_name or ""}
         )
         path = "/profiles/?" + query
-        context = _diagnostic_context(config)
+        context = diagnostic_context or _diagnostic_context(config)
         response = await self._request(
             "GET", path, config.credential_ref, diagnostic_context=context
         )
@@ -715,7 +731,12 @@ class CloudLabProvider(ComputeProvider):
             payload["group"] = config.group
         if config.ssh_public_key:
             payload["sshpubkey"] = config.ssh_public_key
-        await self._require_profile(config)
+        context = _diagnostic_context(
+            config,
+            operation_id=intent.operation_id,
+            allocation_id=intent.allocation_id,
+        )
+        await self._require_profile(config, diagnostic_context=context)
         explicit_type = config.bindings.get(config.node_type_binding)
         pinned = explicit_type is not None and (
             not isinstance(explicit_type, str) or bool(explicit_type.strip())
@@ -733,7 +754,6 @@ class CloudLabProvider(ComputeProvider):
                     {**bindings, config.node_type_binding: node_type}
                 )
             try:
-                context = _diagnostic_context(config)
                 response = await self._request(
                     "POST",
                     "/experiments/",
@@ -752,7 +772,12 @@ class CloudLabProvider(ComputeProvider):
                     response,
                     "POST",
                     "/experiments/",
-                    _diagnostic_context(config, external_id=external_id),
+                    _diagnostic_context(
+                        config,
+                        external_id=external_id,
+                        operation_id=intent.operation_id,
+                        allocation_id=intent.allocation_id,
+                    ),
                     reason_code="request_accepted",
                 )
             except ProviderError as exc:
@@ -769,7 +794,7 @@ class CloudLabProvider(ComputeProvider):
                         response,
                         "POST",
                         "/experiments/",
-                        _diagnostic_context(config),
+                        context,
                         reason_code="missing_or_invalid_experiment_id",
                     )
                     if response is not None
