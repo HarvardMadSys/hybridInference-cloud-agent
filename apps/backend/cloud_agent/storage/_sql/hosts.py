@@ -331,6 +331,34 @@ async def release_covered_sandboxes(
     return [str(row["id"]) for row in rows]
 
 
+async def release_late_covered_sandboxes(conn: Any) -> list[str]:
+    """Hand on the covered groups of hosts that were already revoked.
+
+    A heartbeat authenticated just before its host was revoked can still be
+    writing when the revocation commits. A checkpoint it carries then lands
+    after :func:`release_covered_sandboxes` looked, and covers a stopped group
+    bound to a host that will never beat again. The same rule moves that group
+    on now. A revoked host has no other way to gain a covered group, so this
+    moves only what the revocation would have moved had the beat been earlier.
+    """
+    hosts = [
+        str(row["host"])
+        for row in await conn.fetch(
+            """
+            SELECT h.host FROM agent_runner_hosts h
+            WHERE h.credential_hash IS NULL AND h.status = 'disabled'
+              AND EXISTS (
+                  SELECT 1 FROM agent_sandboxes g
+                  WHERE g.host = h.host AND g.state = 'stopped'
+                    AND g.restore_checkpoint_id IS NOT NULL
+              )
+            ORDER BY h.host
+            """
+        )
+    ]
+    return await release_covered_sandboxes(conn, hosts) if hosts else []
+
+
 # A Host moving out, in its lease window or because an administrator removes
 # it: no claims, and each group stopped and handed to another Host through its
 # checkpoint. ``{host}`` names the Host column.

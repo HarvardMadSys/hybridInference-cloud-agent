@@ -2090,7 +2090,8 @@ checkpoint still covers it: the same container, generation and start fence,
 every member's last settled turn recorded, and a base image another host can
 pull by digest. Every other group stays bound to the removed host, as before,
 and continues only if that host is enrolled again; the admin sandbox page shows
-which is which.
+which is which. A checkpoint carried by a heartbeat still in flight when the
+credential was revoked is handed on by the reaper's next pass.
 
 Two other paths turn covered stopped groups `cold` without revoking the host:
 a provider that confirms the node terminated hands over all of them, and a

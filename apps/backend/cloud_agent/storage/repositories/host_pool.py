@@ -48,6 +48,7 @@ from cloud_agent.storage._sql.hosts import (
     HOST_RETAINED_GROUP,
     QUALIFIED_HOST_COLUMNS,
     lock_revocation_rows,
+    release_late_covered_sandboxes,
     revoke_host_credentials,
 )
 from cloud_agent.storage._sql.move_out import (
@@ -1007,6 +1008,10 @@ class PostgresHostPoolRepository:
         lock: an attempt the reaper is ending at this moment must either be
         finished first or keep the host for the next pass.
 
+        Each pass then hands on any group of an already revoked host whose
+        checkpoint arrived with a beat still in flight at the revocation
+        (``release_late_covered_sandboxes``).
+
         Returns the hosts it revoked.
         """
         removed: list[str] = []
@@ -1040,6 +1045,16 @@ class PostgresHostPoolRepository:
                         continue
                     await revoke_host_credentials(conn, [host])
                 removed.append(host)
+            async with conn.transaction():
+                released = await release_late_covered_sandboxes(conn)
+        if released:
+            logger.info(
+                "agent_sandboxes_released_after_revocation",
+                extra={
+                    "event": "agent_sandboxes_released_after_revocation",
+                    "sandbox_ids": released,
+                },
+            )
         return removed
 
     async def reap_offline_hosts(

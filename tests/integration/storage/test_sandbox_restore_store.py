@@ -985,6 +985,27 @@ async def test_workspace_requests_wait_for_a_cold_group(pool, store: Storage):
     assert (await _state(pool))["restore_checkpoint_id"] == "c" * 32
 
 
+async def test_a_checkpoint_landing_after_the_revocation_still_moves_the_group(
+    pool, store: Storage
+):
+    """A beat authenticated before the revocation may finish writing after it.
+
+    Its checkpoint then covers a stopped group bound to a host that will never
+    beat again, and the revocation's hand-over has already looked.
+    """
+    job, group = await _settled_stopped_group(pool, store)
+    # Its checkpoint is not here yet, so the administrator agrees to leave it.
+    assert await store.host_pool.remove_host(host="runner-a", allow_unmoved=True) == "ok"
+    assert await store.sandbox.record_sandbox_checkpoint(
+        host="runner-a", thread_id=job["thread_id"], checkpoint=_receipt(group, job)
+    )
+    assert (await _state(pool))["state"] == "stopped"
+
+    assert await store.host_pool.finish_host_removals() == []
+
+    assert (await _state(pool))["state"] == "cold"
+
+
 async def test_forgetting_a_removed_host_leaves_its_cold_groups_restorable(pool, store: Storage):
     job, _ = await _covered(pool, store)
     follow_up = await store.conversation_commands.create_follow_up(
