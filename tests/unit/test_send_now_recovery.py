@@ -1,4 +1,4 @@
-"""The durable send-now consumer stays bounded inside the attempt reaper."""
+"""The durable send-now consumer stays bounded beside the attempt reaper."""
 
 from __future__ import annotations
 
@@ -126,7 +126,6 @@ async def test_hung_handoff_recovery_does_not_delay_attempt_reaping(monkeypatch)
     monkeypatch.setattr(attempts, "_reconcile_settled_terminals", AsyncMock())
     monkeypatch.setattr(attempts, "_reap_offline_hosts", AsyncMock())
     monkeypatch.setattr(attempts, "_reap_lapsed_residencies", AsyncMock())
-    monkeypatch.setattr(attempts, "run_goal_wakeups", AsyncMock())
     monkeypatch.setattr(attempts, "_cleanup_reaped_shared_residencies", AsyncMock())
     monkeypatch.setattr(attempts, "settle_waiting_queues", AsyncMock())
     store = SimpleNamespace(
@@ -134,11 +133,7 @@ async def test_hung_handoff_recovery_does_not_delay_attempt_reaping(monkeypatch)
         residency=object(),
         attachments=SimpleNamespace(purge_stale_staged=AsyncMock(return_value=0)),
         attempt_commands=SimpleNamespace(
-            sweep_queued_follow_ups=AsyncMock(),
             reap_expired=reap_expired,
-        ),
-        goals=SimpleNamespace(
-            sweep_goal_scheduling=AsyncMock(return_value={"rearmed": [], "stalled": []})
         ),
         snapshot=SimpleNamespace(
             reap_stalled_sandbox_snapshot_captures=AsyncMock(return_value=[]),

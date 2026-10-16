@@ -56,7 +56,7 @@ do not own service startup or shutdown.
 | `ports/` | Narrow typed capabilities | A caller needs a new operation from an adapter |
 | `storage/assembly.py` | Construction of Postgres repository capabilities | A storage capability is wired into the service |
 | `storage/repositories/` | SQL and transaction/fencing behavior | A durable query or mutation changes |
-| `workers/` | Scheduled work and recovery loops | Work continues independently of a request |
+| `workers/` | Scheduled work and recovery loops | Work continues independently of a request; queue and goal recovery cannot hold up attempt lease recovery |
 | `bootstrap/` | Resources and lifecycle | A component must be constructed, started, or closed |
 | `mcp/` | MCP hosting, transport, policy, and process-local runtime | Protocol or upstream session behavior changes |
 | `goals/` | Goal orchestration and retry policy | Goal scheduling or progress policy changes |
