@@ -267,6 +267,130 @@ def test_environment_orphan_poll_is_throttled(monkeypatch):
     assert [call["cleanup_orphans"] for call in calls] == [True, False, False, True]
 
 
+def _environment_worker(monkeypatch, tmp_path, prepare, status):
+    """A worker whose first claim runs one test run against stand-ins.
+
+    The run is handed the stop event the worker gives its claim, as the real
+    claim does; ``prepare`` stands in for installation and ``status`` answers
+    every report. Returns the worker, its claims and the run's reports.
+    """
+    claims = []
+    reports = []
+
+    class _RunManager:
+        def __init__(self, backend):
+            self.backend = backend
+
+        def create(self, spec):
+            pass
+
+        def start(self, spec):
+            return SimpleNamespace(container_id="container-1")
+
+        def prepare_shared_workspace(self, spec):
+            pass
+
+        def inspect(self, name):
+            return None
+
+        def remove_environment_test(self, spec, *, container_id):
+            pass
+
+    class _Source:
+        def __init__(self, job, **kwargs):
+            pass
+
+        def import_into(self, manager, spec):
+            return "c" * 40
+
+        def discard(self):
+            pass
+
+    class _Preparation:
+        root = tmp_path
+
+        def prepare(self, backend, environment, *, callback, cancel):
+            prepare(callback, cancel)
+
+    def post(path, json):
+        reports.append(json)
+        return httpx.Response(status, request=httpx.Request("POST", f"http://control{path}"))
+
+    backend = SimpleNamespace(
+        uid=1000, gid=1000, version_stamp=lambda: {"sandbox_image_digest": "sha256:" + "a" * 64}
+    )
+    environment = BoundEnvironment(binding_id="b", setup_script="make").model_dump(mode="json")
+
+    def claim_and_execute(**kwargs):
+        claims.append(kwargs)
+        if len(claims) == 1:
+            environment_tests.execute_test(
+                client=SimpleNamespace(post=post),
+                run={
+                    "id": "run-1",
+                    "lease_generation": 1,
+                    "repo": "org/repo",
+                    "base_sha": "c" * 40,
+                    "environment": environment,
+                    "purpose": "test",
+                },
+                backend=backend,
+                stop=kwargs["stop"],
+            )
+        return True
+
+    monkeypatch.setattr(environment_tests, "ChatSandboxManager", _RunManager)
+    monkeypatch.setattr(environment_tests, "RetainedChatBackend", lambda manager, spec: None)
+    monkeypatch.setattr(environment_tests, "EnvironmentPreparation", _Preparation)
+    monkeypatch.setattr(environment_tests, "claim_and_execute", claim_and_execute)
+    monkeypatch.setattr("cloud_agent_host.runner._SourcePrefetch", _Source)
+    return environment_tests.EnvironmentTestWorker("http://control", backend), claims, reports
+
+
+@pytest.mark.parametrize("refused", ["report", "heartbeat"])
+def test_a_cancelled_environment_run_leaves_the_worker_polling(monkeypatch, tmp_path, refused):
+    """A refused report or a failed heartbeat ends that run, never the host's worker."""
+    now = [100.0]
+    monkeypatch.setattr(environment_tests.time, "monotonic", lambda: now[0])
+
+    def prepare(callback, cancel):
+        if refused == "report":
+            # The owner cancelled the run, so its next report is refused.
+            callback({"phase": "setup", "state": "running", "output": "installing"})
+        else:
+            # A heartbeat falls due and the control plane cannot be reached.
+            now[0] += 11
+            assert cancel.wait(15)
+
+    worker, claims, reports = _environment_worker(
+        monkeypatch, tmp_path, prepare, 409 if refused == "report" else 503
+    )
+    worker.poll("credential")
+    worker._thread.join(20)
+    assert reports[-1]["state"] == "cancelled"
+    assert not worker._stop.is_set()
+    now[0] += 6
+    worker.poll("credential")
+    worker._thread.join(1)
+    worker.close()
+    assert len(claims) == 2
+
+
+def test_closing_the_environment_worker_still_cancels_its_run(monkeypatch, tmp_path):
+    started = threading.Event()
+
+    def prepare(callback, cancel):
+        started.set()
+        assert cancel.wait(5)
+
+    worker, _, reports = _environment_worker(monkeypatch, tmp_path, prepare, 200)
+    worker.poll("credential")
+    assert started.wait(5)
+    worker.close()
+    assert not worker.busy
+    assert reports[-1]["state"] == "cancelled"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("configured", [True, False])
 @pytest.mark.parametrize("operation", ["terminal", "create_terminal"])

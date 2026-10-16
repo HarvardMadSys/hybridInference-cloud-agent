@@ -109,7 +109,12 @@ def execute_test(
         int(run["lease_generation"]),
         backend.version_stamp().get("sandbox_image_digest"),
     )
-    cancelled = stop or threading.Event()
+    # This run's own cancellation. A refused report, a failed heartbeat or the
+    # time limit ends this run only: the worker's stop is copied into it, never
+    # set from it, or one cancelled run would stop every later poll.
+    cancelled = threading.Event()
+    if stop is not None and stop.is_set():
+        cancelled.set()
     heartbeat_stop = threading.Event()
     steps: list[dict[str, Any]] = []
     data_lock = threading.Lock()
@@ -139,7 +144,15 @@ def execute_test(
         answer.raise_for_status()
 
     def heartbeat() -> None:
-        while not heartbeat_stop.wait(10):
+        beat_at = began + 10
+        # A short tick, so a closing worker cancels its run without waiting
+        # out the interval between reports.
+        while not heartbeat_stop.wait(0.25):
+            if stop is not None and stop.is_set():
+                cancelled.set()
+            if time.monotonic() < beat_at:
+                continue
+            beat_at = time.monotonic() + 10
             if time.monotonic() - began >= 1800:
                 cancelled.set()
             try:
