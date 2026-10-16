@@ -261,6 +261,7 @@ def public_operation(record: dict[str, Any], *, release_committed: bool = False)
         for key in (
             "checks",
             "blocked_reasons",
+            "provider_diagnostic",
             "nodes_ready",
             "target_expires_at",
             "actual_expires_at",

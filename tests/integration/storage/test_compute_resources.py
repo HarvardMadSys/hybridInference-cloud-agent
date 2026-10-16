@@ -326,6 +326,56 @@ async def test_external_uuid_cannot_be_adopted_through_alias_connection(db, stor
         )
 
 
+@pytest.mark.parametrize(
+    "change",
+    [
+        "scope_complete=FALSE",
+        "observed_state='pending'",
+        "observation_error='provider read failed'",
+        "observed_at=NOW()-INTERVAL '10 minutes'",
+    ],
+)
+async def test_bootstrap_binding_requires_a_current_complete_ready_allocation(db, store, change):
+    repo = store.compute_resources
+    allocation_id, node, op = await resource(store)
+    async with db.acquire() as conn:
+        await conn.execute(
+            f"UPDATE agent_compute_allocations SET {change} WHERE id=$1", allocation_id
+        )
+
+    with pytest.raises(ValueError, match="resource_observation_not_ready"):
+        await repo.prepare_bootstrap_binding(
+            node_id=node["id"], host="machine", operation_id=op["id"]
+        )
+
+    async with db.acquire() as conn:
+        assert (
+            await conn.fetchval("SELECT COUNT(*) FROM agent_runner_hosts WHERE host='machine'") == 0
+        )
+        assert (
+            await conn.fetchval(
+                "SELECT COUNT(*) FROM agent_host_admission_holds "
+                "WHERE purpose='bootstrap' AND source_id=$1",
+                op["id"],
+            )
+            == 0
+        )
+
+
+async def test_bootstrap_binding_requires_exactly_one_observed_node(db, store):
+    repo = store.compute_resources
+    allocation_id, node, op = await resource(store)
+    await repo.upsert_node(
+        allocation_id=allocation_id,
+        node={"provider_node_id": "node-2", "instance_identity": "second", "name": "second"},
+    )
+
+    with pytest.raises(ValueError, match="resource_observation_not_ready"):
+        await repo.prepare_bootstrap_binding(
+            node_id=node["id"], host="machine", operation_id=op["id"]
+        )
+
+
 async def test_expired_worker_cannot_overwrite_observation_and_resume_keeps_fixed_receipt(
     db, store
 ):

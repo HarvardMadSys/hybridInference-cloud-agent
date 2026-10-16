@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import re
+import ssl
+from contextlib import suppress
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 from urllib.parse import urlencode, urlsplit
@@ -103,6 +105,10 @@ _MAX_ERROR_BYTES = 16 * 1024
 #: One request from connect to its last body byte. httpx's own timeout bounds
 #: each read, so an endpoint that drips a byte at a time is bounded only here.
 _REQUEST_DEADLINE_S = 180.0
+_SAFE_DIAGNOSTIC_VALUE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+_SENSITIVE_DIAGNOSTIC_VALUE = re.compile(
+    r"token|secret|password|credential|bearer|api[_-]?key|jwt", re.IGNORECASE
+)
 
 
 # Parameters of deploy/cloudlab/cloud-agent-node.py the boot script reads.
@@ -151,6 +157,172 @@ def _capacity_rejection(diagnostic: str) -> bool:
             re.IGNORECASE,
         )
     )
+
+
+def _safe_diagnostic_value(value: str) -> bool:
+    """Accept short labels while rejecting obvious and opaque credential values."""
+    return bool(
+        _SAFE_DIAGNOSTIC_VALUE.fullmatch(value)
+        and not _SENSITIVE_DIAGNOSTIC_VALUE.search(value)
+        and not (len(value) >= 32 and re.fullmatch(r"[A-Za-z0-9_-]+", value))
+    )
+
+
+def _operation_name(method: str, path: str) -> str:
+    """Name the Portal operation without retaining its URL or query values."""
+    parts = [part for part in path.split("?", 1)[0].strip("/").split("/") if part]
+    method = method.upper()
+    if parts and parts[0] == "experiments":
+        if len(parts) == 1:
+            return "experiments.create" if method == "POST" else "experiments.list"
+        if len(parts) >= 3 and parts[2] == "manifests":
+            return "experiments.manifests.read"
+        return {
+            "GET": "experiments.read",
+            "PUT": "experiments.update",
+            "DELETE": "experiments.delete",
+        }.get(method, "experiments.request")
+    if parts and parts[0] == "profiles":
+        return "profiles.read" if method == "GET" else "profiles.request"
+    return "provider.request"
+
+
+def _error_reason_code(response: httpx.Response) -> str:
+    """Map bounded provider text to a stable reason code; never return that text."""
+    status = response.status_code
+    if status in {401, 403}:
+        return "authorization_denied"
+    if status == 404:
+        return "resource_not_found"
+    try:
+        body = response.json()
+    except (ValueError, UnicodeError):
+        body = None
+    if isinstance(body, dict):
+        code = body.get("code")
+        if isinstance(code, str) and code in {
+            "capacity_unavailable",
+            "invalid_parameter",
+            "invalid_profile_binding",
+            "permission_denied",
+            "profile_not_found",
+            "rate_limited",
+            "reservation_conflict",
+        }:
+            return code
+        error_parts: list[str] = []
+        for key in ("error", "message", "detail"):
+            value = body.get(key)
+            if isinstance(value, str):
+                error_parts.append(value)
+            elif isinstance(value, list):
+                # FastAPI validation responses put field messages in a list of
+                # objects. Read only their public message field; never inspect
+                # or retain ``input``, which can echo submitted credentials.
+                error_parts.extend(
+                    item["msg"]
+                    for item in value
+                    if isinstance(item, dict) and isinstance(item.get("msg"), str)
+                )
+    else:
+        error_parts = []
+    text = " ".join(" ".join(part.split()) for part in error_parts).lower()
+    if status == 429:
+        if "rate limit" in text or "too many requests" in text:
+            return "rate_limited"
+        if any(word in text for word in ("capacity", "free node", "physical node", "reservation")):
+            return "capacity_unavailable"
+        return "rate_limited_or_capacity"
+    if status in {400, 422}:
+        if "not a hash reference" in text or (
+            any(word in text for word in ("binding", "parameter"))
+            and any(word in text for word in ("invalid", "unknown", "required", "not a"))
+        ):
+            return "invalid_profile_binding"
+        if "profile" in text:
+            return "profile_rejected"
+        if "project" in text and any(word in text for word in ("permission", "member", "denied")):
+            return "project_access_denied"
+        if status == 422:
+            return "invalid_parameter"
+        return "invalid_request"
+    if status >= 500:
+        return "provider_server_error"
+    return "http_rejected"
+
+
+def _safe_diagnostic_context(context: dict[str, Any] | None) -> dict[str, str]:
+    """Retain only explicitly allowlisted, short public configuration labels."""
+    if not isinstance(context, dict):
+        return {}
+    safe: dict[str, str] = {}
+    for key in (
+        "external_id",
+        "requested_project",
+        "requested_profile",
+        "requested_profile_project",
+        "requested_site",
+        "requested_hardware",
+    ):
+        value = context.get(key)
+        if not isinstance(value, str):
+            continue
+        if key == "external_id":
+            try:
+                safe[key] = str(UUID(value))
+            except ValueError:
+                continue
+        elif _safe_diagnostic_value(value):
+            safe[key] = value
+    return safe
+
+
+def _connection_failure_reason(error: BaseException) -> str:
+    """Distinguish certificate failures without retaining provider exception text."""
+    pending: list[BaseException] = [error]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, ssl.SSLError):
+            return "tls_verification_failed"
+        # HTTPX can wrap OpenSSL failures in ConnectError. Inspect only to map
+        # to a fixed label; never persist or log this text.
+        message = str(current).lower()
+        if "certificate" in message and any(
+            phrase in message for phrase in ("verify", "expired", "self-signed", "unknown ca")
+        ):
+            return "tls_verification_failed"
+        for cause in (current.__cause__, current.__context__):
+            if isinstance(cause, BaseException):
+                pending.append(cause)
+    return "connect_failed"
+
+
+def _diagnostic_context(
+    config: CloudLabConfig, *, external_id: str | None = None
+) -> dict[str, str]:
+    """Extract only known-safe labels from a validated CloudLab configuration."""
+    context: dict[str, str] = {"requested_project": config.project}
+    if config.profile_name:
+        context["requested_profile"] = config.profile_name
+    if config.profile_project:
+        context["requested_profile_project"] = config.profile_project
+    if external_id:
+        context["external_id"] = external_id
+    for key in ("site", "cluster"):
+        value = config.bindings.get(key)
+        if isinstance(value, str):
+            context["requested_site"] = value
+            break
+    for key in ("phystype", "hardware", "node_type"):
+        value = config.bindings.get(key)
+        if isinstance(value, str):
+            context["requested_hardware"] = value
+            break
+    return context
 
 
 class CloudLabProvider(ComputeProvider):
@@ -231,14 +403,24 @@ class CloudLabProvider(ComputeProvider):
         """Validate token access without creating or changing any experiment."""
         # The deployed Portal API uses a trailing slash for the collection.
         # Call it directly: redirects must never carry account credentials.
-        data = self._json(await self._request("GET", "/experiments/", credential_ref))
+        data = self._json(
+            await self._request("GET", "/experiments/", credential_ref),
+            method="GET",
+            path="/experiments/",
+        )
         if not isinstance(data.get("experiments"), list):
             raise ProviderError(
                 "invalid_response", "CloudLab API endpoint did not return an experiment list"
             )
 
     async def _request(
-        self, method: str, path: str, credential_ref: str, *, payload: dict[str, Any] | None = None
+        self,
+        method: str,
+        path: str,
+        credential_ref: str,
+        *,
+        payload: dict[str, Any] | None = None,
+        diagnostic_context: dict[str, Any] | None = None,
     ) -> httpx.Response:
         # Snapshot the endpoint before awaiting credentials, so an admin edit
         # cannot change the destination midway through this request.
@@ -265,12 +447,20 @@ class CloudLabProvider(ComputeProvider):
                         response = await self._exchange(
                             client, method, api_url + path, headers, payload
                         )
-        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout):
+        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout) as exc:
             # No byte of the request left this process: the TCP or TLS
             # handshake failed (the API host has intermittently served an
             # expired certificate). Even a mutation is safe to send again.
             raise ProviderError(
-                "temporarily_unavailable", "CloudLab could not be reached", retryable=True
+                "temporarily_unavailable",
+                "CloudLab could not be reached",
+                retryable=True,
+                diagnostics=self._network_diagnostics(
+                    method,
+                    path,
+                    diagnostic_context,
+                    _connection_failure_reason(exc),
+                ),
             ) from None
         except (httpx.RequestError, TimeoutError):
             mutation = method != "GET"
@@ -280,15 +470,25 @@ class CloudLabProvider(ComputeProvider):
                 if mutation
                 else "CloudLab could not be reached",
                 retryable=not mutation,
+                diagnostics=self._network_diagnostics(
+                    method,
+                    path,
+                    diagnostic_context,
+                    "request_outcome_unknown" if mutation else "request_failed",
+                ),
             ) from None
         status = response.status_code
+        diagnostics = self._response_diagnostics(response, method, path, diagnostic_context)
         if status in {401, 403}:
             raise ProviderError(
                 "credential_invalid" if status == 401 else "permission_denied",
                 "CloudLab denied access",
+                diagnostics=diagnostics,
             )
         if status == 404:
-            raise ProviderError("not_found", "CloudLab experiment was not found")
+            raise ProviderError(
+                "not_found", "CloudLab experiment was not found", diagnostics=diagnostics
+            )
         if status == 429:
             capacity = _capacity_rejection(_error_text(response))
             raise ProviderError(
@@ -297,6 +497,12 @@ class CloudLabProvider(ComputeProvider):
                 if capacity
                 else "CloudLab request limit reached",
                 retryable=True,
+                diagnostics={
+                    **diagnostics,
+                    "provider_reason_code": (
+                        "capacity_unavailable" if capacity else _error_reason_code(response)
+                    ),
+                },
             )
         if status >= 500:
             # A finished HTTP 500 on create is not a lost request: the portal
@@ -315,9 +521,12 @@ class CloudLabProvider(ComputeProvider):
                 code,
                 detail or "CloudLab could not confirm the request",
                 retryable=method == "GET",
+                diagnostics=diagnostics,
             )
         if status >= 300:
-            raise ProviderError("request_rejected", "CloudLab rejected the request")
+            raise ProviderError(
+                "request_rejected", "CloudLab rejected the request", diagnostics=diagnostics
+            )
         return response
 
     @staticmethod
@@ -328,16 +537,7 @@ class CloudLabProvider(ComputeProvider):
         headers: dict[str, str],
         payload: dict[str, Any] | None,
     ) -> httpx.Response:
-        """Send one request and keep at most :data:`_MAX_RESPONSE_BYTES` of its body.
-
-        A buffered request reads the whole body before anything can look at
-        its size, so the endpoint, not this process, would decide how much is
-        held in memory. The body is streamed instead and refused once it
-        passes the ceiling. An error body is read only for its short portal
-        diagnostic: past :data:`_MAX_ERROR_BYTES` it is dropped, never
-        refused, so the status still decides the outcome. The returned
-        response holds just the status and the bytes that were kept.
-        """
+        """Stream bounded response bodies and retain only safe request metadata."""
         async with client.stream(
             method,
             url,
@@ -346,42 +546,130 @@ class CloudLabProvider(ComputeProvider):
             follow_redirects=False,
             timeout=60,
         ) as streamed:
+            status = streamed.status_code
+            limit = (
+                _MAX_RESPONSE_BYTES
+                if status < 300
+                else _MAX_ERROR_BYTES
+                if status in {400, 422, 429} or status >= 500
+                else 0
+            )
             body = bytearray()
-            if streamed.status_code < 300:
+            too_large = False
+            if limit:
                 async for chunk in iter_response_bytes(streamed):
-                    if len(body) + len(chunk) > _MAX_RESPONSE_BYTES:
-                        raise ProviderError(
-                            "invalid_response", "CloudLab response exceeds the size limit"
-                        )
-                    body.extend(chunk)
-            elif streamed.status_code == 429 or streamed.status_code >= 500:
-                async for chunk in iter_response_bytes(streamed):
-                    if len(body) + len(chunk) > _MAX_ERROR_BYTES:
+                    if len(body) + len(chunk) > limit:
+                        too_large = status < 300
                         body.clear()
                         break
                     body.extend(chunk)
-        return httpx.Response(streamed.status_code, content=bytes(body), request=streamed.request)
+            safe_headers: dict[str, str] = {}
+            content_type = streamed.headers.get("content-type")
+            if content_type:
+                safe_headers["content-type"] = content_type[:128]
+            request_id = streamed.headers.get("x-request-id")
+            if request_id:
+                with suppress(ValueError):
+                    safe_headers["x-request-id"] = str(UUID(request_id))
+            response = httpx.Response(
+                status,
+                headers=safe_headers,
+                content=bytes(body),
+                request=streamed.request,
+            )
+            if too_large:
+                response.extensions["cloudlab_response_too_large"] = True
+            return response
 
     @staticmethod
-    def _json(response: httpx.Response) -> dict[str, Any]:
-        try:
-            value = response.json()
-        except (ValueError, UnicodeError):
-            raise ProviderError("invalid_response", "CloudLab returned invalid JSON") from None
-        if not isinstance(value, dict):
-            raise ProviderError("invalid_response", "CloudLab returned an invalid object")
-        return value
+    def _response_diagnostics(
+        response: httpx.Response,
+        method: str,
+        path: str,
+        context: dict[str, Any] | None,
+        *,
+        reason_code: str | None = None,
+    ) -> dict[str, str | int | bool]:
+        diagnostics: dict[str, str | int | bool] = {
+            "provider_operation": _operation_name(method, path),
+            "http_status": response.status_code,
+            "provider_reason_code": reason_code or _error_reason_code(response),
+        }
+        request_id = response.headers.get("x-request-id")
+        if request_id:
+            with suppress(ValueError):
+                diagnostics["provider_request_id"] = str(UUID(request_id))
+        diagnostics.update(_safe_diagnostic_context(context))
+        return diagnostics
+
+    @staticmethod
+    def _network_diagnostics(
+        method: str,
+        path: str,
+        context: dict[str, Any] | None,
+        reason_code: str,
+    ) -> dict[str, str | int | bool]:
+        diagnostics: dict[str, str | int | bool] = {
+            "provider_operation": _operation_name(method, path),
+            "provider_reason_code": reason_code,
+        }
+        diagnostics.update(_safe_diagnostic_context(context))
+        return diagnostics
+
+    @classmethod
+    def _json(
+        cls,
+        response: httpx.Response,
+        *,
+        method: str = "GET",
+        path: str = "/",
+        diagnostic_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if (
+            response.extensions.get("cloudlab_response_too_large") is True
+            or len(response.content) > _MAX_RESPONSE_BYTES
+        ):
+            reason_code = "response_too_large"
+            message = "CloudLab response exceeds the size limit"
+        else:
+            try:
+                value = response.json()
+            except (ValueError, UnicodeError):
+                reason_code = "invalid_json_response"
+                message = "CloudLab returned invalid JSON"
+            else:
+                if isinstance(value, dict):
+                    return value
+                reason_code = "invalid_response_shape"
+                message = "CloudLab returned an invalid object"
+        diagnostics = cls._response_diagnostics(
+            response, method, path, diagnostic_context, reason_code=reason_code
+        )
+        raise ProviderError("invalid_response", message, diagnostics=diagnostics)
 
     async def _require_profile(self, config: CloudLabConfig) -> None:
         """Reject a missing profile before create. A 500 from that create is not recoverable."""
         query = urlencode(
             {"project": config.profile_project or "", "profile_name": config.profile_name or ""}
         )
-        data = self._json(await self._request("GET", "/profiles/?" + query, config.credential_ref))
+        path = "/profiles/?" + query
+        context = _diagnostic_context(config)
+        response = await self._request(
+            "GET", path, config.credential_ref, diagnostic_context=context
+        )
+        data = self._json(response, method="GET", path=path, diagnostic_context=context)
         profiles = data.get("profiles")
         if not isinstance(profiles, list):
             raise ProviderError(
-                "invalid_response", "CloudLab API endpoint did not return a profile list"
+                "invalid_response",
+                "CloudLab API endpoint did not return a profile list",
+                diagnostics=self._response_diagnostics(
+                    response,
+                    "GET",
+                    path,
+                    context,
+                    reason_code="invalid_response_shape",
+                ),
             )
         if any(
             isinstance(item, dict)
@@ -393,18 +681,32 @@ class CloudLabProvider(ComputeProvider):
         raise ProviderError(
             "request_rejected",
             f"CloudLab project {config.profile_project} has no profile {config.profile_name}.",
+            diagnostics=self._response_diagnostics(
+                response, "GET", path, context, reason_code="profile_not_found"
+            ),
         )
 
     async def _created_experiment(self, name: str, config: CloudLabConfig) -> str | None:
         """Return the id of the experiment this create would have named, if it exists."""
         query = urlencode({"project": config.project})
-        data = self._json(
-            await self._request("GET", "/experiments/?" + query, config.credential_ref)
+        path = "/experiments/?" + query
+        context = _diagnostic_context(config)
+        response = await self._request(
+            "GET", path, config.credential_ref, diagnostic_context=context
         )
+        data = self._json(response, method="GET", path=path, diagnostic_context=context)
         experiments = data.get("experiments")
         if not isinstance(experiments, list):
             raise ProviderError(
-                "invalid_response", "CloudLab API endpoint did not return an experiment list"
+                "invalid_response",
+                "CloudLab API endpoint did not return an experiment list",
+                diagnostics=self._response_diagnostics(
+                    response,
+                    "GET",
+                    path,
+                    context,
+                    reason_code="invalid_response_shape",
+                ),
             )
         matches = [
             item.get("id")
@@ -416,7 +718,15 @@ class CloudLabProvider(ComputeProvider):
         ]
         if len(matches) > 1:
             raise ProviderError(
-                "result_unknown", "CloudLab returned more than one experiment with this name"
+                "result_unknown",
+                "CloudLab returned more than one experiment with this name",
+                diagnostics=self._response_diagnostics(
+                    response,
+                    "GET",
+                    path,
+                    context,
+                    reason_code="resource_identity_mismatch",
+                ),
             )
         if not matches:
             return None
@@ -468,39 +778,64 @@ class CloudLabProvider(ComputeProvider):
             candidates = [None]
         for index, node_type in enumerate(candidates):
             selected_bindings = dict(config.bindings)
+            response: httpx.Response | None = None
+            receipt_diagnostics: dict[str, str | int | bool] = {}
             if node_type is not None:
                 selected_bindings[config.node_type_binding] = node_type
                 payload["bindings"] = _wire_bindings(
                     {**bindings, config.node_type_binding: node_type}
                 )
             try:
+                context = _diagnostic_context(config)
                 response = await self._request(
-                    "POST", "/experiments/", config.credential_ref, payload=payload
+                    "POST",
+                    "/experiments/",
+                    config.credential_ref,
+                    payload=payload,
+                    diagnostic_context=context,
                 )
-                data = self._json(response)
+                data = self._json(
+                    response,
+                    method="POST",
+                    path="/experiments/",
+                    diagnostic_context=context,
+                )
                 external_id = str(UUID(str(data["id"])))
+                receipt_diagnostics = self._response_diagnostics(
+                    response,
+                    "POST",
+                    "/experiments/",
+                    _diagnostic_context(config, external_id=external_id),
+                    reason_code="request_accepted",
+                )
             except ProviderError as exc:
                 if exc.code == "server_error":
                     try:
                         created = await self._created_experiment(name, config)
-                    except ProviderError:
-                        return ProviderReceipt(outcome="unknown")
+                    except ProviderError as lookup_error:
+                        return ProviderReceipt(
+                            outcome="unknown",
+                            diagnostics=lookup_error.diagnostics or exc.diagnostics,
+                        )
                     if created is None:
                         if not _capacity_rejection(str(exc)):
                             raise ProviderError(
                                 "request_rejected",
                                 "CloudLab did not create the experiment. "
                                 "Check the profile name and its parameters.",
+                                diagnostics=exc.diagnostics,
                             ) from None
                         exc = ProviderError(
                             "capacity_unavailable",
                             "CloudLab has no matching node capacity",
                             retryable=True,
+                            diagnostics=exc.diagnostics,
                         )
                     else:
                         external_id = created
+                        receipt_diagnostics = exc.diagnostics
                 elif exc.code in {"result_unknown", "invalid_response"}:
-                    return ProviderReceipt(outcome="unknown")
+                    return ProviderReceipt(outcome="unknown", diagnostics=exc.diagnostics)
                 if exc.code == "capacity_unavailable":
                     if index + 1 < len(candidates):
                         continue
@@ -508,7 +843,18 @@ class CloudLabProvider(ComputeProvider):
                 if exc.code != "server_error":
                     raise
             except (KeyError, ValueError):
-                return ProviderReceipt(outcome="unknown")
+                diagnostics = (
+                    self._response_diagnostics(
+                        response,
+                        "POST",
+                        "/experiments/",
+                        _diagnostic_context(config),
+                        reason_code="missing_or_invalid_experiment_id",
+                    )
+                    if response is not None
+                    else {}
+                )
+                return ProviderReceipt(outcome="unknown", diagnostics=diagnostics)
             ref = ResourceRef(
                 external_id=external_id,
                 config={
@@ -520,7 +866,11 @@ class CloudLabProvider(ComputeProvider):
             )
             # Save the immutable resource ID and selected type immediately,
             # even if its subsequent status request fails.
-            return ProviderReceipt(outcome="pending", resource=ref)
+            return ProviderReceipt(
+                outcome="pending",
+                resource=ref,
+                diagnostics=receipt_diagnostics,
+            )
         raise AssertionError("CloudLab acquisition has no hardware candidates")
 
     async def recover_acquire(self, intent: OperationIntent) -> AcquisitionResolution:
@@ -552,8 +902,12 @@ class CloudLabProvider(ComputeProvider):
         config = CloudLabConfig.model_validate(ref.config)
         external_id = str(UUID(ref.external_id))
         try:
+            diagnostic_context = _diagnostic_context(config, external_id=external_id)
             response = await self._request(
-                "GET", f"/experiments/{external_id}", config.credential_ref
+                "GET",
+                f"/experiments/{external_id}",
+                config.credential_ref,
+                diagnostic_context=diagnostic_context,
             )
         except ProviderError as exc:
             if exc.code != "not_found":
@@ -564,12 +918,25 @@ class CloudLabProvider(ComputeProvider):
             raise ProviderError(
                 "resource_visibility_unknown",
                 "CloudLab cannot confirm this experiment's existence or visibility",
+                diagnostics=exc.diagnostics,
             ) from None
-        data = self._json(response)
+        data = self._json(
+            response,
+            method="GET",
+            path=f"/experiments/{external_id}",
+            diagnostic_context=diagnostic_context,
+        )
         if data.get("id") != external_id or data.get("project") != config.project:
             raise ProviderError(
                 "resource_identity_mismatch",
                 "CloudLab experiment identity or project differs from the authorized scope",
+                diagnostics=self._response_diagnostics(
+                    response,
+                    "GET",
+                    f"/experiments/{external_id}",
+                    diagnostic_context,
+                    reason_code="resource_identity_mismatch",
+                ),
             )
         raw = str(data.get("status", "unknown")).lower()
         state: Literal["pending", "ready", "failed", "terminated", "unknown"] = (
@@ -604,7 +971,15 @@ class CloudLabProvider(ComputeProvider):
                     raise ValueError("Missing timezone")
             except (TypeError, ValueError):
                 raise ProviderError(
-                    "invalid_response", "CloudLab expiry is not a timezone-aware timestamp"
+                    "invalid_response",
+                    "CloudLab expiry is not a timezone-aware timestamp",
+                    diagnostics=self._response_diagnostics(
+                        response,
+                        "GET",
+                        f"/experiments/{external_id}",
+                        diagnostic_context,
+                        reason_code="invalid_expiry_timestamp",
+                    ),
                 ) from None
         nodes, complete = await self._nodes(ref, config, data, state == "ready")
         return ResourceObservation(
@@ -616,6 +991,8 @@ class CloudLabProvider(ComputeProvider):
             lease_known=expires is not None,
             nodes=tuple(nodes),
             scope_complete=complete,
+            provider_http_status=response.status_code,
+            provider_request_id=response.headers.get("x-request-id"),
         )
 
     async def _nodes(
@@ -626,10 +1003,19 @@ class CloudLabProvider(ComputeProvider):
             return [], False
         logins: dict[tuple[str, str], tuple[str, int]] = {}
         if ready and config.ssh_username:
+            path = f"/experiments/{ref.external_id}/manifests"
+            diagnostic_context = _diagnostic_context(config, external_id=ref.external_id)
+            manifest_response = await self._request(
+                "GET",
+                path,
+                config.credential_ref,
+                diagnostic_context=diagnostic_context,
+            )
             manifests = self._json(
-                await self._request(
-                    "GET", f"/experiments/{ref.external_id}/manifests", config.credential_ref
-                )
+                manifest_response,
+                method="GET",
+                path=path,
+                diagnostic_context=diagnostic_context,
             )
             for aggregate_id, manifest in manifests.items():
                 if (
@@ -638,7 +1024,17 @@ class CloudLabProvider(ComputeProvider):
                     or "<!DOCTYPE" in manifest.upper()
                     or "<!ENTITY" in manifest.upper()
                 ):
-                    raise ProviderError("invalid_response", "CloudLab returned an invalid manifest")
+                    raise ProviderError(
+                        "invalid_response",
+                        "CloudLab returned an invalid manifest",
+                        diagnostics=self._response_diagnostics(
+                            manifest_response,
+                            "GET",
+                            path,
+                            diagnostic_context,
+                            reason_code="invalid_manifest",
+                        ),
+                    )
                 try:
                     root = ElementTree.fromstring(manifest)
                     for node in root.findall("{*}node"):
@@ -655,7 +1051,15 @@ class CloudLabProvider(ComputeProvider):
                                     )
                 except (ElementTree.ParseError, ValueError):
                     raise ProviderError(
-                        "invalid_response", "CloudLab returned an invalid SSH manifest"
+                        "invalid_response",
+                        "CloudLab returned an invalid SSH manifest",
+                        diagnostics=self._response_diagnostics(
+                            manifest_response,
+                            "GET",
+                            path,
+                            diagnostic_context,
+                            reason_code="invalid_ssh_manifest",
+                        ),
                     ) from None
         result: list[NodeObservation] = []
         complete = ready
@@ -720,11 +1124,13 @@ class CloudLabProvider(ComputeProvider):
         if request.target_expires_at.tzinfo is None:
             raise ProviderError("invalid_configuration", "Extension target must include a timezone")
         external_id = str(UUID(ref.external_id))
+        diagnostic_context = _diagnostic_context(config, external_id=external_id)
         try:
             response = await self._request(
                 "PUT",
                 f"/experiments/{external_id}",
                 config.credential_ref,
+                diagnostic_context=diagnostic_context,
                 payload={
                     "expires_at": request.target_expires_at.astimezone(timezone.utc).isoformat(),
                     "reason": request.reason,
@@ -738,16 +1144,31 @@ class CloudLabProvider(ComputeProvider):
         # HTTP 200. An undecodable response leaves the mutation uncertain and
         # never causes blind replay or false acceptance.
         try:
-            response_body = self._json(response)
-        except ProviderError:
-            return ProviderReceipt(outcome="unknown", resource=ref)
+            response_body = self._json(
+                response,
+                method="PUT",
+                path=f"/experiments/{external_id}",
+                diagnostic_context=diagnostic_context,
+            )
+        except ProviderError as exc:
+            return ProviderReceipt(outcome="unknown", resource=ref, diagnostics=exc.diagnostics)
         if response.status_code != 200 or response_body.get("id") != external_id:
-            return ProviderReceipt(outcome="unknown", resource=ref)
+            return ProviderReceipt(
+                outcome="unknown",
+                resource=ref,
+                diagnostics=self._response_diagnostics(
+                    response,
+                    "PUT",
+                    f"/experiments/{external_id}",
+                    diagnostic_context,
+                    reason_code="resource_identity_mismatch",
+                ),
+            )
         # PUT acceptance, including a partial extension, is not confirmation.
         try:
             observation = await self.inspect(ref)
-        except ProviderError:
-            return ProviderReceipt(outcome="unknown", resource=ref)
+        except ProviderError as exc:
+            return ProviderReceipt(outcome="unknown", resource=ref, diagnostics=exc.diagnostics)
         outcome: Literal["confirmed", "pending"] = (
             "confirmed"
             if observation.expires_at and request.granted_by(observation.expires_at)
@@ -764,21 +1185,42 @@ class CloudLabProvider(ComputeProvider):
         """
         config = CloudLabConfig.model_validate(ref.config)
         external_id = str(UUID(ref.external_id))
+        diagnostic_context = _diagnostic_context(config, external_id=external_id)
         try:
             response = await self._request(
-                "DELETE", f"/experiments/{external_id}", config.credential_ref
+                "DELETE",
+                f"/experiments/{external_id}",
+                config.credential_ref,
+                diagnostic_context=diagnostic_context,
             )
         except ProviderError as exc:
             if exc.code in {"result_unknown", "not_found"}:
-                return ProviderReceipt(outcome="unknown", resource=ref)
+                return ProviderReceipt(outcome="unknown", resource=ref, diagnostics=exc.diagnostics)
             raise
         # The official contract defines 204 as "Experiment deleted". Save
         # that evidence immediately rather than lose it to a failing GET.
         if response.status_code != 204:
-            return ProviderReceipt(outcome="unknown", resource=ref)
+            return ProviderReceipt(
+                outcome="unknown",
+                resource=ref,
+                diagnostics=self._response_diagnostics(
+                    response,
+                    "DELETE",
+                    f"/experiments/{external_id}",
+                    diagnostic_context,
+                    reason_code="http_rejected",
+                ),
+            )
         return ProviderReceipt(
             outcome="confirmed",
             resource=ref,
+            diagnostics=self._response_diagnostics(
+                response,
+                "DELETE",
+                f"/experiments/{external_id}",
+                diagnostic_context,
+                reason_code="request_accepted",
+            ),
             observation=ResourceObservation(
                 ref=ref,
                 state="terminated",
