@@ -3270,26 +3270,120 @@ async def test_host_release_moves_shared_profiles_and_live_snapshots(store):
     assert retried["result"] == {"kept": True}
 
 
-async def test_a_host_moves_out_only_when_another_host_can_restore_its_groups(store, hosts, db):
+_MOVE_OUT_ARCHIVES = {
+    "enabled": True,
+    "region": "us-east-1",
+    "kms_key_arn": "arn:aws:kms:us-east-1:123456789012:key/00000000-0000-0000-0000-000000000000",
+    "expected_bucket_owner": "123456789012",
+    "max_archive_bytes": 2 * 1024**3,
+    "multipart_threshold_bytes": 8 * 1024**2,
+    "multipart_part_bytes": 8 * 1024**2,
+}
+_CAPTURES = ["sandbox-archive-settings-v1", "sandbox-checkpoints-v1"]
+_RESTORES = [*_CAPTURES, "sandbox-restore-v1"]
+
+
+async def _archives_on(hosts) -> None:
+    configured = await hosts.set_sandbox_archive_settings(
+        expected_revision=0, settings=_MOVE_OUT_ARCHIVES
+    )
+    assert configured is not None and configured["revision"] == 1
+
+
+async def _applies(hosts, host: str, capabilities: list[str], *, register: bool = False) -> None:
+    """The Host runs this archive policy and declares what it can do with it."""
+    if register:
+        await hosts.register_host(
+            host=host, credential_hash=hash_secret("cred-" + host), slots_total=2
+        )
+    await hosts.record_host_heartbeat(
+        host=host,
+        capabilities=capabilities,
+        sandbox_archive_settings_applied_revision=1,
+        sandbox_archive_settings_revision_reported=True,
+    )
+
+
+async def _move_out_holds(db) -> list[str]:
+    async with db.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT host FROM agent_host_admission_holds WHERE purpose='move_out' ORDER BY host"
+        )
+    return [row["host"] for row in rows]
+
+
+async def test_a_host_moves_out_only_where_another_host_would_restore_its_groups(store, hosts, db):
     repo = store.compute_resources
     allocation_id, _, _ = await resource(store, hosts, name="leaving")
-    assert not await repo.move_out_can_proceed(allocation_id=allocation_id)
+    await _archives_on(hosts)
+    await _applies(hosts, "leaving", _CAPTURES)
 
-    await hosts.register_host(
-        host="target",
-        credential_hash=hash_secret("cred-target"),
-        capabilities=["sandbox-restore-v1"],
-        slots_total=2,
-    )
-    await hosts.record_host_heartbeat(host="target")
-    assert await repo.move_out_can_proceed(allocation_id=allocation_id)
+    assert not await repo.set_move_out_hold(allocation_id=allocation_id, due=True)
+    assert await _move_out_holds(db) == []
+
+    await _applies(hosts, "target", _RESTORES, register=True)
+    assert await repo.set_move_out_hold(allocation_id=allocation_id, due=True)
+    assert await _move_out_holds(db) == ["leaving"]
 
     # A started move continues even if its target goes away.
     async with db.acquire() as conn:
+        await conn.execute("DELETE FROM agent_runner_hosts WHERE host='target'")
+    assert await repo.set_move_out_hold(allocation_id=allocation_id, due=True)
+    # An extension ends it.
+    assert not await repo.set_move_out_hold(allocation_id=allocation_id, due=False)
+    assert await _move_out_holds(db) == []
+
+
+async def test_a_host_without_working_checkpoints_never_stops_serving(store, hosts):
+    """Its stopped groups would have no checkpoint, so their chats would only wait."""
+    repo = store.compute_resources
+    allocation_id, _, _ = await resource(store, hosts, name="leaving")
+    await _applies(hosts, "target", _RESTORES, register=True)
+    await _applies(hosts, "leaving", _CAPTURES)
+
+    # Archives off.
+    assert not await repo.set_move_out_hold(allocation_id=allocation_id, due=True)
+
+    # Archives on, but the leaving Host does not capture checkpoints.
+    await _archives_on(hosts)
+    await _applies(hosts, "target", _RESTORES)
+    await _applies(hosts, "leaving", ["sandbox-archive-settings-v1"])
+    assert not await repo.set_move_out_hold(allocation_id=allocation_id, due=True)
+
+    await _applies(hosts, "leaving", _CAPTURES)
+    assert await repo.set_move_out_hold(allocation_id=allocation_id, due=True)
+
+
+async def test_a_target_that_takes_no_new_groups_is_no_target(store, hosts, db):
+    """Restoring creates the group's container, which a new-groups hold forbids."""
+    repo = store.compute_resources
+    allocation_id, _, _ = await resource(store, hosts, name="leaving")
+    await _archives_on(hosts)
+    await _applies(hosts, "leaving", _CAPTURES)
+    await _applies(hosts, "target", _RESTORES, register=True)
+    async with db.acquire() as conn:
         await conn.execute(
             "INSERT INTO agent_host_admission_holds (host,allocation_id,purpose,source_id,scope) "
-            "VALUES ('leaving',$1,'move_out',$1,'all_claims')",
+            "VALUES ('target',$1,'lease_deadline','target-deadline','new_groups')",
             allocation_id,
         )
-        await conn.execute("DELETE FROM agent_runner_hosts WHERE host='target'")
-    assert await repo.move_out_can_proceed(allocation_id=allocation_id)
+
+    assert not await repo.set_move_out_hold(allocation_id=allocation_id, due=True)
+
+
+async def test_two_hosts_entering_their_windows_together_never_both_stop(store, hosts, db):
+    """Each is the other's only target; at most one of them may move out."""
+    repo = store.compute_resources
+    first, _, _ = await resource(store, hosts, name="first")
+    second, _, _ = await resource(store, hosts, name="second")
+    await _archives_on(hosts)
+    for name in ("first", "second"):
+        await _applies(hosts, name, _RESTORES)
+
+    outcomes = await asyncio.gather(
+        repo.set_move_out_hold(allocation_id=first, due=True),
+        repo.set_move_out_hold(allocation_id=second, due=True),
+    )
+
+    assert sorted(outcomes) == [False, True]
+    assert len(await _move_out_holds(db)) == 1

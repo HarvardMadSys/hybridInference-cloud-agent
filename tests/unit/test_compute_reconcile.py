@@ -159,7 +159,7 @@ def harness(monkeypatch, *, kind="acquire", identified=False):
         assert_autoscale_acquire_connections_verified=AsyncMock(),
         record_observation_error=AsyncMock(),
         set_admission_hold=AsyncMock(),
-        move_out_can_proceed=AsyncMock(return_value=True),
+        set_move_out_hold=AsyncMock(return_value=False),
         unmoved_groups=AsyncMock(return_value=0),
         prepare_bootstrap_binding=AsyncMock(),
         clear_bootstrap_hold=AsyncMock(return_value=True),
@@ -249,13 +249,12 @@ async def test_ready_host_uses_public_enrolled_fact_and_opens_only_its_bootstrap
         generation=1,
         worker_id="worker-a",
     )
-    # Four hours from expiry nothing restricts the Host: the move-out hold,
-    # which closes every claim, stays clear.
     assert all(
         call.kwargs["purpose"] == "lease_deadline"
-        or (call.kwargs["purpose"] == "move_out" and call.kwargs["scope"] is None)
         for call in h.repository.set_admission_hold.await_args_list
     )
+    # Four hours from expiry the Host is not moving out.
+    assert h.repository.set_move_out_hold.await_args.kwargs["due"] is False
 
 
 @pytest.mark.parametrize("blocked", [None, "data_mount_unavailable", "data_mount_conflict"])
@@ -1399,38 +1398,25 @@ async def test_a_finished_upgrade_lets_an_old_node_rotate(monkeypatch):
 
 
 def _move_out_hold(h):
-    calls = [
-        call.kwargs
-        for call in h.repository.set_admission_hold.await_args_list
-        if call.kwargs["purpose"] == "move_out"
-    ]
-    assert len(calls) == 1
-    return calls[0]
+    h.repository.set_move_out_hold.assert_awaited_once()
+    return h.repository.set_move_out_hold.await_args.kwargs
 
 
 @pytest.mark.asyncio
-async def test_a_host_in_its_move_out_window_holds_every_claim(monkeypatch):
-    """Each chat's next turn is then claimed elsewhere, from its group's checkpoint."""
+async def test_a_host_in_its_move_out_window_asks_to_hold_every_claim(monkeypatch):
+    """Each chat's next turn is then claimed elsewhere, from its group's checkpoint.
+
+    Whether the hold is set is the repository's decision: it needs working
+    checkpoints and a Host that would take the groups.
+    """
     h = harness(monkeypatch, kind="inspect", identified=True)
     h.provider.inspect.return_value = observed(expires=NOW + timedelta(minutes=90))
 
     await h.reconciler.execute(h.operation)
 
     hold = _move_out_hold(h)
-    assert (hold["source_id"], hold["scope"]) == ("allocation-a", "all_claims")
-    h.repository.move_out_can_proceed.assert_awaited_once_with(allocation_id="allocation-a")
-
-
-@pytest.mark.asyncio
-async def test_a_host_with_nowhere_to_move_keeps_serving_its_chats(monkeypatch):
-    """Holding claims with no other Host to restore on would only stall them."""
-    h = harness(monkeypatch, kind="inspect", identified=True)
-    h.provider.inspect.return_value = observed(expires=NOW + timedelta(minutes=90))
-    h.repository.move_out_can_proceed.return_value = False
-
-    await h.reconciler.execute(h.operation)
-
-    assert _move_out_hold(h)["scope"] is None
+    assert (hold["allocation_id"], hold["due"]) == ("allocation-a", True)
+    assert hold["operation_id"] == "operation-a"
 
 
 @pytest.mark.asyncio
@@ -1450,8 +1436,7 @@ async def test_a_host_that_does_not_move_out_never_holds_its_claims(monkeypatch,
 
     await h.reconciler.execute(h.operation)
 
-    assert _move_out_hold(h)["scope"] is None
-    h.repository.move_out_can_proceed.assert_not_awaited()
+    assert _move_out_hold(h)["due"] is False
 
 
 @pytest.mark.asyncio

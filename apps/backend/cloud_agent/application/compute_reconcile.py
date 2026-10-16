@@ -1511,17 +1511,13 @@ class ComputeReconciler:
         # next turn is taken by another Host from its group's checkpoint, and
         # the move-out sweep stops and hands over the idle groups.
         window = move_out_window_seconds(policy.model_dump())
-        moving = (
-            window > 0
-            and observation.expires_at is not None
-            and (observation.expires_at - _now()).total_seconds() <= window
-            and await self.repository.move_out_can_proceed(allocation_id=allocation["id"])
-        )
-        await self.repository.set_admission_hold(
+        await self.repository.set_move_out_hold(
             allocation_id=allocation["id"],
-            purpose="move_out",
-            source_id=allocation["id"],
-            scope="all_claims" if moving else None,
+            due=(
+                window > 0
+                and observation.expires_at is not None
+                and (observation.expires_at - _now()).total_seconds() <= window
+            ),
             **self._fence(operation),
         )
 

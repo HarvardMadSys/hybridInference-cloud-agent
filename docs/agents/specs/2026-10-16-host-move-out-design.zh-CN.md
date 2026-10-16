@@ -43,7 +43,13 @@ CloudLab 机器有租期，续期常被拒绝。到期时机器被收回，机�
 
 每次 inspection，reconciler 按观测到的到期时间设置或清除这条 hold（`scope='all_claims'`，`source_id` 为 allocation ID）。`all_claims` 沿用现有语义：Host 不能领取任何任务，已运行的 attempt 照常结束。
 
-**只有有地方可去时才开始。** `move_out_can_proceed` 要求另有一台已注册、在线、声明 `sandbox-restore-v1`、自己不在腾空、也没有 `all_claims` 限制的 Host。否则单机部署会提前 2 小时卡住所有后续轮次。一旦开始就不回退：hold 已存在时，即使目标暂时消失也继续。
+**只有真能搬走时才设置。** reconciler 只告诉仓库"窗口到了没有"（`due`），设不设 hold 由 `set_move_out_hold` 决定，条件是：
+
+1. **检查点能产生：** 归档开启且 `checkpoints_enabled`，这台分配的每个 Host 都声明 `sandbox-checkpoints-v1`，并已应用当前归档版本。否则停下的 group 没有检查点，会话只会一直排队。这一条每次都检查：检查点中途关闭，腾空也随之停止。
+2. **有 Host 会接手：** 另有一台在线、已注册、声明恢复和归档能力、已应用当前归档版本的 Host，而且按 claim 自己的准入规则 `host_compute_admission` 现在既能领取、也能新建 group（恢复要新建容器，所以 `new_groups` 限制、租期窗口、观测过期的 Host 都不算）。否则单机部署会提前 2 小时卡住所有后续轮次。
+3. **一旦开始就继续：** hold 已存在时，即使目标暂时消失也继续（第 1 条仍要满足）。
+
+检查和写入在同一事务里，并取得与其他 hold 写入相同的排他拓扑锁。两台 Host 同时进入窗口、互为唯一目标时，先拿到锁的那台设上 hold；第二台再检查时，对方已在腾空、不能新建 group，不再算目标。所以不会两台都停止服务。
 
 ### 3.3 停下闲置的 group
 
@@ -104,6 +110,6 @@ CloudLab 机器有租期，续期常被拒绝。到期时机器被收回，机�
 
 ## 6 验证
 
-- 单元：窗口计算、inspection 设置 hold、续期提前、告警只发一次、池容量计算、清扫任务。
-- PostgreSQL：检查点到达即交出、清扫停止闲置 group 后交出、忙碌 group 不停、旧 Host 领不回自己的 group、provider 终止交出 group。
+- 单元：窗口计算、inspection 按窗口请求 hold、续期提前、告警只发一次、池容量计算、清扫任务。
+- PostgreSQL：检查点未开启或原 Host 不捕获时不腾空、目标有 `new_groups` 限制时不算目标、两台同时进入窗口最多一台腾空、开始后目标消失仍继续；检查点到达即交出、清扫停止闲置 group 后交出、忙碌 group 不停、旧 Host 领不回自己的 group、provider 终止交出 group。
 - 检查命令：`make check`、`make test-db`（独立测试库）、`make ci-database`、`make docs`。

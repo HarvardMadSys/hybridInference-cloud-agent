@@ -23,9 +23,14 @@ from cloud_agent.domain.compute import (
     move_out_window_seconds,
     provider_resource_absent,
 )
+from cloud_agent.sandbox_archive_credentials import load_stored_archive_policy
 from cloud_agent.storage._sql.compute_admission import host_compute_admission, lock_compute_entry
 from cloud_agent.storage._sql.hosts import release_covered_sandboxes, revoke_host_credentials
 from cloud_agent.storage._sql.rows import load_json
+from cloud_agent_shared.sandbox_archive_settings import (
+    SANDBOX_ARCHIVE_CAPABILITY,
+    SANDBOX_CHECKPOINT_CAPABILITY,
+)
 from cloud_agent_shared.sandbox_restore import SANDBOX_RESTORE_CAPABILITY
 
 if TYPE_CHECKING:
@@ -2578,36 +2583,100 @@ class PostgresComputeResourceRepository:
                     scope,
                 )
 
-    async def move_out_can_proceed(self, *, allocation_id: str) -> bool:
-        """Whether this allocation's Host may hold its claims and move its groups out.
+    async def set_move_out_hold(
+        self,
+        *,
+        allocation_id: str,
+        due: bool,
+        operation_id: str | None = None,
+        generation: int | None = None,
+        worker_id: str | None = None,
+    ) -> bool:
+        """Set or clear this allocation's ``move_out`` hold; return whether it holds.
 
-        Once started, a move continues. Otherwise it starts only when another
-        enrolled, restore-capable Host that is not itself moving out could take
-        the groups: with nowhere to go, holding claims would only stall chats
-        until the lease ends.
+        Inside its window (``due``) the Host holds every claim only while its
+        groups can actually move: checkpoints are on and its Hosts capture
+        them, and another Host would claim the groups now, by the claim's own
+        admission rule. A started move continues without a target; it stops
+        if checkpoints stop. The check and the write share one exclusive
+        topology fence, so two Hosts entering their windows together cannot
+        each count on the other and both stop taking work.
         """
-        async with self._pool.acquire() as conn:
-            return bool(
-                await conn.fetchval(
-                    """SELECT EXISTS (
-                           SELECT 1 FROM agent_host_admission_holds
-                           WHERE allocation_id=$1 AND purpose='move_out'
-                       ) OR EXISTS (
-                           SELECT 1 FROM agent_runner_hosts h
-                           LEFT JOIN agent_compute_nodes n ON n.id=h.compute_node_id
-                           WHERE h.status='online' AND h.credential_hash IS NOT NULL
-                             AND h.capabilities @> $2::jsonb
-                             AND n.allocation_id IS DISTINCT FROM $1
-                             AND NOT EXISTS (
-                                 SELECT 1 FROM agent_host_admission_holds x
-                                 WHERE x.host=h.host
-                                   AND (x.scope='all_claims' OR x.purpose='move_out')
-                             )
-                       )""",
+        async with self._pool.acquire() as conn, conn.transaction():
+            await lock_compute_entry(conn, exclusive=True)
+            await self._fence(conn, operation_id, generation, worker_id, allocation_id)
+            moving = due and await self._move_out_possible(conn, allocation_id)
+            if moving:
+                await conn.execute(
+                    """INSERT INTO agent_host_admission_holds(host,allocation_id,purpose,source_id,scope)
+                    SELECT h.host,$1,'move_out',$1,'all_claims' FROM agent_runner_hosts h
+                    JOIN agent_compute_nodes n ON n.id=h.compute_node_id WHERE n.allocation_id=$1
+                    ON CONFLICT(host,purpose,source_id) DO NOTHING""",
                     allocation_id,
-                    json.dumps([SANDBOX_RESTORE_CAPABILITY]),
                 )
+            else:
+                await conn.execute(
+                    "DELETE FROM agent_host_admission_holds "
+                    "WHERE allocation_id=$1 AND purpose='move_out' AND source_id=$1",
+                    allocation_id,
+                )
+            return moving
+
+    @staticmethod
+    async def _move_out_possible(conn: Any, allocation_id: str) -> bool:
+        policy = await conn.fetchrow(
+            "SELECT sandbox_archive_settings, sandbox_archive_revision FROM agent_runner_policy WHERE id"
+        )
+        if policy is None:
+            return False
+        try:
+            archive = load_stored_archive_policy(
+                {
+                    **(load_json(policy["sandbox_archive_settings"]) or {}),
+                    "revision": policy["sandbox_archive_revision"],
+                }
             )
+        except ValueError:
+            return False
+        if not (archive.enabled and archive.checkpoints_enabled):
+            return False
+        hosts = await conn.fetch(
+            """SELECT h.host,h.capabilities,h.sandbox_archive_settings_applied_revision
+               FROM agent_compute_nodes n JOIN agent_runner_hosts h ON h.compute_node_id=n.id
+               WHERE n.allocation_id=$1""",
+            allocation_id,
+        )
+        if not hosts or any(
+            SANDBOX_CHECKPOINT_CAPABILITY not in (load_json(host["capabilities"]) or [])
+            or host["sandbox_archive_settings_applied_revision"] != archive.revision
+            for host in hosts
+        ):
+            return False
+        if await conn.fetchval(
+            "SELECT 1 FROM agent_host_admission_holds "
+            "WHERE allocation_id=$1 AND purpose='move_out' LIMIT 1",
+            allocation_id,
+        ):
+            return True
+        candidates = await conn.fetch(
+            """SELECT h.host FROM agent_runner_hosts h
+               LEFT JOIN agent_compute_nodes n ON n.id=h.compute_node_id
+               WHERE h.status='online' AND h.credential_hash IS NOT NULL
+                 AND h.capabilities @> $2::jsonb
+                 AND h.sandbox_archive_settings_applied_revision=$3
+                 AND n.allocation_id IS DISTINCT FROM $1
+               ORDER BY h.host""",
+            allocation_id,
+            json.dumps([SANDBOX_RESTORE_CAPABILITY, SANDBOX_ARCHIVE_CAPABILITY]),
+            archive.revision,
+        )
+        for candidate in candidates:
+            # Restoring creates the group's container there, which needs the
+            # same admission a new group does.
+            may_create, may_claim = await host_compute_admission(conn, candidate["host"])
+            if may_create and may_claim:
+                return True
+        return False
 
     async def unmoved_groups(self, *, allocation_id: str) -> int:
         """Count the groups still held only by this allocation's Hosts."""
