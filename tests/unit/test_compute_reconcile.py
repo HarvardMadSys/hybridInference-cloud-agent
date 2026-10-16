@@ -37,6 +37,7 @@ from cloud_agent.ports.external.host_bootstrap import (
     HostInventory,
     PreflightResult,
 )
+from cloud_agent.providers.compute.existing_ssh import ExistingSSHProvider
 from cloud_agent.schemas_compute import RenewalPolicy
 from cloud_agent.workers.compute_resources import ComputeResourceWorker
 from cloud_agent_shared.shared_protocol import shared_deployment_capability
@@ -917,6 +918,40 @@ async def test_missing_resource_within_its_lease_is_never_assumed_deleted(monkey
     assert h.operation["state"] == "blocked"
     assert h.allocation.get("observed_state") != "terminated"
     h.repository.record_observation_error.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_an_inspection_that_times_out_over_ssh_is_tried_again(monkeypatch):
+    """Reading a machine's identity changes nothing, so its timeout leaves nothing to verify.
+
+    The inspection waits and runs again. As an unknown outcome it would stop
+    every later operation of the server and keep it closed to new groups.
+    """
+    h = harness(monkeypatch, kind="inspect", identified=True)
+    transport = AsyncMock()
+    transport.run.side_effect = [
+        ProviderError("result_unknown", "SSH timed out; verify remote state before retrying"),
+        "f" * 32 + "\n",
+    ]
+    h.commands.registry.get.return_value.provider = ExistingSSHProvider(transport)
+    h.allocation.update(
+        provider_id="existing_ssh",
+        mode="attach",
+        external_id="allocation-a",
+        configuration={
+            "address": "node.example.org",
+            "username": "agent",
+            "credential_ref": "ssh-1",
+            "known_hosts_ref": "ssh-1:known_hosts",
+        },
+    )
+
+    await h.reconciler.execute(h.operation)
+
+    assert h.operation["state"] == "waiting"
+    assert h.repository.finish_operation.await_args.kwargs["retry_after_seconds"] == 30
+    await h.reconciler.execute(h.operation)
+    assert (h.operation["state"], h.operation["step"]) == ("succeeded", "observed")
 
 
 REGISTERED_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMdO7VBdfUlnQkwf4yfnmrk1h3G625rktRv0VgZa5awA"
