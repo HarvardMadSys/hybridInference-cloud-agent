@@ -42,6 +42,7 @@ from cloud_agent.api.deps import (
 )
 from cloud_agent.api.worker import verify_claiming_host
 from cloud_agent.application.pending_messages import settle_queue, settle_waiting_queues
+from cloud_agent.goals.controller import run_goal_wakeups
 from cloud_agent.source_control_runtime import SourceControlUnavailable
 from cloud_agent.storage.assembly import Storage
 from cloud_agent.storage.repositories import pending_messages as pending_message_storage
@@ -2118,6 +2119,70 @@ async def test_the_owners_waiting_message_runs_before_the_goal_continues(api: Ap
     turns = await api.turns(thread_id)
     assert [turn["turn_source"] for turn in turns] == ["human", "human", "goal"]
     assert turns[2]["parent_job_id"] == turns[1]["id"]
+
+
+#: The owner's goal writes that withdraw a queued automatic round, as the goal
+#: band sends them: method, path after ``/goal``, and body.
+_ROUND_WITHDRAWING_WRITES = {
+    "edit": ("PUT", "", {"goal": {"objective": "the export works, as CSV"}}),
+    "pause": ("POST", "/pause", None),
+    "clear": ("DELETE", "", None),
+}
+
+
+@pytest.mark.parametrize("write", list(_ROUND_WITHDRAWING_WRITES))
+async def test_a_round_the_goal_withdraws_lets_the_owners_waiting_message_go_next(
+    api: Api, write: str
+):
+    """Editing, pausing or clearing a goal is not a Stop for the owner's waiting message.
+
+    Each of the three cancels the automatic round that was waiting for a host,
+    and the owner's message was waiting behind that round. A cancelled newest
+    turn is what a settlement reads as the owner pressing Stop, so the message
+    used to sit in a queue marked ``stopped`` while an edited goal went on
+    queueing rounds ahead of it. The platform withdrew that round; nobody
+    stopped anything. One reaper pass — its goal wakeups, then its queue sweep,
+    in the loop's order — sends the message as the next turn.
+    """
+    job = await api.create(prompt="ship the export", goal={"objective": "the export works"})
+    thread_id = job["thread_id"]
+    await api.run(job)
+    assert [(turn["turn_source"], turn["state"]) for turn in await api.turns(thread_id)] == [
+        ("human", "succeeded"),
+        ("goal", "queued"),
+    ]
+    waiting = await api.send(thread_id, "use CSV, not JSON")
+    assert waiting.status_code == 201, waiting.text
+    assert waiting.json()["pending"] is not None
+    method, path, body = _ROUND_WITHDRAWING_WRITES[write]
+    written = await api.client.request(
+        method, f"/v1/agent/threads/{thread_id}/goal{path}", json=body
+    )
+    assert written.status_code == 200, written.text
+
+    await run_goal_wakeups(store=api.store, gateway=api.gateway)
+    await settle_waiting_queues(api.store, gateway=api.gateway, github_app=None)
+
+    turns = await api.turns(thread_id)
+    assert [(turn["turn_source"], turn["state"]) for turn in turns] == [
+        ("human", "succeeded"),
+        ("goal", "cancelled"),
+        ("human", "queued"),
+    ]
+    assert turns[2]["task_prompt"] == "use CSV, not JSON"
+    queue = await api.queue(thread_id)
+    assert (queue["queue_paused_reason"], queue["messages"]) == (None, [])
+    async with api.pool.acquire() as conn:
+        parked = await conn.fetch(
+            "SELECT waiting_job_id FROM agent_goal_wakeups "
+            "WHERE thread_id = $1 AND state = 'pending'",
+            thread_id,
+        )
+    # An edited goal is still active and waits behind the owner's turn; a
+    # paused or cleared one has nothing to schedule.
+    assert [row["waiting_job_id"] for row in parked] == (
+        [turns[2]["id"]] if write == "edit" else []
+    )
 
 
 # -- the rest of the design's behaviour ---------------------------------------------
