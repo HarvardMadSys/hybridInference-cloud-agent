@@ -34,7 +34,7 @@ from cloud_agent_shared.secret_redaction import SecretRedactor
 
 if TYPE_CHECKING:
     import builtins
-    from collections.abc import Mapping
+    from collections.abc import Iterable, Mapping
 
 
 def _json(value: Any) -> Any:
@@ -99,6 +99,69 @@ async def lock_environment_snapshots(conn: Any, user_id: str) -> None:
         "SELECT pg_advisory_xact_lock(hashtextextended('agent-environment-snapshots:' || $1, 0))",
         user_id,
     )
+
+
+async def retire_changed_snapshots(
+    conn: Any, user_id: str, environment_ids: Iterable[str] | None = None
+) -> None:
+    """Retire the owner's ready snapshots of an installation they have since changed.
+
+    A snapshot holds what its installation wrote, which can include a
+    setup-time Secret (an ``.npmrc``, say). Once the owner changes the
+    install script or a setup-time value, a global one included, new tasks
+    are bound to another fingerprint and never start from it, yet it stayed
+    stored until it expired. It is superseded instead: no longer handed out,
+    and deleted after the grace a snapshot replaced by a newer build gets.
+    Only the current configuration says what is current, and a fingerprint
+    needs the deployment's key, so this runs in the transaction that
+    publishes a configuration and in the one that records a build.
+
+    A snapshot built for a task that replaced the install script is checked
+    against that script with the current values. ``environment_ids`` limits
+    the check to those environments; ``None`` checks all of the owner's, as
+    a change to their global variables needs. Without the key nothing is
+    retired: without it nothing is matched or built either.
+    """
+    await lock_environment_snapshots(conn, user_id)
+    snapshots = await conn.fetch(
+        """
+        SELECT s.id, s.environment_id, s.setup_fingerprint,
+               COALESCE(b.has_setup_override, FALSE) AS has_setup_override, b.setup_override
+        FROM agent_environment_snapshots s
+        LEFT JOIN agent_environment_runs r ON r.id = s.run_id
+        LEFT JOIN agent_environment_bindings b ON b.id = r.binding_id
+        WHERE s.user_id = $1 AND s.state = 'ready'
+          AND ($2::text[] IS NULL OR s.environment_id = ANY($2::text[]))
+        """,
+        user_id,
+        None if environment_ids is None else list(environment_ids),
+    )
+    if not snapshots:
+        return
+    stale = []
+    try:
+        installations = await PostgresEnvironmentRepository._environment_installations(
+            conn, user_id, list({row["environment_id"] for row in snapshots})
+        )
+        for row in snapshots:
+            # An archived environment's snapshots are maintenance's to retire.
+            if (installation := installations.get(row["environment_id"])) is None:
+                continue
+            script, variables = installation
+            if row["has_setup_override"]:
+                script = row["setup_override"]
+            current = setup_fingerprint(script, variables) if script else None
+            if current != row["setup_fingerprint"]:
+                stale.append(row["id"])
+    except EnvironmentEncryptionError:
+        return
+    if stale:
+        await conn.execute(
+            "UPDATE agent_environment_snapshots SET state='superseded', "
+            "detail='The installation changed', updated_at=NOW() "
+            "WHERE id=ANY($1::text[]) AND state='ready'",
+            stale,
+        )
 
 
 class PostgresEnvironmentRepository:
@@ -181,6 +244,45 @@ class PostgresEnvironmentRepository:
             )
             for v in variables
         ]
+
+    @staticmethod
+    async def _environment_installations(
+        conn: Any, user_id: str, environment_ids: builtins.list[str]
+    ) -> dict[str, tuple[str, builtins.list[EnvironmentVariable]]]:
+        """What a task bound now would install with: each active environment's setup and values.
+
+        The values are the global and environment variables merged, as a
+        binding merges them; an environment whose configuration no longer
+        merges binds no task and is left out.
+        """
+        rows = await conn.fetch(
+            "SELECT e.id,v.id AS version_id,v.document FROM agent_environments e "
+            "JOIN agent_environment_versions v ON v.environment_id=e.id AND v.revision=e.revision "
+            "WHERE e.user_id=$1 AND e.id=ANY($2::text[]) AND e.repo IS NOT NULL "
+            "AND e.archived_at IS NULL",
+            user_id,
+            environment_ids,
+        )
+        if not rows:
+            return {}
+        global_id = await conn.fetchval(
+            "SELECT v.id FROM agent_environments e JOIN agent_environment_versions v "
+            "ON v.environment_id=e.id AND v.revision=e.revision WHERE e.user_id=$1 AND e.repo IS NULL",
+            user_id,
+        )
+        decode = PostgresEnvironmentRepository._environment_decode
+        stored = PostgresEnvironmentRepository._environment_stored_variables
+        global_values = decode(await stored(conn, global_id))
+        result = {}
+        for row in rows:
+            try:
+                merged = merge_variables(
+                    global_values, decode(await stored(conn, row["version_id"]))
+                )
+            except ValueError:
+                continue
+            result[row["id"]] = (_json(row["document"]).get("setup_script") or "", merged)
+        return result
 
     @staticmethod
     def _environment_encode(
@@ -413,6 +515,11 @@ class PostgresEnvironmentRepository:
             "UPDATE agent_environments SET revision=$2,updated_at=NOW() WHERE id=$1",
             row["id"],
             revision,
+        )
+        # This revision may install something other than its snapshots hold;
+        # global variables feed every environment of their owner.
+        await retire_changed_snapshots(
+            conn, row["user_id"], None if row["repo"] is None else [row["id"]]
         )
         row = {**row, "revision": revision}
         return await self._environment_public(conn, row)

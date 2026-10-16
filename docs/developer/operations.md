@@ -2144,11 +2144,15 @@ stored like a checkpoint. Design: [install snapshots](../agents/specs/2026-10-15
   group from the sandbox image and installs in full; the turn never fails
   because of a snapshot. Without the encryption key, bindings carry no
   fingerprint and nothing is snapshotted.
-- **Retention.** The newest snapshot of an installation supersedes older ones,
-  which are deleted after 24 hours. A snapshot is not handed out after 25 days,
-  and is deleted after 7 days unused, when its environment is archived or
-  deleted by the owner, and beyond 20 GiB of ready snapshots per owner (least
-  recently used first).
+- **Retention.** The newest snapshot of an installation supersedes older ones.
+  Changing an installation — its install script, or a setup-time variable or
+  Secret, a global one included — supersedes the snapshots of the earlier
+  one, and a build that finishes after the change is superseded on receipt;
+  a snapshot built for a task's own install script is checked against that
+  script. Superseded snapshots are no longer handed out and are deleted after
+  24 hours. A snapshot is not handed out after 25 days, and is deleted after
+  7 days unused, when its environment is archived or deleted by the owner,
+  and beyond 20 GiB of ready snapshots per owner (least recently used first).
 - **Deletion.** Hosts poll `/v1/agent/worker/environment-snapshots/deletions`
   every 10 minutes and delete the object versions it names, least recently
   tried first, so objects the bucket refuses to delete never hold back the

@@ -16,7 +16,10 @@ from typing import TYPE_CHECKING, Any
 from cloud_agent.execution_profiles import default_execution_profile
 from cloud_agent.sandbox_archive_credentials import load_stored_archive_policy
 from cloud_agent.storage._sql.rows import load_json
-from cloud_agent.storage.repositories.environments import lock_environment_snapshots
+from cloud_agent.storage.repositories.environments import (
+    lock_environment_snapshots,
+    retire_changed_snapshots,
+)
 from cloud_agent_shared.environment_snapshots import (
     SNAPSHOT_MAX_AGE_DAYS,
     SNAPSHOT_OWNER_QUOTA_BYTES,
@@ -346,6 +349,10 @@ class PostgresEnvironmentSnapshotRepository:
                 receipt["base_image"],
                 snapshot_id,
             )
+            # A build queued before the owner changed the installation, or for
+            # a task or test bound before it, installed with the old values:
+            # it is recorded, so it gets deleted, but never handed out.
+            await retire_changed_snapshots(conn, row["user_id"], [row["environment_id"]])
             await self._enforce_quota(conn, row["user_id"])
             return True
 
@@ -508,7 +515,7 @@ class PostgresEnvironmentSnapshotRepository:
                     detail=CASE
                         WHEN e.archived_at IS NOT NULL THEN 'Environment archived'
                         WHEN {_SAVED_BY_TEST} THEN 'Saved by an environment test'
-                        WHEN s.state='superseded' THEN 'Replaced by a newer snapshot'
+                        WHEN s.state='superseded' THEN COALESCE(s.detail, 'Replaced by a newer snapshot')
                         WHEN s.ready_at <= NOW() - INTERVAL '{SNAPSHOT_MAX_AGE_DAYS} days' THEN 'Snapshot expired'
                         ELSE 'Not used for {SNAPSHOT_UNUSED_DAYS} days' END
                 FROM agent_environments e
