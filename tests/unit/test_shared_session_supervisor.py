@@ -6179,6 +6179,58 @@ def test_a_reaped_activation_ends_with_its_residency_so_its_group_can_idle(turn)
     assert manager.items[_spec().container_name].running is False
 
 
+def test_a_loss_its_activation_rotated_past_meanwhile_leaves_the_new_process_running():
+    """A loss names the generation its beat sampled, which can be rotated past meanwhile.
+
+    The loss closes that generation's process and then ends the activation
+    that took it on. Before it does, the same activation can rotate to a newer
+    residency and start the replacement, as a Fork rotates its source's. Ending
+    the activation then tore the replacement down and marked its context lost.
+    """
+    manager = _Manager()
+    factory = _TransportFactory()
+    supervisor = SharedChatSessionSupervisor(manager, transport_factory=factory)
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+    first = _launch("athr_source", native_session_id="native-source", slot=0)
+    supervisor.ensure_resident("athr_source", lease.token, first)
+    old = factory.transports[0]
+    rotated = []
+
+    def rotate_as_the_old_process_closes() -> None:
+        # The loss closes the old process outside the supervisor's lock, and
+        # only then ends the activation; the rotation lands in between.
+        type(old).close(old)
+        rotated.append(
+            supervisor.ensure_resident(
+                "athr_source",
+                lease.token,
+                replace(first, credential="grant-2", residency_generation=2),
+            )
+        )
+
+    old.close = rotate_as_the_old_process_closes
+
+    lost = supervisor.residency_lost("athr_source", generation=1)
+
+    assert [replacement.residency_generation for replacement in rotated] == [2]
+    assert old.alive is False
+    assert factory.transports[1].alive is True
+    assert lost.residency_generation == 2
+    assert lost.context_status != "lost"
+    settled = supervisor.settle(
+        "athr_source", lease.token, job_id="ajob_next", context_status="restored"
+    )
+    assert settled.busy is False
+    assert settled.context_status == "restored"
+
+
 def test_a_residency_its_activation_is_replacing_leaves_that_activation_running():
     """A host beat can name the generation a live activation is rotating away from.
 

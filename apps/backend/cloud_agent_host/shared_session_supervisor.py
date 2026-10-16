@@ -3217,10 +3217,24 @@ class SharedChatSessionSupervisor:
             member.settlement_receipt = (token, descriptor)
             return descriptor
 
-    def abandon(self, thread_id: str, token: str, *, lost: bool) -> SharedSessionDescriptor:
-        """Release one failed member; restart/lose it without killing siblings."""
+    def abandon(
+        self,
+        thread_id: str,
+        token: str,
+        *,
+        lost: bool,
+        residency: tuple[str, int] | None = None,
+    ) -> SharedSessionDescriptor:
+        """Release one failed member; restart/lose it without killing siblings.
+
+        ``residency`` releases the lease only while it still names that
+        residency, checked under the same lock as the lease itself: a lease
+        that has taken on a newer process meanwhile keeps it.
+        """
         with self._lock:
             group, member = self._leased_member(thread_id, token)
+            if residency is not None and member.lease_residency != residency:
+                return self._descriptor(group, member)
             turn = member.current_turn
         if turn is not None:
             with contextlib.suppress(Exception):
@@ -3229,6 +3243,8 @@ class SharedChatSessionSupervisor:
                 self.complete_turn(thread_id, token, turn)
         with self._lock:
             group, member = self._leased_member(thread_id, token)
+            if residency is not None and member.lease_residency != residency:
+                return self._descriptor(group, member)
             transport = member.transport
             observer_cursor = member.observer_cursor
             # An admitted turn holds the member lock until whoever detaches it
@@ -3280,7 +3296,8 @@ class SharedChatSessionSupervisor:
         While its turn still runs, the lease stays with that turn's stream and
         runner, so the stream still answers for what the turn did. An
         activation that is replacing the process under a newer residency has
-        not taken it on, and keeps its lease.
+        not taken it on, and keeps its lease, including one that starts the
+        replacement after the old process is closed here.
         """
         with self._lock:
             group, member = self._member(thread_id)
@@ -3334,9 +3351,12 @@ class SharedChatSessionSupervisor:
                 self._manager.finish_guest_observation(group.spec, orphaned_observer_cursor)
         if ended_lease is not None:
             # A settlement or abandon that released the lease meanwhile has
-            # ended the activation already.
+            # ended the activation already. One that rotated it to a newer
+            # residency meanwhile has a process this loss does not name.
             with contextlib.suppress(SessionLeaseLost):
-                return self.abandon(thread_id, ended_lease, lost=True)
+                return self.abandon(
+                    thread_id, ended_lease, lost=True, residency=(ended_lease, generation)
+                )
         with self._lock:
             return self._descriptor(group, member)
 
