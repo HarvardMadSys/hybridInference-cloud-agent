@@ -1095,6 +1095,80 @@ async def test_cancelling_a_persons_queued_turn_leaves_the_goal_alone(store, poo
     assert (await store.goals.get_goal(thread_id=job["thread_id"]))["state"] == "active"
 
 
+async def test_a_round_stopped_while_its_claim_was_handed_back_pauses_the_goal(
+    store, pool, monkeypatch
+):
+    """A round the owner stopped before it began ends as one cancelled in the queue does.
+
+    The owner's Stop can land while the claim is still being handed to its
+    host, and a hand-back then ends the round ``cancelled`` instead of
+    requeueing it. Its goal stayed active with nothing to run: the scheduling
+    sweep armed it again, and the next pass queued another round.
+    """
+    from cloud_agent.goals.controller import run_goal_wakeups
+
+    monkeypatch.setenv("AGENT_REPO_ALLOWLIST", "example-org/example-repo")
+    job, first, goal = await _live_goal_job(store)
+    await _finish(pool, first)
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_goal_wakeups SET state = 'processed' WHERE thread_id = $1",
+            job["thread_id"],
+        )
+    round_job = await _round(store, job=job, goal=goal)
+    claimed = await _claim_round(store)
+    assert claimed is not None and claimed["id"] == round_job["id"]
+    assert (
+        await store.attempt_commands.request_cancel(job_id=round_job["id"], user_id=job["user_id"])
+        == "running"
+    )
+
+    # The hand-over could not mint the round's grant, say.
+    assert await store.attempt_commands.release_claim(
+        job_id=claimed["id"],
+        attempt_id=claimed["attempt_id"],
+        lease_generation=claimed["lease_generation"],
+        retry_after_seconds=30,
+    )
+
+    assert (await store.conversation_queries.get_job(round_job["id"]))["state"] == "cancelled"
+    after = await store.goals.get_goal(thread_id=job["thread_id"])
+    assert (after["state"], after["pause_reason"]) == ("paused", "cancelled")
+    assert job["thread_id"] not in (await store.goals.sweep_goal_scheduling())["rearmed"]
+    await run_goal_wakeups(store=store, gateway=_GATEWAY)
+    rounds = [
+        (turn["turn_no"], turn["state"])
+        for turn in await _thread_turns(store, pool, job["thread_id"])
+        if turn["turn_source"] == "goal"
+    ]
+    assert rounds == [(round_job["turn_no"], "cancelled")]
+
+
+async def test_a_persons_turn_stopped_while_its_claim_was_handed_back_leaves_the_goal_alone(
+    store, pool
+):
+    job, first, _ = await _live_goal_job(store)
+    await _finish(pool, first)
+    human = await store.conversation_commands.create_follow_up(
+        parent_job_id=job["id"],
+        user_id=job["user_id"],
+        prompt="actually, also do this",
+    )
+    claimed = await _claim_round(store)
+    assert claimed is not None and claimed["id"] == human["id"]
+    assert await store.attempt_commands.request_cancel(job_id=human["id"]) == "running"
+
+    assert await store.attempt_commands.release_claim(
+        job_id=claimed["id"],
+        attempt_id=claimed["attempt_id"],
+        lease_generation=claimed["lease_generation"],
+        retry_after_seconds=30,
+    )
+
+    assert (await store.conversation_queries.get_job(human["id"]))["state"] == "cancelled"
+    assert (await store.goals.get_goal(thread_id=job["thread_id"]))["state"] == "active"
+
+
 async def test_sweep_cancels_a_stale_round_and_rearms_its_live_goal(store, pool):
     """A round that no longer matches its goal can never be claimed."""
     job, first, goal = await _live_goal_job(store)

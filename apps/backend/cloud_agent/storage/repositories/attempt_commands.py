@@ -647,8 +647,8 @@ class PostgresAttemptCommands:
                 return False
             released = released_row["job_id"]
             # Attempt taken, conversation next, job last — the same order
-            # ``transition`` keeps. A release that lands on ``cancelled`` runs
-            # the terminal sweep, and that sweep can pause this goal.
+            # ``transition`` keeps. A release that lands on ``cancelled``
+            # pauses an automatic round's goal, which writes the conversation.
             await lock_conversation_by_job(conn, job_id=released)
             # The store's own answer, not the caller's. `agent_job_events.job_id`
             # has no foreign key, so a mismatched (job_id, attempt_id) pair would
@@ -722,6 +722,19 @@ class PostgresAttemptCommands:
                     detail="not run because the sandbox could not be restored",
                 )
             if released_state == CANCELLED:
+                # The owner's Stop ended the turn before it began, as a cancel
+                # in the queue does, and an automatic round stops its goal
+                # with it. Left active with nothing to run, the goal was armed
+                # again by the scheduling sweep, which queued another round.
+                await goal_after_terminal(
+                    conn,
+                    job_id=released,
+                    thread_id=await conn.fetchval(
+                        "SELECT thread_id FROM agent_jobs WHERE id = $1", released
+                    ),
+                    state=CANCELLED,
+                    detail="the automatic round was cancelled before it ran",
+                )
                 # A cancelled parent is a turn boundary like any other
                 # terminal outcome: fail any child that cannot preserve
                 # continuity in this transaction.
