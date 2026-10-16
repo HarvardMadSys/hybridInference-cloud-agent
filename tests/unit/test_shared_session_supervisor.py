@@ -6075,6 +6075,119 @@ def test_lost_shared_residency_preserves_observation_until_turn_closes():
     ]
 
 
+@pytest.mark.parametrize("turn", ["never_started", "aborted"])
+def test_a_reaped_activation_ends_with_its_residency_so_its_group_can_idle(turn):
+    """A runner that dies mid-activation never settles or abandons its member.
+
+    The control plane reaps the attempt and closes the residency its process
+    ran on. The lease the dead activation holds ends with that process, as an
+    abandon would end it; otherwise a sibling's group never goes idle and its
+    publication snapshot is refused as an active mutation. A turn the dead
+    runner had started was already aborted when its stream dropped.
+    """
+    now = [1000.0]
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(
+        manager, transport_factory=_TransportFactory(), idle_timeout_s=60, clock=lambda: now[0]
+    )
+    dead = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+    supervisor.ensure_resident(
+        "athr_source", dead.token, _launch("athr_source", native_session_id="native-source", slot=0)
+    )
+    if turn == "aborted":
+        started = supervisor.start_turn(
+            "athr_source", dead.token, prompt="work", model="glm-5.1", reasoning_effort=None
+        )
+        supervisor.abort_turn("athr_source", dead.token, started)
+    peer = supervisor.acquire(
+        _spec(),
+        thread_id="athr_peer",
+        owner="attempt:7",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+    supervisor.ensure_resident(
+        "athr_peer", peer.token, _launch("athr_peer", native_session_id="native-peer", slot=1)
+    )
+    supervisor.settle("athr_peer", peer.token, job_id="ajob_peer", context_status="live")
+
+    ended = supervisor.residency_lost("athr_source", generation=1)
+
+    assert ended.busy is False
+    assert ended.group_busy is False
+    assert ended.context_status == ended.resident_state == "lost"
+    assert ended.residency_generation == 0
+    assert ended.idle_deadline_monotonic == 1060.0
+    with pytest.raises(SessionLeaseLost):
+        supervisor.settle("athr_source", dead.token, job_id="ajob_dead", context_status="live")
+    assert supervisor.capture_snapshot("athr_peer", capture=lambda _backend: {"patch": ""}) == {
+        "patch": ""
+    }
+    now[0] += 60
+    assert [stopped.running for stopped in supervisor.sweep()] == [False]
+    assert manager.items[_spec().container_name].running is False
+
+
+def test_a_residency_its_activation_is_replacing_leaves_that_activation_running():
+    """A host beat can name the generation a live activation is rotating away from.
+
+    The activation found the member's process unfit for its turn (here, a new
+    model) before taking it on, and asked the control plane for a new
+    residency, so the old generation is no longer current: a beat sampled just
+    before reports it lost. That closes the old process only. The activation
+    keeps its lease and starts the replacement under its new generation.
+    """
+    manager = _Manager()
+    factory = _TransportFactory()
+    supervisor = SharedChatSessionSupervisor(manager, transport_factory=factory)
+    first = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+    old_launch = _launch("athr_source", native_session_id="native-source", slot=0)
+    supervisor.ensure_resident("athr_source", first.token, old_launch)
+    supervisor.settle("athr_source", first.token, job_id="ajob_source", context_status="live")
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:2",
+        activation_generation=2,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+    probe = replace(old_launch, model="glm-5.2", credential=None)
+    with pytest.raises(SandboxError, match="requires a renewable credential"):
+        supervisor.ensure_resident("athr_source", lease.token, probe)
+
+    lost = supervisor.residency_lost("athr_source", generation=1)
+
+    assert lost.busy is True
+    assert lost.context_status == "live"
+    assert factory.transports[0].alive is False
+    replacement = supervisor.ensure_resident(
+        "athr_source", lease.token, replace(probe, credential="grant-2", residency_generation=2)
+    )
+    assert replacement.residency_generation == 2
+    assert replacement.resident_action == "resume"
+    settled = supervisor.settle(
+        "athr_source", lease.token, job_id="ajob_next", context_status="restored"
+    )
+    assert settled.busy is False
+    assert settled.context_status == "restored"
+
+
 def test_supervisor_close_releases_an_active_turn_observation_and_member_lock():
     manager = _Manager()
     manager.backend.runtime = KATA_RUNTIME

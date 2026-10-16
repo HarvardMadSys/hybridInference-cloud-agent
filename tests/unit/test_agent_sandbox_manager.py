@@ -6,6 +6,7 @@ import asyncio
 import base64
 import contextlib
 import functools
+import gc
 import hashlib
 import json
 import logging
@@ -107,6 +108,68 @@ async def test_resource_checkpoint_is_forwarded_before_any_native_event():
     finally:
         gate.set()
         await response.body_iterator.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cli", ["silent", "speaks"])
+async def test_a_dropped_turn_stream_aborts_its_turn_without_a_collector(cli):
+    """A runner whose turn process dies leaves its turn stream with no reader.
+
+    The turn must be aborted as soon as the client is gone, whether or not the
+    CLI says anything more. A frames generator left suspended runs its cleanup
+    only when a garbage collector reaches it, and until then the member's
+    turn, lease and lock stay held.
+    """
+    disconnected = threading.Event()
+    released = threading.Event()
+    aborted = threading.Event()
+
+    class QuietTurn:
+        @staticmethod
+        def lines():
+            yield SimpleNamespace(event_type="message", payload={"text": "hi"}, raw_line="hi")
+            if cli == "speaks":
+                assert disconnected.wait(5)
+                yield SimpleNamespace(event_type="message", payload={"text": "and"}, raw_line="and")
+            released.wait(10)  # the model keeps working until someone interrupts it
+
+    supervisor = _SharedSupervisor()
+    supervisor.start_turn = lambda *_args, **_kw: QuietTurn()  # type: ignore[attr-defined]
+    supervisor.abort_turn = lambda *_args: aborted.set()  # type: ignore[attr-defined]
+    endpoint = next(
+        route.endpoint
+        for route in _app(supervisor).routes
+        if getattr(route, "path", None) == "/shared-sandboxes/{thread_id}/turn"
+    )
+    response = await endpoint(
+        "athr_source", SharedTurnRequest(token="lease", prompt="work", model="model")
+    )
+    first_frame = asyncio.Event()
+
+    async def send(message):
+        if message["type"] == "http.response.body" and message.get("body"):
+            first_frame.set()
+
+    async def receive():
+        # The runner reads the first frame, then its process dies while the
+        # stream waits on the CLI for the next one.
+        await first_frame.wait()
+        await asyncio.sleep(0.5)
+        disconnected.set()
+        return {"type": "http.disconnect"}
+
+    gc.disable()
+    serving = asyncio.ensure_future(
+        response({"type": "http", "asgi": {"spec_version": "2.3"}}, receive, send)
+    )
+    try:
+        done, _ = await asyncio.wait({serving}, timeout=3)
+        assert serving in done
+        assert aborted.is_set()
+    finally:
+        gc.enable()
+        released.set()
+        await asyncio.wait_for(serving, timeout=10)
 
 
 class _TerminalProcess(TerminalProcess):

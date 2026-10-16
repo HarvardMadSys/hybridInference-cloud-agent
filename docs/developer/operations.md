@@ -2267,6 +2267,12 @@ same database transaction, and a new follow-up receives
 `sandbox_context_lost` instead of becoming a permanently unclaimable queued
 job. That conservative choice prevents duplicate prompt/tool execution.
 
+On the host, the reaper's close of that member's residency also ends the
+activation that ran on it, as an abandon would, so a Fork sibling's group can
+still go idle and its publication snapshot is not refused as an active
+mutation. A turn that was running when the runner died was already aborted
+when the runner's turn stream to the sandbox manager closed.
+
 #### Safety watchdogs
 
 These guards serve separate purposes; they do not create extra idle states or
@@ -2283,8 +2289,9 @@ deactivate a healthy group:
   noisy forever. It is a resource/security guard, not sandbox deactivation;
 - `AGENT_RESIDENCY_TTL_S` defaults to 1800 seconds and fences each member's
   live-process ownership plus renewable inference grant. Losing that lease
-  demotes/restarts the member; it does not itself stop a healthy chat group or
-  create another inactivity clock;
+  demotes/restarts the member, and ends with LOST context an unfinished
+  activation that had taken on its process; it does not itself stop a healthy
+  chat group or create another inactivity clock;
 - no TTL removes chat data. A retained sandbox is removed only by an
   administrator's deletion or once its owner permanently deletes every chat
   using it (see [sandbox inventory](#sandbox-inventory-resource-usage-and-controls));

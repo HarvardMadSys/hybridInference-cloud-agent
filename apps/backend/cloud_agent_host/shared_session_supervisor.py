@@ -393,6 +393,11 @@ class _Member:
     last_settled_job_id: str | None = None
     lease_token: str | None = None
     lease_owner: str | None = None
+    #: The lease whose activation took on the member's process, by reusing it
+    #: or by starting it, and that process's residency generation. Losing
+    #: that residency ends the activation; losing one it is replacing, before
+    #: it has taken on the new one, does not.
+    lease_residency: tuple[str, int] | None = None
     # Only the last completed activation can replay its acknowledgement.
     settlement_receipt: tuple[str, SharedSessionDescriptor] | None = field(default=None, repr=False)
     transport: ResidentTransport[DialectRuntime] | None = None
@@ -3266,13 +3271,31 @@ class SharedChatSessionSupervisor:
         *,
         generation: int,
     ) -> SharedSessionDescriptor:
-        """Close only the process whose renewable grant fence was rejected."""
+        """Close only the process whose renewable grant fence was rejected.
+
+        The activation that took that process on ends with it, as
+        ``abandon(lost=True)`` would end it: its CLI and credential are gone,
+        and when the control plane reaped its attempt nothing else is left to
+        settle or abandon it, so its lease would keep the group busy for good.
+        While its turn still runs, the lease stays with that turn's stream and
+        runner, so the stream still answers for what the turn did. An
+        activation that is replacing the process under a newer residency has
+        not taken it on, and keeps its lease.
+        """
         with self._lock:
             group, member = self._member(thread_id)
             if member.residency_generation != generation:
                 return self._descriptor(group, member)
             turn = member.current_turn
             transport = member.transport
+            lease_token = member.lease_token
+            ended_lease = (
+                lease_token
+                if turn is None
+                and lease_token is not None
+                and member.lease_residency == (lease_token, generation)
+                else None
+            )
             # An active observation belongs to the turn, not to the resident
             # transport.  Keep it until complete_turn/abort_turn closes the
             # turn so the events already captured before residency loss are
@@ -3309,6 +3332,11 @@ class SharedChatSessionSupervisor:
         if orphaned_observer_cursor is not None:
             with contextlib.suppress(Exception):
                 self._manager.finish_guest_observation(group.spec, orphaned_observer_cursor)
+        if ended_lease is not None:
+            # A settlement or abandon that released the lease meanwhile has
+            # ended the activation already.
+            with contextlib.suppress(SessionLeaseLost):
+                return self.abandon(thread_id, ended_lease, lost=True)
         with self._lock:
             return self._descriptor(group, member)
 
@@ -4884,6 +4912,8 @@ class SharedChatSessionSupervisor:
                 if launch.residency_generation:
                     member.residency_generation = launch.residency_generation
                 member.resident_state = "live"
+                if lease_token is not None:
+                    member.lease_residency = (lease_token, member.residency_generation)
                 return "reuse"
             if current is not None and current.alive and not launch.credential:
                 # A probe from a new turn intentionally omits credentials so a
@@ -4926,6 +4956,8 @@ class SharedChatSessionSupervisor:
                 member.transport = transport
                 member.process_generation += 1
                 member.residency_generation = launch.residency_generation
+                if lease_token is not None:
+                    member.lease_residency = (lease_token, launch.residency_generation)
                 member.native_session_id = transport.native_session_id or member.native_session_id
                 # HOT means this exact process accepted another turn. Any
                 # newly opened process is a native resume (or the first NEW

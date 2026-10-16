@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 import uvicorn
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi.concurrency import iterate_in_threadpool
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -130,7 +131,9 @@ from cloud_agent_shared.workspace_browser import (
 logger = get_logger(__name__)
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Iterator
+    from collections.abc import AsyncIterator, Awaitable, Callable, Generator, Iterator
+
+    from starlette.types import Receive, Scope, Send
 
     from cloud_agent_host.sandbox_archives import SandboxArchiveService
 
@@ -268,6 +271,33 @@ class _EndpointLifecycleCalls:
             )
         async with self._lock:
             self._calls.difference_update(calls)
+
+
+class _EndingStreamingResponse(StreamingResponse):
+    """A streaming response that runs ``on_end`` however the response ends.
+
+    Starlette stops pulling a body when its client goes away, a send fails or
+    its task is cancelled, but never closes it. A generator left suspended
+    runs its own cleanup only when a garbage collector reaches it, which a
+    reference cycle can put off indefinitely.
+    """
+
+    def __init__(
+        self,
+        content: AsyncIterator[str],
+        *,
+        on_end: Callable[[], Awaitable[None]],
+        media_type: str,
+        headers: dict[str, str],
+    ) -> None:
+        super().__init__(content, media_type=media_type, headers=headers)
+        self._on_end = on_end
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            await self._on_end()
 
 
 class _CommandSlots:
@@ -3044,8 +3074,10 @@ def create_app(
             except Exception:
                 return None
 
-        def frames() -> Iterator[str]:
-            turn_boundary_closed = False
+        turn_boundary_closed = False
+
+        def frames() -> Generator[str, None, None]:
+            nonlocal turn_boundary_closed
             tool_windows = ToolWindowTracker()
             resources: dict[str, Any] | None = None
 
@@ -3082,6 +3114,10 @@ def create_app(
                     try:
                         event = events.get(timeout=0.25)
                     except queue.Empty:
+                        # Hand the pulling thread back while the CLI is quiet:
+                        # a response whose reader has gone can end only once
+                        # the pull it is waiting on returns.
+                        yield ""
                         continue
                     if event is None:
                         break
@@ -3154,9 +3190,34 @@ def create_app(
                 with contextlib.suppress(Exception):
                     if not turn_boundary_closed:
                         owner.abort_turn(thread_id, body.token, turn)
+                        turn_boundary_closed = True
 
-        return StreamingResponse(
-            frames(),
+        lines = frames()
+
+        async def stream() -> AsyncIterator[str]:
+            async for line in iterate_in_threadpool(lines):
+                if line:
+                    yield line
+
+        def end_stream() -> None:
+            # Closing the frames aborts a turn they started and did not
+            # close; a reader gone before they started leaves it to this.
+            lines.close()
+            if not turn_boundary_closed:
+                with contextlib.suppress(Exception):
+                    owner.abort_turn(thread_id, body.token, turn)
+
+        async def ended() -> None:
+            # However the response ended -- the runner's process may have
+            # died -- the member's turn, lease and lock must not wait for a
+            # collector. Shutdown owns the call, as it owns every lifecycle
+            # call, and once sealed it closes the supervisor itself.
+            with contextlib.suppress(HTTPException):
+                await endpoint_calls.run(end_stream)
+
+        return _EndingStreamingResponse(
+            stream(),
+            on_end=ended,
             media_type="application/x-ndjson",
             headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
         )
