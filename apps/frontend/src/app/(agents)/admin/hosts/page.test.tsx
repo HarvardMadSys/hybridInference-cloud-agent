@@ -571,13 +571,57 @@ describe('AdminHostsPage', () => {
     expect(confirm).toHaveBeenCalledTimes(1);
     // The consequence has to be in the prompt: force ends the host's running
     // attempts now, requeueing them or marking a chat lost.
-    expect(confirm.mock.calls[0][0]).toMatch(/Removing it now ends them/);
+    expect(confirm.mock.calls[0][0]).toMatch(/Removing it now ends the attempts/);
     expect(mocked.remove).not.toHaveBeenCalled();
 
     confirm.mockReturnValue(true);
     mocked.remove.mockResolvedValue(pool([]));
     fireEvent.click(screen.getByRole('button', { name: 'Remove now' }));
     await waitFor(() => expect(mocked.remove).toHaveBeenCalledWith('runner-a', true));
+  });
+
+  it('asks before removing a host whose sandboxes cannot move, and removes it only on yes', async () => {
+    mocked.remove.mockRejectedValueOnce(
+      new APIError('no_move_target', 'No other server can take the sandboxes', 409),
+    );
+    const confirm = vi.fn().mockReturnValue(false);
+    vi.stubGlobal('confirm', confirm);
+    renderPage();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Remove from pool' }));
+
+    await waitFor(() => expect(confirm).toHaveBeenCalledTimes(1));
+    expect(confirm.mock.calls[0][0]).toMatch(/cannot continue until it returns/);
+    expect(mocked.remove).toHaveBeenCalledTimes(1);
+
+    mocked.remove.mockRejectedValueOnce(
+      new APIError('no_move_target', 'No other server can take the sandboxes', 409),
+    );
+    mocked.remove.mockResolvedValueOnce(pool([]));
+    confirm.mockReturnValue(true);
+    fireEvent.click(screen.getByRole('button', { name: 'Remove from pool' }));
+
+    await waitFor(() => expect(mocked.remove).toHaveBeenCalledWith('runner-a', false, true));
+  });
+
+  it('shows how much of a removal that moves sandboxes out is left', async () => {
+    mocked.list.mockResolvedValue(
+      pool([
+        host({
+          status: 'draining',
+          removal_pending: true,
+          removal_moves_out: true,
+          sandboxes_left: 3,
+          slots_used: 1,
+        }),
+      ]),
+    );
+    renderPage();
+
+    expect(
+      await screen.findByText('Moving out: 3 sandbox(es), 1 running turn(s) left'),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Remove now' })).toBeInTheDocument();
   });
 
   it('warns when the pinned host has gone quiet', async () => {

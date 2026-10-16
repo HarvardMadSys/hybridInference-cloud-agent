@@ -296,13 +296,20 @@ class HostPoolRepository(Protocol):
         """
         ...
 
-    async def remove_host(self, *, host: str, force: bool = False) -> str:
-        """Revoke a host's credential and take it out of the pool.
+    async def remove_host(
+        self, *, host: str, force: bool = False, allow_unmoved: bool = False
+    ) -> str:
+        """Take a host out of the pool, moving its groups out first when they can.
 
-        Returns ``"ok"``, ``"unknown"``, ``"fenced"``, ``"draining"`` or
-        ``"busy"``. A host still holding slots is drained instead of revoked:
-        it claims nothing more, the request is recorded, and
-        :meth:`finish_host_removals` revokes it once its running attempts end.
+        Returns ``"ok"``, ``"unknown"``, ``"fenced"``, ``"moving_out"``,
+        ``"draining"``, ``"no_move_target"`` or ``"busy"``. ``"moving_out"``
+        drains the host, moves its groups to other hosts through their
+        checkpoints, and :meth:`finish_host_removals` revokes it once none is
+        left and its running attempts end. A host whose groups cannot move is
+        refused with ``"no_move_target"`` unless ``allow_unmoved``; then a host
+        still holding slots is drained instead of revoked: it claims nothing
+        more, the request is recorded, and :meth:`finish_host_removals`
+        revokes it once its running attempts end.
         ``"busy"`` is the busy host whose status cannot move to ``draining``.
         ``force`` revokes now and ends that work — the lease expiry *is* the
         recovery path. A retained activation cannot be replayed safely after

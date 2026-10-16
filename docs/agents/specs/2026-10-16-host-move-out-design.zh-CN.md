@@ -111,13 +111,26 @@ CloudLab 机器有租期，续期常被拒绝。到期时机器被收回，机�
 | 腾空期间续期成功 | hold 清除，未搬走的继续在原 Host；已 `cold` 的在别处恢复 |
 | 恢复失败 | 按 #658：回到 `cold`，最多 3 次，之后 `lost` |
 
-## 5 不在本版范围
+## 5 管理员移除
 
-- 管理员"移除"不进入腾空：没有运行中任务时它会立即撤销凭证。
+管理员在 Admin → Servers 点"移除"，原来的做法是：有运行中的任务就等它结束，没有就立即撤销凭证。闲着、但容器还开着的 group 不会先停下打包，撤销后只能留在原机器上。
+
+现在"移除"默认也先腾空（迁移 `0084_host_removal_move_out` 新增 `agent_runner_hosts.removal_moves_out`）：
+
+1. **能搬就先搬。** 机器上还有需要停下或没有检查点的 group，并且 `move_out_possible` 成立（检查点能产生、有别的 Host 会接手，在同一把排他拓扑锁里判断），机器进入 `draining`，同时置 `removal_moves_out`，返回 `moving_out`。之后和到期腾空完全一样：不接任务，闲着的 group 停下、打包、交出去，正在跑的一轮不打断。
+2. **没地方搬时先问管理员。** 如果这些 group 搬不走，接口返回 409 `no_move_target`。页面弹窗说明"移除后这些会话留在原机器上，回来之前不能继续"，管理员确认后带 `allow_unmoved=true` 再发一次，按原来的规则移除。只有已停止、检查点覆盖的 group 时不问，因为撤销时它们照样会被交出（#658）。
+3. **搬完才撤销。** `finish_host_removals` 对带 `removal_moves_out` 的移除，除了等运行中的任务结束，还要等这台机器上不再有 group（`cold`、`restoring`、`lost`、已删除的不算）。
+4. **页面显示进度。** 主机行显示"Moving out: N sandbox(es), M running turn(s) left"（来自 `sandboxes_left`）。搬不走或卡住时，管理员可以点"Remove now"，也就是原来的强制移除：运行中的任务立即结束，没搬走的 group 留在原机器上。
+5. **"恢复使用"即取消。** undrain 清除 `removal_requested_at`，腾空随之停止。已经交出去的 group 留在新机器上。
+
+已经在等待中的旧移除请求（`removal_moves_out=false`）保持原来的含义。
+
+## 6 不在本版范围
+
 - 腾空完的池成员提前释放（见 3.7）。
 - 心跳超时自动判定 Host 失联。
 
-## 6 验证
+## 7 验证
 
 - 单元：窗口计算、inspection 按窗口请求 hold、续期提前、告警只发一次、池容量计算、清扫任务。
 - PostgreSQL：检查点未开启或原 Host 不捕获时不腾空、目标有 `new_groups` 限制时不算目标、两台同时进入窗口最多一台腾空、开始后目标消失仍继续；检查点到达即交出、清扫停止闲置 group 后交出、忙碌 group 不停、旧 Host 领不回自己的 group、provider 终止交出 group。

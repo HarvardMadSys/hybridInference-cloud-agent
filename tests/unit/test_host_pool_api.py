@@ -378,12 +378,23 @@ class FakeHostPoolStore(AllCapabilities):
             return "ok", row["drain_fence_epoch"]
         return "ok", epoch
 
-    async def remove_host(self, *, host: str, force: bool = False) -> str:
+    async def remove_host(
+        self, *, host: str, force: bool = False, allow_unmoved: bool = False
+    ) -> str:
         row = self.rows.get(host)
         if row is None:
             return "unknown"
         if row["drain_fence_active"] and not force:
             return "fenced"
+        # The sandboxes the real store would have to strand: set by a test.
+        if row.get("stranded") and not force and not allow_unmoved:
+            return "no_move_target"
+        if row.get("movable") and not force:
+            row["status"] = HOST_DRAINING
+            row["removal_requested_at"] = row["removal_requested_at"] or datetime.now(UTC)
+            row["removal_moves_out"] = True
+            row["sandboxes_left"] = row["movable"]
+            return "moving_out"
         if row["slots_used"] > 0 and not force:
             if not transition_allowed(row["status"], HOST_DRAINING):
                 return "busy"
@@ -2289,6 +2300,41 @@ async def test_removing_an_idle_host_revokes_it(client):
     assert response.status_code == 200
     assert store.rows["runner-a"]["status"] == HOST_DISABLED
     assert store.rows["runner-a"]["credential_hash"] is None
+
+
+async def test_removing_a_host_whose_sandboxes_cannot_move_asks_first(client):
+    """They would stay on the removed host, and their chats could not continue."""
+    async_client, store = client
+    store.seed("runner-a", credential_hash="abc", enrolled=True)
+    store.rows["runner-a"]["stranded"] = True
+
+    refused = await async_client.post("/admin/agent/runner-hosts/runner-a/remove", headers=ADMIN)
+
+    assert refused.status_code == 409
+    assert refused.json()["detail"]["error"]["type"] == "no_move_target"
+    assert store.rows["runner-a"]["status"] != HOST_DISABLED
+
+    anyway = await async_client.post(
+        "/admin/agent/runner-hosts/runner-a/remove?allow_unmoved=true", headers=ADMIN
+    )
+
+    assert anyway.status_code == 200
+    assert store.rows["runner-a"]["status"] == HOST_DISABLED
+
+
+async def test_removing_a_host_moves_its_sandboxes_out_and_reports_progress(client):
+    async_client, store = client
+    store.seed("runner-a", credential_hash="abc", enrolled=True)
+    store.rows["runner-a"]["movable"] = 3
+
+    response = await async_client.post("/admin/agent/runner-hosts/runner-a/remove", headers=ADMIN)
+
+    assert response.status_code == 200
+    [host] = response.json()["hosts"]
+    assert host["status"] == HOST_DRAINING
+    assert host["removal_pending"] is True
+    assert host["removal_moves_out"] is True
+    assert host["sandboxes_left"] == 3
 
 
 async def test_forced_removal_takes_a_busy_host_out_anyway(client):

@@ -189,6 +189,10 @@ export interface AgentRunnerHost {
   drain_fence_epoch: string;
   /** True while a Remove waits for this draining host's running attempts to end. */
   removal_pending?: boolean;
+  /** True while that Remove also moves this host's sandboxes to other hosts. */
+  removal_moves_out?: boolean;
+  /** Sandboxes still held only by this host while its removal moves them out. */
+  sandboxes_left?: number | null;
   /**
    * True when the host redeemed an enrollment token, which is the difference
    * between a name that is a scheduling label and a name that is an identity.
@@ -539,9 +543,12 @@ export async function setAgentRunnerHostSettings(
 /**
  * Revoke this host's credential and take it out of the pool.
  *
- * Unforced, a busy host is not revoked yet: it stops taking new work, reports
- * `removal_pending`, and the control plane revokes it once its running
- * attempts end.
+ * Unforced, the host first moves its sandboxes to other hosts when they can
+ * move: it stops taking new work, reports `removal_pending` and
+ * `removal_moves_out`, and the control plane revokes it once none is left and
+ * its running attempts end. When they cannot move, the request fails with the
+ * `no_move_target` code unless `allowUnmoved`; then a busy host is revoked once
+ * its running attempts end, and an idle one at once.
  *
  * `force` is off by default for a reason worth repeating at the call site:
  * attempts still running on that host are ended. Their leases expire at once,
@@ -551,8 +558,12 @@ export async function setAgentRunnerHostSettings(
 export async function removeAgentRunnerHost(
   host: string,
   force = false,
+  allowUnmoved = false,
 ): Promise<AgentRunnerHostPool> {
-  const query = force ? '?force=true' : '';
+  const params = new URLSearchParams();
+  if (force) params.set('force', 'true');
+  if (allowUnmoved) params.set('allow_unmoved', 'true');
+  const query = params.size > 0 ? `?${params.toString()}` : '';
   const resp = await fetchWithAuth(
     API_BASE,
     `${HOSTS}/${encodeURIComponent(host)}/remove${query}`,

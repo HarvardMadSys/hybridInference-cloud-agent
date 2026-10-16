@@ -662,7 +662,8 @@ async def test_a_group_its_checkpoint_does_not_cover_stays_on_its_host(
         # Opening the workspace starts the container after the checkpoint.
         assert await store.sandbox.fence_workspace_start(thread_id=job["thread_id"]) == "stopped"
 
-    assert await store.host_pool.remove_host(host="runner-a") == "ok"
+    # Nowhere to move it, so the administrator removes the host anyway.
+    assert await store.host_pool.remove_host(host="runner-a", allow_unmoved=True) == "ok"
 
     state = await _state(pool)
     assert state["state"] == "stopped"

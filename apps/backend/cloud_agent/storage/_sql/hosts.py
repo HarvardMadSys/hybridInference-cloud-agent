@@ -38,6 +38,7 @@ HOST_COLUMN_NAMES = (
     "drain_fence_active",
     "drain_fence_epoch",
     "removal_requested_at",
+    "removal_moves_out",
     "sandbox_runtime",
     "sandbox_image_digest",
     "runtime_versions",
@@ -274,12 +275,17 @@ async def release_covered_sandboxes(
     return [str(row["id"]) for row in rows]
 
 
-# A Host in its move-out window: no claims, and each group stopped and handed
-# to another Host through its checkpoint. ``{host}`` names the Host column.
-MOVING_OUT_HOST_SQL = """EXISTS (
+# A Host moving out, in its lease window or because an administrator removes
+# it: no claims, and each group stopped and handed to another Host through its
+# checkpoint. ``{host}`` names the Host column.
+MOVING_OUT_HOST_SQL = """(EXISTS (
     SELECT 1 FROM agent_host_admission_holds move_out
     WHERE move_out.host = {host} AND move_out.purpose = 'move_out'
-)"""
+) OR EXISTS (
+    SELECT 1 FROM agent_runner_hosts removing
+    WHERE removing.host = {host} AND removing.removal_requested_at IS NOT NULL
+      AND removing.removal_moves_out
+))"""
 
 
 async def moving_out_hosts(conn: Any) -> list[str]:

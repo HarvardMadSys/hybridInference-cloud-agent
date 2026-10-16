@@ -47,6 +47,7 @@ from cloud_agent.storage._sql.hosts import (
     QUALIFIED_HOST_COLUMNS,
     revoke_host_credentials,
 )
+from cloud_agent.storage._sql.move_out import UNMOVED_GROUP_SQL, move_out_possible
 from cloud_agent.storage._sql.rows import load_json
 from cloud_agent.storage._sql.sandbox import THREAD_SANDBOX_SOURCE
 from cloud_agent.storage.repositories.host_capacity import insert_capacity_history_point
@@ -72,6 +73,11 @@ if TYPE_CHECKING:
 
 
 logger = get_logger(__name__)
+
+#: A removal that moves groups out still has a group bound to host ``h``.
+_GROUPS_LEFT_SQL = (
+    "EXISTS (SELECT 1 FROM agent_sandboxes g WHERE g.host = h.host AND " + UNMOVED_GROUP_SQL + ")"
+)
 
 _LEGACY_SANDBOX_MANAGER_KEYS = frozenset(
     {"terminal_idle_ttl_s", "terminal_hard_ttl_s", "terminal_max_sessions"}
@@ -854,16 +860,27 @@ class PostgresHostPoolRepository:
             )
         return previous
 
-    async def remove_host(self, *, host: str, force: bool = False) -> str:
-        """Revoke a host's credential and take it out of the pool.
+    async def remove_host(
+        self, *, host: str, force: bool = False, allow_unmoved: bool = False
+    ) -> str:
+        """Take a host out of the pool, moving its groups out first when they can.
 
-        Returns ``"ok"``, ``"unknown"``, ``"fenced"``, ``"draining"`` or
-        ``"busy"``. A host still holding slots is not revoked on the spot:
-        that would end running attempts whose machine has officially stopped
-        existing. It moves to ``draining`` with the request recorded, so it
-        claims nothing more, and :meth:`finish_host_removals` revokes it once
-        its last slot comes back. ``"busy"`` is left for the busy host that
-        cannot drain at all.
+        Returns ``"ok"``, ``"unknown"``, ``"fenced"``, ``"moving_out"``,
+        ``"draining"``, ``"no_move_target"`` or ``"busy"``.
+
+        When its groups can move -- checkpoints work and another host would
+        restore them -- the host moves to ``draining`` and moves out
+        (``"moving_out"``): it claims nothing, its idle groups stop into
+        checkpoints and are handed over one at a time, and
+        :meth:`finish_host_removals` revokes it once no group is left and its
+        last running turn has ended. Nothing running is interrupted.
+
+        When they cannot, a host holding groups is refused with
+        ``"no_move_target"`` unless ``allow_unmoved``: removing it now leaves
+        those groups bound to it. With ``allow_unmoved`` a removal keeps its
+        earlier meaning: a host still holding slots drains (``"draining"``)
+        and is revoked once its running attempts end; an idle one is revoked
+        now. ``"busy"`` is left for the busy host that cannot drain at all.
 
         ``force`` ends that work now instead of waiting for it — lease expiry
         *is* the recovery path, and the revocation brings it forward to now
@@ -871,7 +888,7 @@ class PostgresHostPoolRepository:
         host, so a lease left to run would let the removed machine keep
         renewing it. A retained activation cannot be replayed safely after its
         host disappears, so its expiry marks that chat LOST and fails
-        already-queued descendants instead.
+        already-queued descendants instead. Covered stopped groups still move.
 
         Disabling rather than deleting. The row is what
         ``agent_attempts.host_id`` points at, and what an operator reads when
@@ -881,6 +898,9 @@ class PostgresHostPoolRepository:
         Docker writable layer was deleted.
         """
         async with self._pool.acquire() as conn, conn.transaction():
+            # The fence a move-out is decided under, before any row: two hosts
+            # removed together cannot each count on the other as a target.
+            await lock_compute_entry(conn, exclusive=True)
             # The host's running attempts before its row: the order every
             # writer that ends an attempt keeps (move the attempt, then give
             # its slot back). Expiring those leases while holding the host row
@@ -891,26 +911,48 @@ class PostgresHostPoolRepository:
                 host,
             )
             row = await conn.fetchrow(
-                "SELECT status, slots_used, drain_fence_active "
-                "FROM agent_runner_hosts WHERE host = $1 FOR UPDATE",
+                "SELECT status, slots_used, drain_fence_active, removal_requested_at, "
+                "removal_moves_out FROM agent_runner_hosts WHERE host = $1 FOR UPDATE",
                 host,
             )
             if row is None:
                 return "unknown"
             if row["drain_fence_active"] and not force:
                 return "fenced"
-            if row["slots_used"] > 0 and not force:
-                if not transition_allowed(row["status"], HOST_DRAINING):
-                    return "busy"
-                await conn.execute(
-                    "UPDATE agent_runner_hosts SET status = $2, "
-                    "removal_requested_at = COALESCE(removal_requested_at, NOW()) "
-                    "WHERE host = $1",
+            if force:
+                await revoke_host_credentials(conn, [host])
+                return "ok"
+            # A stopped group its checkpoint covers moves on revocation anyway;
+            # the others need stopping into one first, or would stay here.
+            unsettled = int(
+                await conn.fetchval(
+                    f"SELECT count(*) FROM agent_sandboxes g WHERE g.host = $1 "
+                    f"AND {UNMOVED_GROUP_SQL} "
+                    "AND NOT (g.state = 'stopped' AND g.restore_checkpoint_id IS NOT NULL)",
                     host,
-                    HOST_DRAINING,
                 )
-                return "draining"
-            await revoke_host_credentials(conn, [host])
+            )
+            moving = (row["removal_requested_at"] is not None and row["removal_moves_out"]) or (
+                unsettled > 0 and await move_out_possible(conn, [host], need_target=True)
+            )
+            if not moving and unsettled > 0 and not allow_unmoved:
+                return "no_move_target"
+            if row["slots_used"] == 0 and not moving:
+                await revoke_host_credentials(conn, [host])
+                return "ok"
+            if row["status"] != HOST_DRAINING and not transition_allowed(
+                row["status"], HOST_DRAINING
+            ):
+                return "busy"
+            await conn.execute(
+                "UPDATE agent_runner_hosts SET status = $2, "
+                "removal_requested_at = COALESCE(removal_requested_at, NOW()), "
+                "removal_moves_out = $3 WHERE host = $1",
+                host,
+                HOST_DRAINING,
+                moving,
+            )
+            return "moving_out" if moving else "draining"
         return "ok"
 
     async def finish_host_removals(self) -> list[str]:
@@ -927,8 +969,9 @@ class PostgresHostPoolRepository:
         removed: list[str] = []
         async with self._pool.acquire() as conn:
             candidates = await conn.fetch(
-                "SELECT host FROM agent_runner_hosts "
-                "WHERE removal_requested_at IS NOT NULL AND slots_used = 0 ORDER BY host"
+                "SELECT h.host FROM agent_runner_hosts h "
+                "WHERE h.removal_requested_at IS NOT NULL AND h.slots_used = 0 "
+                "AND NOT (h.removal_moves_out AND " + _GROUPS_LEFT_SQL + ") ORDER BY h.host"
             )
             for candidate in candidates:
                 host = candidate["host"]
@@ -939,11 +982,17 @@ class PostgresHostPoolRepository:
                         host,
                     )
                     row = await conn.fetchrow(
-                        "SELECT slots_used, removal_requested_at "
-                        "FROM agent_runner_hosts WHERE host = $1 FOR UPDATE",
+                        "SELECT h.slots_used, h.removal_requested_at, "
+                        "(h.removal_moves_out AND " + _GROUPS_LEFT_SQL + ") AS moving "
+                        "FROM agent_runner_hosts h WHERE h.host = $1 FOR UPDATE",
                         host,
                     )
-                    if row is None or row["removal_requested_at"] is None or row["slots_used"]:
+                    if (
+                        row is None
+                        or row["removal_requested_at"] is None
+                        or row["slots_used"]
+                        or row["moving"]
+                    ):
                         continue
                     await revoke_host_credentials(conn, [host])
                 removed.append(host)
@@ -1087,7 +1136,10 @@ class PostgresHostPoolRepository:
             )
             rows = await conn.fetch(
                 f"""
-                SELECT {HOST_COLUMNS}, {HOST_CAPACITY_COLUMNS}
+                SELECT {HOST_COLUMNS}, {HOST_CAPACITY_COLUMNS},
+                       (SELECT count(*) FROM agent_sandboxes g
+                        WHERE g.host = agent_runner_hosts.host AND {UNMOVED_GROUP_SQL})
+                           AS sandboxes_left
                 FROM agent_runner_hosts
                 ORDER BY last_seen_at DESC
                 """

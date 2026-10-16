@@ -23,15 +23,10 @@ from cloud_agent.domain.compute import (
     move_out_window_seconds,
     provider_resource_absent,
 )
-from cloud_agent.sandbox_archive_credentials import load_stored_archive_policy
 from cloud_agent.storage._sql.compute_admission import host_compute_admission, lock_compute_entry
 from cloud_agent.storage._sql.hosts import release_covered_sandboxes, revoke_host_credentials
+from cloud_agent.storage._sql.move_out import move_out_possible
 from cloud_agent.storage._sql.rows import load_json
-from cloud_agent_shared.sandbox_archive_settings import (
-    SANDBOX_ARCHIVE_CAPABILITY,
-    SANDBOX_CHECKPOINT_CAPABILITY,
-)
-from cloud_agent_shared.sandbox_restore import SANDBOX_RESTORE_CAPABILITY
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -2624,59 +2619,25 @@ class PostgresComputeResourceRepository:
 
     @staticmethod
     async def _move_out_possible(conn: Any, allocation_id: str) -> bool:
-        policy = await conn.fetchrow(
-            "SELECT sandbox_archive_settings, sandbox_archive_revision FROM agent_runner_policy WHERE id"
-        )
-        if policy is None:
-            return False
-        try:
-            archive = load_stored_archive_policy(
-                {
-                    **(load_json(policy["sandbox_archive_settings"]) or {}),
-                    "revision": policy["sandbox_archive_revision"],
-                }
+        hosts = [
+            row["host"]
+            for row in await conn.fetch(
+                """SELECT h.host FROM agent_compute_nodes n
+                   JOIN agent_runner_hosts h ON h.compute_node_id=n.id
+                   WHERE n.allocation_id=$1 ORDER BY h.host""",
+                allocation_id,
             )
-        except ValueError:
-            return False
-        if not (archive.enabled and archive.checkpoints_enabled):
-            return False
-        hosts = await conn.fetch(
-            """SELECT h.host,h.capabilities,h.sandbox_archive_settings_applied_revision
-               FROM agent_compute_nodes n JOIN agent_runner_hosts h ON h.compute_node_id=n.id
-               WHERE n.allocation_id=$1""",
-            allocation_id,
+        ]
+        started = bool(
+            await conn.fetchval(
+                "SELECT 1 FROM agent_host_admission_holds "
+                "WHERE allocation_id=$1 AND purpose='move_out' LIMIT 1",
+                allocation_id,
+            )
         )
-        if not hosts or any(
-            SANDBOX_CHECKPOINT_CAPABILITY not in (load_json(host["capabilities"]) or [])
-            or host["sandbox_archive_settings_applied_revision"] != archive.revision
-            for host in hosts
-        ):
-            return False
-        if await conn.fetchval(
-            "SELECT 1 FROM agent_host_admission_holds "
-            "WHERE allocation_id=$1 AND purpose='move_out' LIMIT 1",
-            allocation_id,
-        ):
-            return True
-        candidates = await conn.fetch(
-            """SELECT h.host FROM agent_runner_hosts h
-               LEFT JOIN agent_compute_nodes n ON n.id=h.compute_node_id
-               WHERE h.status='online' AND h.credential_hash IS NOT NULL
-                 AND h.capabilities @> $2::jsonb
-                 AND h.sandbox_archive_settings_applied_revision=$3
-                 AND n.allocation_id IS DISTINCT FROM $1
-               ORDER BY h.host""",
-            allocation_id,
-            json.dumps([SANDBOX_RESTORE_CAPABILITY, SANDBOX_ARCHIVE_CAPABILITY]),
-            archive.revision,
-        )
-        for candidate in candidates:
-            # Restoring creates the group's container there, which needs the
-            # same admission a new group does.
-            may_create, may_claim = await host_compute_admission(conn, candidate["host"])
-            if may_create and may_claim:
-                return True
-        return False
+        # A started move continues without a target, but never once its
+        # checkpoints stop.
+        return await move_out_possible(conn, hosts, need_target=not started)
 
     async def unmoved_groups(self, *, allocation_id: str) -> int:
         """Count the groups still held only by this allocation's Hosts."""

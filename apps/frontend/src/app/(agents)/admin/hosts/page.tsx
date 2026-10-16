@@ -584,7 +584,10 @@ function HostsView() {
   // action whose effect is visible on the row it changed passes no notice:
   // the row is the confirmation, and a banner restating it is noise.
   const run = useCallback(
-    async (action: () => Promise<AgentRunnerHostPool>, ok: string | null) => {
+    async (
+      action: () => Promise<AgentRunnerHostPool>,
+      ok: string | null | ((pool: AgentRunnerHostPool) => string | null),
+    ) => {
       setBusy(true);
       setNotice(null);
       try {
@@ -595,7 +598,7 @@ function HostsView() {
         appliedSeq.current += 1;
         applyPool(next);
         setRefreshFailed(false);
-        setNotice(ok);
+        setNotice(typeof ok === 'function' ? ok(next) : ok);
       } catch (e) {
         if (!mounted.current) return;
         if (accessDenied(e)) {
@@ -632,23 +635,54 @@ function HostsView() {
   // A busy host is not cut off: it stops taking new work, and the control
   // plane removes it once its running turns end. The row says "removing" until
   // then, so only the idle case needs a notice.
-  const handleRemove = (host: string, slotsUsed: number) =>
+  // Its sandboxes move to other servers first when they can. When they cannot,
+  // the server says so, and removing anyway is the administrator's decision.
+  const handleRemove = (host: string) =>
     void run(
-      () => removeAgentRunnerHost(host, false),
-      slotsUsed > 0
-        ? `${host} stops taking new work and is removed when its ${slotsUsed} running turn(s) finish.`
-        : `Removed ${host} from the pool.`,
+      async () => {
+        try {
+          return await removeAgentRunnerHost(host, false);
+        } catch (e) {
+          if (!(e instanceof APIError && e.code === 'no_move_target')) throw e;
+          const anyway = window.confirm(
+            `No other server can take the sandboxes on ${host} now, or checkpoints are off. ` +
+              'Removing it anyway leaves them on it, and their chats cannot continue until it ' +
+              'returns. Remove anyway?',
+          );
+          return anyway ? removeAgentRunnerHost(host, false, true) : getAgentRunnerHosts();
+        }
+      },
+      (pool) => {
+        const after = pool.hosts.find((item) => item.host === host);
+        if (!after?.removal_pending) {
+          return after?.status === 'disabled' ? `Removed ${host} from the pool.` : null;
+        }
+        return after.removal_moves_out
+          ? `${host} stops taking new work, moves its sandboxes to other servers, and is removed once they have moved.`
+          : `${host} stops taking new work and is removed when its ${after.slots_used} running turn(s) finish.`;
+      },
     );
 
   // The way out of waiting, with the consequence stated before the request.
-  const handleRemoveNow = (host: string, slotsUsed: number) => {
+  const handleRemoveNow = (host: string, slotsUsed: number, sandboxesLeft: number) => {
     const ok = window.confirm(
-      `${host} is still running ${slotsUsed} attempt(s). Removing it now ends them: their ` +
-        'leases expire now, and the work is requeued once, or a chat whose turn may already ' +
-        'have run is marked lost. Remove now?',
+      `${host} is still running ${slotsUsed} attempt(s) and holds ${sandboxesLeft} sandbox(es) ` +
+        'not yet moved. Removing it now ends the attempts: their leases expire now, and the ' +
+        'work is requeued once, or a chat whose turn may already have run is marked lost. ' +
+        'Sandboxes not yet moved stay on it. Remove now?',
     );
     if (!ok) return;
     void run(() => removeAgentRunnerHost(host, true), `Removed ${host} from the pool.`);
+  };
+
+  // A removal still waiting on turns or sandboxes offers to force it instead.
+  const handleRemoveClick = (host: AgentRunnerHost) => {
+    const sandboxesLeft = host.sandboxes_left ?? 0;
+    if (host.removal_pending && (host.slots_used > 0 || sandboxesLeft > 0)) {
+      handleRemoveNow(host.host, host.slots_used, sandboxesLeft);
+    } else {
+      handleRemove(host.host);
+    }
   };
 
   const handleForget = (host: string) => {
@@ -807,7 +841,9 @@ function HostsView() {
                           <StatusBadge host={host} />
                           {host.removal_pending && (
                             <span className="mt-1 block whitespace-nowrap text-[11px] text-gray-500 dark:text-gray-400">
-                              {host.slots_used} running turn(s) left
+                              {host.removal_moves_out
+                                ? `Moving out: ${host.sandboxes_left ?? 0} sandbox(es), ${host.slots_used} running turn(s) left`
+                                : `${host.slots_used} running turn(s) left`}
                             </span>
                           )}
                           {facts.stale && (
@@ -972,11 +1008,7 @@ function HostsView() {
                             <button
                               type="button"
                               disabled={busy}
-                              onClick={() =>
-                                host.removal_pending && host.slots_used > 0
-                                  ? handleRemoveNow(host.host, host.slots_used)
-                                  : handleRemove(host.host, host.slots_used)
-                              }
+                              onClick={() => handleRemoveClick(host)}
                               className="ui-button min-h-9 border border-status-error/20 px-3 py-1.5 text-xs text-status-error hover:bg-status-error/10 [@media(pointer:coarse)]:min-h-11"
                             >
                               {host.removal_pending ? 'Remove now' : 'Remove from pool'}
