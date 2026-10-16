@@ -10,9 +10,26 @@ from typing import TYPE_CHECKING, Any
 
 from cloud_agent.storage._sql.attempts import NEXT_ATTEMPT_START_SQL
 from cloud_agent.storage._sql.rows import load_json
+from cloud_agent.thread_stats import SUMMARY_PAYLOAD_KEYS
 
 if TYPE_CHECKING:
     import asyncpg
+
+_SUMMARY_PAYLOAD_KEYS_SQL = ", ".join(f"'{key}'" for key in SUMMARY_PAYLOAD_KEYS)
+
+#: The payload of event ``e`` as a usage read needs it: the keys the summaries
+#: read (``SUMMARY_PAYLOAD_KEYS``) and whether its text has anything to show. A
+#: tool result also carries what the tool returned, such as a whole edited
+#: file, and taking every key but a few moved all of it to add up token counts.
+USAGE_EVENT_PAYLOAD_SQL = f"""
+COALESCE((
+    SELECT jsonb_object_agg(field.key, field.value)
+    FROM jsonb_each(CASE WHEN jsonb_typeof(e.payload) = 'object'
+                         THEN e.payload ELSE '{{}}'::jsonb END) AS field
+    WHERE field.key IN ({_SUMMARY_PAYLOAD_KEYS_SQL})
+), '{{}}'::jsonb)
+|| jsonb_build_object('has_text', COALESCE(e.payload->>'text', '') ~ '[^[:space:]]')
+"""
 
 LEDGER_WINDOW_UNTIL_SQL = f"""
 LEAST(
@@ -121,15 +138,12 @@ async def fetch_job_usage_inputs(conn: asyncpg.Connection, job_id: str) -> dict[
         job_id,
     )
     events = await conn.fetch(
-        """
-        SELECT job_id, attempt_id, seq, event_type, created_at,
-               (payload - ARRAY['text', 'input', 'content'])
-               || jsonb_build_object(
-                   'has_text', COALESCE(payload->>'text', '') ~ '[^[:space:]]'
-               ) AS payload
-        FROM agent_job_events
-        WHERE job_id = $1
-        ORDER BY attempt_id, seq
+        f"""
+        SELECT e.job_id, e.attempt_id, e.seq, e.event_type, e.created_at,
+               {USAGE_EVENT_PAYLOAD_SQL} AS payload
+        FROM agent_job_events e
+        WHERE e.job_id = $1
+        ORDER BY e.attempt_id, e.seq
         """,
         job_id,
     )

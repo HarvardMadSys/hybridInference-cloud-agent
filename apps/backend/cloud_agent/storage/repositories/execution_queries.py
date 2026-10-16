@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from cloud_agent.storage._sql.ledger import fetch_job_usage_inputs
+from cloud_agent.storage._sql.ledger import USAGE_EVENT_PAYLOAD_SQL, fetch_job_usage_inputs
 from cloud_agent.storage._sql.rows import load_json
 from cloud_agent.storage._sql.sandbox import THREAD_SANDBOX_SOURCE
 
@@ -117,16 +117,13 @@ class PostgresExecutionQueries:
                 thread_id,
             )
             events = await conn.fetch(
-                """
+                f"""
                 SELECT e.job_id,
                        e.attempt_id,
                        e.seq,
                        e.event_type,
                        e.created_at,
-                       (e.payload - ARRAY['text', 'input', 'content'])
-                       || jsonb_build_object(
-                           'has_text', COALESCE(e.payload->>'text', '') ~ '[^[:space:]]'
-                       ) AS payload
+                       {USAGE_EVENT_PAYLOAD_SQL} AS payload
                 FROM agent_job_events e
                 JOIN agent_jobs j ON j.id = e.job_id
                 WHERE j.thread_id = $1

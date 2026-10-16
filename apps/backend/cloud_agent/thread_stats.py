@@ -56,6 +56,22 @@ _CACHE_READ_KEYS = ("cache_read_input_tokens", "cache_read_tokens", "cached_toke
 _CACHE_WRITE_KEYS = ("cache_creation_input_tokens", "cache_write_tokens")
 _TOKEN_KEY_GROUPS = (_INPUT_KEYS, _OUTPUT_KEYS, _CACHE_READ_KEYS, _CACHE_WRITE_KEYS)
 
+#: Every payload key the summaries here read: a model call's usage and its
+#: identity, how a tool call pairs with its result and whether it failed, and
+#: the counters a ``usage`` event may carry at its top level. Assistant text is
+#: read only for whether it has any, which a usage read sends as ``has_text``.
+#: A read that sends these keys and that flag gets the summary the whole
+#: payloads give.
+SUMMARY_PAYLOAD_KEYS = (
+    "usage",
+    "usage_id",
+    "usage_scope",
+    "id",
+    "tool_use_id",
+    "is_error",
+    *(key for group in _TOKEN_KEY_GROUPS for key in group),
+)
+
 
 @dataclass(frozen=True)
 class ThreadStats:
