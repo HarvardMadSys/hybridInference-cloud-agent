@@ -23,6 +23,7 @@ under the MIT license; bugs and questions go to its
 | Find the module that owns a responsibility and follow its dependencies | [Code structure](code-structure.md) |
 | Send a change | [Contributing](contributing.md) |
 | Configure credentials, enroll hosts, qualify Kata, deploy, and migrate | [Operations runbook](operations.md) |
+| Upgrade an existing deployment and see what each migration changes | [Upgrade notes](upgrade-notes.md) |
 | Look up a configuration name, default, or owning component | [Configuration reference](configuration.md) |
 | Build release artifacts and deploy them in the required order | [Releases](releases.md) |
 | Understand the sandbox trust model before deploying | [Security](security.md) |
@@ -62,6 +63,7 @@ security
 :maxdepth: 2
 
 operations
+upgrade-notes
 configuration
 operations-compute
 releases

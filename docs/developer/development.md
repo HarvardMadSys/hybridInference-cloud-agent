@@ -352,6 +352,7 @@ Update the guide that owns any changed configuration, command, or behavior:
 | Topic | Document |
 |---|---|
 | Environment variables and runtime pins | [ENVIRONMENT.md](../../ENVIRONMENT.md) |
+| A new migration | [Upgrade notes](upgrade-notes.md) |
 | Operation and troubleshooting | [operations.md](operations.md) |
 | Local development stack | [Local-stack guide](../../deploy/local/README.md) |
 | Release artifacts and validation | [Release guide](../../deploy/release/README.md) |

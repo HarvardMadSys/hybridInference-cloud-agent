@@ -125,30 +125,3 @@ The implementation is in
 [`agent_access.py`](../../apps/backend/cloud_agent/agent_access.py),
 [`deps.py`](../../apps/backend/cloud_agent/api/deps.py) and
 [`session.py`](../../apps/backend/cloud_agent/api/session.py).
-
-## Local verification (2026-09-10)
-
-The candidate sources were exercised through native HTTP listeners: the Gateway's
-production internal router and PostgreSQL operational store, the actual
-FreeInference backend extension loader, and the Agent's `create_app` control
-plane. Gateway and Agent used separate fresh PostgreSQL databases with their
-production schemas. The Agent database contained no `users` table.
-
-Twenty-five assertions passed: current FreeInference admission, inactive/missing
-account refusal, owner and host APIs, old-session revocation, `/me` permissions,
-a custom policy admitting non-admin accounts, separate use/admin permissions,
-neutral-policy denial, policy exception handling, an old Gateway lacking the
-endpoint, and local infrastructure-token access in each mode.
-
-This run checks local HTTP authorization and database separation. It does not
-claim a staging deployment, a browser login redirect round trip, or execution of
-a sandbox job. No deployment lock or published image was changed.
-
-The login follow-up was also checked in an actual browser against the production
-Next.js build and Agent application, using a local HTTP Gateway fixture with
-PKCE code exchange and signed identity tokens. An active account without Agent
-permissions reached the access-required page. An existing session stayed on a
-retry page during a Gateway outage and recovered without signing in again.
-An outage during the callback returned a retry link that started a fresh login;
-an HTML proxy 403 showed the temporary-failure page. This fixture-based browser
-run does not claim staging deployment or sandbox execution.

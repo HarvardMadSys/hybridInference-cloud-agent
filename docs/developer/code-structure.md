@@ -86,8 +86,10 @@ than importing the facade back into themselves.
 | `events`, `resources`, `workspace` | Event streams, measurements, files, terminals, and Git views |
 | `workers`, `hosts`, `admin_hosts` | Worker requests, enrollment, heartbeats, and admin host controls |
 | `archive_settings`, `audit`, `config` | Archive settings, admin audit, and advertised configuration |
+| `runtime_upgrades` | Agent CLI updates started from the admin Settings page |
 | `integrations`, `mcp`, `session` | Source control, MCP selection, identity, and user preferences |
-| `_host_reports` | Shared bounds for host and worker reports |
+| `teams` | Teams, members, invitations, and join requests |
+| `_host_reports`, `_sandbox_manager_wire`, `_prompts` | Private helpers: bounds for host and worker reports, Sandbox Manager field-name compatibility, and the prompt text rule |
 
 Keep model names and serialized behavior stable during structural refactors.
 Cross-domain annotations must resolve immediately after import. Intentional
@@ -151,8 +153,10 @@ instead of expanding the facade.
 ## Follow a browser action
 
 Next.js route files live under `apps/frontend/src/app/`. Shared feature UI lives
-under `components/features/`, reusable presentation components under
-`components/`, and browser utilities and API clients under `lib/`. Server-only
+under `components/features/` (`agents` for tasks and conversations, `settings`
+for the settings pages, `teams`, `profile` and `auth`), reusable presentation
+components under `components/`, and browser utilities and API clients under
+`lib/`. Server-only
 integrations belong in the existing server modules; a browser component must
 not pull server credentials into its import graph.
 

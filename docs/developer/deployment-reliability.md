@@ -230,31 +230,21 @@ two machines and PostgreSQL without a single transaction.
 
 ### Snapshot publication failures
 
-Snapshot publication currently has no owner retry action or automatic recovery
-after a failure. A rejected patch, unavailable GitHub credential, or failed
-Git/PR request marks the snapshot `failed` and its sandbox group `dirty`; the
-included Agent turns remain successful. Capture and publication require every
-earlier snapshot in that group to be `published`, and later turn settlement
-preserves `dirty`. A transient publication failure can therefore stop all
-subsequent snapshots in the same retained workspace. Capture retries and
-published-commit import retries do not recover this state. See
-[`publish_worker.py`](../../apps/backend/cloud_agent/publish_worker.py),
-[`snapshot.py`](../../apps/backend/cloud_agent/storage/repositories/snapshot.py)
-and [`sandbox.py`](../../apps/backend/cloud_agent/storage/repositories/sandbox.py).
+A publication that fails — a refused patch, an unavailable GitHub credential,
+a failed Git or PR request — leaves its snapshot `failed` with a reason and its
+sandbox group `dirty`; the included agent turns stay successful. It does not
+hold the workspace back: the owner's next **Create PR** / **Update PR** request
+captures a new snapshot of the whole diff since the last published commit,
+which supersedes the failed one. If the failed attempt had already pushed its
+commit, the publisher recorded that commit as the snapshot's
+`pushed_commit_sha` before pushing, and the next snapshot builds on it rather
+than treating it as a moved branch. GitHub rate limits and transient
+draft-PR refusals are retried automatically. The full rules are in
+[Resume, Fork, and publication](operations.md#resume-fork-and-publication).
 
-Inspect the snapshot's `last_error`, the anchor job's
-`shared_snapshot_publish_rejected` event, and GitHub's branch/PR state while
-preserving the retained workspace and snapshot. Restoring GitHub access or
-network availability does not requeue an already failed snapshot. There is no
-supported database reset: marking it published or clearing the group's dirty
-state would bypass the ordered publication lineage. Resetting it to captured
-also cannot safely recover an ambiguous push: if the push succeeded before the
-PR request failed, the publisher treats that remote commit as branch movement
-and refuses it.
-
-A future recovery path should persist the exact prepared commit SHA before
-pushing, then offer an owner-authorized retry of the earliest failed snapshot.
-Retries must repeat entitlement and patch checks, recognize only the persisted
-commit as a prior push, preserve snapshot order, and continue to reject other
-branch movement without force-pushing. Commit-message text and the patch hash
-alone are insufficient evidence of the publisher's prior commit.
+To investigate one, read the snapshot's `last_error`, the anchor job's event
+whose phase is `shared_snapshot_publish_rejected`, and GitHub's branch and PR
+state.
+Do not edit snapshot or group state in the database: marking a snapshot
+published or clearing `dirty` bypasses the ordered publication lineage. Fix
+the cause — access, network, or the refused content — and publish again.

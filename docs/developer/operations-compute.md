@@ -135,8 +135,8 @@ Supply the infrastructure inputs once:
 1. Add and validate management SSH connections for the stable gateway machine
    and control-plane machine, including independently verified host keys.
 2. Select those connections and confirm the machines' SSH addresses and users.
-   The gateway address defaults to the saved Gateway API URL's hostname
-   (for FreeInference, `freeinference.org`). The supported control-plane deployer
+   The gateway address defaults to the saved Gateway API URL's hostname.
+   The supported control-plane deployer
    supplies the service node's FQDN as the control-plane address. Override these
    with `AGENT_GATEWAY_SSH_HOST` and `AGENT_CONTROL_PLANE_SSH_HOST` when SSH uses
    different addresses; other deployers must supply the control-plane value.
@@ -484,6 +484,52 @@ Stopped or unrecognized containers, orphan networks/volumes, offline sandbox man
 and incomplete inventory block it. There is no force bypass. The only machine
 without an inventory is a CloudLab node whose host-key registration never
 completed: this control plane never connected to it.
+
+## Moving sandboxes out before a lease ends
+
+A Host whose allocation does not use automatic replacement moves its sandbox
+groups to other Hosts one at a time before its lease ends, through their
+[restorable checkpoints](operations.md#restoring-a-removed-hosts-sandboxes).
+The lead is **Move sandboxes to other servers before expiry** in the
+allocation's renewal settings: 120 minutes by default, 0 to turn it off.
+Replacement moves the whole Host instead, so the setting is not offered there.
+With renewal enabled, extension is tried before the window opens, and the
+window is capped ten minutes short of the extension horizon: an extension that
+succeeds ends a move rather than starting one.
+
+Inside the window the Host gets a `move_out` admission hold only when its
+groups can really move:
+
+- lifecycle archives and checkpoints are enabled, and every Host of the
+  allocation advertises `sandbox-checkpoints-v1` and has applied the current
+  archive revision;
+- another online, enrolled Host that advertises restore and archives on the
+  current archive revision would pass claim admission for new groups now. A
+  Host under a `new_groups` hold, in its own lease window or with a stale
+  observation does not count, and of two Hosts entering their windows
+  together only one moves out.
+
+Without a target nothing changes, and the Host serves until its lease ends as
+before. A move that has started continues if its target goes away, and stops
+if checkpoints do.
+
+While the hold is in place the Host claims nothing. Every 15 seconds the
+control plane asks it to stop each idle group, as an administrator's stop
+would; a group with a running turn, operation, snapshot or open terminal is
+left for the next pass, so running turns are never interrupted. The stop
+stores the group's final checkpoint, and once that checkpoint covers the group
+it becomes `cold` at once, without waiting for the Host to be removed. Each
+chat's next turn is claimed by another Host and restored there; to the user,
+that message waits a little longer than usual.
+
+In an autoscaled CloudLab pool a moving-out member stops counting toward
+`min_hosts`, so its replacement is acquired while it still serves. It still
+counts toward `max_hosts`: keep `max_hosts` at least one above `min_hosts`,
+with a spare deployment profile, or the replacement waits. The Servers page
+shows such a member as _moving out_; it is released at its lease end as
+before. If groups are still unmoved five minutes before the lease ends (or the
+claim-stop lead, if longer), because a turn is still running, a checkpoint is
+missing or no Host can take them, `compute_move_out_unfinished` alerts once.
 
 ## Automatic CloudLab node replacement
 

@@ -36,9 +36,9 @@ The names and picture are owner-authored Cloud Agent display data, separate
 from Gateway login identity and the automatically generated homepage companion.
 The homepage and Profile editor prefer an uploaded profile picture. When none
 is saved, they use the owner's Pokémon companion. Removing a picture restores
-the companion; memory refreshes and clears continue to update only its habitat
-and badges, and do not change the saved picture. The Profile editor reuses the
-memory panel's current companion, including after a refresh or clear.
+the companion. The companion's habitat and badges come from work insights
+(`work_insights.py`), derived again on each read from the owner's latest
+requests; they are not memory and never change the saved picture.
 `GET` and revision-checked `PATCH /v1/agent/profile` require current Agent admission
 and return `Cache-Control: no-store`. Names allow up to 100 characters each.
 PNG, JPEG, and WebP uploads are limited to 2 MiB and 16 million pixels; the server
@@ -167,24 +167,3 @@ The implementation is in
 [`identity.py`](../../apps/backend/cloud_agent/identity.py),
 [`identity_namespace.py`](../../apps/backend/cloud_agent/identity_namespace.py) and
 [`lifespan.py`](../../apps/backend/cloud_agent/bootstrap/lifespan.py).
-
-## Local verification (2026-09-10)
-
-Gateway `make all` passed (5,254 tests; 48 skipped). Agent `make check` passed
-(2,161 tests), as did its 719 web tests, lint, type checking and production build.
-Fifteen additional PostgreSQL integration cases exercised initial binding,
-explicit adoption, preservation of existing owners, concurrent startup and
-the actual deployment-check/adoption CLI.
-
-Native Gateway and Agent HTTP listeners also completed PKCE code exchange,
-JWKS verification, minimal session creation, `/me` and an owner API request
-against separate fresh PostgreSQL databases with production schemas. The
-Gateway identity token and Agent cookie had exactly the documented fields;
-legacy and foreign-issuer cookies were rejected, and no account-status request
-occurred. Docker Compose rendered each listener's environment separately;
-the control plane and MCP relay both started against the bound database with
-those isolated environments. Compose also refused an omitted issuer. Deploy
-script tests verified that a failed identity check neither bootstraps nor
-replaces listeners. This local check supplied a seeded Gateway login dependency and
-access policy; it did not exercise the main site's password login or deploy
-either service.

@@ -2,8 +2,9 @@
 
 Back up the agent database, its encryption keys, and retained host state as a
 coordinated recovery set. A database dump cannot reconstruct a native CLI
-session whose Docker writable layer was lost. CloudLab node rotation helps move
-an available source; it does not replace an off-node backup.
+session whose Docker writable layer was lost. Restorable checkpoints in S3
+cover only groups that stopped cleanly with archives enabled, and CloudLab node
+rotation helps move an available source; neither replaces an off-node backup.
 
 The deployment owner must implement backup storage and scheduling. This guide
 does not install a backup service, claim a successful restore drill, or establish
@@ -151,10 +152,13 @@ Perform an isolated restore drill quarterly and after changing storage topology,
 key handling or deployment protocol. Record the set/release IDs, checks, elapsed
 time, observed lost-data window and failures without secrets. A static test,
 readable dump, manual node rotation or backup hash is not restore-drill evidence.
-Cross-host recovery of retained sessions remains dependent on compatible full
-host-state restoration; the platform has no generic native-session checkpoint
-import facility. If the only source disk and its off-node copy are lost, native
-context cannot be recovered from Postgres.
+Moving retained sessions to another host otherwise depends on compatible full
+host-state restoration. The exception is a stopped group whose current
+[restorable checkpoint](operations.md#restoring-a-removed-hosts-sandboxes) is
+in S3: once its host is removed from the pool, its node is confirmed
+terminated, or the host moves out before its lease ends, another host restores
+it on the group's next turn. If the source disk, its off-node copy and any checkpoint are
+all lost, native context cannot be recovered from Postgres.
 
 ## Recover a previous artifact release
 

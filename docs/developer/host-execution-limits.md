@@ -21,18 +21,8 @@ silent model or tool invocation can therefore persist its latest sampled
 checkpoint before emitting another message. The existing final report remains
 the authoritative closing measurement.
 
-The runner's **Storage reserve for new sandboxes** setting defaults to 1024 MiB.
-Before accepting a turn that would allocate a new sandbox, the runner takes a
-fresh reading through the existing attested Docker writable-layer storage
-probe. If unprivileged available space is below the reserve, it declines the
-handover and the host returns the untouched turn to the queue. Its launch-error
-status identifies the available space and suggests freeing storage or adjusting
-the reserve. Existing retained sessions may resume and cleanup remains available.
-
-This is an admission guard, not a disk quota or a reservation. Concurrent or
-already-running sandboxes can consume space after the check. Disabled,
-unsupported, unavailable, or unverified capacity does not establish a pressure
-verdict: the guard does not substitute an arbitrary filesystem measurement and
-those hosts retain the existing explicit unmeasured capacity status. Operators
-should keep the storage attestation current and monitor available space;
-storage-driver-specific writable-layer quotas require separate deployment work.
+Disk space is guarded only at admission: the runner declines a turn that
+would create a sandbox when free space is below the
+[storage reserve](runtime-settings.md). Nothing bounds what a running sandbox
+writes except an optional per-container disk limit; see
+[sandbox settings](operations.md#sandbox-settings).
