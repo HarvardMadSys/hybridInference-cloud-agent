@@ -344,14 +344,20 @@ async def test_claim_serves_a_newer_request_before_older_ones_due_again(db, stor
     old_a = await store.sandbox.claim_due_admin_sandbox_deletion(ttl_seconds=3600)
     assert old_a is not None and old_a["id"] == "asbx_old_a"
     assert await store.sandbox.fail_admin_sandbox_deletion(
-        **worker_fence(old_a), error="The host timed out.", retain_pending=True
+        **worker_fence(old_a),
+        error="The host timed out.",
+        retain_pending=True,
+        retry_class="transient",
     )
     old_b = await store.sandbox.claim_due_admin_sandbox_deletion(ttl_seconds=3600)
     assert old_b is not None and old_b["id"] == "asbx_old_b"
     # The newer request arrives while that attempt is still waiting on its host.
     assert await request_delete(store, "asbx_new", discard=True) == "accepted"
     assert await store.sandbox.fail_admin_sandbox_deletion(
-        **worker_fence(old_b), error="The host timed out.", retain_pending=True
+        **worker_fence(old_b),
+        error="The host timed out.",
+        retain_pending=True,
+        retry_class="transient",
     )
     # The attempt outlasted the retry delay, so the first request is due again.
     async with db.acquire() as conn:
@@ -430,7 +436,10 @@ async def test_failure_keeps_verified_or_uncertain_archives_fenced(db, store, ch
     if checkpoint == "archived":
         assert await checkpoint_archive(store, claim)
     assert await store.sandbox.fail_admin_sandbox_deletion(
-        **worker_fence(claim), error="Archive operation will retry.", retain_pending=True
+        **worker_fence(claim),
+        error="Archive operation will retry.",
+        retain_pending=True,
+        retry_class="transient",
     )
     detail = await store.admin_sandboxes.detail("asbx_retry")
     assert detail is not None and detail.sandbox.deletion_state == checkpoint
@@ -475,7 +484,10 @@ async def test_deletion_attempt_ledger_records_sanitized_failure_details(db, sto
         cleanup_outcome="unconfirmed",
     )
     assert await store.sandbox.fail_admin_sandbox_deletion(
-        **worker_fence(claim), error="The container is retained.", retain_pending=True
+        **worker_fence(claim),
+        error="The container is retained.",
+        retain_pending=True,
+        retry_class="transient",
     )
     assert await store.sandbox.finish_admin_sandbox_deletion_attempt(
         correlation_id=correlation_id,
@@ -572,7 +584,10 @@ async def test_uncertain_host_abort_retries_cleanup_only_and_keeps_original_key(
     assert await store.sandbox.renew_admin_sandbox_deletion_claim(**worker_fence(claim))
     assert not await checkpoint_archive(store, claim)
     assert await store.sandbox.fail_admin_sandbox_deletion(
-        **worker_fence(claim), error="Host archive cleanup will retry.", retain_pending=True
+        **worker_fence(claim),
+        error="Host archive cleanup will retry.",
+        retain_pending=True,
+        retry_class="transient",
     )
     assert not await store.sandbox.thread_workspace_ready(thread_id=origin["thread_id"])
     async with db.acquire() as conn:
@@ -595,6 +610,63 @@ async def test_uncertain_host_abort_retries_cleanup_only_and_keeps_original_key(
     assert not await store.sandbox.renew_admin_sandbox_deletion_claim(
         **worker_fence(replacement), for_cleanup=True, cleanup_archive_key="new/request.tar"
     )
+
+
+@pytest.mark.parametrize(
+    ("retry_class", "failure_code"),
+    [
+        ("permanent", "sandbox_manager_rejected"),
+        ("operator_action", "sandbox_manager_precondition"),
+    ],
+)
+async def test_nontransient_failure_stops_retries_and_preserves_archive(
+    db, store, retry_class, failure_code
+):
+    await seed(db, store, "asbx_nontransient", state="stopped")
+    assert await request_delete(store, "asbx_nontransient") == "accepted"
+    claim = await store.sandbox.claim_due_admin_sandbox_deletion(ttl_seconds=3600)
+    assert claim is not None
+    assert await checkpoint_archive(store, claim)
+
+    assert await store.sandbox.fail_admin_sandbox_deletion(
+        **worker_fence(claim),
+        error="The host rejected this deletion request.",
+        retain_pending=True,
+        attempt_correlation_id=claim["deletion_attempt_correlation_id"],
+        failure_code=failure_code,
+        retry_class=retry_class,
+    )
+
+    detail = await store.admin_sandboxes.detail("asbx_nontransient")
+    assert detail is not None
+    assert detail.sandbox.deletion_state == "archived"
+    assert detail.sandbox.deletion_retry_exhausted_at is not None
+    assert detail.sandbox.deletion_request_id == claim["deletion_request_id"]
+    assert detail.sandbox.deletion_archive_key == ARCHIVE_URI
+    assert detail.deletion_attempts[0].outcome == "failed"
+    assert detail.deletion_attempts[0].failure_code == failure_code
+    assert detail.deletion_attempts[0].retry_class == retry_class
+    assert detail.deletion_attempts[0].retry_scheduled is False
+    async with db.acquire() as conn:
+        assert (
+            await conn.fetchval(
+                "SELECT deletion_retry_at FROM agent_sandboxes WHERE id=$1",
+                "asbx_nontransient",
+            )
+            is None
+        )
+    assert await store.sandbox.claim_due_admin_sandbox_deletion(ttl_seconds=3600) is None
+
+    assert await request_delete(store, "asbx_nontransient") == "accepted"
+    resumed = await store.admin_sandboxes.detail("asbx_nontransient")
+    assert resumed is not None
+    assert resumed.sandbox.deletion_request_id == claim["deletion_request_id"]
+    assert resumed.sandbox.deletion_archive_key == ARCHIVE_URI
+    assert resumed.sandbox.deletion_retry_exhausted_at is None
+    retry = await store.sandbox.claim_due_admin_sandbox_deletion(ttl_seconds=3600)
+    assert retry is not None
+    assert retry["deletion_request_id"] == claim["deletion_request_id"]
+    assert retry["deletion_archive_key"] == ARCHIVE_URI
 
 
 async def test_automatic_retry_budget_exhaustion_preserves_receipt_and_resumes_same_request(

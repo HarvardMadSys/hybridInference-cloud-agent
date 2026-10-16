@@ -677,10 +677,12 @@ from. An archive deletion that is already pending or verified is left unchanged;
 wait for it to finish or fail before choosing this action.
 
 One deletion worker handles requests one at a time, in the order they became
-due. Automatic retries use exponential backoff from one minute to one hour and
-stop after eight claims or 24 hours from the request. An exhausted request stays
-fenced in its pending or archived state; the admin view offers **Resume deletion**
-to start a new retry window for the same request. It preserves the original
+due. Only transient failures retry automatically, with exponential backoff from
+one minute to one hour; retries stop after eight claims or 24 hours from the
+request. Permanent and operator-action failures stop automatic retries
+immediately. A stopped request stays fenced in its pending or archived state;
+the admin view offers **Resume deletion** after the issue is resolved, starting
+a new retry window for the same request. It preserves the original
 archive/discard choice, request identity, and any verified archive receipt.
 The admin sandbox details also show a durable attempt history for each request:
 attempt number, host, last confirmed stage, outcome, and a bounded failure code.

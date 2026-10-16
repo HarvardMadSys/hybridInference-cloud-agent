@@ -981,7 +981,7 @@ class PostgresSandboxRepository:
         retry_class: str | None = None,
         cleanup_outcome: str = "not_required",
     ) -> bool:
-        """Retry within the persisted budget, retaining ambiguous host effects."""
+        """Retry transient failures within budget and retain ambiguous host effects."""
         async with self._pool.acquire() as conn, conn.transaction():
             group = await self._locked_admin_deletion(
                 conn, sandbox_id, request_id, claim_token, generation, container_id
@@ -990,6 +990,12 @@ class PostgresSandboxRepository:
                 return False
             retry_requested = group["deletion_state"] == "archived" or retain_pending
             retry_count = int(group["deletion_retry_count"])
+            effective_retry_class = (
+                retry_class
+                if retry_class in {"transient", "permanent", "operator_action"}
+                else "operator_action"
+            )
+            automatic_retry_allowed = effective_retry_class == "transient"
             window_open = bool(
                 await conn.fetchval(
                     "SELECT $1::timestamptz > clock_timestamp() - make_interval(secs => $2)",
@@ -998,20 +1004,34 @@ class PostgresSandboxRepository:
                 )
             )
             retry_scheduled = (
-                retry_requested and retry_count < _DELETION_RETRY_MAX_ATTEMPTS and window_open
+                retry_requested
+                and automatic_retry_allowed
+                and retry_count < _DELETION_RETRY_MAX_ATTEMPTS
+                and window_open
             )
-            exhausted = retry_requested and not retry_scheduled
+            retry_budget_exhausted = (
+                retry_requested and automatic_retry_allowed and not retry_scheduled
+            )
+            automatic_retry_stopped = retry_requested and not retry_scheduled
             if retry_scheduled:
                 delay_seconds = min(
                     _DELETION_RETRY_BASE_SECONDS * (2 ** max(retry_count - 1, 0)),
                     _DELETION_RETRY_MAX_SECONDS,
                 )
                 final_error = error[:400]
-            elif exhausted:
+            elif retry_budget_exhausted:
                 delay_seconds = None
                 final_error = (
                     error[:300]
-                    + " Automatic deletion retries stopped; an administrator can resume this request."
+                    + " Automatic deletion retry budget exhausted; an administrator can resume "
+                    "this request."
+                )
+            elif automatic_retry_stopped:
+                delay_seconds = None
+                final_error = (
+                    error[:300]
+                    + " Automatic retries stopped for this failure; an administrator can resume "
+                    "this request after resolving it."
                 )
             else:
                 delay_seconds = None
@@ -1024,11 +1044,13 @@ class PostgresSandboxRepository:
                 source="system",
                 actor_id="sandbox-deletion-worker",
                 from_state=state,
-                to_state=state if retry_scheduled or exhausted else "failed",
+                to_state=state if automatic_retry_stopped else "failed",
                 details={
                     "request_id": request_id,
                     "retry_scheduled": retry_scheduled,
-                    "retry_exhausted": exhausted,
+                    "retry_exhausted": retry_budget_exhausted,
+                    "retry_stopped": automatic_retry_stopped,
+                    "retry_class": effective_retry_class,
                     "error": final_error[:500],
                 },
             )
@@ -1048,16 +1070,18 @@ class PostgresSandboxRepository:
                 retry_scheduled,
                 final_error,
                 delay_seconds,
-                exhausted,
+                automatic_retry_stopped,
             )
             if attempt_correlation_id is not None:
                 await self._finish_deletion_attempt_in_transaction(
                     conn,
                     correlation_id=attempt_correlation_id,
                     outcome="retrying" if retry_scheduled else "failed",
-                    failure_code=(failure_code if not exhausted else "retry_budget_exhausted"),
+                    failure_code=(
+                        "retry_budget_exhausted" if retry_budget_exhausted else failure_code
+                    ),
                     sandbox_manager_status=sandbox_manager_status,
-                    retry_class=(retry_class if not exhausted else "operator_action"),
+                    retry_class=effective_retry_class,
                     retry_scheduled=retry_scheduled,
                     cleanup_outcome=cleanup_outcome,
                 )
