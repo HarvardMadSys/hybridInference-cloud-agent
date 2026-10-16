@@ -282,8 +282,9 @@ class QueueSweep:
 
     ``created_before`` is captured once per pass from the database clock. New
     threads cannot extend an in-progress sweep, even though IDs are random and
-    do not provide a monotonic high-water mark. A full page advances ``after``;
-    a short page ends the pass and clears both bounds.
+    do not provide a monotonic high-water mark. Each completed queue advances
+    ``after``; a short page ends the pass and clears both bounds after every
+    queue in it has been visited.
     """
 
     after: str | None = None
@@ -321,12 +322,6 @@ async def settle_waiting_queues(
         after=sweep.after if sweep is not None else None,
         created_before=sweep.created_before if sweep is not None else None,
     )
-    if sweep is not None:
-        if len(page) >= limit:
-            sweep.after = page[-1]
-        else:
-            sweep.after = None
-            sweep.created_before = None
     for thread_id in page:
         try:
             await _settle_with(
@@ -338,8 +333,15 @@ async def settle_waiting_queues(
                 extra={"event": "agent_pending_queue_settle_failed", "thread_id": thread_id},
                 exc_info=True,
             )
+            if sweep is not None:
+                sweep.after = thread_id
             continue
         settled += 1
+        if sweep is not None:
+            sweep.after = thread_id
+    if sweep is not None and len(page) < limit:
+        sweep.after = None
+        sweep.created_before = None
     return settled
 
 
