@@ -56,6 +56,7 @@ from cloud_agent_host.runtime_images import (
     discover_or_none,
     image_id,
     image_ref,
+    legacy_repository,
     repository,
     short_id,
 )
@@ -720,14 +721,20 @@ class RuntimeDownloads:
         )
         for container in listed.stdout.split():
             self._docker_run(["rm", "-f", container])
-        candidates = self._docker_run(
-            [
-                "image",
-                "ls",
-                f"{repository(self._namespace)}-candidate",
-                "--format",
-                "{{.Repository}}:{{.Tag}}",
-            ]
-        )
-        for ref in candidates.stdout.split():
-            self._docker_run(["rmi", ref])
+        # Earlier releases' too, under the name every namespace that reads the
+        # same shares. Only this deployment's, by their label: another's may
+        # still be under its check.
+        for name in (repository(self._namespace), legacy_repository(self._namespace)):
+            candidates = self._docker_run(
+                [
+                    "image",
+                    "ls",
+                    f"{name}-candidate",
+                    "--filter",
+                    f"label={NAMESPACE_LABEL}={self._namespace}",
+                    "--format",
+                    "{{.Repository}}:{{.Tag}}",
+                ]
+            )
+            for ref in candidates.stdout.split():
+                self._docker_run(["rmi", ref])

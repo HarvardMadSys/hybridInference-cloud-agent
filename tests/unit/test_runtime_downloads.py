@@ -42,10 +42,27 @@ BASE = "sha256:" + "ab12" * 16
 OLD_BASE = "sha256:" + "cd34" * 16
 NONCE = "0123456789abcdef0123456789abcdef"
 BEFORE = "2026-10-15T00:00:00Z"
+#: Where earlier releases kept this deployment's downloads: the namespace
+#: folded, and so shared with every namespace that folds the same, as this
+#: neighbour's does.
+LEGACY = f"{NAMESPACE}-agent-runtime"
+NEIGHBOUR = NAMESPACE.replace("-", "_")
+#: Docker's grammar for a repository name of one path component.
+DOCKER_REPOSITORY = re.compile(r"[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*")
 
 
 def _target(version: str = "2.1.300", nonce: str = NONCE, runtime: str = "claude-code"):
     return {"runtime": runtime, "version": version, "before": BEFORE, "nonce": nonce}
+
+
+def _kept_labels(version: str, namespace: str = NAMESPACE) -> dict[str, str]:
+    """What a kept claude-code ``version``, and its candidate, are labelled (``_keep_tree``)."""
+    return {
+        runtime_images.WORK_LABEL: "",
+        runtime_images.NAMESPACE_LABEL: namespace,
+        runtime_images.RUNTIME_LABEL: "claude-code",
+        runtime_images.VERSION_LABEL: version,
+    }
 
 
 class FakeDocker:
@@ -96,20 +113,25 @@ class FakeDocker:
             found = self.images.get(args[2])
             return self._done(found or "", 0 if found else 1)
         if args[:2] == ["image", "ls"]:
+            wanted = self._wanted(args)
             if "--quiet" in args:
-                wanted = self._wanted(args)
                 found = {
                     image
                     for image in self.images.values()
                     if all(self._matches(self.labels.get(image, {}), label) for label in wanted)
                 }
                 return self._done("\n".join(sorted(found)))
-            if args[2] == "--filter":
-                if self.held_ls_exit:
-                    return self._done("", self.held_ls_exit, "Cannot connect to the Docker daemon")
-                refs = [ref for ref in self.images if ref.startswith(repository(NAMESPACE) + ":")]
-            else:
-                refs = [ref for ref in self.images if ref.startswith(args[2] + ":")]
+            if args[2] == "--filter" and self.held_ls_exit:
+                return self._done("", self.held_ls_exit, "Cannot connect to the Docker daemon")
+            # Each tag of every image with the labels named, in the one
+            # repository named if there is one: the label decides, not the name.
+            named = None if args[2].startswith("--") else args[2]
+            refs = [
+                ref
+                for ref, image in self.images.items()
+                if named in (None, ref.rpartition(":")[0])
+                and all(self._matches(self.labels.get(image, {}), label) for label in wanted)
+            ]
             return self._done("\n".join(refs))
         if verb == "create":
             if self.refuse_committed_create and any(arg in self.committed for arg in args):
@@ -259,11 +281,13 @@ class Probe:
         return self.result
 
 
-def _downloads(probe: Probe | None = None, **kwargs: Any) -> RuntimeDownloads:
+def _downloads(
+    probe: Probe | None = None, namespace: str = NAMESPACE, **kwargs: Any
+) -> RuntimeDownloads:
     return RuntimeDownloads(
         docker="docker",
         image=IMAGE,
-        namespace=NAMESPACE,
+        namespace=namespace,
         image_menu=lambda: {"claude-code": ["2.1.220"], "codex": ["0.145.0"]},
         probe=probe or Probe(),
         **kwargs,
@@ -448,6 +472,7 @@ def test_a_new_sandbox_image_downloads_and_checks_its_targets_again(docker):
     """The check was against the old image's wrappers; the old build then goes."""
     old = image_ref(NAMESPACE, "claude-code", "2.1.300", OLD_BASE)
     docker.images[old] = "sha256:" + "ee" * 32
+    docker.labels[docker.images[old]] = _kept_labels("2.1.300")
     downloads = _downloads()
     downloads.apply([_target()])
 
@@ -510,6 +535,7 @@ def test_the_version_in_use_is_held_beside_the_update_in_the_order_sent(docker):
 def test_a_restarted_runner_removes_what_a_stopped_download_left(docker):
     docker.leftover_containers = ["dead1", "dead2"]
     docker.images[f"{repository(NAMESPACE)}-candidate:claude-code_2.1.300_{short_id(BASE)}"] = "x"
+    docker.labels["x"] = _kept_labels("2.1.300")
 
     _downloads()._remove_leftovers()
 
@@ -566,6 +592,7 @@ def _held(docker: FakeDocker, version: str, base: str = BASE) -> str:
     """This host holds claude-code ``version``, built on sandbox image ``base``."""
     ref = image_ref(NAMESPACE, "claude-code", version, base)
     docker.images[ref] = "sha256:" + f"{len(docker.images):064x}"
+    docker.labels[docker.images[ref]] = _kept_labels(version)
     return ref
 
 
@@ -926,16 +953,58 @@ def test_a_failed_listing_of_the_held_versions_is_tried_again(docker, monkeypatc
 
 
 def test_image_names_are_this_deployments_and_parse_back():
-    assert repository("Free Inference/Staging") == "free-inference-staging-agent-runtime"
+    assert repository("Free Inference/Staging") == (
+        "free-inference-staging-agent-runtime-d1ad2a5251b3"
+    )
     ref = image_ref(NAMESPACE, "claude-code", "2.1.300-beta.1", BASE)
-    assert ref == f"{NAMESPACE}-agent-runtime:claude-code_2.1.300-beta.1_{'ab12' * 3}"
+    assert ref == f"{NAMESPACE}-agent-runtime-74d1c3b2b18b:claude-code_2.1.300-beta.1_{'ab12' * 3}"
     assert runtime_images._parse(ref, NAMESPACE) is not None
     assert runtime_images._parse(ref, "another-deployment") is None
     assert (
-        runtime_images._parse(f"{NAMESPACE}-agent-runtime:kilo_7.4.17_{'ab12' * 3}", NAMESPACE)
+        runtime_images._parse(f"{repository(NAMESPACE)}:kilo_7.4.17_{'ab12' * 3}", NAMESPACE)
         is None
     )
-    assert runtime_images._parse(f"{NAMESPACE}-agent-runtime:<none>", NAMESPACE) is None
+    assert runtime_images._parse(f"{repository(NAMESPACE)}:<none>", NAMESPACE) is None
+    # What earlier releases kept parses back too; a candidate never does.
+    tag = f"claude-code_2.1.300_{'ab12' * 3}"
+    assert runtime_images._parse(f"{LEGACY}:{tag}", NAMESPACE) is not None
+    assert runtime_images._parse(f"{repository(NAMESPACE)}-candidate:{tag}", NAMESPACE) is None
+    assert runtime_images._parse(f"{LEGACY}-candidate:{tag}", NAMESPACE) is None
+
+
+def test_namespaces_that_read_the_same_get_repositories_of_their_own():
+    """Folding keeps neither case nor punctuation, so ``foo_bar`` and ``foo-bar`` read the same."""
+    assert repository("foo_bar") == "foo-bar-agent-runtime-4928cae8b37b"
+    assert repository("foo-bar") == "foo-bar-agent-runtime-7d89c4f517e3"
+    assert image_ref("foo_bar", "claude-code", "2.1.300", BASE) != image_ref(
+        "foo-bar", "claude-code", "2.1.300", BASE
+    )
+    # Still valid Docker repository names, the candidate's included.
+    for namespace in ("Free Inference/Staging", "foo_bar", "--", "Ünïcode", "x" * 128):
+        for name in (repository(namespace), f"{repository(namespace)}-candidate"):
+            assert len(name) <= 255 and DOCKER_REPOSITORY.fullmatch(name), name
+
+
+def test_deployments_whose_namespaces_read_the_same_keep_their_downloads_apart(docker):
+    """Two deployments on one Docker daemon download the same version on the same image.
+
+    Sharing a repository, the second download moved the tag off the first
+    one's image: the version dropped out of that deployment's label-filtered
+    discovery, and its menu, until it downloaded the version again and moved
+    the tag back.
+    """
+    for namespace in (NAMESPACE, NEIGHBOUR):
+        downloads = _downloads(namespace=namespace)
+        downloads.apply([_target()])
+        assert _run_once(downloads) is not None
+
+    for namespace in (NAMESPACE, NEIGHBOUR):
+        assert runtime_images.DownloadedVersions("docker", namespace).versions() == {
+            "claude-code": ["2.1.300"]
+        }
+    (ours,) = discover("docker", NAMESPACE)
+    (theirs,) = discover("docker", NEIGHBOUR)
+    assert docker.images[ours.ref] != docker.images[theirs.ref]
 
 
 def test_downloaded_versions_are_listed_oldest_first():
@@ -991,6 +1060,7 @@ def downloaded(monkeypatch):
     images = {image_ref(NAMESPACE, "claude-code", "2.1.300", BASE): "x", IMAGE: BASE}
     fake = FakeDocker()
     fake.images = images
+    fake.labels["x"] = _kept_labels("2.1.300")
     monkeypatch.setattr(subprocess, "run", fake)
 
     class Reader:
@@ -1056,7 +1126,7 @@ def test_a_runner_restarting_mid_copy_leaves_the_copy_alone(downloaded):
     chat copies the CLI removes every container that has it.
     """
     final = image_ref(NAMESPACE, "claude-code", "2.1.300", BASE)
-    downloaded.labels[downloaded.images[final]] = {runtime_images.WORK_LABEL: NAMESPACE}
+    downloaded.labels[downloaded.images[final]][runtime_images.WORK_LABEL] = NAMESPACE
 
     class Manager(FakeManager):
         """Creates the source container through Docker."""
@@ -1178,3 +1248,83 @@ def test_the_activation_refuses_a_tree_root_does_not_own_outright(tmp_path):
     # Owned by the test runner's user and writable by anyone: both refuse it.
     assert "not protected" in result.stderr
     assert not target.exists()
+
+
+# ── what earlier releases kept ────────────────────────────────────────────
+
+
+def _kept_earlier(docker: FakeDocker, ref: str, version: str, namespace: str = NAMESPACE) -> str:
+    """``ref`` is claude-code ``version`` as an earlier release kept it for ``namespace``."""
+    docker.images[ref] = "sha256:" + f"{len(docker.images):064x}"
+    docker.labels[docker.images[ref]] = _kept_labels(version, namespace)
+    return ref
+
+
+def test_a_version_an_earlier_release_kept_is_still_offered_used_and_removed(docker):
+    """Hosts hold versions under the old name, and its label says whose each one is.
+
+    A chat starts on the image discovery returns, and a cleanup removes the
+    ones discovery returns, so neither needs the name to be this release's.
+    """
+    clock = Clock()
+    kept = _kept_earlier(docker, f"{LEGACY}:claude-code_2.1.300_{short_id(BASE)}", "2.1.300")
+    # The neighbour's, under the very same name, is never this deployment's.
+    theirs = _kept_earlier(
+        docker, f"{LEGACY}:claude-code_2.1.299_{short_id(BASE)}", "2.1.299", NEIGHBOUR
+    )
+    downloads = _downloads(clock=clock)
+    downloads.apply([_target()])
+
+    # Offered, and ready for its target without being downloaded again…
+    assert runtime_images.DownloadedVersions("docker", NAMESPACE).versions() == {
+        "claude-code": ["2.1.300"]
+    }
+    assert _run_once(downloads) is None
+    assert _reported(downloads)["state"] == "ready"
+    assert docker.ran("create") == []
+    # …copied into a chat from that very image…
+    manager = FakeManager()
+    runtime_install.ensure_downloaded_runtime(manager, None, "claude-code", "2.1.300")
+    assert manager.runs[0][-1] == kept
+    # …and removed once nothing needs it.
+    downloads.apply([])
+    _cleaned_up(downloads, clock)
+    assert kept not in docker.images
+    assert theirs in docker.images
+
+
+def test_a_new_download_is_kept_under_the_new_name_and_the_old_build_goes(docker):
+    """A new sandbox image downloads its targets again; nothing new goes under the old name."""
+    probe = Probe()
+    old = _kept_earlier(docker, f"{LEGACY}:claude-code_2.1.300_{short_id(OLD_BASE)}", "2.1.300")
+    downloads = _downloads(probe)
+    downloads.apply([_target()])
+
+    assert _run_once(downloads) is not None
+
+    (kept,) = discover("docker", NAMESPACE)
+    assert kept.ref == f"{repository(NAMESPACE)}:claude-code_2.1.300_{short_id(BASE)}"
+    assert not kept.ref.startswith(f"{LEGACY}:")
+    # Its candidate too: the old one is a name neighbours share.
+    (checked,) = probe.calls
+    assert checked["image"].startswith(f"{repository(NAMESPACE)}-candidate:")
+    assert not checked["image"].startswith(f"{LEGACY}-candidate:")
+    assert old not in docker.images
+
+
+def test_a_restarted_runner_removes_its_old_name_candidates_and_no_neighbours(docker):
+    """Earlier releases named candidates for the namespace folded, a name neighbours share.
+
+    Only this deployment's go: a neighbour's may still be under its check.
+    """
+    ours = _kept_earlier(
+        docker, f"{LEGACY}-candidate:claude-code_2.1.300_{short_id(BASE)}", "2.1.300"
+    )
+    theirs = _kept_earlier(
+        docker, f"{LEGACY}-candidate:claude-code_2.1.301_{short_id(BASE)}", "2.1.301", NEIGHBOUR
+    )
+
+    _downloads()._remove_leftovers()
+
+    assert ours not in docker.images
+    assert theirs in docker.images

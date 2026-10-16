@@ -23,6 +23,7 @@ new release downloads and checks its targets again.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import re
 import subprocess
@@ -76,10 +77,32 @@ class RuntimeImage:
     ref: str
 
 
+def _readable(namespace: str) -> str:
+    """``namespace`` lowercased, every run of anything but ``a-z0-9`` folded to ``-``."""
+    return re.sub(r"[^a-z0-9]+", "-", namespace.lower()).strip("-") or "default"
+
+
 def repository(namespace: str) -> str:
-    """This deployment's repository name for downloaded versions."""
-    name = re.sub(r"[^a-z0-9]+", "-", namespace.lower()).strip("-") or "default"
-    return f"{name}-agent-runtime"
+    """This deployment's repository name for downloaded versions.
+
+    The namespace, readable, then the first 12 hex digits of its SHA-256.
+    Reading it loses case and punctuation: ``foo_bar`` and ``foo-bar`` read
+    the same, and two such deployments on one Docker daemon would share a
+    repository, each download moving the other's tag off its image. The
+    digest of the exact namespace keeps them apart, as it does their bridges
+    and tables (``egress``).
+    """
+    digest = hashlib.sha256(namespace.encode()).hexdigest()[:12]
+    return f"{_readable(namespace)}-agent-runtime-{digest}"
+
+
+def legacy_repository(namespace: str) -> str:
+    """Where earlier releases kept downloads, shared by every namespace that reads the same.
+
+    Hosts still hold versions there. They are offered, used and removed as
+    before; nothing new is kept there.
+    """
+    return f"{_readable(namespace)}-agent-runtime"
 
 
 def short_id(image_id: str) -> str:
@@ -98,7 +121,9 @@ def image_ref(namespace: str, runtime: str, version: str, base: str) -> str:
 
 def _parse(ref: str, namespace: str) -> RuntimeImage | None:
     repo, _, tag = ref.rpartition(":")
-    if repo != repository(namespace):
+    # The old name is shared, but the listing holds only images labelled with
+    # this exact namespace: under either name, they are this deployment's.
+    if repo not in (repository(namespace), legacy_repository(namespace)):
         return None
     parts = tag.split("_")
     if len(parts) != 3:
