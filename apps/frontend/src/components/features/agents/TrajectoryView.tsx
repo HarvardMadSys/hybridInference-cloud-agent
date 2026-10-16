@@ -462,11 +462,14 @@ function ExecutionOverview({
     // produced. Without this, a draft interval and the frame loop walking the
     // window would carry on after the reader asked for it to stop, and the
     // release would commit the selection they just cancelled.
+    const gesture = dragRef.current !== null || panRef.current !== null;
     stopEdgePan();
     dragRef.current = null;
     panRef.current = null;
     setPanning(false);
     setDraft(null);
+    // Cancelling the gesture claims the key, so it cannot also stop the run.
+    if (gesture) event.preventDefault();
     if (range !== null) {
       event.preventDefault();
       commitRange(null);

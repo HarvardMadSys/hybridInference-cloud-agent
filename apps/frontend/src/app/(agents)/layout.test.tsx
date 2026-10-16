@@ -6,9 +6,12 @@ import { useState } from 'react';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { cancelAgentJob } from '@/lib/api/agents';
 import { listMcpInvocations, type McpInvocationsApi } from '@/lib/api/mcp';
 import type { AgentAccessApi } from '@/lib/api/session';
+import { useJobRunActions } from '@/components/features/agents/job-detail/useJobRunActions';
 import { SkillDialog } from '@/components/features/agents/skills/SkillDialog';
+import type { AgentJob } from '@/components/features/agents/types';
 import { KeyboardShortcutsSettings } from '@/components/features/settings/KeyboardShortcutsSettings';
 import { onPlatform } from '@/lib/platformTestSupport';
 
@@ -26,12 +29,18 @@ beforeEach(() => {
   sessionStorage.clear();
   window.history.replaceState(null, '', '/');
   vi.mocked(listMcpInvocations).mockReset().mockResolvedValue({ invocations: [] });
+  vi.mocked(cancelAgentJob).mockReset();
   router.replace.mockReset();
   logout.mockReset();
 });
 
 let pathname = '/';
 let statusUrl = '/status';
+
+vi.mock('@/lib/api/agents', async (original) => ({
+  ...(await original<typeof import('@/lib/api/agents')>()),
+  cancelAgentJob: vi.fn(),
+}));
 
 vi.mock('@/lib/api/mcp', async (original) => ({
   ...(await original<typeof import('@/lib/api/mcp')>()),
@@ -420,6 +429,28 @@ describe('AgentsLayout mobile task list', () => {
     expect(screen.getByRole('main')).toBeVisible();
     expect(toggle()).toHaveFocus();
     expect(toggle()).toHaveAttribute('aria-expanded', 'false');
+  });
+
+  it('closes the task list with Escape without stopping the run it covers', () => {
+    // What JobDetail mounts for a running conversation: Escape stops its turn.
+    function RunningConversation() {
+      useJobRunActions({ job: { id: 'ajob_1', state: 'running' } as AgentJob, onError: () => {} });
+      return <p>Task composer</p>;
+    }
+    render(
+      <AgentsLayout>
+        <RunningConversation />
+      </AgentsLayout>,
+    );
+    fireEvent.click(toggle());
+    const newTask = screen.getByRole('link', { name: 'New task' });
+    expect(newTask).toHaveFocus();
+
+    fireEvent.keyDown(newTask, { key: 'Escape' });
+
+    expect(cancelAgentJob).not.toHaveBeenCalled();
+    expect(screen.queryByTestId('sidebar-stub')).not.toBeInTheDocument();
+    expect(toggle()).toHaveFocus();
   });
 
   it('moves focus into the task list when opened with Control+B and back when closed', async () => {
