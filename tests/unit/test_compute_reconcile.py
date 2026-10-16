@@ -257,6 +257,8 @@ async def test_ready_host_uses_public_enrolled_fact_and_opens_only_its_bootstrap
         call.kwargs["purpose"] == "lease_deadline"
         for call in h.repository.set_admission_hold.await_args_list
     )
+    # Four hours from expiry the Host is not moving out.
+    assert h.repository.set_move_out_hold.await_args.kwargs["due"] is False
 
 
 @pytest.mark.parametrize("blocked", [None, "data_mount_unavailable", "data_mount_conflict"])
@@ -1829,3 +1831,77 @@ async def test_unknown_acquisition_receipt_keeps_safe_provider_diagnostics(monke
     await h.reconciler.execute(h.operation)
     h.provider.acquire.assert_awaited_once()
     assert h.operation["state"] == "unknown"
+
+
+def _move_out_hold(h):
+    h.repository.set_move_out_hold.assert_awaited_once()
+    return h.repository.set_move_out_hold.await_args.kwargs
+
+
+@pytest.mark.asyncio
+async def test_a_host_in_its_move_out_window_asks_to_hold_every_claim(monkeypatch):
+    """Each chat's next turn is then claimed elsewhere, from its group's checkpoint.
+
+    Whether the hold is set is the repository's decision: it needs working
+    checkpoints and a Host that would take the groups.
+    """
+    h = harness(monkeypatch, kind="inspect", identified=True)
+    h.provider.inspect.return_value = observed(expires=NOW + timedelta(minutes=90))
+
+    await h.reconciler.execute(h.operation)
+
+    hold = _move_out_hold(h)
+    assert (hold["allocation_id"], hold["due"]) == ("allocation-a", True)
+    assert hold["operation_id"] == "operation-a"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "policy",
+    [
+        RenewalPolicy(move_out_before_seconds=0),
+        RenewalPolicy(
+            enabled=True, reason="Keep the sandboxes", rotation_enabled=True, node_types=["m510"]
+        ),
+    ],
+)
+async def test_a_host_that_does_not_move_out_never_holds_its_claims(monkeypatch, policy):
+    h = harness(monkeypatch, kind="inspect", identified=True)
+    h.allocation["policy"] = policy.model_dump()
+    h.provider.inspect.return_value = observed(expires=NOW + timedelta(minutes=30))
+
+    await h.reconciler.execute(h.operation)
+
+    assert _move_out_hold(h)["due"] is False
+
+
+@pytest.mark.asyncio
+async def test_renewal_is_tried_before_the_move_out_window_opens(monkeypatch):
+    """A granted extension keeps the groups where they are."""
+    h = harness(monkeypatch, kind="inspect", identified=True)
+    h.allocation.update(
+        expires_at=NOW + timedelta(minutes=110),
+        policy=RenewalPolicy(enabled=True, reason="Keep the sandboxes").model_dump(),
+    )
+
+    await h.reconciler.schedule()
+
+    h.commands.extend.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_groups_still_unmoved_near_the_lease_end_alert_once(monkeypatch):
+    h = harness(monkeypatch, kind="inspect", identified=True)
+    h.allocation["expires_at"] = NOW + timedelta(minutes=4)
+    h.repository.unmoved_groups.return_value = 2
+    events = []
+
+    async def notify(event, *, host, reason):
+        events.append((event, host, reason))
+
+    monkeypatch.setattr(h.reconciler.rotation, "_notify", notify)
+
+    await h.reconciler.schedule()
+    await h.reconciler.schedule()
+
+    assert events == [("compute_move_out_unfinished", "compute-nodeid", "2 groups not moved")]
