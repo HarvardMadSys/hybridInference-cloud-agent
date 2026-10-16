@@ -4179,10 +4179,13 @@ class SharedChatSessionSupervisor:
         token: str,
         *,
         last_activity_monotonic: float | None = None,
-    ) -> SharedSessionDescriptor:
-        """Release one PTY and refresh the group's single activity clock."""
+    ) -> SharedSessionDescriptor | None:
+        """Release one PTY and refresh the group's single activity clock.
+
+        Returns ``None`` for an opener that is no longer a member.
+        """
         with self._lock:
-            group, member = self._member(thread_id)
+            group, member = self._token_opener_locked(thread_id, token, terminal=True)
             if group.terminal_tokens.get(token) != thread_id:
                 raise SessionLeaseLost("shared terminal lifecycle token is stale")
             now = self._clock()
@@ -4197,17 +4200,39 @@ class SharedChatSessionSupervisor:
             group.terminal_tokens.pop(token, None)
             if self._is_quiescent(group) and group.inspection.running:
                 group.idle_deadline = activity_at + self._idle_timeout_s
-            return self._descriptor(group, member)
+            return None if member is None else self._descriptor(group, member)
 
-    def operation_closed(self, thread_id: str, token: str) -> SharedSessionDescriptor:
-        """Release one workspace operation and refresh the group activity clock."""
+    def operation_closed(self, thread_id: str, token: str) -> SharedSessionDescriptor | None:
+        """Release one workspace operation and refresh the group activity clock.
+
+        Returns ``None`` for an opener that is no longer a member.
+        """
         with self._lock:
-            group, member = self._member(thread_id)
+            group, member = self._token_opener_locked(thread_id, token, terminal=False)
             if group.operation_tokens.get(token) != thread_id:
                 raise SessionLeaseLost("shared workspace operation token is stale")
             group.operation_tokens.pop(token, None)
             self._arm_idle_if_quiescent(group)
-            return self._descriptor(group, member)
+            return None if member is None else self._descriptor(group, member)
+
+    def _token_opener_locked(
+        self, thread_id: str, token: str, *, terminal: bool
+    ) -> tuple[_Group, _Member | None]:
+        """Find the group a terminal or operation token was opened in, and its opener.
+
+        The token is what keeps its group awake, and only its own close can
+        release it. A later manifest can drop the opener while the token is
+        open -- a deleted chat whose resident slot a Fork reclaimed -- so an
+        opener that is no longer a member is found through its token instead.
+        """
+        group = self._members.get(thread_id)
+        if group is not None:
+            return group, group.members[thread_id]
+        for candidate in self._groups.values():
+            tokens = candidate.terminal_tokens if terminal else candidate.operation_tokens
+            if tokens.get(token) == thread_id:
+                return candidate, None
+        raise SandboxError(f"chat {thread_id!r} has no shared sandbox membership")
 
     def backend(self, thread_id: str) -> RetainedChatBackend:
         """Return the one container backend shared by this member's group."""

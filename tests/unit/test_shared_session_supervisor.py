@@ -2216,6 +2216,49 @@ def test_invalid_terminal_close_keeps_reference_for_a_valid_retry():
     assert closed.idle_deadline_monotonic == 120.0
 
 
+@pytest.mark.parametrize("kind", ["terminal", "operation"])
+def test_a_token_still_closes_after_a_manifest_drops_its_opener(kind):
+    """A deleted Fork child's PTY or workspace request can outlive its membership.
+
+    A later Fork reclaims the deleted chat's resident slot, so every manifest
+    from then on omits the chat, and the host drops the member while its
+    token is still open. Closing the token must still release the group;
+    otherwise it never goes idle and every publication snapshot is refused.
+    """
+    now = [1000.0]
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager, idle_timeout_s=60, clock=lambda: now[0])
+    origin, child = _members()
+    supervisor.register_manifest(_spec(), [origin, child])
+    if kind == "terminal":
+        token, _ = supervisor.terminal_opened("athr_peer")
+
+        def close():
+            return supervisor.terminal_closed("athr_peer", token, last_activity_monotonic=now[0])
+    else:
+        token, _ = supervisor.operation_opened("athr_peer")
+
+        def close():
+            return supervisor.operation_closed("athr_peer", token)
+
+    supervisor.register_manifest(_spec(), [origin])
+    assert not supervisor.owns("athr_peer")
+
+    assert close() is None
+
+    [descriptor] = supervisor.list()
+    assert descriptor.group_busy is False
+    assert descriptor.idle_deadline_monotonic == 1060.0
+    with pytest.raises(SandboxError, match="no shared sandbox membership"):
+        close()
+    assert supervisor.capture_snapshot("athr_source", capture=lambda _backend: {"patch": ""}) == {
+        "patch": ""
+    }
+    now[0] += 60
+    assert [stopped.running for stopped in supervisor.sweep()] == [False]
+    assert manager.items[_spec().container_name].running is False
+
+
 def test_a_changed_idle_timeout_arms_the_next_quiet_moment_with_the_new_value():
     manager = _Manager()
     supervisor = SharedChatSessionSupervisor(manager, idle_timeout_s=30, clock=lambda: 100.0)
