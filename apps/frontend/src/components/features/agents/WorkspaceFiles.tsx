@@ -275,11 +275,20 @@ function TreeLevel({
       </p>
     ) : null;
   }
+  // The host leaves out entries past its limit and names that are not UTF-8,
+  // and says so; without this a partial folder reads as the whole of it.
+  const incomplete = state.truncated ? (
+    <p style={indent} className="py-1 pr-2 text-[11px] text-gray-400 dark:text-gray-500">
+      {t('workspaceFiles.listingIncomplete')}
+    </p>
+  ) : null;
   if (state.entries.length === 0) {
     return (
-      <p style={indent} className="py-1 pr-2 text-[11px] text-gray-400 dark:text-gray-500">
-        Empty
-      </p>
+      incomplete ?? (
+        <p style={indent} className="py-1 pr-2 text-[11px] text-gray-400 dark:text-gray-500">
+          Empty
+        </p>
+      )
     );
   }
 
@@ -325,6 +334,7 @@ function TreeLevel({
           </div>
         );
       })}
+      {incomplete}
     </>
   );
 }

@@ -278,6 +278,7 @@ export const en = {
   'workspaceFiles.binaryPreview':
     'Preview is unavailable for this file type. Download the file to open it.',
   'workspaceFiles.binaryMissing': 'This binary file has no downloadable content.',
+  'workspaceFiles.listingIncomplete': 'Some entries in this folder are not listed.',
   'transcript.display': 'Activity: {mode}',
   'transcript.displayTitle': 'Show in chat',
   'transcript.displayHint': 'Only changes the display, not how the agent runs.',

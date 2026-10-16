@@ -262,6 +262,7 @@ export const zhCN: Record<TranslationKey, string> = {
   'workspaceFiles.tooLarge': '此文件超过工作区预览大小限制，无法预览或下载。',
   'workspaceFiles.binaryPreview': '此文件类型无法预览，请下载文件后打开。',
   'workspaceFiles.binaryMissing': '此二进制文件没有可下载内容。',
+  'workspaceFiles.listingIncomplete': '此文件夹中有部分条目未列出。',
   'transcript.display': '执行过程：{mode}',
   'transcript.displayTitle': '在聊天中显示',
   'transcript.displayHint': '仅调整显示，不影响 Agent 执行。',

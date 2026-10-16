@@ -351,6 +351,58 @@ describe('workspace navigation and copying', () => {
     expect(getAgentJobFiles).toHaveBeenCalledExactlyOnceWith(JOB.id, 'src');
   });
 
+  it('says which folders list only some of their entries', async () => {
+    vi.mocked(getAgentJobFiles).mockImplementation(async (_jobId, path = '') => {
+      if (!path)
+        return {
+          path: '',
+          kind: 'directory',
+          entries: [
+            { path: 'src', name: 'src', kind: 'directory' },
+            { path: 'docs', name: 'docs', kind: 'directory' },
+          ],
+          truncated: false,
+        };
+      return {
+        path,
+        kind: 'directory',
+        entries: [{ path: `${path}/kept.txt`, name: 'kept.txt', kind: 'file' }],
+        // The host leaves out names past its entry limit, and names that are
+        // not UTF-8, and says so.
+        truncated: path === 'src',
+      };
+    });
+    render(<WorkspaceFiles job={JOB} active />);
+    fireEvent.click(await screen.findByRole('button', { name: 'docs' }));
+    await screen.findByRole('button', { name: 'docs/kept.txt' });
+    expect(screen.queryByText('Some entries in this folder are not listed.')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'src' }));
+    await screen.findByRole('button', { name: 'src/kept.txt' });
+    expect(screen.getAllByText('Some entries in this folder are not listed.')).toHaveLength(1);
+
+    // A folder opened by its path reads the same flag.
+    openPath('lib');
+    await screen.findByRole('button', { name: 'lib/kept.txt' });
+    expect(screen.queryByText('Some entries in this folder are not listed.')).toBeNull();
+    openPath('src');
+    await screen.findByRole('button', { name: 'src/kept.txt' });
+    expect(screen.getByText('Some entries in this folder are not listed.')).toBeVisible();
+  });
+
+  it('does not call a folder empty when every entry was left out of its listing', async () => {
+    vi.mocked(getAgentJobFiles).mockResolvedValue({
+      path: '',
+      kind: 'directory',
+      entries: [],
+      truncated: true,
+    });
+    render(<WorkspaceFiles job={JOB} active />);
+
+    expect(await screen.findByText('Some entries in this folder are not listed.')).toBeVisible();
+    expect(screen.queryByText('Empty')).not.toBeInTheDocument();
+  });
+
   it.each(['', Array.from({ length: 4002 }, (_, index) => `line ${index + 1}`).join('\n')])(
     'copies all authorized text, including empty files and lines beyond the display limit',
     async (content) => {

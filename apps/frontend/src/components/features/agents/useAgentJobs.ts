@@ -748,9 +748,15 @@ export function useAgentJob(
 /** One directory of the workspace tree, as far as it has been loaded. */
 export interface WorkspaceDirectory {
   entries: AgentJobFileEntryApi[] | null;
+  /** Set when the listing leaves entries out, so `entries` is not the whole folder. */
+  truncated?: true;
   loading: boolean;
   error: string | null;
 }
+
+/** A listing's incompleteness, carried only when it is set. */
+const partialListing = (truncated: boolean | undefined) =>
+  truncated ? { truncated: true as const } : {};
 
 export interface WorkspaceFilesState {
   /** Loaded directories keyed by path; the workspace root is the empty string. */
@@ -834,7 +840,12 @@ export function useWorkspaceFiles(
         directoryRequests.current.get(path)?.request === request;
       setDirectories((current) => ({
         ...current,
-        [path]: { entries: current[path]?.entries ?? null, loading: true, error: null },
+        [path]: {
+          entries: current[path]?.entries ?? null,
+          ...partialListing(current[path]?.truncated),
+          loading: true,
+          error: null,
+        },
       }));
       try {
         const node = await getAgentJobFiles(jobId, path);
@@ -844,6 +855,7 @@ export function useWorkspaceFiles(
           ...current,
           [path]: {
             entries: node.kind === 'directory' ? (node.entries ?? []) : [],
+            ...partialListing(node.kind === 'directory' && node.truncated),
             loading: false,
             error: null,
           },
@@ -883,7 +895,12 @@ export function useWorkspaceFiles(
           directoryGenerations.current.set(node.path, mine);
           setDirectories((current) => ({
             ...current,
-            [node.path]: { entries: node.entries ?? [], loading: false, error: null },
+            [node.path]: {
+              entries: node.entries ?? [],
+              ...partialListing(node.truncated),
+              loading: false,
+              error: null,
+            },
           }));
           setExpanded((current) => ({
             ...current,

@@ -16,6 +16,12 @@ Opening a folder shows its current entries directly in the tree. Use
 expanded. This also lets you open a folder created after the original listing
 loaded, or one omitted from a large directory's bounded listing.
 
+A folder's listing is bounded: entries past the listing limit, and names that
+are not UTF-8, are left out. Such a folder ends with **Some entries in this
+folder are not listed** instead of reading as complete, and one whose entries
+were all left out says that rather than **Empty**. An entry left out for the
+limit can still be opened by its path.
+
 Returning to **Workspace root** cancels an unfinished path read so a late
 response cannot take you back into another folder. An already loaded file
 preview stays open beside the root tree.
