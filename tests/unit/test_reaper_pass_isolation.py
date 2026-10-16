@@ -61,6 +61,7 @@ async def test_stalled_environment_maintenance_does_not_delay_attempt_reaping() 
 
     inner = SimpleNamespace(
         environments=SimpleNamespace(maintain_environments=stalled_maintenance),
+        environment_snapshots=SimpleNamespace(maintain=AsyncMock(return_value=None)),
         reap_expired=AsyncMock(return_value=[]),
         reap_stalled_sandbox_snapshot_captures=AsyncMock(return_value=[]),
         reap_stalled_snapshot_publishes=AsyncMock(return_value=[]),
@@ -68,7 +69,12 @@ async def test_stalled_environment_maintenance_does_not_delay_attempt_reaping() 
     )
     store = OneFake(inner)
     maintenance = asyncio.create_task(
-        run_environment_maintenance(inner.environments, interval_seconds=0.001, deadline_seconds=1),
+        run_environment_maintenance(
+            inner.environments,
+            inner.environment_snapshots,
+            interval_seconds=0.001,
+            deadline_seconds=1,
+        ),
         name="stalled-environment-maintenance",
     )
     reaper = asyncio.create_task(reap_expired_attempts(store, interval_seconds=0.001, grants=None))

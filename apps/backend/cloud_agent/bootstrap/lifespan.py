@@ -449,7 +449,7 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
                 )
             )
             environment_maintenance = asyncio.create_task(
-                run_environment_maintenance(storage.environments)
+                run_environment_maintenance(storage.environments, storage.environment_snapshots)
             )
             # The workers below wait on this as well as their clocks; the shared
             # listener started further down is what sets it.

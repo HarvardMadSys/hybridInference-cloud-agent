@@ -276,6 +276,7 @@ async def test_environment_maintenance_lock_does_not_delay_attempt_reaper(api, m
     maintenance_task = asyncio.create_task(
         run_environment_maintenance(
             store.environments,
+            store.environment_snapshots,
             interval_seconds=0.001,
             deadline_seconds=10,
         ),
