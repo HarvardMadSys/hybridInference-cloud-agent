@@ -692,6 +692,29 @@ class PostgresAttemptCommands:
                 attempt_id,
                 retry_after_seconds,
             )
+            # A member this attempt reserved is released with it, as an
+            # abandoned activation is. Nothing else clears it once the attempt
+            # stops running, and a member still naming the attempt refused
+            # every later reservation of its chat and kept its group busy. A
+            # group this attempt was restoring is left to the restore release
+            # below, which reads this reservation to tell whether it began.
+            await conn.execute(
+                """
+                UPDATE agent_thread_sandbox_memberships m
+                SET active_attempt_id = NULL,
+                    resident_state = CASE
+                        WHEN m.native_session_id IS NULL
+                             OR m.native_session_id !~ '[^[:space:]]'
+                            THEN 'stopped'
+                        ELSE 'restarting'
+                    END,
+                    updated_at = NOW()
+                FROM agent_sandboxes g
+                WHERE m.active_attempt_id = $1 AND g.id = m.sandbox_id
+                  AND g.restore_attempt_id IS DISTINCT FROM $1
+                """,
+                attempt_id,
+            )
             # All close-attempt paths take locks in attempt -> job -> host
             # order. Previously transition took job -> attempt while this path
             # took attempt -> host -> job, so concurrent finishes and aborts

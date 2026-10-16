@@ -5525,6 +5525,50 @@ async def test_a_turn_reserved_but_not_admitted_can_still_be_handed_back(store: 
     assert (await store.conversation_queries.get_job(job["id"]))["state"] == "queued"
 
 
+async def test_a_turn_handed_back_after_its_reservation_can_be_reserved_again(store: Storage):
+    """The aborted attempt takes its activation of the chat's member with it.
+
+    Grant renewal hands back an attempt whose grant the Gateway will not
+    renew, and that attempt may already have reserved its chat. The member
+    went on naming the aborted attempt as its active one, which nothing
+    clears once the attempt is no longer running: every later reservation
+    of the chat was refused, and its group never counted as idle.
+    """
+    job, claim, sandbox = await _reserve_shared_chat(store)
+
+    assert await store.attempt_commands.release_claim(
+        job_id=job["id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+    )
+
+    member = await store.sandbox.thread_sandbox(thread_id=job["thread_id"])
+    assert member is not None
+    assert (member["active_attempt_id"], member["resident_state"]) == (None, "stopped")
+    retry = await _claim(
+        store,
+        worker_id="shared-worker",
+        lease_ttl_seconds=60,
+        host="shared-runner",
+        host_credential_hash="test-credential-hash",
+    )
+    assert retry is not None and retry["id"] == job["id"]
+    reserved = await store.sandbox.reserve_thread_sandbox(
+        thread_id=job["thread_id"],
+        attempt_id=retry["attempt_id"],
+        lease_generation=retry["lease_generation"],
+        host="shared-runner",
+        sandbox_id=sandbox["sandbox_id"],
+        container_name=sandbox["container_name"],
+        runtime_id=sandbox["runtime_id"],
+        runtime_version=sandbox["runtime_version"],
+        sandbox_image_digest=sandbox["sandbox_image_digest"],
+        execution_profile=sandbox["execution_profile"],
+    )
+    assert reserved is not None
+    assert reserved["active_attempt_id"] == retry["attempt_id"]
+
+
 async def test_a_release_records_the_reason_it_was_given(store: Storage):
     """'This host cannot start turns' is what the trail is read for."""
     job = await _create_job(store)
