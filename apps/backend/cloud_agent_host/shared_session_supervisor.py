@@ -3588,16 +3588,36 @@ class SharedChatSessionSupervisor:
         *,
         activation_owner: str | None = None,
     ) -> dict[str, Any]:
-        """Serialize preparation with writers, preserving this activation's lease."""
+        """Serialize preparation with writers, preserving this activation's lease.
+
+        As in :meth:`status`, Docker and the preparation receipt are read outside
+        the metadata lock, which every other group's calls would otherwise wait
+        behind. An observation that a lifecycle call superseded while it was in
+        flight never replaces that call's own.
+        """
         with self._lock:
             group, _ = self._member(thread_id)
         self._ensure_running(group)
         with self._lock:
             group, member = self._member(thread_id)
-            backend = RetainedChatBackend(self._manager, group.spec)
-            self._require_current_inspection(group)
-            if preparer.status(backend, environment.binding_id).get("ready"):
-                return preparer.status(backend, environment.binding_id)
+            observed = group.inspection
+            lifecycle_generation = group.lifecycle_generation
+        backend = RetainedChatBackend(self._manager, group.spec)
+        current = self._manager.inspect(group.spec.container_name)
+        receipt = preparer.status(backend, environment.binding_id)
+        with self._lock:
+            current_group, current_member = self._member(thread_id)
+            if current_group is not group or current_member is not member:
+                raise SessionLeaseLost("shared sandbox membership changed during observation")
+            if group.inspection == observed and group.lifecycle_generation == lifecycle_generation:
+                if current is None:
+                    self._mark_container_lost_locked(group)
+                    raise RetainedChatLost("shared sandbox container is missing")
+                self._accept_inspection_locked(group, current)
+            elif group.container_lost:
+                raise RetainedChatLost("shared sandbox container identity was lost")
+            if receipt.get("ready"):
+                return receipt
             self._require_mutation_admission(group)
             if group.operation_tokens or any(
                 m.current_turn is not None
