@@ -6,11 +6,13 @@ from typing import TYPE_CHECKING
 
 import pytest
 from tests.integration.storage.test_sandbox_restore_store import (
+    _ARCHIVE_HOST,
     _RESTORE_HOST,
     _claim,
     _covered,
     _host,
     _receipt,
+    _reserve,
     _settled_stopped_group,
     _state,
     pool as pool,
@@ -168,3 +170,37 @@ async def test_a_machine_the_provider_ended_hands_its_covered_groups_over(pool, 
     assert (await _state(pool))["state"] == "cold"
     # The Host row, its credential and any deployment fence stay for removal.
     assert (await store.host_pool.get_host(host="runner-a"))["enrolled"]
+
+
+async def test_a_turn_claimed_before_the_hold_keeps_its_group(pool, store: Storage):
+    """It reserves the group only after its claim; moving the group would end it."""
+    job, _ = await _covered(pool, store)
+    follow_up = await store.conversation_commands.create_follow_up(
+        parent_job_id=job["id"], user_id="user-1", prompt="continue"
+    )
+    claim = await _claim(store, "runner-a", _ARCHIVE_HOST)
+    assert claim is not None and claim["id"] == follow_up["id"]
+    await _moving_out(pool)
+
+    assert await store.sandbox.release_moving_out_groups() == []
+
+    assert (await _state(pool))["state"] == "stopped"
+    reserved = await _reserve(store, follow_up, claim, "runner-a")
+    assert reserved["host"] == "runner-a"
+
+
+async def test_a_checkpoint_after_a_claimed_turn_does_not_move_its_group(pool, store: Storage):
+    job, group = await _settled_stopped_group(pool, store)
+    follow_up = await store.conversation_commands.create_follow_up(
+        parent_job_id=job["id"], user_id="user-1", prompt="continue"
+    )
+    claim = await _claim(store, "runner-a", _ARCHIVE_HOST)
+    assert claim is not None and claim["id"] == follow_up["id"]
+    await _moving_out(pool)
+
+    assert await store.sandbox.record_sandbox_checkpoint(
+        host="runner-a", thread_id=job["thread_id"], checkpoint=_receipt(group, job)
+    )
+
+    assert (await _state(pool))["state"] == "stopped"
+    assert (await _reserve(store, follow_up, claim, "runner-a"))["host"] == "runner-a"

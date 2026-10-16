@@ -1131,10 +1131,20 @@ class PostgresSandboxRepository:
     async def release_moving_out_groups(self) -> list[str]:
         """Hand every covered stopped group on a Host moving out to another Host."""
         async with self._pool.acquire() as conn, conn.transaction():
+            # Held to the end: an extension cannot clear a hold between the
+            # list read here and the hand-over below.
+            await lock_compute_entry(conn)
             hosts = await moving_out_hosts(conn)
             if not hosts:
                 return []
-            return await release_covered_sandboxes(conn, hosts)
+            # A claim of a group's next turn holds the group row; waiting for
+            # it here lets the hand-over see that turn and leave the group.
+            await conn.fetch(
+                "SELECT id FROM agent_sandboxes WHERE host = ANY($1::text[]) "
+                "AND state = 'stopped' AND deletion_state = 'none' ORDER BY id FOR UPDATE",
+                hosts,
+            )
+            return await release_covered_sandboxes(conn, hosts, live_host=True)
 
     async def thread_workspace_ready(self, *, thread_id: str) -> bool:
         """Return whether a retained thread permits owner workspace mutation.
@@ -1940,6 +1950,9 @@ class PostgresSandboxRepository:
         if isinstance(start_seq, bool) or not isinstance(start_seq, int) or start_seq < 0:
             start_seq = None
         async with self._pool.acquire() as conn, conn.transaction():
+            # The fence a move-out hold changes under, taken before the group
+            # row as every compute-aware path takes it.
+            await lock_compute_entry(conn)
             group = await conn.fetchrow(
                 """
                 SELECT state, start_seq FROM agent_sandboxes
@@ -2006,7 +2019,7 @@ class PostgresSandboxRepository:
                 if await conn.fetchval("SELECT " + MOVING_OUT_HOST_SQL.format(host="$1"), host):
                     # The group's chats are waiting for it on another Host.
                     await release_covered_sandboxes(
-                        conn, [host], sandbox_ids=[checkpoint["sandbox_id"]]
+                        conn, [host], sandbox_ids=[checkpoint["sandbox_id"]], live_host=True
                     )
         return bool(inserted)
 

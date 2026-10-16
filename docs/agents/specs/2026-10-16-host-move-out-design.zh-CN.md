@@ -64,6 +64,15 @@ CloudLab 机器有租期，续期常被拒绝。到期时机器被收回，机�
 
 `record_sandbox_checkpoint` 在把回执绑定为 `restore_checkpoint_id` 后，如果这台 Host 正在腾空，立即对这个 group 调用 `release_covered_sandboxes(..., sandbox_ids=[id])`。覆盖条件与 #658 第 6.2 节完全相同，不放宽。
 
+**已领取、还没占用 group 的一轮不能被打断。** Host 在 hold 生效前可能已经领取了某个会话的下一轮。这一轮要等领取之后才 reserve group，此刻 membership 上还没有 `active_attempt_id`。如果这时把 group 交出去，reserve 会失败，合法的一轮会以 `lease_lost` 结束。因此腾空路径调用时传 `live_host=True`：会话有 `running` 的 job 时，group 不交出，等这一轮结束后由清扫再次停下。
+
+两条腾空路径（清扫、检查点到达）都先取得与 hold 写入相同的拓扑锁，再锁 group 行，然后才执行交出：
+
+- 拓扑锁保证读到的腾空列表在交出完成前不会被续期撤销；
+- 领取会以共享锁持有 group 行，先锁 group 行，就能让交出语句看到所有已提交的领取。
+
+撤销路径不传这个参数：被撤销 Host 上已领取的轮次会被 reaper 重新排队，group 仍照原规则交出。
+
 ### 3.5 旧 Host 不能领回自己的 `cold` group
 
 容器名由 `(thread_id, sandbox_id)` 决定，不含 generation。仍在线的腾空 Host（或撤销后以同名重新注册的 Host）本地还留着旧容器，如果它领取了这个 `cold` group，恢复时会撞名并耗尽重试次数。

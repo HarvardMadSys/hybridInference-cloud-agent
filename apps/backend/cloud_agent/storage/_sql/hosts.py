@@ -196,7 +196,11 @@ async def revoke_host_credentials(conn: Any, hosts: list[str]) -> None:
 
 
 async def release_covered_sandboxes(
-    conn: Any, hosts: list[str], *, sandbox_ids: list[str] | None = None
+    conn: Any,
+    hosts: list[str],
+    *,
+    sandbox_ids: list[str] | None = None,
+    live_host: bool = False,
 ) -> list[str]:
     """Hand every stopped group a checkpoint covers to whichever host claims it.
 
@@ -210,6 +214,13 @@ async def release_covered_sandboxes(
 
     ``sandbox_ids`` limits the hand-over to those groups, as a Host moving out
     does once each checkpoint arrives.
+
+    ``live_host`` is for a Host that still runs, as one moving out does. It
+    may have claimed a chat's next turn before its hold began, and that turn
+    reserves the group only after the claim; such a group is not handed over.
+    Callers lock the candidate groups first, so this statement's snapshot sees
+    every claim that a group's row lock waited for. A revoked Host's claimed
+    turns are requeued instead, and their groups move as before.
     """
     rows = await conn.fetch(
         f"""
@@ -228,6 +239,14 @@ async def release_covered_sandboxes(
           AND c.start_seq = g.start_seq
           AND c.base_image = g.sandbox_image_digest
           AND c.base_image ~ '{PULLABLE_IMAGE_PATTERN}'
+          AND (
+              NOT $3::boolean
+              OR NOT EXISTS (
+                  SELECT 1 FROM agent_thread_sandbox_memberships claimed
+                  JOIN agent_jobs j ON j.thread_id = claimed.thread_id
+                  WHERE claimed.sandbox_id = g.id AND j.state = 'running'
+              )
+          )
           AND NOT EXISTS (
               SELECT 1 FROM agent_thread_sandbox_memberships m
               WHERE m.sandbox_id = g.id
@@ -250,6 +269,7 @@ async def release_covered_sandboxes(
         """,
         hosts,
         sandbox_ids,
+        live_host,
     )
     return [str(row["id"]) for row in rows]
 
