@@ -649,16 +649,36 @@ def tracked_lockfiles(workdir: str) -> dict[str, str] | None:
     or when a repository has more manifests than a snapshot records, so that it
     is never matched.
     """
-    listed = _run_git(["ls-files", "-s", "-z"], cwd=workdir)
+    # Bytes, not text: Git keeps each name as the bytes it was committed
+    # with, and ``-z`` prints them unquoted.
+    listed = subprocess.run(
+        ["git", "ls-files", "-s", "-z"],
+        cwd=workdir,
+        env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), **_GIT_ENV},
+        capture_output=True,
+        timeout=_GIT_TIMEOUT_S,
+        stdin=subprocess.DEVNULL,
+        check=False,
+    )
     if listed.returncode != 0:
         return None
     found: dict[str, str] = {}
-    for entry in listed.stdout.split("\0"):
-        meta, _, path = entry.partition("\t")
+    for entry in listed.stdout.split(b"\0"):
+        meta, _, raw = entry.partition(b"\t")
         fields = meta.split()
-        if len(fields) != 3 or not is_lockfile(path):
+        if len(fields) != 3:
             continue
-        found[path] = fields[1]
+        try:
+            path = raw.decode()
+        except UnicodeDecodeError:
+            # A manifest whose own name is text may sit in a directory whose
+            # name is not; no receipt can record it, so Git cannot say.
+            if is_lockfile(raw.rpartition(b"/")[2].decode(errors="replace")):
+                return None
+            continue
+        if not is_lockfile(path):
+            continue
+        found[path] = fields[1].decode()
         if len(found) > MAX_LOCKFILES:
             return None
     return found

@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import io
 import os
+import subprocess
+import sys
 import tarfile
 import threading
 from dataclasses import replace
@@ -269,6 +271,38 @@ def test_the_real_clone_and_archive_run_on_the_prefetch_thread(monkeypatch, remo
         names = archive.getnames()
     assert any(name.endswith("hello.py") for name in names)
     assert not any(name.endswith("second.txt") for name in names), "the pinned base, not the tip"
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="other filesystems refuse non-UTF-8 names")
+def test_a_tracked_name_that_is_not_utf8_still_starts_a_chat(monkeypatch, tmp_path):
+    """Git keeps a name as the bytes it was committed with, here Latin-1."""
+    source = tmp_path / "source"
+    source.mkdir()
+    git = ["git", "-C", str(source), "-c", "user.email=a@b", "-c", "user.name=t"]
+    subprocess.run([*git, "init", "-q"], check=True)
+    (source / "uv.lock").write_text("version = 1\n")
+    with open(os.path.join(os.fsencode(source), b"r\xe9sum\xe9.txt"), "wb") as handle:
+        handle.write(b"cv\n")
+    subprocess.run([*git, "add", "-A"], check=True)
+    subprocess.run([*git, "commit", "-qm", "base"], check=True)
+    head = subprocess.run(
+        [*git, "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+    subprocess.run(
+        ["git", "clone", "-q", "--bare", str(source), str(tmp_path / "remotes/owner/name.git")],
+        check=True,
+    )
+    monkeypatch.setattr(
+        runner_mod, "repo_clone_base_url", lambda **_kwargs: f"file://{tmp_path / 'remotes'}"
+    )
+    prefetch = runner_mod._prefetch_retained_source(
+        job=replace(_JOB, repo="owner/name", base_sha=head), uid=1000, gid=1000
+    )
+    manager = Mock()
+
+    assert prefetch.import_into(manager, Mock()) == head
+    manager.import_archive.assert_called_once()
+    assert set(prefetch.lockfiles() or {}) == {"uv.lock"}
 
 
 def test_the_prefetch_clone_is_stopped_at_the_turns_import_limit(monkeypatch, remote):
