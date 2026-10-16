@@ -598,6 +598,72 @@ async def test_resume_keeps_a_bound_the_goal_has_not_reached(store, pool):
     assert resumed["max_rounds"] == goal["max_rounds"] == 5
 
 
+async def test_a_resume_that_lands_after_the_chat_is_deleted_starts_nothing(
+    store, pool, monkeypatch: pytest.MonkeyPatch
+):
+    """A Resume racing the chat's deletion cannot restart its goal.
+
+    The route reads the goal, tombstone included, and writes the resume as a
+    second statement, so a delete can commit in between. Deleting pauses only
+    an *active* goal and leaves a paused one's revision where it was, so the
+    resume used to match, write ``active`` into the deleted chat, and arm the
+    wakeup that queued a round there for a host to claim.
+    """
+    from cloud_agent.goals.controller import run_goal_wakeups
+
+    monkeypatch.setenv("AGENT_REPO_ALLOWLIST", "example-org/example-repo")
+    job, first, goal = await _live_goal_job(store)
+    await _finish(pool, first)
+    paused = await store.goals.pause_goal(
+        thread_id=job["thread_id"], revision=goal["revision"], reason="user"
+    )
+    # The resume has read the goal it is about to write; the delete commits first.
+    read = await store.goals.get_thread_goal_state(
+        user_id=job["user_id"], thread_id=job["thread_id"]
+    )
+    assert read is not None and read["revision"] == paused["revision"]
+    deleted = await store.conversation_commands.delete_sessions(
+        thread_ids=[job["thread_id"]], user_id=job["user_id"]
+    )
+    assert deleted["thread_ids"] == [job["thread_id"]]
+
+    resumed = await store.goals.resume_goal(
+        thread_id=job["thread_id"], user_id=job["user_id"], revision=read["revision"]
+    )
+
+    assert resumed is None
+    assert (await store.goals.get_goal(thread_id=job["thread_id"]))["state"] == "paused"
+    assert await store.goal_wakeups.pending_wakeup(thread_id=job["thread_id"]) is None
+    assert await run_goal_wakeups(store=store, gateway=_GATEWAY) == 0
+    turns = await _thread_turns(store, pool, job["thread_id"])
+    assert [row for row in turns if row["turn_source"] == "goal"] == []
+
+
+async def test_a_round_left_in_a_deleted_chat_is_never_claimed(store, pool):
+    """The claim's goal re-check reads the tombstone as well.
+
+    Deleting a chat cancels its queued turns, because claims do not read the
+    tombstone. An automatic round is the one turn the claim re-checks against
+    its conversation just before a host gets it, and a deleted chat's goal
+    authorizes nothing: a round that outlived the delete, by whatever race,
+    does not run in a chat its owner deleted.
+    """
+    job, first, goal = await _live_goal_job(store)
+    await _finish(pool, first)
+    queued = await _round(store, job=job, goal=goal)
+    async with pool.acquire() as conn:
+        # What a resume landing after the delete used to leave: an active goal
+        # and its queued round, in a chat its owner has deleted.
+        await conn.execute(
+            "UPDATE agent_threads SET deleted_at = NOW() WHERE id = $1", job["thread_id"]
+        )
+
+    assert await _claim_round(store) is None
+    async with pool.acquire() as conn:
+        state = await conn.fetchval("SELECT state FROM agent_jobs WHERE id = $1", queued["id"])
+    assert state == "queued"
+
+
 async def test_lock_goal_state_holds_the_conversations_row(store, pool):
     """The last read before a decision is written is under the same lock."""
     job, _ = await _goal_job(store)

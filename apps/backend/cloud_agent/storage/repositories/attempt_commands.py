@@ -303,6 +303,7 @@ class PostgresAttemptCommands:
                         OR EXISTS (
                             SELECT 1 FROM agent_threads goal_thread
                             WHERE goal_thread.id = j.thread_id
+                              AND goal_thread.deleted_at IS NULL
                               AND goal_thread.goal_state = 'active'
                               AND goal_thread.goal_id = j.goal_id
                               AND goal_thread.goal_revision = j.goal_revision

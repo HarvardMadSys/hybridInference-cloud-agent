@@ -325,8 +325,9 @@ class PostgresGoalRepository:
         """``paused`` → ``active``, and record the obligation to schedule.
 
         Returns the goal as written, or ``None`` when the revision moved under
-        the caller. The owner's authorization is the trigger: no model report is
-        needed to start working again.
+        the caller or the conversation has been deleted. The owner's
+        authorization is the trigger: no model report is needed to start
+        working again.
 
         **Resuming releases a bound that has been spent.** A goal is only ever
         bounded because the owner stated a number, and a goal sitting at that
@@ -343,6 +344,11 @@ class PostgresGoalRepository:
         at three still gets fifty.
         """
         async with self._pool.acquire() as conn, conn.transaction():
+            # The tombstone is checked here, in the write, and not only by the
+            # caller's read before it. A delete that commits in between pauses
+            # only an active goal, so a paused one keeps the revision this
+            # resume carries, and a goal restarted in a deleted chat would
+            # queue rounds nobody can see.
             written = await conn.fetchrow(
                 """
                 UPDATE agent_threads t
@@ -360,7 +366,7 @@ class PostgresGoalRepository:
                     goal_revision = goal_revision + 1,
                     goal_updated_at = NOW(), updated_at = NOW()
                 WHERE t.id = $1 AND t.user_id = $2 AND t.goal_revision = $3
-                  AND t.goal_state = 'paused'
+                  AND t.goal_state = 'paused' AND t.deleted_at IS NULL
                 RETURNING t.id, t.goal_id, t.goal_revision
                 """,
                 thread_id,
