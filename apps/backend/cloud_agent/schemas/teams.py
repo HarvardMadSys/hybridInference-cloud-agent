@@ -258,10 +258,12 @@ class AdminTeamSummary(BaseModel):
 
 
 class AdminTeamListResponse(BaseModel):
-    """A page of teams, newest first; pass ``next_offset`` for the next."""
+    """A page of teams, newest first; pass ``next_before`` as ``before`` for the next."""
 
     teams: list[AdminTeamSummary]
-    next_offset: int | None
+    next_before: str | None = Field(
+        description="The last team on this page, or null when no more follow."
+    )
 
 
 class AdminTeamMember(TeamPerson):

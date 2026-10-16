@@ -845,7 +845,10 @@ administrators see every team under **Admin → Teams**, read-only:
   active members, admins besides the owner, and join requests waiting for a
   decision. `state` is `active` (default), `deleted` or `all`; `q` matches part
   of a team name, a team id, or the user id of anyone who has been a member.
-  It pages with `offset`; the response's `next_offset` is the next page.
+  It pages with `before`, the id of the last team the previous page showed;
+  the response's `next_before` is that id for the next page. A page starts
+  after that team rather than after a row count, so a team created or deleted
+  while an administrator reads is neither shown twice nor skipped.
 - A team's page (`GET /admin/agent/teams/{team_id}`) lists members in every
   state, including those who left or were removed and when, plus open join
   requests and how many invitation links are open, expired, claimed or revoked.

@@ -13,15 +13,15 @@ it('reads teams uncached, sending only the filters that are set', async () => {
     );
   const controller = new AbortController();
 
-  await listAdminTeams({ q: '  ', state: 'active', offset: 0 }, controller.signal);
-  await listAdminTeams({ q: ' a&b ', state: 'all', offset: 50 }, controller.signal);
+  await listAdminTeams({ q: '  ', state: 'active', before: null }, controller.signal);
+  await listAdminTeams({ q: ' a&b ', state: 'all', before: 'ateam_9' }, controller.signal);
   await getAdminTeam('ateam/1', controller.signal);
   await listAdminTeamAudit('ateam/1', null, controller.signal);
   await listAdminTeamAudit('ateam/1', 42, controller.signal);
 
   expect(fetch.mock.calls.map(([, path]) => path)).toEqual([
     '/admin/agent/teams?state=active',
-    '/admin/agent/teams?q=a%26b&state=all&offset=50',
+    '/admin/agent/teams?q=a%26b&state=all&before=ateam_9',
     '/admin/agent/teams/ateam%2F1',
     '/admin/agent/teams/ateam%2F1/audit-events',
     '/admin/agent/teams/ateam%2F1/audit-events?before=42',

@@ -129,14 +129,17 @@ async def test_the_list_names_owners_and_offers_the_next_page(api) -> None:
     teams.more = True
 
     response = await client.get(
-        "/admin/agent/teams?q=%20plat%20&state=all&limit=1&offset=4", headers=ADMIN
+        "/admin/agent/teams?q=%20plat%20&state=all&limit=1&before=ateam_9", headers=ADMIN
     )
 
     assert response.status_code == 200
     assert response.headers["cache-control"] == "no-store"
-    assert teams.calls == [("list", {"query": "plat", "state": "all", "limit": 1, "offset": 4})]
+    assert teams.calls == [
+        ("list", {"query": "plat", "state": "all", "limit": 1, "before": "ateam_9"})
+    ]
     body = response.json()
-    assert body["next_offset"] == 5
+    # The next page starts after the last team this one showed.
+    assert body["next_before"] == "ateam_1"
     (summary,) = body["teams"]
     assert summary["owner"] == {
         "user_id": "alice",
@@ -156,8 +159,10 @@ async def test_a_blank_search_lists_everything_and_a_bad_state_is_refused(api) -
     assert (await client.get("/admin/agent/teams?q=%20%20", headers=ADMIN)).status_code == 200
     assert teams.calls[-1][1]["query"] is None
     assert teams.calls[-1][1]["state"] == "active"
+    assert teams.calls[-1][1]["before"] is None
     assert (await client.get("/admin/agent/teams?state=gone", headers=ADMIN)).status_code == 422
     assert (await client.get("/admin/agent/teams?limit=101", headers=ADMIN)).status_code == 422
+    assert (await client.get("/admin/agent/teams?before=", headers=ADMIN)).status_code == 422
 
 
 async def test_a_team_lists_everyone_and_survives_an_unreadable_email(api) -> None:

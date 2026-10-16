@@ -20,12 +20,13 @@ class TeamAdminQueries(Protocol):
     """
 
     async def list_teams_for_admin(
-        self, *, query: str | None, state: str, limit: int, offset: int
+        self, *, query: str | None, state: str, limit: int, before: str | None
     ) -> tuple[list[AdminTeamRecord], bool]:
         """Teams newest first, and whether more follow.
 
         ``query`` matches part of a name, a team id, or a member's user id;
-        ``state`` is ``active``, ``deleted`` or ``all``.
+        ``state`` is ``active``, ``deleted`` or ``all``. ``before`` is the id
+        of the last team a previous page showed; the page starts after it.
         """
         ...
 

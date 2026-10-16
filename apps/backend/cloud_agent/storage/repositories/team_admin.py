@@ -72,9 +72,16 @@ class PostgresTeamAdminQueries:
         self._pool = pool
 
     async def list_teams_for_admin(
-        self, *, query: str | None, state: str, limit: int, offset: int
+        self, *, query: str | None, state: str, limit: int, before: str | None
     ) -> tuple[list[AdminTeamRecord], bool]:
-        """Teams newest first; one row past ``limit`` says whether more follow."""
+        """Teams newest first; one row past ``limit`` says whether more follow.
+
+        A page continues from the team named by ``before``, not from a row
+        count: teams are created and deleted while an administrator reads, and
+        a count from the top would then show a team twice or never. The cursor
+        is looked up in every state, so a team deleted since it was shown still
+        marks where the next page starts; one that does not exist starts none.
+        """
         rows = await self._pool.fetch(
             _ADMIN_TEAM_VIEW
             + """
@@ -84,14 +91,18 @@ class PostgresTeamAdminQueries:
                     OR t.id = $2
                     OR EXISTS (SELECT 1 FROM agent_team_members AS member
                                 WHERE member.team_id = t.id AND member.user_id = $2))
+               AND ($5::text IS NULL
+                    OR (t.created_at, t.id) < (SELECT shown.created_at, shown.id
+                                                 FROM agent_teams AS shown
+                                                WHERE shown.id = $5))
              ORDER BY t.created_at DESC, t.id DESC
-             LIMIT $4 OFFSET $5
+             LIMIT $4
             """,
             state,
             query,
             _like_pattern(query) if query is not None else None,
             limit + 1,
-            offset,
+            before,
         )
         return [_admin_team(row) for row in rows[:limit]], len(rows) > limit
 

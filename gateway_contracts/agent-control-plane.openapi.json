@@ -3170,18 +3170,19 @@
         "type": "object"
       },
       "AdminTeamListResponse": {
-        "description": "A page of teams, newest first; pass ``next_offset`` for the next.",
+        "description": "A page of teams, newest first; pass ``next_before`` as ``before`` for the next.",
         "properties": {
-          "next_offset": {
+          "next_before": {
             "anyOf": [
               {
-                "type": "integer"
+                "type": "string"
               },
               {
                 "type": "null"
               }
             ],
-            "title": "Next Offset"
+            "description": "The last team on this page, or null when no more follow.",
+            "title": "Next Before"
           },
           "teams": {
             "items": {
@@ -3193,7 +3194,7 @@
         },
         "required": [
           "teams",
-          "next_offset"
+          "next_before"
         ],
         "title": "AdminTeamListResponse",
         "type": "object"
@@ -27097,7 +27098,7 @@
     },
     "/admin/agent/teams": {
       "get": {
-        "description": "Teams newest first.\n\n``q`` matches part of a team's name, a team id, or the user id of anyone\nwho has been a member.",
+        "description": "Teams newest first.\n\n``q`` matches part of a team's name, a team id, or the user id of anyone\nwho has been a member. A page continues after the team ``before`` names,\nso teams created or deleted meanwhile neither repeat nor drop out of view.",
         "operationId": "list_teams_admin_agent_teams_get",
         "parameters": [
           {
@@ -27145,14 +27146,23 @@
             }
           },
           {
+            "description": "The id of the last team the previous page showed.",
             "in": "query",
-            "name": "offset",
+            "name": "before",
             "required": false,
             "schema": {
-              "default": 0,
-              "minimum": 0,
-              "title": "Offset",
-              "type": "integer"
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The id of the last team the previous page showed.",
+              "title": "Before"
             }
           },
           {

@@ -27,7 +27,8 @@ export interface AdminTeamSummary {
 
 export interface AdminTeamsPage {
   teams: AdminTeamSummary[];
-  next_offset: number | null;
+  /** The last team on this page; pass it as `before` for the next, or null when none follow. */
+  next_before: string | null;
 }
 
 export interface AdminTeamMember extends AdminTeamPerson {
@@ -71,15 +72,19 @@ async function read<T>(path: string, signal?: AbortSignal): Promise<T> {
   return jsonOrThrow<T>(await fetchWithAuth(config.apiBase, path, { signal, cache: 'no-store' }));
 }
 
-/** Teams newest first; `q` matches part of a name, a team id, or a member's user id. */
+/**
+ * Teams newest first; `q` matches part of a name, a team id, or a member's user id.
+ * `before` is the last team a previous page showed: the page starts after it, so
+ * teams created or deleted in the meantime neither repeat nor go missing.
+ */
 export function listAdminTeams(
-  filters: { q?: string; state?: AdminTeamStateFilter; offset?: number },
+  filters: { q?: string; state?: AdminTeamStateFilter; before?: string | null },
   signal?: AbortSignal,
 ): Promise<AdminTeamsPage> {
   const params = new URLSearchParams();
   if (filters.q?.trim()) params.set('q', filters.q.trim());
   if (filters.state) params.set('state', filters.state);
-  if (filters.offset) params.set('offset', String(filters.offset));
+  if (filters.before) params.set('before', filters.before);
   return read(`/admin/agent/teams${params.size ? `?${params}` : ''}`, signal);
 }
 
