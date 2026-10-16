@@ -1770,14 +1770,61 @@ def test_reconcile_refuses_an_externally_stopped_replacement_without_archiving_i
         status=ChatSandboxStatus.STOPPED,
     )
 
-    with pytest.raises(RetainedChatLost, match="identity changed"):
-        supervisor.list()
+    descriptors = supervisor.list()
 
+    assert {(row.container_id, row.context_status) for row in descriptors} == {
+        ("container-shared", "lost")
+    }
     group = supervisor._members["athr_source"]
     assert group.inspection.container_id == "container-shared"
     assert group.container_lost is True
     assert manager.stop_count == 0
     assert archived == []
+    with pytest.raises(RetainedChatLost, match="identity was lost"):
+        supervisor.stop_if_idle("athr_source", generation=1)
+
+
+@pytest.mark.asyncio
+async def test_a_lost_group_does_not_fail_the_host_listing_of_the_others():
+    manager = _Manager()
+    other = replace(_spec(), thread_id="athr_other", sandbox_id="asbx_other")
+    supervisor = SharedChatSessionSupervisor(manager)
+    supervisor.register_manifest(_spec(), _members())
+    supervisor.register_manifest(other, [replace(_members()[0], thread_id=other.thread_id)])
+    original = manager.items[_spec().container_name]
+    manager.items[_spec().container_name] = replace(original, container_id="container-replacement")
+
+    # The first listing finds the replacement; later ones find a group already lost.
+    for _ in range(2):
+        rows = {row.thread_id: row for row in supervisor.list()}
+        assert {thread_id: row.context_status for thread_id, row in rows.items()} == {
+            "athr_source": "lost",
+            "athr_peer": "lost",
+            "athr_other": "live",
+        }
+        assert rows["athr_source"].container_id == "container-shared"
+    assert supervisor._members["athr_source"].container_lost is True
+    assert manager.pruned_specs == [_spec(), other]
+
+    app = create_app(
+        backend=ProcessBackend(acknowledged_unsafe=True),
+        token="sandbox-manager-secret",
+        shared_session_supervisor=supervisor,
+    )
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://sandbox_manager"
+    ) as client:
+        listed = await client.get(
+            "/sandboxes", headers={"X-Agent-Workspace-Token": "sandbox-manager-secret"}
+        )
+
+    assert listed.status_code == 200, listed.text
+    assert {row["sandbox_id"] for row in listed.json()["sandboxes"]} == {
+        "asbx_shared",
+        "asbx_other",
+    }
+    stopped = supervisor.stop_if_idle(other.thread_id, generation=other.generation)
+    assert stopped.running is False
 
 
 def test_status_blocks_an_externally_stopped_group_without_a_final_marker():
@@ -3601,6 +3648,50 @@ def test_idle_stop_releases_networks_after_docker_already_stopped_the_container(
     assert manager.stop_count == 1
     assert stopped.running is False
     assert manager.items[spec.container_name].networks == ()
+
+
+def test_a_failed_stop_docker_cannot_inspect_leaves_the_group_unlost():
+    """Only Docker's "no such container" loses a group, not a daemon that cannot answer.
+
+    ``docker stop`` times out and so does the inspection that follows it. The
+    container never went anywhere: once Docker answers again the group keeps
+    its contexts, lists, and stops.
+    """
+
+    class DaemonDown(_Manager):
+        def __init__(self) -> None:
+            super().__init__()
+            self.down = False
+
+        def inspect(self, container_name):
+            if self.down:
+                raise SandboxError("Docker lifecycle command failed: timed out after 30 seconds")
+            return super().inspect(container_name)
+
+        def stop(self, spec, **kwargs):
+            if self.stop_count == 0:
+                self.stop_count += 1
+                self.down = True
+                raise SandboxError("Docker lifecycle command failed: timed out")
+            return super().stop(spec, **kwargs)
+
+    manager = DaemonDown()
+    supervisor = SharedChatSessionSupervisor(manager)
+    supervisor.register_manifest(_spec(), _members())
+
+    with pytest.raises(SandboxError, match="timed out"):
+        supervisor.stop_if_idle("athr_source", generation=1)
+    manager.down = False
+
+    group = supervisor._members["athr_source"]
+    assert group.container_lost is False
+    assert group.stopping is False
+    assert group.idle_deadline is not None
+    assert {row.context_status for row in supervisor.list()} == {"live"}
+    stopped = supervisor.stop_if_idle("athr_source", generation=1)
+    assert stopped.running is False
+    assert manager.stop_count == 2
+    assert manager.items[_spec().container_name].running is False
 
 
 def _archive_shutdown_group(

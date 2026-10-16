@@ -1381,9 +1381,25 @@ class SharedChatSessionSupervisor:
                     self._groups[spec.sandbox_id] = group
                     self._members[origin.thread_id] = group
                 else:
-                    if group.spec != spec:
-                        raise SandboxError("shared sandbox immutable labels changed")
-                    self._accept_inspection_locked(group, inspection)
+                    try:
+                        if group.spec != spec:
+                            raise SandboxError("shared sandbox immutable labels changed")
+                        self._accept_inspection_locked(group, inspection)
+                    except SandboxError as exc:
+                        # A lost or changed group keeps its last observation and
+                        # is reported as it stands; it must not cost every other
+                        # group on this host its listing.
+                        logger.warning(
+                            "shared sandbox group was not reconciled",
+                            extra={
+                                "event": "shared_sandbox_reconcile_group_failed",
+                                "sandbox_id": spec.sandbox_id,
+                                "generation": spec.generation,
+                                "detail": str(exc)[:300],
+                            },
+                        )
+                        found.extend(self._descriptors(group))
+                        continue
                 read_marker = (
                     discovered
                     or group.orphan_marker_unreadable
@@ -4575,8 +4591,10 @@ class SharedChatSessionSupervisor:
                         )
         except BaseException:
             failed_inspection: ChatSandboxInspection | None = None
+            inspected = False
             with contextlib.suppress(Exception):
                 failed_inspection = self._manager.inspect(group.spec.container_name)
+                inspected = True
             with self._lock:
                 if inspection is not None:
                     self._accept_inspection_locked(group, inspection)
@@ -4585,6 +4603,16 @@ class SharedChatSessionSupervisor:
                         if reason == "lost":
                             member.context_status = "lost"
                     group.idle_deadline = None
+                elif not inspected:
+                    # Only Docker's "no such container" proves the container
+                    # gone; a daemon that cannot answer proves nothing. Keep the
+                    # last accepted observation for the next sweep or
+                    # reconciliation to inspect again.
+                    if not group.container_lost:
+                        for member in group.members.values():
+                            member.resident_state = (
+                                "restarting" if member.native_session_id else "stopped"
+                            )
                 elif failed_inspection is None:
                     self._mark_container_lost_locked(group)
                 else:
