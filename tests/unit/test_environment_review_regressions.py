@@ -139,6 +139,29 @@ def test_snapshot_allows_ordinary_flags_ignored_files_and_secret_removal(git_wor
     check_snapshot_secrets(backend, base, bound, workdir=str(root))
 
 
+def test_snapshot_scan_never_imports_from_the_workspace(git_workspace):
+    root, _, base, _ = git_workspace
+    # The change adds the project's own module, named like the standard library's.
+    (root / "types.py").write_text("UserId = int\n")
+
+    def capture(_spec, argv, *, env, workdir, timeout_s):
+        # The scan exactly as the sandbox runs it, with the system interpreter.
+        return subprocess.run(
+            argv,
+            cwd=workdir,
+            env={"PATH": "/usr/bin:/bin", **env},
+            capture_output=True,
+            timeout=timeout_s,
+        )
+
+    backend = SimpleNamespace(spec=object(), manager=SimpleNamespace(exec_capture=capture))
+    bound = BoundEnvironment(
+        binding_id="b",
+        variables=[EnvironmentVariable(name="TOKEN", value="example-private-credential")],
+    )
+    check_snapshot_secrets(backend, base, bound, workdir=str(root))
+
+
 def test_completed_action_is_not_reexecuted_after_reaping_or_broker_restart(tmp_path):
     receipts = ActionReceipts(tmp_path)
     manager = _TerminalManager(

@@ -17,6 +17,7 @@ import pytest
 from cloud_agent_host import resident_transport
 from cloud_agent_host.bounded_output import text_chunks
 from cloud_agent_host.chat_sandbox import (
+    CHAT_WORKDIR,
     ChatSandboxManager,
     ChatSandboxSpec,
     claude_member_config_dir,
@@ -85,8 +86,10 @@ class _LocalProcess:
 class _LocalManager:
     backend = SimpleNamespace(uid=10001, gid=10001)
 
-    def __init__(self) -> None:
+    def __init__(self, workspace: Path | None = None) -> None:
         self.calls: list[dict] = []
+        #: Where commands run, standing in for the sandbox's working directory.
+        self.workspace = workspace
 
     def spawn(self, _spec, argv, **kwargs):
         assert (
@@ -102,6 +105,7 @@ class _LocalManager:
         return _LocalProcess(
             subprocess.Popen(
                 argv,
+                cwd=self.workspace,
                 env=kwargs["env"],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -121,6 +125,8 @@ def _native_stub(tmp_path: Path) -> tuple[dict[str, str], Path, Path]:
         "config = pathlib.Path(os.environ['CLAUDE_CONFIG_DIR'])\n"
         "with open(os.environ['PLUGIN_TEST_LOG'], 'a') as handle:\n"
         "    handle.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+        "if 'PLUGIN_TEST_CWD' in os.environ:\n"
+        "    pathlib.Path(os.environ['PLUGIN_TEST_CWD']).write_text(os.getcwd())\n"
         "if sys.argv[1:3] == ['plugin', 'install'] and (config / 'fail-once').exists():\n"
         "    (config / 'fail-once').unlink()\n"
         "    print('x' * 10000)\n"
@@ -186,6 +192,28 @@ def test_marketplace_source_is_passed_as_one_literal_argument(tmp_path):
         slot_id=1,
     )
     assert json.loads(log.read_text().splitlines()[0])[-1] == source
+
+
+def test_claude_installer_starts_in_the_workspace_without_importing_from_it(tmp_path):
+    env, config, log = _native_stub(tmp_path)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    # The project's own module, named like the standard library's.
+    (workspace / "types.py").write_text("UserId = int\n")
+    env["PLUGIN_TEST_CWD"] = str(tmp_path / "cwd")
+    manager = _LocalManager(workspace)
+    install_claude_plugins(
+        manager,  # type: ignore[arg-type]
+        _spec(),
+        _PLUGINS,
+        config_dir=str(config),
+        env=env,
+        slot_id=1,
+    )
+    assert manager.calls[0]["workdir"] == CHAT_WORKDIR
+    assert len(log.read_text().splitlines()) == 3
+    # The CLI it runs still starts in the workspace.
+    assert (tmp_path / "cwd").read_text() == str(workspace.resolve())
 
 
 def test_plugin_deadline_kills_and_reaps_even_when_output_is_already_closed():

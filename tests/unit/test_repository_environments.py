@@ -408,6 +408,59 @@ def test_missing_completion_receipt_never_reports_success():
         process.wait()
 
 
+def test_environment_script_starts_in_the_workspace_without_importing_from_it(tmp_path):
+    import subprocess
+
+    from cloud_agent_host.environment_process import EnvironmentProcess
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    # The project's own module, named like the standard library's.
+    (workspace / "types.py").write_text("UserId = int\n")
+    commands = []
+    spawned = {}
+
+    def exec_capture(_spec, argv, **kwargs):
+        commands.append(argv)
+        return SimpleNamespace(returncode=0, stdout=b"")
+
+    def spawn(_spec, argv, **kwargs):
+        commands.append(argv)
+        spawned.update(argv=argv, **kwargs)
+        return SimpleNamespace()
+
+    backend = SimpleNamespace(
+        spec=None,
+        base_env=lambda: {"PATH": "/usr/bin:/bin"},
+        manager=SimpleNamespace(
+            exec_capture=exec_capture, spawn=spawn, backend=SimpleNamespace(gid=10001)
+        ),
+    )
+    EnvironmentProcess(
+        backend,
+        phase="setup",
+        script='printf "%s %s" "$(pwd -P)" "$PYTHONPATH"',
+        env={"PYTHONPATH": "src"},
+    )
+    assert spawned["workdir"] == "/workspace"
+    status = tmp_path / "status"
+    # The helper exactly as the sandbox runs it, from the workspace.
+    helper = subprocess.run(
+        spawned["argv"],
+        cwd=workspace,
+        env={**spawned["env"], "AGENT_SCRIPT_STATUS": str(status)},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert helper.returncode == 0, helper.stderr
+    # Its script still starts there, with the owner's variables.
+    assert helper.stdout == f"{workspace.resolve()} src"
+    assert status.read_text() == "0"
+    # The helpers that reap and prepare its identity run isolated as well.
+    assert [argv[:2] for argv in commands if argv[0] == "python3"] == [["python3", "-I"]] * 3
+
+
 def test_runtime_refresh_preserves_setup_and_scans_both_secret_generations():
     bound = BoundEnvironment(
         binding_id="fixed",

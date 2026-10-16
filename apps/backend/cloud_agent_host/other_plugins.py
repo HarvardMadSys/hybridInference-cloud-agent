@@ -152,7 +152,7 @@ def install_other_runtime_plugins(
     run_plugin_command(
         manager,
         spec,
-        ["python3", "-c", _INSTALL_SCRIPT, runtime_id, json.dumps(selections), home],
+        ["python3", "-I", "-c", _INSTALL_SCRIPT, runtime_id, json.dumps(selections), home],
         env={**env, "HOME": home, "CI": "1", "GIT_TERMINAL_PROMPT": "0"},
         slot_id=slot_id,
     )

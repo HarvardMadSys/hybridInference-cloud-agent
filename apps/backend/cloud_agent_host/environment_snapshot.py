@@ -49,7 +49,8 @@ def check_snapshot_secrets(
         return
     check = backend.manager.exec_capture(
         backend.spec,
-        ["python3", "-c", SCAN_SCRIPT, workdir, base_sha],
+        # Isolated: the scan starts in the workspace and never imports from it.
+        ["python3", "-I", "-c", SCAN_SCRIPT, workdir, base_sha],
         env=patterns,
         workdir=workdir,
         timeout_s=60,
