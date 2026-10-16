@@ -120,6 +120,75 @@ async def test_long_transcripts_include_every_message_through_chunk_summaries():
     assert "Summary of fragment 1" in final and "Summary of fragment 2" in final
 
 
+def _session_of(fragments: int) -> list[dict[str, str]]:
+    """A conversation whose title source splits into exactly ``fragments`` fragments."""
+    return [{"role": "assistant", "content": "x" * (pr_titles._INPUT_CHARS * fragments - 1000)}]
+
+
+async def test_fragments_are_summarized_together_so_the_title_fits_the_budget(monkeypatch):
+    """The longest session that is titled costs one round of summaries and the title.
+
+    Summarized one after another, each fragment waited for the one before it,
+    and a session of a few fragments could spend the whole budget before its
+    title was asked for. Here no summary is answered until every fragment has
+    been asked about, which only a single round can satisfy.
+    """
+    monkeypatch.setattr(pr_titles, "_TOTAL_TIMEOUT_S", 2.0)
+    fragments = pr_titles._MAX_FRAGMENTS
+    asked: list[str] = []
+    everyone_asked = asyncio.Event()
+
+    async def handle(request):
+        payload = json.loads(request.content)
+        if payload["messages"][0]["content"] == pr_titles._TITLE_PROMPT:
+            reply = "Fix retries and document backoff"
+        else:
+            asked.append(payload["messages"][1]["content"])
+            if len(asked) == fragments:
+                everyone_asked.set()
+            await everyone_asked.wait()
+            reply = f"Summary of fragment {len(asked)}"
+        return httpx.Response(200, json={"choices": [{"message": {"content": reply}}]})
+
+    job = {**_JOB, "session_messages": _session_of(fragments)}
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        title = await generate_pr_title(job, ["retry.py"], grants=_grants(), client=client)
+
+    assert title == "[agent] Fix retries and document backoff"
+    assert len(asked) == fragments
+
+
+async def test_a_session_too_long_to_summarize_in_the_budget_asks_the_model_nothing(caplog):
+    """Past the fragments one round can summarize, the publisher's own title is used.
+
+    A long session used to be summarized fragment after fragment until the
+    budget ran out, on every publication attempt: the owner paid for each call,
+    and the title came from the fallback anyway. Now no grant is minted and no
+    call is made.
+    """
+    caplog.set_level(logging.INFO, logger="cloud_agent.pr_titles")
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "Fix retries"}}]})
+
+    grants = _grants()
+    job = {**_JOB, "session_messages": _session_of(pr_titles._MAX_FRAGMENTS + 1)}
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        title = await generate_pr_title(job, ["retry.py"], grants=grants, client=client)
+
+    assert title is None
+    assert requests == []
+    grants.mint.assert_not_awaited()
+    failures = [
+        record
+        for record in caplog.records
+        if record.getMessage() == "agent_pr_title_generation_failed"
+    ]
+    assert [failure.reason for failure in failures] == ["conversation_too_long"]
+
+
 @pytest.mark.parametrize(
     "content", [None, "", "Title\nexplanation", "<think>title</think>", "Fix\u202e title"]
 )
@@ -293,6 +362,29 @@ async def test_inference_failure_logs_status_without_sensitive_context(caplog):
     logged = caplog.text + json.dumps([record.__dict__ for record in caplog.records], default=str)
     for private_value in ("scoped-secret", private_conversation, private_error_body):
         assert private_value not in logged
+
+
+async def test_a_fragment_that_fails_is_logged_as_that_call_failed(caplog):
+    """Fragments are asked about at once, and the log still names the failed call's error."""
+    caplog.set_level(logging.INFO, logger="cloud_agent.pr_titles")
+    grants = _grants()
+    job = {**_JOB, "session_messages": _session_of(2)}
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(503, text="unavailable"))
+    ) as client:
+        assert await generate_pr_title(job, ["x"], grants=grants, client=client) is None
+
+    grants.revoke.assert_awaited_once_with("publication-grant")
+    (failure,) = [
+        record
+        for record in caplog.records
+        if record.getMessage() == "agent_pr_title_generation_failed"
+    ]
+    assert (failure.reason, failure.error_type, failure.status_code) == (
+        "inference_failed",
+        "HTTPStatusError",
+        503,
+    )
 
 
 async def test_timeout_cannot_block_publication(monkeypatch, caplog):

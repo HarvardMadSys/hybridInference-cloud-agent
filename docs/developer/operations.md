@@ -1508,9 +1508,14 @@ GitHub repositories retain the complete Agent lifecycle: checkout, branch
 discovery, push, and draft PR publishing use short-lived GitHub App installation
 tokens. Draft PR titles summarize the captured user and assistant messages across
 the shared session through a bounded inference request under a separate,
-owner-scoped grant. Generic completion text is rejected and retried. If inference
-is unavailable, the publisher uses the first concrete line from each included
-turn's closing summary, skipping headings and generic completion preambles. It
+owner-scoped grant. A Fork's copies of earlier turns are read once, in the chat
+they were copied from. A session longer than one request is summarized in at
+most four fragments, all at once, and the title is written from their summaries
+within the same one-minute budget. A longer session is not sent to the model at
+all (fallback reason `conversation_too_long`). Generic completion text is
+rejected and retried. If inference is unavailable, the publisher uses the first
+concrete line from each included turn's closing summary, skipping headings and
+generic completion preambles. It
 falls back to the changed files when no usable summary exists. The
 `agent_pr_title_generation_failed` log records the snapshot ID and fallback
 reason as structured fields, plus the exception type and HTTP status when

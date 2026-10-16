@@ -22,6 +22,12 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _INPUT_CHARS = 24000
+#: The most fragments a session is summarized in. They are summarized at once,
+#: so one round of summaries and then the title fit in the budget. A longer
+#: session is not sent to the model at all: summarizing it would spend the whole
+#: budget on calls the owner pays for, and the publisher's own title would be
+#: used anyway, on every publication attempt.
+_MAX_FRAGMENTS = 4
 _TOTAL_TIMEOUT_S = 60.0
 _TITLE_PROMPT = """Write one pull request title summarizing the completed work across the entire
 session. Consider all user requests, corrections, and assistant responses together. Describe the
@@ -87,9 +93,11 @@ async def generate_pr_title(
     """Read every captured user/assistant message; return None if inference fails.
 
     Large transcripts are summarized in chunks and then combined, so earlier
-    messages and long responses are considered rather than sliced off. The
-    publication owns its own grant: it cannot revive or revoke an Agent turn's
-    credential, and it never renews this bounded capability.
+    messages and long responses are considered rather than sliced off. A
+    transcript longer than :data:`_MAX_FRAGMENTS` chunks returns None without
+    asking the model anything. The publication owns its own grant: it cannot
+    revive or revoke an Agent turn's credential, and it never renews this
+    bounded capability.
     """
     base_url = (setting_env(ENV_BASE_URL) or "").strip().rstrip("/")
     model = job.get("model")
@@ -116,6 +124,12 @@ async def generate_pr_title(
         return None
     grant_id = None
     try:
+        source = json.dumps(
+            {"conversation": messages, "changed_files": changed_files}, ensure_ascii=False
+        )
+        if len(source) > _INPUT_CHARS * _MAX_FRAGMENTS:
+            fallback("conversation_too_long")
+            return None
         async with asyncio.timeout(_TOTAL_TIMEOUT_S), contextlib.AsyncExitStack() as stack:
             grant = await grants.mint(
                 user_id=job["user_id"],
@@ -162,14 +176,21 @@ async def generate_pr_title(
                     raise _InvalidTitle
                 raise ValueError("no session summary returned")
 
-            source = json.dumps(
-                {"conversation": messages, "changed_files": changed_files}, ensure_ascii=False
-            )
             while len(source) > _INPUT_CHARS:
-                summaries = [
-                    await complete(_SUMMARY_PROMPT, source[offset : offset + _INPUT_CHARS])
+                # Every fragment at once: one after another, a few of them
+                # could spend the budget before the title was asked for. The
+                # first failure stops the rest, whose answers would be dropped.
+                pending = [
+                    asyncio.create_task(
+                        complete(_SUMMARY_PROMPT, source[offset : offset + _INPUT_CHARS])
+                    )
                     for offset in range(0, len(source), _INPUT_CHARS)
                 ]
+                try:
+                    summaries = await asyncio.gather(*pending)
+                finally:
+                    for task in pending:
+                        task.cancel()
                 combined = json.dumps({"session_fragment_summaries": summaries}, ensure_ascii=False)
                 if len(combined) >= len(source):
                     fallback("summary_not_reduced")

@@ -17,6 +17,7 @@ database that is not there is a failure to report, never a reason to skip.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 from types import SimpleNamespace
@@ -2328,6 +2329,50 @@ async def test_a_publication_takes_the_workspaces_own_turns_and_not_a_forks_copi
     assert included == [job["id"]]
     child_view = await api.store.sandbox.thread_sandbox(thread_id=child["thread_id"])
     assert child_view is not None and child_view["workspace_unpublished_changes"] is False
+
+
+async def test_a_publication_titles_the_session_from_each_turn_once_and_not_a_forks_copies(
+    api: Api,
+):
+    """The conversation a draft PR's title is written from holds a Fork's copies once.
+
+    The title reads every chat of the workspace, and a Fork's chat starts with
+    copies of its source's turns. Read in both chats, the source's history
+    counted twice for every Fork, and a forked session reached the length past
+    which no title is asked for sooner.
+    """
+    job = await api.create(prompt="add retry backoff")
+    await api.run(job)
+    child = await api.fork(job)
+    sent = await api.send(child["thread_id"], "also document it")
+    assert sent.status_code == 201, sent.text
+    await api.run(sent.json()["job"])
+    snapshot_id = await _request_publication(api, child["thread_id"])
+    capture = await api.store.snapshot.claim_due_sandbox_snapshot()
+    assert capture is not None and capture["snapshot_id"] == snapshot_id
+    patch = "diff --git a/retry.py b/retry.py\n"
+    assert (
+        await api.store.snapshot.record_sandbox_snapshot_capture(
+            snapshot_id=snapshot_id,
+            sandbox_id=capture["sandbox_id"],
+            sandbox_generation=capture["generation"],
+            container_id=capture["container_id"],
+            workspace_epoch=capture["workspace_epoch"],
+            base_sha=capture["base_sha"],
+            patch=patch,
+            content_sha256=hashlib.sha256(patch.encode()).hexdigest(),
+        )
+        == "captured"
+    )
+
+    publication = await api.store.snapshot.claim_for_publish()
+
+    assert publication is not None and publication["snapshot_id"] == snapshot_id
+    assert sorted(
+        (message["thread_id"], message["content"])
+        for message in publication["session_messages"]
+        if message["role"] == "user"
+    ) == sorted([(job["thread_id"], "add retry backoff"), (child["thread_id"], "also document it")])
 
 
 async def test_a_publication_request_says_why_it_was_refused(api: Api):

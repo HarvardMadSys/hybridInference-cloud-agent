@@ -917,8 +917,11 @@ class PostgresSnapshotRepository:
                                  AND captured.workspace_epoch <= s.workspace_epoch
                                GROUP BY included_job.thread_id
                            ) boundary
+                           -- A Fork's copies of its source's turns are read
+                           -- once, in the chat they were copied from.
                            JOIN agent_jobs history ON history.thread_id = boundary.thread_id
                                AND history.turn_no <= boundary.turn_no
+                               AND history.fork_source_job_id IS NULL
                            JOIN agent_thread_messages message ON message.job_id = history.id
                                AND message.thread_id = history.thread_id
                            LEFT JOIN agent_job_events event ON event.id = message.source_event_id
