@@ -192,6 +192,16 @@ class HostCommands:
                 "until it returns. Repeat with allow_unmoved=true to remove it anyway.",
                 code="no_move_target",
             )
+        if outcome == "cannot_move":
+            raise HostCommandError(
+                409,
+                f"Some sandboxes on {host!r} have no checkpoint another server can restore, "
+                "for example because a checkpoint failed, so they cannot move. Removing it "
+                "leaves them on it, and their chats cannot continue until it returns. Repeat "
+                "with allow_unmoved=true to remove it anyway; the other sandboxes still move "
+                "first.",
+                code="cannot_move",
+            )
         if outcome == "busy":
             raise HostCommandError(
                 409,

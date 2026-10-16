@@ -290,3 +290,65 @@ async def test_putting_a_removed_host_back_to_work_stops_its_move(pool, store: S
     assert await store.sandbox.sandboxes_moving_out() == []
     assert await store.host_pool.finish_host_removals() == []
     assert (await store.host_pool.get_host(host="runner-a"))["enrolled"]
+
+
+async def test_removal_counts_a_checkpoint_that_no_longer_covers_its_group(pool, store: Storage):
+    """A checkpoint of a local image moves nothing; revoking would strand the group."""
+    _, group = await _covered(pool, store)
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_sandboxes SET sandbox_image_digest = 'cloud-agent-sandbox:local' "
+            "WHERE id = $1",
+            group["sandbox_id"],
+        )
+        await conn.execute(
+            "UPDATE agent_sandbox_checkpoints SET base_image = 'cloud-agent-sandbox:local' "
+            "WHERE sandbox_id = $1",
+            group["sandbox_id"],
+        )
+    await _captures(pool)
+    await _host(store, "runner-c", _RESTORE_HOST)
+
+    assert await store.host_pool.remove_host(host="runner-a") == "cannot_move"
+    assert (await store.host_pool.get_host(host="runner-a"))["enrolled"]
+
+    assert await store.host_pool.remove_host(host="runner-a", allow_unmoved=True) == "ok"
+    state = await _state(pool)
+    assert state["state"] == "stopped" and state["host"] == "runner-a"
+
+
+async def test_removal_does_not_wait_for_a_stopped_group_without_a_checkpoint(pool, store: Storage):
+    """Nothing checkpoints a group already stopped, so it would wait forever."""
+    await _settled_stopped_group(pool, store)
+    await _captures(pool)
+    await _host(store, "runner-c", _RESTORE_HOST)
+
+    assert await store.host_pool.remove_host(host="runner-a") == "cannot_move"
+    assert await store.sandbox.sandboxes_moving_out() == []
+    assert (await store.host_pool.get_host(host="runner-a"))["status"] != "draining"
+
+
+async def test_a_checkpoint_failing_during_the_move_holds_the_removal_for_consent(
+    pool, store: Storage
+):
+    _, group = await _settled_stopped_group(pool, store)
+    await _running(pool, group["sandbox_id"])
+    await _captures(pool)
+    await _host(store, "runner-c", _RESTORE_HOST)
+    assert await store.host_pool.remove_host(host="runner-a") == "moving_out"
+
+    # The stop completes, but its checkpoint failed.
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_sandboxes SET state = 'stopped', stop_requested_at = NULL WHERE id = $1",
+            group["sandbox_id"],
+        )
+    assert await store.host_pool.finish_host_removals() == []
+    hosts, *_ = await store.host_pool.runner_pool()
+    [leaving] = [row for row in hosts if row["host"] == "runner-a"]
+    assert leaving["sandboxes_left"] == 0 and leaving["sandboxes_unmovable"] == 1
+
+    assert await store.host_pool.remove_host(host="runner-a") == "cannot_move"
+    assert await store.host_pool.remove_host(host="runner-a", allow_unmoved=True) == "moving_out"
+    assert await store.host_pool.finish_host_removals() == ["runner-a"]
+    assert (await _state(pool))["host"] == "runner-a"

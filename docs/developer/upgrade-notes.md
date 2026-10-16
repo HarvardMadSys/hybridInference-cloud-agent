@@ -25,7 +25,7 @@ Newest first.
 
 | Migration | What it changes |
 |---|---|
-| `0084_host_removal_move_out` | Adds `agent_runner_hosts.removal_moves_out`, false for every existing host, so a removal already pending keeps its earlier meaning: revoke once its running turns end. |
+| `0084_host_removal_move_out` | Adds `agent_runner_hosts.removal_moves_out` and `removal_leaves_unmoved`, false for every existing host, so a removal already pending keeps its earlier meaning: revoke once its running turns end. |
 | `0083_host_move_out` | Adds the `move_out` purpose to the admission-hold check constraint. Changes no existing row. Its downgrade deletes any move-out holds; groups already moved keep their checkpoints. |
 | `0082_team_environments` | Adds nullable team columns to environments and their bindings, and lets a repository default name any environment. Changes no existing row. Its downgrade refuses while a team environment exists, archived ones included. |
 | `0081_snapshot_pushed_commit` | Adds `agent_sandbox_snapshots.pushed_commit_sha` and copies into it the commit of every snapshot that was never published. `published_commit_sha` is left as it was, so the API it replaces keeps working, and no notice fires. |

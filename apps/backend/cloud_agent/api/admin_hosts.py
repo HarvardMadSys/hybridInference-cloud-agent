@@ -188,6 +188,8 @@ def _to_item(row: dict[str, Any], *, now: datetime | None = None) -> AgentRunner
         removal_pending=row.get("removal_requested_at") is not None,
         removal_moves_out=moving_out,
         sandboxes_left=int(row.get("sandboxes_left") or 0) if moving_out else None,
+        sandboxes_unmovable=int(row.get("sandboxes_unmovable") or 0) if moving_out else None,
+        removal_leaves_unmoved=moving_out and bool(row.get("removal_leaves_unmoved")),
         sandbox_runtime=row.get("sandbox_runtime"),
         sandbox_image_digest=row.get("sandbox_image_digest"),
         runtime_versions=row.get("runtime_versions"),
@@ -745,10 +747,13 @@ async def remove_agent_runner_host(
     allow_unmoved: bool = Query(
         False,
         description=(
-            "Remove a host whose sandboxes cannot move to another host now. "
-            "Without it the request is refused with 409 no_move_target, since "
-            "those sandboxes stay on the removed host and their chats cannot "
-            "continue until it returns."
+            "Remove a host even though some of its sandboxes will stay on it. "
+            "Without it the request is refused with 409 no_move_target when no "
+            "other host or no checkpoint can take them now, or 409 cannot_move "
+            "when some can never move (a stopped sandbox whose checkpoint "
+            "failed, say): those sandboxes stay on the removed host and their "
+            "chats cannot continue until it returns. Whatever can move still "
+            "moves first."
         ),
     ),
     _admin_id: str = Depends(verify_admin_access),
@@ -760,8 +765,10 @@ async def remove_agent_runner_host(
     restore them -- the host first moves them out: it drains, each idle
     sandbox stops into a checkpoint and is handed to another host, and the
     reaper revokes it once none is left and its running turns end. Nothing
-    running is interrupted. When they cannot, the request is refused unless
-    ``allow_unmoved``, and then keeps the meaning below.
+    running is interrupted. A removal that would leave sandboxes on the host
+    is refused unless ``allow_unmoved``, and then keeps the meaning below once
+    whatever can move has moved. A sandbox whose checkpoint fails during the
+    move holds the removal until it is repeated with ``allow_unmoved``.
 
     A host still holding slots is not revoked on the spot: its running attempts
     belong to a machine the platform would have just declared gone, and nobody

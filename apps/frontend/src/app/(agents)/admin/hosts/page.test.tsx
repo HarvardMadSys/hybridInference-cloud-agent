@@ -604,6 +604,43 @@ describe('AdminHostsPage', () => {
     await waitFor(() => expect(mocked.remove).toHaveBeenCalledWith('runner-a', false, true));
   });
 
+  it('says why sandboxes that never move would stay, and removes only on yes', async () => {
+    mocked.remove.mockRejectedValueOnce(
+      new APIError('cannot_move', 'Some sandboxes have no checkpoint', 409),
+    );
+    mocked.remove.mockResolvedValueOnce(pool([]));
+    const confirm = vi.fn().mockReturnValue(true);
+    vi.stubGlobal('confirm', confirm);
+    renderPage();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Remove from pool' }));
+
+    await waitFor(() => expect(mocked.remove).toHaveBeenCalledWith('runner-a', false, true));
+    expect(confirm.mock.calls[0][0]).toMatch(/a checkpoint failed, so they cannot move/);
+  });
+
+  it('shows the sandboxes a moving removal cannot move', async () => {
+    mocked.list.mockResolvedValue(
+      pool([
+        host({
+          status: 'draining',
+          removal_pending: true,
+          removal_moves_out: true,
+          sandboxes_left: 0,
+          sandboxes_unmovable: 2,
+          slots_used: 0,
+        }),
+      ]),
+    );
+    renderPage();
+
+    expect(
+      await screen.findByText(
+        'Moving out: 0 sandbox(es), 0 running turn(s) left; 2 cannot move, remove again to leave them',
+      ),
+    ).toBeInTheDocument();
+  });
+
   it('shows how much of a removal that moves sandboxes out is left', async () => {
     mocked.list.mockResolvedValue(
       pool([

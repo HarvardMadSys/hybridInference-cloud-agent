@@ -304,6 +304,26 @@ function panelIdFor(name: string): string {
   return `capacity-panel-${name.replace(/[^a-zA-Z0-9_-]/g, '-')}`;
 }
 
+// Why a removal would leave sandboxes on the host, by the server's refusal.
+const UNMOVED_REASONS: Record<string, (host: string) => string> = {
+  no_move_target: (host) =>
+    `No other server can take the sandboxes on ${host} now, or checkpoints are off.`,
+  cannot_move: (host) =>
+    `Some sandboxes on ${host} have no checkpoint another server can restore, for example ` +
+    'because a checkpoint failed, so they cannot move. The others still move first.',
+};
+
+// What a moving removal still waits for. Sandboxes that cannot move hold it
+// until the administrator agrees to leave them, by removing again.
+function movingOutProgress(host: AgentRunnerHost): string {
+  const progress = `Moving out: ${host.sandboxes_left ?? 0} sandbox(es), ${host.slots_used} running turn(s) left`;
+  const unmovable = host.sandboxes_unmovable ?? 0;
+  if (unmovable === 0) return progress;
+  return host.removal_leaves_unmoved
+    ? `${progress}; ${unmovable} cannot move and stay`
+    : `${progress}; ${unmovable} cannot move, remove again to leave them`;
+}
+
 function HostsView() {
   const [computeInventory, setComputeInventory] = useState<ComputeServerSnapshot | null>(null);
   const [pool, setPool] = useState<PoolSnapshot | null>(null);
@@ -635,19 +655,21 @@ function HostsView() {
   // A busy host is not cut off: it stops taking new work, and the control
   // plane removes it once its running turns end. The row says "removing" until
   // then, so only the idle case needs a notice.
-  // Its sandboxes move to other servers first when they can. When they cannot,
-  // the server says so, and removing anyway is the administrator's decision.
+  // Its sandboxes move to other servers first when they can. When some would
+  // stay on it, the server says why, and removing anyway is the
+  // administrator's decision.
   const handleRemove = (host: string) =>
     void run(
       async () => {
         try {
           return await removeAgentRunnerHost(host, false);
         } catch (e) {
-          if (!(e instanceof APIError && e.code === 'no_move_target')) throw e;
+          if (!(e instanceof APIError)) throw e;
+          const why = UNMOVED_REASONS[e.code];
+          if (why === undefined) throw e;
           const anyway = window.confirm(
-            `No other server can take the sandboxes on ${host} now, or checkpoints are off. ` +
-              'Removing it anyway leaves them on it, and their chats cannot continue until it ' +
-              'returns. Remove anyway?',
+            `${why(host)} Removing it anyway leaves them on it, and their chats cannot ` +
+              'continue until it returns. Remove anyway?',
           );
           return anyway ? removeAgentRunnerHost(host, false, true) : getAgentRunnerHosts();
         }
@@ -842,7 +864,7 @@ function HostsView() {
                           {host.removal_pending && (
                             <span className="mt-1 block whitespace-nowrap text-[11px] text-gray-500 dark:text-gray-400">
                               {host.removal_moves_out
-                                ? `Moving out: ${host.sandboxes_left ?? 0} sandbox(es), ${host.slots_used} running turn(s) left`
+                                ? movingOutProgress(host)
                                 : `${host.slots_used} running turn(s) left`}
                             </span>
                           )}

@@ -12,12 +12,16 @@ from typing import Any
 
 from cloud_agent.sandbox_archive_credentials import load_stored_archive_policy
 from cloud_agent.storage._sql.compute_admission import host_compute_admission
+from cloud_agent.storage._sql.hosts import COVERED_GROUP_SQL
 from cloud_agent.storage._sql.rows import load_json
 from cloud_agent_shared.sandbox_archive_settings import (
     SANDBOX_ARCHIVE_CAPABILITY,
     SANDBOX_CHECKPOINT_CAPABILITY,
 )
-from cloud_agent_shared.sandbox_restore import SANDBOX_RESTORE_CAPABILITY
+from cloud_agent_shared.sandbox_restore import (
+    PULLABLE_IMAGE_PATTERN,
+    SANDBOX_RESTORE_CAPABILITY,
+)
 
 #: A leaving Host must have beaten this recently to stop and capture its groups.
 _LIVE_HEARTBEAT_SECONDS = 120
@@ -90,3 +94,19 @@ async def move_out_possible(conn: Any, leaving: list[str], *, need_target: bool)
 
 #: Groups still held only by a Host: not yet handed over, lost or deleted.
 UNMOVED_GROUP_SQL = """g.deletion_state = 'none' AND g.state NOT IN ('cold', 'restoring', 'lost')"""
+
+#: An unmoved group a leaving Host can still move: its checkpoint covers it
+#: now, or it has not stopped yet and its stop will record a checkpoint of an
+#: image another Host can pull. Nothing else ever moves: no checkpoint is
+#: taken of a group already stopped, so one whose checkpoint failed, a dirty
+#: stop, or a group on a local image stays with this Host.
+MOVABLE_GROUP_SQL = f"""({UNMOVED_GROUP_SQL} AND (
+    {COVERED_GROUP_SQL}
+    OR (
+        g.state IN ('provisioning', 'starting', 'running', 'stopping')
+        AND g.sandbox_image_digest ~ '{PULLABLE_IMAGE_PATTERN}'
+    )
+))"""
+
+#: An unmoved group that can never move: it stays bound to its Host.
+UNMOVABLE_GROUP_SQL = f"""({UNMOVED_GROUP_SQL} AND NOT {MOVABLE_GROUP_SQL})"""
