@@ -368,6 +368,41 @@ def test_a_snapshot_captured_under_a_colour_config_publishes(backend, tmp_path):
     assert _git("show", f"{result.commit_sha}:a.txt", cwd=origin) == "two\n"
 
 
+def test_a_snapshot_captured_under_diff_context_zero_keeps_its_context_and_publishes(
+    backend, tmp_path
+):
+    from cloud_agent.publisher import publish_patch
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    _git("init", "-q", "-b", "main", cwd=workspace)
+    (workspace / "a.txt").write_text("one\ntwo\nthree\nfour\nfive\n")
+    _git("add", "a.txt", cwd=workspace)
+    _git("commit", "-q", "-m", "first", cwd=workspace)
+    base = _git("rev-parse", "HEAD", cwd=workspace).strip()
+    origin = tmp_path / "origin.git"
+    _git("clone", "-q", "--bare", str(workspace), str(origin), cwd=tmp_path)
+    _git("config", "uploadpack.allowAnySHA1InWant", "true", cwd=origin)
+    # git apply refuses a hunk with no context around it.
+    _git("config", "diff.context", "0", cwd=workspace)
+    (workspace / "a.txt").write_text("one\ntwo\nTHREE\nfour\nfive\n")
+
+    captured = _run_git(backend, workspace, base, exact_patch=True)
+    result = publish_patch(
+        job_id="ajob_context",
+        branch_id="athr_context",
+        patch=captured["patch"],
+        clone_url=f"file://{origin}",
+        base_sha=base,
+        commit_message="agent: edit",
+    )
+
+    assert _git("show", f"{result.commit_sha}:a.txt", cwd=origin) == "one\ntwo\nTHREE\nfour\nfive\n"
+    hunk = "@@ -1,5 +1,5 @@\n one\n two\n-three\n+THREE\n four\n five\n"
+    assert captured["patch"].endswith(hunk)
+    assert _run_git(backend, workspace)["patch"].endswith(hunk)
+
+
 def test_base_bundle_import_never_lazily_fetches_a_missing_prerequisite(tmp_path, monkeypatch):
     source = _repo(tmp_path / "source")
     base = _git("rev-parse", "HEAD", cwd=source).strip()
