@@ -14,6 +14,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     from cloud_agent.domain.pending_messages import PreparedHead, SettleOutcome
 
 
@@ -197,12 +199,23 @@ class PendingMessageRepository(Protocol):
         """
         ...
 
-    async def threads_to_settle(self, *, limit: int = 50, after: str | None = None) -> list[str]:
+    async def settlement_sweep_boundary(self) -> datetime:
+        """Return the database-clock boundary for one finite periodic sweep."""
+        ...
+
+    async def threads_to_settle(
+        self,
+        *,
+        limit: int = 50,
+        after: str | None = None,
+        created_before: datetime | None = None,
+    ) -> list[str]:
         """Threads whose queue a settlement could move or pause right now.
 
         For the periodic sweep: a turn that ended without the finish route —
         the reaper's verdict, a control plane restarted mid-request — still
         gets its queue acted on. In thread order, from past ``after`` when
-        given, so a sweep can page through them all.
+        given, and no newer than ``created_before`` when bounded, so arrivals
+        cannot keep one sweep in progress forever.
         """
         ...

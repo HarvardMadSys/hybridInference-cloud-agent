@@ -13,9 +13,12 @@ from __future__ import annotations
 
 import json
 import math
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import asyncpg
+
+if TYPE_CHECKING:
+    from datetime import datetime
 
 from cloud_agent.attachments.models import AttachmentError
 from cloud_agent.domain.execution import RUNNING
@@ -1152,14 +1155,27 @@ class PostgresPendingMessageRepository:
             await conn.execute("DELETE FROM agent_pending_messages WHERE id = $1", head["id"])
         return SettleOutcome(job=job, message_id=str(head["id"]))
 
-    async def threads_to_settle(self, *, limit: int = 50, after: str | None = None) -> list[str]:
+    async def settlement_sweep_boundary(self) -> datetime:
+        """Capture a finite creation-time boundary from PostgreSQL's clock."""
+        async with self._pool.acquire() as conn:
+            return await conn.fetchval("SELECT statement_timestamp()")
+
+    async def threads_to_settle(
+        self,
+        *,
+        limit: int = 50,
+        after: str | None = None,
+        created_before: datetime | None = None,
+    ) -> list[str]:
         """Threads whose queue a settlement could move or pause right now.
 
         For the periodic sweep: a turn that ended without the finish route —
         the reaper's verdict, a control plane restarted mid-request — still
         gets its queue acted on. In thread order, from past ``after`` when
-        given, so a sweep can page through them all.
+        given, and no newer than ``created_before`` when bounded.
         """
+        if limit < 1:
+            raise ValueError("limit must be at least 1")
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 f"""
@@ -1168,6 +1184,7 @@ class PostgresPendingMessageRepository:
                 JOIN agent_threads t ON t.id = waiting.thread_id
                 WHERE t.deleted_at IS NULL
                   AND ($2::text IS NULL OR t.id > $2)
+                  AND ($3::timestamptz IS NULL OR t.created_at <= $3)
                   AND NOT EXISTS (
                         SELECT 1 FROM agent_jobs j
                         WHERE j.thread_id = t.id AND j.{LIVE_TURN_SQL}
@@ -1196,6 +1213,7 @@ class PostgresPendingMessageRepository:
                 """,
                 limit,
                 after,
+                created_before,
             )
         return [str(row["id"]) for row in rows]
 

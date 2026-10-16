@@ -33,6 +33,8 @@ from cloud_agent.owner_access import (
 from cloud_agent.source_control_runtime import SourceControlUnavailable
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     from cloud_agent.ports import (
         AttachmentRepository,
         ConversationQueries,
@@ -276,14 +278,16 @@ async def settle_queue_when_possible(
 
 @dataclass
 class QueueSweep:
-    """Where the next periodic sweep starts: past the last thread one reached.
+    """Where the current finite sweep starts and ends.
 
-    A full page moves it on and a short one, which reached the end, starts the
-    next sweep over. However many threads before it cannot move, a waiting
-    queue is reached within one pass over them all.
+    ``created_before`` is captured once per pass from the database clock. New
+    threads cannot extend an in-progress sweep, even though IDs are random and
+    do not provide a monotonic high-water mark. A full page advances ``after``;
+    a short page ends the pass and clears both bounds.
     """
 
     after: str | None = None
+    created_before: datetime | None = None
 
 
 async def settle_waiting_queues(
@@ -306,13 +310,23 @@ async def settle_waiting_queues(
     so a page of queues that cannot move does not hide the ones after it.
     Returns how many were settled.
     """
+    if limit < 1:
+        raise ValueError("limit must be at least 1")
     app_credentials = _app_credentials(github_app)
     settled = 0
+    if sweep is not None and sweep.created_before is None:
+        sweep.created_before = await store.pending_messages.settlement_sweep_boundary()
     page = await store.pending_messages.threads_to_settle(
-        limit=limit, after=sweep.after if sweep is not None else None
+        limit=limit,
+        after=sweep.after if sweep is not None else None,
+        created_before=sweep.created_before if sweep is not None else None,
     )
     if sweep is not None:
-        sweep.after = page[-1] if len(page) >= limit else None
+        if len(page) >= limit:
+            sweep.after = page[-1]
+        else:
+            sweep.after = None
+            sweep.created_before = None
     for thread_id in page:
         try:
             await _settle_with(

@@ -1045,7 +1045,16 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         del self.pending[head["id"]]
         return SettleOutcome(job=job, message_id=head["id"])
 
-    async def threads_to_settle(self, *, limit: int = 50, after: str | None = None) -> list[str]:
+    async def settlement_sweep_boundary(self) -> datetime:
+        return datetime.now(timezone.utc)
+
+    async def threads_to_settle(
+        self,
+        *,
+        limit: int = 50,
+        after: str | None = None,
+        created_before: datetime | None = None,
+    ) -> list[str]:
         threads = sorted({row["thread_id"] for row in self.pending.values()})
         return [thread_id for thread_id in threads if after is None or thread_id > after][:limit]
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import UTC, datetime
 
 import pytest
 from tests.support.storage import AllCapabilities
@@ -64,7 +65,16 @@ class _Store(AllCapabilities):
             raise self.purge_error
         return 0
 
-    async def threads_to_settle(self, *, limit: int = 50, after: str | None = None) -> list[str]:
+    async def settlement_sweep_boundary(self) -> datetime:
+        return datetime.now(UTC)
+
+    async def threads_to_settle(
+        self,
+        *,
+        limit: int = 50,
+        after: str | None = None,
+        created_before: datetime | None = None,
+    ) -> list[str]:
         self.events.append("settle_queues")
         return []
 
