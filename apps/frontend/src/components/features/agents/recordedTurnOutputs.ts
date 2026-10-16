@@ -91,7 +91,7 @@ function recordedFiles(payload: AgentJobEventApi['payload']): RecordedTurnFile[]
     typeof text !== 'string' ||
     text.length >= 4000 ||
     payload?.truncated === true ||
-    !text.startsWith('diff --git a/')
+    !/^diff --git "?a\//.test(text)
   ) {
     return [];
   }
@@ -104,10 +104,6 @@ function recordedFiles(payload: AgentJobEventApi['payload']): RecordedTurnFile[]
   ) {
     return [];
   }
-  // The shared parser handles plain paths. Quoted/escaped Git paths need a
-  // decoder before they can become usable file actions, so keep them out.
-  if (files.some((file) => !file.path || file.path.includes('\\') || file.path.startsWith('"')))
-    return [];
   // A path containing " b/" can confuse an unquoted diff header. The new-file
   // marker, when present, must agree before we advertise a selectable path.
   if (

@@ -1455,6 +1455,79 @@ describe('patch parsing', () => {
     expect(toDisplayJob(JOB, { patch: PATCH }).diffStat).toEqual({ add: 1, del: 1 });
   });
 
+  // What the host's `git diff` writes for `文档.md`: core.quotePath is on, so
+  // the name is quoted and each byte of its UTF-8 spelling is an octal escape.
+  const QUOTED = [
+    'diff --git "a/\\346\\226\\207\\346\\241\\243.md" "b/\\346\\226\\207\\346\\241\\243.md"',
+    'index ce01362..3b18e51 100644',
+    '--- "a/\\346\\226\\207\\346\\241\\243.md"',
+    '+++ "b/\\346\\226\\207\\346\\241\\243.md"',
+    '@@ -1 +1 @@',
+    '-hello',
+    '+hello world',
+  ].join('\n');
+
+  it('decodes a quoted non-ASCII path', () => {
+    expect(toDiffFiles(QUOTED)).toEqual(['文档.md']);
+    expect(toDiffFileDetails(QUOTED)).toEqual([
+      expect.objectContaining({ path: '文档.md', add: 1, del: 1 }),
+    ]);
+  });
+
+  it('keeps a quoted file out of the file listed before it', () => {
+    const patch = `${PATCH}\n${QUOTED}`;
+    expect(toDiffFiles(patch)).toEqual(['src/x.py', '文档.md']);
+    expect(toDiffFileDetails(patch)).toEqual([
+      expect.objectContaining({ path: 'src/x.py', add: 1, del: 1 }),
+      expect.objectContaining({ path: '文档.md', add: 1, del: 1 }),
+    ]);
+  });
+
+  it.each([
+    ['tab\\tname.md', 'tab\tname.md'],
+    ['say \\"hi\\".md', 'say "hi".md'],
+    ['back\\\\slash.md', 'back\\slash.md'],
+  ])('decodes the escape in "b/%s"', (quoted, path) => {
+    expect(toDiffFiles(`diff --git "a/${quoted}" "b/${quoted}"`)).toEqual([path]);
+  });
+
+  it('reads a header that quotes only one of its names', () => {
+    const rename = [
+      'diff --git a/plain.md "b/\\345\\220\\215\\345\\255\\227.md"',
+      'similarity index 100%',
+      'rename from plain.md',
+      'rename to "\\345\\220\\215\\345\\255\\227.md"',
+    ].join('\n');
+    expect(toDiffFiles(rename)).toEqual(['名字.md']);
+  });
+
+  it('reads each line of a hunk by its first character', () => {
+    // A removed `--count;` and an added `++count;` are changes like any other,
+    // not the `---` and `+++` lines that name the file before its first hunk.
+    const patch = [
+      'diff --git a/tick.c b/tick.c',
+      'index 15c5242..04c18dc 100644',
+      '--- a/tick.c',
+      '+++ b/tick.c',
+      '@@ -1,3 +1,3 @@',
+      ' void tick(void) {',
+      '---count;',
+      '+++count;',
+      ' }',
+    ].join('\n');
+    const [file] = toDiffFileDetails(patch);
+    expect(file).toMatchObject({ add: 1, del: 1 });
+    expect(file.lines.slice(0, 2)).toEqual([
+      { marker: 'ctx', text: '--- a/tick.c' },
+      { marker: 'ctx', text: '+++ b/tick.c' },
+    ]);
+    expect(file.lines.slice(4, 6)).toEqual([
+      { marker: 'del', text: '---count;' },
+      { marker: 'add', text: '+++count;' },
+    ]);
+    expect(toDisplayJob(JOB, { patch }).diffStat).toEqual({ add: 1, del: 1 });
+  });
+
   it('handles a job that produced no patch', () => {
     const job = toDisplayJob(JOB, { patch: null });
     expect(job.diffFiles).toEqual([]);
