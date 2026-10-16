@@ -47,6 +47,7 @@ from cloud_agent.storage._sql.hosts import (
     HOST_COLUMNS,
     HOST_RETAINED_GROUP,
     QUALIFIED_HOST_COLUMNS,
+    lock_revocation_rows,
     revoke_host_credentials,
 )
 from cloud_agent.storage._sql.move_out import (
@@ -930,6 +931,9 @@ class PostgresHostPoolRepository:
                 "ORDER BY id FOR UPDATE",
                 host,
             )
+            # Then its groups, which the counts below read and the revocation
+            # hands over: a start fenced in between would slip out of both.
+            await lock_revocation_rows(conn, [host])
             row = await conn.fetchrow(
                 "SELECT status, slots_used, drain_fence_active, removal_requested_at, "
                 "removal_moves_out, removal_leaves_unmoved "
@@ -1020,6 +1024,7 @@ class PostgresHostPoolRepository:
                         "ORDER BY id FOR UPDATE",
                         host,
                     )
+                    await lock_revocation_rows(conn, [host])
                     row = await conn.fetchrow(
                         "SELECT h.slots_used, h.removal_requested_at, "
                         "(" + _REMOVAL_WAITS_SQL + ") AS moving "

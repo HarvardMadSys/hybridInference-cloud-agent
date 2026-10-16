@@ -36,7 +36,12 @@ from tests.integration.storage.test_environment_snapshot_store import (
     _receipt,
 )
 from tests.integration.storage.test_environment_store import _save as _save_environment
+from tests.integration.storage.test_sandbox_restore_store import (
+    _covered,
+    _state as _restore_state,
+)
 
+from cloud_agent.storage._sql.sandbox import fence_sandbox_start
 from cloud_agent.storage.repositories import (
     attempt_commands as attempt_module,
     snapshot as snapshot_module,
@@ -1025,6 +1030,37 @@ async def test_a_claim_counts_an_environment_run_started_while_it_waited(
         host_credential_hash=_HOST_CREDENTIAL,
     )
     assert claimed is not None and claimed["id"] == follow["id"]
+
+
+async def test_a_removal_counts_a_hosts_groups_under_their_locks(pool, store: Storage):
+    """A workspace start fenced while a removal decides cannot strand its group.
+
+    Revoking an idle host hands each stopped group its checkpoint covers to
+    another host. A workspace request fences the group before it is
+    forwarded, which ends that cover: the container may start. The removal
+    counted the groups without locks, so a fence landing between the count
+    and the hand-over took the group out of the hand-over, and the host was
+    revoked with the group left on it, uncovered, its container about to
+    start where nothing could report it.
+    """
+    _job, group = await _covered(pool, store)
+    removing = None
+    async with pool.acquire() as request:
+        try:
+            async with request.transaction():
+                # The request's fence, held until it is forwarded to the host.
+                assert await fence_sandbox_start(request, group["sandbox_id"]) == "stopped"
+                removing = asyncio.create_task(store.host_pool.remove_host(host="runner-a"))
+                await _blocked_by(pool, await request.fetchval("SELECT pg_backend_pid()"))
+            removed = await asyncio.wait_for(removing, timeout=10)
+        finally:
+            await _settle(removing)
+    # The fence came first, so the group no longer moves: the administrator is
+    # asked, and the host is not revoked under it.
+    assert removed == "cannot_move"
+    assert (await _restore_state(pool, group["sandbox_id"]))["state"] == "stopped"
+    kept = await store.host_pool.get_host(host="runner-a")
+    assert kept is not None and kept["status"] == "online"
 
 
 @pytest.mark.parametrize("sibling", ["claim", "finish"])

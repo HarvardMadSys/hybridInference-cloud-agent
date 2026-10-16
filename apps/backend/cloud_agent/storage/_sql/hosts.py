@@ -172,6 +172,8 @@ async def revoke_host_credentials(conn: Any, hosts: list[str]) -> None:
 
     Callers own admission locks and busy/retention policy; this is the one
     credential transition shared by Host Remove and committed resource release.
+    Host Remove takes the rows this writes below the host rows first
+    (:func:`lock_revocation_rows`).
 
     **The work the machine was holding ends with its credential.** Clearing
     the hash stops the host's own requests, but its attempts run on worker
@@ -207,6 +209,35 @@ async def revoke_host_credentials(conn: Any, hosts: list[str]) -> None:
         hosts,
     )
     await release_covered_sandboxes(conn, hosts)
+
+
+async def lock_revocation_rows(conn: Any, hosts: list[str]) -> None:
+    """Lock what revoking ``hosts`` reads and writes below their host rows.
+
+    Taken before the host rows, in the documented order: the hot memberships
+    whose residency leases the revocation ends, then every undeleted group
+    the hosts hold. A removal's decision and its hand-over then see the same
+    groups. A workspace request that fenced a covered group between the two
+    would take it out of the hand-over without a word, and leave it on the
+    revoked host with no checkpoint to move it. Locked, the fence waits, and
+    then finds the group ``cold``; one that came first leaves the group
+    uncovered, which the removal counts as a group that cannot move.
+    """
+    await conn.execute(
+        """
+        SELECT m.thread_id FROM agent_thread_sandbox_memberships m
+        JOIN agent_sandboxes g ON g.id = m.sandbox_id
+        WHERE g.host = ANY($1::text[]) AND m.residency_status = 'hot'
+        ORDER BY m.thread_id
+        FOR UPDATE OF m
+        """,
+        hosts,
+    )
+    await conn.execute(
+        "SELECT id FROM agent_sandboxes WHERE host = ANY($1::text[]) "
+        "AND deletion_state = 'none' ORDER BY id FOR UPDATE",
+        hosts,
+    )
 
 
 #: Whether stopped group ``g`` moves through its checkpoint: the restore point
