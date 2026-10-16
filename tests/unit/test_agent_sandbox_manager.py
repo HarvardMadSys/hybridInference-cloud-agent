@@ -2928,6 +2928,105 @@ def test_a_slow_terminal_suspension_never_holds_up_another_workspace(tmp_path):
     assert terminals._workspace_locks == {}
 
 
+class _SlowSpawner:
+    """A terminal spawn, a Docker inspect and exec in production, held until released."""
+
+    def __init__(self) -> None:
+        self.spawning = threading.Event()
+        self.release = threading.Event()
+
+    @staticmethod
+    def base_env() -> dict[str, str]:
+        return {}
+
+    def spawn_terminal(self, _spec, *, rows: int, cols: int) -> TerminalProcess:
+        self.spawning.set()
+        assert self.release.wait(5)
+        return _RunningTerminalProcess()
+
+
+def test_a_slow_terminal_creation_never_holds_up_another_workspace(tmp_path):
+    """Opening a terminal is a Docker call too, and can take seconds.
+
+    Holding the manager's lock across it stalled every keystroke, listing and
+    suspension in every other workspace on the host, as a slow suspension
+    did. A suspension of its own workspace still waits for it.
+    """
+    terminals = _TerminalManager(idle_ttl_s=1800, hard_ttl_s=28800, max_sessions=8)
+    other = _listed_session(terminals, "athr_other", _SuspendableTerminalProcess(), tmp_path)
+    spawner = _SlowSpawner()
+    creation = threading.Thread(
+        target=functools.partial(
+            terminals.create, "athr_source", "/workspace", rows=24, cols=80, backend=spawner
+        ),
+        daemon=True,
+    )
+    creation.start()
+    assert spawner.spawning.wait(2)
+    own_suspension = threading.Thread(
+        target=functools.partial(
+            terminals.suspend, "athr_source", lease_generation=1, job_id="job-source"
+        ),
+        daemon=True,
+    )
+
+    try:
+        controlled, listed, suspended = _finish_within(
+            1,
+            lambda: (
+                terminals.get_for_control("athr_other", other.id),
+                terminals.list("athr_other"),
+                terminals.suspend("athr_other", lease_generation=1, job_id="job-other"),
+            ),
+        )
+        own_suspension.start()
+        own_suspension.join(0.3)
+        suspended_mid_creation = not own_suspension.is_alive()
+    finally:
+        spawner.release.set()
+        creation.join(5)
+    own_suspension.join(5)
+
+    assert controlled is other
+    assert [item["id"] for item in listed] == [other.id]
+    assert suspended == {"ok": True, "suspended": 1}
+    assert not suspended_mid_creation
+    [created] = terminals._sessions["athr_source"].values()
+    assert created._suspended
+    assert terminals._workspace_locks == {}
+    terminals.delete("athr_source", created.id)
+
+
+def test_a_terminal_still_being_created_counts_against_the_sandbox_managers_limit():
+    terminals = _TerminalManager(idle_ttl_s=1800, hard_ttl_s=28800, max_sessions=1)
+    spawner = _SlowSpawner()
+    creation = threading.Thread(
+        target=functools.partial(
+            terminals.create, "athr_source", "/workspace", rows=24, cols=80, backend=spawner
+        ),
+        daemon=True,
+    )
+    creation.start()
+    assert spawner.spawning.wait(2)
+
+    try:
+        with pytest.raises(HTTPException) as refused:
+            _finish_within(
+                1,
+                lambda: terminals.create(
+                    "athr_other", "/workspace", rows=24, cols=80, backend=_Spawner()
+                ),
+            )
+    finally:
+        spawner.release.set()
+        creation.join(5)
+
+    assert refused.value.status_code == 503
+    assert [row["state"] for row in terminals.list("athr_source")] == ["running"]
+    assert "athr_other" not in terminals._sessions
+    terminals.close()
+
+
 def test_a_resume_waits_for_its_own_workspaces_suspension_to_finish(tmp_path):
     """A workspace's freeze and thaw still run one at a time.
 
