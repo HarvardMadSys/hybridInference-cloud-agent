@@ -3057,6 +3057,83 @@ async def test_running_autoscale_acquisition_cannot_be_cancelled(db, store):
         await repo.cancel_operation(operation_row["id"])
 
 
+async def test_retiring_an_autoscaled_server_mid_acquisition_frees_its_route(db, store):
+    """An administrator retires an autoscaled server whose Host never heartbeat.
+
+    Its acquisition waits between checks for the deployed Host, and the
+    retirement is claimed in that window. Once the release commits the
+    dispatcher never claims the acquisition again, so it stayed waiting for
+    good, and the route it reserved stayed reserved with it: the autoscaler
+    could not deploy another member there.
+    """
+    repo = store.compute_resources
+    allocation_id, acquire = await autoscale_acquisition(
+        db, store, request_id="retired-mid-acquisition", state=None
+    )
+    await repo.observe_allocation(
+        allocation_id=allocation_id,
+        observation={
+            "external_id": "experiment-retired-mid-acquisition",
+            "observed_state": "ready",
+            "expiration_known": True,
+            "expires_at": datetime.now(UTC) + timedelta(hours=4),
+            "scope_complete": True,
+            "nodes": [
+                {"provider_node_id": "node-1", "instance_identity": "vm-1", "name": "node-1"}
+            ],
+        },
+        **fence(acquire),
+    )
+    assert await repo.checkpoint_operation(
+        **fence(acquire), step="verifying_host", result={"external_pending": False}
+    )
+    assert await repo.finish_operation(
+        **fence(acquire),
+        state="waiting",
+        step="waiting_for_heartbeat",
+        message="Waiting for the deployed Host to register and heartbeat.",
+        retry_after_seconds=15,
+    )
+
+    retire = await operation(repo, allocation_id, "retire")
+    assert retire is not None and retire["kind"] == "retire"
+    await repo.begin_retirement(allocation_id=allocation_id, **fence(retire))
+    nodes = (await repo.get_allocation(allocation_id))["nodes"]
+    assert await repo.record_inventory(
+        allocation_id=allocation_id,
+        hosts=[],
+        empty=True,
+        verified_node_ids=[node["id"] for node in nodes],
+        **fence(retire),
+    )
+    committed = await repo.commit_release(allocation_id=allocation_id, **fence(retire))
+    assert committed["release_committed"] is True
+    await repo.observe_allocation(
+        allocation_id=allocation_id,
+        observation={"observed_state": "terminated", "scope_complete": True},
+        **fence(retire),
+    )
+    assert await repo.finish_operation(**fence(retire), state="succeeded", step="released")
+
+    snapshot = await repo.get_cloudlab_autoscaling()
+    assert snapshot["profile_reservations"][0]["allocation_id"] is None
+    assert snapshot["members"][0]["state"] == "released"
+    # Nothing can run the acquisition now; it ends with its server.
+    assert (await repo.get_operation(acquire["id"]))["state"] == "cancelled"
+    replacement = await repo.create_autoscale_allocation_operation(
+        expected_revision=0,
+        expected_generation=snapshot["runtime"]["generation"],
+        request_id="after-retired-mid-acquisition",
+        fingerprint="after-retired-mid-acquisition",
+        allocation={"name": "replacement"},
+        parameters={},
+        requested_by="system:cloudlab-autoscaler",
+        decision={"action": "scale_up"},
+        cooldown_seconds=60,
+    )
+    assert replacement["operation"]["allocation_id"] != allocation_id
+
+
 OLD_SHA = "d" * 40
 NEW_SHA = "e" * 40
 OTHER_SHA = "f" * 40

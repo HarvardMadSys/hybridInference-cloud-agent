@@ -473,7 +473,7 @@ Pool and resource actions have different effects:
 | `Cancel removal` | Puts a `removing` Host back to work. Sandboxes already moved stay on their new Hosts. |
 | `Remove now` | Revokes a `removing` Host at once and ends its running turns: they are requeued once, or a chat whose turn may already have run is marked lost. Sandboxes not yet moved stay on the removed Host. |
 | `Forget` | Removes an eligible history record. A `cold` sandbox, which waits in its checkpoint for any Host, does not block it. |
-| `Retire/release` | Releases the complete allocation; for CloudLab, the whole experiment. Existing SSH has no cloud-destruction capability. |
+| `Retire/release` | Releases the complete allocation; for CloudLab, the whole experiment. An acquisition still waiting on the server, for its Host's first heartbeat say, is cancelled when the release commits: nothing can run it afterwards, and an autoscaled server's profile is free for the pool once the release is confirmed. Existing SSH has no cloud-destruction capability. |
 
 The page has no separate pause action. A Host held by a deployment drain shows
 `updating`; one drained through the `/drain` API shows `paused` and offers

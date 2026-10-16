@@ -3155,6 +3155,22 @@ class PostgresComputeResourceRepository:
                     allocation_id,
                     operation_id,
                 )
+            else:
+                # An acquisition between its checks -- waiting for its Host's
+                # first heartbeat, or blocked on a deployment given up on -- is
+                # never claimed again after this commit. Left waiting, it kept
+                # an autoscaled server's route reserved for good. The release
+                # deletes the resource by the allocation's own identity.
+                await conn.execute(
+                    """UPDATE agent_compute_operations
+                    SET state='cancelled',message='release_committed',
+                        completed_at=NOW(),updated_at=NOW()
+                    WHERE allocation_id=$1 AND id<>$2
+                      AND kind IN ('acquire','import')
+                      AND state IN ('pending','waiting','blocked')""",
+                    allocation_id,
+                    operation_id,
+                )
             await conn.execute(
                 "UPDATE agent_compute_allocations SET release_committed_at=NOW(),updated_at=NOW() WHERE id=$1",
                 allocation_id,
