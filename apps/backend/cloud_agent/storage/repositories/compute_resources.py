@@ -155,7 +155,8 @@ class PostgresComputeResourceRepository:
         """Move every stored profile of one release, and the live hosts using it.
 
         A profile another deployment is currently installing is left unchanged.
-        The calling allocation must end on the new revision.
+        An autoscaling route's snapshot moves with its stored profile. The
+        calling allocation must end on the new revision.
         """
         if previous_sha == deployment_sha and previous_digest == source_sha256:
             return
@@ -188,6 +189,26 @@ class PostgresComputeResourceRepository:
                 source_sha256,
                 deployment_sha,
                 operation_id,
+            )
+            # A reserved route deploys its next pool member from this snapshot.
+            # It names the stored bundle, so it moves only with that profile.
+            await conn.execute(
+                """UPDATE agent_cloudlab_autoscaling_profile_reservations AS reservation
+                SET profile_snapshot=reservation.profile_snapshot
+                      || jsonb_build_object('deployment_sha',$3::text,'source_sha256',$4::text),
+                    updated_at=NOW()
+                FROM agent_compute_deployment_profiles AS profile
+                WHERE profile.id=reservation.deployment_profile
+                  AND reservation.profile_snapshot->>'source_bundle'
+                      ='stored-profile:'||profile.id||':bundle'
+                  AND reservation.profile_snapshot->>'deployment_sha'=$1
+                  AND reservation.profile_snapshot->>'source_sha256'=$2
+                  AND profile.configuration->>'deployment_sha'=$3
+                  AND profile.source_sha256=$4""",
+                previous_sha,
+                previous_digest,
+                deployment_sha,
+                source_sha256,
             )
             await conn.execute(
                 """UPDATE agent_compute_allocations AS allocation

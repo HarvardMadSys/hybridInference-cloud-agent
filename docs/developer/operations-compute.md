@@ -166,8 +166,9 @@ defaults are saved for future setups. **Start new setup** retains those inputs
 and creates a new request on submission; it leaves an unfinished setup
 unavailable. Tunnel credentials, the install directory, and enrollment stay
 fixed. A control-plane release rolls managed hosts forward: stored profiles
-that share the previous commit and bundle, and the live allocations using
-them, advance together so a later node replacement still sees one revision.
+that share the previous commit and bundle, and the live allocations and
+autoscaling reservations using them, advance together so a later node
+replacement or new pool member still sees one revision.
 That rollout starts only once the new control plane runs, so the deployment's
 readiness check does not wait for managed hosts; they take new chats again
 when they report the new commit.

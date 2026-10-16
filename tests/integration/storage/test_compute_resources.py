@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
@@ -3268,6 +3269,111 @@ async def test_host_release_moves_shared_profiles_and_live_snapshots(store):
     retried = await repo.retry_operation(upgrade["id"])
     assert retried["state"] == "pending"
     assert retried["result"] == {"kept": True}
+
+
+async def test_host_release_moves_reserved_routes_with_their_stored_profiles(db, store):
+    """A new pool member is deployed from its route's snapshot, which names the stored bundle.
+
+    The snapshot must keep pinning the bundle its stored profile holds, or the
+    deployment refuses it after the experiment is created.
+    """
+    repo = store.compute_resources
+    for profile_id in ("pool-serving", "pool-installing", "pool-spare"):
+        await repo.save_deployment_profile(
+            profile_id=profile_id,
+            label=profile_id,
+            configuration={"deployment_sha": OLD_SHA, "deploy_root": "/opt/" + profile_id},
+            source_bundle=b"old-" + profile_id.encode(),
+            source_sha256=OLD_DIGEST,
+            secret_ciphertext="cipher-" + profile_id,
+        )
+    serving = await _ready_allocation(
+        repo,
+        "pool-serving",
+        _profile_snapshot(
+            "pool-serving", OLD_SHA, OLD_DIGEST, "stored-profile:pool-serving:bundle"
+        ),
+    )
+    upgrade = await operation(repo, serving, "upgrade")
+    assert upgrade["kind"] == "upgrade"
+    async with db.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO agent_compute_connections
+               (id,name,provider_id,secret_ciphertext,status)
+               VALUES ('pool-cloudlab','CloudLab','cloudlab','ciphertext','verified'),
+                      ('pool-ssh','SSH','existing_ssh','ciphertext','verified')"""
+        )
+        await conn.execute(
+            """UPDATE agent_cloudlab_autoscaling_policy
+               SET enabled=TRUE,min_hosts=0,max_hosts=2,
+                   connection_id='pool-cloudlab',ssh_connection_id='pool-ssh',
+                   deployment_profiles=ARRAY['pool-installing','pool-spare']"""
+        )
+        for profile_id in ("pool-installing", "pool-spare"):
+            await conn.execute(
+                """INSERT INTO agent_cloudlab_autoscaling_profile_reservations
+                   (deployment_profile,profile_snapshot) VALUES ($1,$2::jsonb)""",
+                profile_id,
+                json.dumps(
+                    _profile_snapshot(
+                        profile_id, OLD_SHA, OLD_DIGEST, f"stored-profile:{profile_id}:bundle"
+                    )
+                ),
+            )
+
+    async def scale_up(request_id: str, generation: int) -> dict:
+        created = await repo.create_autoscale_allocation_operation(
+            expected_revision=0,
+            expected_generation=generation,
+            request_id=request_id,
+            fingerprint=request_id,
+            allocation={"name": request_id},
+            parameters={},
+            requested_by="system:cloudlab-autoscaler",
+            decision={"action": "scale_up_pressure"},
+            cooldown_seconds=0,
+        )
+        return created["operation"]
+
+    # A member is being installed from the first route when the release lands.
+    installing = await scale_up("pool-member-installing", 0)
+    await repo.advance_host_release(
+        allocation_id=serving,
+        previous_sha=OLD_SHA,
+        previous_digest=OLD_DIGEST,
+        deployment_sha=NEW_SHA,
+        source_sha256=NEW_DIGEST,
+        source_bundle=b"replacement",
+        release_bundle_path="/app/compute-host-release/source.tar.gz",
+        **fence(upgrade),
+    )
+
+    # The route being installed keeps its bundle, and its snapshot with it.
+    assert (await repo.get_deployment_profile("pool-installing"))["source_sha256"] == OLD_DIGEST
+    async with db.acquire() as conn:
+        snapshot = await conn.fetchrow(
+            """SELECT profile_snapshot->>'deployment_sha' AS sha,
+                      profile_snapshot->>'source_sha256' AS digest
+               FROM agent_cloudlab_autoscaling_profile_reservations
+               WHERE deployment_profile='pool-installing'"""
+        )
+    assert (snapshot["sha"], snapshot["digest"]) == (OLD_SHA, OLD_DIGEST)
+    claimed = await repo.claim_operation(worker_id="worker")
+    assert claimed["id"] == installing["id"]
+    assert await repo.finish_operation(**fence(claimed), state="succeeded", step="ready")
+
+    # The spare route moved: the next member must pin what it now holds.
+    spare = await repo.get_deployment_profile("pool-spare")
+    assert spare["source_bundle"] == b"replacement"
+    scaled = await scale_up("pool-member-scaled", 1)
+    profile = (await repo.get_allocation(scaled["allocation_id"]))["deployment_profile"]
+    assert profile["id"] == "pool-spare"
+    assert profile["source_bundle"] == "stored-profile:pool-spare:bundle"
+    assert (profile["deployment_sha"], profile["source_sha256"]) == (
+        spare["configuration"]["deployment_sha"],
+        spare["source_sha256"],
+    )
+    assert (profile["deployment_sha"], profile["source_sha256"]) == (NEW_SHA, NEW_DIGEST)
 
 
 _MOVE_OUT_ARCHIVES = {
