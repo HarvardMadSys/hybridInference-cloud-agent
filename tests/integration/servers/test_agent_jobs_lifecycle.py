@@ -14,6 +14,8 @@ override the source wrote.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import os
 from typing import Any
 
@@ -35,6 +37,8 @@ from cloud_agent.api.deps import (
 )
 from cloud_agent.api.worker import verify_claiming_host
 from cloud_agent.storage.assembly import Storage
+from cloud_agent.workers.attempts import reap_expired_attempts
+from cloud_agent.workers.environment_maintenance import run_environment_maintenance
 from cloud_agent_host.shared_protocol import (
     NATIVE_FORK_AT_ANCHOR_CAPABILITY,
     SHARED_SANDBOX_CAPABILITY,
@@ -237,6 +241,105 @@ async def test_reaped_worker_token_is_rejected_end_to_end(api):
     # The supersede is visible to the owner as an append-only control event.
     events = (await client.get(f"/v1/agent/jobs/{job_id}/events")).json()["events"]
     assert [event["event_type"] for event in events] == ["attempt_superseded", "message"]
+
+
+async def test_environment_maintenance_lock_does_not_delay_attempt_reaper(api, monkeypatch):
+    """A real maintenance query blocked on PostgreSQL cannot hold up lease recovery."""
+    client, store, pool = api
+    created = await client.post(
+        "/v1/agent/jobs",
+        json={"repo": "owner/name", "task_prompt": "lock test", "model": _TEST_MODEL},
+    )
+    assert created.status_code == 201
+    claim = await client.post("/v1/agent/worker/claim", json=_claim_body("lock-test"))
+    attempt_id = claim.json()["attempt_id"]
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_attempts SET lease_expires_at=NOW()-INTERVAL '1 second' WHERE id=$1",
+            attempt_id,
+        )
+
+    maintenance_completed = asyncio.Event()
+    original_maintenance = store.environments.maintain_environments
+
+    async def observed_maintenance() -> None:
+        await original_maintenance()
+        maintenance_completed.set()
+
+    monkeypatch.setattr(store.environments, "maintain_environments", observed_maintenance)
+
+    lock_connection = await pool.acquire()
+    lock_transaction = lock_connection.transaction()
+    await lock_transaction.start()
+    await lock_connection.execute("LOCK TABLE agent_environment_runs IN ACCESS EXCLUSIVE MODE")
+    lock_held = True
+    maintenance_task = asyncio.create_task(
+        run_environment_maintenance(
+            store.environments,
+            store.environment_snapshots,
+            interval_seconds=0.001,
+            deadline_seconds=10,
+        ),
+        name="dbtest-environment-maintenance",
+    )
+    reaper_task: asyncio.Task[None] | None = None
+    try:
+        async with asyncio.timeout(3):
+            while not await pool.fetchval(
+                """
+                SELECT EXISTS (
+                    SELECT 1 FROM pg_stat_activity
+                    WHERE datname = current_database()
+                      AND state = 'active'
+                      AND wait_event_type = 'Lock'
+                      AND query LIKE 'UPDATE agent_environment_runs SET state=%'
+                )
+                """
+            ):
+                await asyncio.sleep(0.005)
+
+        reaper_task = asyncio.create_task(
+            reap_expired_attempts(
+                store,
+                interval_seconds=0.01,
+                max_attempts=3,
+                grants=None,
+            ),
+            name="dbtest-attempt-reaper",
+        )
+        async with asyncio.timeout(3):
+            while (
+                await pool.fetchval("SELECT status FROM agent_attempts WHERE id=$1", attempt_id)
+                != "superseded"
+            ):
+                await asyncio.sleep(0.01)
+
+        await lock_transaction.commit()
+        lock_held = False
+        await pool.release(lock_connection)
+        lock_connection = None
+        async with asyncio.timeout(3):
+            await maintenance_completed.wait()
+    finally:
+        if lock_connection is not None:
+            if lock_held:
+                with contextlib.suppress(Exception):
+                    await lock_transaction.rollback()
+            await pool.release(lock_connection)
+        tasks = [maintenance_task]
+        if reaper_task is not None:
+            tasks.append(reaper_task)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    assert await pool.fetchval("SELECT status FROM agent_attempts WHERE id=$1", attempt_id) == (
+        "superseded"
+    )
+    assert maintenance_completed.is_set(), "releasing the lock must let maintenance finish"
+    assert pool.get_idle_size() == pool.get_size(), (
+        "worker shutdown must return every pool connection"
+    )
 
 
 async def test_cancel_running_job_is_delivered_via_heartbeat(api):

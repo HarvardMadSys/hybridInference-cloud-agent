@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+
 # ruff: noqa: F811 -- imported pytest fixtures remain parameters
 import secrets
+from contextlib import suppress
 
 import pytest
 from tests.integration.storage.test_agent_job_store import (  # noqa: F401
@@ -20,6 +23,7 @@ from cloud_agent.storage.repositories import (
     environment_snapshots as snapshots_module,
     environments as environments_module,
 )
+from cloud_agent.workers.environment_maintenance import run_environment_maintenance
 from cloud_agent_shared.environment import EnvironmentScripts
 from cloud_agent_shared.environment_snapshots import owner_hash, snapshot_object_key
 from cloud_agent_shared.sandbox_archive_settings import SANDBOX_ARCHIVE_CAPABILITY
@@ -171,6 +175,98 @@ async def _running(store, pool, binding):
         "attempt_id": claim["attempt_id"],
         "lease_generation": claim["lease_generation"],
     }
+
+
+async def test_environment_maintenance_worker_retires_expired_snapshots(store, pool, monkeypatch):
+    """The periodic worker runs snapshot maintenance, not only environment-run cleanup."""
+    snapshot_id, _binding, _run = await _ready_snapshot(store, pool, monkeypatch)
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_environment_snapshots SET ready_at=NOW()-INTERVAL '8 days' WHERE id=$1",
+            snapshot_id,
+        )
+
+    task = asyncio.create_task(
+        run_environment_maintenance(
+            store.environments,
+            store.environment_snapshots,
+            interval_seconds=0.001,
+            deadline_seconds=5,
+        )
+    )
+    try:
+        async with asyncio.timeout(3):
+            while (
+                await pool.fetchval(
+                    "SELECT state FROM agent_environment_snapshots WHERE id=$1", snapshot_id
+                )
+                != "deleting"
+            ):
+                await asyncio.sleep(0.005)
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+    assert pool.get_idle_size() == pool.get_size()
+
+
+@pytest.mark.parametrize(
+    ("table", "query_pattern"),
+    [
+        ("agent_environment_runs", "%UPDATE agent_environment_runs SET state=%"),
+        ("agent_environment_snapshots", "%UPDATE agent_environment_snapshots s SET state=%"),
+    ],
+)
+async def test_cancelling_a_blocked_maintenance_pass_returns_its_connection(
+    store, pool, table: str, query_pattern: str
+):
+    """Cancellation in either database pass returns the checked-out connection."""
+    lock_connection = await pool.acquire()
+    transaction = lock_connection.transaction()
+    await transaction.start()
+    lock_statement = {
+        "agent_environment_runs": "LOCK TABLE agent_environment_runs IN ACCESS EXCLUSIVE MODE",
+        "agent_environment_snapshots": (
+            "LOCK TABLE agent_environment_snapshots IN ACCESS EXCLUSIVE MODE"
+        ),
+    }[table]
+    await lock_connection.execute(lock_statement)
+    task = asyncio.create_task(
+        run_environment_maintenance(
+            store.environments,
+            store.environment_snapshots,
+            interval_seconds=0.001,
+            deadline_seconds=30,
+        )
+    )
+    try:
+        async with asyncio.timeout(3):
+            while not await pool.fetchval(
+                """
+                SELECT EXISTS (
+                    SELECT 1 FROM pg_stat_activity
+                    WHERE datname = current_database()
+                      AND state = 'active'
+                      AND wait_event_type = 'Lock'
+                      AND query LIKE $1
+                )
+                """,
+                query_pattern,
+            ):
+                await asyncio.sleep(0.005)
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        with suppress(Exception):
+            await transaction.rollback()
+        await pool.release(lock_connection)
+
+    assert pool.get_idle_size() == pool.get_size()
 
 
 async def test_a_prebuild_needs_a_capable_host_and_never_takes_the_owners_test(
