@@ -231,12 +231,17 @@ class PostgresConversationQueries:
         emitted them. A turn that produced no assistant text reports ``None``
         rather than the previous turn's words, which is what makes "no report"
         distinguishable from "reported".
+
+        Read through the conversation's transcript index. No index orders a
+        reply by its job, so a read by job alone scanned every conversation's
+        transcript, once for each automatic round that finished.
         """
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
                 SELECT content, truncated FROM agent_thread_messages
-                WHERE job_id = $1 AND role = 'assistant'
+                WHERE thread_id = (SELECT thread_id FROM agent_jobs WHERE id = $1)
+                  AND job_id = $1 AND role = 'assistant'
                 ORDER BY id DESC LIMIT 1
                 """,
                 job_id,
