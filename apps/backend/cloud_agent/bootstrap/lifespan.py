@@ -45,6 +45,19 @@ logger = get_logger("cloud_agent.app")
 ENV_DATABASE_URL = "AGENT_DATABASE_URL"
 
 
+#: What every database session the service opens sets for itself.
+#:
+#: No JIT compilation. It pays off for statements that process millions of
+#: rows, and the largest reads here, the admin usage selection among them, stop
+#: at tens of thousands. But the planner prices a correlated subquery once per
+#: outer row, so a statement reading a few hundred indexed rows can be
+#: estimated past ``jit_above_cost``, and then compiles itself on every call.
+#: At a thousand hosts the admin host list spent 1.9 s compiling a statement
+#: that ran in 85 ms, and each reaper pass spent 170 ms compiling a check that
+#: ran in under one.
+DATABASE_SESSION_SETTINGS = {"jit": "off"}
+
+
 ENV_PUBLISH_BASE_BRANCH = "AGENT_PUBLISH_BASE_BRANCH"
 
 
@@ -368,7 +381,7 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
 
     # One region after the pool exists: any later failure still releases what
     # startup opened, and a cleanup error must not replace that failure.
-    pool = await asyncpg.create_pool(dsn)
+    pool = await asyncpg.create_pool(dsn, server_settings=DATABASE_SESSION_SETTINGS)
     http = None
     local_measurement_writer = None
     writer_installed = False
