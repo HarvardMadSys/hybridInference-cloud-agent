@@ -75,9 +75,13 @@ FORBIDDEN_HEADER_PREFIXES: tuple[str, ...] = ("x-forwarded-", "x-real-ip", "forw
 #: Link-local covers IPv4 cloud metadata services. The IPv6 ones sit in
 #: unique-local space, which a deployment may open for its connectors, so each
 #: is named: AWS's (``fd00:ec2::254``) and Google Cloud's (``fd20:ce::254``).
+#: Azure's WireServer (``168.63.129.16``) serves a VM its provisioning and
+#: extension data from a public address, so nothing else covers it; the
+#: sandbox rules protect it on every host for the same reason.
 #: The rest is the platform's own plumbing.
 ALWAYS_BLOCKED_NETWORKS: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...] = (
     ipaddress.ip_network("169.254.0.0/16"),
+    ipaddress.ip_network("168.63.129.16/32"),
     ipaddress.ip_network("fd00:ec2::254/128"),
     ipaddress.ip_network("fd20:ce::254/128"),
     ipaddress.ip_network("fe80::/10"),
