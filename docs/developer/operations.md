@@ -660,6 +660,9 @@ sandbox manager prepares the archive. The archive contains `manifest.json` and
 files. Archives larger than 5 GiB are refused before deletion. An immutable S3
 object must match both SHA-256 and byte length, and its receipt must commit to
 the database before the host may remove the exact reviewed stopped container.
+If the host reports that this container is missing or changed before archive
+verification, the request fails for operator review; that response never counts
+as a successful deletion.
 Upload failures retain the container. Once an archive is verified, uncertain
 deletion acknowledgements keep admission blocked and retry the same request.
 The sandbox manager stores its deletion receipts on its own persistent volume so an
@@ -674,14 +677,26 @@ from. An archive deletion that is already pending or verified is left unchanged;
 wait for it to finish or fail before choosing this action.
 
 One deletion worker handles requests one at a time, in the order they became
-due. A failed attempt shows its error and is retried a minute later, behind any
-request already waiting. Requests whose hosts keep timing out therefore delay a
-newer request by one attempt each at most, instead of holding it back forever.
-The admin sandbox details also show a durable attempt history for each request:
-attempt number, host, last confirmed stage, outcome, and a bounded failure code.
-Provider response bodies and credential-bearing diagnostics are not stored.
-When a claim expires, its unfinished attempt is recorded as lease-expired before
-the same fenced deletion request can be claimed again.
+due. Only transient failures retry automatically, with exponential backoff from
+one minute to one hour; retries stop after eight claims or 24 hours from the
+request. Permanent and operator-action failures stop automatic retries
+immediately. A stopped request stays fenced in its pending or archived state;
+the admin view offers **Resume deletion** after the issue is resolved, starting
+a new retry window for the same request. It preserves the original
+archive/discard choice, request identity, and any verified archive receipt.
+The admin sandbox details also show an attempt history for each request: attempt
+number, host, last confirmed stage, outcome, and a bounded failure code. This
+history is diagnostic and best-effort; its writes have a short deadline and do
+not prevent a fenced deletion claim or lifecycle transition. A stalled or
+unavailable ledger can leave an attempt missing or unfinished. Provider response
+bodies and credential-bearing diagnostics are not stored. When a claim expires,
+its unfinished attempt is recorded as lease-expired when the ledger is available
+before the same fenced deletion request can be claimed again.
+
+Each claim pass marks at most 50 exhausted requests, oldest request first, before
+claiming due deletion work. Later worker passes continue through any remaining
+exhausted requests. Exhaustion state, trajectory events, and audit records commit
+together; updating the diagnostic attempt history is best-effort.
 
 **Sandboxes of deleted chats are removed automatically.** When an owner
 permanently deletes the last chat in a sandbox, the deletion worker asks the

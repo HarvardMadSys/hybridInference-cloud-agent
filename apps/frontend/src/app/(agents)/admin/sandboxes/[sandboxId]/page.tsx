@@ -145,7 +145,9 @@ function SandboxTrajectory({ sandboxId }: { sandboxId: string }) {
   );
 
   const deletionState = trajectory?.sandbox.deletion_state ?? 'none';
-  const deletionPending = deletionState === 'pending' || deletionState === 'archived';
+  const deletionRetryExhausted = Boolean(trajectory?.sandbox.deletion_retry_exhausted_at);
+  const deletionPending =
+    (deletionState === 'pending' || deletionState === 'archived') && !deletionRetryExhausted;
   const deletionComplete = deletionState === 'deleted';
 
   useEffect(() => {
@@ -265,11 +267,12 @@ function SandboxTrajectory({ sandboxId }: { sandboxId: string }) {
       ? `Verify the exact retained container shared by ${sessions} is stopped or dead, and idle. ` +
         'The server refuses if that exact container is still running or has activity; this action does not stop a running container. '
       : '';
-    const confirmation =
-      verification +
-      (discard
-        ? `Permanently delete sandbox ${sandbox.id}, shared by ${sessions}, without uploading it to S3? Workspace files and native session history on the host will be destroyed and cannot be restored. Live native resume will no longer be available. Chat history and the lifecycle audit remain. Container deletion cannot be undone.`
-        : `Archive to S3 and permanently delete sandbox ${sandbox.id}, shared by ${sessions}? Workspace files and native session history will be uploaded to S3 and verified before the retained container is deleted. Live native resume will no longer be available. Chat history and the lifecycle audit remain. Container deletion cannot be undone.`);
+    const confirmation = deletionRetryExhausted
+      ? `Resume the existing deletion request for sandbox ${sandbox.id}, shared by ${sessions}? Its original archive/discard choice and any verified archive receipt will be retained.`
+      : verification +
+        (discard
+          ? `Permanently delete sandbox ${sandbox.id}, shared by ${sessions}, without uploading it to S3? Workspace files and native session history on the host will be destroyed and cannot be restored. Live native resume will no longer be available. Chat history and the lifecycle audit remain. Container deletion cannot be undone.`
+          : `Archive to S3 and permanently delete sandbox ${sandbox.id}, shared by ${sessions}? Workspace files and native session history will be uploaded to S3 and verified before the retained container is deleted. Live native resume will no longer be available. Chat history and the lifecycle audit remain. Container deletion cannot be undone.`);
     if (!window.confirm(confirmation)) return;
 
     const controller = new AbortController();
@@ -478,21 +481,23 @@ function SandboxTrajectory({ sandboxId }: { sandboxId: string }) {
                         : 'Requesting deletion…'
                       : deletionComplete
                         ? 'Sandbox deleted'
-                        : deletionState === 'pending'
-                          ? sandbox.deletion_discard
-                            ? 'Deletion in progress'
-                            : 'Archiving to S3…'
-                          : deletionState === 'archived'
-                            ? 'Deleting archived sandbox…'
-                            : deletionState === 'failed'
-                              ? 'Retry archive and delete'
-                              : forceDelete
-                                ? 'Verify stopped and force delete'
-                                : 'Archive to S3 and delete'}
+                        : deletionRetryExhausted
+                          ? 'Resume deletion'
+                          : deletionState === 'pending'
+                            ? sandbox.deletion_discard
+                              ? 'Deletion in progress'
+                              : 'Archiving to S3…'
+                            : deletionState === 'archived'
+                              ? 'Deleting archived sandbox…'
+                              : deletionState === 'failed'
+                                ? 'Retry archive and delete'
+                                : forceDelete
+                                  ? 'Verify stopped and force delete'
+                                  : 'Archive to S3 and delete'}
                   </button>
                   <button
                     type="button"
-                    disabled={deleting || deleteBlocked !== null}
+                    disabled={deleting || deleteBlocked !== null || deletionRetryExhausted}
                     onClick={() => void requestDeletion(true)}
                     className="rounded-lg border border-red-300 px-3 py-1.5 text-sm font-medium text-red-700 transition-colors hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-600 disabled:cursor-not-allowed disabled:opacity-40 dark:border-red-500/40 dark:text-red-300 dark:hover:bg-red-500/10"
                   >
