@@ -1513,6 +1513,38 @@ def _run_frames(frames):
     )
 
 
+def test_tool_output_cut_inside_a_surrogate_pair_does_not_end_the_turn():
+    """A sandbox manager forwards the half pair its CLI's JSON escaped.
+
+    UTF-8 has no surrogates, so the event could be neither measured nor sent:
+    the error escaped the stream, and the turn failed with its context lost.
+    """
+    control = _Control()
+
+    code, *_ = runner_mod._stream_shared_agent_turn(
+        supervisor=_Supervisor(
+            [
+                {
+                    "kind": "event",
+                    "event_type": "tool_result",
+                    "payload": {"tool_use_id": "toolu_1", "content": "build ok \ud83d"},
+                },
+                {"kind": "result", "status": "completed", "exit_code": 0},
+            ]
+        ),
+        job=_JOB,
+        control=control,
+        heart=SimpleNamespace(cancel_requested=False, lease_lost=False),
+        lease_token="lease",
+        timeout_s=30,
+    )
+
+    assert code == 0
+    assert ("tool_result", {"tool_use_id": "toolu_1", "content": "build ok \ufffd"}) in (
+        control.events
+    )
+
+
 def test_a_turn_reports_its_clis_last_error_as_the_reason():
     """A Codex turn refused with 403 printed a config warning last."""
     *_, reported = _run_frames(

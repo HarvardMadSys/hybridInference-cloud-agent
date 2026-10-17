@@ -16,6 +16,13 @@ record, and JSON escaping. An oversized native record stops its member process
 through the same scoped cleanup path. Setup and runner diagnostic tails are
 also bounded by bytes.
 
+Each normalized event is bounded to 256 KiB of JSON where the host creates it,
+and again where the control plane receives it. Text Postgres cannot store is
+replaced first: a NUL, which a tool printing binary or NUL-separated output
+emits, and an unpaired surrogate, which a CLI leaves when it cuts a string
+inside a surrogate pair, each become U+FFFD. The event is kept rather than
+refused, because a runner that cannot record an event ends its turn.
+
 Resource checkpoints are forwarded independently of native CLI events. A
 silent model or tool invocation can therefore persist its latest sampled
 checkpoint before emitting another message. The existing final report remains
