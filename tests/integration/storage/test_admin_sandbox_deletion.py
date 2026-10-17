@@ -13,6 +13,8 @@ from tests.integration.storage.test_agent_job_store import (
 from tests.integration.storage.test_attempt_ledger import db as db, store as store
 from tests.unit.test_ledger_snapshots import START
 
+from cloud_agent.storage.repositories.sandbox import _DELETION_RETRY_EXHAUSTION_BATCH
+
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
 ARCHIVE_URI = "s3://sandbox-archive-bucket/archives/exact-request.tar"
@@ -588,6 +590,71 @@ async def test_attempt_ledger_insert_failure_does_not_rollback_deletion_claim(db
             await conn.execute("DROP FUNCTION IF EXISTS reject_deletion_attempt_ledger_insert()")
 
 
+async def test_attempt_ledger_insert_timeout_does_not_rollback_or_strand_claim(db, store):
+    sandbox_id = "asbx_attempt_telemetry_timeout"
+    await seed(db, store, sandbox_id, state="stopped")
+    assert await request_delete(store, sandbox_id) == "accepted"
+    async with db.acquire() as conn:
+        await conn.execute(
+            """
+            CREATE OR REPLACE FUNCTION stall_deletion_attempt_ledger_insert()
+            RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN
+                IF NEW.sandbox_id = 'asbx_attempt_telemetry_timeout' THEN
+                    PERFORM pg_sleep(10);
+                END IF;
+                RETURN NEW;
+            END;
+            $$
+            """
+        )
+        await conn.execute(
+            """
+            CREATE TRIGGER stall_deletion_attempt_ledger_insert
+            BEFORE INSERT ON agent_sandbox_deletion_attempts
+            FOR EACH ROW EXECUTE FUNCTION stall_deletion_attempt_ledger_insert()
+            """
+        )
+    try:
+        async with asyncio.timeout(2):
+            claim = await store.sandbox.claim_due_admin_sandbox_deletion(ttl_seconds=3600)
+        assert claim is not None
+        assert claim["deletion_attempt_correlation_id"] is None
+        assert claim["deletion_attempt_number"] is None
+        async with db.acquire() as conn:
+            assert (
+                await conn.fetchval(
+                    "SELECT deletion_claim_token FROM agent_sandboxes WHERE id=$1", sandbox_id
+                )
+                == claim["deletion_claim_token"]
+            )
+            assert (
+                await conn.fetchval(
+                    "SELECT deletion_retry_count FROM agent_sandboxes WHERE id=$1", sandbox_id
+                )
+                == 1
+            )
+    finally:
+        async with db.acquire() as conn:
+            await conn.execute(
+                "DROP TRIGGER IF EXISTS stall_deletion_attempt_ledger_insert "
+                "ON agent_sandbox_deletion_attempts"
+            )
+            await conn.execute("DROP FUNCTION IF EXISTS stall_deletion_attempt_ledger_insert()")
+
+    async with db.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_sandboxes SET deletion_claim_expires_at=NOW()-INTERVAL '1 second' "
+            "WHERE id=$1",
+            sandbox_id,
+        )
+    reclaimed = await store.sandbox.claim_due_admin_sandbox_deletion(ttl_seconds=3600)
+    assert reclaimed is not None
+    assert reclaimed["id"] == sandbox_id
+    assert reclaimed["deletion_retry_count"] == 2
+    assert reclaimed["deletion_attempt_number"] == 1
+
+
 async def test_attempt_ledger_finish_failure_does_not_rollback_deletion(db, store):
     """A diagnostic write cannot undo an externally confirmed deletion."""
     sandbox_id = "asbx_attempt_finish_telemetry_failure"
@@ -636,6 +703,56 @@ async def test_attempt_ledger_finish_failure_does_not_rollback_deletion(db, stor
                 "ON agent_sandbox_deletion_attempts"
             )
             await conn.execute("DROP FUNCTION IF EXISTS reject_deletion_attempt_ledger_finish()")
+
+
+async def test_attempt_ledger_finish_timeout_does_not_rollback_deletion(db, store):
+    sandbox_id = "asbx_attempt_finish_telemetry_timeout"
+    await seed(db, store, sandbox_id, state="stopped")
+    assert await request_delete(store, sandbox_id) == "accepted"
+    claim = await store.sandbox.claim_due_admin_sandbox_deletion(ttl_seconds=3600)
+    assert claim is not None
+    assert await checkpoint_archive(store, claim)
+    async with db.acquire() as conn:
+        await conn.execute(
+            """
+            CREATE OR REPLACE FUNCTION stall_deletion_attempt_ledger_finish()
+            RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN
+                IF OLD.sandbox_id = 'asbx_attempt_finish_telemetry_timeout'
+                   AND NEW.outcome <> 'running' THEN
+                    PERFORM pg_sleep(10);
+                END IF;
+                RETURN NEW;
+            END;
+            $$
+            """
+        )
+        await conn.execute(
+            """
+            CREATE TRIGGER stall_deletion_attempt_ledger_finish
+            BEFORE UPDATE ON agent_sandbox_deletion_attempts
+            FOR EACH ROW EXECUTE FUNCTION stall_deletion_attempt_ledger_finish()
+            """
+        )
+    try:
+        async with asyncio.timeout(2):
+            assert await store.sandbox.complete_admin_sandbox_deletion(
+                **worker_fence(claim),
+                attempt_correlation_id=claim["deletion_attempt_correlation_id"],
+            )
+        detail = await store.admin_sandboxes.detail(sandbox_id)
+        assert detail is not None and detail.sandbox.deletion_state == "deleted"
+        assert detail.sandbox.deletion_archive_key == ARCHIVE_URI
+        assert detail.sandbox.deletion_sha256 == DIGEST
+        assert detail.sandbox.deletion_size_bytes == 4096
+        assert detail.deletion_attempts[0].outcome == "running"
+    finally:
+        async with db.acquire() as conn:
+            await conn.execute(
+                "DROP TRIGGER IF EXISTS stall_deletion_attempt_ledger_finish "
+                "ON agent_sandbox_deletion_attempts"
+            )
+            await conn.execute("DROP FUNCTION IF EXISTS stall_deletion_attempt_ledger_finish()")
 
 
 async def test_uncertain_host_abort_retries_cleanup_only_and_keeps_original_key(db, store):
@@ -821,6 +938,148 @@ async def test_expired_final_attempt_marks_budget_exhausted_without_reclaiming(d
     assert detail.sandbox.deletion_retry_exhausted_at is not None
     assert detail.deletion_attempts[0].outcome == "failed"
     assert detail.deletion_attempts[0].failure_code == "retry_budget_exhausted"
+
+
+async def test_retry_exhaustion_is_batched_and_concurrent_passes_do_not_duplicate_audit(db, store):
+    exhausted_ids = [
+        f"asbx_retry_sweep_{index:03d}" for index in range(_DELETION_RETRY_EXHAUSTION_BATCH + 3)
+    ]
+    eligible_id = "asbx_retry_sweep_eligible"
+    for sandbox_id in [*exhausted_ids, eligible_id]:
+        await seed(db, store, sandbox_id, state="stopped")
+        assert await request_delete(store, sandbox_id) == "accepted"
+    async with db.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE agent_sandboxes AS sandbox
+            SET deletion_retry_at=NOW(),
+                deletion_requested_at=NOW()
+                    + ($2 - seeded.ordinal) * INTERVAL '1 second'
+            FROM unnest($1::text[]) WITH ORDINALITY AS seeded(id, ordinal)
+            WHERE sandbox.id=seeded.id
+            """,
+            exhausted_ids,
+            len(exhausted_ids) - 1,
+        )
+        await conn.execute(
+            "UPDATE agent_sandboxes SET deletion_retry_at=NOW(), "
+            "deletion_requested_at=NOW()+INTERVAL '1 day' WHERE id=$1",
+            eligible_id,
+        )
+    first_attempt = await store.sandbox.claim_due_admin_sandbox_deletion(ttl_seconds=3600)
+    assert first_attempt is not None and first_attempt["id"] == exhausted_ids[-1]
+    async with db.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_sandboxes SET deletion_retry_count=8 WHERE id=ANY($1::text[])",
+            exhausted_ids,
+        )
+        await conn.execute(
+            "UPDATE agent_sandboxes SET deletion_claim_expires_at=NOW()-INTERVAL '1 second' "
+            "WHERE id=$1",
+            first_attempt["id"],
+        )
+        await conn.execute(
+            """
+            CREATE OR REPLACE FUNCTION stall_retry_exhaustion_attempt_update()
+            RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN
+                IF OLD.sandbox_id LIKE 'asbx_retry_sweep_%'
+                   AND NEW.failure_code = 'retry_budget_exhausted' THEN
+                    PERFORM pg_sleep(10);
+                END IF;
+                RETURN NEW;
+            END;
+            $$
+            """
+        )
+        await conn.execute(
+            """
+            CREATE TRIGGER stall_retry_exhaustion_attempt_update
+            BEFORE UPDATE ON agent_sandbox_deletion_attempts
+            FOR EACH ROW EXECUTE FUNCTION stall_retry_exhaustion_attempt_update()
+            """
+        )
+
+    try:
+        async with asyncio.timeout(2):
+            claim = await store.sandbox.claim_due_admin_sandbox_deletion(ttl_seconds=3600)
+        assert claim is not None and claim["id"] == eligible_id
+        async with db.acquire() as conn:
+            assert (
+                await conn.fetchval(
+                    "SELECT COUNT(*) FROM agent_sandboxes "
+                    "WHERE id=ANY($1::text[]) AND deletion_retry_exhausted_at IS NOT NULL",
+                    exhausted_ids,
+                )
+                == _DELETION_RETRY_EXHAUSTION_BATCH
+            )
+            selected = await conn.fetch(
+                "SELECT id FROM agent_sandboxes "
+                "WHERE id=ANY($1::text[]) AND deletion_retry_exhausted_at IS NOT NULL",
+                exhausted_ids,
+            )
+            assert {row["id"] for row in selected} == set(
+                exhausted_ids[-_DELETION_RETRY_EXHAUSTION_BATCH:]
+            )
+            assert (
+                await conn.fetchval(
+                    "SELECT COUNT(*) FROM agent_admin_audit_log "
+                    "WHERE action='agent.sandbox.delete.retry_exhausted'"
+                )
+                == _DELETION_RETRY_EXHAUSTION_BATCH
+            )
+            assert (
+                await conn.fetchval(
+                    "SELECT outcome FROM agent_sandbox_deletion_attempts WHERE request_id=$1",
+                    first_attempt["deletion_request_id"],
+                )
+                == "running"
+            )
+    finally:
+        async with db.acquire() as conn:
+            await conn.execute(
+                "DROP TRIGGER IF EXISTS stall_retry_exhaustion_attempt_update "
+                "ON agent_sandbox_deletion_attempts"
+            )
+            await conn.execute("DROP FUNCTION IF EXISTS stall_retry_exhaustion_attempt_update()")
+
+    remaining_ids = set(exhausted_ids[:-_DELETION_RETRY_EXHAUSTION_BATCH])
+    assert len(remaining_ids) == 3
+    locked_id = min(remaining_ids)
+    async with db.acquire() as lock_conn, lock_conn.transaction():
+        assert (
+            await lock_conn.fetchval(
+                "SELECT id FROM agent_sandboxes WHERE id=$1 FOR UPDATE", locked_id
+            )
+            == locked_id
+        )
+        results = await asyncio.gather(
+            store.sandbox.claim_due_admin_sandbox_deletion(ttl_seconds=3600),
+            store.sandbox.claim_due_admin_sandbox_deletion(ttl_seconds=3600),
+        )
+        assert results == [None, None]
+        async with db.acquire() as conn:
+            assert (
+                await conn.fetchval(
+                    "SELECT COUNT(*) FROM agent_sandboxes "
+                    "WHERE id=ANY($1::text[]) AND deletion_retry_exhausted_at IS NOT NULL",
+                    exhausted_ids,
+                )
+                == _DELETION_RETRY_EXHAUSTION_BATCH + 2
+            )
+    assert await store.sandbox.claim_due_admin_sandbox_deletion(ttl_seconds=3600) is None
+    async with db.acquire() as conn:
+        events = await conn.fetch(
+            """
+            SELECT details->>'sandbox_id' AS sandbox_id, COUNT(*) AS count
+            FROM agent_admin_audit_log
+            WHERE action='agent.sandbox.delete.retry_exhausted'
+            GROUP BY details->>'sandbox_id'
+            """
+        )
+    assert {row["sandbox_id"]: int(row["count"]) for row in events} == dict.fromkeys(
+        exhausted_ids, 1
+    )
 
 
 async def test_retry_window_expiry_is_durable_and_keeps_archive_receipt(db, store):

@@ -684,13 +684,19 @@ immediately. A stopped request stays fenced in its pending or archived state;
 the admin view offers **Resume deletion** after the issue is resolved, starting
 a new retry window for the same request. It preserves the original
 archive/discard choice, request identity, and any verified archive receipt.
-The admin sandbox details also show a durable attempt history for each request:
-attempt number, host, last confirmed stage, outcome, and a bounded failure code.
-Claim creation and final outcomes commit with their corresponding database state
-changes; a ledger write failure prevents the deletion claim or final transition.
-Provider response bodies and credential-bearing diagnostics are not stored.
-When a claim expires, its unfinished attempt is recorded as lease-expired before
-the same fenced deletion request can be claimed again.
+The admin sandbox details also show an attempt history for each request: attempt
+number, host, last confirmed stage, outcome, and a bounded failure code. This
+history is diagnostic and best-effort; its writes have a short deadline and do
+not prevent a fenced deletion claim or lifecycle transition. A stalled or
+unavailable ledger can leave an attempt missing or unfinished. Provider response
+bodies and credential-bearing diagnostics are not stored. When a claim expires,
+its unfinished attempt is recorded as lease-expired when the ledger is available
+before the same fenced deletion request can be claimed again.
+
+Each claim pass marks at most 50 exhausted requests, oldest request first, before
+claiming due deletion work. Later worker passes continue through any remaining
+exhausted requests. Exhaustion state, trajectory events, and audit records commit
+together; updating the diagnostic attempt history is best-effort.
 
 **Sandboxes of deleted chats are removed automatically.** When an owner
 permanently deletes the last chat in a sandbox, the deletion worker asks the

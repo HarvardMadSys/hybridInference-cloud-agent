@@ -42,6 +42,7 @@ logger = get_logger(__name__)
 _DELETION_ATTEMPT_TELEMETRY_TIMEOUT_SECONDS = 0.25
 _DELETION_RETRY_MAX_ATTEMPTS = 8
 _DELETION_RETRY_WINDOW_SECONDS = 24 * 60 * 60
+_DELETION_RETRY_EXHAUSTION_BATCH = 50
 _DELETION_RETRY_BASE_SECONDS = 60
 _DELETION_RETRY_MAX_SECONDS = 60 * 60
 
@@ -411,7 +412,9 @@ class PostgresSandboxRepository:
                       )
                       AND (deletion_claim_expires_at IS NULL
                            OR deletion_claim_expires_at <= clock_timestamp())
+                    ORDER BY deletion_requested_at, id
                     FOR UPDATE SKIP LOCKED
+                    LIMIT $3
                 )
                 UPDATE agent_sandboxes g
                 SET deletion_retry_exhausted_at = NOW(), deletion_retry_at = NULL,
@@ -423,20 +426,32 @@ class PostgresSandboxRepository:
                 """,
                 _DELETION_RETRY_MAX_ATTEMPTS,
                 _DELETION_RETRY_WINDOW_SECONDS,
+                _DELETION_RETRY_EXHAUSTION_BATCH,
             )
+            if exhausted:
+                request_ids = [str(group["deletion_request_id"]) for group in exhausted]
+                try:
+                    async with asyncio.timeout(_DELETION_ATTEMPT_TELEMETRY_TIMEOUT_SECONDS):
+                        # Exhaustion is authoritative; its attempt history is diagnostic.
+                        async with conn.transaction():
+                            await conn.execute(
+                                """
+                                UPDATE agent_sandbox_deletion_attempts
+                                SET outcome='failed', failure_code='retry_budget_exhausted',
+                                    retry_class='operator_action', retry_scheduled=FALSE,
+                                    finished_at=NOW(), updated_at=NOW()
+                                WHERE request_id = ANY($1::text[]) AND outcome='running'
+                                """,
+                                request_ids,
+                            )
+                except Exception:
+                    logger.warning(
+                        "Sandbox deletion exhaustion telemetry update failed",
+                        extra={"request_count": len(request_ids)},
+                    )
             for group in exhausted:
                 state = str(group["deletion_state"])
                 request_id = str(group["deletion_request_id"])
-                await conn.execute(
-                    """
-                    UPDATE agent_sandbox_deletion_attempts
-                    SET outcome='failed', failure_code='retry_budget_exhausted',
-                        retry_class='operator_action', retry_scheduled=FALSE,
-                        finished_at=NOW(), updated_at=NOW()
-                    WHERE request_id=$1 AND outcome='running'
-                    """,
-                    request_id,
-                )
                 await self._record_trajectory_event(
                     conn,
                     group=group,
@@ -797,28 +812,29 @@ class PostgresSandboxRepository:
         try:
             # Attempt telemetry is ancillary. A failed ledger write must not
             # undo a deletion receipt or the fenced lifecycle transition.
-            async with conn.transaction():
-                result = await conn.execute(
-                    """
-                    UPDATE agent_sandbox_deletion_attempts
-                    SET outcome=$2, failure_code=$3,
-                        sandbox_manager_status=COALESCE($4, sandbox_manager_status),
-                        retry_class=$5, retry_scheduled=$6, cleanup_outcome=$7,
-                        finished_at=NOW(), updated_at=NOW()
-                    WHERE correlation_id=$1 AND outcome='running'
-                    """,
-                    correlation_id,
-                    outcome,
-                    failure_code,
-                    sandbox_manager_status,
-                    retry_class,
-                    retry_scheduled,
-                    cleanup_outcome,
-                )
-                if not result.endswith(" 1"):
-                    raise RuntimeError(
-                        "sandbox deletion attempt outcome lost its transaction fence"
+            async with asyncio.timeout(_DELETION_ATTEMPT_TELEMETRY_TIMEOUT_SECONDS):
+                async with conn.transaction():
+                    result = await conn.execute(
+                        """
+                        UPDATE agent_sandbox_deletion_attempts
+                        SET outcome=$2, failure_code=$3,
+                            sandbox_manager_status=COALESCE($4, sandbox_manager_status),
+                            retry_class=$5, retry_scheduled=$6, cleanup_outcome=$7,
+                            finished_at=NOW(), updated_at=NOW()
+                        WHERE correlation_id=$1 AND outcome='running'
+                        """,
+                        correlation_id,
+                        outcome,
+                        failure_code,
+                        sandbox_manager_status,
+                        retry_class,
+                        retry_scheduled,
+                        cleanup_outcome,
                     )
+                    if not result.endswith(" 1"):
+                        raise RuntimeError(
+                            "sandbox deletion attempt outcome lost its transaction fence"
+                        )
         except Exception:
             logger.warning(
                 "Sandbox deletion attempt outcome write failed",
