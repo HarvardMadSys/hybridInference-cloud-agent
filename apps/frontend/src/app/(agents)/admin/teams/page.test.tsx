@@ -113,6 +113,31 @@ describe('Admin → Teams', () => {
   it('says when nothing matches', async () => {
     vi.mocked(listAdminTeams).mockResolvedValue({ teams: [], next_before: null });
     render(<AdminTeamsPage />);
+    expect(await screen.findByText('No active teams.')).toBeInTheDocument();
+  });
+
+  it('names the filter that found nothing', async () => {
+    vi.mocked(listAdminTeams).mockResolvedValue({ teams: [], next_before: null });
+    render(<AdminTeamsPage />);
+    await screen.findByText(/^No /);
+
+    // Active teams may well exist; none of them is deleted.
+    fireEvent.click(screen.getByRole('button', { name: 'Deleted' }));
+    expect(await screen.findByText('No deleted teams.')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Search teams' }), {
+      target: { value: 'bob' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+    expect(await screen.findByText('No deleted team matches “bob”.')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'All' }));
+    expect(await screen.findByText('No team matches “bob”.')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Search teams' }), {
+      target: { value: '' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }));
     expect(await screen.findByText('No teams yet.')).toBeInTheDocument();
   });
 

@@ -35,6 +35,13 @@ const STATES: { key: AdminTeamStateFilter; label: string }[] = [
   { key: 'all', label: 'All' },
 ];
 
+/** What an empty list says. Under Active or Deleted, the other state may still hold teams. */
+function nothingFound(state: AdminTeamStateFilter, query: string): string {
+  const kind = state === 'all' ? '' : `${state} `;
+  if (query) return `No ${kind}team matches “${query}”.`;
+  return state === 'all' ? 'No teams yet.' : `No ${kind}teams.`;
+}
+
 export default function AdminTeamsPage() {
   const [draft, setDraft] = useState('');
   const [query, setQuery] = useState('');
@@ -160,11 +167,7 @@ export default function AdminTeamsPage() {
             Loading…
           </p>
         ) : teams.length === 0 ? (
-          !error && (
-            <p className="mt-8 text-sm text-muted">
-              {query ? `No team matches “${query}”.` : 'No teams yet.'}
-            </p>
-          )
+          !error && <p className="mt-8 text-sm text-muted">{nothingFound(state, query)}</p>
         ) : (
           <div className={`${CARD} mt-6 overflow-x-auto`}>
             <table className="w-full min-w-[720px] text-left text-sm">
