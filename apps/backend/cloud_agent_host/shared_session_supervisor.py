@@ -1944,9 +1944,12 @@ class SharedChatSessionSupervisor:
     ) -> ChatSandboxInspection:
         """Recreate a moved group's container from its checkpoint, stopped.
 
-        Any failure leaves nothing behind that could be taken for the group and
-        is reported as :class:`SandboxRestoreFailed`, which hands the turn back
-        rather than marking the chat lost: the checkpoint is unchanged.
+        Any failure is reported as :class:`SandboxRestoreFailed`, which hands
+        the turn back rather than marking the chat lost: the checkpoint is
+        unchanged. What the attempt made goes with it: ``create`` removes a
+        container it made that failed its checks, and the image this restore
+        loaded is removed here. Any host may claim the next try, and nothing
+        would tell this one that the group lives elsewhere.
         """
         hook = self.checkpoint_restore_hook
         if hook is None:
@@ -1974,8 +1977,13 @@ class SharedChatSessionSupervisor:
                     "error_type": type(exc).__name__,
                 },
             )
+            # Nothing is kept for a retry here: an older container goes with
+            # its image even when it is this checkpoint's, and so does the
+            # image this restore loaded. Docker keeps one a container uses.
             with contextlib.suppress(Exception):
-                self._manager.remove_superseded(spec, keep_checkpoint=restore.checkpoint_id)
+                self._manager.remove_superseded(spec)
+            with contextlib.suppress(Exception):
+                self._manager.remove_checkpoint_image(spec, restore.checkpoint_id)
             raise SandboxRestoreFailed(f"sandbox checkpoint could not be restored: {exc}") from exc
 
     def _create_from_snapshot(

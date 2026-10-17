@@ -2162,10 +2162,14 @@ running.
 The loaded image, `freeinference-checkpoint/<sandbox hash>:<checkpoint id>`,
 is that container's alone, and it goes with the container: when the group is
 deleted or discarded, and when a later move back onto the same host replaces
-the older container. A restore retrying the same checkpoint on that host keeps
-it and loads nothing again. A failure to remove it is logged as
-`sandbox_checkpoint_image_remove_failed` and leaves only the image, which
-`docker image rm` clears.
+the older container. A move back that restores the older container's own
+checkpoint uses its image and loads nothing again. A restore that fails before
+the group starts removes the container it created, with any anonymous volume,
+and the image it loaded: any host may claim the next try, so a retry on the
+same host downloads the checkpoint again. A failure to remove the image is
+logged as `sandbox_checkpoint_image_remove_failed` and one to remove the
+container as `sandbox_create_cleanup_failed`; `docker image rm` and
+`docker rm --volumes` clear what they leave.
 
 A restore that fails before the turn is admitted returns the group to `cold`
 and the turn to the queue without spending an attempt. The group is not

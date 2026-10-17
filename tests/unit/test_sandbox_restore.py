@@ -472,7 +472,12 @@ def test_identity_accepts_a_checkpoint_image_only_for_the_checkpoint_it_names():
 
 
 def _stopped_container(
-    spec: ChatSandboxSpec, *, checkpoint_id: str | None, generation: int | None = None
+    spec: ChatSandboxSpec,
+    *,
+    checkpoint_id: str | None,
+    generation: int | None = None,
+    status: str = "exited",
+    mounts: list[dict[str, str]] | None = None,
 ) -> str:
     """``docker container inspect`` of a stopped group container on this host."""
     labels = {**spec.docker_labels(), CHAT_NAMESPACE_LABEL: "default"}
@@ -489,9 +494,9 @@ def _stopped_container(
                 "Name": f"/{spec.container_name}",
                 "Image": "sha256:local-image-id",
                 "Config": {"Image": image, "Labels": labels},
-                "State": {"Status": "exited", "Running": False, "Paused": False},
+                "State": {"Status": status, "Running": False, "Paused": False},
                 "HostConfig": {"Runtime": ""},
-                "Mounts": [],
+                "Mounts": mounts or [],
                 "NetworkSettings": {"Networks": {}},
             }
         ]
@@ -499,10 +504,11 @@ def _stopped_container(
 
 
 class _Daemon:
-    """Answer the commands that remove one group container and its image."""
+    """Answer the commands that create or remove one group container and its image."""
 
-    def __init__(self, container: str) -> None:
-        self.container: str | None = container
+    def __init__(self, container: str | None, *, created: str | None = None) -> None:
+        self.container = container
+        self.created = created
         self.commands: list[list[str]] = []
 
     def run(self, argv: list[str], *, timeout: float) -> SimpleNamespace:
@@ -511,6 +517,10 @@ class _Daemon:
             if self.container is None:
                 return SimpleNamespace(returncode=1, stdout="", stderr="Error: No such container")
             return SimpleNamespace(returncode=0, stdout=self.container, stderr="")
+        if argv[1] == "create":
+            assert self.created is not None
+            self.container = self.created
+            return SimpleNamespace(returncode=0, stdout="container-restored\n", stderr="")
         if argv[1] == "rm" or argv[1:3] == ["container", "rm"]:
             self.container = None
             return SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -554,24 +564,61 @@ def test_a_superseded_restored_container_takes_its_checkpoint_image_with_it(monk
     assert daemon.removed_images() == []
 
 
+def test_a_container_that_fails_its_checks_once_created_is_removed_with_its_volumes(
+    monkeypatch,
+):
+    """Docker made the container, then it failed its checks: a volume its image declares.
+
+    Nothing has run in it and nothing will adopt it, so neither it nor that
+    volume may stay on a host the group need never come back to. A container
+    that already held the name is not this call's to remove.
+    """
+    spec = _moved_spec()
+    manager = ChatSandboxManager(ContainerBackend(image="img"))
+    monkeypatch.setattr(ChatSandboxManager, "require_host_rules", lambda _self: None)
+    volume = [{"Type": "volume", "Name": "anonymous", "Destination": "/data"}]
+    built = _stopped_container(spec, checkpoint_id=_CHECKPOINT, status="created", mounts=volume)
+    daemon = _Daemon(None, created=built)
+    monkeypatch.setattr(manager, "_run", daemon.run)
+
+    with pytest.raises(SandboxError, match="forbidden volume mount"):
+        manager.create(spec, image=_REFERENCE, checkpoint_id=_CHECKPOINT)
+    assert ["docker", "rm", "--force", "--volumes", "container-restored"] in daemon.commands
+    assert daemon.container is None
+
+    daemon = _Daemon(built)
+    monkeypatch.setattr(manager, "_run", daemon.run)
+
+    with pytest.raises(SandboxError, match="forbidden volume mount"):
+        manager.create(spec, image=_REFERENCE, checkpoint_id=_CHECKPOINT)
+    assert not any("rm" in argv for argv in daemon.commands)
+
+
 # -- the supervisor's restore path ----------------------------------------------
 
 
 class _RestoringManager(_Manager):
-    def __init__(self) -> None:
+    def __init__(self, *, create_fails: bool = False) -> None:
         super().__init__()
         self.created: list[dict[str, Any]] = []
         self.superseded: list[str] = []
         self.kept: list[str | None] = []
+        self.removed_images: list[str] = []
+        self.create_fails = create_fails
 
     def create(self, spec, *, image=None, checkpoint_id=None, facts=None, observer=None):
         self.created.append({"image": image, "checkpoint_id": checkpoint_id})
+        if self.create_fails:
+            raise SandboxError("retained chat sandbox has forbidden volume mount at /data")
         return super().create(spec, facts=facts, observer=observer)
 
     def remove_superseded(self, spec, *, keep_checkpoint=None):
         self.superseded.append(spec.container_name)
         self.kept.append(keep_checkpoint)
         return False
+
+    def remove_checkpoint_image(self, spec, checkpoint_id):
+        self.removed_images.append(checkpoint_id)
 
 
 def test_a_moved_group_is_created_only_from_its_checkpoint():
@@ -620,6 +667,51 @@ def test_a_failed_restore_says_so_without_losing_the_chat():
         SharedChatSessionSupervisor(_RestoringManager()).register_manifest(
             _moved_spec(), _members(), restore=_restore()
         )
+
+
+@pytest.mark.parametrize("failing", [None, "load", "create"])
+def test_a_failed_restore_leaves_no_checkpoint_image_behind(failing):
+    """The group can restore on any host next; this one would keep the image for good."""
+    manager = _RestoringManager(create_fails=failing == "create")
+
+    def load(_sandbox_id: str, _checkpoint: CheckpointRestore) -> str:
+        if failing == "load":
+            raise SandboxCheckpointError("sandbox checkpoint could not be loaded")
+        return _REFERENCE
+
+    supervisor = SharedChatSessionSupervisor(manager, checkpoint_restore_hook=load)
+
+    if failing is None:
+        supervisor.register_manifest(_moved_spec(), _members(), restore=_restore())
+    else:
+        with pytest.raises(SandboxRestoreFailed):
+            supervisor.register_manifest(_moved_spec(), _members(), restore=_restore())
+    # A restore that worked keeps the image its container runs. One that
+    # failed keeps nothing, not even an older container's image of it.
+    assert manager.removed_images == ([] if failing is None else [_CHECKPOINT])
+    assert manager.kept == ([_CHECKPOINT] if failing is None else [_CHECKPOINT, None])
+
+
+def test_a_restore_refused_once_created_leaves_neither_container_nor_image(monkeypatch):
+    """The container goes first, so Docker lets the image it ran go after it."""
+    spec = _moved_spec()
+    manager = ChatSandboxManager(ContainerBackend(image="img"))
+    monkeypatch.setattr(ChatSandboxManager, "require_host_rules", lambda _self: None)
+    volume = [{"Type": "volume", "Name": "anonymous", "Destination": "/data"}]
+    built = _stopped_container(spec, checkpoint_id=_CHECKPOINT, status="created", mounts=volume)
+    daemon = _Daemon(None, created=built)
+    monkeypatch.setattr(manager, "_run", daemon.run)
+    supervisor = SharedChatSessionSupervisor(
+        manager, checkpoint_restore_hook=lambda _sandbox_id, _checkpoint: _REFERENCE
+    )
+
+    with pytest.raises(SandboxRestoreFailed, match="forbidden volume mount"):
+        supervisor.register_manifest(spec, _members(), restore=_restore())
+
+    assert [argv for argv in daemon.commands if "rm" in argv] == [
+        ["docker", "rm", "--force", "--volumes", "container-restored"],
+        ["docker", "image", "rm", _REFERENCE],
+    ]
 
 
 def test_a_checkpoint_names_the_start_that_actually_ran():
