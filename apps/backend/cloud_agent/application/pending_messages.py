@@ -17,6 +17,7 @@ the transaction then finds.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
 from fastapi import HTTPException
@@ -273,13 +274,25 @@ async def settle_queue_when_possible(
     )
 
 
+@dataclass
+class QueueSweep:
+    """Where the next periodic sweep starts: past the last thread one reached.
+
+    A full page moves it on and a short one, which reached the end, starts the
+    next sweep over. However many threads before it cannot move, a waiting
+    queue is reached within one pass over them all.
+    """
+
+    after: str | None = None
+
+
 async def settle_waiting_queues(
     store: QueueStorage,
     *,
     gateway: Any,
     github_app: GitHubAppSource | None,
     limit: int = 50,
-    scan_interval_seconds: float = 30.0,
+    sweep: QueueSweep | None = None,
 ) -> int:
     """Settle every queue a settlement could move or pause; the periodic sweep.
 
@@ -289,15 +302,18 @@ async def settle_waiting_queues(
     between a turn's end and its settlement, and a message that waited while
     the GitHub App could not be loaded. The App is asked for once per pass.
     Each thread is settled on its own, so one bad thread cannot stop the rest.
-    The storage page rotates on the sweep cadence, so persistently unavailable
-    threads cannot hold later queues behind the same first page. Returns how
-    many were settled.
+    A ``sweep`` carried from one pass to the next pages through the threads,
+    so a page of queues that cannot move does not hide the ones after it.
+    Returns how many were settled.
     """
     app_credentials = _app_credentials(github_app)
     settled = 0
-    for thread_id in await store.pending_messages.threads_to_settle(
-        limit=limit, scan_interval_seconds=scan_interval_seconds
-    ):
+    page = await store.pending_messages.threads_to_settle(
+        limit=limit, after=sweep.after if sweep is not None else None
+    )
+    if sweep is not None:
+        sweep.after = page[-1] if len(page) >= limit else None
+    for thread_id in page:
         try:
             await _settle_with(
                 store, thread_id=thread_id, gateway=gateway, app_credentials=app_credentials
@@ -315,6 +331,7 @@ async def settle_waiting_queues(
 
 __all__ = [
     "QueueStorage",
+    "QueueSweep",
     "prepare_message",
     "prepared_head",
     "settle_queue",

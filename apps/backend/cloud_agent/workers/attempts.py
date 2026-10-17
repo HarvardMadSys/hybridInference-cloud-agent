@@ -14,7 +14,7 @@ import asyncio
 import contextlib
 from typing import TYPE_CHECKING, Any, Protocol
 
-from cloud_agent.application.pending_messages import settle_waiting_queues
+from cloud_agent.application.pending_messages import QueueSweep, settle_waiting_queues
 from cloud_agent.application.send_now import recover_handoffs
 from cloud_agent.gateway import GatewayError
 from cloud_agent.goals.controller import run_goal_wakeups
@@ -689,6 +689,13 @@ async def _run_attempt_reaper(
             without one, a message naming either waits for a settlement that
             can check it.
     """
+    # Consecutive renewal refusals, per grant. Held by the loop rather than by
+    # the module, so two reapers (a test's and a running app's) cannot count
+    # each other's failures toward a give-up — and so a restart forgets, which
+    # is the right way round: a fresh process should ask the gateway again
+    # before abandoning anyone's attempt.
+    renewal_failures: dict[str, int] = {}
+    queue_sweep = QueueSweep()
     while True:
         await asyncio.sleep(interval_seconds)
         # Hosts first. A machine that stopped heartbeating should be out of the
@@ -857,10 +864,7 @@ async def _run_attempt_reaper(
         # try so a queue cannot stop attempts being recovered.
         try:
             await settle_waiting_queues(
-                store,
-                gateway=gateway,
-                github_app=github_app,
-                scan_interval_seconds=interval_seconds,
+                store, gateway=gateway, github_app=github_app, sweep=queue_sweep
             )
         except Exception:
             logger.warning("Pending message queue sweep failed", exc_info=True)

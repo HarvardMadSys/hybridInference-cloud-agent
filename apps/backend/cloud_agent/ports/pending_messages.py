@@ -197,13 +197,12 @@ class PendingMessageRepository(Protocol):
         """
         ...
 
-    async def threads_to_settle(
-        self, *, limit: int = 50, scan_interval_seconds: float = 30.0
-    ) -> list[str]:
+    async def threads_to_settle(self, *, limit: int = 50, after: str | None = None) -> list[str]:
         """Threads whose queue a settlement could move or pause right now.
 
         For the periodic sweep: a turn that ended without the finish route —
         the reaper's verdict, a control plane restarted mid-request — still
-        gets its queue acted on.
+        gets its queue acted on. In thread order, from past ``after`` when
+        given, so a sweep can page through them all.
         """
         ...
