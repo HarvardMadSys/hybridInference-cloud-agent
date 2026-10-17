@@ -282,11 +282,14 @@ def test_a_checkpoint_object_that_is_not_the_receipts_is_refused(case: str, mess
 class _Docker:
     """Answer the Docker commands a restore issues."""
 
-    def __init__(self, *, present: set[str], load_ok: bool = True) -> None:
+    def __init__(self, *, present: set[str], load_ok: bool = True, spool: Any = None) -> None:
         self.present = set(present)
         self.load_ok = load_ok
         self.commands: list[list[str]] = []
         self.loaded: list[bytes] = []
+        self.spool = spool
+        #: What the spool directory names while Docker reads the archive.
+        self.spooled_at_load: list[list[str]] = []
 
     def run(self, argv: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
         self.commands.append(argv)
@@ -300,8 +303,11 @@ class _Docker:
             self.present.add(argv[-1])
             return subprocess.CompletedProcess(argv, 0, "", "")
         if verb == ["image", "load"]:
-            with open(argv[-1], "rb") as handle:
-                self.loaded.append(handle.read())
+            if self.spool is not None:
+                self.spooled_at_load.append(sorted(path.name for path in self.spool.iterdir()))
+            # The checked archive arrives on standard input, never by a name.
+            assert "--input" not in argv
+            self.loaded.append(_kwargs["stdin"].read())
             if self.load_ok:
                 self.present.add(_REFERENCE)
             return subprocess.CompletedProcess(argv, 0 if self.load_ok else 1, "", "")
@@ -363,6 +369,27 @@ def test_a_restore_pulls_the_base_by_digest_and_loads_only_the_checked_archive(t
     assert len(docker.loaded) == 1
     assert json.loads(_entries(docker.loaded[0])["manifest.json"])[0]["RepoTags"] == [_REFERENCE]
     assert not list((tmp_path / "spool").iterdir())
+
+
+def test_a_restore_spools_nothing_a_killed_sandbox_manager_could_leave_behind(tmp_path):
+    spool = tmp_path / "spool"
+    docker = _Docker(present={_BASE_IMAGE}, spool=spool)
+    archive = _checkpoint_archive()
+    downloading: list[list[str]] = []
+
+    def download(*, output: Any, **_kwargs: Any) -> None:
+        output.write(archive)
+        downloading.append(sorted(path.name for path in spool.iterdir()))
+
+    _capture(tmp_path, docker).restore(
+        "asbx_shared", _restore(), download=download, max_bytes=10**6, deadline=1e3
+    )
+
+    # A reboot, a forced stop or the OOM killer runs no cleanup, and the spool
+    # sits in the durable state directory: a named file there stays for good.
+    assert downloading == [[]]
+    assert docker.spooled_at_load == [[]]
+    assert len(docker.loaded) == 1
 
 
 def test_a_restore_reuses_an_image_already_loaded_here(tmp_path):

@@ -2151,6 +2151,14 @@ old host still holds is fenced out. The new host's Sandbox Manager:
    network, labelled with the checkpoint id, and resumes each native session as
    after any restart.
 
+The download and the checked archive are unnamed files in
+`AGENT_SANDBOX_ARCHIVE_STATE_DIR/checkpoint-spool`, and Docker reads the
+archive on standard input, so a restore or snapshot load cut short by a
+reboot, a forced stop or the OOM killer leaves nothing in that durable
+directory. Sandbox Managers that predate this named them `restore-*`; any such
+file is an interrupted restore's and can be deleted while no restore is
+running.
+
 The loaded image, `freeinference-checkpoint/<sandbox hash>:<checkpoint id>`,
 is that container's alone, and it goes with the container: when the group is
 deleted or discarded, and when a later move back onto the same host replaces
