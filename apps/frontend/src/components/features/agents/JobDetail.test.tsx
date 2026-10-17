@@ -66,6 +66,7 @@ import {
   sendPendingMessageNow,
   submitThreadMessage,
   type PendingMessageApi,
+  type ThreadMessageResultApi,
 } from '@/lib/api/pendingMessages';
 
 import { APIError } from '@/lib/utils/errors';
@@ -6421,6 +6422,37 @@ describe('sending a follow-up', () => {
     await waitFor(() => expect(submitThreadMessage).toHaveBeenCalled());
     await waitFor(() => expect((box as HTMLTextAreaElement).value).toBe(''));
     expect(box).not.toBeDisabled();
+  });
+
+  it('clears the composer of a chat opened again before its send answered', async () => {
+    // Leaving a chat unmounts its composer, but the send it made still lands.
+    // The composer opened on coming back read the draft while that send was
+    // out; still showing it afterwards offers the same message a second time,
+    // under a new key, since the first one's was retired with its answer.
+    localStorage.clear();
+    let answer!: (result: ThreadMessageResultApi) => void;
+    vi.mocked(submitThreadMessage)
+      .mockClear()
+      .mockReturnValueOnce(
+        new Promise((resolve) => {
+          answer = resolve;
+        }),
+      );
+    const job = makeJob({ state: 'done' });
+    const left = render(<JobDetail job={job} userId="alice" />);
+    fireEvent.change(screen.getByLabelText('Add a follow-up'), {
+      target: { value: 'and now the docs' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /^(Send|Queue)$/ }));
+    await waitFor(() => expect(submitThreadMessage).toHaveBeenCalledTimes(1));
+    left.unmount();
+
+    render(<JobDetail job={job} userId="alice" />);
+    const box = screen.getByLabelText('Add a follow-up');
+    expect(box).toHaveValue('and now the docs');
+    await act(async () => answer({ pending: null, job: { id: 'ajob_next' } } as never));
+
+    expect(box).toHaveValue('');
   });
 });
 

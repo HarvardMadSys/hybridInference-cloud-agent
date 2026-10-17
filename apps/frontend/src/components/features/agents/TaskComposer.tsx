@@ -116,7 +116,13 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
   const router = useRouter();
   const t = useT();
   const userProfile = useUserHomeProfile(userId);
-  const draftStore = useComposerDraft({ userId, threadId: 'new-task' });
+  // A create made before New task was opened again can land while it shows
+  // that task's text, which Run would then create a second time.
+  const draftStore = useComposerDraft({
+    userId,
+    threadId: 'new-task',
+    onSentElsewhere: () => setTask(''),
+  });
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;

@@ -103,6 +103,33 @@ describe('composer drafts', () => {
     expect(third.result.current.value).toBe('Repeat this message');
   });
 
+  it('clears a composer opened again while its send was out, once the send lands', () => {
+    const left = renderHook(() => useComposerDraft({ userId: 'alice', threadId: 'chat' }));
+    act(() => left.result.current.setValue('Send this once'));
+    const sent = left.result.current.capture();
+    const { acknowledge } = left.result.current;
+    left.unmount();
+    const reopened = renderHook(() => useComposerDraft({ userId: 'alice', threadId: 'chat' }));
+    const other = renderHook(() => useComposerDraft({ userId: 'alice', threadId: 'other' }));
+    act(() => other.result.current.setValue('Send this once'));
+    expect(reopened.result.current.value).toBe('Send this once');
+    act(() => acknowledge(sent));
+    expect(reopened.result.current.value).toBe('');
+    expect(other.result.current.value).toBe('Send this once');
+  });
+
+  it('keeps what a composer opened again typed while the send it showed was out', () => {
+    const left = renderHook(() => useComposerDraft({ userId: 'alice', threadId: 'chat' }));
+    act(() => left.result.current.setValue('Send this once'));
+    const sent = left.result.current.capture();
+    const { acknowledge } = left.result.current;
+    left.unmount();
+    const reopened = renderHook(() => useComposerDraft({ userId: 'alice', threadId: 'chat' }));
+    act(() => reopened.result.current.setValue('Typed after coming back'));
+    act(() => acknowledge(sent));
+    expect(reopened.result.current.value).toBe('Typed after coming back');
+  });
+
   it('works in memory when browser storage is blocked', () => {
     vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
       throw new Error('Storage denied');
