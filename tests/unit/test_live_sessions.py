@@ -957,6 +957,44 @@ def test_codex_records_the_server_an_mcp_call_went_to(tmp_path):
     ]
 
 
+def test_codex_reports_what_an_mcp_call_returned_as_readable_text(tmp_path):
+    """An MCP call's item carries its result as an object, and its error as one.
+
+    A command's output is text already; the result's blocks and the error's
+    message are what the call returned, not a Python rendering of them.
+    """
+    process, turn = _codex_turn(tmp_path)
+    returned = {
+        "content": [{"type": "text", "text": "Issue #7: the build fails"}],
+        "structuredContent": None,
+    }
+
+    def call(call_id: str, status: str, **outcome: object) -> dict:
+        item = {
+            "type": "mcpToolCall",
+            "id": call_id,
+            "server": "session",
+            "tool": "github__get_issue",
+            "status": status,
+            "arguments": {"number": 7},
+            **outcome,
+        }
+        return {"method": "item/completed", "params": {"item": item}}
+
+    process.feed = _turn_lines(
+        call("mcp-1", "completed", result=returned, error=None),
+        call("mcp-2", "failed", result=None, error={"message": "issue 8 does not exist"}),
+        {"method": "turn/completed", "params": {"turn": {"id": "turn-a", "status": "completed"}}},
+    )
+    results = [event.payload for event in turn.iter_events() if event.event_type == "tool_result"]
+
+    assert [result["tool_use_id"] for result in results] == ["mcp-1", "mcp-2"]
+    assert json.loads(results[0]["content"]) == returned
+    assert results[0]["is_error"] is False
+    assert results[1]["content"] == "issue 8 does not exist"
+    assert results[1]["is_error"] is True
+
+
 def test_a_codex_json_rpc_error_reads_as_its_message(tmp_path):
     process, turn = _codex_turn(tmp_path)
     error = {"code": -32600, "message": "turn is not active"}

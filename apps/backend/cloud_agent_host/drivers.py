@@ -292,6 +292,24 @@ def _codex_error_text(message: str) -> str:
     return message.split(", url: ", 1)[0][:2000]
 
 
+def _codex_tool_output(item: dict[str, Any]) -> str:
+    """What a command or an MCP call returned, as the text the owner reads.
+
+    A command's ``aggregatedOutput`` is text already. An MCP call's ``result``
+    is an object of the tool's content blocks and structured content, and its
+    ``error`` an object naming a message (0.145.0); ``str`` of either is a
+    Python rendering. So the result is stored as JSON, as the other runtimes
+    store theirs, and the error as its message.
+    """
+    output = item.get("aggregatedOutput") or item.get("result")
+    if not output:
+        error = item.get("error")
+        output = (error.get("message") or error) if isinstance(error, dict) else error
+    if output is None or isinstance(output, str):
+        return output or ""
+    return json.dumps(output, ensure_ascii=False, default=str)
+
+
 def _http_agent_error_text(error: Any) -> str:
     """Read an OpenCode/Kilo session error the way their own CLI prints it.
 
@@ -1688,12 +1706,7 @@ class CodexAppServerSession(_JsonResidentSession[CodexRuntime]):
                     "tool_use_id": item.get("id"),
                     "is_error": (isinstance(exit_code, int) and exit_code != 0)
                     or bool(item.get("error")),
-                    "content": str(
-                        item.get("aggregatedOutput")
-                        or item.get("result")
-                        or item.get("error")
-                        or ""
-                    )[:4000],
+                    "content": _codex_tool_output(item)[:4000],
                     "exit_code": exit_code,
                     **owner,
                 },
