@@ -221,6 +221,26 @@ async def _expire_attempt(pool, store: Storage, attempt_id: int) -> None:
         )
 
 
+async def _waiting_on(pool, pid: int) -> int:
+    """The backend that waits on a lock ``pid`` holds, once one does.
+
+    test_lock_order has the same probe; it imports this module, so this one
+    cannot import it. Postgres queues a row's lockers: the first one holds the
+    row's tuple lock while it waits for the owner, and the next waits behind
+    that first one rather than behind the owner.
+    """
+    async with asyncio.timeout(10), pool.acquire() as observer:
+        while True:
+            waiter = await observer.fetchval(
+                "SELECT pid FROM pg_locks "
+                "WHERE NOT granted AND $1 = ANY(pg_blocking_pids(pid)) LIMIT 1",
+                pid,
+            )
+            if waiter is not None:
+                return waiter
+            await asyncio.sleep(0.01)
+
+
 def _shared_claim_attestation() -> dict[str, object]:
     """Return the exact process-local fence required for shared work."""
     return {
@@ -1819,13 +1839,17 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
     # operation lock. A retry that takes thread -> operation would deadlock
     # against finalization's operation -> thread once this lock is released.
     async with pool.acquire() as conn, conn.transaction():
+        holder = await conn.fetchval("SELECT pg_backend_pid()")
         await conn.fetchrow(
             "SELECT id FROM agent_session_forks WHERE id = $1 FOR UPDATE", operation["id"]
         )
         finalization = asyncio.create_task(
             store.session_fork.finalize_session_fork(operation_id=operation["id"])
         )
-        await asyncio.sleep(0.03)
+        # Start the retry only once finalization waits on this row. Finalization
+        # then holds the row's tuple lock, so the retry queues behind it: the
+        # second wait looks for what finalization blocks, not this holder.
+        finalizer = await _waiting_on(pool, holder)
         retry = asyncio.create_task(
             store.session_fork.prepare_session_fork(
                 source_job_id=job["id"],
@@ -1833,7 +1857,7 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
                 idempotency_key="native-fork-one",
             )
         )
-        await asyncio.sleep(0.03)
+        await _waiting_on(pool, finalizer)
         assert not finalization.done() and not retry.done()
     child, replayed = await asyncio.wait_for(asyncio.gather(finalization, retry), timeout=3)
     assert replayed is not None and replayed["state"] == "ready"
