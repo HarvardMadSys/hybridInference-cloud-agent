@@ -7,6 +7,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getAgentJobFiles, type AgentJobFileApi, type AgentJobFilesApi } from '@/lib/api/agents';
 import { LocaleProvider } from '@/components/providers/LocaleProvider';
 import { LOCALE_STORAGE_KEY } from '@/lib/i18n/locales';
+import { APIError } from '@/lib/utils/errors';
+import { toDiffFileDetails, toDiffFiles } from './adapt';
 import type { AgentJob } from './types';
 import { WorkspaceFiles } from './WorkspaceFiles';
 
@@ -323,6 +325,48 @@ describe('workspace navigation and copying', () => {
     await screen.findByRole('button', { name: 'Copy contents' });
     expect(getAgentJobFiles).toHaveBeenCalledExactlyOnceWith(JOB.id, 'missing.txt');
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('says a changed file the run deleted was deleted, rather than failing to read it', async () => {
+    vi.mocked(getAgentJobFiles).mockImplementation(async (_jobId, path = '') => {
+      if (!path) return { path: '', kind: 'directory', entries: [] };
+      // What the live workspace answers for a path that is no longer there.
+      throw new APIError('NOT_FOUND', 'workspace path does not exist', 404);
+    });
+    const patch = [
+      'diff --git a/kept.ts b/kept.ts',
+      'index 1111111..2222222 100644',
+      '--- a/kept.ts',
+      '+++ b/kept.ts',
+      '@@ -1 +1 @@',
+      '-old',
+      '+new',
+      'diff --git a/old.ts b/old.ts',
+      'deleted file mode 100644',
+      'index 3333333..0000000',
+      '--- a/old.ts',
+      '+++ /dev/null',
+      '@@ -1 +0,0 @@',
+      '-gone',
+      '',
+    ].join('\n');
+    const job = {
+      ...JOB,
+      diffFiles: toDiffFiles(patch),
+      diffFileDetails: toDiffFileDetails(patch),
+    };
+    render(<WorkspaceFiles job={job} active />);
+    fireEvent.click(screen.getByRole('tab', { name: /^Changes/ }));
+
+    fireEvent.click(await screen.findByRole('button', { name: 'old.ts' }));
+    expect(await screen.findByText('This file was deleted by the run.')).toBeVisible();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Retry loading file' })).not.toBeInTheDocument();
+
+    // A file the diff does not delete still reports that it could not be read.
+    fireEvent.click(screen.getByRole('button', { name: 'kept.ts' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('workspace path does not exist');
+    expect(screen.getByRole('button', { name: 'Retry loading file' })).toBeVisible();
   });
 
   it('retries a failed folder beside its error without refreshing the rest of the tree', async () => {

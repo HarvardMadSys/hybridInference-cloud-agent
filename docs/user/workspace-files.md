@@ -2,7 +2,8 @@
 
 Open **Files** in the conversation's workspace pane to browse the retained
 sandbox's current repository. The folder tree loads directories as you expand
-them; **Changes** lists files changed by the run.
+them; **Changes** lists files changed by the run. Opening one the run deleted
+says **This file was deleted by the run** rather than reporting a failed read.
 
 ## Open a known path
 
