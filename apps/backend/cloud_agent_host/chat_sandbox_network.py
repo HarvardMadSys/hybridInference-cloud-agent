@@ -1565,11 +1565,16 @@ class ChatSandboxNetwork:
         network = self.network_for(spec)
         bridge = config.bridge_name(network)
         guard = self.backend.network_guard()
-        # A bridge holds one exception per configured relay port, and one gone
-        # cuts the group off from that relay as surely as all of them: the
-        # ports alone say so, without asking Docker on a healthy pass.
-        held_ports = {port for _address, port in held.relays.get(bridge, frozenset())}
-        relays_lost = not {relay.port for relay in config.relays} <= held_ports
+        # One relay exception gone cuts the group off from that relay as
+        # surely as all of them. What the guard last wrote for the bridge says
+        # which, whatever ports the relays share; the configured ports stand
+        # in when it has written none since it started. Neither asks Docker
+        # on a healthy pass.
+        held_relays = held.relays.get(bridge, frozenset())
+        written_relays = guard.written_relays(bridge)
+        relays_lost = not {relay.port for relay in config.relays} <= {
+            port for _address, port in held_relays
+        } or (written_relays is not None and not written_relays <= held_relays)
         written = guard.written_ssh_targets(bridge)
         ssh_lost = written is not None and written[1] != held.ssh_targets.get(bridge, frozenset())
         if not relays_lost and not ssh_lost:

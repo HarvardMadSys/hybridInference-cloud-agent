@@ -57,7 +57,7 @@ from cloud_agent_shared.egress import SandboxNetwork, network_from_env
 _NAMESPACE = "this-stack"
 
 
-def _config(namespace: str = _NAMESPACE) -> SandboxNetwork:
+def _config(namespace: str = _NAMESPACE, *, mcp_port: int = 8000) -> SandboxNetwork:
     return network_from_env(
         {
             "AGENT_SANDBOX_NAMESPACE": namespace,
@@ -65,7 +65,7 @@ def _config(namespace: str = _NAMESPACE) -> SandboxNetwork:
             "AGENT_EGRESS_DNS_SERVER": "1.1.1.1",
             "AGENT_RELAY_NETWORK": "agent-relays",
             "AGENT_GATEWAY_URL": "http://agent-gateway:8080",
-            "AGENT_SANDBOX_MCP_URL": "http://agent-mcp:8000",
+            "AGENT_SANDBOX_MCP_URL": f"http://agent-mcp:{mcp_port}",
         }
     )
 
@@ -402,8 +402,8 @@ class FakeDocker:
         return subprocess.CompletedProcess([], 1, "", stderr)
 
 
-def _world(monkeypatch, *, runtime: str | None = None):
-    config = _config()
+def _world(monkeypatch, *, runtime: str | None = None, config: SandboxNetwork | None = None):
+    config = config or _config()
     backend = ContainerBackend(
         image="img", runtime=runtime, sandbox_network=config, sandbox_namespace=_NAMESPACE
     )
@@ -1271,11 +1271,11 @@ def test_guest_network_snapshot_still_checks_files_and_skips_unchanged_writes(
 # ── a table the sweep reinstalls ──────────────────────────────────────
 
 
-def _guarded_world(monkeypatch):
+def _guarded_world(monkeypatch, config: SandboxNetwork | None = None):
     """The lifecycle against the Docker model, and its rules through the real guard."""
     from tests.unit.test_network_guard import FakeNft
 
-    manager, docker, _ = _world(monkeypatch)
+    manager, docker, _ = _world(monkeypatch, config=config)
     nft = FakeNft()
     guard = HostNetworkGuard(manager._network(), helper_image="sha256:" + "a" * 64, run=nft)
     manager.backend._network_guard = guard
@@ -1310,17 +1310,22 @@ def test_a_flushed_table_gives_each_running_group_its_exceptions_back(monkeypatc
     assert guard.ssh_target_endpoints(bridge) == {("93.184.216.34", 22)}
 
 
-def test_a_relay_exception_lost_on_its_own_comes_back(monkeypatch):
-    """One endpoint gone cuts the group off from that relay as surely as both."""
-    manager, docker, guard, nft = _guarded_world(monkeypatch)
+@pytest.mark.parametrize("mcp_port", [8000, 8080], ids=["own-ports", "one-port"])
+def test_a_relay_exception_lost_on_its_own_comes_back(monkeypatch, mcp_port):
+    """One endpoint gone cuts the group off from that relay as surely as both.
+
+    Both relays may listen on one port, so the port alone cannot say which.
+    """
+    manager, docker, guard, nft = _guarded_world(monkeypatch, _config(mcp_port=mcp_port))
     spec = _spec()
     bridge = manager._network().bridge_name(_running_on_its_bridge(manager, docker, spec))
     relays = guard.relay_endpoints(bridge)
-    _address, port = max(relays, key=lambda relay: relay[1])
+    assert len(relays) == 2
+    address, _port = max(relays)
     for table in nft.tables.values():
         if "relays" in table["sets"]:
             table["sets"]["relays"] = [
-                element for element in table["sets"]["relays"] if element["concat"][2] != port
+                element for element in table["sets"]["relays"] if element["concat"][1] != address
             ]
     assert len(guard.relay_endpoints(bridge)) == 1
 

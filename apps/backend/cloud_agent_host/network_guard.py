@@ -315,6 +315,10 @@ class HostNetworkGuard:
         #: a shortcut but what a running group gets back when a reinstalled
         #: table lost it, so a failed check does not forget it.
         self._ssh_written: dict[str, tuple[str, frozenset[tuple[str, int]]]] = {}
+        #: The relay exceptions this guard last wrote for each bridge. Kept
+        #: for the same reason: it is what says that a read-back lost one,
+        #: whatever ports the relays share.
+        self._relays_written: dict[str, frozenset[tuple[str, int]]] = {}
 
     # ── public surface ──────────────────────────────────────────────────
 
@@ -412,6 +416,7 @@ class HostNetworkGuard:
         with self._lock:
             held = self._held.pop(bridge, None)
             now = time.monotonic()
+            self._relays_written.pop(bridge, None)
             if (
                 network_id
                 and held is not None
@@ -424,6 +429,7 @@ class HostNetworkGuard:
                 and now - held.confirmed_at < HELD_RELAYS_TRUST_S
             ):
                 self._held[bridge] = held
+                self._relays_written[bridge] = wanted
                 return
             written_at = time.monotonic()
             self._batch(
@@ -435,6 +441,7 @@ class HostNetworkGuard:
                     "wanted": sorted([address, port] for address, port in wanted),
                 },
             )
+            self._relays_written[bridge] = wanted
             if network_id:
                 self._held[bridge] = _HeldRelays(network_id, wanted, written_at)
 
@@ -463,6 +470,11 @@ class HostNetworkGuard:
                     network_id,
                     frozenset((address, port) for address, port in update["wanted"]),
                 )
+
+    def written_relays(self, bridge: str) -> frozenset[tuple[str, int]] | None:
+        """The relay exceptions this guard last wrote for one bridge, if any."""
+        with self._lock:
+            return self._relays_written.get(bridge)
 
     def written_ssh_targets(self, bridge: str) -> tuple[str, frozenset[tuple[str, int]]] | None:
         """The SSH exceptions this guard last wrote for one bridge, and for which network."""
@@ -493,6 +505,7 @@ class HostNetworkGuard:
         with self._lock:
             self._held.pop(bridge, None)
             self._ssh_written.pop(bridge, None)
+            self._relays_written.pop(bridge, None)
             self._batch(
                 [],
                 relays={
