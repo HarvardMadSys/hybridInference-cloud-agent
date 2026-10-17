@@ -118,6 +118,26 @@ describe('composer drafts', () => {
     expect(other.result.current.value).toBe('Send this once');
   });
 
+  it('clears a composer opened again when its send lands before the composer listens', () => {
+    const left = renderHook(() => useComposerDraft({ userId: 'alice', threadId: 'chat' }));
+    act(() => left.result.current.setValue('Send this once'));
+    const sent = left.result.current.capture();
+    const { acknowledge } = left.result.current;
+    left.unmount();
+    let landed = false;
+    const reopened = renderHook(() => {
+      const draft = useComposerDraft({ userId: 'alice', threadId: 'chat' });
+      // The send answers after this render read the draft, and before the
+      // composer's effects have run.
+      if (!landed) {
+        landed = true;
+        acknowledge(sent);
+      }
+      return draft;
+    });
+    expect(reopened.result.current.value).toBe('');
+  });
+
   it('keeps what a composer opened again typed while the send it showed was out', () => {
     const left = renderHook(() => useComposerDraft({ userId: 'alice', threadId: 'chat' }));
     act(() => left.result.current.setValue('Send this once'));

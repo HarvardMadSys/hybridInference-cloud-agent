@@ -124,6 +124,22 @@ export function useComposerDraft({
     };
     mounted.current = true;
     mountedComposers.add(clearIfSent);
+    // A send this composer shows may have answered after the render that read
+    // the draft and before it listened here: storage then holds a newer one.
+    const current = entries.current.get(activeScope.current);
+    if (current?.storageKey) {
+      const saved = readDraft(current.storageKey);
+      if (saved.persisted && saved.revision > current.snapshot.revision) {
+        const sentElsewhere = saved.value === '' && current.snapshot.value !== '';
+        current.snapshot = {
+          scope: current.snapshot.scope,
+          value: saved.value,
+          revision: saved.revision,
+        };
+        rerender();
+        if (sentElsewhere) onSentElsewhereRef.current?.();
+      }
+    }
     return () => {
       mounted.current = false;
       mountedComposers.delete(clearIfSent);
