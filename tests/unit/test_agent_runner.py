@@ -1815,6 +1815,33 @@ def test_event_upload_gives_up_inside_its_budget(monkeypatch):
     assert clock.now <= control_plane_client._EVENT_RETRY_BUDGET_S < runner_mod.DEFAULT_LEASE_TTL_S
 
 
+def test_a_turn_can_end_with_a_reason_its_sandbox_printed():
+    """The reason quotes the CLI: a NUL, or half the surrogate pair it cut.
+
+    httpx writes JSON as UTF-8, which has no surrogates, so that finish never
+    left the host, and the control plane stores no NUL.
+    """
+    sent: list[dict[str, Any]] = []
+
+    def endpoint(request):
+        sent.append(json.loads(request.content))
+        return httpx.Response(200, json={"ok": True, "state": "failed"})
+
+    control = _event_control(endpoint)
+    try:
+        control.finish("failed", "agent reported an error: cat\x00/proc/self/cmdline \ud83d")
+    finally:
+        control.close()
+
+    assert sent == [
+        {
+            "state": "failed",
+            "detail": "agent reported an error: cat\ufffd/proc/self/cmdline \ufffd",
+            "base_sha": None,
+        }
+    ]
+
+
 def test_run_forever_refuses_to_enroll_a_host_that_cannot_attest(monkeypatch):
     backend = ProcessBackend(acknowledged_unsafe=True)
     monkeypatch.setattr(backend, "preflight", lambda **_kwargs: None)

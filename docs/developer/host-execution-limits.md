@@ -21,7 +21,11 @@ and again where the control plane receives it. Text Postgres cannot store is
 replaced first: a NUL, which a tool printing binary or NUL-separated output
 emits, and an unpaired surrogate, which a CLI leaves when it cuts a string
 inside a surrogate pair, each become U+FFFD. The event is kept rather than
-refused, because a runner that cannot record an event ends its turn.
+refused, because a runner that cannot record an event ends its turn. The same
+replacement applies to everything the runner posts to the control plane, and
+again to the reason it gives when it releases an activation or ends a turn,
+which quotes what the CLI printed: a refused reason would leave the turn on its
+lease.
 
 Resource checkpoints are forwarded independently of native CLI events. A
 silent model or tool invocation can therefore persist its latest sampled
