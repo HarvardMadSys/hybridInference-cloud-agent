@@ -973,3 +973,95 @@ def test_an_ssh_target_must_be_an_ipv4_address_and_port(target, message) -> None
         guard.sync_ssh_targets(bridge, {target})
     with pytest.raises(NetworkGuardError, match="not one of this deployment"):
         guard.sync_ssh_targets("eth0", set())
+
+
+# ── what a reinstalled table lost ───────────────────────────────────────
+
+
+def test_every_read_back_reports_what_each_bridge_holds() -> None:
+    """A flushed table is reinstalled empty, and the sweep is told so."""
+    nft, guard, bridge = _synced_guard()
+    guard.sync_ssh_targets(bridge, {("93.184.216.34", 22)}, network_id=_NET)
+
+    held = guard.recheck()
+
+    assert held is not None
+    assert held.relays == {bridge: frozenset({("10.240.0.3", 8080)})}
+    assert held.ssh_targets == {bridge: frozenset({("93.184.216.34", 22)})}
+
+    nft.tables.clear()  # `flush ruleset`, from a firewall reload
+    reinstalled = guard.recheck()
+
+    assert reinstalled is not None
+    assert reinstalled.relays == {} and reinstalled.ssh_targets == {}
+
+
+def test_a_relay_held_in_only_one_family_is_reported_lost() -> None:
+    nft, guard, bridge = _synced_guard()
+    nft.table("bridge", guard.network.table)["sets"]["relays"].clear()
+
+    held = guard.recheck()
+
+    assert held is not None and bridge not in held.relays
+
+
+def test_an_unreadable_element_reports_nothing_rather_than_failing_the_check() -> None:
+    nft, guard, _bridge = _synced_guard()
+    nft.table("inet", guard.network.table)["sets"]["relays"].append({"prefix": "garbage"})
+
+    assert guard.recheck() is None
+
+
+def test_ssh_targets_come_back_only_to_the_network_they_were_written_for() -> None:
+    nft, guard, bridge = _synced_guard()
+    guard.sync_ssh_targets(bridge, {("93.184.216.34", 22)}, network_id=_NET)
+    nft.tables.clear()
+    guard.recheck()
+
+    guard.restore_ssh_targets(bridge, network_id="net-2222")  # a successor bridge
+
+    assert guard.ssh_target_endpoints(bridge) == set()
+    assert guard.written_ssh_targets(bridge) is None, "a stale memory is forgotten"
+
+    guard.sync_ssh_targets(bridge, {("93.184.216.34", 22)}, network_id=_NET)
+    nft.tables.clear()
+    guard.recheck()
+    guard.restore_ssh_targets(bridge, network_id=_NET)
+
+    assert guard.ssh_target_endpoints(bridge) == {("93.184.216.34", 22)}
+
+
+def test_a_restore_writes_the_latest_selection_not_an_earlier_one() -> None:
+    """An owner's change synced after the loss is what comes back, never what it replaced."""
+    nft, guard, bridge = _synced_guard()
+    guard.sync_ssh_targets(bridge, {("93.184.216.34", 22)}, network_id=_NET)
+    nft.tables.clear()
+    guard.recheck()
+    guard.sync_ssh_targets(bridge, set(), network_id=_NET)  # the owner turned it off
+
+    guard.restore_ssh_targets(bridge, network_id=_NET)
+
+    assert guard.ssh_target_endpoints(bridge) == set()
+
+
+@pytest.mark.parametrize("ending", ["released", "failed_write", "no_network"])
+def test_nothing_is_restored_once_the_written_targets_are_no_longer_known(ending) -> None:
+    nft, guard, bridge = _synced_guard()
+    if ending == "released":
+        guard.sync_ssh_targets(bridge, {("93.184.216.34", 22)}, network_id=_NET)
+        guard.release_bridge(bridge)
+    elif ending == "failed_write":
+        guard.sync_ssh_targets(bridge, {("93.184.216.34", 22)}, network_id=_NET)
+        del nft.table("inet", guard.network.table)["sets"]["ssh_targets"]
+        with pytest.raises(NetworkGuardError):
+            guard.sync_ssh_targets(bridge, {("93.184.216.35", 22)}, network_id=_NET)
+        nft.table("inet", guard.network.table)["sets"]["ssh_targets"] = []
+    else:
+        guard.sync_ssh_targets(bridge, {("93.184.216.34", 22)})
+
+    guard.restore_ssh_targets(bridge, network_id=_NET)
+
+    assert guard.written_ssh_targets(bridge) is None
+    assert guard.ssh_target_endpoints(bridge) == (
+        {("93.184.216.34", 22)} if ending == "no_network" else set()
+    )

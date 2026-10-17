@@ -41,6 +41,7 @@ if TYPE_CHECKING:
     import subprocess
     from collections.abc import Iterator, Sequence
 
+    from cloud_agent_host.network_guard import HeldExceptions
     from cloud_agent_host.sandbox import ContainerBackend
     from cloud_agent_shared.egress import SandboxNetwork
     from cloud_agent_shared.operation_profiling import StageObserver
@@ -867,9 +868,15 @@ class ChatSandboxNetwork:
 
         The caller proves the group network first (:meth:`require_network`
         through the manager), so the bridge exists and the rules are verified.
+        The guard is told which Docker network they are for, so a table the
+        sweep reinstalls gives them back to that network and no other.
         """
+        network = self.network_for(spec)
+        inspected = self._inspect_network(network)
         self.backend.network_guard().sync_ssh_targets(
-            self._network().bridge_name(self.network_for(spec)), endpoints
+            self._network().bridge_name(network),
+            endpoints,
+            network_id=str((inspected or {}).get("Id") or "") or None,
         )
 
     def require_host_rules(self) -> None:
@@ -1519,7 +1526,7 @@ class ChatSandboxNetwork:
             stopped,
         )
 
-    def verify_host_rules(self) -> None:
+    def verify_host_rules(self, running: Sequence[ChatSandboxSpec] = ()) -> None:
         """Prove the host still enforces this deployment's rules, repairing them if not.
 
         Reads the tables from the kernel on every call, so the sweep that
@@ -1527,5 +1534,53 @@ class ChatSandboxNetwork:
         the guard's last verification ages out; a difference reinstalls and
         reads back. A raise means the host cannot show the boundary every
         running group was started behind.
+
+        A reinstalled table holds no group's exceptions, and a group that kept
+        running would stay cut off from its relays and SSH servers until its
+        next turn. So each group in ``running`` whose bridge the read-back
+        shows without them gets them back. One that cannot is logged, not
+        raised: the rules stand, and its next activation syncs it again.
         """
-        self.backend.network_guard().recheck()
+        held = self.backend.network_guard().recheck()
+        if held is None:
+            return
+        for spec in running:
+            try:
+                self._restore_exceptions(spec, held)
+            except SandboxError as exc:
+                logger.warning(
+                    "chat_group_exceptions_not_restored",
+                    extra={"sandbox_id": spec.sandbox_id, "detail": str(exc)[:300]},
+                )
+
+    def _restore_exceptions(self, spec: ChatSandboxSpec, held: HeldExceptions) -> None:
+        """Give a running group's live bridge back the exceptions the kernel lost.
+
+        Relays come from what Docker reports now, as an activation's would.
+        SSH targets come from the guard, only for the network they were
+        written for. Nothing changes on Docker, and a group that is not on its
+        bridge any more gets nothing.
+        """
+        config = self._network()
+        network = self.network_for(spec)
+        bridge = config.bridge_name(network)
+        guard = self.backend.network_guard()
+        relays_lost = bool(config.relays) and not held.relays.get(bridge)
+        written = guard.written_ssh_targets(bridge)
+        ssh_lost = written is not None and written[1] != held.ssh_targets.get(bridge, frozenset())
+        if not relays_lost and not ssh_lost:
+            return
+        raw = self._inspect_network(network)
+        sandbox = self._containers.inspect(spec.container_name)
+        if raw is None or sandbox is None or not sandbox.running:
+            return
+        self._verify_group_network(raw, spec)
+        self._containers._verify_identity(sandbox, spec)
+        network_id = str(raw.get("Id") or "")
+        if not network_id or not self._endpoint_is_current(sandbox, network, raw):
+            return
+        if ssh_lost:
+            guard.restore_ssh_targets(bridge, network_id=network_id)
+        if relays_lost:
+            addresses = self._relay_addresses_from(self._relay_owners(), raw)
+            self._sync_relay_exceptions(network, addresses, network_id=network_id)

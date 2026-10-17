@@ -3568,7 +3568,12 @@ rules, not the host's.
 - **Watched while groups run.** While any group of this deployment is
   running, the sandbox manager reads the tables back on every five-second sweep, logs
   `network_guard_rules_changed` when they differ from what it installed, and
-  reinstalls whatever is missing. If that fails twice in a row, it logs
+  reinstalls whatever is missing. A reinstalled table holds no group's
+  exceptions, so the same pass gives each running group whose bridge lost
+  them its relays back, from what Docker reports, and its SSH targets as the
+  sandbox manager last wrote them for that same Docker network; a group that
+  cannot get them back logs `chat_group_exceptions_not_restored` and is synced
+  again by its next activation. If the check fails twice in a row, it logs
   `shared_chat_network_unguarded` and stops every running group — workspaces
   and native sessions kept — rather than let one go on without the boundary it
   was started behind. Waking a group reinstalls and verifies the rules first,
@@ -3626,8 +3631,8 @@ own and no one else's — with the helper above:
 `bridge`. Never delete or flush a table a running deployment uses: Docker
 routes and masquerades every group bridge, and the table is what limits it.
 Anything that flushes the host's whole ruleset removes these tables too; they
-are reinstalled at the next check, so do not run such a reload on a host with
-active groups.
+are reinstalled at the next check, with each running group's relay and SSH
+exceptions, but do not run such a reload on a host with active groups.
 
 #### Choosing the resolver
 

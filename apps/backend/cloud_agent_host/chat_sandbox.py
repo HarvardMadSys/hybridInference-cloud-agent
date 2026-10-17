@@ -838,9 +838,9 @@ class ChatSandboxManager:
             defer_network_release=defer_network_release,
         )
 
-    def verify_host_rules(self) -> None:
+    def verify_host_rules(self, running: Sequence[ChatSandboxSpec] = ()) -> None:
         """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle.verify_host_rules()
+        return self._network_lifecycle.verify_host_rules(running)
 
     def require_docker_data_root(self, expected: str) -> str:
         """Verify retained state is owned by the intended Docker data root.

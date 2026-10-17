@@ -5398,25 +5398,31 @@ class SharedChatSessionSupervisor:
         closed — stop them all, which releases their bridges and
         keeps their workspaces. Waking one reinstalls and verifies the rules
         before it runs again, and refuses while they cannot be.
+
+        The running groups are named to the check: a table it (or another
+        process) reinstalled holds none of their relay or SSH exceptions, and
+        it gives back what each still-running group lost.
         """
         with self._lock:
-            running = [
-                (next(iter(group.members)), group.spec.generation)
+            groups = [
+                group
                 for group in self._groups.values()
                 if group.inspection.running and not group.stopping and group.members
             ]
+            running = [(next(iter(group.members)), group.spec.generation) for group in groups]
+            specs = [group.spec for group in groups]
         if not running:
             self._renew_idle_host_rules()
             return []
         try:
-            self._manager.verify_host_rules()
+            self._manager.verify_host_rules(specs)
             return []
         except SandboxError:
             pass
         try:
             # A failed check is never cached, so this is a full second attempt:
             # one Docker hiccup is not reason enough to stop every group.
-            self._manager.verify_host_rules()
+            self._manager.verify_host_rules(specs)
             return []
         except SandboxError as exc:
             logger.error(

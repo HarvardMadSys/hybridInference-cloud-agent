@@ -84,6 +84,8 @@ class _Manager:
         # The host-rule check: how many of the next checks fail, and how many ran.
         self.host_rule_failures = 0
         self.host_rule_checks = 0
+        # The running groups each check was given, whose exceptions it restores.
+        self.host_rule_running: list[list[ChatSandboxSpec]] = []
         # Renewals of the host-rule verification the sweep makes while idle.
         self.host_rule_renewals = 0
         self.host_rule_renewal_failures = 0
@@ -242,8 +244,9 @@ class _Manager:
             self.host_rule_renewal_failures -= 1
             raise SandboxError("nft failed: Error: Could not process rule")
 
-    def verify_host_rules(self) -> None:
+    def verify_host_rules(self, running: Any = ()) -> None:
         self.host_rule_checks += 1
+        self.host_rule_running.append(list(running))
         if self.host_rule_failures:
             self.host_rule_failures -= 1
             raise SandboxError("inet cloud_agent_x is missing chain 'from_group'")
@@ -2279,6 +2282,21 @@ def test_guest_network_fail_stop_archives_once_and_does_not_duplicate_on_listing
     assert archived[0][1].running is False
     supervisor.list()
     assert len(archived) == 1
+
+
+def test_the_sweep_names_its_running_groups_to_the_host_rule_check():
+    """A table the check reinstalls comes back without any group's relay or SSH exceptions.
+
+    A firewall reload flushes the host's ruleset; the check puts the table
+    back, but a group still running behind it stays cut off from its gateway
+    and MCP relays, and from its SSH servers, until something syncs its bridge
+    again. Only the sweep knows which groups are running, so it names them.
+    """
+    manager, supervisor = _running_group()
+
+    assert supervisor.guard_network() == []
+
+    assert manager.host_rule_running == [[_spec()]]
 
 
 def test_one_failed_check_is_retried_before_anything_is_stopped():
