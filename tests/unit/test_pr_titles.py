@@ -387,6 +387,46 @@ async def test_a_fragment_that_fails_is_logged_as_that_call_failed(caplog):
     )
 
 
+async def test_a_failed_fragment_stops_and_joins_its_siblings(monkeypatch):
+    """A failing fragment must not leave sibling requests in flight.
+
+    The first failure aborts the title, but the requests it raced are still
+    talking to the gateway. They must be stopped *and awaited* before the title
+    path returns, so nothing outlives the publication grant's revocation.
+    """
+    grants = _grants()
+    job = {**_JOB, "session_messages": _session_of(3)}
+
+    created: list[asyncio.Task] = []
+    real_create_task = asyncio.create_task
+
+    def record(coro, **kwargs):
+        task = real_create_task(coro, **kwargs)
+        created.append(task)
+        return task
+
+    monkeypatch.setattr(asyncio, "create_task", record)
+
+    started = 0
+
+    async def handle(request):
+        nonlocal started
+        started += 1
+        if started == 1:
+            raise httpx.ConnectError("fragment gateway failure", request=request)
+        await asyncio.Event().wait()
+        return httpx.Response(200, json={"choices": [{"message": {"content": "summary"}}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        assert await generate_pr_title(job, ["x"], grants=grants, client=client) is None
+        # Nothing may still be in flight once the title path has returned.
+        unfinished = [task for task in created if not task.done()]
+
+    assert len(created) == 3
+    assert unfinished == []
+    grants.revoke.assert_awaited_once_with("publication-grant")
+
+
 async def test_timeout_cannot_block_publication(monkeypatch, caplog):
     monkeypatch.setattr(pr_titles, "_TOTAL_TIMEOUT_S", 0.01)
     grants = _grants()

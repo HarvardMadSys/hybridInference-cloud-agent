@@ -191,6 +191,12 @@ async def generate_pr_title(
                 finally:
                     for task in pending:
                         task.cancel()
+                    # Cancellation is only a request: join the tasks so no
+                    # sibling request is still in flight when the title path
+                    # returns and the publication grant is revoked. Their
+                    # results are already unusable, so only the shutdown
+                    # matters here.
+                    await asyncio.gather(*pending, return_exceptions=True)
                 combined = json.dumps({"session_fragment_summaries": summaries}, ensure_ascii=False)
                 if len(combined) >= len(source):
                     fallback("summary_not_reduced")
