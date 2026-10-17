@@ -13,7 +13,7 @@ from typing import Any
 from cloud_agent.execution_profiles import KATA_RUNTIME, ExecutionProfile
 from cloud_agent.sandbox_archive_credentials import load_stored_archive_policy
 from cloud_agent.storage._sql.compute_admission import host_compute_admission
-from cloud_agent.storage._sql.hosts import COVERED_GROUP_SQL
+from cloud_agent.storage._sql.hosts import COVERED_GROUP_SQL, UNDELETED_GROUP_SQL
 from cloud_agent.storage._sql.rows import load_json
 from cloud_agent_shared.sandbox_archive_settings import (
     SANDBOX_ARCHIVE_CAPABILITY,
@@ -120,7 +120,7 @@ async def move_out_blocker(conn: Any, leaving: list[str], *, need_target: bool) 
 
 
 #: Groups still held only by a Host: not yet handed over, lost or deleted.
-UNMOVED_GROUP_SQL = """g.deletion_state = 'none' AND g.state NOT IN ('cold', 'restoring', 'lost')"""
+UNMOVED_GROUP_SQL = f"""{UNDELETED_GROUP_SQL} AND g.state NOT IN ('cold', 'restoring', 'lost')"""
 
 #: An unmoved group a leaving Host can still move: its checkpoint covers it
 #: now, or it has not stopped yet and its stop will record a checkpoint of an

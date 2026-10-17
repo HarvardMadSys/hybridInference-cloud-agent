@@ -20,6 +20,7 @@ from cloud_agent.owner_usage import measured_interval, utc_day_shares
 from cloud_agent.storage._sql.compute_admission import lock_compute_entry
 from cloud_agent.storage._sql.hosts import (
     MOVING_OUT_HOST_SQL,
+    UNDELETED_GROUP_SQL,
     moving_out_hosts,
     release_covered_sandboxes,
 )
@@ -1061,7 +1062,7 @@ class PostgresSandboxRepository:
                 f"""
                 SELECT g.id AS sandbox_id, g.host, g.generation, g.container_id
                 FROM agent_sandboxes g
-                WHERE g.state = 'running' AND g.deletion_state = 'none'
+                WHERE g.state = 'running' AND {UNDELETED_GROUP_SQL}
                   AND g.container_id IS NOT NULL AND g.stop_requested_at IS NULL
                   AND {MOVING_OUT_HOST_SQL.format(host="g.host")}
                 ORDER BY g.last_activity_at NULLS FIRST, g.id
@@ -1090,7 +1091,8 @@ class PostgresSandboxRepository:
             )
             group = await conn.fetchrow(
                 f"""
-                SELECT g.*, {MOVING_OUT_HOST_SQL.format(host="g.host")} AS moving_out
+                SELECT g.*, {MOVING_OUT_HOST_SQL.format(host="g.host")} AS moving_out,
+                       {UNDELETED_GROUP_SQL} AS undeleted
                 FROM agent_sandboxes g WHERE g.id = $1 FOR UPDATE
                 """,
                 sandbox_id,
@@ -1099,7 +1101,7 @@ class PostgresSandboxRepository:
                 return "not_found"
             if group["generation"] != generation or group["container_id"] != container_id:
                 return "stale"
-            if not group["moving_out"] or group["deletion_state"] != "none":
+            if not group["moving_out"] or not group["undeleted"]:
                 return "stale"
             if group["state"] == "stopping" and group["stop_requested_at"] is not None:
                 return "accepted"
@@ -1140,8 +1142,8 @@ class PostgresSandboxRepository:
             # A claim of a group's next turn holds the group row; waiting for
             # it here lets the hand-over see that turn and leave the group.
             await conn.fetch(
-                "SELECT id FROM agent_sandboxes WHERE host = ANY($1::text[]) "
-                "AND state = 'stopped' AND deletion_state = 'none' ORDER BY id FOR UPDATE",
+                "SELECT g.id FROM agent_sandboxes g WHERE g.host = ANY($1::text[]) "
+                f"AND g.state = 'stopped' AND {UNDELETED_GROUP_SQL} ORDER BY g.id FOR UPDATE",
                 hosts,
             )
             return await release_covered_sandboxes(conn, hosts, live_host=True)

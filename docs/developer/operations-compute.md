@@ -531,7 +531,10 @@ left for the next pass, so running turns are never interrupted. The stop
 stores the group's final checkpoint, and once that checkpoint covers the group
 it becomes `cold` at once, without waiting for the Host to be removed. Each
 chat's next turn is claimed by another Host and restored there; to the user,
-that message waits a little longer than usual.
+that message waits a little longer than usual. A sandbox whose deletion failed
+before its archive still serves its chats, so it is counted, moved and, with a
+reclaimed machine, lost like any other; one whose deletion is pending or
+verified is left to that deletion.
 
 In an autoscaled CloudLab pool a moving-out member stops counting toward
 `min_hosts`, so its replacement is acquired while it still serves. It still

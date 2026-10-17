@@ -125,6 +125,13 @@ LIVE_ATTEMPT_HOST = """EXISTS (
 HOST_RETAINED_GROUP = "g.deletion_state <> 'deleted' AND g.state <> 'cold'"
 
 
+#: Group ``g`` has no deletion in progress or done, as the claim reads it. A
+#: deletion that failed before its archive (``failed``) kept the container,
+#: and the group serves its chats as one never asked to be deleted: it is
+#: counted, moved out, handed over and lost with its machine like any other.
+UNDELETED_GROUP_SQL = "g.deletion_state NOT IN ('pending', 'archived', 'deleted')"
+
+
 def host_claim_ceiling(slots_total: int | None, slots_desired: int | None) -> int | None:
     """The concurrency a host may be asked for: the lower of its two numbers.
 
@@ -234,8 +241,8 @@ async def lock_revocation_rows(conn: Any, hosts: list[str]) -> None:
         hosts,
     )
     await conn.execute(
-        "SELECT id FROM agent_sandboxes WHERE host = ANY($1::text[]) "
-        "AND deletion_state = 'none' ORDER BY id FOR UPDATE",
+        "SELECT g.id FROM agent_sandboxes g WHERE g.host = ANY($1::text[]) "
+        f"AND {UNDELETED_GROUP_SQL} ORDER BY g.id FOR UPDATE",
         hosts,
     )
 
@@ -270,7 +277,7 @@ async def lock_hosts_for_revocation(conn: Any, hosts: list[str]) -> None:
 #: leave behind, uses this one condition.
 COVERED_GROUP_SQL = f"""(
     g.state = 'stopped'
-    AND g.deletion_state = 'none'
+    AND {UNDELETED_GROUP_SQL}
     AND g.stop_requested_at IS NULL
     AND EXISTS (
         SELECT 1 FROM agent_sandbox_checkpoints c

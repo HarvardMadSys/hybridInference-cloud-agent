@@ -720,3 +720,91 @@ async def test_a_lease_move_out_needs_a_host_that_runs_its_untrusted_groups(pool
 
     await _kata(store, "runner-c")
     assert await repo.set_move_out_hold(allocation_id="leaving", due=True) is True
+
+
+async def _deletion_failed(store: Storage, sandbox_id: str = "asbx_restore") -> None:
+    """An administrator's deletion fails before its archive; the group serves its chats on."""
+    detail = await store.admin_sandboxes.detail(sandbox_id)
+    assert detail is not None
+    assert (
+        await store.sandbox.request_admin_delete(
+            sandbox_id=sandbox_id,
+            generation=detail.sandbox.generation,
+            container_id=detail.sandbox.container_id,
+            last_activity_at=detail.sandbox.last_activity_at,
+            actor_id="admin:operator",
+            admin_ip="127.0.0.1",
+        )
+        == "accepted"
+    )
+    claim = await store.sandbox.claim_due_admin_sandbox_deletion(ttl_seconds=60)
+    assert claim is not None
+    assert await store.sandbox.fail_admin_sandbox_deletion(
+        sandbox_id=sandbox_id,
+        request_id=claim["deletion_request_id"],
+        claim_token=claim["deletion_claim_token"],
+        generation=claim["generation"],
+        container_id=claim["container_id"],
+        error="The archive was refused before deletion.",
+    )
+    detail = await store.admin_sandboxes.detail(sandbox_id)
+    assert detail is not None and detail.sandbox.deletion_state == "failed"
+
+
+async def test_a_removed_hosts_covered_group_whose_deletion_failed_is_handed_over(
+    pool, store: Storage
+):
+    """The claim still serves such a group, so its checkpoint must still move it."""
+    job, _ = await _covered(pool, store)
+    await _deletion_failed(store)
+    follow_up = await store.conversation_commands.create_follow_up(
+        parent_job_id=job["id"], user_id="user-1", prompt="continue"
+    )
+    assert follow_up is not None
+
+    assert await store.host_pool.remove_host(host="runner-a") == "ok"
+
+    assert (await _state(pool))["state"] == "cold"
+    await _host(store, "runner-c", _RESTORE_HOST)
+    claim = await _claim(store, "runner-c", _RESTORE_HOST)
+    assert claim is not None and claim["id"] == follow_up["id"]
+
+
+async def test_a_removal_moves_out_a_running_group_whose_deletion_failed(pool, store: Storage):
+    _, group = await _settled_stopped_group(pool, store)
+    await _deletion_failed(store)
+    await _running(pool, group["sandbox_id"])
+    await _captures(pool)
+    await _host(store, "runner-c", _RESTORE_HOST)
+
+    # Revoked at once, the host would keep the group and its chat would wait for good.
+    assert await store.host_pool.remove_host(host="runner-a") == "moving_out"
+    [row] = await store.sandbox.sandboxes_moving_out()
+    assert row["sandbox_id"] == group["sandbox_id"]
+    assert (
+        await store.sandbox.request_move_out_stop(
+            sandbox_id=row["sandbox_id"],
+            generation=row["generation"],
+            container_id=row["container_id"],
+            actor_id="host-move-out",
+        )
+        == "accepted"
+    )
+
+
+async def test_a_reclaimed_machine_loses_a_group_whose_deletion_failed(pool, store: Storage):
+    job, group = await _settled_stopped_group(pool, store)
+    await _deletion_failed(store)
+    follow_up = await store.conversation_commands.create_follow_up(
+        parent_job_id=job["id"], user_id="user-1", prompt="continue"
+    )
+    assert follow_up is not None
+    await _on_machine(pool, "ended", observed_state="terminated")
+    await _silent(pool)
+
+    assert await store.compute_resources.lose_reclaimed_groups(
+        allocation_id="ended", quiet_seconds=600
+    ) == [group["sandbox_id"]]
+    async with pool.acquire() as conn:
+        queued = await conn.fetchval("SELECT state FROM agent_jobs WHERE id = $1", follow_up["id"])
+    assert queued == "failed"

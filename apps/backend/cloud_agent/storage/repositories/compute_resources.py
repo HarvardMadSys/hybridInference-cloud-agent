@@ -62,8 +62,7 @@ _JSON_ARRAY_FIELDS = {"slot_status"}
 #: and with no turn, claim or Fork in flight. ``g`` is the group and ``h`` its
 #: Host; ``$2`` is how long the Host must have been silent.
 _RECLAIMED_GROUP_SQL = f"""(
-    g.deletion_state = 'none'
-    AND g.state NOT IN ('cold', 'restoring', 'lost')
+    {UNMOVED_GROUP_SQL}
     AND (h.last_heartbeat_at IS NULL
          OR h.last_heartbeat_at < NOW() - make_interval(secs => $2))
     AND NOT EXISTS (
@@ -2703,11 +2702,10 @@ class PostgresComputeResourceRepository:
         async with self._pool.acquire() as conn:
             return int(
                 await conn.fetchval(
-                    """SELECT count(*) FROM agent_sandboxes g
+                    f"""SELECT count(*) FROM agent_sandboxes g
                        JOIN agent_runner_hosts h ON h.host=g.host
                        JOIN agent_compute_nodes n ON n.id=h.compute_node_id
-                       WHERE n.allocation_id=$1 AND g.deletion_state='none'
-                         AND g.state NOT IN ('cold','restoring','lost')""",
+                       WHERE n.allocation_id=$1 AND {UNMOVED_GROUP_SQL}""",
                     allocation_id,
                 )
             )
