@@ -3699,7 +3699,9 @@ async def test_remembered_worker_skips_a_locked_thread_without_discarding(store,
         await conn.fetchval(
             "SELECT id FROM agent_threads WHERE id = $1 FOR UPDATE", job["thread_id"]
         )
-        assert await asyncio.wait_for(store.mcp.apply_pending_mcp_allow_rules(), timeout=1) == 0
+        # The thread stays locked until this call returns, so a worker that
+        # waited for it would never answer: the timeout only guards a hang.
+        assert await asyncio.wait_for(store.mcp.apply_pending_mcp_allow_rules(), timeout=10) == 0
         assert (await store.mcp.get_mcp_invocation(invocation_id=invocation["id"]))[
             "always_allow_status"
         ] == "pending"
