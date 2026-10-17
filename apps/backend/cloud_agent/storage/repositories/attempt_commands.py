@@ -39,8 +39,10 @@ from cloud_agent.storage._sql.events import insert_event
 from cloud_agent.storage._sql.goals import arm_finish_wakeup, goal_after_terminal
 from cloud_agent.storage._sql.hosts import (
     LIVE_ATTEMPT_HOST,
+    SILENT_HOST_GROUP_SQL,
     host_slots_exhausted,
     release_host_slot,
+    take_silent_host_group,
 )
 from cloud_agent.storage._sql.jobs import (
     QUALIFIED_JOB_COLUMNS,
@@ -361,6 +363,25 @@ class PostgresAttemptCommands:
                             AND s.native_state <> 'lost'
                             AND s.shared_live
                         )
+                        OR (
+                            -- A stopped group of a Host silent for a long
+                            -- time, held by its checkpoint: a restore-capable
+                            -- host may take it, and the claim below hands it
+                            -- over and rehomes it. Until then it stays, so a
+                            -- Host that returns continues with it.
+                            s.state = 'stopped'
+                            AND s.host IS DISTINCT FROM $2
+                            AND $7::boolean
+                            AND $6::boolean
+                            AND s.fork_operation_id IS NULL
+                            AND s.context_status <> 'lost'
+                            AND s.native_state <> 'lost'
+                            AND s.shared_live
+                            AND EXISTS (
+                                SELECT 1 FROM agent_sandboxes g
+                                WHERE g.id = s.sandbox_id AND {SILENT_HOST_GROUP_SQL}
+                            )
+                        )
                   )
                 ORDER BY j.created_at
                 LIMIT 1
@@ -379,6 +400,13 @@ class PostgresAttemptCommands:
             job_id = job_row["id"]
             thread_sandbox = load_json(job_row["thread_sandbox"])
             restore = isinstance(thread_sandbox, dict) and thread_sandbox.get("state") == "cold"
+            # Only the silent-Host branch admits a stopped group on another host.
+            take_silent = (
+                isinstance(thread_sandbox, dict)
+                and thread_sandbox.get("state") == "stopped"
+                and thread_sandbox.get("host") != host
+            )
+            handover = None
             if isinstance(thread_sandbox, dict):
                 # Serialize a retained claim with an administrative stop. A
                 # claim committed first is visible to the stop's busy check;
@@ -391,12 +419,23 @@ class PostgresAttemptCommands:
                     "AND stop_requested_at IS NULL "
                     "AND deletion_state NOT IN ('pending', 'archived', 'deleted') "
                     "FROM agent_sandboxes "
-                    "WHERE id = $1 " + ("FOR UPDATE" if restore else "FOR SHARE"),
+                    "WHERE id = $1 " + ("FOR UPDATE" if restore or take_silent else "FOR SHARE"),
                     thread_sandbox["sandbox_id"],
                     restore,
                 )
                 if not claimable:
                     return None
+                if take_silent:
+                    # A savepoint, so a claim that then finds no slot leaves
+                    # the group with its silent Host instead of cold.
+                    handover = conn.transaction()
+                    await handover.start()
+                    if not await take_silent_host_group(
+                        conn, sandbox_id=thread_sandbox["sandbox_id"], claimant=host
+                    ):
+                        await handover.rollback()
+                        return None
+                    restore = True
             # The atomic half of the slot claim. Under READ COMMITTED two
             # claims hitting the same host row serialize and the loser
             # re-evaluates capacity against the winner's committed value.
@@ -428,7 +467,11 @@ class PostgresAttemptCommands:
                 json.dumps([SANDBOX_ARCHIVE_CAPABILITY]),
             )
             if took_slot is None:
+                if handover is not None:
+                    await handover.rollback()
                 return None
+            if handover is not None:
+                await handover.commit()
             if restore:
                 # The fence that makes this host the group's only owner: a new
                 # generation, no container yet, and the checkpoint kept as the
