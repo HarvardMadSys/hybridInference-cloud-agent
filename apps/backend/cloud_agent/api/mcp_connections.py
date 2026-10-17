@@ -22,14 +22,12 @@ somebody else made.
 
 from __future__ import annotations
 
-import hashlib
 import json
-import secrets
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from dataclasses import replace
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import Any
 from urllib.parse import urlencode, urlsplit, urlunsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
@@ -41,10 +39,27 @@ from pydantic import BaseModel, ConfigDict, Field
 # ``_owner_auth`` and never the reverse, so there is no cycle to reason about.
 from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api.deps import get_current_user, get_storage
+from cloud_agent.api.mcp_connections_shared import (
+    _bad_request,
+    _conflict,
+    _McpConnectionsStorage,
+    _not_found,
+    _require_store,
+)
+from cloud_agent.api.mcp_connector_routes import (
+    CONNECTOR_RUNTIME_UNAVAILABLE,
+    _require_connector,
+    router as connector_router,
+)
+from cloud_agent.api.mcp_thread_bindings import (
+    BindingRequest,
+    BindingResponse,
+    BindingsResponse,
+    ReplaceBindingsRequest,
+    router as thread_bindings_router,
+)
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp import config_import, github_oauth, launch, oauth
-from cloud_agent.mcp.authorization import binding_from_selection
-from cloud_agent.mcp.binding_aliases import binding_aliases
 from cloud_agent.mcp.errors import (
     McpConnectionCreateConflict,
     McpCredentialWriteRejected,
@@ -63,7 +78,6 @@ from cloud_agent.mcp.models import (
     InvocationStatus,
     LaunchSpec,
     Mount,
-    ToolPolicy,
     Transport,
 )
 from cloud_agent.mcp.net_policy import (
@@ -83,19 +97,9 @@ from cloud_agent.mcp.registry import (
 from cloud_agent.settings import setting_env
 from cloud_agent.source_control import SourceControlError
 
-if TYPE_CHECKING:
-    from cloud_agent.ports import ConversationQueries, McpConnectionRepository
-
 # Imported at runtime, not only for typing: FastAPI resolves every route
 # handler's annotations to build its dependency graph, so moving this behind
 # ``TYPE_CHECKING`` turns an import-time warning into a startup failure.
-
-
-class _McpConnectionsStorage(Protocol):
-    """The storage capabilities used by the MCP owner API."""
-
-    mcp: McpConnectionRepository
-    conversation_queries: ConversationQueries
 
 
 logger = get_logger(__name__)
@@ -241,21 +245,6 @@ def _policy() -> EgressPolicy:
     policy this API validates against: two doors, one policy.
     """
     return policy_from_environment()
-
-
-def _require_store(store: _McpConnectionsStorage | None) -> _McpConnectionsStorage:
-    """Refuse a request that needs the database when there is none."""
-    if store is None:
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "error": {
-                    "type": "server_error",
-                    "message": "MCP needs a configured database.",
-                }
-            },
-        )
-    return store
 
 
 # --------------------------------------------------------------------------
@@ -443,55 +432,6 @@ class AuthorizeResponse(BaseModel):
     redirect_uri: str | None = None
 
 
-class BindingRequest(BaseModel):
-    """One connection's selection for a session."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    connection_id: int
-    alias: str | None = None
-    enabled: bool = True
-    use_defaults: bool = False
-    #: Tool name to policy. ``deny`` is also what an omitted name means.
-    tools: dict[str, str] = Field(default_factory=dict)
-    resources: dict[str, str] = Field(default_factory=dict)
-    prompts: dict[str, str] = Field(default_factory=dict)
-
-
-class BindingResponse(BaseModel):
-    """What one session is currently allowed to use."""
-
-    connection_id: int
-    connection_label: str
-    alias: str
-    enabled: bool
-    selection_pending: bool
-    available: bool
-    error: str | None = None
-    capabilities: list[dict[str, Any]] = Field(default_factory=list)
-    tools: dict[str, str] = Field(default_factory=dict)
-    resources: dict[str, str] = Field(default_factory=dict)
-    prompts: dict[str, str] = Field(default_factory=dict)
-    config_revision: int = 1
-    authorization_epoch: int = 1
-    capability_revision: int = 1
-    policy_revision: int = 1
-
-
-class BindingsResponse(BaseModel):
-    """Every connection a session may use."""
-
-    bindings: list[BindingResponse] = Field(default_factory=list)
-
-
-class ReplaceBindingsRequest(BaseModel):
-    """Replace a session's selection wholesale."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    bindings: list[BindingRequest] = Field(default_factory=list)
-
-
 class InvocationView(BaseModel):
     """One call that needed a decision."""
 
@@ -603,15 +543,6 @@ async def _view(store: _McpConnectionsStorage, row: Mapping[str, Any]) -> Connec
     )
 
 
-#: Where each capability kind is kept in a stored snapshot, in display order.
-_SNAPSHOT_SURFACES: tuple[tuple[str, CapabilityKind], ...] = (
-    ("tools", CapabilityKind.TOOL),
-    ("resources", CapabilityKind.RESOURCE),
-    ("resource_templates", CapabilityKind.RESOURCE_TEMPLATE),
-    ("prompts", CapabilityKind.PROMPT),
-)
-
-
 def _capability_view(entry: Mapping[str, Any], kind: CapabilityKind) -> dict[str, Any]:
     """Render one discovered capability for the selection dialog."""
     return {
@@ -623,28 +554,13 @@ def _capability_view(entry: Mapping[str, Any], kind: CapabilityKind) -> dict[str
     }
 
 
-def _conflict(message: str) -> HTTPException:
-    """A state change that lost a race with another writer."""
-    return HTTPException(
-        status_code=409,
-        detail={"error": {"type": "conflict", "message": message}},
-    )
-
-
-def _not_found(message: str) -> HTTPException:
-    """A resource that does not exist, or is not this user's."""
-    return HTTPException(
-        status_code=404,
-        detail={"error": {"type": "not_found", "message": message}},
-    )
-
-
-def _bad_request(message: str) -> HTTPException:
-    """A request whose input cannot be turned into a connection."""
-    return HTTPException(
-        status_code=400,
-        detail={"error": {"type": "invalid_request_error", "message": message}},
-    )
+#: Where each capability kind is kept in a stored snapshot, in display order.
+_SNAPSHOT_SURFACES: tuple[tuple[str, CapabilityKind], ...] = (
+    ("tools", CapabilityKind.TOOL),
+    ("resources", CapabilityKind.RESOURCE),
+    ("resource_templates", CapabilityKind.RESOURCE_TEMPLATE),
+    ("prompts", CapabilityKind.PROMPT),
+)
 
 
 # --------------------------------------------------------------------------
@@ -1792,203 +1708,6 @@ def _callback_redirect(provider: str, *, ok: bool, message: str) -> Response:
 
 
 # --------------------------------------------------------------------------
-# Session bindings
-# --------------------------------------------------------------------------
-
-
-@router.get("/threads/{thread_id}/bindings", response_model=BindingsResponse)
-async def get_thread_bindings(
-    thread_id: str,
-    user: dict[str, Any] = Depends(require_agent_owner),
-    store: _McpConnectionsStorage | None = Depends(get_storage),
-) -> BindingsResponse:
-    """What one session may use, and what each connection offers."""
-    job_store = _require_store(store)
-    await _require_thread(job_store, thread_id=thread_id, user_id=user["user_id"])
-    return BindingsResponse(bindings=await _binding_views(job_store, thread_id=thread_id))
-
-
-@router.put("/threads/{thread_id}/bindings", response_model=BindingsResponse)
-async def replace_thread_bindings(
-    thread_id: str,
-    body: ReplaceBindingsRequest,
-    user: dict[str, Any] = Depends(require_agent_owner),
-    store: _McpConnectionsStorage | None = Depends(get_storage),
-) -> BindingsResponse:
-    """Replace explicit conversation overrides."""
-    return await _save_thread_bindings(thread_id, body, user, store, merge=False)
-
-
-@router.put("/threads/{thread_id}/bindings/{connection_id}", response_model=BindingsResponse)
-async def update_thread_binding(
-    thread_id: str,
-    connection_id: int,
-    body: BindingRequest,
-    user: dict[str, Any] = Depends(require_agent_owner),
-    store: _McpConnectionsStorage | None = Depends(get_storage),
-) -> BindingsResponse:
-    """Change one server without reapproving or overwriting another server's rules."""
-    if body.connection_id != connection_id:
-        raise _bad_request("the connection id does not match the requested server")
-    return await _save_thread_bindings(
-        thread_id, ReplaceBindingsRequest(bindings=[body]), user, store, merge=True
-    )
-
-
-async def _save_thread_bindings(
-    thread_id: str,
-    body: ReplaceBindingsRequest,
-    user: dict[str, Any],
-    store: _McpConnectionsStorage | None,
-    *,
-    merge: bool,
-) -> BindingsResponse:
-    """Replace a session's selection.
-
-    The selection is validated against the connections' *current* revisions, so
-    a binding can never be written that already fails its own fence. Every
-    connection the user names must be theirs, which is what makes the
-    connection id safe to accept from a client.
-    """
-    job_store = _require_store(store)
-    await _require_thread(job_store, thread_id=thread_id, user_id=user["user_id"])
-    prepared: list[dict[str, Any]] = []
-    aliases: list[tuple[int, str | None, str]] = []
-    for index, item in enumerate(body.bindings):
-        row = await job_store.mcp.get_mcp_connection(
-            connection_id=item.connection_id, user_id=user["user_id"]
-        )
-        if row is None:
-            raise _not_found(f"no MCP connection with id {item.connection_id}")
-        resolved = await resolve_connection(job_store.mcp, row=row)
-        connection = resolved.connection
-        snapshot = resolved.snapshot
-        capabilities = snapshot.tools if snapshot else ()
-        rules = {name: _parse_policy(value) for name, value in item.tools.items()}
-        if snapshot is not None:
-            known = {capability.name for capability in capabilities}
-            unknown = sorted(set(rules) - known)
-            if unknown:
-                # A rule for a tool the server does not offer is either a stale
-                # client or a typo; either way storing it would grant nothing
-                # now and something unexpected after the next discovery.
-                raise _bad_request(f"{connection.label} does not offer: {', '.join(unknown)}")
-        binding = binding_from_selection(
-            thread_id=thread_id,
-            connection=connection,
-            alias=item.alias or _default_alias(row, index),
-            rules=rules,
-            resources={name: _parse_policy(value) for name, value in item.resources.items()},
-            prompts={name: _parse_policy(value) for name, value in item.prompts.items()},
-            capabilities=tuple(capabilities),
-        )
-        prepared.append(
-            {
-                "connection_id": int(row["id"]),
-                "alias": binding.alias,
-                "enabled": item.enabled and (binding.enabled or item.use_defaults),
-                "selection_pending": item.use_defaults,
-                "config_revision": binding.config_revision,
-                "authorization_epoch": binding.authorization_epoch,
-                "capability_revision": binding.capability_revision,
-                "policy_revision": binding.policy_revision,
-                "rules": {
-                    name: {"policy": rule.policy.value, "fingerprint": rule.fingerprint}
-                    for name, rule in binding.rules.items()
-                },
-                "resource_rules": {k: v.value for k, v in binding.resource_rules.items()},
-                "prompt_rules": {k: v.value for k, v in binding.prompt_rules.items()},
-            }
-        )
-        aliases.append((item.connection_id, item.alias, _default_alias(row, index)))
-    try:
-        reserved = []
-        if merge:
-            changed_ids = {item.connection_id for item in body.bindings}
-            reserved = [
-                (int(row["connection_id"]), str(row["alias"]), str(row["alias"]))
-                for row in await job_store.mcp.list_mcp_bindings(thread_id=thread_id)
-                if int(row["connection_id"]) not in changed_ids
-            ]
-        assigned = binding_aliases([*reserved, *aliases])[len(reserved) :]
-        for binding_row, alias in zip(prepared, assigned, strict=True):
-            binding_row["alias"] = alias
-    except ValueError as exc:
-        raise _bad_request(str(exc)) from exc
-    await job_store.mcp.replace_mcp_bindings(thread_id=thread_id, bindings=prepared, merge=merge)
-    logger.info(
-        "agent_mcp_bindings_replaced",
-        extra={"event": "agent_mcp_bindings_replaced", "thread_id": thread_id},
-    )
-    return BindingsResponse(bindings=await _binding_views(job_store, thread_id=thread_id))
-
-
-async def _binding_views(
-    job_store: _McpConnectionsStorage, *, thread_id: str
-) -> list[BindingResponse]:
-    """Render every binding on one thread, with what each connection offers."""
-    rows = await job_store.mcp.list_mcp_bindings(thread_id=thread_id)
-    views: list[BindingResponse] = []
-    for row in rows:
-        connection_row = await job_store.mcp.get_mcp_connection(
-            connection_id=int(row["connection_id"])
-        )
-        if connection_row is None or connection_row.get("deleted_at") is not None:
-            continue
-        resolved = await resolve_connection(job_store.mcp, row=connection_row)
-        snapshot = resolved.snapshot
-        capabilities = (
-            [
-                _capability_view(_capability_payload(item), item.kind)
-                for item in snapshot.all_capabilities()
-            ]
-            if snapshot
-            else []
-        )
-        views.append(
-            BindingResponse(
-                connection_id=int(row["connection_id"]),
-                connection_label=resolved.connection.label,
-                alias=str(row["alias"]),
-                enabled=bool(row["enabled"]),
-                selection_pending=bool(row.get("selection_pending", False)),
-                available=resolved.usable
-                and resolved.connection.status is not ConnectionStatus.ERROR,
-                error=resolved.error or resolved.connection.error_detail,
-                capabilities=capabilities,
-                tools={
-                    str(name): str(rule.get("policy") if isinstance(rule, Mapping) else rule)
-                    for name, rule in (row.get("rules") or {}).items()
-                },
-                resources={str(k): str(v) for k, v in (row.get("resource_rules") or {}).items()},
-                prompts={str(k): str(v) for k, v in (row.get("prompt_rules") or {}).items()},
-                config_revision=int(row["config_revision"]),
-                authorization_epoch=int(row["authorization_epoch"]),
-                capability_revision=int(row["capability_revision"]),
-                policy_revision=int(row["policy_revision"]),
-            )
-        )
-    return views
-
-
-async def _require_thread(
-    job_store: _McpConnectionsStorage, *, thread_id: str, user_id: str
-) -> None:
-    """Refuse a thread this user does not own."""
-    thread = await job_store.conversation_queries.get_thread(thread_id)
-    if thread is None or str(thread.get("user_id")) != user_id:
-        raise _not_found("no such conversation")
-
-
-def _default_alias(row: Mapping[str, Any], index: int) -> str:
-    """A stable alias derived from the connection, used when none is given."""
-    template = str(row.get("template") or "").strip()
-    if template:
-        return f"{template}{index + 1}" if index else template
-    return f"mcp{row['id']}"
-
-
-# --------------------------------------------------------------------------
 # Invocation decisions
 # --------------------------------------------------------------------------
 
@@ -2227,274 +1946,6 @@ def mcp_invocation_cipher() -> Any:
 
 
 # --------------------------------------------------------------------------
-# Connectors
-# --------------------------------------------------------------------------
-#
-# A connector is the user's own machine, reached over an authenticated outbound
-# channel. It exists for the servers that cannot run in the cloud at all: a
-# local file, a database on a private network, a program with a licence key on
-# the user's laptop. The platform never asks a connector for a shell or a raw
-# socket -- it asks for one named connection's MCP operations, and the connector
-# decides whether that connection is one it was authorized for.
-#
-# **Registering is not running.** No connector runtime ships with this service
-# yet, so a registered connector is configuration: it records who the user's
-# machine is, which connections they routed to it, and the registration secret
-# the connector would present. A connection bound to one is refused at use with
-# that reason, in the same way a managed-worker connection is refused for having
-# no worker. Saying so is the point of the `runtime` field below -- a page that
-# showed "connected" beside a server that cannot start would be the same lie the
-# "Coming soon" label existed to avoid.
-
-#: What a connection bound to a connector can expect today.
-CONNECTOR_RUNTIME_UNAVAILABLE = "unavailable"
-
-
-class ConnectorView(BaseModel):
-    """One connector, as its owner sees it. Never its registration secret."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    id: int
-    name: str
-    status: str
-    mounts: list[str] = Field(default_factory=list)
-    connection_ids: list[int] = Field(default_factory=list)
-    #: Whether this deployment can actually run a connector. ``unavailable``
-    #: means the configuration is accepted and nothing serves it yet.
-    runtime: str = CONNECTOR_RUNTIME_UNAVAILABLE
-    created_at: datetime | None = None
-    last_seen_at: datetime | None = None
-    revoked_at: datetime | None = None
-
-
-class RegisterConnectorRequest(BaseModel):
-    """Register one machine as this user's connector."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    name: str = Field(min_length=1, max_length=120)
-    #: Paths on the user's machine the connector may reach. Advisory: the
-    #: connector enforces its own policy, and this records what its owner said.
-    mounts: list[str] = Field(default_factory=list, max_length=32)
-
-
-class RegisterConnectorResponse(BaseModel):
-    """The connector, and the one time its registration secret is shown."""
-
-    connector: ConnectorView
-    #: Returned exactly once, hashed at rest. It is what the connector presents
-    #: to prove which machine it is, so a second read would be a second copy of
-    #: a credential.
-    registration_secret: str
-
-
-class UpdateConnectorRequest(BaseModel):
-    """Rename a connector or change the resources it may reach."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    name: str | None = Field(default=None, max_length=120)
-    mounts: list[str] | None = Field(default=None, max_length=32)
-
-
-class BindConnectorRequest(BaseModel):
-    """Route one connection through one connector."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    connection_id: int
-
-
-async def _connector_view(store: _McpConnectionsStorage, row: Mapping[str, Any]) -> ConnectorView:
-    """Build the owner-facing view, with the connection ids it may serve."""
-    connector_id = int(row["id"])
-    return ConnectorView(
-        id=connector_id,
-        name=str(row["name"]),
-        status=str(row["status"]),
-        mounts=[str(mount) for mount in (row.get("mounts") or [])],
-        connection_ids=await store.mcp.list_mcp_connector_connections(connector_id=connector_id),
-        created_at=row.get("created_at"),
-        last_seen_at=row.get("last_seen_at"),
-        revoked_at=row.get("revoked_at"),
-    )
-
-
-async def _require_connector(
-    store: _McpConnectionsStorage, *, connector_id: int, user_id: str
-) -> dict[str, Any]:
-    """Fetch one of this user's connectors, or refuse."""
-    row = next(
-        (
-            item
-            for item in await store.mcp.list_mcp_connectors(user_id=user_id)
-            if int(item["id"]) == connector_id
-        ),
-        None,
-    )
-    if row is None:
-        raise _not_found("no such connector")
-    return row
-
-
-@router.get("/connectors", response_model=list[ConnectorView])
-async def list_connectors(
-    user: dict[str, Any] = Depends(require_agent_owner),
-    store: _McpConnectionsStorage | None = Depends(get_storage),
-) -> list[ConnectorView]:
-    """Every connector this user registered."""
-    job_store = _require_store(store)
-    return [
-        await _connector_view(job_store, row)
-        for row in await job_store.mcp.list_mcp_connectors(user_id=user["user_id"])
-    ]
-
-
-@router.post("/connectors", response_model=RegisterConnectorResponse, status_code=201)
-async def register_connector(
-    body: RegisterConnectorRequest,
-    user: dict[str, Any] = Depends(require_agent_owner),
-    store: _McpConnectionsStorage | None = Depends(get_storage),
-) -> RegisterConnectorResponse:
-    """Register one machine, returning the secret it will authenticate with.
-
-    The secret is hashed before it is stored and never returned again, which is
-    the same rule the connection credentials follow: a value that can be read
-    back is a value that can be read back by somebody else.
-    """
-    job_store = _require_store(store)
-    secret = secrets.token_urlsafe(32)
-    row = await job_store.mcp.create_mcp_connector(
-        user_id=user["user_id"],
-        name=body.name.strip(),
-        registration_hash=hashlib.sha256(secret.encode()).hexdigest(),
-    )
-    if body.mounts:
-        updated = await job_store.mcp.update_mcp_connector(
-            connector_id=int(row["id"]), user_id=user["user_id"], mounts=body.mounts
-        )
-        row = updated or row
-    logger.info(
-        "agent_mcp_connector_registered",
-        extra={"event": "agent_mcp_connector_registered", "connector_id": row["id"]},
-    )
-    return RegisterConnectorResponse(
-        connector=await _connector_view(job_store, row), registration_secret=secret
-    )
-
-
-@router.patch("/connectors/{connector_id}", response_model=ConnectorView)
-async def update_connector(
-    connector_id: int,
-    body: UpdateConnectorRequest,
-    user: dict[str, Any] = Depends(require_agent_owner),
-    store: _McpConnectionsStorage | None = Depends(get_storage),
-) -> ConnectorView:
-    """Rename a connector or change the resources it may reach."""
-    job_store = _require_store(store)
-    updated = await job_store.mcp.update_mcp_connector(
-        connector_id=connector_id,
-        user_id=user["user_id"],
-        name=body.name.strip() if body.name else None,
-        mounts=body.mounts,
-    )
-    if updated is None:
-        raise _not_found("no such connector")
-    return await _connector_view(job_store, updated)
-
-
-@router.delete("/connectors/{connector_id}", status_code=204)
-async def revoke_connector(
-    connector_id: int,
-    user: dict[str, Any] = Depends(require_agent_owner),
-    store: _McpConnectionsStorage | None = Depends(get_storage),
-) -> Response:
-    """Revoke a connector and detach everything that routed through it."""
-    job_store = _require_store(store)
-    if not await job_store.mcp.revoke_mcp_connector(
-        connector_id=connector_id, user_id=user["user_id"]
-    ):
-        raise _not_found("no such connector")
-    logger.info(
-        "agent_mcp_connector_revoked",
-        extra={"event": "agent_mcp_connector_revoked", "connector_id": connector_id},
-    )
-    return Response(status_code=204)
-
-
-@router.post("/connectors/{connector_id}/connections", response_model=ConnectorView)
-async def bind_connector_connection(
-    connector_id: int,
-    body: BindConnectorRequest,
-    user: dict[str, Any] = Depends(require_agent_owner),
-    store: _McpConnectionsStorage | None = Depends(get_storage),
-) -> ConnectorView:
-    """Route one connection through this connector.
-
-    Only a connection that runs on the user's own machine can be routed to it.
-    A remote connection addressed through a connector would be a server the
-    platform could reach directly, sent the long way round -- and a
-    managed-worker connection belongs to a worker that is not the user's.
-    """
-    job_store = _require_store(store)
-    await _require_connector(job_store, connector_id=connector_id, user_id=user["user_id"])
-    row = await job_store.mcp.get_mcp_connection(
-        connection_id=body.connection_id, user_id=user["user_id"]
-    )
-    if row is None:
-        raise _not_found(f"no MCP connection with id {body.connection_id}")
-    if str(row.get("location")) != ExecutionLocation.USER_CONNECTOR.value:
-        raise _bad_request(
-            "only a connection that runs on your own machine can use a connector; "
-            f"this one runs at {row.get('location')!r}"
-        )
-    bound = await job_store.mcp.bind_mcp_connection_connector(
-        connection_id=body.connection_id, user_id=user["user_id"], connector_id=connector_id
-    )
-    if bound is None:
-        raise _conflict("that connector was revoked while you were binding to it")
-    logger.info(
-        "agent_mcp_connector_bound",
-        extra={
-            "event": "agent_mcp_connector_bound",
-            "connector_id": connector_id,
-            "connection_id": body.connection_id,
-        },
-    )
-    return await _connector_view(
-        job_store,
-        await _require_connector(job_store, connector_id=connector_id, user_id=user["user_id"]),
-    )
-
-
-@router.delete("/connectors/{connector_id}/connections/{connection_id}", status_code=204)
-async def unbind_connector_connection(
-    connector_id: int,
-    connection_id: int,
-    user: dict[str, Any] = Depends(require_agent_owner),
-    store: _McpConnectionsStorage | None = Depends(get_storage),
-) -> Response:
-    """Stop serving one connection through this connector."""
-    job_store = _require_store(store)
-    await _require_connector(job_store, connector_id=connector_id, user_id=user["user_id"])
-    unbound = await job_store.mcp.unbind_mcp_connection_connector(
-        connection_id=connection_id, user_id=user["user_id"], connector_id=connector_id
-    )
-    if unbound is None or unbound.get("connector_id") is not None:
-        raise _not_found("that connection is not routed through this connector")
-    logger.info(
-        "agent_mcp_connector_unbound",
-        extra={
-            "event": "agent_mcp_connector_unbound",
-            "connector_id": connector_id,
-            "connection_id": connection_id,
-        },
-    )
-    return Response(status_code=204)
-
-
-# --------------------------------------------------------------------------
 # Validation helpers
 # --------------------------------------------------------------------------
 
@@ -2524,15 +1975,6 @@ def _parse_auth_kind(value: str) -> AuthKind:
     except ValueError as exc:
         allowed = ", ".join(item.value for item in AuthKind)
         raise _bad_request(f"unknown auth kind {value!r}; use one of: {allowed}") from exc
-
-
-def _parse_policy(value: str) -> ToolPolicy:
-    """Read a capability policy."""
-    try:
-        return ToolPolicy(str(value))
-    except ValueError as exc:
-        allowed = ", ".join(item.value for item in ToolPolicy)
-        raise _bad_request(f"unknown policy {value!r}; use one of: {allowed}") from exc
 
 
 def _build_auth(
@@ -2808,4 +2250,18 @@ def _no_encryption_key() -> HTTPException:
     )
 
 
-__all__ = ["ENV_MCP_PUBLIC_BASE_URL", "router"]
+__all__ = [
+    "CONNECTOR_RUNTIME_UNAVAILABLE",
+    "ENV_MCP_PUBLIC_BASE_URL",
+    "BindingRequest",
+    "BindingResponse",
+    "BindingsResponse",
+    "ReplaceBindingsRequest",
+    "router",
+]
+
+# Copy already-prefixed routes into the compatibility router. This keeps the
+# public router flat, so an application that includes it can bind dependency
+# overrides exactly as it did when every route lived here.
+router.routes.extend(thread_bindings_router.routes)
+router.routes.extend(connector_router.routes)
