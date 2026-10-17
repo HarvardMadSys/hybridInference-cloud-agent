@@ -38,6 +38,11 @@ def discard_request_id(allocation_id: str) -> str:
     return "discard:" + allocation_id
 
 
+#: After its provider confirms a machine is gone, how long its Host must have
+#: been silent before what it still holds is taken as gone with it: the groups
+#: are marked lost, and a deletion without an archive finishes without it.
+RECLAIMED_QUIET_SECONDS = 600
+
 #: How long before its lease ends a Host starts moving its groups out.
 DEFAULT_MOVE_OUT_BEFORE_SECONDS = 7200
 #: How long before that window opens its lease is renewed. An extension the

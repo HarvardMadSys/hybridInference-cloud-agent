@@ -86,8 +86,14 @@ class SandboxRepository(Protocol):
         claim_token: str,
         generation: int,
         container_id: str,
+        reclaimed_quiet_seconds: float | None = None,
     ) -> bool:
-        """Mark native context lost after the host removes a container with no archive."""
+        """Mark native context lost after the host removes a container with no archive.
+
+        With ``reclaimed_quiet_seconds``, finish without the host instead, only
+        when its provider confirmed the machine terminated and the host has
+        been silent that long; otherwise return ``False`` and change nothing.
+        """
         ...
 
     async def fail_admin_sandbox_deletion(

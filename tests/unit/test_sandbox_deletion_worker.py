@@ -132,6 +132,51 @@ async def test_discard_removes_the_container_without_an_archive(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_discard_on_a_reclaimed_machine_finishes_without_its_host(monkeypatch):
+    """The container went with the machine; its host would never answer the request."""
+    store, sandbox_manager, archives, _ = setup(monkeypatch)
+    store.sandbox.claim_due_admin_sandbox_deletion.return_value["deletion_discard"] = True
+    store.host_pool.get_host.return_value = {"host": "host-one", "compute_node_id": "node-one"}
+    sandbox_manager.discard_sandbox_deletion = AsyncMock()
+    store.sandbox.complete_admin_sandbox_discard = AsyncMock(return_value=True)
+
+    assert await run(store, archives)
+
+    store.sandbox.complete_admin_sandbox_discard.assert_awaited_once_with(
+        sandbox_id="group",
+        request_id="request",
+        claim_token="claim-token",
+        generation=4,
+        container_id="container-one",
+        reclaimed_quiet_seconds=600,
+    )
+    sandbox_manager.discard_sandbox_deletion.assert_not_awaited()
+    store.sandbox.fail_admin_sandbox_deletion.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_discard_on_a_provider_machine_still_asks_its_host_until_it_is_reclaimed(
+    monkeypatch,
+):
+    store, sandbox_manager, archives, _ = setup(monkeypatch)
+    store.sandbox.claim_due_admin_sandbox_deletion.return_value["deletion_discard"] = True
+    store.host_pool.get_host.return_value = {"host": "host-one", "compute_node_id": "node-one"}
+    sandbox_manager.discard_sandbox_deletion = AsyncMock(
+        return_value={"request_id": "request", "container_id": "container-one", "deleted": True}
+    )
+    store.sandbox.complete_admin_sandbox_discard = AsyncMock(
+        side_effect=lambda **kwargs: "reclaimed_quiet_seconds" not in kwargs
+    )
+
+    assert await run(store, archives)
+
+    sandbox_manager.discard_sandbox_deletion.assert_awaited_once()
+    calls = store.sandbox.complete_admin_sandbox_discard.await_args_list
+    assert [call.kwargs.get("reclaimed_quiet_seconds") for call in calls] == [600, None]
+    store.sandbox.fail_admin_sandbox_deletion.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_unconfirmed_discard_retries_without_aborting_or_uploading(monkeypatch):
     store, sandbox_manager, archives, _events = setup(monkeypatch)
     claim = store.sandbox.claim_due_admin_sandbox_deletion.return_value

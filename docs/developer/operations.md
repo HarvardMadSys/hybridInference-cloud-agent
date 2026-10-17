@@ -669,9 +669,13 @@ acknowledgement can survive a sandbox manager restart.
 uploading workspace files or native session history. It does not require an S3
 bucket. The host still refuses a running, busy, or changed container, and the
 control plane marks native resume lost only after the host confirms removal.
-Chat history and the lifecycle audit remain. There is no S3 object to restore
-from. An archive deletion that is already pending or verified is left unchanged;
-wait for it to finish or fail before choosing this action.
+The one exception is a host whose server its provider confirmed `terminated`:
+once that host has been silent for 10 minutes, the container is taken as gone
+with the machine and the deletion finishes without it, the rule that marks the
+machine's other sandboxes lost. Its trajectory and audit record
+`host_reclaimed`. Chat history and the lifecycle audit remain. There is no S3
+object to restore from. An archive deletion that is already pending or verified
+is left unchanged; wait for it to finish or fail before choosing this action.
 
 One deletion worker handles requests one at a time, in the order they became
 due. A failed attempt shows its error and is retried a minute later, behind any

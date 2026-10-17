@@ -20,6 +20,7 @@ from cloud_agent.owner_usage import measured_interval, utc_day_shares
 from cloud_agent.storage._sql.compute_admission import lock_compute_entry
 from cloud_agent.storage._sql.hosts import (
     MOVING_OUT_HOST_SQL,
+    RECLAIMED_HOST_SQL,
     UNDELETED_GROUP_SQL,
     moving_out_hosts,
     release_covered_sandboxes,
@@ -597,8 +598,16 @@ class PostgresSandboxRepository:
         claim_token: str,
         generation: int,
         container_id: str,
+        reclaimed_quiet_seconds: float | None = None,
     ) -> bool:
-        """Mark native context lost after the host removes a container with no archive."""
+        """Mark native context lost after the host removes a container with no archive.
+
+        With ``reclaimed_quiet_seconds`` the discard finishes without that
+        host, which can never confirm it: only when its provider confirmed the
+        machine it ran on terminated and it has been silent that long
+        (``RECLAIMED_HOST_SQL``). The container went with the machine.
+        Otherwise this returns ``False`` and changes nothing.
+        """
         async with self._pool.acquire() as conn, conn.transaction():
             await conn.fetch(
                 "SELECT t.id FROM agent_threads t "
@@ -620,6 +629,13 @@ class PostgresSandboxRepository:
                 return bool(group["deletion_discard"])
             if group["deletion_state"] != "pending" or not group["deletion_discard"]:
                 return False
+            host_reclaimed = reclaimed_quiet_seconds is not None
+            if host_reclaimed and not await conn.fetchval(
+                "SELECT " + RECLAIMED_HOST_SQL.format(host="$1", quiet="$2"),
+                group["host"],
+                reclaimed_quiet_seconds,
+            ):
+                return False
             await self._record_trajectory_event(
                 conn,
                 group=group,
@@ -628,7 +644,8 @@ class PostgresSandboxRepository:
                 actor_id="sandbox-deletion-worker",
                 from_state="pending",
                 to_state="deleted",
-                details={"request_id": request_id, "discard": True},
+                details={"request_id": request_id, "discard": True}
+                | ({"host_reclaimed": True} if host_reclaimed else {}),
             )
             await conn.execute(
                 """
@@ -659,6 +676,7 @@ class PostgresSandboxRepository:
                 group=group,
                 request_id=request_id,
                 action="agent.sandbox.delete.discarded",
+                host_reclaimed=host_reclaimed,
             )
         return True
 
@@ -773,6 +791,7 @@ class PostgresSandboxRepository:
         archive_version_id: str | None = None,
         sandbox_manager_confirmed_stopped: bool = False,
         confirmed_docker_status: str | None = None,
+        host_reclaimed: bool = False,
     ) -> None:
         """Keep each deletion transition and content-free audit atomic."""
         await conn.execute(
@@ -804,6 +823,7 @@ class PostgresSandboxRepository:
                     if sandbox_manager_confirmed_stopped
                     else {}
                 )
+                | ({"host_reclaimed": True} if host_reclaimed else {})
             ),
             action != "agent.sandbox.delete.failed",
         )

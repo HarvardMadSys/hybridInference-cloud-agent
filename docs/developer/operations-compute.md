@@ -538,7 +538,8 @@ chat's next turn is claimed by another Host and restored there; to the user,
 that message waits a little longer than usual. A sandbox whose deletion failed
 before its archive still serves its chats, so it is counted, moved and, with a
 reclaimed machine, lost like any other; one whose deletion is pending or
-verified is left to that deletion.
+verified is left to that deletion. A pending deletion without an archive
+finishes without the Host once the machine is reclaimed, as below.
 
 In an autoscaled CloudLab pool a moving-out member stops counting toward
 `min_hosts`, so its replacement is acquired while it still serves. It still
@@ -562,8 +563,10 @@ groups become `cold` as above. Every other group its Host still holds lost its
 only Docker copy with the machine: once the Host has been silent for 10
 minutes and no turn, claim or Fork of the group is in flight, the group and its
 chats become LOST, their queued turns fail with a reason, and
-`compute_groups_lost_with_server` reports how many. The Host row stays for
-**Remove from pool**.
+`compute_groups_lost_with_server` reports how many. A group an administrator
+was already deleting without an archive is deleted instead, by the deletion
+worker's next attempt after those 10 minutes, without asking the Host. The
+Host row stays for **Remove from pool**.
 
 ## Automatic CloudLab node replacement
 

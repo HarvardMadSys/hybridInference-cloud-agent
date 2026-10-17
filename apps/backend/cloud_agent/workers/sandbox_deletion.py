@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 
 import httpx
 
+from cloud_agent.domain.compute import RECLAIMED_QUIET_SECONDS
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.sandbox_archive import S3SandboxArchiveStore
 from cloud_agent.sandbox_manager_client import SandboxManagerError
@@ -131,6 +132,15 @@ async def delete_one_archived_sandbox(
     try:
         if discarding:
             host = await store.host_pool.get_host(host=str(claim["host"]))
+            if host is not None and host.get("compute_node_id") is not None:
+                request_phase = "complete_reclaimed_discard"
+                if await store.sandbox.complete_admin_sandbox_discard(
+                    **fence, reclaimed_quiet_seconds=RECLAIMED_QUIET_SECONDS
+                ):
+                    # Its provider reclaimed the machine, and the container
+                    # with it: the host this would wait for never answers.
+                    return True
+                request_phase = "resolve_sandbox_manager"
             sandbox_manager = sandbox_manager_for_host(host) if host is not None else None
             if sandbox_manager is None:
                 configuration_error = sandbox_manager_configuration_error(host)

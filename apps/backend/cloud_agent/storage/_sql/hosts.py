@@ -398,6 +398,22 @@ REVOKED_HOST_SQL = """EXISTS (
 )"""
 
 
+#: Whether host ``{host}`` runs on a machine its provider confirmed
+#: ``terminated`` and has been silent for ``{quiet}`` seconds: whatever Docker
+#: held there went with the machine, and the host will never answer again. The
+#: rule the compute reconciler marks such a host's remaining groups lost by.
+RECLAIMED_HOST_SQL = """EXISTS (
+    SELECT 1 FROM agent_runner_hosts reclaimed
+    JOIN agent_compute_nodes reclaimed_node ON reclaimed_node.id = reclaimed.compute_node_id
+    JOIN agent_compute_allocations reclaimed_machine
+        ON reclaimed_machine.id = reclaimed_node.allocation_id
+    WHERE reclaimed.host = {host}
+      AND reclaimed_machine.observed_state = 'terminated'
+      AND (reclaimed.last_heartbeat_at IS NULL
+           OR reclaimed.last_heartbeat_at < NOW() - make_interval(secs => {quiet}))
+)"""
+
+
 async def refuse_start_on_revoked_host(conn: Any, group: Any) -> str | None:
     """Refuse to start ``group`` on a revoked host; ``None`` lets the start go ahead.
 
