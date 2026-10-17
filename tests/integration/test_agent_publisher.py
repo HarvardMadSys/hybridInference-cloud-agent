@@ -696,6 +696,39 @@ def test_unapplyable_patch_fails_without_publishing(origin):
     assert _branches(clone_url) == ["main"]
 
 
+def test_an_apply_failure_says_which_file_did_not_apply(origin):
+    """Git goes on writing progress after the file that failed; the error names that file."""
+    clone_url, base_sha = origin
+    patch = (
+        "diff --git a/app.py b/app.py\n"
+        "--- a/app.py\n"
+        "+++ b/app.py\n"
+        "@@ -1,2 +1,2 @@\n"
+        " context that does not exist\n"
+        "-    return 0\n"
+        "+    return 1\n"
+        "diff --git a/README.md b/README.md\n"
+        "--- a/README.md\n"
+        "+++ b/README.md\n"
+        "@@ -1 +1 @@\n"
+        "-# demo\n"
+        "+# demo, edited\n"
+    )
+
+    with pytest.raises(PublishError) as failed:
+        publish_patch(
+            job_id="ajob_half",
+            patch=patch,
+            clone_url=clone_url,
+            base_sha=base_sha,
+            commit_message="agent: one file does not apply",
+        )
+    assert str(failed.value).startswith("git apply failed: ")
+    assert "error: app.py: patch does not apply" in str(failed.value)
+    assert "Falling back" not in str(failed.value)
+    assert _branches(clone_url) == ["main"]
+
+
 def test_noop_patch_is_reported_rather_than_pushed(origin):
     """A patch that applies to nothing does not create an empty branch."""
     clone_url, base_sha = origin

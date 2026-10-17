@@ -46,6 +46,8 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _GIT_TIMEOUT_S = 120.0
+#: How many error lines a failed local git command's message quotes.
+_ERROR_LINES_QUOTED = 3
 
 # A commit hash and nothing else. git treats a leading `-` as an option even
 # in positions that look like operands, so an unvalidated ref is an argument
@@ -158,10 +160,28 @@ def _run_git(
         raise error(f"git {args[0]} timed out after {timeout_s:.0f}s") from exc
     if completed.returncode != 0:
         detail = (completed.stderr or completed.stdout or "").strip().splitlines()
-        tail = detail[-1] if detail else "no output"
+        # The publish worker tells a dropped connection from a refusal by a
+        # remote command's last line, so that one stays as it is.
+        tail = (None if remote else _error_lines(detail)) or (detail[-1] if detail else "no output")
         error = TransientPublishError if remote else PublishError
         raise error(f"git {args[0]} failed: {tail}")
     return completed.stdout
+
+
+def _error_lines(detail: list[str]) -> str | None:
+    """The first few distinct ``error:`` and ``fatal:`` lines of a failed command.
+
+    Git writes them where they happen and goes on writing progress after them:
+    ``git apply --3way`` ends a failed apply with "Falling back to direct
+    application..." or "Applied patch to 'b.txt' cleanly.", so its last line
+    does not say which file failed. ``None`` when there are none.
+    """
+    errors = list(dict.fromkeys(line for line in detail if line.startswith(("error:", "fatal:"))))
+    if not errors:
+        return None
+    quoted = "; ".join(errors[:_ERROR_LINES_QUOTED])
+    more = len(errors) - _ERROR_LINES_QUOTED
+    return f"{quoted}; and {more} more" if more > 0 else quoted
 
 
 @dataclass
