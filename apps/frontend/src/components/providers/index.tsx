@@ -35,6 +35,6 @@ export function Providers({
   );
 }
 
-export { useAuth } from './AuthProvider';
+export { useAuth, useSignedInAccount } from './AuthProvider';
 export { useLocale, useT } from './LocaleProvider';
 export { useTheme } from './ThemeProvider';

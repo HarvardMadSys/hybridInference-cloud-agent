@@ -615,7 +615,7 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
     const snapshot = draftStore.capture();
     setGoalHint(null);
     const job = await attachments.whileSending(
-      createAgentJob(requestBody(objective, { objective })),
+      createAgentJob(requestBody(objective, { objective }), { account: userId }),
     );
     draftStore.acknowledge(snapshot);
     if (mounted.current) router.push(`/${job.id}`);
@@ -641,7 +641,9 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
     setError(null);
     try {
       const snapshot = draftStore.capture();
-      const job = await attachments.whileSending(createAgentJob(requestBody(task.trim())));
+      const job = await attachments.whileSending(
+        createAgentJob(requestBody(task.trim()), { account: userId }),
+      );
       draftStore.acknowledge(snapshot);
       if (mounted.current) router.push(`/${job.id}`);
     } catch (cause: unknown) {

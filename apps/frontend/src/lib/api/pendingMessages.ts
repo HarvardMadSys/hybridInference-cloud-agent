@@ -173,10 +173,15 @@ function pendingKey(scope: string): string {
   return created;
 }
 
-function clearPendingKey(scope: string): void {
+function clearPendingKey(scope: string, key: string): void {
+  // An older send can answer after a newer one in this conversation rotated
+  // the key. It retires only the key it was sent with.
+  if (pendingKeys.get(scope) !== key) return;
   pendingKeys.delete(scope);
   try {
-    globalThis.sessionStorage?.removeItem(keyStorage(scope));
+    if (globalThis.sessionStorage?.getItem(keyStorage(scope)) === key) {
+      globalThis.sessionStorage.removeItem(keyStorage(scope));
+    }
   } catch {
     // The answer already arrived; cleanup is best effort.
   }
@@ -202,12 +207,14 @@ export async function submitThreadMessage(
       headers: { 'Content-Type': 'application/json', 'Idempotency-Key': key },
       body: JSON.stringify(request),
     });
-  let resp = await send(options.requestId ?? pendingKey(scope));
+  let key = options.requestId ?? pendingKey(scope);
+  let resp = await send(key);
   if (resp.status === 409 && options.requestId === undefined) {
     const type = await errorType(resp);
     if (type === 'idempotency_conflict') {
-      clearPendingKey(scope);
-      resp = await send(pendingKey(scope));
+      clearPendingKey(scope, key);
+      key = pendingKey(scope);
+      resp = await send(key);
     }
   }
   if (!resp.ok) {
@@ -216,7 +223,7 @@ export async function submitThreadMessage(
     return queueJson<ThreadMessageResultApi>(resp);
   }
   const result = await queueJson<ThreadMessageResultApi>(resp);
-  if (options.requestId === undefined) clearPendingKey(scope);
+  if (options.requestId === undefined) clearPendingKey(scope, key);
   return result;
 }
 

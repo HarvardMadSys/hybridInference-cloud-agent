@@ -273,17 +273,33 @@ export const suggestEnvironmentScript = (repo: string) =>
     'POST',
     { repo },
   );
-export const testEnvironment = (
+/**
+ * The key of each test request not yet answered with its run, by environment
+ * version. A test whose response was lost may be running; the retry carries
+ * the same key, so the control plane answers with that run instead of
+ * refusing a second test while the dialog cannot see or cancel the first.
+ */
+const pendingTests = new Map<string, string>();
+
+export async function testEnvironment(
   environment_id: string,
   environment_revision: number,
   global_revision: number,
-) =>
-  call<EnvironmentRun>(
+): Promise<EnvironmentRun> {
+  const scope = `${environment_id}:${environment_revision}:${global_revision}`;
+  const key = pendingTests.get(scope) ?? crypto.randomUUID();
+  pendingTests.set(scope, key);
+  // Kept on any failure: the control plane records a key only with the run it
+  // made, so resending one it never recorded is simply a new request.
+  const run = await call<EnvironmentRun>(
     'environment-runs',
     'POST',
     { environment_id, environment_revision, global_revision },
-    crypto.randomUUID(),
+    key,
   );
+  if (pendingTests.get(scope) === key) pendingTests.delete(scope);
+  return run;
+}
 export const getEnvironmentRun = (id: string) => call<EnvironmentRun>(`environment-runs/${id}`);
 export const cancelEnvironmentRun = (id: string) =>
   call<EnvironmentRun>(`environment-runs/${id}/cancel`, 'POST');

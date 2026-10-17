@@ -10,7 +10,7 @@
 import { apiRepo, projectKey } from '@/lib/temporaryWorkspace';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { useT } from '@/components/providers';
+import { useSignedInAccount, useT } from '@/components/providers';
 import type { TranslationKey } from '@/lib/i18n/dictionaries/en';
 
 import {
@@ -321,6 +321,7 @@ export function RunDetails({
 }) {
   const t = useT();
   const router = useRouter();
+  const account = useSignedInAccount();
   const idPrefix = `run-${jobId}`;
   const { usage, loaded, refreshing, error, refresh } = useJobUsage(jobId);
   const [restarting, setRestarting] = useState(false);
@@ -387,14 +388,17 @@ export function RunDetails({
     setRestarting(true);
     setRestartError(null);
     try {
-      const restart = await createAgentJob({
-        repo: apiRepo(repo),
-        task_prompt: prompt,
-        model,
-        ...((job?.reasoning_effort ?? turnFallback?.reasoningEffort)
-          ? { reasoning_effort: job?.reasoning_effort ?? turnFallback?.reasoningEffort }
-          : {}),
-      });
+      const restart = await createAgentJob(
+        {
+          repo: apiRepo(repo),
+          task_prompt: prompt,
+          model,
+          ...((job?.reasoning_effort ?? turnFallback?.reasoningEffort)
+            ? { reasoning_effort: job?.reasoning_effort ?? turnFallback?.reasoningEffort }
+            : {}),
+        },
+        { account },
+      );
       router.push(`/${restart.id}`);
     } catch (cause: unknown) {
       setRestarting(false);

@@ -94,6 +94,35 @@ describe('job submission recovery', () => {
     },
   );
 
+  it('keeps the lost submission of one account for it while another account creates a task', async () => {
+    const { createAgentJob } = await import('../agents');
+    // The control plane matches a key per account.
+    const committed = new Map<string, { body: string; id: string }>();
+    let account = 'alice';
+    let loseNext = true;
+    transport.fetchWithAuth.mockImplementation(async (_base, _path, init) => {
+      const key = `${account}:${new Headers(init?.headers).get('Idempotency-Key')}`;
+      const body = String(init?.body);
+      const saved = committed.get(key) ?? { body, id: `job-${committed.size + 1}` };
+      committed.set(key, saved);
+      if (loseNext) {
+        loseNext = false;
+        throw new TypeError('Response lost after commit');
+      }
+      return jsonResponse(saved, 201);
+    });
+
+    await expect(createAgentJob(request, { account: 'alice' })).rejects.toThrow('Response lost');
+    // Another account signs in to this tab and starts its own task.
+    account = 'bob';
+    await createAgentJob({ ...request, task_prompt: 'Bob task' }, { account: 'bob' });
+    account = 'alice';
+    const retried = await createAgentJob(request, { account: 'alice' });
+
+    expect(retried.id).toBe('job-1');
+    expect(committed.size).toBe(2);
+  });
+
   it.each(['lost response', 'temporary server failure'] as const)(
     'reuses a pending request after a %s without retrying it automatically',
     async (failure) => {

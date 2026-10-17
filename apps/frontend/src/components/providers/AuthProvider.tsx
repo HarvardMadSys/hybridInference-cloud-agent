@@ -216,6 +216,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
 
+/** The signed-in account, for scoping what a component keeps; none outside the provider. */
+export function useSignedInAccount(): string | undefined {
+  return useContext(AuthContext)?.state.user?.id;
+}
+
 export function useAuth(): AuthContextValue {
   const context = useContext(AuthContext);
   if (!context) {

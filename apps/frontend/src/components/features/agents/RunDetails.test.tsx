@@ -332,12 +332,15 @@ describe('RunDetails', () => {
     fireEvent.click(restart);
 
     await waitFor(() =>
-      expect(createAgentJob).toHaveBeenCalledWith({
-        repo: 'acme/widgets',
-        task_prompt: 'Add checkout to the catalog page',
-        model: 'gpt-observed',
-        reasoning_effort: 'high',
-      }),
+      expect(createAgentJob).toHaveBeenCalledWith(
+        {
+          repo: 'acme/widgets',
+          task_prompt: 'Add checkout to the catalog page',
+          model: 'gpt-observed',
+          reasoning_effort: 'high',
+        },
+        { account: undefined },
+      ),
     );
     expect(navigation.push).toHaveBeenCalledWith('/ajob_new');
   });
