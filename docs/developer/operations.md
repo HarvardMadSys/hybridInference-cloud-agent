@@ -2193,7 +2193,10 @@ stored like a checkpoint. Design: [install snapshots](../agents/specs/2026-10-15
   the owner's one running test. After a failed build, tasks queue no new one
   for that installation for 6 hours; a passing test or an owner's rebuild
   still does. Deleting snapshots cancels their pending prebuilds, and a
-  receipt is accepted only while its run's lease is live.
+  receipt is accepted only while its run's lease is live. A prebuild no host
+  has started a day after it was queued is given up on: maintenance fails its
+  snapshot and then its run, which no claim would take any more, so it neither
+  waits for good nor counts as queued work for the autoscaler.
 - **Who uses.** A claim names a snapshot only for a new group on a host whose
   sandbox image is the snapshot's base image, and only when the binding's setup
   fingerprint (an HMAC of the install script and setup-time variables, keyed by

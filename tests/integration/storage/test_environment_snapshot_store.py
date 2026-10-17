@@ -680,6 +680,56 @@ async def test_a_prebuild_whose_snapshot_ended_is_never_claimed(store, pool, mon
     assert await _claim(store, capable=True) is None
 
 
+async def test_a_prebuild_maintenance_gave_up_on_does_not_stay_queued(store, pool, monkeypatch):
+    """A build no host took within a day is given up on, and so is the run that would build it.
+
+    Maintenance fails the snapshot, and a claim never takes a prebuild whose
+    snapshot is no longer pending. Its run stayed queued for good: only an
+    owner deleting the environment's snapshots cancelled it. The autoscaler
+    counts every queued environment run as waiting work, so the pool never
+    read as idle again and its nodes were never released.
+    """
+    monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "environment-test-key")
+    await _enable_archives(store)
+    await _host(store)
+    env = await _save(store, script="npm ci")
+    binding = await _binding(store, pool, env)
+    waiting = (await store.host_pool.autoscaling_observation(expected_deployment_sha=""))[
+        "runnable_new_group_jobs"
+    ]
+    snapshot_id = await store.environment_snapshots.queue_prebuild(
+        user_id="alice", binding_id=binding, repo="org/repo", base_sha=SOURCE
+    )
+    async with pool.acquire() as conn:
+        # A day in which no host was free to take it, as a busy pool's are:
+        # hosts look for environment runs only when no task is waiting.
+        await conn.execute(
+            "UPDATE agent_environment_snapshots SET created_at=NOW()-INTERVAL '25 hours' "
+            "WHERE id=$1",
+            snapshot_id,
+        )
+
+    # What the attempt reaper runs on every pass.
+    await store.environments.maintain_environments()
+    await store.environment_snapshots.maintain()
+
+    async with pool.acquire() as conn:
+        snapshot = await conn.fetchval(
+            "SELECT state FROM agent_environment_snapshots WHERE id=$1", snapshot_id
+        )
+        run = await conn.fetchrow(
+            "SELECT state, cleanup_complete, finished_at IS NOT NULL AS finished "
+            "FROM agent_environment_runs WHERE snapshot_id=$1",
+            snapshot_id,
+        )
+    assert snapshot == "failed"
+    assert dict(run) == {"state": "failed", "cleanup_complete": True, "finished": True}
+    assert (await store.host_pool.autoscaling_observation(expected_deployment_sha=""))[
+        "runnable_new_group_jobs"
+    ] == waiting
+    assert await _claim(store, capable=True) is None
+
+
 async def test_a_snapshot_saved_by_a_test_is_never_handed_out_and_is_retired(
     store, pool, monkeypatch
 ):

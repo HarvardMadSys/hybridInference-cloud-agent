@@ -578,7 +578,9 @@ class PostgresEnvironmentSnapshotRepository:
 
         Snapshots already due for deletion go first, so a stale one that is
         also expired or unused is deleted now rather than after the grace a
-        retired one gets.
+        retired one gets. A queued prebuild whose snapshot is no longer pending
+        is failed with it: no claim takes it, so it would otherwise wait for
+        good, counted as queued work by the autoscaler.
         """
         async with self._pool.acquire() as conn:
             await conn.execute(
@@ -612,6 +614,25 @@ class PostgresEnvironmentSnapshotRepository:
                     OR EXISTS (SELECT 1 FROM agent_environment_runs r WHERE r.id = s.run_id
                                AND r.state IN ('succeeded','failed','cancelled')
                                AND r.finished_at <= NOW() - INTERVAL '5 minutes'))
+                """
+            )
+            # Its run goes with it. A claim skips a prebuild whose snapshot is
+            # no longer pending, and a snapshot never becomes pending again, so
+            # a run left queued here waits for good. Only the runs are locked,
+            # and only those no claim holds: nothing here waits for a lock.
+            await conn.execute(
+                """
+                WITH abandoned AS MATERIALIZED (
+                    SELECT r.id FROM agent_environment_runs r
+                    WHERE r.state='queued' AND r.purpose='prebuild' AND NOT EXISTS (
+                        SELECT 1 FROM agent_environment_snapshots s
+                        WHERE s.id = r.snapshot_id AND s.state IN ('queued','building'))
+                    FOR UPDATE OF r SKIP LOCKED
+                )
+                UPDATE agent_environment_runs r SET state='failed', cleanup_complete=TRUE,
+                    detail='The installation snapshot is no longer being built',
+                    finished_at=NOW(), updated_at=NOW()
+                FROM abandoned WHERE r.id = abandoned.id
                 """
             )
         await self._retire_changed_installations()
