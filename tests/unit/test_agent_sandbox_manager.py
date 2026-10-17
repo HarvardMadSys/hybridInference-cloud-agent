@@ -26,6 +26,7 @@ from fastapi import HTTPException
 from httpx import ASGITransport, AsyncClient
 
 from cloud_agent.sandbox_manager_client import SandboxManagerClient
+from cloud_agent.schemas import RetainedSandboxStop
 from cloud_agent_host import sandbox_manager as sandbox_manager_mod
 from cloud_agent_host.chat_sandbox import (
     ACTIVATION_TMPFS,
@@ -48,6 +49,7 @@ from cloud_agent_host.sandbox_manager import (
     MAX_TERMINAL_BUFFER_BYTES,
     MAX_TERMINAL_BUFFER_EVENTS,
     MAX_TERMINAL_SESSIONS_PER_WORKSPACE,
+    SharedIdleStopRequest,
     SharedTurnRequest,
     TerminalRequest,
     _run_terminal,
@@ -68,6 +70,46 @@ from cloud_agent_host.shared_session_supervisor import (
 )
 from cloud_agent_host.tool_windows import ToolMark
 from cloud_agent_shared.host_settings import SANDBOX_MANAGER_SETTING_KEYS, default_values
+
+
+def test_generation_zero_is_limited_to_fenced_group_stop_requests():
+    with pytest.raises(ValueError, match="generation zero requires"):
+        SharedIdleStopRequest(
+            generation=3,
+            activation_generation=0,
+            reason="idle",
+            member_activation_generations={"athr_source": 0},
+        )
+    with pytest.raises(ValueError, match="generation zero requires"):
+        SharedIdleStopRequest(
+            generation=3,
+            activation_generation=0,
+            reason="orphaned_attempt",
+        )
+
+    orphan_stop = SharedIdleStopRequest(
+        generation=3,
+        activation_generation=0,
+        reason="orphaned_attempt",
+        member_activation_generations={"athr_source": 0},
+    )
+    assert orphan_stop.activation_generation == 0
+
+    with pytest.raises(ValueError, match="generation zero requires"):
+        RetainedSandboxStop(
+            thread_id="athr_source",
+            generation=3,
+            activation_generation=0,
+            reason="idle",
+        )
+    control_plane_orphan_stop = RetainedSandboxStop(
+        thread_id="athr_source",
+        generation=3,
+        activation_generation=0,
+        reason="orphaned_attempt",
+        member_activation_generations={"athr_source": 0},
+    )
+    assert control_plane_orphan_stop.activation_generation == 0
 
 
 @pytest.mark.asyncio

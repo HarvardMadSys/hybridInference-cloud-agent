@@ -36,7 +36,7 @@ import uvicorn
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.concurrency import iterate_in_threadpool
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from cloud_agent_host import sandbox_manager_profiling_policy
 from cloud_agent_host.bounded_output import OutputPump
@@ -493,6 +493,15 @@ class SharedIdleStopRequest(BaseModel):
         dict[Annotated[str, Field(min_length=1, max_length=256)], Annotated[int, Field(ge=0)]]
         | None
     ) = Field(None, max_length=128)
+
+    @model_validator(mode="after")
+    def zero_activation_requires_group_stop_scope(self) -> SharedIdleStopRequest:
+        if self.activation_generation == 0 and (
+            self.reason not in {"orphaned_attempt", "lost"}
+            or self.member_activation_generations is None
+        ):
+            raise ValueError("generation zero requires a fenced group-level orphan/lost stop")
+        return self
 
 
 class SandboxArchivePrepareRequest(BaseModel):

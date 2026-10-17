@@ -266,10 +266,8 @@ class RetainedSandboxStop(BaseModel):
 
     thread_id: str = Field(..., min_length=1, max_length=128)
     generation: int = Field(..., ge=1)
-    # A fork target is born stopped at generation zero. If the sandbox manager starts
-    # it for a file/terminal operation and then restarts before the first agent
-    # turn, the durable idle-stop fence still legitimately names generation
-    # zero. Rejecting it here leaks that reconstructed container in RUNNING.
+    # Zero is reserved for explicit group-level orphan/lost stops. Ordinary
+    # idle stops carry the origin member's positive activation generation.
     activation_generation: int = Field(..., ge=0)
     reason: Literal["idle", "orphaned_attempt", "lost"] = "idle"
     shared_live: Literal[True] = True
@@ -277,6 +275,16 @@ class RetainedSandboxStop(BaseModel):
         dict[Annotated[str, Field(min_length=1, max_length=256)], Annotated[int, Field(ge=0)]]
         | None
     ) = Field(None, max_length=128)
+
+    @model_validator(mode="after")
+    def zero_activation_requires_group_stop_scope(self) -> RetainedSandboxStop:
+        """Require a group-level scope for generation-zero stop fences."""
+        if self.activation_generation == 0 and (
+            self.reason not in {"orphaned_attempt", "lost"}
+            or self.member_activation_generations is None
+        ):
+            raise ValueError("generation zero requires a fenced group-level orphan/lost stop")
+        return self
 
 
 class HostHeartbeatRequest(BaseModel):
