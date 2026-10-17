@@ -971,7 +971,10 @@ The relay enforces these rules:
   per connection would duplicate the merged catalogue. The per-connection route
   remains available to clients needing unmodified protocol passthrough. A legacy
   SSE server cannot initialize through a pipe, so the adapters use the merged
-  host instead.
+  host instead, and the per-connection route answers a `GET` for one with 405
+  rather than relaying its stream: that stream opens by announcing the upstream
+  session its messages go to, which many such servers accept without the
+  credential, so the sandbox could use it past the relay.
 
 Tools and prompts use `<alias>__<name>` on the merged surface. Routing looks up
 that name in the catalogue; it never splits on `__`, because aliases can contain

@@ -77,7 +77,7 @@ from cloud_agent.mcp.jsonrpc import (
     MAX_MESSAGE_BYTES,
     PARSE_ERROR,
 )
-from cloud_agent.mcp.models import CapabilityKind, McpServer
+from cloud_agent.mcp.models import CapabilityKind, McpServer, Transport
 from cloud_agent.mcp.net_policy import EndpointRejected, credential_headers, policy_from_environment
 from cloud_agent.mcp.refresh import RefreshRefused, ensure_fresh
 from cloud_agent.mcp.registry import (
@@ -2434,6 +2434,21 @@ async def mcp_get(
     """
     authorized = await _authorize(server_name, authorization, store)
     assert store is not None
+    if authorized.connection.config.transport is Transport.HTTP_SSE:
+        # A 2024-11-05 server's stream opens by announcing where its messages
+        # go, session included, and many such servers take messages on that
+        # session without the credential that opened it. Relayed, it would be
+        # the sandbox's way to the owner's server past every decision and fence
+        # here. This route cannot carry the session anyway, since it posts to
+        # the stream's own address; the merged endpoint speaks it itself.
+        return JSONResponse(
+            _error_reply(
+                None,
+                f"The {authorized.alias!r} MCP connection is a legacy SSE server, whose "
+                "stream this route cannot relay. Use the merged endpoint, /v1/agent/mcp.",
+            ),
+            status_code=405,
+        )
     response = await _proxy(request, authorized=authorized, store=store, method="GET")
     if isinstance(response, StreamingResponse):
         response.body_iterator = _while_authorized(response.body_iterator, authorized, store)

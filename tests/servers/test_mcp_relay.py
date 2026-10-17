@@ -1065,6 +1065,33 @@ async def test_a_quiet_server_stream_is_closed_once_its_turn_ends(monkeypatch, s
     assert body.closed.is_set()
 
 
+async def test_a_legacy_server_stream_is_not_relayed_to_the_sandbox(monkeypatch, store):
+    """A 2024-11-05 server's stream opens by naming where its messages go.
+
+    That announcement carries the upstream session, which many such servers
+    accept messages on without the credential it was opened with. Relayed,
+    it let the sandbox post straight to the owner's server, past this relay's
+    decisions and its fence, and it named the upstream address the relay
+    otherwise keeps to itself. This route cannot carry the session anyway: it
+    posts to the stream's own address.
+    """
+    announcement = (
+        b"event: endpoint\ndata: http://" + _UPSTREAM_HOST.encode() + b"/messages"
+        b"?sessionId=upstream-session-7\n\n"
+    )
+    upstream = Upstream(body=announcement, content_type="text/event-stream")
+    store.connection = _connection(transport="http-sse")
+    store.bindings = [_binding(transport="http-sse")]
+    async with _relay(monkeypatch, store, upstream) as api:
+        response = await api.get(f"/v1/agent/mcp/{_ALIAS}", headers=_auth())
+
+    assert b"upstream-session-7" not in response.content
+    assert _UPSTREAM_HOST not in response.text
+    assert response.status_code == 405
+    assert "merged" in response.json()["error"]["message"]
+    assert upstream.requests == []
+
+
 async def test_a_server_stream_runs_on_while_its_session_stays_authorized(monkeypatch, store):
     """Looking again is not ending: a live session's stream carries everything the server sends."""
     monkeypatch.setattr(agent_mcp_router, "_STREAM_RECHECK_S", 0.05)
