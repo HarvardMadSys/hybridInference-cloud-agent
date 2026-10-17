@@ -1574,6 +1574,111 @@ def test_a_member_inspection_does_not_block_another_groups_status(monkeypatch, c
     assert "error" not in status_outcome
 
 
+def test_retiring_a_cli_at_settlement_does_not_hold_the_supervisor_lock():
+    """A CLI that must retire after its turn is closed when its member settles.
+
+    The close waits for the CLI to flush its native history and, when it does
+    not exit in time, for a Docker exec to kill it: seconds, up to that exec's
+    timeout. Holding the supervisor-wide lock across it stalled every other
+    group's lifecycle calls, the host listing among them. The member's own next
+    process still waits for the close, so it never resumes unflushed history.
+    """
+    _manager, supervisor, lease = _question_activation()
+    factory = supervisor._transport_factory
+    other = replace(_spec(), thread_id="athr_other", sandbox_id="asbx_other")
+    supervisor.register_manifest(other, [replace(_members()[0], thread_id=other.thread_id)])
+    retiring = factory.transports[0]
+    retiring.retire_after_turn = True
+    entered = threading.Event()
+    release = threading.Event()
+
+    def flushing_close() -> None:
+        entered.set()
+        assert release.wait(timeout=2)
+        retiring.alive = False
+
+    retiring.close = flushing_close
+    settle_thread, settle_outcome = _in_thread(
+        lambda: supervisor.settle(
+            "athr_source", lease.token, job_id="ajob_next", context_status="live"
+        )
+    )
+    resume_thread = None
+    try:
+        assert entered.wait(timeout=1)
+        status_thread, status_outcome = _in_thread(lambda: supervisor.status(other.thread_id))
+        status_thread.join(timeout=0.5)
+        assert not status_thread.is_alive(), "a retiring CLI's close held the supervisor lock"
+        assert "error" not in status_outcome
+        nxt = supervisor.acquire(
+            _spec(),
+            thread_id="athr_source",
+            owner="attempt:2",
+            activation_generation=2,
+            has_settled_context=True,
+            manifest=_members(),
+        )
+        resume = replace(
+            _launch("athr_source", native_session_id="native-source", slot=0),
+            credential="grant-2",
+            residency_generation=2,
+        )
+        resume_thread, resume_outcome = _in_thread(
+            lambda: supervisor.ensure_resident("athr_source", nxt.token, resume)
+        )
+        resume_thread.join(timeout=0.3)
+        assert resume_thread.is_alive(), "the next process started before the old one closed"
+        assert len(factory.opened) == 1
+    finally:
+        release.set()
+        settle_thread.join(timeout=2)
+        if resume_thread is not None:
+            resume_thread.join(timeout=2)
+
+    assert not settle_thread.is_alive()
+    settled = settle_outcome["value"]
+    assert settled.busy is False
+    assert settled.resident_state == "restarting"
+    assert settled.native_session_id == "native-source"
+    assert resume_thread is not None and not resume_thread.is_alive()
+    assert resume_outcome["value"].resident_action == "resume"
+    assert len(factory.opened) == 2
+
+
+def test_a_retiring_cli_that_fails_to_close_still_settles_its_member():
+    """The settlement's native locator is recorded before the CLI retires.
+
+    A close that cannot confirm the CLI's exit, such as a Docker exec kill
+    timing out, used to fail the settlement after recording it, with the lease
+    still held. The runner's retry then found no live transport to settle, so
+    a turn that had completed ended with its chat's context lost. The next
+    process of the member reaps its slot before it starts.
+    """
+    _manager, supervisor, lease = _question_activation()
+    retiring = supervisor._transport_factory.transports[0]
+    retiring.retire_after_turn = True
+
+    def failing_close() -> None:
+        retiring.alive = False
+        raise SandboxError("resident process cleanup failed: Docker exec timed out")
+
+    retiring.close = failing_close
+
+    settled = supervisor.settle(
+        "athr_source", lease.token, job_id="ajob_next", context_status="live"
+    )
+
+    assert settled.busy is False
+    assert settled.resident_state == "restarting"
+    assert settled.context_status == "live"
+    assert settled.native_session_id == "native-source"
+    assert settled.last_settled_job_id == "ajob_next"
+    replayed = supervisor.settle(
+        "athr_source", lease.token, job_id="ajob_next", context_status="live"
+    )
+    assert replayed == settled
+
+
 def test_environment_preparation_reads_docker_outside_the_supervisor_lock(monkeypatch):
     """Preparation inspects the container and reads its receipt without the lock.
 

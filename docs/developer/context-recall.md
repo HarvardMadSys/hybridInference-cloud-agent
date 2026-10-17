@@ -83,9 +83,11 @@ The pinned Claude 2.1.220 CLI has a reproduced retry-parent-chain defect: a
 delayed `system/api_error` can bypass a successfully retried assistant reply on
 a later resume. When the driver sees `system/api_retry`, it settles the current
 turn, saves the native locator, and gracefully retires the process. The next
-turn resumes that same session in the same container. A successful turn without
-a retry keeps the live process. This handling does not repair transcripts that
-the older behavior already damaged.
+turn resumes that same session in the same container, once the retiring process
+has flushed its history; a retirement that cannot confirm the exit still
+settles the turn, and the next launch reaps the member's slot before it starts.
+A successful turn without a retry keeps the live process. This handling does
+not repair transcripts that the older behavior already damaged.
 
 The sandbox's `http-agent-live-bridge=4` helper pin is required by host
 attestation. Version 4 gates every turn on the current live SSE subscription,

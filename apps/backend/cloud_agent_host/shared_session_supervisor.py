@@ -3239,17 +3239,59 @@ class SharedChatSessionSupervisor:
             # a retry-affected CLI. Unexpected process death still fails the
             # live-transport check above, and no subsequent turn can enter
             # until EOF has flushed the native history.
-            if member.transport.retire_after_turn:
-                member.transport.close()
-                member.resident_state = "restarting"
-            else:
+            retiring = member.transport if member.transport.retire_after_turn else None
+            retire_later: ResidentTransport[DialectRuntime] | None = None
+            retire_key = f"retire:{thread_id}"
+            if retiring is None:
                 member.resident_state = "live"
+            else:
+                member.transport = None
+                member.resident_state = "restarting"
+                # Retiring waits for the CLI to flush, and for a Docker exec to
+                # kill it if it does not exit, so it runs outside this lock.
+                # Meanwhile the member lock keeps the member's next process
+                # from resuming that history, and the group stays busy so no
+                # capture freezes the CLI mid-flush. Whoever holds the member
+                # lock already waits for this lock, so the CLI retires here.
+                if member.turn_lock.acquire(blocking=False):
+                    retire_later = retiring
+                    group.operation_tokens[retire_key] = thread_id
+                else:
+                    self._retire(retiring, thread_id)
             member.lease_token = None
             member.lease_owner = None
             self._arm_idle_if_quiescent(group)
             descriptor = self._descriptor(group, member)
             member.settlement_receipt = (token, descriptor)
-            return descriptor
+        if retire_later is not None:
+            try:
+                self._retire(retire_later, thread_id)
+            finally:
+                with self._lock:
+                    group.operation_tokens.pop(retire_key, None)
+                    self._arm_idle_if_quiescent(group)
+                member.turn_lock.release()
+        return descriptor
+
+    @staticmethod
+    def _retire(transport: ResidentTransport[DialectRuntime], thread_id: str) -> None:
+        """Close a settled member's CLI; the settlement stands whatever the close says.
+
+        The settlement has recorded the CLI's native locator already. A close
+        that cannot confirm the exit leaves the process to the member's next
+        launch: Claude Code, the one CLI that retires, reaps its slot first.
+        """
+        try:
+            transport.close()
+        except Exception as exc:
+            logger.warning(
+                "retiring shared member CLI did not confirm its exit",
+                extra={
+                    "event": "shared_member_retire_close_failed",
+                    "thread_id": thread_id,
+                    "error_type": _safe_error_type(exc),
+                },
+            )
 
     def abandon(
         self,
