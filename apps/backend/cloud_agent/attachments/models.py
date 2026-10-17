@@ -135,9 +135,14 @@ def safe_attachment_path(path: str) -> str:
     upload is no more trusted than one arriving from a repository. Refusing is
     the whole behaviour — a path is never rewritten into a safe one, because
     that hides the problem instead of reporting it.
+
+    A name is kept exactly as it was given. Surrounding whitespace is part of
+    the name — ``" report.csv "`` and ``"report.csv"`` are different files — so
+    it is never trimmed. A path that is only whitespace names nothing, and is
+    refused like an empty one.
     """
-    cleaned = (path or "").strip().replace("\\", "/")
-    if not cleaned or len(cleaned) > MAX_ATTACHMENT_PATH_LENGTH:
+    cleaned = (path or "").replace("\\", "/")
+    if not cleaned.strip() or len(cleaned) > MAX_ATTACHMENT_PATH_LENGTH:
         raise AttachmentError("An upload path must be 1 to 512 characters.")
     if cleaned.startswith("/") or _DRIVE_PREFIX.match(cleaned):
         raise AttachmentError("An upload path must be relative.")

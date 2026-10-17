@@ -28,9 +28,17 @@ describe('isSafeUploadPath', () => {
     'a\nb.txt',
     'a\rb.txt',
     'tab\tname.txt',
+    '   ',
   ])('refuses %s', (path) => {
     expect(isSafeUploadPath(path, MAX)).toBe(false);
   });
+
+  it.each([' report.csv ', 'notes.txt ', ' specs/api.md '])(
+    'accepts %s with its surrounding whitespace intact',
+    (path) => {
+      expect(isSafeUploadPath(path, MAX)).toBe(true);
+    },
+  );
 
   it('refuses a path longer than the server will accept', () => {
     expect(isSafeUploadPath('a'.repeat(MAX), MAX)).toBe(true);
