@@ -150,11 +150,12 @@ jobs:
             docker=false
           fi
 
-          # Docs: the site's sources, any Markdown file a page includes or
-          # links to, and the locked Sphinx toolchain and the target that runs it.
+          # Docs: the site's sources and translations, any Markdown file a
+          # page includes or links to, and the locked Sphinx toolchain, the
+          # target that runs it and the translation checker.
           if matches '\.md$' \
              || matches '^docs/developer/' \
-             || matches '^(pyproject\.toml|uv\.lock|Makefile)$'; then
+             || matches '^(pyproject\.toml|uv\.lock|Makefile|scripts/check_docs_translations\.py)$'; then
             docs=true
           else
             docs=false
@@ -1819,7 +1820,8 @@ jobs:
   # ------------------------------------------------------------------- docs
   # The developer documentation in docs/developer/ builds with warnings as
   # errors, so a broken link, a missing anchor or a page left out of the table
-  # of contents fails here rather than on the published site.
+  # of contents fails here rather than on the published site. The same target
+  # then checks the translations, which fall back to English silently.
   docs-build:
     name: Docs Build
     needs: changes
@@ -1855,11 +1857,14 @@ jobs:
       - name: Sync dependencies
         run: uv sync --locked --only-group dev
 
-      # Through the Makefile, so this job and a contributor's `make docs` run
-      # the same command. --no-sync keeps `uv run` from re-syncing the full
-      # project closure the step above deliberately left out.
-      - name: Build developer docs
-        run: make docs UV_RUN="uv run --no-sync"
+      # Through the Makefile, so this job and a contributor's `make docs-verify`
+      # run the same commands: `make docs` (every published language), then the
+      # translation check, which catches a stale, missing or dropped
+      # translation that -W cannot see. --no-sync keeps `uv run` from
+      # re-syncing the full project closure the step above deliberately left
+      # out.
+      - name: Build developer docs and verify translations
+        run: make docs-verify UV_RUN="uv run --no-sync"
 
   ci-gate:
     name: CI Gate

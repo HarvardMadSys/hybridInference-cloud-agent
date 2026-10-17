@@ -13,10 +13,16 @@ site through `{include}` wrappers; links to them go to their site page. A link
 to a path that does not exist in the repository is still a build error.
 """
 
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
 from pathlib import Path
 
 from docutils import nodes
 from sphinx import addnodes
+from sphinx.transforms import i18n as _sphinx_i18n
 from sphinx.util import logging
 
 # -- Project information -----------------------------------------------------
@@ -48,6 +54,58 @@ myst_enable_extensions = [
 myst_heading_anchors = 4
 
 exclude_patterns = ["_build"]
+templates_path = ["_templates"]
+
+# -- Translations ------------------------------------------------------------
+# The pages are written in English and translated with Sphinx's gettext
+# workflow: `make docs-gettext` extracts one catalog per page, a translator
+# fills in the `msgstr` entries, and `make docs-lang DOCS_LANG=<code>` builds
+# that language. Every string without a translation falls back to the English
+# source, so a partly-translated language still builds a complete site -- and
+# when an English paragraph changes, its `msgid` changes with it and the page
+# falls back to English rather than serving a translation that no longer
+# matches. See translations.md.
+language = os.environ.get("DOCS_LANGUAGE", "en").strip() or "en"
+locale_dirs = ["locale"]
+
+# One catalog per page rather than one per directory, so a pull request shows
+# which page a translation touches.
+gettext_compact = False
+
+# Languages the published site offers, as `code:endonym` pairs, in switcher
+# order. The first is the root language, published at the site root
+# (`/operations.html`); every other language goes in a directory named for its
+# code (`/zh_CN/operations.html`), which keeps every URL the English site had.
+#
+# The default is deliberately not empty: the published site is built by one
+# `sphinx-build` whose command line lives in the hosting project's settings,
+# not in this repository, so the list has to travel here. The root-language
+# build emits every other language beneath its own output directory
+# (`_build_nested_languages` below). `DOCS_LANGUAGES="en:English"` builds the
+# root language alone.
+_languages = []
+for _entry in os.environ.get("DOCS_LANGUAGES", "en:English,zh_CN:简体中文").split(","):
+    _code, _, _label = _entry.strip().partition(":")
+    # A code reaches an href, so accept only the shape a locale code has.
+    if _code.replace("_", "").isalnum() and _label.strip():
+        _languages.append({"code": _code, "label": _label.strip()})
+if len(_languages) < 2:
+    # One language needs no switcher, and a malformed value must not render a
+    # half-built one.
+    _languages = []
+_root_language = _languages[0]["code"] if _languages else language
+
+# A translated paragraph's links are re-parsed from its msgstr, and Sphinx then
+# copies each original link's attributes onto the translated link with the same
+# (domain, type, target) key. MyST keeps a link's anchor apart from its target,
+# in `reftargetid`, so two links to different headings of one page share a key
+# and the last one's anchor overwrote the others: "see [A](ops.md#a) and
+# [B](ops.md#b)" rendered both links to #b. Keep the anchor the translation
+# itself names; the translation check confirms it matches the English.
+_sphinx_i18n.EXCLUDED_PENDING_XREF_ATTRIBUTES = (
+    *_sphinx_i18n.EXCLUDED_PENDING_XREF_ATTRIBUTES,
+    "reftargetid",
+)
 
 # Mermaid diagrams and dotenv examples have no Pygments lexer. They render as
 # plain preformatted text, which is how GitHub shows the dotenv blocks anyway.
@@ -63,6 +121,11 @@ html_theme = "sphinx_rtd_theme"
 html_static_path = ["_static"]
 html_css_files = ["custom.css"]
 html_title = "Cloud Agent documentation"
+
+html_context = {
+    "doc_languages": _languages,
+    "doc_root_language": _root_language,
+}
 
 html_theme_options = {
     "navigation_depth": 4,
@@ -197,10 +260,64 @@ def _check_anchors(app, doctree, docname):
             )
 
 
+# Set in the child processes below so a nested build does not nest again.
+_NESTED_ENV = "DOCS_NESTED_BUILD"
+
+
+def _build_nested_languages(app, exception):
+    """Build every non-root language into ``<outdir>/<code>/``.
+
+    Sphinx builds one language per invocation, and the published site gets one
+    invocation this repository does not control. Running the other languages
+    from ``build-finished`` is what lets that single command publish all of
+    them. The child inherits ``-W``, so a translation that breaks the build
+    fails the parent too. Doctrees go to a temporary directory so the published
+    tree contains only HTML.
+    """
+    if exception is not None or os.environ.get(_NESTED_ENV) == "1":
+        return
+    # Only the root-language build nests; a `-D language=zh_CN` build is a
+    # translator iterating on one language or the child process below.
+    if app.builder.name != "html" or app.config.language != _root_language:
+        return
+    nested = [entry["code"] for entry in _languages if entry["code"] != _root_language]
+    if not nested:
+        return
+
+    env = {**os.environ, _NESTED_ENV: "1"}
+    scratch = tempfile.mkdtemp(prefix="sphinx-i18n-")
+    try:
+        for code in nested:
+            subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "sphinx",
+                    "-b",
+                    "html",
+                    str(app.srcdir),
+                    os.path.join(str(app.outdir), code),
+                    "-d",
+                    os.path.join(scratch, code),
+                    "-D",
+                    f"language={code}",
+                    "-W",
+                    "--keep-going",
+                    "-q",
+                ],
+                env=env,
+                check=True,
+            )
+            print(f"  translated site: {os.path.join(str(app.outdir), code)}")
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
 def setup(app):
-    """Register the repository-link rewrite and its anchor check."""
+    """Register the repository-link rewrite, its anchor check and translations."""
     # Before the download collector, so repository files are not copied into
     # the site as downloads.
     app.connect("doctree-read", _rewrite_repository_links, priority=400)
     app.connect("doctree-resolved", _check_anchors)
+    app.connect("build-finished", _build_nested_languages)
     return {"parallel_read_safe": True, "parallel_write_safe": True}

@@ -22,6 +22,7 @@ under the MIT license; bugs and questions go to its
 | Set up a checkout, find the code that owns a change, and run checks | [Developer guide](development.md) |
 | Find the module that owns a responsibility and follow its dependencies | [Code structure](code-structure.md) |
 | Send a change | [Contributing](contributing.md) |
+| Translate a page, or update a translation after an English edit | [Translating the docs](translations.md) |
 | Configure credentials, enroll hosts, qualify Kata, deploy, and migrate | [Operations runbook](operations.md) |
 | Upgrade an existing deployment and see what each migration changes | [Upgrade notes](upgrade-notes.md) |
 | Look up a configuration name, default, or owning component | [Configuration reference](configuration.md) |
@@ -45,6 +46,7 @@ local-stack
 development
 code-structure
 contributing
+translations
 ```
 
 ```{toctree}

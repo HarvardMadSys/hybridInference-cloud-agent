@@ -1,0 +1,438 @@
+# Simplified Chinese translation of the Cloud Agent developer documentation.
+# See docs/developer/translations.md.
+msgid ""
+msgstr ""
+"Project-Id-Version: HybridInference Cloud Agent \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-10-16 01:54-0400\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: The HybridInference contributors\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../developer/runner-lease-troubleshooting.md:1
+msgid "Runner lease failures"
+msgstr "Runner 租约失效"
+
+#: ../developer/runner-lease-troubleshooting.md:3
+msgid ""
+"A retained sandbox may still exist after the worker driving its turn "
+"loses its lease. Start with the attempt records and runner logs: "
+"container presence alone does not prove that the native session can "
+"safely continue."
+msgstr ""
+"驱动某个轮次的 worker 丢了租约之后，保留沙箱可能还在。排查时先看 attempt 记录和 runner "
+"日志：容器还在，并不能说明原生会话可以安全地接着用。"
+
+#: ../developer/runner-lease-troubleshooting.md:7
+msgid "Lease timing and retries"
+msgstr "租约时长与重试"
+
+#: ../developer/runner-lease-troubleshooting.md:9
+msgid "The lease and execution timeout govern different things:"
+msgstr "租约和执行超时管的是两件不同的事："
+
+#: ../developer/runner-lease-troubleshooting.md
+msgid "Setting"
+msgstr "设置"
+
+#: ../developer/runner-lease-troubleshooting.md
+msgid "Default"
+msgstr "默认值"
+
+#: ../developer/runner-lease-troubleshooting.md
+msgid "Purpose"
+msgstr "用途"
+
+#: ../developer/runner-lease-troubleshooting.md
+msgid "Attempt lease"
+msgstr "Attempt 租约"
+
+#: ../developer/runner-lease-troubleshooting.md
+msgid "120 seconds"
+msgstr "120 秒"
+
+#: ../developer/runner-lease-troubleshooting.md
+msgid "Fences the worker's authority to write."
+msgstr "限定 worker 在什么时候有权写入。"
+
+#: ../developer/runner-lease-troubleshooting.md
+msgid "Heartbeat interval"
+msgstr "心跳间隔"
+
+#: ../developer/runner-lease-troubleshooting.md
+msgid "30 seconds"
+msgstr "30 秒"
+
+#: ../developer/runner-lease-troubleshooting.md
+msgid "Renews that authority on a separate thread."
+msgstr "在单独的线程里续期这份写入权。"
+
+#: ../developer/runner-lease-troubleshooting.md
+msgid "Heartbeat HTTP timeout"
+msgstr "心跳 HTTP 超时"
+
+#: ../developer/runner-lease-troubleshooting.md
+msgid "10 seconds"
+msgstr "10 秒"
+
+#: ../developer/runner-lease-troubleshooting.md
+msgid "Limits each renewal request."
+msgstr "每次续期请求最多等这么久。"
+
+#: ../developer/runner-lease-troubleshooting.md
+msgid "Retry delay after heartbeat failure"
+msgstr "心跳失败后的重试延迟"
+
+#: ../developer/runner-lease-troubleshooting.md
+msgid "5 seconds"
+msgstr "5 秒"
+
+#: ../developer/runner-lease-troubleshooting.md
+msgid "Retries while the current lease remains valid."
+msgstr "在当前租约仍然有效时重试。"
+
+#: ../developer/runner-lease-troubleshooting.md
+msgid "Agent execution timeout"
+msgstr "Agent 执行超时"
+
+#: ../developer/runner-lease-troubleshooting.md
+msgid "3,600 seconds"
+msgstr "3,600 秒"
+
+#: ../developer/runner-lease-troubleshooting.md
+msgid "Limits the turn itself."
+msgstr "限制轮次本身最多跑多久。"
+
+#: ../developer/runner-lease-troubleshooting.md
+msgid "Ordinary control RPC timeout"
+msgstr "普通控制 RPC 超时"
+
+#: ../developer/runner-lease-troubleshooting.md
+msgid "Default for other control requests."
+msgstr "其他控制请求的默认超时。"
+
+#: ../developer/runner-lease-troubleshooting.md:20
+msgid ""
+"A successful heartbeat restores the normal interval. HTTP 409 rejects the"
+" lease permanently: renewal and execution stop, and retries cannot "
+"restore the expired owner. Renewal does not depend on model output, tool "
+"activity or progress events, so a quiet call can span many lease periods."
+msgstr ""
+"心跳成功一次，就恢复正常间隔。HTTP 409 "
+"表示租约被永久拒绝：续期和执行都会停止，重试也救不回已过期的所有者。续期不依赖模型输出、工具活动或进度事件，所以一次没有任何输出的调用，可以持续好几个租约周期。"
+
+#: ../developer/runner-lease-troubleshooting.md:25
+msgid ""
+"The runner reaches the same verdict without a 409 when the lease cannot "
+"still be valid: once its last acknowledged renewal is a whole lease old, "
+"or when the control plane refuses the worker credential itself (HTTP 401,"
+" 403 or 404, which no retry changes). It then stops the agent as for a "
+"409 instead of letting it write to the shared workspace after the reaper "
+"has superseded the attempt. A lease must therefore outlast one heartbeat "
+"interval plus one request timeout (40 seconds): a shorter "
+"`AGENT_LEASE_TTL` is ignored in favour of the default, and a shorter "
+"`--lease-ttl` is refused. A cancellation does not end renewal; the lease "
+"is kept while the runner releases or drains the turn."
+msgstr ""
+"即使没收到 409，只要租约已经不可能还有效，runner "
+"也会得出同样的结论。有两种情况：一是距离最后一次被确认的续期，已经过了整整一个租约时长；二是控制平面直接拒绝了 worker 凭据（HTTP "
+"401、403 或 404，重试也不会变）。这时它会像收到 409 一样停掉 agent，免得 reaper 已经让这个 attempt "
+"作废之后，agent 还在往共享工作区里写东西。因此，租约时长必须超过一个心跳间隔加一个请求超时，也就是 40 "
+"秒：`AGENT_LEASE_TTL` 设得比这短，会被忽略并改用默认值；`--lease-ttl` "
+"设得比这短，会直接被拒绝。取消并不会停止续期；runner 释放或排空这一轮期间，租约一直保持着。"
+
+#: ../developer/runner-lease-troubleshooting.md:35
+msgid ""
+"With the first heartbeat at 30 seconds and repeated ten-second read "
+"timeouts, retry requests start at 30, 45, 60, 75, 90 and 105 seconds "
+"after claim. This illustrates opportunities to reconnect before the "
+"original 120-second lease ends; it is not a wall-clock guarantee. HTTP "
+"timeout limits apply separately to connection, pool, write and read "
+"operations. An outage longer than the remaining lease still loses the "
+"lease."
+msgstr ""
+"假设第一次心跳在第 30 秒，之后每次读取都等满十秒超时，那么重试请求会在认领后的第 30、45、60、75、90 和 105 "
+"秒发出。这说明在最初 120 秒的租约结束之前，有好几次重新连上的机会；但这不是按墙上时钟严格保证的。HTTP "
+"超时分别作用在建立连接、连接池、写入和读取上。如果中断的时间比剩下的租约还长，租约照样会丢。"
+
+#: ../developer/runner-lease-troubleshooting.md:42
+msgid ""
+"The regression suite drives a silent six-minute turn through the real "
+"heartbeat thread, stream loop and HTTP client against a simulated lease "
+"endpoint. It covers healthy renewal and timed-out reads followed by "
+"recovery at 100 or 105 seconds. The previous cadence loses the latter "
+"case. These tests reproduce a failure mechanism; they do not establish "
+"the cause of a historical incident."
+msgstr ""
+"回归测试会用真实的心跳线程、流处理循环和 HTTP "
+"客户端，对着一个模拟的租约接口，跑一个六分钟没有任何输出的轮次。测试覆盖两种情况：续期一直正常；以及读取超时之后，在第 100 或 105 "
+"秒恢复。按以前的节奏，后一种情况会丢租约。这些测试复现的是一种出错的机制，并不能断定某次历史事故的原因。"
+
+#: ../developer/runner-lease-troubleshooting.md:48
+msgid "Diagnose from positive evidence"
+msgstr "凭确切的证据下结论"
+
+#: ../developer/runner-lease-troubleshooting.md:50
+msgid ""
+"Distinguish a renewal-request timeout from an execution timeout, explicit"
+" cancellation or agent exit. `lease_expired` proves only that the "
+"database did not persist a timely renewal. Missing error events do not "
+"prove the worker was healthy: the control outage that blocks renewal can "
+"also block error reporting."
+msgstr ""
+"先分清是续期请求超时，还是执行超时、主动取消或 agent 自己退出。`lease_expired` "
+"只能说明数据库没有及时记下续期。没有错误事件，也不代表 worker 一切正常：让续期失败的那次控制面中断，很可能也让错误上报发不出去。"
+
+#: ../developer/runner-lease-troubleshooting.md:55
+msgid "Use these ordinary process-log records:"
+msgstr "看下面这些普通的进程日志记录："
+
+#: ../developer/runner-lease-troubleshooting.md
+msgid "Record"
+msgstr "记录"
+
+#: ../developer/runner-lease-troubleshooting.md
+msgid "Evidence"
+msgstr "证据"
+
+#: ../developer/runner-lease-troubleshooting.md
+msgid "`agent_attempt_claimed`"
+msgstr ""
+
+#: ../developer/runner-lease-troubleshooting.md
+msgid "Job, attempt, worker and host identifiers."
+msgstr "任务、attempt、worker 和主机的标识。"
+
+#: ../developer/runner-lease-troubleshooting.md
+msgid "`agent_control_failure`"
+msgstr ""
+
+#: ../developer/runner-lease-troubleshooting.md
+msgid ""
+"Failed operation/stage, job ID, exception class and HTTP status when "
+"available."
+msgstr "失败的操作或阶段、任务 ID、异常类，以及能拿到时的 HTTP 状态码。"
+
+#: ../developer/runner-lease-troubleshooting.md
+msgid "`agent_heartbeat_retry`"
+msgstr ""
+
+#: ../developer/runner-lease-troubleshooting.md
+msgid ""
+"Consecutive failures, time since the last acknowledgement (or heartbeat "
+"start), and next retry delay."
+msgstr "连续失败了几次、距离上次确认（或心跳开始）过了多久，以及下次重试前要等多久。"
+
+#: ../developer/runner-lease-troubleshooting.md
+msgid "`agent_heartbeat_recovered`"
+msgstr ""
+
+#: ../developer/runner-lease-troubleshooting.md
+msgid "Renewal succeeded after failures."
+msgstr "失败几次之后，续期又成功了。"
+
+#: ../developer/runner-lease-troubleshooting.md:64
+msgid ""
+"The failure diagnostics exclude request URLs, tokens, response bodies and"
+" exception messages. The heartbeat's exception class/status are logged "
+"once per outage; retry records carry the changing count and timing."
+msgstr "失败诊断里不包含请求 URL、令牌、响应内容和异常消息。每次中断期间，心跳的异常类和状态码只记录一次；之后的重试记录只带不断变化的次数和时间。"
+
+#: ../developer/runner-lease-troubleshooting.md:68
+msgid ""
+"Correlate logs with the attempt's persisted `lease_owner`, "
+"`lease_expires_at` and event timestamps. Collect runner and control-plane"
+" logs outside their containers: replacing a container can delete its "
+"Docker log history. The runner does not configure an external collector "
+"or recover deleted logs."
+msgstr ""
+"把日志和这个 attempt 存下来的 `lease_owner`、`lease_expires_at` 以及事件时间戳对照着看。runner "
+"和控制平面的日志要收集到容器之外：替换容器时，它的 Docker 日志可能就没了。runner "
+"不会帮你配置外部日志收集，也恢复不了已经删掉的日志。"
+
+#: ../developer/runner-lease-troubleshooting.md:73
+msgid ""
+"An `attempt_superseded` event does not establish that another attempt "
+"ran. Retained sessions can become lost without a replacement, including "
+"when activation ownership is uncertain during preparation. The UI "
+"announces another attempt only when its events exist."
+msgstr ""
+"看到 `attempt_superseded` 事件，不代表真的有另一个 attempt "
+"跑过。保留会话有可能在没有任何替代的情况下丢失，比如准备阶段激活的归属不确定时。只有另一个 attempt 确实留下了事件，界面上才会显示它。"
+
+#: ../developer/runner-lease-troubleshooting.md:78
+msgid "Reporting and acknowledgement failures"
+msgstr "上报和确认失败"
+
+#: ../developer/runner-lease-troubleshooting.md:80
+msgid ""
+"Error-event upload and the terminal `finish` request are independent. The"
+" runner attempts the terminal transition even if event upload fails. If "
+"both remain unavailable, the reaper is the final backstop."
+msgstr ""
+"上传错误事件和发出终态的 `finish` 请求，是两件互不依赖的事。即使事件上传失败，runner "
+"也会尝试把任务转入终态。如果两者都一直发不出去，最后由 reaper 兜底。"
+
+#: ../developer/runner-lease-troubleshooting.md:84
+msgid ""
+"Post-claim preparation outside the shared execution handler, such as "
+"image inspection or manifest validation, has an outer failure handler "
+"too. It attempts a terminal failure before stopping heartbeat renewal and"
+" logs the exception class even if reporting fails. An explicit lease "
+"rejection skips that write. This records early setup failures without "
+"repairing their cause."
+msgstr ""
+"认领之后、在共享执行处理流程之外的准备工作，比如检查镜像或校验清单，外面也包了一层失败处理。它会在停止心跳续期之前，先尝试写入一个失败的终态；即使上报失败，也会把异常类记进日志。如果租约已被明确拒绝，就跳过这次写入。这样早期的"
+" setup 失败能留下记录，但问题本身不会因此被修好。"
+
+#: ../developer/runner-lease-troubleshooting.md:90
+msgid ""
+"After supervisor and control-plane settlement both succeed, a failed "
+"upload of the final `shared_workspace_settled` notice does not fail the "
+"turn: the runner still submits its successful terminal state. Lease "
+"rejection prevents that write. Earlier settlement failures remain "
+"failures."
+msgstr ""
+"supervisor 和控制平面两边的结算都成功之后，如果最后那条 `shared_workspace_settled` "
+"通知没传上去，这一轮不会因此失败：runner 照样提交成功的终态。租约被拒绝时，这次写入不会发生。更早阶段的结算失败，仍然按失败处理。"
+
+#: ../developer/runner-lease-troubleshooting.md:95
+msgid ""
+"Admission and settlement receipts allow **up to three attempts**, using "
+"ten-second HTTP timeouts and five-second delays. Only transport failures "
+"and HTTP 408/502/503/504 are retried; 409/410 are definitive. The prompt "
+"is sent exactly once, after its admission acknowledgement succeeds."
+msgstr ""
+"准入回执和结算回执**最多尝试三次**，每次 HTTP 超时十秒，间隔五秒。只有网络传输失败和 HTTP 408/502/503/504 "
+"会重试；409/410 就是最终结果。提示词只发送一次，而且是在准入确认成功之后。"
+
+#: ../developer/runner-lease-troubleshooting.md:100
+msgid ""
+"Supervisor settlement retains the last token's receipt until another "
+"activation takes ownership. Control-plane settlement returns the recorded"
+" boundary only for the same still-live attempt and activation. Repeating "
+"it does not increment the workspace epoch, append a snapshot or change "
+"the native turn ordinal. A sandbox manager restart loses its in-memory "
+"receipt, so uncertain completion across a restart fails closed."
+msgstr ""
+"supervisor 的结算会一直保留最后一个令牌的回执，直到另一次激活接手。控制平面的结算只会对同一个仍然有效的 attempt "
+"和激活，返回已记录的边界。重复结算不会让工作区的 epoch 加一，不会追加快照，也不会改变原生轮次的序号。sandbox manager "
+"重启后，内存里的回执就没了，所以跨重启、无法确定是否完成的情况，一律按失败处理。"
+
+#: ../developer/runner-lease-troubleshooting.md:107
+msgid "When a retained conversation can continue"
+msgstr "保留对话什么时候还能继续"
+
+#: ../developer/runner-lease-troubleshooting.md:109
+msgid ""
+"A reported preparation failure **before admission** can leave an existing"
+" conversation usable. The runner abandons the activation and reports a "
+"failed turn; the next message can resume the retained native session. "
+"This requires a known retained container. Failure before its identity was"
+" recorded does not provide that proof, and error-event availability must "
+"not gate the report."
+msgstr ""
+"**准入之前**报告的准备失败，已有的对话可能还能继续用。runner "
+"会放弃这次激活，报告一个失败的轮次；下一条消息可以接着用保留的原生会话。前提是确切知道是哪个保留容器。如果在记下容器身份之前就失败了，就证明不了这一点；而且能不能上报错误事件，不能成为报告失败的前提。"
+
+#: ../developer/runner-lease-troubleshooting.md:115
+msgid ""
+"An admission request with no received acknowledgement is different: the "
+"database may have committed it even though the runner has not sent the "
+"prompt. The membership then records the job as admitted. `abandon` only "
+"releases pre-admission turns (`admitted_job_id IS NULL`), so it cannot "
+"release this ambiguous turn; the terminal transition marks its context "
+"LOST. The runner never replays an unconfirmed admitted prompt."
+msgstr ""
+"发出了准入请求、但没收到确认的情况就不一样了：哪怕 runner "
+"还没发提示词，数据库也可能已经提交了准入，成员关系里就会把这个任务记成已准入。`abandon` "
+"只能释放准入之前的轮次（`admitted_job_id IS NULL`），所以释放不了这个状态不确定的轮次；转入终态时，会把它的上下文标成 "
+"LOST。runner 绝不会重放一个没有确认过的已准入提示词。"
+
+#: ../developer/runner-lease-troubleshooting.md:122
+msgid ""
+"Recovery after an expired activation or killed runner requires a further "
+"protocol: durably quarantine the member, fence the old runner's "
+"preparation commands and sandbox manager token, verify the exact retained"
+" container and native turn boundary, then resume that session or report "
+"it unrecoverable. A sandbox manager `busy=false` observation is "
+"insufficient because workspace setup commands run outside its agent-turn "
+"transport. Never requeue a turn solely because its admission field is "
+"empty, clear a lost flag, or replay an admitted prompt to repair a "
+"display state."
+msgstr ""
+"激活过期或 runner 被杀之后要恢复，还需要一套更完整的协议：先把这个成员持久地隔离起来，挡住旧 runner 的准备命令和 sandbox "
+"manager 令牌，核实确切的保留容器和原生轮次边界，然后要么接着这个会话继续，要么报告它无法恢复。sandbox manager 显示 "
+"`busy=false` 是不够的，因为工作区的 setup 命令不走它的 agent "
+"轮次通道。绝不能只因为准入字段为空就把一个轮次重新入队，也不能清掉 lost 标记，更不能为了让界面显示正常就重放一个已准入的提示词。"
+
+#: ../developer/runner-lease-troubleshooting.md:131
+msgid ""
+"Owner-facing wording describes interrupted responses and unavailable "
+"conversations in plain language. Infrastructure details stay in API "
+"records and operator logs; task errors and assistant messages remain "
+"intact. Historical LOST memberships remain disabled after wording "
+"changes."
+msgstr ""
+"给所有者看的文字，会用大白话说明回复被中断了、对话用不了了。基础设施层面的细节留在 API 记录和运维日志里；任务错误和 assistant "
+"消息都原样保留。改了这些文字之后，历史上已经是 LOST 的成员关系依然保持禁用。"
+
+#: ../developer/runner-lease-troubleshooting.md:136
+msgid "The safe release case: a child never accepted its turn"
+msgstr "可以安全释放的情况：子进程从没接下这个轮次"
+
+#: ../developer/runner-lease-troubleshooting.md:138
+msgid ""
+"The host runs each turn in a child process. It can release a claim back "
+"to the queue only when it can prove that child never accepted the turn:"
+msgstr "主机为每个轮次单独起一个子进程。只有能证明这个子进程从没接下这一轮时，主机才能把认领释放回队列："
+
+#: ../developer/runner-lease-troubleshooting.md:141
+msgid "Process creation failed."
+msgstr "进程没创建成功。"
+
+#: ../developer/runner-lease-troubleshooting.md:142
+msgid "Payload delivery failed."
+msgstr "数据没送到子进程。"
+
+#: ../developer/runner-lease-troubleshooting.md:143
+msgid ""
+"The child closed its handover descriptor without accepting, including a "
+"failed read-only Docker/network preflight before acceptance."
+msgstr "子进程没接任务就关闭了交接用的描述符，包括接任务之前那次只读的 Docker 或网络 preflight 失败的情况。"
+
+#: ../developer/runner-lease-troubleshooting.md:146
+msgid ""
+"A silent child that remains alive is not proof and is never released. "
+"After acceptance, crashes, kills and lost acknowledgements belong to the "
+"lease protocol; the conversation may become lost instead of repeating the"
+" turn."
+msgstr "子进程一直不吭声但还活着，这不算证据，永远不会因此释放。一旦接下任务，之后的崩溃、被杀和确认丢失都交给租约协议处理；对话可能因此丢失，但绝不会把这一轮重跑一遍。"
+
+#: ../developer/runner-lease-troubleshooting.md:150
+msgid ""
+"Release uses `POST /v1/agent/worker/jobs/<job>/release` with that turn's "
+"worker token. The control plane requires the same still-running attempt "
+"and lease generation **and** no membership that admitted the job. The "
+"database statement enforces the admission condition, so an incorrect host"
+" observation cannot requeue admitted work."
+msgstr ""
+"释放时调用 `POST /v1/agent/worker/jobs/<job>/release`，带上这一轮的 worker "
+"令牌。控制平面要求两点都满足：是同一个仍在运行的 "
+"attempt、同一个租约代次，**并且**没有任何成员关系已经准入了这个任务。准入条件由数据库语句本身强制检查，所以主机即使观察错了，也没法把已准入的工作重新入队。"
+
+#: ../developer/runner-lease-troubleshooting.md:156
+msgid ""
+"Consecutive launch failures stop claims on that host and back off. "
+"Heartbeats report `launch_error`, which appears beside the host on Admin "
+"→ Servers."
+msgstr ""
+"连续启动失败时，这台主机会停止认领并逐步拉长重试间隔。心跳会上报 `launch_error`，显示在 Admin → Servers "
+"里这台主机的旁边。"
+

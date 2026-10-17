@@ -1,0 +1,180 @@
+# Simplified Chinese translation of the Cloud Agent developer documentation.
+# See docs/developer/translations.md.
+msgid ""
+msgstr ""
+"Project-Id-Version: HybridInference Cloud Agent \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-10-16 01:54-0400\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: The HybridInference contributors\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../developer/index.md:41
+msgid "Getting started"
+msgstr "快速上手"
+
+#: ../developer/index.md:52
+msgid "Concepts"
+msgstr "概念"
+
+#: ../developer/index.md:63
+msgid "Operations"
+msgstr "运维"
+
+#: ../developer/index.md:1
+msgid "HybridInference Cloud Agent"
+msgstr ""
+
+#: ../developer/index.md:3
+msgid ""
+"Cloud Agent runs coding agents against a user's repository inside "
+"retained sandbox containers. Users work from a web interface, while "
+"enrolled hosts run Claude Code, Codex, pi, OpenCode, or Kilo. The control"
+" plane coordinates jobs, sessions, and publication to source control. "
+"Model access and account identity come from a [HybridInference "
+"gateway](https://github.com/HarvardMadSys/hybridInference), over HTTP "
+"only."
+msgstr ""
+"Cloud Agent 让编码 agent 在保留的沙箱容器里处理用户的仓库。用户在网页上操作，真正执行任务的是已注册的主机，上面跑着 "
+"Claude Code、Codex、pi、OpenCode 或 "
+"Kilo。控制平面负责调度任务、管理会话，并把改动发布到代码托管平台。模型调用和账号身份都来自 [HybridInference "
+"网关](https://github.com/HarvardMadSys/hybridInference)，双方只通过 HTTP 通信。"
+
+#: ../developer/index.md:10
+msgid ""
+"This is the documentation for the software itself: running it locally, "
+"operating a deployment, understanding how it works, and contributing to "
+"it. The source is at [github.com/HarvardMadSys/hybridInference-cloud-"
+"agent](https://github.com/HarvardMadSys/hybridInference-cloud-agent), "
+"under the MIT license; bugs and questions go to its [issue "
+"tracker](https://github.com/HarvardMadSys/hybridInference-cloud-"
+"agent/issues)."
+msgstr ""
+"这里是软件本身的文档：怎么在本地跑起来、怎么运维一套部署、它内部怎么运作，以及怎么参与贡献。源代码在 "
+"[github.com/HarvardMadSys/hybridInference-cloud-"
+"agent](https://github.com/HarvardMadSys/hybridInference-cloud-agent)，采用 "
+"MIT 许可证。发现 bug 或有疑问，请到 [issue tracker](https://github.com/HarvardMadSys"
+"/hybridInference-cloud-agent/issues) 提出。"
+
+#: ../developer/index.md:17
+msgid "Where to start"
+msgstr "从哪里开始"
+
+#: ../developer/index.md
+msgid "If you want to"
+msgstr "你想做的事"
+
+#: ../developer/index.md
+msgid "Start here"
+msgstr "先看这里"
+
+#: ../developer/index.md
+msgid "Run the browser, API, gateway fixture, hosts, and sandboxes on one machine"
+msgstr "在一台机器上跑起浏览器、API、网关模拟服务、主机和沙箱"
+
+#: ../developer/index.md
+msgid "[Local Docker stack](local-stack.md)"
+msgstr "[本地 Docker 环境](local-stack.md)"
+
+#: ../developer/index.md
+msgid "Set up a checkout, find the code that owns a change, and run checks"
+msgstr "准备好代码仓库，找到改动该落在哪段代码，并运行检查"
+
+#: ../developer/index.md
+msgid "[Developer guide](development.md)"
+msgstr "[开发者指南](development.md)"
+
+#: ../developer/index.md
+msgid "Find the module that owns a responsibility and follow its dependencies"
+msgstr "找到负责某项功能的模块，顺着它的依赖往下看"
+
+#: ../developer/index.md
+msgid "[Code structure](code-structure.md)"
+msgstr "[代码结构](code-structure.md)"
+
+#: ../developer/index.md
+msgid "Send a change"
+msgstr "提交改动"
+
+#: ../developer/index.md
+msgid "[Contributing](contributing.md)"
+msgstr "[贡献指南](contributing.md)"
+
+#: ../developer/index.md
+msgid "Translate a page, or update a translation after an English edit"
+msgstr "翻译页面，或者在英文改动后更新译文"
+
+#: ../developer/index.md
+msgid "[Translating the docs](translations.md)"
+msgstr "[翻译文档](translations.md)"
+
+#: ../developer/index.md
+msgid "Configure credentials, enroll hosts, qualify Kata, deploy, and migrate"
+msgstr "配置凭据、注册主机、验证 Kata、部署和执行迁移"
+
+#: ../developer/index.md
+msgid "[Operations runbook](operations.md)"
+msgstr "[运维手册](operations.md)"
+
+#: ../developer/index.md
+msgid "Upgrade an existing deployment and see what each migration changes"
+msgstr "升级已有部署，了解每个迁移改了什么"
+
+#: ../developer/index.md
+msgid "[Upgrade notes](upgrade-notes.md)"
+msgstr "[升级说明](upgrade-notes.md)"
+
+#: ../developer/index.md
+msgid "Look up a configuration name, default, or owning component"
+msgstr "查某个配置项的名称、默认值或归属组件"
+
+#: ../developer/index.md
+msgid "[Configuration reference](configuration.md)"
+msgstr "[配置参考](configuration.md)"
+
+#: ../developer/index.md
+msgid "Build release artifacts and deploy them in the required order"
+msgstr "构建发布产物，并按规定顺序部署"
+
+#: ../developer/index.md
+msgid "[Releases](releases.md)"
+msgstr "[发布](releases.md)"
+
+#: ../developer/index.md
+msgid "Understand the sandbox trust model before deploying"
+msgstr "部署之前，先弄清沙箱的信任模型"
+
+#: ../developer/index.md
+msgid "[Security](security.md)"
+msgstr "[安全](security.md)"
+
+#: ../developer/index.md
+msgid "See which gateway APIs Cloud Agent consumes"
+msgstr "看看 Cloud Agent 用到了网关的哪些 API"
+
+#: ../developer/index.md
+msgid "[Gateway contracts](gateway-contracts.md)"
+msgstr "[网关契约](gateway-contracts.md)"
+
+#: ../developer/index.md:33
+msgid "Scope of this site"
+msgstr "本站涵盖的内容"
+
+#: ../developer/index.md:35
+msgid ""
+"These pages document the software, not any one installation of it. How "
+"end users work with a particular deployment, which agents and models it "
+"offers, and how to get an account there are the operator's to publish. "
+"Dated designs, plans, and acceptance records stay in the repository as "
+"engineering history and are linked from here where they explain a "
+"decision."
+msgstr ""
+"这些页面讲的是软件本身，而不是某一套具体的部署。某个部署的终端用户怎么使用它、提供哪些 agent "
+"和模型、怎么申请账号，由各自的运维方发布。带日期的设计、计划和验收记录作为工程历史留在仓库里；它们能说明某个决定的来龙去脉时，这里会附上链接。"
+

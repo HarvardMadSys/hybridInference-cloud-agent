@@ -1,0 +1,476 @@
+# Simplified Chinese translation of the Cloud Agent developer documentation.
+# See docs/developer/translations.md.
+msgid ""
+msgstr ""
+"Project-Id-Version: HybridInference Cloud Agent \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-10-16 06:17-0400\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: The HybridInference contributors\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../developer/disaster-recovery.md:1
+msgid "Backup and recovery"
+msgstr "备份与恢复"
+
+#: ../developer/disaster-recovery.md:3
+msgid ""
+"Back up the agent database, its encryption keys, and retained host state "
+"as a coordinated recovery set. A database dump cannot reconstruct a "
+"native CLI session whose Docker writable layer was lost. Restorable "
+"checkpoints in S3 cover only groups that stopped cleanly with archives "
+"enabled, and CloudLab node rotation helps move an available source; "
+"neither replaces an off-node backup."
+msgstr ""
+"Agent 数据库、它的加密密钥和主机上保留的状态，要作为一套互相对应的恢复集一起备份。原生 CLI 会话的 Docker "
+"可写层一旦丢了，光靠数据库转储是重建不出来的。S3 里的可恢复检查点，只覆盖开启归档后正常停止的沙箱组；CloudLab "
+"节点轮换也只能帮忙迁走仍然可用的数据。这两样都替代不了存在节点之外的备份。"
+
+#: ../developer/disaster-recovery.md:9
+msgid ""
+"The deployment owner must implement backup storage and scheduling. This "
+"guide does not install a backup service, claim a successful restore "
+"drill, or establish measured recovery times."
+msgstr "备份存在哪里、什么时候做，需要部署的负责人自己落实。这份指南不会帮你装备份服务，不声称做过成功的恢复演练，也不给出实测的恢复时长。"
+
+#: ../developer/disaster-recovery.md:13
+msgid "Initial operating policy"
+msgstr "初始的运维策略"
+
+#: ../developer/disaster-recovery.md:15
+msgid ""
+"Use these initial targets until the deployment owner records different "
+"ones and validates them with a restore drill. Retention alone does not "
+"meet a recovery objective: alert on a failed or late backup and on failed"
+" integrity checks."
+msgstr "在部署负责人定下自己的目标、并通过恢复演练验证之前，先用下面这些初始目标。光设了保留期，不等于达到了恢复目标：备份失败或晚了、完整性检查没通过，都要告警。"
+
+#: ../developer/disaster-recovery.md
+msgid "Recovery material"
+msgstr "恢复材料"
+
+#: ../developer/disaster-recovery.md
+msgid "Frequency and retention"
+msgstr "频率和保留期"
+
+#: ../developer/disaster-recovery.md
+msgid "Initial recovery objective"
+msgstr "初始恢复目标"
+
+#: ../developer/disaster-recovery.md
+msgid "Agent Postgres database"
+msgstr "Agent 的 Postgres 数据库"
+
+#: ../developer/disaster-recovery.md
+msgid ""
+"Hourly encrypted dumps for 24 hours; daily copies for 30 days; monthly "
+"copies for 3 months"
+msgstr "每小时一次加密转储，保留 24 小时；每日一份，保留 30 天；每月一份，保留 3 个月"
+
+#: ../developer/disaster-recovery.md
+msgid "Database recovery point at most 1 hour old"
+msgstr "数据库最多丢失 1 小时的数据"
+
+#: ../developer/disaster-recovery.md
+msgid "Coordinated database and retained host state"
+msgstr "彼此对应的数据库和主机保留状态"
+
+#: ../developer/disaster-recovery.md
+msgid "Daily off-node recovery set for 7 days; weekly set for 4 weeks"
+msgstr "每天在节点外存一套恢复集，保留 7 天；每周一套，保留 4 周"
+
+#: ../developer/disaster-recovery.md
+msgid "Native-session recovery point at most 24 hours old"
+msgstr "原生会话最多丢失 24 小时的数据"
+
+#: ../developer/disaster-recovery.md
+msgid ""
+"Configuration, encryption keys, host credentials, SSH trust, release "
+"locks and recipes"
+msgstr "配置、加密密钥、主机凭据、SSH 信任、发布锁定文件和部署配方（recipe）"
+
+#: ../developer/disaster-recovery.md
+msgid ""
+"Capture with every recovery set and before every change; retain while any"
+" dependent backup/release is retained"
+msgstr "每做一套恢复集、每次变更之前都要采集一次；只要还有备份或发布依赖它，就一直保留"
+
+#: ../developer/disaster-recovery.md
+msgid "Recover the exact keys and identities used by the selected set"
+msgstr "能恢复出所选恢复集当时用的那批密钥和身份，一个不差"
+
+#: ../developer/disaster-recovery.md
+msgid "Previous verified artifact release"
+msgstr "上一个经过验证的产物发布"
+
+#: ../developer/disaster-recovery.md
+msgid ""
+"Keep the current and previous successful release, plus every release "
+"referenced by retained recovery sets"
+msgstr "保留当前和上一个成功的发布，以及所有被保留的恢复集引用到的发布"
+
+#: ../developer/disaster-recovery.md
+msgid "Available without rebuilding or relying on mutable image tags"
+msgstr "不用重新构建，也不依赖会变的镜像标签，随时能拿到"
+
+#: ../developer/disaster-recovery.md:26
+msgid ""
+"The initial recovery-time target is 4 hours after choosing a usable set. "
+"Large Docker stores can exceed this; measure the copy/restore time, "
+"provision enough capacity, and revise the target. More frequent database "
+"dumps do not imply a 1-hour native-session objective: a full restore that"
+" includes retained chats must use a coherent host/database set. Use "
+"Postgres-supported continuous WAL archiving if the database needs a "
+"shorter recovery-point objective."
+msgstr ""
+"选定一套可用的恢复集之后，初始的恢复时间目标是 4 小时。Docker "
+"存储很大时可能会超时，所以要实测复制和恢复的耗时，准备足够的容量，再据此调整目标。数据库转储得再勤，也不代表原生会话能做到只丢 1 "
+"小时：要完整恢复保留的对话，主机状态和数据库必须来自同一时刻。如果数据库需要更短的数据丢失窗口，请使用 Postgres 自带的持续 WAL "
+"归档。"
+
+#: ../developer/disaster-recovery.md:33
+msgid ""
+"Keep encrypted backups outside the machines and CloudLab allocation they "
+"protect. Restrict access, separate backup decryption material from the "
+"stored backups, monitor available space, and verify hashes after "
+"transfer. Do not delete an encryption key or registry image still needed "
+"by a retained set."
+msgstr ""
+"加密备份要存在它所保护的机器和 CloudLab "
+"分配之外。限制访问权限，把解密用的材料和备份分开存放，监控剩余空间，传输完要校验哈希。还被某套保留恢复集用到的加密密钥或镜像仓库里的镜像，不要删。"
+
+#: ../developer/disaster-recovery.md:38
+msgid "What belongs in a recovery set"
+msgstr "一套恢复集里要有什么"
+
+#: ../developer/disaster-recovery.md:40
+msgid ""
+"Record a set ID, start/end UTC times, source host machine identities, "
+"source commit, database revision, deployment protocol, Docker/storage-"
+"driver versions, data-root paths, container inventory, file hashes, and "
+"the release manifest hash. This inventory contains identifiers, not "
+"prompts, tokens, or credential values."
+msgstr ""
+"要记下：恢复集 ID、开始和结束的 UTC 时间、源主机的机器身份、源 commit、数据库修订号、部署协议、Docker "
+"和存储驱动的版本、数据目录路径、容器清单、文件哈希，以及发布清单的哈希。这份清单里只有各种标识，不包含提示词、令牌或凭据的值。"
+
+#: ../developer/disaster-recovery.md:45
+msgid "Preserve all of the following privately:"
+msgstr "下面这些都要私密保存："
+
+#: ../developer/disaster-recovery.md:47
+msgid ""
+"A full agent-owned Postgres backup, including settings, identity "
+"namespace, enrolled hosts, placement/ownership, jobs and attempts, "
+"connections, and compute lifecycle records. Do not select only user-"
+"facing conversation tables."
+msgstr ""
+"一份完整的 Agent Postgres 备份，包括设置、身份命名空间、已注册的主机、放置和归属关系、任务和 "
+"attempt、连接，以及计算资源的生命周期记录。不要只挑用户看得到的那几张对话表。"
+
+#: ../developer/disaster-recovery.md:50
+msgid ""
+"Both deployment roots' `.env` and mounted credential files. Preserve "
+"`AGENT_SETTINGS_ENCRYPTION_KEY`, or the original `AGENT_SESSION_SECRET` "
+"when used as its fallback; also preserve source-control and compute "
+"encryption keys, control/session signing secrets, sandbox manager "
+"credentials and GitHub App keys. Saved settings can hold some of these "
+"keys, but they still require the settings root key to decrypt. Generating"
+" new keys does not recover old data."
+msgstr ""
+"两个部署根目录下的 `.env` 和挂载的凭据文件。要保存 "
+"`AGENT_SETTINGS_ENCRYPTION_KEY`；如果没设它、而是由原来的 `AGENT_SESSION_SECRET` "
+"兜底，就保存后者。代码托管和计算资源的加密密钥、控制和会话的签名密钥、sandbox manager 凭据以及 GitHub App "
+"密钥，也都要保存。已保存的设置里可能存着其中一部分密钥，但要解密它们，仍然需要设置的根密钥。重新生成密钥是找不回旧数据的。"
+
+#: ../developer/disaster-recovery.md:56
+msgid ""
+"Each host's persisted enrollment credential directory and deployment "
+"identity, `.deployed-sha`, readiness marker, namespace/project, tunnel "
+"SSH credentials and verified `known_hosts`, and host runtime/storage "
+"configuration. The credential must match the restored host row's "
+"credential hash."
+msgstr ""
+"每台主机上持久化的注册凭据目录和部署身份、`.deployed-sha`、就绪标记、命名空间或项目名、隧道用的 SSH 凭据和核实过的 "
+"`known_hosts`，以及主机的运行时和存储配置。凭据必须和恢复后主机记录里的凭据哈希对得上。"
+
+#: ../developer/disaster-recovery.md:60
+msgid ""
+"The complete retained Docker store and the containerd image store. With "
+"the supported bind layout those trees are `<disk>/docker` and "
+"`<disk>/containerd`, while `docker info` still reports "
+"`DockerRootDir=/var/lib/docker`. Copy both with Docker and containerd "
+"stopped. Preserve ownership, modes, hard links, extended attributes and "
+"sparse files. Keep the thread-to-host-to-container identities in the "
+"matching database; exporting a container filesystem alone omits required "
+"metadata."
+msgstr ""
+"完整的 Docker 保留存储和 containerd 镜像存储。按受支持的绑定布局，这两个目录分别是 `<disk>/docker` 和 "
+"`<disk>/containerd`，尽管 `docker info` 显示的仍是 "
+"`DockerRootDir=/var/lib/docker`。复制时 Docker 和 containerd "
+"都要先停掉，并保留属主、权限、硬链接、扩展属性和稀疏文件。对话、主机、容器三者之间的身份对应关系要留在配套的数据库里；只导出容器的文件系统，会丢掉必需的元数据。"
+
+#: ../developer/disaster-recovery.md:67
+msgid ""
+"The verified `release.json`, its reviewed pinned SHA-256, "
+"`recipe.tar.gz`, extracted recipe, helper dependencies and image digests "
+"for both the current and previous serving releases. Keep digest-addressed"
+" images available in the registry or a tested private archive."
+msgstr ""
+"当前和上一个在用发布的这些材料：验证过的 `release.json`、评审后固定的 SHA-256、`recipe.tar.gz`、解压后的 "
+"recipe、辅助依赖，以及镜像摘要。按摘要寻址的镜像要一直能拿到，要么留在镜像仓库里，要么存在测试过的私有归档里。"
+
+#: ../developer/disaster-recovery.md:72
+msgid ""
+"Never place these backups in the repository or attach credential archives"
+" to issues or CI logs. A read-only Docker socket does not make raw "
+"overlay copying safe. Follow [retained Docker storage](operations.md"
+"#retained-docker-storage-on-a-host)."
+msgstr ""
+"这些备份绝不能放进代码仓库，凭据归档也不能附到 issue 或 CI 日志里。只读的 Docker socket 并不能让直接复制 overlay"
+" 目录变得安全。具体做法见[保留的 Docker 存储](operations.md#retained-docker-storage-"
+"on-a-host)。"
+
+#: ../developer/disaster-recovery.md:76
+msgid "Capture a coordinated set"
+msgstr "采集一套彼此对应的恢复集"
+
+#: ../developer/disaster-recovery.md:78
+msgid ""
+"Record current deployment markers, placement, host status, container "
+"inventory and encryption-key version identifiers. Schedule a maintenance "
+"window and prevent new admissions and admin configuration changes. Drain "
+"hosts and wait for active attempts and publications to finish; record "
+"which hosts were already draining or disabled so their state is "
+"preserved."
+msgstr ""
+"记下当前的部署标记、放置关系、主机状态、容器清单和加密密钥的版本标识。安排维护窗口，暂停接收新任务，也暂停管理配置的修改。排空主机，等进行中的 "
+"attempt 和发布都结束；同时记下哪些主机本来就处于排空或禁用状态，事后不要把它们的状态改掉。"
+
+#: ../developer/disaster-recovery.md:83
+msgid ""
+"Stop the main API and MCP listener after draining. This also stops "
+"compute reconciliation and background writers. Stop retained sandbox "
+"containers and each host stack, then stop `docker.socket`, Docker and "
+"containerd before taking a host-state snapshot or copy. No source host "
+"may keep writing while its recovery set is captured."
+msgstr ""
+"排空之后，停掉主 API 和 MCP 监听器，计算资源的调和和后台写入也会随之停止。再停掉保留的沙箱容器和每台主机上的服务，然后停掉 "
+"`docker.socket`、Docker 和 "
+"containerd，之后才能给主机状态做快照或复制。采集恢复集期间，任何一台源主机都不能再写数据。"
+
+#: ../developer/disaster-recovery.md:88
+msgid ""
+"Take a full database dump while the listeners remain stopped. From the "
+"control-plane deployment root, with the existing generated Compose file "
+"and project selected, this writes no credentials to the command output:"
+msgstr ""
+"在两个监听器都停着的时候，做一次完整的数据库转储。在控制平面的部署根目录下，选好现有生成的 Compose "
+"文件和项目，运行下面的命令；它不会把凭据打印到输出里："
+
+#: ../developer/disaster-recovery.md:102
+msgid ""
+"Capture configuration and the stopped host storage into that same set "
+"using the approved encrypted backup tooling. Transfer it off-node, record"
+" hashes, and verify the archive and dump are readable before treating it "
+"as usable."
+msgstr "用批准使用的加密备份工具，把配置和停止状态下的主机存储也采集到同一套恢复集里。传输到节点之外，记下哈希；确认归档和转储都能正常读取之后，才把它当作可用的恢复集。"
+
+#: ../developer/disaster-recovery.md:105
+msgid ""
+"Start the original daemons and both listeners, then start host stacks and"
+" run host checks; their live probes require the API and MCP listener. "
+"Verify identity, sandbox manager access and readiness. Restore only the "
+"drain states changed for this maintenance window, then reopen admissions."
+" A failed backup does not authorize deleting or replacing the source "
+"state."
+msgstr ""
+"启动原来的守护进程和两个监听器，再启动各主机上的服务并做主机检查；这些检查的实时探测需要 API 和 MCP 监听器在线。确认身份、sandbox"
+" manager 访问和就绪状态都没问题。只把这次维护窗口里改过的排空状态改回去，然后重新开放任务接收。备份失败了，也不能因此删掉或替换源数据。"
+
+#: ../developer/disaster-recovery.md:111
+msgid ""
+"An hourly database-only dump can be taken while Postgres serves requests;"
+" `pg_dump` supplies a consistent database snapshot. Label it as database-"
+"only. Do not combine it with a host snapshot from another time and claim "
+"a coherent native-session restore."
+msgstr ""
+"每小时一次的纯数据库转储可以在 Postgres 正常服务时进行，`pg_dump` "
+"本身就能给出一致的数据库快照。这种备份要标明\"仅数据库\"。不要把它和另一个时间点的主机快照凑在一起，还声称能完整恢复原生会话。"
+
+#: ../developer/disaster-recovery.md:116
+msgid "Restore and verify before reopening"
+msgstr "恢复，并在重新开放前验证"
+
+#: ../developer/disaster-recovery.md:118
+msgid ""
+"Keep ingress closed and replacement host daemons stopped. Isolate "
+"recovered compute controllers from provider side effects until "
+"allocation/node inventory is reconciled: an old database can refer to "
+"expired allocations. Confirm source hosts are stopped or fenced; two "
+"machines must never serve the same host credential and retained namespace"
+" simultaneously."
+msgstr "入口保持关闭，替换用的主机守护进程先不要启动。在分配和节点清单核对清楚之前，不要让恢复出来的计算资源控制器去调用云服务商：旧数据库里可能还记着早已过期的分配。确认源主机已经停掉或被隔离；绝不能让两台机器同时用同一个主机凭据和同一个保留命名空间对外服务。"
+
+#: ../developer/disaster-recovery.md:123
+msgid ""
+"Verify the selected set's hashes and decryption material. Restore into an"
+" isolated database first, using compatible Postgres and the selected "
+"release. Restore the matching configuration/root keys before starting a "
+"listener. Follow [identity binding](minimal-identity.md) and the existing"
+" [database recovery procedures](operations.md#preserving-an-old-chain-"
+"database) for historical schema chains. Do not improvise an Alembic "
+"downgrade."
+msgstr ""
+"核对所选恢复集的哈希，确认解密材料齐全。先恢复到一个隔离的数据库里，使用兼容版本的 Postgres "
+"和所选的发布。启动任何监听器之前，先恢复对应的配置和根密钥。如果是历史上的旧 schema 链，按[身份绑定](minimal-"
+"identity.md)和已有的[数据库恢复流程](operations.md#preserving-an-old-chain-"
+"database)处理。不要自己临时拼一个 Alembic 降级。"
+
+#: ../developer/disaster-recovery.md:129
+msgid ""
+"Restore the complete stopped host state with a compatible Docker/storage "
+"driver and the correct mounts. Check mount availability before starting "
+"Docker. Retain the matching enrollment credential, namespace, and "
+"container IDs. Start and inspect the owning daemon without admitting new "
+"tasks; do not run generic prune or orphan cleanup to make mismatched "
+"state look empty."
+msgstr ""
+"用兼容的 Docker 和存储驱动、正确的挂载，把停止状态下的主机数据完整恢复回去。启动 Docker "
+"之前，先确认挂载都在。注册凭据、命名空间和容器 ID "
+"要和原来一致。启动并检查对应的守护进程，但先不接新任务；不要为了让不一致的状态\"看起来干净\"，就去跑通用的 prune 或孤儿清理。"
+
+#: ../developer/disaster-recovery.md:134
+msgid ""
+"Compare every retained group's database owner and recorded container "
+"identity with the restored Docker labels. Reconcile stale attempts, "
+"leases and compute operations through their supported recovery paths. A "
+"missing container or credential mismatch is a blocked recovery, not "
+"evidence that another host can recreate the native session."
+msgstr ""
+"把每个保留沙箱组在数据库里记录的所有者和容器身份，和恢复出来的 Docker 标签逐个比对。过期的 "
+"attempt、租约和计算资源操作，走它们各自受支持的恢复路径去调和。容器不见了或凭据对不上，说明恢复卡住了，而不是说明换一台主机就能重建原生会话。"
+
+#: ../developer/disaster-recovery.md:139
+msgid ""
+"Run namespace verification and Kata/candidate checks, then use the phased"
+" deployment sequence to bootstrap listeners before host live checks. "
+"After host state and live checks pass, restore only hosts previously "
+"eligible for work to `online`; the exact-generation readiness fence "
+"requires an online host and reverse-sandbox-manager probes. This can "
+"resume work already queued in the restored database. Keep external "
+"ingress closed while completing activation and checking the restored "
+"system. Verify sign-in, file access, retained continuation, separate Fork"
+" context, a queued turn, cancellation, publication, and a host restart "
+"with disposable test conversations. Reopen production admissions only "
+"after these checks and external health/queue monitoring pass."
+msgstr ""
+"做命名空间核对和 "
+"Kata/候选检查，然后按分阶段部署流程，先启动监听器，再做主机的实时检查。主机状态和实时检查都通过之后，只把原本就能接任务的主机恢复为 "
+"`online`；精确代次的就绪栅栏要求主机在线，并通过反向 sandbox manager "
+"探测。这样一来，恢复后的数据库里已经排队的工作可能就会开始执行。在完成激活、检查恢复后的系统期间，外部入口一直保持关闭。用几个用完即弃的测试对话，逐项验证：登录、文件访问、保留会话的续接、Fork"
+" 出的独立上下文、排队的轮次、取消、发布，以及主机重启。这些检查和外部的健康、队列监控都通过之后，才重新对生产开放。"
+
+#: ../developer/disaster-recovery.md:151
+msgid ""
+"Perform an isolated restore drill quarterly and after changing storage "
+"topology, key handling or deployment protocol. Record the set/release "
+"IDs, checks, elapsed time, observed lost-data window and failures without"
+" secrets. A static test, readable dump, manual node rotation or backup "
+"hash is not restore-drill evidence. Moving retained sessions to another "
+"host otherwise depends on compatible full host-state restoration. The "
+"exception is a stopped group whose current [restorable "
+"checkpoint](operations.md#restoring-a-removed-hosts-sandboxes) is in S3: "
+"once its host is removed from the pool, its node is confirmed terminated,"
+" or the host moves out before its lease ends, another host restores it on"
+" the group's next turn. If the source disk, its off-node copy and any "
+"checkpoint are all lost, native context cannot be recovered from "
+"Postgres."
+msgstr ""
+"每个季度做一次隔离的恢复演练；改了存储拓扑、密钥处理方式或部署协议之后，也要做一次。记录恢复集和发布的 "
+"ID、做了哪些检查、花了多长时间、实际丢了多长时间的数据，以及出了哪些问题，但不要写入任何 "
+"secret。静态测试、能读出来的转储、手动节点轮换或备份哈希，都不能算作恢复演练的证据。除下面这个例外，把保留会话搬到另一台主机，都要靠兼容的、完整的主机状态恢复。例外是：已停止的沙箱组在"
+" S3 里有最新的[可恢复检查点](operations.md#restoring-a-removed-hosts-"
+"sandboxes)。这时只要它的主机被移出资源池、节点被确认已回收，或者主机在租期结束前迁出，另一台主机就会在这个组的下一轮把它恢复出来。如果源磁盘、它在节点外的副本和所有检查点全都丢了，原生上下文就没办法从"
+" Postgres 里恢复了。"
+
+#: ../developer/disaster-recovery.md:163
+msgid "Recover a previous artifact release"
+msgstr "恢复到上一个产物发布"
+
+#: ../developer/disaster-recovery.md:165
+msgid ""
+"The host deployer does not automatically restore an older artifact "
+"manifest: it is handed only one release. The consuming distribution must "
+"retain previous verified release material outside `DEPLOY_ROOT`, "
+"alongside the reviewed lock. Keep each release in a separate immutable "
+"directory; do not overwrite the previous recipe with a candidate that "
+"failed."
+msgstr ""
+"主机部署器不会自动退回到更早的产物清单，因为它每次只拿到一个发布。使用这个发行版的一方必须在 `DEPLOY_ROOT` "
+"之外，和评审过的锁定文件放在一起，保留之前验证过的发布材料。每个发布放进单独的、不再改动的目录；不要用一个失败的候选版本覆盖上一个 recipe。"
+
+#: ../developer/disaster-recovery.md:171
+msgid ""
+"Before rollback, verify the previous manifest's pinned hash, the recipe "
+"hash, registry digests/platforms/labels and deployment protocol. Check "
+"the candidate's `compatibility.verified_rollback_to` against the previous"
+" commit and the previous release's compatibility with the database now "
+"installed. Empty compatibility records do not establish a verified online"
+" rollback. An older recipe must not run migrations backwards or cross the"
+" deployment-protocol fence; use a tested stopped-writer recovery "
+"procedure when online compatibility is unproved."
+msgstr ""
+"回滚之前，先核对上一个清单的固定哈希、recipe 哈希、镜像仓库里的摘要、平台和标签，以及部署协议。拿候选版本的 "
+"`compatibility.verified_rollback_to` 对照上一个 "
+"commit，并确认上一个发布和当前已装的数据库兼容。兼容性记录为空，不能说明可以安全地在线回滚。旧 recipe "
+"不能反向执行迁移，也不能跨过部署协议的栅栏；在线兼容性没有得到证实时，请使用测试过的、停止所有写入后再恢复的流程。"
+
+#: ../developer/disaster-recovery.md:179
+msgid ""
+"For a compatible rollback, on **each** machine select its previously "
+"verified directory and stable deployment root:"
+msgstr "确认兼容、准备回滚时，在**每台**机器上指定它之前验证过的发布目录和固定的部署根目录："
+
+#: ../developer/disaster-recovery.md:190
+#, python-brace-format
+msgid ""
+"Run the [phased deployment sequence](../../deploy/release/README.md"
+"#deploying-the-two-in-the-order-the-design-specifies) using "
+"`\"${RECOVERY_RELEASE}/recipe/deploy/control-plane/deploy.sh\"` on the "
+"control-plane machine and "
+"`\"${RECOVERY_RELEASE}/recipe/deploy/host/deploy.sh\"` on its execution "
+"host: prepare both, prepare the database, activate the host, then "
+"activate the control plane. All exact-generation and isolation checks "
+"remain in force. Database preparation runs `upgrade head` from the "
+"selected recipe; Alembic will refuse unknown newer revisions, so verify "
+"this against the current schema in isolation before choosing online "
+"rollback. Do not delete or stamp migration history to bypass a refusal. A"
+" rollback may therefore require an explicitly tested compatible recipe or"
+" full stopped-writer recovery."
+msgstr ""
+"按[分阶段部署流程](../../deploy/release/README.md#deploying-the-two-in-the-order-"
+"the-design-specifies)执行：控制平面机器上用 `\"${RECOVERY_RELEASE}/recipe/deploy"
+"/control-plane/deploy.sh\"`，它的执行主机上用 "
+"`\"${RECOVERY_RELEASE}/recipe/deploy/host/deploy.sh\"`。顺序是先把两边都准备好，再准备数据库，然后激活主机，最后激活控制平面。精确代次检查和隔离检查全部照常生效。准备数据库这一步会用所选"
+" recipe 运行 `upgrade head`；遇到它不认识的更新修订号，Alembic "
+"会拒绝执行。所以在决定在线回滚之前，先在隔离环境里对着当前的 schema 验证一遍。不要为了绕过这个拒绝去删除迁移历史或执行 "
+"stamp。也就是说，回滚有可能需要一个专门测试过的兼容 recipe，或者一次完整的停写恢复。"
+
+#: ../developer/disaster-recovery.md:201
+msgid ""
+"Read both `.deployed-sha` files and host readiness after success. Record "
+"the incident as a failed candidate rollout even when the previous release"
+" serves again. Verify retained continuation and sandbox manager access "
+"before reopening traffic."
+msgstr ""
+"完成后，读一下两边的 `.deployed-sha` "
+"文件和主机就绪状态。即使上一个发布已经重新开始服务，这次事件也要记为一次失败的候选版本上线。重新放流量之前，确认保留会话能正常续接，sandbox"
+" manager 访问也正常。"
+

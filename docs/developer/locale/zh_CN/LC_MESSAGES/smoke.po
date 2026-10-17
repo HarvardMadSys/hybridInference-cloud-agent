@@ -1,0 +1,472 @@
+# Simplified Chinese translation of the Cloud Agent developer documentation.
+# See docs/developer/translations.md.
+msgid ""
+msgstr ""
+"Project-Id-Version: HybridInference Cloud Agent \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-10-16 01:54-0400\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: The HybridInference contributors\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../developer/smoke.md:1
+msgid "Staging end-to-end smoke"
+msgstr "Staging 端到端冒烟测试"
+
+#: ../developer/smoke.md:3
+msgid ""
+"Use this runbook on a disposable staging deployment to verify the full "
+"path from Gateway sign-in to a real pull request. The check covers a "
+"Cloud Agent control plane, one runner host, and a disposable GitHub "
+"repository."
+msgstr ""
+"这份手册用在一套可以随时丢弃的 staging 部署上，验证从网关登录一直到生成真实 pull request 的完整链路。涉及的范围是：一个 "
+"Cloud Agent 控制平面、一台 runner 主机，以及一个可以随时丢弃的 GitHub 仓库。"
+
+#: ../developer/smoke.md:7
+msgid ""
+"If you only need a local product check without provider keys, start with "
+"the [complete local Docker stack](../../deploy/local/README.md):"
+msgstr ""
+"如果你只想在本地检查一下产品，不想用服务商的密钥，先用[完整的本地 Docker "
+"环境](../../deploy/local/README.md)："
+
+#: ../developer/smoke.md:15
+msgid ""
+"The local stack exercises browser login, control-plane/host wiring, all "
+"five pinned CLIs, and retained native sessions with deterministic "
+"substitutes for external services. It does not test live provider "
+"behavior or GitHub publication; this staging runbook checks those "
+"boundaries separately."
+msgstr ""
+"本地环境会实际跑一遍浏览器登录、控制平面和主机之间的对接、五个固定版本的 "
+"CLI，以及保留的原生会话；外部服务都换成了结果固定的模拟服务。真实服务商的行为和 GitHub 发布它测不到，这两处边界由这份 staging "
+"手册单独检查。"
+
+#: ../developer/smoke.md:20
+msgid ""
+"Earlier runs of this checklist, from the 2026-08 extraction, are kept as "
+"a [dated record](../agents/reviews/2026-08-04-staging-smoke-runs.md). "
+"They do not show that any current deployment passes it."
+msgstr ""
+"这份清单在 2026-08 仓库拆分期间跑过的几次结果，保存为一份[带日期的记录](../agents/reviews/2026-08-04"
+"-staging-smoke-runs.md)。它们并不能说明现在的任何一套部署能通过检查。"
+
+#: ../developer/smoke.md:24
+msgid "What a passing run proves"
+msgstr "跑通一次能证明什么"
+
+#: ../developer/smoke.md:26
+msgid ""
+"A completed, passing run proves identity sign-in, explicit Agent access, "
+"enrollment, inference grants, sandbox execution, and GitHub publication "
+"for the recorded revision and environment. A successful job alone does "
+"not prove publication: the owner asks for it, and the publisher then "
+"processes an immutable workspace snapshot asynchronously."
+msgstr ""
+"完整跑通一次，能证明在所记录的版本和环境下，这些环节都是通的：身份登录、明确授予的 Agent 访问权限、主机注册、推理授权、沙箱执行和 "
+"GitHub 发布。光是任务成功，并不能证明发布没问题：发布要由所有者主动发起，之后发布器再异步处理一份不可变的工作区快照。"
+
+#: ../developer/smoke.md:32
+msgid ""
+"The run does not cover migrated ownership/data, concurrency, host loss, "
+"or every isolation boundary. Use [cutover](../agents/specs/cutover.md), "
+"[deployment reliability](deployment-reliability.md) and [native context "
+"recall](context-recall.md) for those separate checks. The Gateway "
+"contracts belong to the Gateway; verify its deployed routes before "
+"starting."
+msgstr ""
+"这次运行不涵盖迁移过来的归属关系和数据、并发、主机丢失，也没有覆盖每一道隔离边界。这些要分别按 "
+"[cutover](../agents/specs/cutover.md)、[部署可靠性](deployment-"
+"reliability.md)和[原生会话的上下文记忆](context-"
+"recall.md)去检查。网关契约归网关负责；开始之前，先确认网关上已经部署了相应的路由。"
+
+#: ../developer/smoke.md:38
+msgid "0. Before you start"
+msgstr "0\\. 开始之前"
+
+#: ../developer/smoke.md:40
+msgid ""
+"Use a disposable staging deployment with Docker/Compose, a checkout and"
+"     enough memory for the selected CLI. The local all-five-CLI smoke "
+"recommends     at least 8 GiB; public multi-tenant staging requires a "
+"Kata-capable host."
+msgstr ""
+"用一套可以随时丢弃的 staging 部署，要有 Docker/Compose、一份本地仓库，内存要够所选的 CLI 用。本地跑五个 CLI "
+"的冒烟测试建议至少 8 GiB；对公众开放的多租户 staging 需要一台支持 Kata 的主机。"
+
+#: ../developer/smoke.md:43
+msgid ""
+"Record the exact release SHA and the Gateway environment. API, host,     "
+"sandbox manager and sandbox must satisfy the shared deployment/version "
+"checks."
+msgstr "记下确切的发布 SHA 和网关环境。API、主机、sandbox manager 和沙箱都必须通过共用的部署和版本检查。"
+
+#: ../developer/smoke.md:45
+msgid "Verify `GET /v1/identity/jwks` succeeds on the staging Gateway:"
+msgstr "确认 staging 网关上的 `GET /v1/identity/jwks` 能正常返回："
+
+#: ../developer/smoke.md:52
+msgid ""
+"With the configured dispatch credential, verify     `/internal/model-"
+"catalog?user_id=<test-user>` and     `/internal/users/<test-user>/agent-"
+"access`. The test account must receive     `agent.use`, and the catalog "
+"must include the chosen model. A missing     access endpoint or rejected "
+"dispatch credential blocks the run. The retired     `/internal/mcp-"
+"registry` is not a prerequisite, and     `/internal/users/<id>/status` "
+"only supplies the Profile page's email."
+msgstr ""
+"用配置好的 dispatch 凭据，检查 `/internal/model-catalog?user_id=<test-user>` 和 "
+"`/internal/users/<test-user>/agent-access`。测试账号必须拿到 "
+"`agent.use`，模型目录里也必须有你选的模型。只要缺少访问端点，或者 dispatch 凭据被拒绝，这次就跑不下去。已经退役的 "
+"`/internal/mcp-registry` 不是必需的；`/internal/users/<id>/status` 只用来给 Profile"
+" 页面提供邮箱。"
+
+#: ../developer/smoke.md:59
+msgid ""
+"Have an account that can complete Gateway browser sign-in, plus     "
+"infrastructure administration access for host enrollment."
+msgstr "准备一个能在浏览器里完成网关登录的账号，以及注册主机所需的基础设施管理权限。"
+
+#: ../developer/smoke.md:61
+msgid ""
+"Choose a disposable GitHub repository and configure write/PR permission"
+"     through the deployment's supported GitHub App or publishing "
+"credential.     Record its base branch. Do not use a repository others "
+"depend on."
+msgstr ""
+"选一个可以随时丢弃的 GitHub 仓库，通过部署支持的 GitHub App 或发布凭据，给它配置写入和创建 PR 的权限。记下它的 base "
+"分支。不要用别人在用的仓库。"
+
+#: ../developer/smoke.md:65
+msgid "1. Configure"
+msgstr "1\\. 配置"
+
+#: ../developer/smoke.md:67
+msgid ""
+"Use separate, private environment files for the control plane and host. "
+"Start from [`control-plane/.env.example`](../../deploy/control-"
+"plane/.env.example) and "
+"[`host/.env.example`](../../deploy/host/.env.example); "
+"[ENVIRONMENT.md](../../ENVIRONMENT.md) is the reference. Keep the Agent "
+"database separate from the Gateway database."
+msgstr ""
+"控制平面和主机各用一份独立的私有环境文件。分别从 [`control-plane/.env.example`](../../deploy"
+"/control-plane/.env.example) 和 "
+"[`host/.env.example`](../../deploy/host/.env.example) 改起，参考资料是 "
+"[ENVIRONMENT.md](../../ENVIRONMENT.md)。Agent 数据库和网关数据库要分开。"
+
+#: ../developer/smoke.md:72
+msgid ""
+"Generate deployment-owned secrets once and keep them out of version "
+"control:"
+msgstr "部署自己用的 secret 只生成一次，并且不要放进版本控制："
+
+#: ../developer/smoke.md:80
+msgid ""
+"Keep the encryption key stable so saved connections remain decryptable. "
+"`GATEWAY_GRANT_DISPATCH_TOKEN` is the shared service credential; it must "
+"match on Agent/Gateway and differ between staging and production. Agent "
+"receives neither Gateway signing keys nor its account database "
+"credentials."
+msgstr ""
+"加密密钥不要变，不然已保存的连接就解不开了。`GATEWAY_GRANT_DISPATCH_TOKEN` 是两边共用的服务凭据：Agent "
+"和网关两侧必须一致，staging 和 production 之间必须不同。Agent 拿不到网关的签名密钥，也拿不到网关账号数据库的凭据。"
+
+#: ../developer/smoke.md:85
+msgid ""
+"Set the exact `GATEWAY_ISSUER`, JWKS/authorize URLs, callback allowlist,"
+"     web origin/base path and browser API path. For existing data, "
+"prepare the     [identity binding](minimal-identity.md#upgrade-an-"
+"existing-deployment)."
+msgstr ""
+"设置确切的 `GATEWAY_ISSUER`、JWKS 和 authorize 地址、回调白名单、Web 的源和 base "
+"path，以及浏览器访问的 API 路径。如果有已有数据，先准备好[身份绑定](minimal-identity.md#upgrade-an-"
+"existing-deployment)。"
+
+#: ../developer/smoke.md:88
+msgid ""
+"Set explicit Compose project names, sandbox image, enrolled host name,"
+"     sandbox manager credential/reverse route, all three tunnel "
+"destinations and keys,     and the host's non-overlapping egress "
+"pool/resolver."
+msgstr ""
+"明确设置：Compose 项目名、沙箱镜像、要注册的主机名、sandbox manager "
+"凭据和反向路由、三条隧道各自的目标地址和密钥，以及主机上互不重叠的出口地址池和 DNS 解析器。"
+
+#: ../developer/smoke.md:91
+msgid ""
+"Render configuration privately using the active environment file. Export"
+"     `AGENT_DEPLOYMENT_SHA` for direct control-plane Compose commands; "
+"the     deployment scripts supply it themselves. Rendered configuration "
+"contains     secrets, so do not paste it into acceptance logs."
+msgstr ""
+"用当前生效的环境文件，在私密的地方渲染出最终配置。如果直接对控制平面执行 Compose 命令，要导出 "
+"`AGENT_DEPLOYMENT_SHA`；部署脚本会自己设置它。渲染出来的配置里有 secret，不要贴进验收日志。"
+
+#: ../developer/smoke.md:96
+msgid "2. Start the control plane"
+msgstr "2\\. 启动控制平面"
+
+#: ../developer/smoke.md:98
+msgid ""
+"Use the deployment process in [deployment reliability](deployment-"
+"reliability.md). For a cold source deployment, its `prepare` and "
+"`prepare-database` phases build images, start Postgres, migrate/check the"
+" identity namespace, and bootstrap the API and MCP listener needed for "
+"host readiness. Complete activation after the host publishes readiness in"
+" section 4. Preserve the deployment's project and configuration root "
+"throughout these phases."
+msgstr ""
+"按[部署可靠性](deployment-reliability.md)里的部署流程操作。如果是从零开始的源码部署，它的 `prepare` 和 "
+"`prepare-database` 两个阶段会构建镜像、启动 Postgres、执行迁移并检查身份命名空间，再启动主机就绪检查要用到的 API "
+"和 MCP 监听器。等主机在第 4 节报告就绪之后，再完成激活。整个过程中，部署的项目名和配置根目录都不要变。"
+
+#: ../developer/smoke.md:105
+msgid ""
+"Migrations exit successfully at the checkout's current head. The API does"
+"     not create missing tables at startup."
+msgstr "迁移在本地仓库当前的 head 上成功退出。API 启动时不会自动创建缺失的表。"
+
+#: ../developer/smoke.md:107
+msgid "Main API `/healthz` responds on port 8000 by default."
+msgstr "主 API 的 `/healthz` 能响应，默认端口 8000。"
+
+#: ../developer/smoke.md:108
+msgid ""
+"MCP-only `/healthz` responds on port 8001 by default; its tunnel targets"
+"     that listener."
+msgstr "MCP 专用监听器的 `/healthz` 能响应，默认端口 8001；MCP 隧道指向的就是这个监听器。"
+
+#: ../developer/smoke.md:110
+msgid ""
+"Reaper and publication workers are running. General health alone does not"
+"     establish working grant renewal or publication."
+msgstr "reaper 和发布 worker 都在运行。整体健康检查通过，并不代表授权续期和发布一定正常。"
+
+#: ../developer/smoke.md:113
+msgid "3. Sign in — the identity flow end to end"
+msgstr "3\\. 登录：走一遍完整的身份流程"
+
+#: ../developer/smoke.md:115
+msgid ""
+"Open the web app and start sign-in. The browser reaches the Gateway's"
+"     authorize page, returns through Agent's callback and establishes a "
+"session."
+msgstr "打开 Web 应用，开始登录。浏览器会跳到网关的授权页面，再经由 Agent 的回调回来，建立会话。"
+
+#: ../developer/smoke.md:117
+#, python-brace-format
+msgid ""
+"`GET /v1/session/me` returns the test user's `id` and     `agent_access: "
+"{allowed, permissions}`. Account roles/profile fields are     absent. "
+"Confirm explicit `agent.use` before creating a task."
+msgstr ""
+"`GET /v1/session/me` 返回测试用户的 `id` 和 `agent_access: {allowed, "
+"permissions}`，不包含账号角色和个人资料字段。创建任务之前，确认明确拿到了 `agent.use`。"
+
+#: ../developer/smoke.md:120
+msgid ""
+"Confirm the Agent session is signed with its own secret and carries the"
+"     configured issuer. No Gateway session token is retained in Agent "
+"storage.     Avoid recording cookies or token bodies in the run log."
+msgstr ""
+"确认 Agent 会话是用它自己的 secret 签名的，并带有配置的签发方。Agent 的存储里不保留任何网关的会话令牌。运行日志里不要记录 "
+"cookie 或令牌内容。"
+
+#: ../developer/smoke.md:124
+msgid "4. Enrol the host"
+msgstr "4\\. 注册主机"
+
+#: ../developer/smoke.md:126
+msgid ""
+"Issue `POST /admin/agent/runner-hosts/enroll-token` with the chosen "
+"`host`     name using infrastructure admin access. The response reveals a"
+" single-use     enrollment token; put it in the host's private "
+"configuration."
+msgstr ""
+"用基础设施管理员权限，带上选好的 `host` 名，调用 `POST /admin/agent/runner-hosts/enroll-"
+"token`。响应里会给出一个只能用一次的注册令牌，把它放进主机的私有配置。"
+
+#: ../developer/smoke.md:129
+msgid ""
+"Deploy the host through `deploy/host/deploy.sh` for the same target "
+"release.     The host process prepares/attests the sandbox image, starts "
+"tunnels and     sandbox manager, probes both relays and publishes the "
+"completed-generation marker.     Directly starting runner Compose "
+"containers does not complete this gate."
+msgstr ""
+"用 `deploy/host/deploy.sh` 把主机部署到同一个目标版本。主机进程会准备并证明沙箱镜像、启动隧道和 sandbox "
+"manager、探测两个中继，最后写入\"本代已完成\"的标记。直接启动 runner 的 Compose 容器，过不了这一关。"
+
+#: ../developer/smoke.md:133
+msgid ""
+"`GET /admin/agent/runner-hosts` shows a fresh online heartbeat, expected"
+"     deployment capability and reachable sandbox manager URL. Check the "
+"reverse sandbox manager     route from the control plane."
+msgstr ""
+"`GET /admin/agent/runner-hosts` 显示：刚收到的在线心跳、预期的部署能力，以及可以访问的 sandbox "
+"manager URL。再从控制平面检查一下反向 sandbox manager 路由。"
+
+#: ../developer/smoke.md:136
+msgid ""
+"Complete control-plane activation and confirm its readiness check "
+"succeeds     for the intended host/API SHA."
+msgstr "完成控制平面的激活，确认它的就绪检查对预期的主机和 API SHA 通过。"
+
+#: ../developer/smoke.md:138
+msgid ""
+"If testing enrollment refusal, use a separate disposable token: "
+"redemption     under a different host name must fail without consuming "
+"it. Record the     refusal; do not attempt to reenroll an unrelated live "
+"host."
+msgstr "如果要测试注册被拒的情况，另外拿一个用完即弃的令牌：用不同的主机名去兑换，必须失败，而且令牌不能被消耗掉。把这次拒绝记下来；不要试图重新注册一台无关的线上主机。"
+
+#: ../developer/smoke.md:142
+msgid "5. One job, all the way"
+msgstr "5\\. 跑通一个完整的任务"
+
+#: ../developer/smoke.md:144
+msgid "Connect/authorize the scratch repository under **Integrations**."
+msgstr "在 **Integrations** 里连接并授权这个临时仓库。"
+
+#: ../developer/smoke.md:145
+msgid ""
+"Create a task on its intended base branch with a small verifiable change,"
+"     such as adding a `CONTRIBUTING.md` containing a specified sentence."
+msgstr "在预定的 base 分支上创建一个任务，改动要小、容易验证，比如新建一个 `CONTRIBUTING.md`，里面写一句指定的话。"
+
+#: ../developer/smoke.md:147
+msgid ""
+"Observe `queued` then a host claim. Record job/attempt/host identifiers "
+"and     the non-secret grant ID. Verify the sandbox receives scoped "
+"inference     authority for the account's chosen model."
+msgstr ""
+"看到状态先是 `queued`，然后被某台主机认领。记下任务、attempt 和主机的标识，以及不涉密的授权 "
+"ID。确认沙箱拿到的推理授权，限定在这个账号所选的模型上。"
+
+#: ../developer/smoke.md:150
+msgid ""
+"Confirm events stream to the browser and at least one model/tool call"
+"     succeeds."
+msgstr "确认事件能实时推送到浏览器，并且至少有一次模型或工具调用成功。"
+
+#: ../developer/smoke.md:152
+msgid ""
+"Confirm the turn succeeds with the expected file change. Nothing is     "
+"published until you ask: choose **Create PR** in the conversation, wait"
+"     for the publication to finish, and open the real **draft pull "
+"request**.     Check target branch, author and diff; record its URL. "
+"Execution success     alone is insufficient."
+msgstr ""
+"确认这一轮成功了，文件改动符合预期。你不发起，就什么都不会发布：在对话里点 **Create PR**，等发布完成，再打开那个真实的 "
+"**draft pull request**。检查目标分支、作者和 diff，记下它的 URL。光是执行成功是不够的。"
+
+#: ../developer/smoke.md:157
+msgid "List files and open a terminal on the retained workspace through the app."
+msgstr "在应用里列出保留工作区的文件，并打开一个终端。"
+
+#: ../developer/smoke.md:159
+msgid "6. The parts that only fail later"
+msgstr "6\\. 那些过一阵才会出问题的地方"
+
+#: ../developer/smoke.md:161
+msgid ""
+"Run failure injection only in the disposable staging deployment and "
+"restore its original settings after each case."
+msgstr "故障注入只能在可以随时丢弃的 staging 部署上做，每做完一项，都要把设置改回原样。"
+
+#: ../developer/smoke.md:164
+msgid ""
+"**Renewal:** keep a turn running across several renewal passes. Initial"
+"     grant TTL is 120 seconds (30-second cadence × four passes); a "
+"Gateway     renewal buys 300 seconds. Verify actual renewal and continued"
+" model calls.     A quick successful turn never exercises this boundary."
+msgstr ""
+"**续期**：让一个轮次一直跑，跨过好几次续期。初始授权的 TTL 是 120 秒（每 30 秒一次，共四次）；网关每续期一次延长 300 "
+"秒。确认续期真的发生了，模型调用也一直在继续。一个很快就跑完的轮次，根本碰不到这条边界。"
+
+#: ../developer/smoke.md:168
+msgid ""
+"**Cancellation/revocation:** cancel a separate running turn. Verify "
+"worker     acknowledgment, terminal cancellation, unusable abandoned "
+"member     credentials and grant-revocation evidence. Revocation "
+"accelerates expiry;     TTL remains the backstop if its HTTP call fails."
+msgstr ""
+"**取消和撤销**：另起一个正在运行的轮次，然后取消它。确认 worker "
+"收到并确认了取消、任务进入了取消的终态、被放弃的成员凭据已经不能再用，并且有授权被撤销的证据。撤销只是让授权提前过期；如果撤销的 HTTP "
+"调用失败了，还有 TTL 兜底。"
+
+#: ../developer/smoke.md:172
+msgid ""
+"**Fail closed:** make the Gateway unavailable, then attempt fresh sign-in"
+"     and a new protected owner request/task creation. Neither may gain "
+"access.     Existing-session `/me` must show a temporary failure without "
+"exposing     protected content. Restore reachability and verify recovery."
+msgstr ""
+"**出错时一律拒绝**：让网关不可用，然后尝试全新登录，并发起一个新的受保护所有者请求或创建任务，两者都不能放行。已有会话的 `/me` "
+"必须显示暂时性失败，且不能露出受保护的内容。恢复网关的连通性后，确认一切恢复正常。"
+
+#: ../developer/smoke.md:176
+msgid ""
+"**Control-plane loss:** stop the disposable API while a task runs. The"
+"     Gateway does not own or end the attempt; renewal ceases and the "
+"grant     expires. After restoring the API, verify lease/reaper handling "
+"here."
+msgstr ""
+"**控制平面中断**：在任务运行时，停掉这套可丢弃部署的 API。网关并不掌管这个 attempt，也不会去结束它；续期会停止，授权随之过期。恢复"
+" API 之后，在这里检查租约和 reaper 的处理是否正确。"
+
+#: ../developer/smoke.md:179
+msgid ""
+"Check live follow-up and same-container idle restore separately using"
+"     [context recall](context-recall.md#verification-before-"
+"accepting-a-deployment)."
+msgstr ""
+"按[上下文记忆](context-recall.md#verification-before-"
+"accepting-a-deployment)里的方法，分别检查运行中发送后续消息，以及同一个容器在空闲后的恢复。"
+
+#: ../developer/smoke.md:182
+msgid "7. Tear down"
+msgstr "7\\. 收尾清理"
+
+#: ../developer/smoke.md:184
+msgid ""
+"Stop the disposable stacks using their recorded project names. Keep data"
+"     until acceptance evidence has been captured. Volume deletion is "
+"permanent;     use `down -v` only for a stack whose database is "
+"intentionally disposable."
+msgstr "用记下的项目名，停掉这些可丢弃的环境。验收证据收集完之前，数据先留着。删除卷是不可恢复的；只有数据库确实可以丢弃的环境，才用 `down -v`。"
+
+#: ../developer/smoke.md:187
+msgid ""
+"Delete scratch branches/repository and revoke test-only repository and"
+"     dispatch credentials when the deployment is retired."
+msgstr "部署退役时，删掉临时分支或临时仓库，并撤销只用于测试的仓库凭据和 dispatch 凭据。"
+
+#: ../developer/smoke.md:189
+msgid ""
+"Restore any failure-injection settings on staging and record the result"
+"     as described under [Log](#log)."
+msgstr "把 staging 上所有故障注入的设置都改回去，并按[记录](#log)一节的要求记下结果。"
+
+#: ../developer/smoke.md:192
+msgid "Log"
+msgstr "记录"
+
+#: ../developer/smoke.md:194
+msgid ""
+"Record results while running: the date and time (UTC), result and notes "
+"for each numbered section, plus the source SHA, environment, host, job "
+"and PR identifiers. Keep the record with the deployment's own acceptance "
+"evidence."
+msgstr ""
+"边跑边记：每个编号小节的日期和时间（UTC）、结果和备注，以及源 SHA、环境、主机、任务和 PR "
+"的标识。这份记录和部署自己的验收证据放在一起保存。"
+
