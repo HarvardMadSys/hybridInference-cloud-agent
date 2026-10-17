@@ -61,6 +61,13 @@ from cloud_agent_shared import operation_profiling
 from cloud_agent_shared.errors import SandboxArchiveBlocked
 from cloud_agent_shared.sandbox_archive_settings import SandboxArchivePolicy
 
+#: How long a call on another group may take while one group's Docker call or
+#: hook is held. Only a guard against a hang: a held call waits for the test
+#: longer than this (_HELD_S), so a call queued behind the supervisor-wide lock
+#: still runs out of time, however late the machine runs the calling thread.
+_UNBLOCKED_S = 5
+_HELD_S = 10
+
 
 class _Manager:
     def __init__(self) -> None:
@@ -1162,7 +1169,7 @@ def test_blocking_reconcile_archive_does_not_hold_global_lock_for_other_group_st
     def archive(spec, _inspection, _members):
         if spec.sandbox_id == other.sandbox_id:
             archived_entered.set()
-            assert allow_archive.wait(timeout=2)
+            assert allow_archive.wait(timeout=_HELD_S)
 
     supervisor = SharedChatSessionSupervisor(manager, stopped_archive_hook=archive)
     supervisor.register_manifest(_spec(), _members())
@@ -1194,7 +1201,7 @@ def test_blocking_reconcile_archive_does_not_hold_global_lock_for_other_group_st
 
     status_thread = threading.Thread(target=read_other_group)
     status_thread.start()
-    assert status_done.wait(timeout=0.5), "archive I/O held the supervisor-wide lock"
+    assert status_done.wait(timeout=_UNBLOCKED_S), "archive I/O held the supervisor-wide lock"
     allow_archive.set()
     reconcile_thread.join(timeout=2)
     status_thread.join(timeout=2)
@@ -1362,7 +1369,7 @@ def test_targeted_listing_inspection_does_not_block_another_groups_status(monkey
     def inspect(container_name):
         if container_name == _spec().container_name:
             inspect_entered.set()
-            assert allow_inspect.wait(timeout=2)
+            assert allow_inspect.wait(timeout=_HELD_S)
         return manager.items[container_name]
 
     monkeypatch.setattr(manager, "inspect", inspect)
@@ -1387,7 +1394,7 @@ def test_targeted_listing_inspection_does_not_block_another_groups_status(monkey
     try:
         assert inspect_entered.wait(timeout=1)
         status_thread.start()
-        assert status_done.wait(timeout=0.5), "inspection held the supervisor-wide lock"
+        assert status_done.wait(timeout=_UNBLOCKED_S), "inspection held the supervisor-wide lock"
     finally:
         allow_inspect.set()
         listing_thread.join(timeout=2)
@@ -1493,7 +1500,7 @@ def _gated_inspect(manager, monkeypatch, container_name):
         observed = inspect(name)
         if name == container_name and not entered.is_set():
             entered.set()
-            assert release.wait(timeout=2)
+            assert release.wait(timeout=_HELD_S)
         return observed
 
     monkeypatch.setattr(manager, "inspect", gated)
@@ -1563,7 +1570,7 @@ def test_a_member_inspection_does_not_block_another_groups_status(monkeypatch, c
     try:
         assert entered.wait(timeout=1)
         status_thread, status_outcome = _in_thread(lambda: supervisor.status(other.thread_id))
-        status_thread.join(timeout=0.5)
+        status_thread.join(timeout=_UNBLOCKED_S)
         assert not status_thread.is_alive(), "an inspection held the supervisor-wide lock"
     finally:
         release.set()
@@ -1707,7 +1714,7 @@ def test_environment_preparation_reads_docker_outside_the_supervisor_lock(monkey
         # EnvironmentPreparation.status inspects the container on a cache miss.
         backend.manager.inspect(backend.spec.container_name)
         entered.set()
-        assert release.wait(timeout=2)
+        assert release.wait(timeout=_HELD_S)
         return {"binding_id": binding_id, "ready": True}
 
     preparer = SimpleNamespace(status=receipt)
@@ -1718,7 +1725,7 @@ def test_environment_preparation_reads_docker_outside_the_supervisor_lock(monkey
     try:
         assert entered.wait(timeout=1)
         status_thread, status_outcome = _in_thread(lambda: supervisor.status(other.thread_id))
-        status_thread.join(timeout=0.5)
+        status_thread.join(timeout=_UNBLOCKED_S)
         assert not status_thread.is_alive(), "preparation held the supervisor-wide lock"
     finally:
         release.set()
@@ -1800,7 +1807,7 @@ def test_creating_a_group_does_not_hold_the_supervisor_lock():
             inspection = super().create(spec, facts=facts, observer=observer)
             if spec.sandbox_id == _spec().sandbox_id:
                 creating.set()
-                assert proceed.wait(timeout=5)
+                assert proceed.wait(timeout=_HELD_S)
             return inspection
 
     manager = Manager()
@@ -1814,7 +1821,7 @@ def test_creating_a_group_does_not_hold_the_supervisor_lock():
         assert creating.wait(timeout=2)
         # Other groups are answered while this one is being created.
         status_thread, status_outcome = _in_thread(lambda: supervisor.status(other.thread_id))
-        status_thread.join(timeout=0.5)
+        status_thread.join(timeout=_UNBLOCKED_S)
         assert not status_thread.is_alive(), "Docker create held the supervisor-wide lock"
         assert "error" not in status_outcome
         # Host reconciliation sees the new container but leaves it to its
@@ -7562,7 +7569,7 @@ def test_lifecycle_io_leaves_other_groups_available(monkeypatch, operation):
 
     def gate():
         entered.set()
-        assert release.wait(timeout=5)
+        assert release.wait(timeout=_HELD_S)
 
     if operation == "idle_stop":
         inspect = manager.inspect
@@ -7631,7 +7638,7 @@ def test_lifecycle_io_leaves_other_groups_available(monkeypatch, operation):
     try:
         assert entered.wait(timeout=2)
         other_worker, other_outcome = _in_thread(lambda: supervisor.status(other.thread_id))
-        other_worker.join(timeout=0.5)
+        other_worker.join(timeout=_UNBLOCKED_S)
         assert not other_worker.is_alive(), "lifecycle I/O held the supervisor-wide lock"
         assert "error" not in other_outcome
         if operation != "reconcile_marker":
