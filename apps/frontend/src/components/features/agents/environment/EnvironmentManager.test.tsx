@@ -30,15 +30,21 @@ vi.mock('./EnvironmentDialog', async (actual) => ({
   EnvironmentDialog: ({
     initial,
     teams,
+    onClose,
   }: {
     initial: { name: string; repo: string | null };
     teams?: { name: string }[];
+    onClose: () => void;
   }) => (
     <div
       role="dialog"
       aria-label={`editing ${initial.repo === null ? 'globals' : initial.name}`}
       data-teams={(teams ?? []).map((team) => team.name).join(',')}
-    />
+    >
+      <button type="button" onClick={onClose}>
+        close editor
+      </button>
+    </div>
   ),
 }));
 
@@ -93,6 +99,52 @@ it('opens the shared editor for global variables, an environment, or a new one',
   await screen.findByText('org/web');
   fireEvent.click(screen.getAllByRole('button', { name: 'environment.edit' })[0]);
   expect(screen.getByRole('dialog', { name: 'editing globals' })).toBeInTheDocument();
+});
+
+it('reads the list again when the editor closes, so a test run there shows', async () => {
+  const globals = environment({ id: 'global', repo: null, name: 'Global', revision: 2 });
+  vi.mocked(listEnvironments)
+    .mockResolvedValue({
+      globals,
+      environments: [
+        environment({
+          latest_test: { id: 'run', state: 'succeeded', revision: 3, global_revision: 2 },
+        }),
+      ],
+    })
+    .mockResolvedValueOnce({ globals, environments: [environment({})] });
+  render(<EnvironmentManager />);
+  const web = (await screen.findByText('org/web')).parentElement!;
+  expect(within(web).getByText('environment.test.never')).toBeInTheDocument();
+  // A test of the saved version saves nothing, so only closing tells the list.
+  fireEvent.click(screen.getByRole('button', { name: 'environment.editItem' }));
+  fireEvent.click(screen.getByRole('button', { name: 'close editor' }));
+  expect(await within(web).findByText('environment.test.passed')).toBeInTheDocument();
+});
+
+it('follows a test the editor left running until it ends', async () => {
+  const globals = environment({ id: 'global', repo: null, name: 'Global', revision: 2 });
+  const tested = (state: string) => ({
+    globals,
+    environments: [
+      environment({ latest_test: { id: 'run', state, revision: 3, global_revision: 2 } }),
+    ],
+  });
+  vi.mocked(listEnvironments)
+    .mockResolvedValue(tested('succeeded'))
+    .mockResolvedValueOnce(tested('running'));
+  vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+  try {
+    render(<EnvironmentManager />);
+    const web = (await screen.findByText('org/web')).parentElement!;
+    expect(within(web).getByText('environment.test.running')).toBeInTheDocument();
+    await act(async () => {
+      vi.advanceTimersByTime(10_000);
+    });
+    expect(await within(web).findByText('environment.test.passed')).toBeInTheDocument();
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 it('asks before removing an environment', async () => {

@@ -14,7 +14,7 @@ import {
 import type { EnvironmentConfig, EnvironmentTeam } from '@/lib/api/environments';
 import { listTeams } from '@/lib/api/teams';
 import { EnvironmentDialog, OwnerSelect } from './EnvironmentDialog';
-import { Badge, SnapshotBadge, TeamBadge, TestBadge } from './EnvironmentStatus';
+import { ACTIVE_STATES, Badge, SnapshotBadge, TeamBadge, TestBadge } from './EnvironmentStatus';
 
 export function emptyEnvironment(repo: string | null): EnvironmentConfig {
   return {
@@ -182,9 +182,13 @@ export function EnvironmentManager() {
       if (request === latest.current) throw e;
     }
   }, []);
-  // A snapshot builds on some host for a few minutes; follow it until it settles.
+  // A snapshot builds, and a test runs, on some host for a few minutes; follow
+  // them until they settle.
   const building = (items ?? []).some(
-    (item) => item.snapshot?.state === 'queued' || item.snapshot?.state === 'building',
+    (item) =>
+      item.snapshot?.state === 'queued' ||
+      item.snapshot?.state === 'building' ||
+      ACTIVE_STATES.includes(item.latest_test?.state ?? ''),
   );
   useEffect(() => {
     if (!building) return;
@@ -492,7 +496,12 @@ export function EnvironmentManager() {
             if (next.repo === null) setGlobals(next);
             void load().catch(() => {});
           }}
-          onClose={() => setEditing(null)}
+          onClose={() => {
+            setEditing(null);
+            // A test run in the editor saves nothing, but changes the row's
+            // test result, and a pass can queue a prebuild.
+            void load().catch(() => {});
+          }}
         />
       ) : null}
     </section>

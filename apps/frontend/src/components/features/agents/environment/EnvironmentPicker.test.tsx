@@ -8,8 +8,12 @@ import { VariableEditor, variableEdits } from './VariableEditor';
 vi.mock('@/components/providers', () => ({ useT: () => (key: string) => key }));
 vi.mock('@/lib/api/environments', () => ({ listEnvironments: vi.fn() }));
 vi.mock('./EnvironmentDialog', () => ({
-  EnvironmentDialog: ({ initial }: { initial: { name: string } }) => (
-    <div role="dialog" aria-label={`editing ${initial.name}`} />
+  EnvironmentDialog: ({ initial, onClose }: { initial: { name: string }; onClose: () => void }) => (
+    <div role="dialog" aria-label={`editing ${initial.name}`}>
+      <button type="button" onClick={onClose}>
+        close editor
+      </button>
+    </div>
   ),
 }));
 const globals = {
@@ -67,6 +71,31 @@ it('edits the selected environment or a new one in the shared dialog', async () 
   await screen.findByRole('radio', { name: /Development/ });
   fireEvent.click(screen.getByRole('button', { name: 'environment.editItem' }));
   expect(screen.getByRole('dialog', { name: 'editing Development' })).toBeInTheDocument();
+});
+it('reads the environments again when the editor closes, so a test run there shows', async () => {
+  const development = { ...globals, id: 'env', repo: 'org/repo', name: 'Development' };
+  vi.mocked(listEnvironments)
+    .mockResolvedValue({
+      globals,
+      environments: [
+        {
+          ...development,
+          latest_test: { id: 'run', state: 'succeeded', revision: 2, global_revision: 2 },
+        },
+      ],
+    })
+    .mockResolvedValueOnce({ globals, environments: [development] });
+  render(<EnvironmentPicker repo="org/repo" open onClose={vi.fn()} onChange={vi.fn()} />);
+  const option = await screen.findByRole('radio', { name: /Development/ });
+  expect(option.closest('label')).toHaveTextContent('environment.test.never');
+  fireEvent.click(option);
+  fireEvent.click(screen.getByRole('button', { name: 'environment.editItem' }));
+  fireEvent.click(screen.getByRole('button', { name: 'close editor' }));
+  await waitFor(() =>
+    expect(screen.getByRole('radio', { name: /Development/ }).closest('label')).toHaveTextContent(
+      'environment.test.passed',
+    ),
+  );
 });
 it('keeps a saved Secret blank and requires an explicit replacement when changing its type', () => {
   const change = vi.fn();
