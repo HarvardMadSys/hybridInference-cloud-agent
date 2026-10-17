@@ -95,6 +95,23 @@ def test_conversation_keeps_known_totals_but_names_incomplete_coverage(change):
     assert summary.queried_at == END
 
 
+def test_a_turn_that_never_called_a_model_is_no_gap_in_its_conversation():
+    """It spent nothing, so the conversation's totals are all there is."""
+    quiet = {
+        "job_id": "quiet",
+        "attempt_id": 12,
+        "attempt_no": 1,
+        "attempt_status": "finished",
+        "model_usage_reported": False,
+        "id": None,
+        "snapshot": None,
+    }
+    summary = summarize_conversation([quiet, ledger_row(job_id="job2", attempt_id=11)])
+    assert summary.turn_count == 2
+    assert summary.totals.calls == 1
+    assert summary.incomplete is False
+
+
 def test_unstarted_conversation_does_not_fabricate_zero_cost():
     summary = summarize_conversation([{"job_id": "queued", "attempt_id": None}])
     assert summary.turn_count == 1

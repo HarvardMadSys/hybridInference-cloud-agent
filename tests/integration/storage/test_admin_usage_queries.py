@@ -15,7 +15,7 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-from tests.integration.storage.test_agent_job_store import _create_job
+from tests.integration.storage.test_agent_job_store import _claim, _create_job
 from tests.integration.storage.test_attempt_ledger import _seed_attempt, db as db
 from tests.unit.test_ledger_snapshots import END, START, report_payload
 
@@ -192,6 +192,54 @@ async def test_a_missing_snapshot_keeps_the_run_detail_status(db, store, admin_t
     assert body["summary"]["status_counts"]["pending"] == 1
     assert body["summary"]["status_counts"]["unavailable"] == 1
     assert body["summary"]["missing_attempts"] == 1
+
+
+async def test_an_attempt_without_a_reference_keeps_the_run_detail_status(db, store, admin_token):
+    """A turn that never called a model, and one still starting, read as their run detail.
+
+    Neither attempt has a ledger reference. One ended before its agent could
+    call a model, so it spent nothing; the other is still binding its grant, so
+    its usage is to come. The run detail says both. The aggregate's attempt rows
+    left out the attempt's status and whether it ever reported model usage, so
+    the shared reducer took each for usage nobody attributed: two unavailable
+    runs, each missing an attempt, on this page and on the owner's Usage page.
+    """
+    quiet = await _create_job(store, user_id="owner-one", model="model-a")
+    claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
+    assert claim is not None and claim["id"] == quiet["id"]
+    assert await store.attempt_commands.transition(
+        job_id=quiet["id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        from_states=("running",),
+        to_state="failed",
+        detail="source checkout exceeds the retained import size limit",
+    )
+    starting = await _create_job(store, user_id="owner-one", model="model-a")
+    claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
+    assert claim is not None and claim["id"] == starting["id"]
+    await _backdate(db, store, [quiet["id"], starting["id"]], START)
+
+    async with _client(store) as client:
+        response = await client.get("/admin/agent/usage", params=WINDOW, headers=admin_token)
+        details = [
+            (await client.get(f"/admin/agent/runs/{job['id']}", headers=admin_token)).json()
+            for job in (quiet, starting)
+        ]
+    assert [detail["usage"]["ledger"]["status"] for detail in details] == [
+        "available",
+        "pending",
+    ]
+    summary = response.json()["summary"]
+    assert summary["status_counts"] == {
+        "available": 1,
+        "partial": 0,
+        "stale": 0,
+        "pending": 1,
+        "unavailable": 0,
+    }
+    assert summary["missing_attempts"] == 0
+    assert summary["totals"] is None
 
 
 async def test_a_forks_copied_turns_are_not_counted_as_runs(db, store, admin_token):
@@ -549,7 +597,7 @@ async def test_a_snapshot_carrying_only_allowlisted_keys_is_read(db, store, admi
 
 
 async def test_event_volume_does_not_change_the_result(db, store, admin_token):
-    """Aggregation reads jobs and ledger rows, never the event table."""
+    """Aggregation reads jobs and ledger rows, and no event of a referenced attempt."""
     job = await _create_job(store, user_id="owner-one", model="model-a")
     _, attempt_id, ledger_id = await _seed_attempt(db, store, job=job)
     await _backdate(db, store, [job["id"]], START, state="succeeded")

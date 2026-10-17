@@ -16,6 +16,7 @@ import asyncio
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
+from cloud_agent.storage._sql.ledger import UNREFERENCED_ATTEMPT_SQL
 from cloud_agent.storage._sql.rows import load_json
 
 if TYPE_CHECKING:
@@ -74,7 +75,8 @@ _SNAPSHOT_SQL = f"""
 """
 
 #: Refreshing uses the same rule as the owner read, so the admin page never
-#: invents its own refresh phases.
+#: invents its own refresh phases, and an attempt without a reference is told
+#: apart by the same columns the run detail reads.
 _LEDGER_COLUMNS = f"""
     -- ``id`` is the name the shared ledger reducer reads to tell an existing
     -- reference from a missing one; aliasing it here keeps one accounting path.
@@ -85,7 +87,8 @@ _LEDGER_COLUMNS = f"""
         OR l.next_refresh_at <= NOW()
         OR (a.status <> 'running' AND l.terminal_refresh_count = 0
             AND l.next_refresh_at IS NULL)
-    )) IS TRUE AS refreshing
+    )) IS TRUE AS refreshing,
+    {UNREFERENCED_ATTEMPT_SQL.strip()}
 """
 
 _FILTERS_SQL = """
