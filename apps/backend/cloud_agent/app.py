@@ -16,7 +16,8 @@ import os
 from typing import Any
 
 from fastapi import Depends, FastAPI, Request, Response
-from fastapi.exception_handlers import http_exception_handler, request_validation_exception_handler
+from fastapi.encoders import jsonable_encoder
+from fastapi.exception_handlers import http_exception_handler
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import JSONResponse, PlainTextResponse
@@ -24,6 +25,7 @@ from starlette.responses import JSONResponse, PlainTextResponse
 from cloud_agent.api._parameters import refuse_unstorable_parameters
 from cloud_agent.entitlement import RepoAccessUnavailable
 from cloud_agent.logging_utils import configure_process_logging, get_logger
+from cloud_agent_shared.storable_text import encodable_json
 
 logger = get_logger(__name__)
 
@@ -65,8 +67,10 @@ def install_admin_no_store(
     A route dependency can set a header on a response the route returns, but
     FastAPI builds a fresh response for a raised refusal and for its own
     validation errors. These handlers wrap the defaults instead of replacing
-    them, and are registered here rather than as middleware: middleware would
-    also sit in front of the event streams, which are long-lived by design.
+    them (the validation answer keeps the default's shape, with what it repeats
+    made encodable), and are registered here rather than as middleware:
+    middleware would also sit in front of the event streams, which are
+    long-lived by design.
     """
     normalized = tuple(prefix.rstrip("/") for prefix in prefixes)
 
@@ -91,7 +95,13 @@ def install_admin_no_store(
                     },
                 )
             else:
-                response = await request_validation_exception_handler(request, exc)
+                # FastAPI's own answer, which repeats each refused input. Half
+                # a surrogate pair is replaced in what it repeats: Starlette
+                # writes UTF-8, which has none, and the 422 would be a 500.
+                response = JSONResponse(
+                    status_code=422,
+                    content={"detail": encodable_json(jsonable_encoder(exc.errors()))},
+                )
         else:
             response = await http_exception_handler(request, exc)  # type: ignore[arg-type]
         if any(
