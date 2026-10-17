@@ -305,6 +305,71 @@ describe('AuthProvider and the browser’s other Agents tabs', () => {
     expect(current().user?.id).toBe('first');
   });
 
+  function slowRead() {
+    let answer!: (me: { id: string; agent_access: AgentAccessApi } | null) => void;
+    getMe.mockReturnValueOnce(new Promise((resolve) => (answer = resolve)));
+    return (me: { id: string; agent_access: AgentAccessApi } | null) => act(async () => answer(me));
+  }
+
+  it('lets a sign-out in another tab outlast a first read asked before it', async () => {
+    const reply = slowRead();
+    render(
+      <AuthProvider>
+        <Consumer />
+      </AuthProvider>,
+    );
+    getMe.mockResolvedValue(null);
+
+    announceFromAnotherTab(null);
+    await waitFor(() => expect(getMe).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(current().loading).toBe(false));
+    await reply({ id: 'first', agent_access: access });
+
+    expect(current().isAuthenticated).toBe(false);
+    expect(current().user).toBeNull();
+  });
+
+  it('keeps the account another tab switched to when an older read answers last', async () => {
+    let auth: ReturnType<typeof useAuth> | undefined;
+    function Switched() {
+      auth = useAuth();
+      return null;
+    }
+    getMe.mockResolvedValue({ id: 'first', agent_access: access });
+    render(
+      <AuthProvider>
+        <Consumer />
+        <Switched />
+      </AuthProvider>,
+    );
+    await waitFor(() => expect(current().user?.id).toBe('first'));
+    const reply = slowRead();
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    getMe.mockResolvedValue({ id: 'second', agent_access: access });
+
+    announceFromAnotherTab('second');
+    await waitFor(() => expect(current().user?.id).toBe('second'));
+    act(() => auth?.acknowledgeSessionSwitch());
+    await reply({ id: 'first', agent_access: access });
+
+    expect(current().user?.id).toBe('second');
+    expect(auth?.sessionSwitched).toBe(false);
+  });
+
+  it('stays signed out when a read asked before signing out answers after it', async () => {
+    await renderAs('first');
+    vi.mocked(endSession).mockResolvedValue(undefined);
+    const reply = slowRead();
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
+    await waitFor(() => expect(current().isAuthenticated).toBe(false));
+    await reply({ id: 'first', agent_access: access });
+
+    expect(current().isAuthenticated).toBe(false);
+    expect(current().user).toBeNull();
+  });
+
   it('tells the other tabs when it signs out', async () => {
     await renderAs('first');
     vi.mocked(endSession).mockResolvedValue(undefined);

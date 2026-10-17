@@ -1457,12 +1457,26 @@ class PostgresEnvironmentRepository:
                 "setup_script": thread["setup_script"],
                 "start_script": "",
                 "actions": [],
+                "action_runs": [],
                 "steps": _json(steps) or [],
             }
         bound = await self.get_environment_binding(user_id, binding_id, include_secrets=False)
         view = bound.model_dump(
             mode="json", exclude={"variables", "runtime_variables", "previous_secrets"}
         )
+        # Each saved command's latest run, so a panel opened again shows what
+        # is still running and offers Stop rather than a second Run. Without
+        # output: the panel reads that from the run itself, and this view is
+        # polled.
+        async with self._pool.acquire() as conn:
+            action_runs = await conn.fetch(
+                "SELECT DISTINCT ON (action_id) id,action_id,state,terminal_id,exit_code "
+                "FROM agent_environment_action_runs WHERE user_id=$1 AND thread_id=$2 "
+                "AND binding_id=$3 ORDER BY action_id, created_at DESC, id DESC",
+                user_id,
+                thread_id,
+                binding_id,
+            )
         current = None
         if bound.environment_id:
             # Read by the binding, which is the owner's: a team environment
@@ -1520,6 +1534,7 @@ class PostgresEnvironmentRepository:
                 }
                 for v in bound.variables
             ],
+            "action_runs": [{**dict(run), "output": ""} for run in action_runs],
             "steps": _json(steps) or [],
         }
 

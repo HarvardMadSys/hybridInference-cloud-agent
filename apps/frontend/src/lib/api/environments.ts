@@ -123,10 +123,13 @@ export interface EnvironmentBinding {
   setup_script: string;
   start_script: string;
   actions: EnvironmentAction[];
+  /** Each action's latest run, without its output. */
+  action_runs?: ActionRun[];
   steps: EnvironmentStep[];
 }
 export interface ActionRun {
   id: string;
+  action_id?: string;
   state: string;
   terminal_id?: string;
   job_id?: string;

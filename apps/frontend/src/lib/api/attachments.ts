@@ -6,7 +6,8 @@
 // fingerprints. Staging also means the transfer happens while the user is
 // still typing rather than after they press Run.
 //
-// The control plane garbage-collects a staged upload that no job ever claimed.
+// A composer deletes the uploads it never sent when it is left or its page is
+// closed; the control plane garbage-collects any that still no job claimed.
 //
 // Bytes travel base64 inside JSON rather than as multipart: every other call
 // this client makes is JSON, and the control plane has no binary surface at
@@ -63,8 +64,17 @@ export async function uploadAttachment(file: File, relativePath?: string): Promi
   return jsonOrThrow<AttachmentApi>(response);
 }
 
-/** Drop a staged upload the user removed before running. */
-export async function deleteAttachment(id: number): Promise<void> {
-  const response = await fetchWithAuth(config.apiBase, `${PATH}/${id}`, { method: 'DELETE' });
+/**
+ * Drop a staged upload the user removed, or left behind, before running.
+ * `keepalive` lets the request outlive a page that is being closed.
+ */
+export async function deleteAttachment(
+  id: number,
+  options: { keepalive?: boolean } = {},
+): Promise<void> {
+  const response = await fetchWithAuth(config.apiBase, `${PATH}/${id}`, {
+    method: 'DELETE',
+    ...(options.keepalive ? { keepalive: true } : {}),
+  });
   if (!response.ok) await jsonOrThrow(response);
 }

@@ -412,6 +412,19 @@ async def test_action_idempotency_and_terminal_state_are_durable(store, monkeypa
         "alice", run["id"], {"state": "running", "output": "late acknowledgement"}
     )
     assert late["state"] == "succeeded" and late["output"] == "deployed" and late["exit_code"] == 0
+    # A panel opened again recovers the newest run of each command, still running.
+    again = await store.environments.create_environment_action_run(*arguments[:4], "next-request")
+    view = await store.environments.workspace_environment_view("alice", job["thread_id"])
+    assert view["action_runs"] == [
+        {
+            "id": again["id"],
+            "action_id": "deploy",
+            "state": "starting",
+            "terminal_id": None,
+            "exit_code": None,
+            "output": "",
+        }
+    ]
 
 
 async def test_empty_selection_is_frozen_but_requires_no_environment_protocol(store, monkeypatch):

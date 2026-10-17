@@ -73,7 +73,7 @@ function SideChatContent({
   const active = selected && visible;
   const t = useT();
   const attachments = useAttachments(t, config?.attachment_limits);
-  const { reset: resetAttachments } = attachments;
+  const { reset: resetAttachments, whileSending: sendingAttachments } = attachments;
   const { session, status, error, recoverable, retry, restart, advance } = useSideChatSession(
     sourceJob,
     userId,
@@ -299,9 +299,11 @@ function SideChatContent({
     setSubmitting(true);
     setActionError(null);
     try {
-      const result = requestId
-        ? await submitThreadMessage(threadId, body, { requestId })
-        : await submitThreadMessage(threadId, body);
+      const result = await sendingAttachments(
+        requestId
+          ? submitThreadMessage(threadId, body, { requestId })
+          : submitThreadMessage(threadId, body),
+      );
       if (!mounted.current) return;
       if (clearDraft) {
         setDraft('');

@@ -82,6 +82,14 @@ function VariableList({
 }
 
 /**
+ * The idempotency key of each action start whose answer has not arrived, by
+ * conversation turn and action. Outside the panel, which unmounts whenever
+ * another tab is chosen: a Run pressed again after coming back is the same
+ * request, not a second copy of the command.
+ */
+const pendingStarts = new Map<string, string>();
+
+/**
  * A conversation's Environment panel. What the reader needs first is whether
  * the workspace is ready and, when it is not, what to do about it; then the
  * saved commands they can run. The fixed configuration behind it is detail.
@@ -104,8 +112,9 @@ export function WorkspaceEnvironment({
   // succeeds; an action's failure stays until the owner acts again.
   const [loadError, setLoadError] = useState('');
   const [runs, setRuns] = useState<Record<string, ActionRun>>({});
+  // The actions whose listed run this panel has already taken in.
+  const listedRuns = useRef(new Set<string>());
   const [busy, setBusy] = useState(false);
-  const pendingKeys = useRef<Record<string, string>>({});
   const [reload, setReload] = useState(0);
   const [skipArmed, setSkipArmed] = useState(false);
   const [editing, setEditing] = useState<{
@@ -120,9 +129,41 @@ export function WorkspaceEnvironment({
           if (!active) return;
           setBound(value);
           setLoadError('');
+          adoptRuns(value.action_runs ?? []);
         })
         .catch((e) => {
           if (active) setLoadError(e instanceof Error ? e.message : String(e));
+        });
+    };
+    // The panel's own record of a run is newer than any listing: it may hold a
+    // start this read predates. A listed run fills only an action the panel
+    // knows nothing about, as when it was opened again mid-run; a finished one
+    // is read once more for the output the listing leaves out.
+    const adoptRuns = (listed: ActionRun[]) => {
+      const known = listedRuns.current;
+      const adopted = listed.filter((run) => run.action_id && !known.has(run.action_id));
+      if (!adopted.length) return;
+      adopted.forEach((run) => known.add(run.action_id!));
+      setRuns((previous) => {
+        const next = { ...previous };
+        for (const run of adopted) next[run.action_id!] ??= run;
+        return next;
+      });
+      adopted
+        .filter((run) => !ACTIVE_STATES.includes(run.state))
+        .forEach((run) => {
+          void getEnvironmentActionRun(run.id)
+            .then((value) => {
+              if (!active) return;
+              setRuns((previous) =>
+                previous[run.action_id!]?.id === run.id
+                  ? { ...previous, [run.action_id!]: value }
+                  : previous,
+              );
+            })
+            .catch(() => {
+              // The state is already shown; only its output is missing.
+            });
         });
     };
     refresh();
@@ -329,10 +370,11 @@ export function WorkspaceEnvironment({
                           void perform(async () => {
                             // The same key for a retry after a lost response, so
                             // the command is not started twice.
-                            const key = pendingKeys.current[action.id] ?? crypto.randomUUID();
-                            pendingKeys.current[action.id] = key;
+                            const pending = `${jobId}:${action.id}`;
+                            const key = pendingStarts.get(pending) ?? crypto.randomUUID();
+                            pendingStarts.set(pending, key);
                             const result = await startEnvironmentAction(jobId, action.id, key);
-                            delete pendingKeys.current[action.id];
+                            pendingStarts.delete(pending);
                             setRuns((v) => ({ ...v, [action.id]: result }));
                           })
                         }

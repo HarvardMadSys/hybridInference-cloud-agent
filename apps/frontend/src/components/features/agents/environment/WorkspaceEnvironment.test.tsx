@@ -1,13 +1,15 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  getEnvironmentActionRun,
   getWorkspaceEnvironment,
   listEnvironments,
   refreshWorkspaceRuntime,
   retryWorkspaceEnvironment,
   skipWorkspaceStart,
+  startEnvironmentAction,
 } from '@/lib/api/environments';
 import type { EnvironmentBinding } from '@/lib/api/environments';
 import { WorkspaceEnvironment } from './WorkspaceEnvironment';
@@ -175,4 +177,63 @@ it('names the team whose environment the workspace uses, and opens it to view', 
   expect(await screen.findByText('environment.teamBadge')).toBeInTheDocument();
   fireEvent.click(screen.getByRole('button', { name: 'environment.openTeamSaved' }));
   expect(await screen.findByRole('dialog', { name: 'editing Development' })).toBeInTheDocument();
+});
+
+describe('an action outliving its panel', () => {
+  const withAction = {
+    ...binding,
+    steps: [{ phase: 'setup' as const, state: 'succeeded', output: '' }],
+    actions: [{ id: 'serve', name: 'Serve', command: 'npm start', cwd: '' }],
+  };
+
+  it('offers Stop, not a second Run, when the panel is opened again mid-run', async () => {
+    const running = { id: 'run-1', action_id: 'serve', state: 'running', output: 'listening' };
+    vi.mocked(getWorkspaceEnvironment).mockResolvedValue({ ...withAction, action_runs: [] });
+    vi.mocked(startEnvironmentAction).mockResolvedValue(running);
+    vi.mocked(getEnvironmentActionRun).mockResolvedValue(running);
+    const first = render(
+      <WorkspaceEnvironment jobId="job" repo="org/repo" onTerminal={() => {}} />,
+    );
+    fireEvent.click(await screen.findByRole('button', { name: 'environment.run' }));
+    expect(await screen.findByRole('button', { name: 'environment.stop' })).toBeInTheDocument();
+    // Another workspace tab is chosen, and this one chosen again.
+    first.unmount();
+    vi.mocked(getWorkspaceEnvironment).mockResolvedValue({
+      ...withAction,
+      action_runs: [{ ...running, output: '' }],
+    });
+    render(<WorkspaceEnvironment jobId="job" repo="org/repo" onTerminal={() => {}} />);
+    expect(await screen.findByRole('button', { name: 'environment.stop' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'environment.run' })).not.toBeInTheDocument();
+    expect(startEnvironmentAction).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows the last finished run again, with its output', async () => {
+    const done = { id: 'run-1', action_id: 'serve', state: 'succeeded', output: '' };
+    vi.mocked(getWorkspaceEnvironment).mockResolvedValue({ ...withAction, action_runs: [done] });
+    vi.mocked(getEnvironmentActionRun).mockResolvedValue({ ...done, output: 'served' });
+    render(<WorkspaceEnvironment jobId="job" repo="org/repo" onTerminal={() => {}} />);
+    expect(await screen.findByText('served')).toBeInTheDocument();
+    expect(getEnvironmentActionRun).toHaveBeenCalledWith('run-1');
+  });
+
+  it('resends an unanswered start under its key after the panel is opened again', async () => {
+    vi.mocked(getWorkspaceEnvironment).mockResolvedValue({ ...withAction, action_runs: [] });
+    vi.mocked(startEnvironmentAction)
+      .mockReturnValueOnce(new Promise(() => {}))
+      .mockResolvedValue({ id: 'run-1', action_id: 'serve', state: 'running', output: '' });
+    const first = render(
+      <WorkspaceEnvironment jobId="job" repo="org/repo" onTerminal={() => {}} />,
+    );
+    fireEvent.click(await screen.findByRole('button', { name: 'environment.run' }));
+    await waitFor(() => expect(startEnvironmentAction).toHaveBeenCalledTimes(1));
+    first.unmount();
+    render(<WorkspaceEnvironment jobId="job" repo="org/repo" onTerminal={() => {}} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'environment.run' }));
+    await waitFor(() => expect(startEnvironmentAction).toHaveBeenCalledTimes(2));
+    const [firstKey, secondKey] = vi
+      .mocked(startEnvironmentAction)
+      .mock.calls.map((call) => call[2]);
+    expect(secondKey).toBe(firstKey);
+  });
 });

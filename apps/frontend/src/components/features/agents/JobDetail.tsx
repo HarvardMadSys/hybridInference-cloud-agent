@@ -357,14 +357,16 @@ export function JobDetail({
       // One request whatever the conversation is doing: idle, the message is
       // the next turn when this returns; busy, it waits in the queue above the
       // composer. ``queue.apply`` shows the card or, for a turn, moves to it.
-      const result = await submitThreadMessage(threadId, {
-        prompt,
-        ...(chosenSkills !== null ? { skill_ids: chosenSkills.map((skill) => skill.id) } : {}),
-        ...(attachments.ids.length ? { attachment_ids: attachments.ids } : {}),
-        // Omitted controls inherit the parent's validated model and effort.
-        // The parent is the latest turn, which need not be the one on screen.
-        ...composerOverrides(inherited, model, effort),
-      });
+      const result = await attachments.whileSending(
+        submitThreadMessage(threadId, {
+          prompt,
+          ...(chosenSkills !== null ? { skill_ids: chosenSkills.map((skill) => skill.id) } : {}),
+          ...(attachments.ids.length ? { attachment_ids: attachments.ids } : {}),
+          // Omitted controls inherit the parent's validated model and effort.
+          // The parent is the latest turn, which need not be the one on screen.
+          ...composerOverrides(inherited, model, effort),
+        }),
+      );
       draft.acknowledge(snapshot);
       if (!composerMounted.current || currentDraftScope.current !== snapshot.scope) return result;
       queue.apply(result);

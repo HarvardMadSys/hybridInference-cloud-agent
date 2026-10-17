@@ -73,6 +73,12 @@ const SIGNED_OUT: AuthState = { isAuthenticated: false, loading: false, user: nu
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const accountId = useRef<string | undefined>(undefined);
+  // Bumped by every read of the session and every sign-out this tab makes. A
+  // reply to an older read describes a session that may no longer stand — a
+  // sign-out or switch since then has the last word — so it is dropped.
+  const sessionEpoch = useRef(0);
+  // Whether the latest read is still unanswered.
+  const reading = useRef(false);
   const [state, setState] = useState<AuthState>({
     isAuthenticated: false,
     loading: true,
@@ -82,9 +88,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const acknowledgeSessionSwitch = useCallback(() => setSessionSwitched(false), []);
 
   const refreshUser = useCallback(async () => {
+    const epoch = ++sessionEpoch.current;
+    reading.current = true;
     setState((previous) => ({ ...previous, loading: true, error: null }));
     try {
       const me = await getSessionUser();
+      if (epoch !== sessionEpoch.current) return;
+      reading.current = false;
       if (!me) {
         clearAccountResources();
         accountId.current = undefined;
@@ -107,6 +117,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         },
       });
     } catch (error) {
+      if (epoch !== sessionEpoch.current) return;
+      reading.current = false;
       // Do not retain permissions or mistake an outage for an expired session.
       const category =
         error instanceof APIError &&
@@ -143,9 +155,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   useEffect(
     () =>
       listenForSession(({ userId }) => {
-        if ((userId ?? undefined) !== accountId.current) void checkSession();
+        // A read still unanswered may have been asked before this change, and
+        // its reply would undo it: ask again, and let only that reply stand.
+        if (reading.current) void refreshUser();
+        else if ((userId ?? undefined) !== accountId.current) void checkSession();
       }),
-    [checkSession],
+    [checkSession, refreshUser],
   );
 
   useEffect(() => {
@@ -164,6 +179,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     const handleAuthExpired = () => {
+      sessionEpoch.current += 1;
+      reading.current = false;
       clearSideChatDrafts(state.user?.id);
       clearAccountResources();
       accountId.current = undefined;
@@ -179,6 +196,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     // would hand this account to the next person at this browser. The caller
     // gets the failure and says so.
     await endSession();
+    sessionEpoch.current += 1;
+    reading.current = false;
     clearSideChatDrafts(state.user?.id);
     clearAccountResources();
     accountId.current = undefined;

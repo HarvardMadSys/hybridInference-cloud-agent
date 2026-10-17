@@ -614,7 +614,9 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
     if (pluginsBlocked) throw new Error(pluginBlockedReason);
     const snapshot = draftStore.capture();
     setGoalHint(null);
-    const job = await createAgentJob(requestBody(objective, { objective }));
+    const job = await attachments.whileSending(
+      createAgentJob(requestBody(objective, { objective })),
+    );
     draftStore.acknowledge(snapshot);
     if (mounted.current) router.push(`/${job.id}`);
   }
@@ -639,7 +641,7 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
     setError(null);
     try {
       const snapshot = draftStore.capture();
-      const job = await createAgentJob(requestBody(task.trim()));
+      const job = await attachments.whileSending(createAgentJob(requestBody(task.trim())));
       draftStore.acknowledge(snapshot);
       if (mounted.current) router.push(`/${job.id}`);
     } catch (cause: unknown) {
