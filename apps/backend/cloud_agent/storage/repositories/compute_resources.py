@@ -26,6 +26,7 @@ from cloud_agent.domain.compute import (
 from cloud_agent.storage._sql.compute_admission import host_compute_admission, lock_compute_entry
 from cloud_agent.storage._sql.hosts import (
     HOST_RETAINED_GROUP,
+    lock_hosts_for_revocation,
     release_covered_sandboxes,
     revoke_host_credentials,
 )
@@ -1798,15 +1799,18 @@ class PostgresComputeResourceRepository:
             allocation_id,
         ):
             return False
+        # Read under the exclusive compute fence, which every binding change
+        # takes; the revocation's rows are locked before the host rows.
         hosts = [
             row["host"]
             for row in await conn.fetch(
                 """SELECT h.host FROM agent_compute_nodes n
                    JOIN agent_runner_hosts h ON h.compute_node_id=n.id
-                   WHERE n.allocation_id=$1 FOR UPDATE OF h""",
+                   WHERE n.allocation_id=$1 ORDER BY h.host""",
                 allocation_id,
             )
         ]
+        await lock_hosts_for_revocation(conn, hosts)
         await conn.execute(
             """UPDATE agent_compute_allocations
                SET desired_state='absent',
@@ -3110,11 +3114,19 @@ class PostgresComputeResourceRepository:
                 raise ValueError("allocation_not_found")
             if allocation["release_committed_at"] is not None:
                 return {"release_committed": True, "blocked_reasons": []}
-            await conn.fetch(
-                """SELECT h.host FROM agent_compute_nodes n
-                   JOIN agent_runner_hosts h ON h.compute_node_id=n.id
-                   WHERE n.allocation_id=$1 FOR UPDATE OF h""",
-                allocation_id,
+            # The rows the revocation below writes, then the host rows: a
+            # provider-terminal release proceeds past attempts still running.
+            await lock_hosts_for_revocation(
+                conn,
+                [
+                    row["host"]
+                    for row in await conn.fetch(
+                        """SELECT h.host FROM agent_compute_nodes n
+                           JOIN agent_runner_hosts h ON h.compute_node_id=n.id
+                           WHERE n.allocation_id=$1 ORDER BY h.host""",
+                        allocation_id,
+                    )
+                ],
             )
             impact = await self._retirement_impact(conn, allocation_id)
             provider_terminal = allocation["desired_state"] == "absent" and allocation[

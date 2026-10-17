@@ -2142,6 +2142,96 @@ async def test_terminal_observation_fences_running_autoscale_extension(db, store
     assert await repo.claim_operation(worker_id="other") is None
 
 
+@pytest.mark.parametrize("release", ["autoscaled_termination", "retirement_commit"])
+async def test_a_terminal_release_takes_its_hosts_attempts_before_their_host_rows(
+    db, store, hosts, release
+):
+    """Revoking a released server's Host waits for a turn ending there, holding nothing.
+
+    Ending an attempt -- the reaper's pass, a finish, a hand-back -- takes the
+    attempt, writes its group and gives its slot back on the host row last.
+    The provider's terminal answer for an autoscaled server, and a retirement
+    committing once the provider has ended the server, locked the host row
+    first and then brought the Host's attempt leases forward, so a turn the
+    reaper was ending on that Host at the same moment deadlocked with them.
+    """
+    repo = store.compute_resources
+    allocation_id, _, _ = await resource(store, hosts)
+    if release == "autoscaled_termination":
+        async with db.acquire() as conn:
+            await conn.execute(
+                """INSERT INTO agent_cloudlab_autoscaling_members
+                   (allocation_id,deployment_profile,state)
+                   VALUES ($1,'terminal-release-route','active')""",
+                allocation_id,
+            )
+            await conn.execute(
+                """INSERT INTO agent_cloudlab_autoscaling_profile_reservations
+                   (deployment_profile,profile_snapshot,allocation_id)
+                   VALUES ('terminal-release-route','{"id":"terminal-release-route"}',$1)""",
+                allocation_id,
+            )
+    await _create_job(store)
+    claim = await _claim(store, worker_id="runner", lease_ttl_seconds=90, host="machine")
+    assert claim is not None
+    if release == "autoscaled_termination":
+        releasing_call = repo.observe_allocation(
+            allocation_id=allocation_id,
+            observation={"observed_state": "terminated", "scope_complete": True},
+        )
+    else:
+        # The provider ended the server while it was being retired.
+        retire = await operation(repo, allocation_id, "retire")
+        assert retire is not None and retire["kind"] == "retire"
+        await repo.begin_retirement(allocation_id=allocation_id, **fence(retire))
+        await repo.observe_allocation(
+            allocation_id=allocation_id,
+            observation={"observed_state": "terminated", "scope_complete": True},
+            **fence(retire),
+        )
+        releasing_call = repo.commit_release(allocation_id=allocation_id, **fence(retire))
+
+    releasing = None
+    async with db.acquire() as reaper:
+        try:
+            async with reaper.transaction():
+                # The reaper ending this attempt: the attempt first.
+                await reaper.execute(
+                    "SELECT id FROM agent_attempts WHERE id = $1 FOR UPDATE", claim["attempt_id"]
+                )
+                releasing = asyncio.create_task(releasing_call)
+                reaper_pid = await reaper.fetchval("SELECT pg_backend_pid()")
+                async with asyncio.timeout(10):
+                    while not await reaper.fetchval(
+                        "SELECT EXISTS (SELECT 1 FROM pg_locks "
+                        "WHERE NOT granted AND $1 = ANY(pg_blocking_pids(pid)))",
+                        reaper_pid,
+                    ):
+                        await asyncio.sleep(0.01)
+                # Its slot back last, which the waiting release must not hold.
+                await reaper.execute(
+                    "SELECT host FROM agent_runner_hosts WHERE host = 'machine' FOR UPDATE NOWAIT"
+                )
+            settled = await asyncio.wait_for(releasing, timeout=10)
+        finally:
+            if releasing is not None and not releasing.done():
+                releasing.cancel()
+                await asyncio.gather(releasing, return_exceptions=True)
+
+    assert (await repo.get_allocation(allocation_id))["release_committed_at"] is not None
+    if release == "autoscaled_termination":
+        snapshot = await repo.get_cloudlab_autoscaling()
+        assert snapshot["members"][0]["state"] == "released"
+        assert all(
+            reservation["allocation_id"] != allocation_id
+            for reservation in snapshot["profile_reservations"]
+        )
+    else:
+        assert settled["release_committed"] is True
+    revoked = await hosts.get_host(host="machine")
+    assert revoked is not None and revoked["status"] == "disabled"
+
+
 @pytest.mark.parametrize("operation_state", ["blocked", "unknown"])
 async def test_terminal_observation_releases_nonrunning_autoscale_discard_history(
     db, store, operation_state

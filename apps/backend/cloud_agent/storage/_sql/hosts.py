@@ -172,8 +172,8 @@ async def revoke_host_credentials(conn: Any, hosts: list[str]) -> None:
 
     Callers own admission locks and busy/retention policy; this is the one
     credential transition shared by Host Remove and committed resource release.
-    Host Remove takes the rows this writes below the host rows first
-    (:func:`lock_revocation_rows`).
+    Every caller takes the rows this writes below the host rows first: Host
+    Remove itself, a resource release through :func:`lock_hosts_for_revocation`.
 
     **The work the machine was holding ends with its credential.** Clearing
     the hash stops the host's own requests, but its attempts run on worker
@@ -236,6 +236,29 @@ async def lock_revocation_rows(conn: Any, hosts: list[str]) -> None:
     await conn.execute(
         "SELECT id FROM agent_sandboxes WHERE host = ANY($1::text[]) "
         "AND deletion_state = 'none' ORDER BY id FOR UPDATE",
+        hosts,
+    )
+
+
+async def lock_hosts_for_revocation(conn: Any, hosts: list[str]) -> None:
+    """Lock what revoking ``hosts`` writes, the host rows last.
+
+    Their running attempts, then their memberships and groups
+    (:func:`lock_revocation_rows`), then the host rows: the order of every
+    writer that ends an attempt, which moves the attempt, writes its group and
+    gives its slot back on the host row last. A release that locked the host
+    rows first and then brought the attempts' leases forward deadlocked with an
+    attempt the reaper was ending on that host. Host Remove takes the same rows
+    in the same order itself.
+    """
+    await conn.execute(
+        "SELECT id FROM agent_attempts WHERE host_id = ANY($1::text[]) AND status = 'running' "
+        "ORDER BY id FOR UPDATE",
+        hosts,
+    )
+    await lock_revocation_rows(conn, hosts)
+    await conn.execute(
+        "SELECT host FROM agent_runner_hosts WHERE host = ANY($1::text[]) ORDER BY host FOR UPDATE",
         hosts,
     )
 
