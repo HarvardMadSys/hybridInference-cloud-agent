@@ -90,6 +90,16 @@ For frontend changes, use Node.js 22 and run `make ci-frontend`. It installs the
 locked dependencies with `npm ci`, then checks lint, formatting, types, tests,
 and build guards. `make setup-dev` installs backend dependencies only.
 
+The developer documentation site is published in English and Simplified
+Chinese, and CI fails while any English string lacks a current translation.
+When a change edits a page under `docs/developer/` or a root guide the site
+includes (`ENVIRONMENT.md`, `CONTRIBUTING.md`, `SECURITY.md`,
+`deploy/local/README.md`, `deploy/release/README.md`,
+`gateway_contracts/README.md`), run `make docs-translate`, translate the
+entries it adds or marks fuzzy, and run `make docs-verify`.
+[Translating the docs](docs/developer/translations.md) has the workflow and
+terminology.
+
 If `apps/frontend/node_modules` is absent, install it before reporting checks
 as blocked. From `apps/frontend`, run `npm ci`, `npm run type-check`, and
 `npm test`; `vitest` and `tsc` come from the project's development dependencies.
