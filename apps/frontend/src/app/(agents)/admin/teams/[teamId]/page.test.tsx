@@ -170,6 +170,22 @@ describe('Admin → Teams → one team', () => {
     expect(members).not.toHaveTextContent(/Showing the latest/);
   });
 
+  it('counts every request waiting, not only the oldest ones it lists', async () => {
+    const team = detail();
+    // The list holds the oldest 50 requests; the count is all of them.
+    vi.mocked(getAdminTeam).mockResolvedValue({
+      ...team,
+      team: { ...team.team, pending_request_count: 60 },
+    });
+    vi.mocked(listAdminTeamAudit).mockResolvedValue({ events: [], next_before: null });
+
+    render(<AdminTeamPage />);
+
+    const requests = await screen.findByRole('region', { name: 'Waiting to join (60)' });
+    expect(requests).toHaveTextContent('Dave');
+    expect(requests).toHaveTextContent('Showing the oldest 1 of 60.');
+  });
+
   it('says when there is no such team', async () => {
     vi.mocked(getAdminTeam).mockRejectedValue(new APIError('not_found', 'No such team.', 404));
     vi.mocked(listAdminTeamAudit).mockRejectedValue(
