@@ -45,6 +45,12 @@ _CONCURRENCY = 8
 _PR_PATH = re.compile(r"/([^/]+/[^/]+)/pull/([1-9][0-9]*)/?")
 _MERGE_SHA = re.compile(r"[0-9a-fA-F]{7,64}")
 _Verdict = tuple[str, datetime | None, str | None, float]
+# GitHub answers 401/403/404 when an installation loses access, and 404 too
+# when the PR or its repository is gone. A check skipped for it is tried again
+# every six hours for about two weeks: a repaired installation resumes
+# archiving, and a deleted PR stops costing a request.
+_ACCESS_RECOVERY_S = 6 * 3600
+_ACCESS_RECOVERY_ATTEMPTS = 56
 
 
 @dataclass
@@ -418,6 +424,8 @@ async def _check(
         error.retry_after,
         min(maximum, poll_s * 2 ** min(failures - 1, 20) * random.uniform(0.8, 1.2)),
     )
+    if terminal and error.code == "github_access_denied":
+        delay = max(delay, _ACCESS_RECOVERY_S)
     try:
         await reschedule(delay=delay, code=error.code, terminal=terminal)
     except Exception:
@@ -479,11 +487,16 @@ async def _poll(
     remaining = integer_setting("pr_archive_batch_size", 20)
     timeout_s = number_setting("pr_archive_timeout_s", 10)
     poll_s = number_setting("pr_archive_poll_s", 30)
+    access_recovery_failures = (
+        integer_setting("pr_archive_max_failures", 10) + _ACCESS_RECOVERY_ATTEMPTS
+    )
     archived = 0
     reads = _PassReads()
     while remaining > 0:
         claims = await store.pr_archive.claim_pr_archive_checks(
-            limit=min(remaining, _CONCURRENCY), lease_seconds=max(120, timeout_s * 3 + 60)
+            limit=min(remaining, _CONCURRENCY),
+            lease_seconds=max(120, timeout_s * 3 + 60),
+            access_recovery_failures=access_recovery_failures,
         )
         if not claims:
             break
