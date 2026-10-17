@@ -166,11 +166,21 @@ export function EnvironmentManager() {
   const copyRequest = useRef<{ fingerprint: string; key: string } | null>(null);
   const [removing, setRemoving] = useState<string | null>(null);
   const [snapshotsEnabled, setSnapshotsEnabled] = useState(false);
+  // Only the most recently sent read may land: a poll sent before an action
+  // must not put back the list that action changed.
+  const latest = useRef(0);
   const load = useCallback(async () => {
-    const result = await listEnvironments();
-    setItems(result.environments);
-    setGlobals(result.globals);
-    setSnapshotsEnabled(Boolean(result.snapshots_enabled));
+    const request = ++latest.current;
+    try {
+      const result = await listEnvironments();
+      if (request !== latest.current) return;
+      setItems(result.environments);
+      setGlobals(result.globals);
+      setSnapshotsEnabled(Boolean(result.snapshots_enabled));
+    } catch (e) {
+      // A newer read is on its way and reports for itself.
+      if (request === latest.current) throw e;
+    }
   }, []);
   // A snapshot builds on some host for a few minutes; follow it until it settles.
   const building = (items ?? []).some(
