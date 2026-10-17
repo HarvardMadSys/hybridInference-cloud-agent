@@ -21,6 +21,11 @@ from cloud_agent.mcp.registry import mcp_cipher
 
 pytestmark = pytest.mark.asyncio
 
+#: How long a request may take before the test calls it hung. Only a guard: a
+#: refresh a request must not make fails the test as soon as it is called, so
+#: no outcome here depends on how fast a loaded machine runs the request.
+_HANG_GUARD_S = 10
+
 
 def _oauth(store):
     store.connections[7].update(
@@ -43,11 +48,11 @@ async def test_catalogue_does_not_contact_an_oauth_endpoint(
 
     async def refresh(repository, *, row, policy):
         refreshed.append(row["id"])
-        await asyncio.Event().wait()
+        pytest.fail(f"{method} waited on connection {row['id']}'s OAuth refresh")
 
     monkeypatch.setattr(mcp_relay, "ensure_fresh", refresh)
     response = await asyncio.wait_for(
-        client.post("/v1/agent/mcp", json=_rpc(method), headers=_auth()), 0.5
+        client.post("/v1/agent/mcp", json=_rpc(method), headers=_auth()), _HANG_GUARD_S
     )
     assert "result" in response.json()
     assert refreshed == []
@@ -63,7 +68,7 @@ async def test_a_healthy_tool_does_not_wait_for_another_connections_refresh(
     async def refresh(repository, *, row, policy):
         refreshed.append(row["id"])
         if row["id"] == 7:
-            await asyncio.Event().wait()
+            pytest.fail("a call to docs waited on the GitHub connection's OAuth refresh")
         return row
 
     monkeypatch.setattr(mcp_relay, "ensure_fresh", refresh)
@@ -73,7 +78,7 @@ async def test_a_healthy_tool_does_not_wait_for_another_connections_refresh(
             json=_rpc("tools/call", name="docs__search", arguments={}),
             headers=_auth(),
         ),
-        0.5,
+        _HANG_GUARD_S,
     )
     assert "result" in response.json()
     assert refreshed == [8]
@@ -115,7 +120,7 @@ async def test_changes_during_refresh_prevent_dispatch(
             headers=_auth(),
         )
     )
-    await asyncio.wait_for(started.wait(), 1)
+    await asyncio.wait_for(started.wait(), _HANG_GUARD_S)
     if change == "lease":
         store.live = False
     elif change == "binding":
@@ -133,7 +138,7 @@ async def test_changes_during_refresh_prevent_dispatch(
         store.snapshots[9] = {**store.snapshots[7], "connection_id": 9}
         store.bindings[0]["connection_id"] = 9
     finish.set()
-    response = await asyncio.wait_for(task, 1)
+    response = await asyncio.wait_for(task, _HANG_GUARD_S)
     assert "error" in response.json() or response.status_code in {401, 403, 503}
     assert host.called == []
     assert host.opened == []
@@ -203,11 +208,11 @@ async def test_approval_cannot_dispatch_after_its_refresh_outlives_the_lease(
             "/v1/agent/mcp", json=_rpc("tools/call", name="github__get_issue"), headers=_auth()
         )
     )
-    await asyncio.wait_for(started.wait(), 1)
+    await asyncio.wait_for(started.wait(), _HANG_GUARD_S)
     store.approved = {**store.created_invocations[0], "status": "approved"}
     store.live = False
     finish.set()
-    response = await asyncio.wait_for(task, 1)
+    response = await asyncio.wait_for(task, _HANG_GUARD_S)
     assert "error" in response.json()
     assert store.created_invocations[0]["status"] == "expired"
     assert store.claimed == []
