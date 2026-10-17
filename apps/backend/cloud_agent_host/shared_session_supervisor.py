@@ -380,6 +380,19 @@ class SharedTurnBoundaryError(SandboxError):
         self.telemetry = telemetry
 
 
+@dataclass(frozen=True, eq=False)
+class _LostTurn:
+    """A running turn whose process a residency loss closed.
+
+    ``residency`` is the lease and the generation the loss named. The lease
+    ends when this turn's boundary closes, by its stream or by the sweep.
+    """
+
+    turn: ResidentTurn[DialectRuntime]
+    residency: tuple[str, int]
+    lost_at: float
+
+
 @dataclass
 class _Member:
     thread_id: str
@@ -398,6 +411,9 @@ class _Member:
     #: that residency ends the activation; losing one it is replacing, before
     #: it has taken on the new one, does not.
     lease_residency: tuple[str, int] | None = None
+    #: The running turn whose process a residency loss closed, if any. Its
+    #: activation ends with it.
+    lost_turn: _LostTurn | None = field(default=None, repr=False)
     # Only the last completed activation can replay its acknowledgement.
     settlement_receipt: tuple[str, SharedSessionDescriptor] | None = field(default=None, repr=False)
     transport: ResidentTransport[DialectRuntime] | None = None
@@ -510,6 +526,10 @@ HELD_INPUT_TTL_S = 15 * 60.0
 #: The pre-prompt archive's bound on waiting for a concurrent bridge check or
 #: workspace request (the chat page reads the workspace while a chat prepares).
 INITIAL_ARCHIVE_WAIT_S = 30.0
+#: How long a turn whose process a residency loss closed is left to its stream
+#: before the sweep closes it. A stream that is still read ends such a turn
+#: within seconds; one whose runner stopped reading never reaches its end.
+LOST_TURN_GRACE_S = 60.0
 
 
 @dataclass(frozen=True)
@@ -2500,7 +2520,11 @@ class SharedChatSessionSupervisor:
         token: str,
         turn: ResidentTurn[DialectRuntime],
     ) -> SharedTurnTelemetry:
-        """Close observation, then enforce and release the activation boundary."""
+        """Close observation, then enforce and release the activation boundary.
+
+        A turn whose process a residency loss closed takes its activation with
+        it, as ``abandon(lost=True)`` would: see :meth:`residency_lost`.
+        """
         with self._lock:
             group, member = self._leased_member(thread_id, token)
             if member.current_turn is not turn:
@@ -2600,6 +2624,7 @@ class SharedChatSessionSupervisor:
                 exc_info=True,
             )
         detached = False
+        lost_turn: _LostTurn | None = None
         try:
             with self._lock:
                 _, member = self._leased_member(thread_id, token)
@@ -2609,6 +2634,9 @@ class SharedChatSessionSupervisor:
                 # releases it however the bookkeeping below ends.
                 member.current_turn = None
                 detached = True
+                if member.lost_turn is not None and member.lost_turn.turn is turn:
+                    lost_turn = member.lost_turn
+                    member.lost_turn = None
                 member.activation_processes = None
                 member.observer_cursor = None
                 member.tool_mark_reader = None
@@ -2636,10 +2664,16 @@ class SharedChatSessionSupervisor:
         finally:
             if detached:
                 member.turn_lock.release()
+        if boundary_error is not None and transport is not None:
+            with contextlib.suppress(Exception):
+                transport.close()
+        if lost_turn is not None:
+            # Nothing but this turn kept the activation: its process and
+            # credential are gone. A lease that took on a newer process since
+            # keeps it, and one that ended meanwhile has nothing left to end.
+            with contextlib.suppress(SessionLeaseLost):
+                self.abandon(thread_id, token, lost=True, residency=lost_turn.residency)
         if boundary_error is not None:
-            if transport is not None:
-                with contextlib.suppress(Exception):
-                    transport.close()
             raise SharedTurnBoundaryError(
                 f"shared member activation boundary failed: {boundary_error}",
                 telemetry,
@@ -3236,6 +3270,9 @@ class SharedChatSessionSupervisor:
             if residency is not None and member.lease_residency != residency:
                 return self._descriptor(group, member)
             turn = member.current_turn
+            # This teardown ends the activation itself, so the turn it closes
+            # below must not end it first.
+            member.lost_turn = None
         if turn is not None:
             with contextlib.suppress(Exception):
                 turn.interrupt()
@@ -3293,11 +3330,13 @@ class SharedChatSessionSupervisor:
         ``abandon(lost=True)`` would end it: its CLI and credential are gone,
         and when the control plane reaped its attempt nothing else is left to
         settle or abandon it, so its lease would keep the group busy for good.
-        While its turn still runs, the lease stays with that turn's stream and
-        runner, so the stream still answers for what the turn did. An
-        activation that is replacing the process under a newer residency has
-        not taken it on, and keeps its lease, including one that starts the
-        replacement after the old process is closed here.
+        While its turn still runs, the turn stays with its stream, which still
+        answers for what the turn did; the activation ends once that turn is
+        closed. A runner that hung still holding the stream may never read it
+        to the end, so the sweep closes a turn still open ``LOST_TURN_GRACE_S``
+        after the loss. An activation that is replacing the process under a
+        newer residency has not taken it on, and keeps its lease, including
+        one that starts the replacement after the old process is closed here.
         """
         with self._lock:
             group, member = self._member(thread_id)
@@ -3306,13 +3345,15 @@ class SharedChatSessionSupervisor:
             turn = member.current_turn
             transport = member.transport
             lease_token = member.lease_token
-            ended_lease = (
+            # The lease whose activation took this process on, if any.
+            taken_by = (
                 lease_token
-                if turn is None
-                and lease_token is not None
-                and member.lease_residency == (lease_token, generation)
+                if lease_token is not None and member.lease_residency == (lease_token, generation)
                 else None
             )
+            ended_lease = taken_by if turn is None else None
+            if taken_by is not None and turn is not None:
+                member.lost_turn = _LostTurn(turn, (taken_by, generation), self._clock())
             # An active observation belongs to the turn, not to the resident
             # transport.  Keep it until complete_turn/abort_turn closes the
             # turn so the events already captured before residency loss are
@@ -4873,8 +4914,53 @@ class SharedChatSessionSupervisor:
                     self._creating.discard(spec.sandbox_id)
                     self._condition.notify_all()
 
+    def _close_lost_turns(self) -> None:
+        """End each activation whose lost turn its stream has not closed in time.
+
+        The loss already interrupted the turn and closed its process. Ending
+        the activation closes the turn's boundary as its stream would have,
+        and still releases the turn and its lease if that boundary fails.
+        """
+        now = self._clock()
+        due: builtins.list[tuple[str, tuple[str, int]]] = []
+        with self._lock:
+            for group in self._groups.values():
+                for member in group.members.values():
+                    lost = member.lost_turn
+                    if lost is None:
+                        continue
+                    if (
+                        member.current_turn is not lost.turn
+                        or member.lease_token != lost.residency[0]
+                    ):
+                        # Closed or torn down some other way.
+                        member.lost_turn = None
+                    elif now - lost.lost_at >= LOST_TURN_GRACE_S:
+                        due.append((member.thread_id, lost.residency))
+        for thread_id, residency in due:
+            try:
+                self.abandon(thread_id, residency[0], lost=True, residency=residency)
+            except SandboxError:
+                # Its stream closed the turn meanwhile, which ended the
+                # activation, or the activation ended some other way.
+                continue
+            except Exception as exc:
+                logger.error(
+                    "lost shared member turn could not be closed",
+                    extra={
+                        "event": "shared_member_lost_turn_close_failed",
+                        "thread_id": thread_id,
+                        "error_type": _safe_error_type(exc),
+                    },
+                )
+
     def sweep(self) -> builtins.list[SharedSessionDescriptor]:
-        """Stop groups whose single refreshed inactivity deadline elapsed."""
+        """Stop groups whose single refreshed inactivity deadline elapsed.
+
+        Each pass first closes the turns :meth:`residency_lost` left to a
+        stream that has not closed them within ``LOST_TURN_GRACE_S``.
+        """
+        self._close_lost_turns()
         now = self._clock()
         with self._lock:
             candidates = [

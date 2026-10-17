@@ -6283,6 +6283,103 @@ def test_a_residency_its_activation_is_replacing_leaves_that_activation_running(
     assert settled.context_status == "restored"
 
 
+def _hung_turn_with_a_live_sibling(now: list[float]):
+    """A member's turn is running for a runner that hangs; its Fork sibling has settled."""
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(
+        manager, transport_factory=_TransportFactory(), idle_timeout_s=60, clock=lambda: now[0]
+    )
+    hung = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+    supervisor.ensure_resident(
+        "athr_source", hung.token, _launch("athr_source", native_session_id="native-source", slot=0)
+    )
+    turn = supervisor.start_turn(
+        "athr_source", hung.token, prompt="work", model="glm-5.1", reasoning_effort=None
+    )
+    peer = supervisor.acquire(
+        _spec(),
+        thread_id="athr_peer",
+        owner="attempt:7",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+    supervisor.ensure_resident(
+        "athr_peer", peer.token, _launch("athr_peer", native_session_id="native-peer", slot=1)
+    )
+    supervisor.settle("athr_peer", peer.token, job_id="ajob_peer", context_status="live")
+    return manager, supervisor, hung, turn
+
+
+def test_a_loss_during_its_turn_ends_the_activation_once_its_stream_closes_the_turn():
+    """A hung runner still holds its turn stream when the reaper closes its residency.
+
+    The loss closes the process and leaves the running turn to that stream,
+    which still answers for what the turn did. Nothing else will release the
+    lease afterwards: the runner never settles or abandons, and the member's
+    residency generation is gone, so no host beat names it again. The
+    activation therefore ends with its turn, as an abandon would end it.
+    """
+    now = [1000.0]
+    _manager, supervisor, hung, turn = _hung_turn_with_a_live_sibling(now)
+
+    lost = supervisor.residency_lost("athr_source", generation=1)
+
+    assert lost.busy is True
+    assert turn.interrupted is True
+    # The stream ends the turn once the closed process has ended it.
+    supervisor.complete_turn("athr_source", hung.token, turn)
+
+    ended = supervisor.status("athr_source")
+    assert ended.busy is False
+    assert ended.group_busy is False
+    assert ended.context_status == ended.resident_state == "lost"
+    assert ended.idle_deadline_monotonic == 1060.0
+    with pytest.raises(SessionLeaseLost):
+        supervisor.settle("athr_source", hung.token, job_id="ajob_hung", context_status="live")
+    assert supervisor.capture_snapshot("athr_peer", capture=lambda _backend: {"patch": ""}) == {
+        "patch": ""
+    }
+
+
+def test_a_lost_turn_whose_stream_never_closes_it_is_closed_by_the_sweep():
+    """A stream to a runner that stopped reading never reaches its turn's end.
+
+    Its frames wait on a socket the runner no longer drains, so the turn the
+    loss interrupted stays open with its member lock and lease. Once the
+    stream has had ample time, the sweep closes that turn's boundary on its
+    behalf, which ends the activation; a stream that wakes later finds it gone.
+    """
+    now = [1000.0]
+    manager, supervisor, hung, turn = _hung_turn_with_a_live_sibling(now)
+    member = supervisor._members["athr_source"].members["athr_source"]
+    supervisor.residency_lost("athr_source", generation=1)
+
+    supervisor.sweep()
+    assert supervisor.status("athr_source").busy is True
+    now[0] += 60
+
+    assert supervisor.sweep() == []
+
+    ended = supervisor.status("athr_source")
+    assert ended.busy is False
+    assert ended.group_busy is False
+    assert ended.context_status == ended.resident_state == "lost"
+    assert member.turn_lock.locked() is False
+    assert manager.events[-2:] == [("reap-except", 0, ((41, 400),)), ("normalize", 0)]
+    with pytest.raises(SessionLeaseLost):
+        supervisor.complete_turn("athr_source", hung.token, turn)
+    now[0] += 60
+    assert [stopped.running for stopped in supervisor.sweep()] == [False]
+
+
 def test_supervisor_close_releases_an_active_turn_observation_and_member_lock():
     manager = _Manager()
     manager.backend.runtime = KATA_RUNTIME
