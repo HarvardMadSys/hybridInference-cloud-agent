@@ -114,8 +114,10 @@ class PostgresAttemptCommands:
         """Fail queued follow-ups whose earlier native context is unavailable.
 
         Claiming already excludes these rows. This periodic safety net gives
-        legacy pending turns a terminal answer using the partial queued
-        indexes, without a cleanup scan on every claim poll.
+        them a terminal answer using the partial queued indexes, without a
+        cleanup scan on every claim poll: legacy pending turns, and the turns a
+        Fork sibling had queued when a writer for another chat lost the group
+        they share.
         """
         async with self._pool.acquire() as conn, conn.transaction():
             await fail_discontinuous_follow_ups(conn)

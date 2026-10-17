@@ -711,6 +711,58 @@ async def test_a_failed_restore_returns_to_the_checkpoint_until_attempts_run_out
     assert await _claim(store, "runner-c", _RESTORE_HOST) is None
 
 
+async def test_a_group_its_restores_lost_fails_every_chats_queued_turns(pool, store: Storage):
+    """A Fork sibling waiting in the group gets an answer when the group is lost.
+
+    The release that ran out the group's attempts failed the queued turns of
+    its own chat only. A sibling's turn queued behind a turn that did not
+    succeed -- one its owner stopped, say -- could never be claimed again and
+    was never failed either: it stayed queued for good.
+    """
+    job, _ = await _covered(pool, store)
+    sibling = await _create_job(store, task_prompt="the sibling chat")
+    assert await store.attempt_commands.request_cancel(job_id=sibling["id"]) == "cancelled"
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO agent_thread_sandbox_memberships "
+            "(thread_id, user_id, sandbox_id, resident_slot_id) VALUES ($1, $2, $3, 1)",
+            sibling["thread_id"],
+            sibling["user_id"],
+            "asbx_restore",
+        )
+    follow_up = await store.conversation_commands.create_follow_up(
+        parent_job_id=job["id"], user_id="user-1", prompt="continue"
+    )
+    assert follow_up is not None
+    assert await store.host_pool.remove_host(host="runner-a") == "ok"
+    assert (await _state(pool))["state"] == "cold"
+    waiting = await store.conversation_commands.create_follow_up(
+        parent_job_id=sibling["id"], user_id="user-1", prompt="try the sibling again"
+    )
+    assert waiting is not None and waiting.get("error") is None
+    await _host(store, "runner-c", _RESTORE_HOST)
+
+    for attempt in range(1, MAX_RESTORE_ATTEMPTS + 1):
+        claim = await _claim(store, "runner-c", _RESTORE_HOST)
+        assert claim is not None and claim["id"] == follow_up["id"]
+        assert await store.attempt_commands.release_claim(
+            job_id=follow_up["id"],
+            attempt_id=claim["attempt_id"],
+            lease_generation=claim["lease_generation"],
+            reason="sandbox_restore_failed",
+        )
+        if attempt < MAX_RESTORE_ATTEMPTS:
+            await _age_restore_failure(pool, RESTORE_RETRY_DELAYS_S[attempt - 1])
+    assert (await _state(pool))["state"] == "lost"
+    assert await _claim(store, "runner-c", _RESTORE_HOST) is None
+
+    # The sweep every reaper pass runs answers what can never be claimed.
+    await store.attempt_commands.sweep_queued_follow_ups()
+    answered = await store.conversation_queries.get_job(waiting["id"])
+    assert answered is not None and answered["state"] == "failed"
+    assert "sandbox" in answered["detail"]
+
+
 async def test_restore_failures_during_a_short_outage_do_not_lose_the_chat(pool, store: Storage):
     """Two minutes of a registry or S3 outage fail every restore tried in them."""
     job, _ = await _covered(pool, store)
