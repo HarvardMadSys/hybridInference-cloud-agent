@@ -15,12 +15,13 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from fastapi import FastAPI, Request, Response
+from fastapi import Depends, FastAPI, Request, Response
 from fastapi.exception_handlers import http_exception_handler, request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import JSONResponse, PlainTextResponse
 
+from cloud_agent.api._parameters import refuse_unstorable_parameters
 from cloud_agent.entitlement import RepoAccessUnavailable
 from cloud_agent.logging_utils import configure_process_logging, get_logger
 
@@ -187,6 +188,9 @@ def create_app() -> FastAPI:
         description="Cloud coding agents on sandboxed hosts",
         version="0.1.0",
         lifespan=lifespan,
+        # Every route, before its own dependencies: a NUL or an integer no
+        # column holds is refused here rather than by the first query.
+        dependencies=[Depends(refuse_unstorable_parameters)],
         **_api_docs(),
     )
     # Every browser-facing write carries the session cookie, and SameSite=Lax
@@ -354,6 +358,7 @@ def create_mcp_app() -> FastAPI:
         # and a second copy would renew every grant twice and race the same
         # publish. This listener still maintains its own upstream MCP sockets.
         lifespan=lambda app: lifespan(app, background=False),
+        dependencies=[Depends(refuse_unstorable_parameters)],
         # Never, whatever the main listener does: a sandbox reaches this one,
         # and its contract is the relay, not a description of it.
         **_NO_DOCS,
