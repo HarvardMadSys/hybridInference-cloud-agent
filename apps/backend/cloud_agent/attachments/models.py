@@ -8,7 +8,10 @@ from typing import TYPE_CHECKING, Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from cloud_agent.settings import integer_setting
-from cloud_agent_shared.git.source_archive import DEFAULT_MAX_UPLOAD_ARCHIVE_BYTES
+from cloud_agent_shared.git.source_archive import (
+    DEFAULT_MAX_UPLOAD_ARCHIVE_BYTES,
+    upload_archive_size,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -25,9 +28,10 @@ MAX_CONTENT_TYPE_LENGTH = 255
 #: What one conversation's ``/uploads`` may hold, every turn's files together.
 #: The host rebuilds that directory from all of them as one archive and
 #: refuses one over ``DEFAULT_MAX_UPLOAD_ARCHIVE_BYTES``, which would fail that
-#: turn and every later one on a fresh container; the difference leaves room
-#: for the archive's own headers. Not admin settings, for the same reason: the
-#: host's limit is not one either.
+#: turn and every later one on a fresh container. The difference leaves room
+#: for the headers of a shallow tree; :func:`check_thread_total` measures the
+#: archive itself, which deep folders can fill with headers alone. Not admin
+#: settings, for the same reason: the host's limit is not one either.
 MAX_THREAD_ATTACHMENT_BYTES = DEFAULT_MAX_UPLOAD_ARCHIVE_BYTES - 4 * 1024 * 1024
 MAX_THREAD_ATTACHMENT_FILES = 200
 
@@ -179,7 +183,8 @@ def check_thread_total(rows: list[dict[str, Any]]) -> None:
 
     ``rows`` are what it would hold with a new turn's files in (see
     :func:`current_uploads`): a file attached again counts once, as the host
-    imports it once.
+    imports it once. Last, the archive the host builds from them must fit its
+    limit, with a header for every file and folder.
     """
     if len(rows) > MAX_THREAD_ATTACHMENT_FILES:
         raise AttachmentError(
@@ -192,6 +197,13 @@ def check_thread_total(rows: list[dict[str, Any]]) -> None:
             "A conversation's uploaded files must total no more than "
             f"{attachment_size_label(MAX_THREAD_ATTACHMENT_BYTES)}. "
             "Start a new chat to attach more."
+        )
+    archive = upload_archive_size((str(row["path"]), int(row["size_bytes"])) for row in rows)
+    if archive > DEFAULT_MAX_UPLOAD_ARCHIVE_BYTES:
+        raise AttachmentError(
+            "A conversation's uploaded files, with every folder they sit in, must fit in "
+            f"{attachment_size_label(DEFAULT_MAX_UPLOAD_ARCHIVE_BYTES)}. Deep folders take "
+            "the most room. Start a new chat to attach more."
         )
 
 
