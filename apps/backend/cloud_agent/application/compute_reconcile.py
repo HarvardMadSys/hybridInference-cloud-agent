@@ -7,9 +7,12 @@ fixed resource identity and request parameters bound the external effects.
 
 from __future__ import annotations
 
+import re
 import secrets
+from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
+from uuid import UUID
 
 from pydantic import SecretStr
 
@@ -141,6 +144,241 @@ def _preferred_host_key(keys: list[str]) -> str:
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _provider_observation_is_fresh(observation: ResourceObservation) -> bool:
+    """Reject stale provider snapshots before using them to authorize bootstrap."""
+    observed_at = observation.observed_at
+    if observed_at.tzinfo is None:
+        return False
+    age = (_now() - observed_at.astimezone(timezone.utc)).total_seconds()
+    return -30 <= age <= 300
+
+
+_SAFE_DIAGNOSTIC_LABEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+_SENSITIVE_DIAGNOSTIC_LABEL = re.compile(
+    r"token|secret|password|credential|bearer|api[_-]?key|jwt", re.IGNORECASE
+)
+_SAFE_PROVIDER_OPERATIONS = {
+    "experiments.create",
+    "experiments.delete",
+    "experiments.list",
+    "experiments.manifests.read",
+    "experiments.read",
+    "experiments.update",
+    "profiles.read",
+    "profiles.request",
+    "provider.request",
+}
+_SAFE_PROVIDER_REASONS = {
+    "authorization_denied",
+    "capacity_unavailable",
+    "connect_failed",
+    "experiment_failed_no_provider_reason",
+    "experiment_ready",
+    "http_rejected",
+    "invalid_create_response",
+    "invalid_expiry_timestamp",
+    "invalid_json_response",
+    "invalid_manifest",
+    "invalid_parameter",
+    "invalid_profile_binding",
+    "invalid_request",
+    "invalid_response_shape",
+    "invalid_ssh_destination",
+    "invalid_ssh_manifest",
+    "incomplete_resource_scope",
+    "missing_or_invalid_experiment_id",
+    "permission_denied",
+    "profile_not_found",
+    "profile_rejected",
+    "project_access_denied",
+    "provider_server_error",
+    "rate_limited",
+    "rate_limited_or_capacity",
+    "request_accepted",
+    "request_failed",
+    "request_outcome_unknown",
+    "reservation_conflict",
+    "resource_identity_mismatch",
+    "resource_not_found",
+    "response_too_large",
+    "tls_verification_failed",
+    "unsupported_node_count",
+}
+
+
+def _safe_provider_fields(source: dict[str, Any]) -> dict[str, str | int | bool]:
+    """Validate provider diagnostic values as well as their field names."""
+    details: dict[str, str | int | bool] = {}
+    operation = source.get("provider_operation")
+    if isinstance(operation, str) and operation in _SAFE_PROVIDER_OPERATIONS:
+        details["provider_operation"] = operation
+    status = source.get("http_status")
+    if isinstance(status, int) and not isinstance(status, bool) and 100 <= status <= 599:
+        details["http_status"] = status
+    reason = source.get("provider_reason_code")
+    if isinstance(reason, str) and reason in _SAFE_PROVIDER_REASONS:
+        details["provider_reason_code"] = reason
+    for key in ("provider_request_id", "external_id", "submission_request_id"):
+        value = source.get(key)
+        if isinstance(value, str):
+            try:
+                details[key] = str(UUID(value))
+            except ValueError:
+                continue
+    status = source.get("submission_http_status")
+    if isinstance(status, int) and not isinstance(status, bool) and 100 <= status <= 599:
+        details["submission_http_status"] = status
+    for key in (
+        "requested_project",
+        "requested_profile",
+        "requested_profile_project",
+        "requested_site",
+        "requested_hardware",
+        "provider_state",
+    ):
+        value = source.get(key)
+        if isinstance(value, str) and _safe_diagnostic_label(value):
+            details[key] = value
+    observed_at = source.get("provider_observed_at")
+    if isinstance(observed_at, str):
+        try:
+            parsed = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
+        except ValueError:
+            pass
+        else:
+            if parsed.tzinfo is not None:
+                details["provider_observed_at"] = observed_at[:64]
+    return details
+
+
+def _safe_diagnostic_label(value: str) -> bool:
+    """Reject label-shaped values that look like credentials or opaque tokens."""
+    return bool(
+        _SAFE_DIAGNOSTIC_LABEL.fullmatch(value)
+        and not _SENSITIVE_DIAGNOSTIC_LABEL.search(value)
+        and not (len(value) >= 32 and re.fullmatch(r"[A-Za-z0-9_-]+", value))
+    )
+
+
+def _cloudlab_observation_diagnostics(
+    observation: ResourceObservation, *, reason_code: str
+) -> dict[str, str | int | bool]:
+    """Summarize a successful CloudLab read without retaining provider text."""
+    config = observation.ref.config
+    details: dict[str, str | int | bool] = {
+        "provider_operation": "experiments.read",
+        "provider_reason_code": reason_code,
+        "external_id": observation.ref.external_id,
+        "provider_state": observation.state,
+        "provider_observed_at": observation.observed_at.isoformat(),
+    }
+    project = config.get("project")
+    if isinstance(project, str) and _safe_diagnostic_label(project):
+        details["requested_project"] = project
+    if observation.provider_http_status is not None:
+        details["http_status"] = observation.provider_http_status
+    if observation.provider_request_id is not None:
+        details["provider_request_id"] = observation.provider_request_id
+    for source, target in (
+        ("profile_name", "requested_profile"),
+        ("profile_project", "requested_profile_project"),
+    ):
+        value = config.get(source)
+        if isinstance(value, str) and _safe_diagnostic_label(value):
+            details[target] = value
+    bindings = config.get("bindings")
+    if isinstance(bindings, dict):
+        for keys, target in (
+            (("site", "cluster"), "requested_site"),
+            (("phystype", "hardware", "node_type"), "requested_hardware"),
+        ):
+            value = next(
+                (bindings[key] for key in keys if isinstance(bindings.get(key), str)), None
+            )
+            if isinstance(value, str) and _safe_diagnostic_label(value):
+                details[target] = value
+    return details
+
+
+def _provider_diagnostic_result(
+    error: Exception,
+    operation: dict[str, Any],
+    *,
+    outcome: str,
+) -> dict[str, Any]:
+    """Persist only allowlisted provider facts plus local operation correlation."""
+    source = getattr(error, "diagnostics", None)
+    if not isinstance(source, dict) or not source:
+        return {}
+    stage = source.get("_failure_stage")
+    if not isinstance(stage, str):
+        stage = str(operation.get("step") or "unknown")
+    details = _safe_provider_fields(source)
+    previous = (operation.get("result") or {}).get("provider_diagnostic")
+    if (
+        isinstance(previous, dict)
+        and previous.get("provider_operation") == "experiments.create"
+        and previous.get("operation_outcome") == "accepted"
+    ):
+        request_id = previous.get("provider_request_id")
+        if isinstance(request_id, str):
+            with suppress(ValueError):
+                details["submission_request_id"] = str(UUID(request_id))
+        status = previous.get("http_status")
+        if isinstance(status, int) and not isinstance(status, bool) and 100 <= status <= 599:
+            details["submission_http_status"] = status
+    resource_ref = (operation.get("result") or {}).get("resource_ref") or {}
+    external_id = details.get("external_id") or (
+        resource_ref.get("external_id") if isinstance(resource_ref, dict) else None
+    )
+    if isinstance(external_id, str):
+        try:
+            details["external_id"] = str(UUID(external_id))
+        except ValueError:
+            details.pop("external_id", None)
+    details.update(
+        {
+            "stage": stage[:64],
+            "operation_id": str(operation.get("id") or "")[:128],
+            "allocation_id": str(operation.get("allocation_id") or "")[:128],
+            "operation_outcome": outcome,
+            "retryable": bool(getattr(error, "retryable", False)),
+            "recorded_at": _now().isoformat(),
+        }
+    )
+    return {"provider_diagnostic": details}
+
+
+def _provider_receipt_diagnostic_result(
+    receipt: ProviderReceipt, operation: dict[str, Any]
+) -> dict[str, Any]:
+    """Checkpoint allowlisted receipt metadata before the next provider call."""
+    source = receipt.diagnostics
+    if not source:
+        return {}
+    details = _safe_provider_fields(source)
+    if receipt.resource is not None:
+        try:
+            details["external_id"] = str(UUID(receipt.resource.external_id))
+        except ValueError:
+            details.pop("external_id", None)
+    details.update(
+        {
+            "stage": str(operation.get("step") or "unknown")[:64],
+            "operation_id": str(operation.get("id") or "")[:128],
+            "allocation_id": str(operation.get("allocation_id") or "")[:128],
+            "operation_outcome": (
+                "accepted"
+                if details.get("provider_reason_code") == "request_accepted"
+                else receipt.outcome
+            ),
+            "retryable": False,
+            "recorded_at": _now().isoformat(),
+        }
+    )
+    return {"provider_diagnostic": details}
 
 
 def _moment(value: Any) -> datetime | None:
@@ -378,7 +616,10 @@ class ComputeReconciler:
                     "waiting",
                     "confirming",
                     "The provider outcome is being checked.",
-                    result={"external_pending": True},
+                    result={
+                        "external_pending": True,
+                        **_provider_diagnostic_result(exc, operation, outcome="waiting"),
+                    },
                     retry=30,
                 )
             elif code == "result_unknown" and (
@@ -391,6 +632,7 @@ class ComputeReconciler:
                     "waiting",
                     operation["step"],
                     "Connection and deployment readiness will be checked again.",
+                    result=_provider_diagnostic_result(exc, operation, outcome="waiting"),
                     retry=30,
                 )
             elif code == "result_unknown":
@@ -399,6 +641,7 @@ class ComputeReconciler:
                     "unknown",
                     operation["step"],
                     "The acquisition outcome is unknown. Identify the existing resource before continuing.",
+                    result=_provider_diagnostic_result(exc, operation, outcome="unknown"),
                 )
             else:
                 terminal_acquire = operation["kind"] == "acquire" and (
@@ -415,6 +658,17 @@ class ComputeReconciler:
                     str(exc),
                     result={
                         **({"external_pending": False} if terminal_acquire else {}),
+                        **_provider_diagnostic_result(
+                            exc,
+                            operation,
+                            outcome=(
+                                "failed"
+                                if terminal_acquire
+                                else "waiting"
+                                if retryable
+                                else "blocked"
+                            ),
+                        ),
                         "blocked_reasons": [{"code": code, "message": str(exc)}],
                     },
                     retry=30 if retryable else None,
@@ -546,9 +800,17 @@ class ComputeReconciler:
             raise ProviderError("resource_terminated", "The allocated resource has terminated")
         if observation.state == "failed":
             await self._release_failed_acquisition(operation, allocation)
+            diagnostics = (
+                _cloudlab_observation_diagnostics(
+                    observation, reason_code="experiment_failed_no_provider_reason"
+                )
+                if allocation.get("provider_id") == "cloudlab"
+                else {}
+            )
             raise ProviderError(
                 "resource_failed",
                 "The provider could not set up this resource; it was released",
+                diagnostics=diagnostics,
             )
         if observation.state != "ready":
             await self._finish(
@@ -560,8 +822,8 @@ class ComputeReconciler:
                 retry=30,
             )
             return
-        await self._checkpoint(operation, "resource_ready", {"external_pending": False})
         if operation["kind"] == "import":
+            await self._checkpoint(operation, "resource_ready", {"external_pending": False})
             await self._finish(
                 operation,
                 "succeeded",
@@ -569,14 +831,106 @@ class ComputeReconciler:
                 "Resource imported for observation; no Host was deployed.",
             )
             return
+        if not observation.scope_complete:
+            diagnostics = (
+                _cloudlab_observation_diagnostics(
+                    observation, reason_code="incomplete_resource_scope"
+                )
+                if allocation.get("provider_id") == "cloudlab"
+                else {}
+            )
+            raise ProviderError(
+                "resource_scope_incomplete",
+                "The provider has not reported the complete resource inventory.",
+                diagnostics=diagnostics,
+            )
+        await self._checkpoint(operation, "resource_ready", {"external_pending": False})
         if len(observation.nodes) != 1:
+            diagnostics = (
+                _cloudlab_observation_diagnostics(observation, reason_code="unsupported_node_count")
+                if allocation.get("provider_id") == "cloudlab"
+                else {}
+            )
             raise ProviderError(
                 "unsupported_node_count",
                 "This deployment profile supports one node; the full allocation remains visible for review",
+                diagnostics=diagnostics,
             )
         allocation = await self._allocation(allocation["id"])
+        # The original ready observation only admitted node registration. Read
+        # CloudLab again immediately before creating the Host binding, then
+        # persist that full snapshot so the repository can guard the commit
+        # against current allocation state under its compute-entry lock.
+        latest = await provider.inspect(self._ref(allocation))
+        if not _provider_observation_is_fresh(latest):
+            await self._finish(
+                operation,
+                "waiting",
+                "waiting_for_resource",
+                "Waiting for a fresh provider observation before bootstrapping the host.",
+                result={"external_pending": True},
+                retry=30,
+            )
+            return
+        await self._save_observation(operation, allocation, latest)
+        if latest.state == "terminated":
+            raise ProviderError("resource_terminated", "The allocated resource has terminated")
+        if latest.state == "failed":
+            await self._release_failed_acquisition(operation, allocation)
+            diagnostics = (
+                _cloudlab_observation_diagnostics(
+                    latest, reason_code="experiment_failed_no_provider_reason"
+                )
+                if allocation.get("provider_id") == "cloudlab"
+                else {}
+            )
+            raise ProviderError(
+                "resource_failed",
+                "The provider could not set up this resource; it was released",
+                diagnostics=diagnostics,
+            )
+        if latest.state != "ready" or not latest.scope_complete:
+            await self._finish(
+                operation,
+                "waiting",
+                "waiting_for_resource",
+                "Waiting for the provider to report one complete ready node before bootstrapping.",
+                result={"external_pending": True},
+                retry=30,
+            )
+            return
+        if len(latest.nodes) != 1:
+            diagnostics = (
+                _cloudlab_observation_diagnostics(latest, reason_code="unsupported_node_count")
+                if allocation.get("provider_id") == "cloudlab"
+                else {}
+            )
+            raise ProviderError(
+                "unsupported_node_count",
+                "This deployment profile supports one node; the full allocation remains visible for review",
+                diagnostics=diagnostics,
+            )
+        allocation = await self._allocation(allocation["id"])
+        if (
+            not allocation.get("scope_complete")
+            or allocation.get("observed_state") not in {"ready", "active", "running"}
+            or allocation.get("observation_error") is not None
+            or len(allocation.get("nodes", [])) != 1
+            or allocation.get("observed_at") is None
+            or (_now() - allocation["observed_at"]).total_seconds() > 300
+        ):
+            await self._finish(
+                operation,
+                "waiting",
+                "waiting_for_resource",
+                "Waiting for the current allocation snapshot to become complete and ready.",
+                result={"external_pending": True},
+                retry=30,
+            )
+            return
+        observation = latest
         node = allocation["nodes"][0]
-        registered = await self._registered_node(operation, allocation, node, observation.nodes[0])
+        registered = await self._registered_node(operation, allocation, node, latest.nodes[0])
         if registered is None:
             return
         observed_node = registered
@@ -604,12 +958,22 @@ class ComputeReconciler:
                 enrollment = SecretStr(token)
             deployed = await self.bootstrap.deploy(observed_node, profile, intent, enrollment)
             if not deployed.ready:
-                await self._bootstrap_blocked(operation, deployed.blocked_reasons)
+                await self._bootstrap_blocked(
+                    operation,
+                    deployed.blocked_reasons,
+                    observation=observation,
+                    provider_id=allocation.get("provider_id"),
+                )
                 return
             await self._checkpoint(operation, "verifying_host", {"deployed": True})
         readiness = await self.bootstrap.readiness(observed_node, profile, intent)
         if not readiness.ready:
-            await self._bootstrap_blocked(operation, readiness.blocked_reasons)
+            await self._bootstrap_blocked(
+                operation,
+                readiness.blocked_reasons,
+                observation=observation,
+                provider_id=allocation.get("provider_id"),
+            )
             return
         host = await self.host_pool.get_host(host=intent.host)
         if host is None or host.get("status") != "online" or not host.get("enrolled"):
@@ -651,7 +1015,14 @@ class ComputeReconciler:
             result={"nodes_ready": 1, "external_pending": False, "blocked_reasons": []},
         )
 
-    async def _bootstrap_blocked(self, operation: dict[str, Any], reasons: tuple[str, ...]) -> None:
+    async def _bootstrap_blocked(
+        self,
+        operation: dict[str, Any],
+        reasons: tuple[str, ...],
+        *,
+        observation: ResourceObservation | None = None,
+        provider_id: str | None = None,
+    ) -> None:
         # Public diagnostics use our vocabulary, never remote exception/output text.
         blocked = [
             {"code": code, "message": _BOOTSTRAP_REASONS[code]}
@@ -665,12 +1036,22 @@ class ComputeReconciler:
                     "message": "Host deployment or readiness checks did not pass.",
                 }
             ]
+        result: dict[str, Any] = {"blocked_reasons": blocked}
+        if observation is not None and provider_id == "cloudlab":
+            error = ProviderError(
+                "host_initialization_failed",
+                "CloudLab resource is ready but host initialization did not pass.",
+                diagnostics=_cloudlab_observation_diagnostics(
+                    observation, reason_code="experiment_ready"
+                ),
+            )
+            result.update(_provider_diagnostic_result(error, operation, outcome="blocked"))
         await self._finish(
             operation,
             "blocked",
             operation["step"],
             "Host deployment needs attention.",
-            result={"blocked_reasons": blocked},
+            result=result,
         )
 
     async def _queue_host_release(
@@ -1163,6 +1544,11 @@ class ComputeReconciler:
         try:
             return await provider.acquire(request, self._intent(operation, allocation))
         except (ProviderError, ComputeSecretError) as exc:
+            if isinstance(exc, ProviderError) and exc.diagnostics:
+                # A definite rejection resets the acquisition step below so
+                # it can be retried after repair. Preserve where this attempt
+                # failed before that retry checkpoint changes the step.
+                exc.diagnostics["_failure_stage"] = str(operation.get("step") or "unknown")
             if getattr(exc, "code", "credential_unavailable") != "result_unknown":
                 # A definite rejection is safe to retry after credentials or
                 # capacity are repaired. Ambiguous submissions keep the fence.
@@ -1179,6 +1565,7 @@ class ComputeReconciler:
                 {
                     "resource_ref": receipt.resource.model_dump(mode="json"),
                     "external_id": receipt.resource.external_id,
+                    **_provider_receipt_diagnostic_result(receipt, operation),
                 },
             )
         if receipt.observation is not None:
@@ -1186,6 +1573,12 @@ class ComputeReconciler:
         if receipt.resource is not None:
             provider = self.commands.registry.get(allocation["provider_id"]).provider
             return await provider.inspect(receipt.resource)
+        if receipt.outcome == "unknown" and receipt.diagnostics:
+            raise ProviderError(
+                "result_unknown",
+                "The provider did not return an identifiable resource",
+                diagnostics=receipt.diagnostics,
+            )
         return None
 
     async def _extend(self, operation: dict[str, Any], allocation: dict[str, Any]) -> None:

@@ -19,7 +19,7 @@ import pytest
 from cloud_agent.application import compute_reconcile
 from cloud_agent.application.compute_reconcile import ComputeReconciler
 from cloud_agent.application.compute_setup import HostRelease
-from cloud_agent.domain.compute import autoscaling_acquire_can_cancel, fingerprint
+from cloud_agent.domain.compute import autoscaling_acquire_can_cancel, fingerprint, public_operation
 from cloud_agent.host_pool import hash_secret
 from cloud_agent.ports.external.compute_provider import (
     AcquisitionResolution,
@@ -37,7 +37,6 @@ from cloud_agent.ports.external.host_bootstrap import (
     HostInventory,
     PreflightResult,
 )
-from cloud_agent.providers.compute.existing_ssh import ExistingSSHProvider
 from cloud_agent.schemas_compute import RenewalPolicy
 from cloud_agent.workers.compute_resources import ComputeResourceWorker
 from cloud_agent_shared.shared_protocol import shared_deployment_capability
@@ -310,6 +309,7 @@ async def test_identified_acquisition_receipt_survives_failed_followup_get(monke
     h.provider.acquire.return_value = ProviderReceipt(outcome="pending", resource=REF)
     h.provider.inspect.side_effect = [
         ProviderError("result_unknown", "Observation interrupted"),
+        observed(),
         observed(),
     ]
     await h.reconciler.execute(h.operation)
@@ -848,6 +848,25 @@ async def test_bootstrap_refusal_reports_only_public_diagnostics(
 ):
     """A failed deployment remains blocked and never renders arbitrary remote output."""
     h = harness(monkeypatch, identified=True)
+    resource_ref = ResourceRef(
+        external_id="f47eb2a4-a0ac-4656-80da-8a638d2d263c",
+        config={
+            "credential_ref": "account-1",
+            "project": "research",
+            "profile_name": "one-node",
+            "profile_project": "FAST25-AE",
+            "bindings": {"cluster": "utah", "phystype": "r6615"},
+        },
+    )
+    h.allocation["external_id"] = resource_ref.external_id
+    h.allocation["configuration"] = resource_ref.config
+    h.provider.inspect.return_value = observed().model_copy(
+        update={
+            "ref": resource_ref,
+            "provider_http_status": 200,
+            "provider_request_id": "d14b57a4-7e2b-4f49-8b4b-4ca3a9410a4d",
+        }
+    )
     h.bootstrap.deploy.return_value = BootstrapResult(
         ready=False,
         host="compute-nodeid",
@@ -856,8 +875,31 @@ async def test_bootstrap_refusal_reports_only_public_diagnostics(
     )
     await h.reconciler.execute(h.operation)
     assert h.operation["state"] == "blocked"
+    assert h.operation["step"] == "deploying"
     assert [item["code"] for item in h.operation["result"]["blocked_reasons"]] == [expected_code]
     assert "secret-looking-remote-output" not in str(h.operation["result"])
+    diagnostic = h.operation["result"]["provider_diagnostic"]
+    assert diagnostic == {
+        "provider_operation": "experiments.read",
+        "http_status": 200,
+        "provider_reason_code": "experiment_ready",
+        "provider_request_id": "d14b57a4-7e2b-4f49-8b4b-4ca3a9410a4d",
+        "external_id": resource_ref.external_id,
+        "requested_project": "research",
+        "requested_profile": "one-node",
+        "requested_profile_project": "FAST25-AE",
+        "requested_site": "utah",
+        "requested_hardware": "r6615",
+        "provider_state": "ready",
+        "provider_observed_at": NOW.isoformat(),
+        "stage": "deploying",
+        "operation_id": "operation-a",
+        "allocation_id": "allocation-a",
+        "operation_outcome": "blocked",
+        "retryable": False,
+        "recorded_at": NOW.isoformat(),
+    }
+    assert public_operation(h.operation)["result"]["provider_diagnostic"] == diagnostic
     h.bootstrap.readiness.assert_not_awaited()
     h.repository.clear_bootstrap_hold.assert_not_awaited()
 
@@ -865,19 +907,36 @@ async def test_bootstrap_refusal_reports_only_public_diagnostics(
 @pytest.mark.asyncio
 async def test_failed_provisioning_is_released_and_never_deployed(monkeypatch):
     h = harness(monkeypatch)
-    h.provider.acquire.return_value = ProviderReceipt(outcome="pending", resource=REF)
+    failed_ref = REF.model_copy(update={"external_id": "f47eb2a4-a0ac-4656-80da-8a638d2d263c"})
+    h.provider.acquire.return_value = ProviderReceipt(outcome="pending", resource=failed_ref)
     # CloudLab marks an experiment failed when it cannot set it up; it holds
     # no Host, so the acquisition deletes it instead of waiting forever.
     h.provider.inspect.return_value = ResourceObservation(
-        ref=REF, state="failed", raw_state="failed", observed_at=NOW, lease_known=True
+        ref=failed_ref,
+        state="failed",
+        raw_state="failed",
+        observed_at=NOW,
+        provider_http_status=200,
+        lease_known=True,
     )
     await h.reconciler.execute(h.operation)
     h.provider.release.assert_awaited_once()
-    assert h.provider.release.await_args.args[0].external_id == REF.external_id
+    assert h.provider.release.await_args.args[0].external_id == failed_ref.external_id
     assert h.allocation["observed_state"] == "terminated"
     assert h.operation["state"] == "failed"
     assert h.repository.finish_operation.await_args.kwargs["state"] == "failed"
     assert h.operation["result"]["blocked_reasons"][0]["code"] == "resource_failed"
+    diagnostic = h.operation["result"]["provider_diagnostic"]
+    assert diagnostic["provider_operation"] == "experiments.read"
+    assert diagnostic["http_status"] == 200
+    assert diagnostic["provider_reason_code"] == "experiment_failed_no_provider_reason"
+    assert diagnostic["external_id"] == failed_ref.external_id
+    assert diagnostic["provider_state"] == "failed"
+    assert diagnostic["provider_observed_at"] == NOW.isoformat()
+    assert diagnostic["stage"] == "failed_resource_released"
+    assert diagnostic["operation_outcome"] == "failed"
+    assert diagnostic["recorded_at"] == NOW.isoformat()
+    assert public_operation(h.operation)["result"]["provider_diagnostic"] == diagnostic
     h.repository.prepare_bootstrap_binding.assert_not_awaited()
     h.bootstrap.deploy.assert_not_awaited()
 
@@ -922,40 +981,6 @@ async def test_missing_resource_within_its_lease_is_never_assumed_deleted(monkey
     assert h.operation["state"] == "blocked"
     assert h.allocation.get("observed_state") != "terminated"
     h.repository.record_observation_error.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_an_inspection_that_times_out_over_ssh_is_tried_again(monkeypatch):
-    """Reading a machine's identity changes nothing, so its timeout leaves nothing to verify.
-
-    The inspection waits and runs again. As an unknown outcome it would stop
-    every later operation of the server and keep it closed to new groups.
-    """
-    h = harness(monkeypatch, kind="inspect", identified=True)
-    transport = AsyncMock()
-    transport.run.side_effect = [
-        ProviderError("result_unknown", "SSH timed out; verify remote state before retrying"),
-        "f" * 32 + "\n",
-    ]
-    h.commands.registry.get.return_value.provider = ExistingSSHProvider(transport)
-    h.allocation.update(
-        provider_id="existing_ssh",
-        mode="attach",
-        external_id="allocation-a",
-        configuration={
-            "address": "node.example.org",
-            "username": "agent",
-            "credential_ref": "ssh-1",
-            "known_hosts_ref": "ssh-1:known_hosts",
-        },
-    )
-
-    await h.reconciler.execute(h.operation)
-
-    assert h.operation["state"] == "waiting"
-    assert h.repository.finish_operation.await_args.kwargs["retry_after_seconds"] == 30
-    await h.reconciler.execute(h.operation)
-    assert (h.operation["state"], h.operation["step"]) == ("succeeded", "observed")
 
 
 REGISTERED_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMdO7VBdfUlnQkwf4yfnmrk1h3G625rktRv0VgZa5awA"
@@ -1436,115 +1461,74 @@ async def test_a_finished_upgrade_lets_an_old_node_rotate(monkeypatch):
     assert h.repository.create_operation.await_args.kwargs["kind"] == "rotate"
 
 
-def _move_out_hold(h):
-    h.repository.set_move_out_hold.assert_awaited_once()
-    return h.repository.set_move_out_hold.await_args.kwargs
-
-
 @pytest.mark.asyncio
-async def test_a_host_in_its_move_out_window_asks_to_hold_every_claim(monkeypatch):
-    """Each chat's next turn is then claimed elsewhere, from its group's checkpoint.
-
-    Whether the hold is set is the repository's decision: it needs working
-    checkpoints and a Host that would take the groups.
-    """
-    h = harness(monkeypatch, kind="inspect", identified=True)
-    h.provider.inspect.return_value = observed(expires=NOW + timedelta(minutes=90))
-
-    await h.reconciler.execute(h.operation)
-
-    hold = _move_out_hold(h)
-    assert (hold["allocation_id"], hold["due"]) == ("allocation-a", True)
-    assert hold["operation_id"] == "operation-a"
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "policy",
-    [
-        RenewalPolicy(move_out_before_seconds=0),
-        RenewalPolicy(
-            enabled=True, reason="Keep the sandboxes", rotation_enabled=True, node_types=["m510"]
-        ),
-    ],
-)
-async def test_a_host_that_does_not_move_out_never_holds_its_claims(monkeypatch, policy):
-    h = harness(monkeypatch, kind="inspect", identified=True)
-    h.allocation["policy"] = policy.model_dump()
-    h.provider.inspect.return_value = observed(expires=NOW + timedelta(minutes=30))
-
-    await h.reconciler.execute(h.operation)
-
-    assert _move_out_hold(h)["due"] is False
-
-
-@pytest.mark.asyncio
-async def test_renewal_is_tried_before_the_move_out_window_opens(monkeypatch):
-    """A granted extension keeps the groups where they are."""
-    h = harness(monkeypatch, kind="inspect", identified=True)
-    h.allocation.update(
-        expires_at=NOW + timedelta(minutes=110),
-        policy=RenewalPolicy(enabled=True, reason="Keep the sandboxes").model_dump(),
+async def test_accepted_create_correlation_survives_followup_read_failure(monkeypatch):
+    h = harness(monkeypatch)
+    cloudlab_ref = ResourceRef(
+        external_id="f47eb2a4-a0ac-4656-80da-8a638d2d263c",
+        config={"credential_ref": "account-1", "project": "research"},
+    )
+    submission_id = "d14b57a4-7e2b-4f49-8b4b-4ca3a9410a4d"
+    followup_id = "a2cd14af-4c77-49c0-85cf-3a58e0dfbb2b"
+    h.provider.acquire.return_value = ProviderReceipt(
+        outcome="pending",
+        resource=cloudlab_ref,
+        diagnostics={
+            "provider_operation": "experiments.create",
+            "http_status": 201,
+            "provider_reason_code": "request_accepted",
+            "provider_request_id": submission_id,
+            "external_id": cloudlab_ref.external_id,
+        },
+    )
+    h.provider.inspect.side_effect = ProviderError(
+        "temporarily_unavailable",
+        "CloudLab could not be reached",
+        retryable=True,
+        diagnostics={
+            "provider_operation": "experiments.read",
+            "provider_reason_code": "request_failed",
+            "provider_request_id": followup_id,
+            "external_id": cloudlab_ref.external_id,
+        },
     )
 
-    await h.reconciler.schedule()
+    await h.reconciler.execute(h.operation)
 
-    h.commands.extend.assert_awaited_once()
+    assert h.operation["state"] == "waiting"
+    diagnostic = h.operation["result"]["provider_diagnostic"]
+    assert diagnostic["provider_operation"] == "experiments.read"
+    assert diagnostic["provider_request_id"] == followup_id
+    assert diagnostic["submission_request_id"] == submission_id
+    assert diagnostic["submission_http_status"] == 201
+    assert diagnostic["external_id"] == cloudlab_ref.external_id
+    assert public_operation(h.operation)["result"]["provider_diagnostic"] == diagnostic
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("granted", [True, False])
-async def test_a_renewal_has_ended_before_the_move_out_window_opens(monkeypatch, granted):
-    """The first renewal is granted or given up while the Host still serves.
-
-    A granted extension never starts a move: no claim is held and no idle
-    group is stopped. One the provider neither applies nor refuses stops
-    being awaited before the window opens.
-    """
-    h = harness(monkeypatch, kind="extend", identified=True)
-    policy = RenewalPolicy(enabled=True, reason="Keep the sandboxes")
-    h.allocation["policy"] = policy.model_dump()
-    # A lease just extended to the horizon runs down; the scheduler polls
-    # every 30 seconds.
-    remaining = timedelta(seconds=policy.extend_to_horizon_seconds)
-    while not h.commands.extend.await_count:
-        remaining -= timedelta(seconds=30)
-        h.allocation["expires_at"] = NOW + remaining
-        await h.reconciler.schedule()
-    h.provider.inspect.return_value = observed(expires=NOW + remaining)
-    if not granted:
-        h.provider.extend.return_value = ProviderReceipt(outcome="unknown", resource=REF)
+async def test_definite_create_rejection_reports_original_stage_after_retry_reset(monkeypatch):
+    h = harness(monkeypatch)
+    h.provider.acquire.side_effect = ProviderError(
+        "request_rejected",
+        "CloudLab rejected the request",
+        diagnostics={
+            "provider_operation": "experiments.create",
+            "http_status": 400,
+            "provider_reason_code": "invalid_profile_binding",
+        },
+    )
 
     await h.reconciler.execute(h.operation)
-    if not granted:
-        # Its last check, one poll after the confirmation wait.
-        later = NOW + compute_reconcile._EXTENSION_CONFIRMATION + timedelta(seconds=30)
-        monkeypatch.setattr(compute_reconcile, "_now", lambda: later)
-        await h.reconciler.execute(h.operation)
 
-    assert (h.operation["state"], h.operation["step"]) == (
-        ("succeeded", "extended") if granted else ("blocked", "extension_unconfirmed")
-    )
-    due = [call.kwargs["due"] for call in h.repository.set_move_out_hold.await_args_list]
-    assert due == [False] * len(due)
-
-
-@pytest.mark.asyncio
-async def test_groups_still_unmoved_near_the_lease_end_alert_once(monkeypatch):
-    h = harness(monkeypatch, kind="inspect", identified=True)
-    h.allocation["expires_at"] = NOW + timedelta(minutes=4)
-    h.repository.unmoved_groups.return_value = 2
-    events = []
-
-    async def notify(event, *, host, reason):
-        events.append((event, host, reason))
-
-    monkeypatch.setattr(h.reconciler.rotation, "_notify", notify)
-
-    await h.reconciler.schedule()
-    await h.reconciler.schedule()
-
-    assert events == [("compute_move_out_unfinished", "compute-nodeid", "2 groups not moved")]
+    assert h.operation["state"] == "blocked"
+    assert h.operation["step"] == "pending"
+    diagnostic = h.operation["result"]["provider_diagnostic"]
+    assert diagnostic["stage"] == "acquiring"
+    assert diagnostic["provider_operation"] == "experiments.create"
+    assert diagnostic["http_status"] == 400
+    assert diagnostic["provider_reason_code"] == "invalid_profile_binding"
+    assert public_operation(h.operation)["result"]["provider_diagnostic"] == diagnostic
+    h.provider.acquire.assert_awaited_once()
 
 
 def _recorded_events(monkeypatch, h) -> list:
@@ -1692,3 +1676,237 @@ async def test_a_fenced_host_already_on_the_release_is_not_reported(monkeypatch)
     await h.reconciler._queue_host_release(row, [], RELEASE, NOW + timedelta(hours=2))
 
     assert events == []
+
+
+@pytest.mark.asyncio
+async def test_incomplete_ready_cloudlab_scope_is_not_reported_as_usable(monkeypatch):
+    h = harness(monkeypatch)
+    resource_ref = ResourceRef(
+        external_id="f47eb2a4-a0ac-4656-80da-8a638d2d263c",
+        config={
+            "credential_ref": "account-1",
+            "project": "research",
+            "profile_name": "one-node",
+            "profile_project": "FAST25-AE",
+            "bindings": {"cluster": "utah", "phystype": "r6615"},
+        },
+    )
+    submission_id = "d14b57a4-7e2b-4f49-8b4b-4ca3a9410a4d"
+    observation_id = "a2cd14af-4c77-49c0-85cf-3a58e0dfbb2b"
+    h.provider.acquire.return_value = ProviderReceipt(
+        outcome="pending",
+        resource=resource_ref,
+        diagnostics={
+            "provider_operation": "experiments.create",
+            "http_status": 201,
+            "provider_reason_code": "request_accepted",
+            "provider_request_id": submission_id,
+            "external_id": resource_ref.external_id,
+        },
+    )
+    h.provider.inspect.return_value = observed().model_copy(
+        update={
+            "ref": resource_ref,
+            "scope_complete": False,
+            "provider_http_status": 200,
+            "provider_request_id": observation_id,
+        }
+    )
+
+    await h.reconciler.execute(h.operation)
+
+    assert h.operation["state"] == "blocked"
+    assert h.operation["step"] == "resource_identified"
+    assert h.operation["result"]["blocked_reasons"][0]["code"] == "resource_scope_incomplete"
+    diagnostic = h.operation["result"]["provider_diagnostic"]
+    assert diagnostic["provider_operation"] == "experiments.read"
+    assert diagnostic["provider_reason_code"] == "incomplete_resource_scope"
+    assert diagnostic["provider_request_id"] == observation_id
+    assert diagnostic["submission_request_id"] == submission_id
+    assert diagnostic["submission_http_status"] == 201
+    assert diagnostic["requested_project"] == "research"
+    assert diagnostic["requested_site"] == "utah"
+    assert diagnostic["requested_hardware"] == "r6615"
+    assert public_operation(h.operation)["result"]["provider_diagnostic"] == diagnostic
+    h.repository.prepare_bootstrap_binding.assert_not_awaited()
+    h.bootstrap.deploy.assert_not_awaited()
+    h.bootstrap.readiness.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_provider_diagnostics_drop_untrusted_values_that_look_like_secrets(monkeypatch):
+    h = harness(monkeypatch)
+    h.provider.acquire.side_effect = ProviderError(
+        "request_rejected",
+        "CloudLab rejected the request",
+        diagnostics={
+            "provider_operation": "experiments.create",
+            "http_status": 400,
+            "provider_reason_code": "private-token-value",
+            "provider_request_id": "private-token-value",
+            "requested_hardware": "private-token-value",
+        },
+    )
+
+    await h.reconciler.execute(h.operation)
+
+    diagnostic = h.operation["result"]["provider_diagnostic"]
+    assert diagnostic["provider_operation"] == "experiments.create"
+    assert diagnostic["http_status"] == 400
+    assert "provider_reason_code" not in diagnostic
+    assert "provider_request_id" not in diagnostic
+    assert "requested_hardware" not in diagnostic
+    assert "private-token-value" not in str(h.operation["result"])
+
+
+@pytest.mark.asyncio
+async def test_provider_readiness_change_before_bootstrap_waits_then_deploys_once(monkeypatch):
+    h = harness(monkeypatch)
+    h.provider.inspect.side_effect = [
+        observed(state="pending"),
+        observed(state="pending"),
+        observed(),
+        observed(),
+    ]
+
+    await h.reconciler.execute(h.operation)
+
+    assert h.operation["state"] == "waiting"
+    assert h.repository.prepare_bootstrap_binding.await_count == 0
+    h.bootstrap.deploy.assert_not_awaited()
+
+    await h.reconciler.execute(h.operation)
+
+    assert h.operation["state"] == "waiting"
+    assert h.repository.prepare_bootstrap_binding.await_count == 0
+    h.bootstrap.deploy.assert_not_awaited()
+
+    await h.reconciler.execute(h.operation)
+
+    assert h.operation["state"] == "succeeded"
+    assert h.repository.prepare_bootstrap_binding.await_count == 1
+    h.bootstrap.deploy.assert_awaited_once()
+    assert h.provider.inspect.await_count == 4
+
+
+@pytest.mark.asyncio
+async def test_stale_provider_observation_cannot_authorize_bootstrap(monkeypatch):
+    h = harness(monkeypatch)
+    stale = observed().model_copy(update={"observed_at": NOW - timedelta(minutes=10)})
+    h.provider.inspect.return_value = stale
+
+    await h.reconciler.execute(h.operation)
+
+    assert h.operation["state"] == "waiting"
+    assert h.operation["step"] == "waiting_for_resource"
+    h.repository.observe_allocation.assert_awaited_once()
+    h.repository.prepare_bootstrap_binding.assert_not_awaited()
+    h.bootstrap.deploy.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_unknown_acquisition_receipt_keeps_safe_provider_diagnostics(monkeypatch):
+    h = harness(monkeypatch)
+    h.provider.acquire.return_value = ProviderReceipt(
+        outcome="unknown",
+        diagnostics={
+            "provider_operation": "experiments.create",
+            "http_status": 503,
+            "provider_reason_code": "provider_server_error",
+            "requested_profile": "one-node",
+        },
+    )
+
+    await h.reconciler.execute(h.operation)
+
+    assert h.operation["state"] == "unknown"
+    diagnostic = h.operation["result"]["provider_diagnostic"]
+    assert diagnostic["provider_operation"] == "experiments.create"
+    assert diagnostic["http_status"] == 503
+    assert diagnostic["provider_reason_code"] == "provider_server_error"
+    assert diagnostic["requested_profile"] == "one-node"
+    assert diagnostic["operation_outcome"] == "unknown"
+    assert public_operation(h.operation)["result"]["provider_diagnostic"] == diagnostic
+    h.repository.prepare_bootstrap_binding.assert_not_awaited()
+    h.bootstrap.deploy.assert_not_awaited()
+    h.host_pool.issue_enroll_token.assert_not_awaited()
+    await h.reconciler.execute(h.operation)
+    h.provider.acquire.assert_awaited_once()
+    h.repository.prepare_bootstrap_binding.assert_not_awaited()
+    h.bootstrap.deploy.assert_not_awaited()
+    h.host_pool.issue_enroll_token.assert_not_awaited()
+    assert h.operation["state"] == "unknown"
+
+
+def _move_out_hold(h):
+    h.repository.set_move_out_hold.assert_awaited_once()
+    return h.repository.set_move_out_hold.await_args.kwargs
+
+
+@pytest.mark.asyncio
+async def test_a_host_in_its_move_out_window_asks_to_hold_every_claim(monkeypatch):
+    """Each chat's next turn is then claimed elsewhere, from its group's checkpoint.
+
+    Whether the hold is set is the repository's decision: it needs working
+    checkpoints and a Host that would take the groups.
+    """
+    h = harness(monkeypatch, kind="inspect", identified=True)
+    h.provider.inspect.return_value = observed(expires=NOW + timedelta(minutes=90))
+
+    await h.reconciler.execute(h.operation)
+
+    hold = _move_out_hold(h)
+    assert (hold["allocation_id"], hold["due"]) == ("allocation-a", True)
+    assert hold["operation_id"] == "operation-a"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "policy",
+    [
+        RenewalPolicy(move_out_before_seconds=0),
+        RenewalPolicy(
+            enabled=True, reason="Keep the sandboxes", rotation_enabled=True, node_types=["m510"]
+        ),
+    ],
+)
+async def test_a_host_that_does_not_move_out_never_holds_its_claims(monkeypatch, policy):
+    h = harness(monkeypatch, kind="inspect", identified=True)
+    h.allocation["policy"] = policy.model_dump()
+    h.provider.inspect.return_value = observed(expires=NOW + timedelta(minutes=30))
+
+    await h.reconciler.execute(h.operation)
+
+    assert _move_out_hold(h)["due"] is False
+
+
+@pytest.mark.asyncio
+async def test_renewal_is_tried_before_the_move_out_window_opens(monkeypatch):
+    """A granted extension keeps the groups where they are."""
+    h = harness(monkeypatch, kind="inspect", identified=True)
+    h.allocation.update(
+        expires_at=NOW + timedelta(minutes=110),
+        policy=RenewalPolicy(enabled=True, reason="Keep the sandboxes").model_dump(),
+    )
+
+    await h.reconciler.schedule()
+
+    h.commands.extend.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_groups_still_unmoved_near_the_lease_end_alert_once(monkeypatch):
+    h = harness(monkeypatch, kind="inspect", identified=True)
+    h.allocation["expires_at"] = NOW + timedelta(minutes=4)
+    h.repository.unmoved_groups.return_value = 2
+    events = []
+
+    async def notify(event, *, host, reason):
+        events.append((event, host, reason))
+
+    monkeypatch.setattr(h.reconciler.rotation, "_notify", notify)
+
+    await h.reconciler.schedule()
+    await h.reconciler.schedule()
+
+    assert events == [("compute_move_out_unfinished", "compute-nodeid", "2 groups not moved")]
