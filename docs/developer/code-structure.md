@@ -46,7 +46,10 @@ flowchart TD
 installs shared HTTP response and exception policies, and on both listeners a
 dependency that runs ahead of every route's own (`api/_parameters.py`): a path
 or query parameter holding NUL, or a route's integer parameter too wide for a
-`bigint`, is refused with a 422 before any query reads it. `bootstrap/lifespan.py`
+`bigint`, is refused with a 422 before any query reads it. So is a JSON body
+holding NUL or half a surrogate pair, on a route an owner, an administrator or
+the on-call relay calls; host and sandbox reports keep their own models, which
+replace those characters instead. `bootstrap/lifespan.py`
 constructs the resources and starts and stops background work; route modules
 do not own service startup or shutdown.
 
