@@ -4028,6 +4028,10 @@ is never automatically replayed. Inspect external effects before starting a new
 run with a different idempotency key. These receipts do not promise exactly-once
 side effects in external services.
 
+The output of a test, a preparation or an action is stored masked and bounded,
+with each NUL and unpaired surrogate replaced by U+FFFD: Postgres stores
+neither, and refusing the output would leave the test or command unfinished.
+
 Empty bindings still pin the original task's selection, but require neither
 `environment-v1` nor preparation. Each environment test reserves one local slot
 on a background worker so other free slots continue claiming coding tasks. Host
