@@ -22,6 +22,7 @@ from cloud_agent.schemas._host_reports import (
 from cloud_agent_shared.plugins import (
     SandboxPlugin,  # noqa: TC001 — Pydantic resolves annotations at runtime.
 )
+from cloud_agent_shared.shared_protocol import ABANDON_DETAIL_MAX_CHARS
 from cloud_agent_shared.ssh_access import (
     SshAccess,  # noqa: TC001 — Pydantic resolves annotations at runtime.
 )
@@ -474,7 +475,7 @@ class WorkerSandboxAbandonRequest(BaseModel):
     sandbox_generation: int = Field(..., ge=1)
     activation_generation: int = Field(..., ge=1)
     lost: bool
-    detail: ReportedText | None = Field(None, max_length=1000)
+    detail: ReportedText | None = Field(None, max_length=ABANDON_DETAIL_MAX_CHARS)
     idle_timeout_seconds: float = Field(1800.0, gt=0, le=7 * 24 * 60 * 60)
 
 

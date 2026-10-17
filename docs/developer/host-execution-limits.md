@@ -25,7 +25,9 @@ refused, because a runner that cannot record an event ends its turn. The same
 replacement applies to everything the runner posts to the control plane, and
 again to the reason it gives when it releases an activation or ends a turn,
 which quotes what the CLI printed: a refused reason would leave the turn on its
-lease.
+lease. The runner also cuts a release's reason to the 1000 characters the
+control plane accepts (`ABANDON_DETAIL_MAX_CHARS`), as it cuts a heartbeat's
+launch error, because a longer one would have the whole release refused.
 
 Resource checkpoints are forwarded independently of native CLI events. A
 silent model or tool invocation can therefore persist its latest sampled

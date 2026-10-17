@@ -15,7 +15,9 @@ from unittest.mock import Mock
 
 import httpx
 import pytest
+from pydantic import ValidationError
 
+from cloud_agent.schemas import WorkerSandboxAbandonRequest
 from cloud_agent_host import control_plane_client, runner as runner_mod
 from cloud_agent_host.chat_sandbox import ChatSandboxSpec
 from cloud_agent_host.runner import ClaimedJob, LeaseLost
@@ -1840,6 +1842,40 @@ def test_a_turn_can_end_with_a_reason_its_sandbox_printed():
             "base_sha": None,
         }
     ]
+
+
+def test_a_long_reason_still_releases_the_activation():
+    """The control plane holds an abandon's reason to 1000 characters.
+
+    The runner sent its failure as it was, so an unexpected error with a long
+    message had its release refused, and with it the immediate end of the
+    member's residency and grant.
+    """
+    released: list[dict[str, Any]] = []
+
+    def endpoint(request):
+        body = json.loads(request.content)
+        try:
+            WorkerSandboxAbandonRequest.model_validate(body)
+        except ValidationError:
+            return httpx.Response(422, json={"detail": "refused"})
+        released.append(body)
+        return httpx.Response(200, json={})
+
+    reason = "shared live chat failed unexpectedly: " + "docker: no space left on device. " * 40
+    control = _event_control(endpoint)
+    try:
+        control.abandon_chat_sandbox(
+            sandbox_generation=1,
+            activation_generation=3,
+            lost=True,
+            detail=reason,
+            idle_timeout_seconds=1800,
+        )
+    finally:
+        control.close()
+
+    assert [body["detail"] for body in released] == [reason[:1000]]
 
 
 def test_run_forever_refuses_to_enroll_a_host_that_cannot_attest(monkeypatch):

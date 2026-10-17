@@ -3154,7 +3154,7 @@ def _run_shared_live_attempt(
                 sandbox_generation=spec.generation,
                 activation_generation=activation_generation,
                 lost=False,
-                detail=failure_detail[:1000],
+                detail=failure_detail,
                 idle_timeout_seconds=idle_timeout_s,
             )
         except Exception as abandon_exc:
