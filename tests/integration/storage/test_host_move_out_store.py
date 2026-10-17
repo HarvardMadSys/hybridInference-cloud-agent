@@ -22,6 +22,8 @@ from tests.integration.storage.test_sandbox_restore_store import (
     store as store,
 )
 
+from cloud_agent.execution_profiles import KATA_RUNTIME
+
 if TYPE_CHECKING:
     from cloud_agent.storage.assembly import Storage
 
@@ -663,3 +665,58 @@ async def test_the_move_out_report_names_why_groups_would_stay(pool, store: Stor
     report = await repo.move_out_report(allocation_id="leaving")
     # The move can start, but this stopped group has no checkpoint to move with.
     assert (report["blocker"], report["unmoved"], report["unmovable"]) == (None, 1, 1)
+
+
+async def _untrusted(pool, sandbox_id: str = "asbx_restore") -> None:
+    """The group and its chats run ``untrusted-kata-v1``, the deployed default."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_threads SET execution_profile = 'untrusted-kata-v1' WHERE id IN ("
+            "SELECT thread_id FROM agent_thread_sandbox_memberships WHERE sandbox_id = $1)",
+            sandbox_id,
+        )
+        await conn.execute(
+            "UPDATE agent_sandboxes SET execution_profile = 'untrusted-kata-v1' WHERE id = $1",
+            sandbox_id,
+        )
+
+
+async def _kata(store: Storage, host: str) -> None:
+    """The host's runner reports the Kata runtime, the only one an untrusted chat runs on."""
+    assert await store.host_pool.record_host_heartbeat(
+        host=host, credential_hash=f"{host}-hash", sandbox_runtime=KATA_RUNTIME
+    )
+
+
+async def test_a_removal_does_not_move_an_untrusted_group_to_a_host_without_kata(
+    pool, store: Storage
+):
+    """Its next turn is claimed only under Kata, so a runc Host would never restore it."""
+    _, group = await _settled_stopped_group(pool, store)
+    await _untrusted(pool)
+    await _running(pool, group["sandbox_id"])
+    await _captures(pool)
+    await _host(store, "runner-c", _RESTORE_HOST)
+
+    assert await store.host_pool.remove_host(host="runner-a") == "no_move_target"
+    assert (await store.host_pool.get_host(host="runner-a"))["status"] == "online"
+
+    await _kata(store, "runner-c")
+    assert await store.host_pool.remove_host(host="runner-a") == "moving_out"
+
+
+async def test_a_lease_move_out_needs_a_host_that_runs_its_untrusted_groups(pool, store: Storage):
+    _, group = await _settled_stopped_group(pool, store)
+    await _untrusted(pool)
+    await _running(pool, group["sandbox_id"])
+    await _captures(pool)
+    await _on_machine(pool, "leaving")
+    await _host(store, "runner-c", _RESTORE_HOST)
+    repo = store.compute_resources
+
+    # Holding every claim now would only strand the chat: nothing could restore it.
+    assert await repo.set_move_out_hold(allocation_id="leaving", due=True) is False
+    assert (await repo.move_out_report(allocation_id="leaving"))["blocker"] == "no_restore_target"
+
+    await _kata(store, "runner-c")
+    assert await repo.set_move_out_hold(allocation_id="leaving", due=True) is True

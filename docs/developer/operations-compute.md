@@ -516,7 +516,9 @@ groups can really move:
   current archive revision would pass claim admission for new groups now. A
   Host under a `new_groups` hold, in its own lease window or with a stale
   observation does not count, and of two Hosts entering their windows
-  together only one moves out.
+  together only one moves out. When an `untrusted-kata-v1` group would move,
+  that Host must also run the Kata runtime: no other Host is ever handed such
+  a chat, so without one the group would wait in its checkpoint for good.
 
 Without a target nothing changes, and the Host serves until its lease ends as
 before. A move that has started continues if its target goes away, and stops
