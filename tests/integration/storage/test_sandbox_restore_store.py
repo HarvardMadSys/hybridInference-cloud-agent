@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -11,6 +12,7 @@ from tests.integration.storage.test_agent_job_store import (
     _SHARED_HOST_CAPABILITIES,
     _create_job,
     _shared_claim_attestation,
+    _waiting_on,
     pool as pool,
     store as store,
 )
@@ -1164,6 +1166,154 @@ async def test_a_checkpoint_landing_after_the_revocation_still_moves_the_group(
 
     assert await store.host_pool.finish_host_removals() == []
 
+    assert (await _state(pool))["state"] == "cold"
+
+
+async def test_a_workspace_request_hands_on_a_group_its_late_checkpoint_covers(
+    pool, store: Storage
+):
+    """A request before the reaper's next pass moves the group instead of starting it.
+
+    Started on the removed machine, which never reports its stop, the group
+    would lose the checkpoint's cover for good.
+    """
+    job, group = await _settled_stopped_group(pool, store)
+    assert await store.host_pool.remove_host(host="runner-a", allow_unmoved=True) == "ok"
+    assert await store.sandbox.record_sandbox_checkpoint(
+        host="runner-a", thread_id=job["thread_id"], checkpoint=_receipt(group, job)
+    )
+
+    assert await store.sandbox.fence_workspace_start(thread_id=job["thread_id"]) == "cold"
+
+    state = await _state(pool)
+    assert (state["state"], state["restore_checkpoint_id"]) == ("cold", "c" * 32)
+
+
+async def test_a_workspace_request_to_a_removed_hosts_group_starts_nothing(pool, store: Storage):
+    """Refused without a fence, so a checkpoint still in flight moves the group."""
+    job, group = await _settled_stopped_group(pool, store)
+    assert await store.host_pool.remove_host(host="runner-a", allow_unmoved=True) == "ok"
+
+    assert await store.sandbox.fence_workspace_start(thread_id=job["thread_id"]) == "host_revoked"
+
+    assert await store.sandbox.record_sandbox_checkpoint(
+        host="runner-a", thread_id=job["thread_id"], checkpoint=_receipt(group, job)
+    )
+    assert await store.host_pool.finish_host_removals() == []
+    assert (await _state(pool))["state"] == "cold"
+
+
+async def test_a_removed_hosts_group_is_not_captured_for_publication(pool, store: Storage):
+    """A capture starts the container too, so it waits for the group to move."""
+    job, group = await _settled_stopped_group(pool, store)
+    requested = await store.snapshot.request_snapshot_publication(
+        thread_id=job["thread_id"], user_id=job["user_id"]
+    )
+    assert requested.get("requested") is True, requested
+    assert await store.host_pool.remove_host(host="runner-a", allow_unmoved=True) == "ok"
+
+    assert await store.snapshot.claim_due_sandbox_snapshot() is None
+
+    assert await store.sandbox.record_sandbox_checkpoint(
+        host="runner-a", thread_id=job["thread_id"], checkpoint=_receipt(group, job)
+    )
+    assert await store.host_pool.finish_host_removals() == []
+    assert (await _state(pool))["state"] == "cold"
+
+
+@pytest.mark.parametrize("checkpoint_first", [False, True])
+async def test_a_publication_recorded_after_the_removal_starts_nothing(
+    pool, store: Storage, checkpoint_first: bool
+):
+    """A publication out when its host was removed lands after the removal.
+
+    Importing its base would start the container on the removed machine, so
+    the import waits for the group's next host, and the late checkpoint still
+    moves the group whichever lands first.
+    """
+    job, _ = await _settled_stopped_group(pool, store)
+    requested = await store.snapshot.request_snapshot_publication(
+        thread_id=job["thread_id"], user_id=job["user_id"]
+    )
+    assert requested.get("requested") is True, requested
+    capture = await store.snapshot.claim_due_sandbox_snapshot()
+    assert capture is not None
+    patch = "diff --git a/answer.txt b/answer.txt\nnew file mode 100644\n"
+    assert (
+        await store.snapshot.record_sandbox_snapshot_capture(
+            snapshot_id=capture["snapshot_id"],
+            sandbox_id=capture["sandbox_id"],
+            sandbox_generation=capture["generation"],
+            container_id=capture["container_id"],
+            workspace_epoch=capture["workspace_epoch"],
+            base_sha=capture["base_sha"],
+            patch=patch,
+            content_sha256=hashlib.sha256(patch.encode()).hexdigest(),
+        )
+        == "captured"
+    )
+    publication = await store.snapshot.claim_for_publish()
+    assert publication is not None
+    # The capture started the container; it stops again, and the host is
+    # removed while the publication is out.
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_sandboxes SET state = 'stopped', idle_deadline = NULL WHERE id = $1",
+            "asbx_restore",
+        )
+    group = await store.sandbox.thread_sandbox(thread_id=job["thread_id"])
+    assert group is not None
+    assert await store.host_pool.remove_host(host="runner-a", allow_unmoved=True) == "ok"
+    if checkpoint_first:
+        assert await store.sandbox.record_sandbox_checkpoint(
+            host="runner-a", thread_id=job["thread_id"], checkpoint=_receipt(group, job)
+        )
+
+    assert await store.snapshot.record_snapshot_publish(
+        snapshot_id=capture["snapshot_id"],
+        expected_publish_attempt_count=publication["publish_attempt_count"],
+        pr_url="https://example.test/pull/1",
+        commit_sha="b" * 40,
+    )
+    assert await store.snapshot.pending_snapshot_base_import() is None
+
+    if not checkpoint_first:
+        assert await store.sandbox.record_sandbox_checkpoint(
+            host="runner-a", thread_id=job["thread_id"], checkpoint=_receipt(group, job)
+        )
+    assert await store.host_pool.finish_host_removals() == []
+    assert (await _state(pool))["state"] == "cold"
+
+
+async def test_a_fork_that_waited_on_the_revocation_starts_nothing(pool, store: Storage):
+    """A Fork that read its host before the revocation committed checks it again.
+
+    It waits on the group the revocation holds, and finds the host gone once
+    it has the group.
+    """
+    job, group = await _settled_stopped_group(pool, store)
+    async with pool.acquire() as revoking, revoking.transaction():
+        await revoking.execute(
+            "SELECT id FROM agent_sandboxes WHERE id = $1 FOR UPDATE", group["sandbox_id"]
+        )
+        fork = asyncio.create_task(
+            store.session_fork.prepare_session_fork(
+                source_job_id=job["id"],
+                user_id=job["user_id"],
+                idempotency_key="fork-across-removal",
+            )
+        )
+        await _waiting_on(pool, await revoking.fetchval("SELECT pg_backend_pid()"))
+        await revoking.execute(
+            "UPDATE agent_runner_hosts SET status = 'disabled', credential_hash = NULL "
+            "WHERE host = 'runner-a'"
+        )
+
+    assert await asyncio.wait_for(fork, 10) == {"error": "host_removed"}
+    assert await store.sandbox.record_sandbox_checkpoint(
+        host="runner-a", thread_id=job["thread_id"], checkpoint=_receipt(group, job)
+    )
+    assert await store.host_pool.finish_host_removals() == []
     assert (await _state(pool))["state"] == "cold"
 
 

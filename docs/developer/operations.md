@@ -2111,6 +2111,14 @@ and continues only if that host is enrolled again; the admin sandbox page shows
 which is which. A checkpoint carried by a heartbeat still in flight when the
 credential was revoked is handed on by the reaper's next pass.
 
+Nothing starts a group on a removed host, since that host never reports the
+stop that would cover it again. A workspace request (Files, Terminal, Git or
+an environment retry) answers `workspace_unavailable` (409), a Fork is refused,
+and a publication's capture and base import wait until the group has moved. A
+checkpoint still in flight therefore covers its group when it lands, and a
+request or Fork that finds the group covered hands it on at once: the request
+answers `workspace_restoring`.
+
 Two other paths turn covered stopped groups `cold` without revoking the host:
 a provider that confirms the node terminated hands over all of them, and a
 host [moving out before its lease ends](operations-compute.md#moving-sandboxes-out-before-a-lease-ends)

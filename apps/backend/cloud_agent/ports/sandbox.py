@@ -355,7 +355,11 @@ class SandboxRepository(Protocol):
         ...
 
     async def fence_workspace_start(self, *, thread_id: str) -> str | None:
-        """Count a start a workspace request may cause; return the group's state."""
+        """Count a start a workspace request may cause; return the group's state.
+
+        ``host_revoked`` when the group's host has left the pool: nothing may
+        start the group there, and it is not fenced.
+        """
         ...
 
     async def due_thread_sandbox_stop(

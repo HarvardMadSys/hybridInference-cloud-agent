@@ -1026,6 +1026,10 @@ async def fork_agent_job(
                 "native_context_unavailable",
                 "This chat's retained native context is not safe to fork.",
             ),
+            "host_removed": (
+                "native_context_unavailable",
+                "This chat's sandbox is on a server that has been removed.",
+            ),
             "source_busy": (
                 "sandbox_busy",
                 "This chat is currently running a turn; retry after it settles.",

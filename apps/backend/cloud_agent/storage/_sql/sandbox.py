@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from cloud_agent.storage._sql.hosts import refuse_start_on_revoked_host
 from cloud_agent_shared.sandbox_restore import MAX_RESTORE_ATTEMPTS, RESTORE_RETRY_DELAYS_S
 from cloud_agent_shared.shared_protocol import (
     FORK_HELPER,
@@ -206,8 +207,19 @@ async def fence_sandbox_start(conn: Any, sandbox_id: str) -> str | None:
 
     For callers that are about to ask a sandbox manager for something that may
     start a stopped container: a workspace request, a fork, a snapshot. The
-    returned state lets them refuse a group that only a checkpoint holds.
+    returned state lets them refuse a group that only a checkpoint holds. A
+    group bound to a revoked host is not fenced: it reads ``host_revoked``, or
+    ``cold`` once a late checkpoint has handed it on
+    (:func:`refuse_start_on_revoked_host`).
     """
+    group = await conn.fetchrow(
+        "SELECT id, state, host FROM agent_sandboxes WHERE id = $1 FOR UPDATE", sandbox_id
+    )
+    if group is None:
+        return None
+    refused = await refuse_start_on_revoked_host(conn, group)
+    if refused is not None:
+        return refused
     return await conn.fetchval(
         f"""
         UPDATE agent_sandboxes

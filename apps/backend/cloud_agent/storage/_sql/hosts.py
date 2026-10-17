@@ -382,6 +382,39 @@ async def release_late_covered_sandboxes(conn: Any) -> list[str]:
     return await release_covered_sandboxes(conn, hosts) if hosts else []
 
 
+#: Whether host ``{host}`` has been revoked (:func:`revoke_host_credentials`)
+#: and not enrolled again. ``{host}`` names the host column or parameter.
+REVOKED_HOST_SQL = """EXISTS (
+    SELECT 1 FROM agent_runner_hosts revoked
+    WHERE revoked.host = {host}
+      AND revoked.credential_hash IS NULL AND revoked.status = 'disabled'
+)"""
+
+
+async def refuse_start_on_revoked_host(conn: Any, group: Any) -> str | None:
+    """Refuse to start ``group`` on a revoked host; ``None`` lets the start go ahead.
+
+    For a caller about to start a stopped container, which holds the group's
+    row lock and passes its ``id``, ``state`` and ``host``. Read after that
+    lock, the host's revocation is the one any handover of the group saw.
+
+    A revoked host never reports a stop again, so a start there would end the
+    cover of the checkpoint that moves the group, for good. A checkpoint that
+    landed after the revocation already covers it, and the group is handed on
+    now, as the reaper's next pass would do (:func:`release_late_covered_sandboxes`):
+    ``"cold"``. Any other group stays with that host, unstarted, so a checkpoint
+    still in flight covers it when it lands: ``"host_revoked"``. A ``cold`` or
+    ``restoring`` group lives in its checkpoint, whatever host it last named.
+    """
+    if group["state"] in ("cold", "restoring") or not await conn.fetchval(
+        "SELECT " + REVOKED_HOST_SQL.format(host="$1"), group["host"]
+    ):
+        return None
+    if await release_covered_sandboxes(conn, [str(group["host"])], sandbox_ids=[str(group["id"])]):
+        return "cold"
+    return "host_revoked"
+
+
 # A Host moving out, in its lease window or because an administrator removes
 # it: no claims, and each group stopped and handed to another Host through its
 # checkpoint. ``{host}`` names the Host column.

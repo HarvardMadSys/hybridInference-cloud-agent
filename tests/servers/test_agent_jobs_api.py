@@ -3224,6 +3224,27 @@ async def test_chat_without_shared_native_state_cannot_be_forked(
     assert len(store.jobs) == 1
 
 
+async def test_a_fork_from_a_removed_hosts_sandbox_says_its_server_is_gone(
+    client: AsyncClient, store: FakeStorage, monkeypatch: pytest.MonkeyPatch
+):
+    source_id = await _create_job(client)
+    store.jobs[source_id].update(
+        state="succeeded",
+        thread_sandbox={"sandbox_id": "asbx_shared", "shared_live": True},
+    )
+
+    async def _on_a_removed_host(**_kwargs):
+        return {"error": "host_removed"}
+
+    monkeypatch.setattr(store, "prepare_session_fork", _on_a_removed_host)
+    response = await client.post(f"/v1/agent/jobs/{source_id}/fork")
+
+    assert response.status_code == 409
+    error = response.json()["detail"]["error"]
+    assert error["type"] == "native_context_unavailable"
+    assert "server that has been removed" in error["message"]
+
+
 async def test_fork_of_an_active_turn_is_refused(client: AsyncClient, store: FakeStorage):
     """A running turn's output is not history yet, so it cannot anchor a fork."""
     job_id = await _create_job(client)

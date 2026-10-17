@@ -2030,7 +2030,8 @@ class PostgresSandboxRepository:
         container through the sandbox manager, which records nothing here. The
         fence is taken before the request is forwarded, so the checkpoint of
         the last stop stops covering the group from that moment on. ``None``
-        when the chat has no group.
+        when the chat has no group, and ``host_revoked`` when its host has
+        left the pool: nothing may start it there, and it is not fenced.
         """
         async with self._pool.acquire() as conn, conn.transaction():
             sandbox_id = await conn.fetchval(
