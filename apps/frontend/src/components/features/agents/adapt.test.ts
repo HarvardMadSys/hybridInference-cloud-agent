@@ -1491,6 +1491,27 @@ describe('patch parsing', () => {
     expect(toDiffFiles(`diff --git "a/${quoted}" "b/${quoted}"`)).toEqual([path]);
   });
 
+  it('leaves out a file whose name is not UTF-8, with its lines', () => {
+    // A Latin-1 `café.md`: Git writes its é as the one byte \351, which spells
+    // no UTF-8 name, and the workspace lists no such file to open.
+    const latin1 = [
+      'diff --git "a/caf\\351.md" "b/caf\\351.md"',
+      'index ce01362..3b18e51 100644',
+      '--- "a/caf\\351.md"',
+      '+++ "b/caf\\351.md"',
+      '@@ -1 +1 @@',
+      '-hello',
+      '+hello world',
+    ].join('\n');
+    const patch = `${PATCH}\n${latin1}`;
+    expect(toDiffFiles(patch)).toEqual(['src/x.py']);
+    expect(toDiffFileDetails(patch)).toEqual([
+      expect.objectContaining({ path: 'src/x.py', add: 1, del: 1 }),
+    ]);
+    // Its lines still count, as a header without prefixes does.
+    expect(toDisplayJob(JOB, { patch }).diffStat).toEqual({ add: 2, del: 2 });
+  });
+
   it('reads a header that quotes only one of its names', () => {
     const rename = [
       'diff --git a/plain.md "b/\\345\\220\\215\\345\\255\\227.md"',

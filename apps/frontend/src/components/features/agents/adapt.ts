@@ -342,7 +342,8 @@ const GIT_PATH_ESCAPES: Readonly<Record<string, number>> = {
   '\\': 0x5c,
 };
 
-function unquoteGitPath(quoted: string): string {
+/** The name a quoted Git path spells, or null when its bytes are not UTF-8. */
+function unquoteGitPath(quoted: string): string | null {
   const encoder = new TextEncoder();
   const bytes: number[] = [];
   for (const [, escape, text] of quoted.matchAll(/\\([0-3][0-7]{2}|.)|([^\\]+)/g)) {
@@ -350,10 +351,21 @@ function unquoteGitPath(quoted: string): string {
     else if (escape.length === 3) bytes.push(Number.parseInt(escape, 8));
     else bytes.push(GIT_PATH_ESCAPES[escape] ?? escape.charCodeAt(0));
   }
-  return new TextDecoder().decode(new Uint8Array(bytes));
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(new Uint8Array(bytes));
+  } catch {
+    // Read loosely, such a name would show a path with U+FFFD in it that no
+    // file has, and two names could read the same. The workspace leaves it
+    // out of its listing too.
+    return null;
+  }
 }
 
-/** The path a `diff --git` header gives the changed file, or null for any other line. */
+/**
+ * The path a `diff --git` header gives the changed file, or null for any other
+ * line and for a header naming no file the workspace can open: one whose name
+ * is not UTF-8, or whose prefixes a repository's diff config changed.
+ */
 function diffHeaderPath(line: string): string | null {
   const header = DIFF_HEADER.exec(line);
   if (!header) return null;
@@ -381,10 +393,12 @@ export function toDiffFileDetails(patch: string): AgentDiffFile[] {
   let inHunk = false;
 
   for (const line of patch.split('\n')) {
-    const path = diffHeaderPath(line);
-    if (path !== null) {
-      current = { path, add: 0, del: 0, lines: [] };
-      files.push(current);
+    if (line.startsWith('diff --git ')) {
+      // Every header starts a new file. One the workspace cannot name is left
+      // out with its lines, rather than adding them to the file before it.
+      const path = diffHeaderPath(line);
+      current = path === null ? null : { path, add: 0, del: 0, lines: [] };
+      if (current) files.push(current);
       inHunk = false;
       continue;
     }
