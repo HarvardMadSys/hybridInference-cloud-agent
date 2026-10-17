@@ -1861,9 +1861,30 @@ Release cloud resources before removing their records. Attached servers without
 release support can be removed after their hosts are disabled. Remove retained
 sandboxes through the sandbox deletion flow and wait for cleanup to finish; clear
 the default placement pin, running attempts, and deployment drains first. Removal
-checks these dependencies in the same transaction as cleanup and refuses work
-whose provider result is unresolved. An acquisition that never submitted to its
-provider can be removed even when resource observation is unavailable.
+checks these dependencies in the same transaction as cleanup. An acquisition that
+never submitted to its provider can be removed even when resource observation is
+unavailable.
+
+Removal also refuses with _The external operation is unresolved_ in three cases.
+The server's **Activity** tab lists the operations involved:
+
+- An operation that is running, or waiting while it confirms a provider call (an
+  acquisition waiting for its experiment, an extension or a release waiting for
+  the provider's answer), is still in progress. Wait for it to finish or stop.
+- An operation whose outcome is `unknown`, such as an acquisition whose create
+  request timed out, waits for an administrator, and a release requested
+  meanwhile waits behind it. Open it and retry it or, for an acquisition, adopt
+  the experiment it created.
+- A server that never recorded its provider resource is refused while one of its
+  operations suggests the provider has one: an answer that named it, an
+  acquisition past submission, a registered node, or a call never confirmed.
+  Release the server. The release deletes a resource an operation named, and
+  otherwise records that there is none, so first check the provider for one the
+  request created.
+
+Once the provider has confirmed the machine gone, an operation that stopped
+(blocked, failed or cancelled) no longer keeps the server, even one that stopped
+while it was confirming a provider call: that call can change nothing now.
 
 The compute API is `DELETE /admin/agent/servers/<allocation_id>` with
 `{"expected_revision": N}`. A revision conflict requires refreshing the server.

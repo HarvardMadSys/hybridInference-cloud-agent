@@ -10,7 +10,7 @@ from uuid import uuid4
 import pytest
 from tests.integration.storage.test_admin_sandbox_queries import member, seed
 from tests.integration.storage.test_attempt_ledger import _seed_attempt
-from tests.integration.storage.test_compute_resources import resource
+from tests.integration.storage.test_compute_resources import fence, operation, resource
 from tests.integration.storage.test_host_pool_store import db as db, hosts as hosts, store as store
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
@@ -329,6 +329,113 @@ async def test_unresolved_operation_blocks_even_confirmed_terminal_removal(
         await remove_current(store, allocation_id)
     assert await store.compute_resources.get_allocation(allocation_id) == before
     assert await store.compute_resources.get_operation(operation["id"]) is not None
+
+
+async def confirm_again(db, repo, claimed, *, step):
+    """Leave a provider call to be confirmed, then claim it as the next check."""
+    assert await repo.finish_operation(
+        **fence(claimed), state="waiting", step=step, result={"external_pending": True}
+    )
+    async with db.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_compute_operations SET next_attempt_at=NOW() WHERE id=$1", claimed["id"]
+        )
+    again = await repo.claim_operation(worker_id="worker")
+    assert again["id"] == claimed["id"]
+    return again
+
+
+async def test_extension_unconfirmed_when_the_lease_ended_does_not_keep_the_server(
+    db, store, hosts
+):
+    """The renewal timed out and the lease ran out while it was being confirmed.
+
+    The check that found the machine gone stopped the extension blocked, with
+    the flag of the call it had been confirming. Retrying it only finds the
+    machine gone again, and a machine its provider ended offers no release.
+    """
+    repo = store.compute_resources
+    allocation_id, _, _ = await resource(store, hosts, name="expired")
+    extend = await operation(repo, allocation_id, kind="extend")
+    assert await repo.checkpoint_operation(
+        **fence(extend),
+        step="extending",
+        result={"extension_requested": True, "external_pending": True},
+    )
+    extend = await confirm_again(db, repo, extend, step="confirming")
+    await repo.observe_allocation(
+        allocation_id=allocation_id,
+        observation={"observed_state": "terminated", "scope_complete": True},
+        **fence(extend),
+    )
+    assert await repo.finish_operation(
+        **fence(extend),
+        state="blocked",
+        step="confirming",
+        message="The resource can no longer be renewed",
+        result={"blocked_reasons": [{"code": "resource_terminated", "message": "gone"}]},
+    )
+    assert (await repo.get_operation(extend["id"]))["result"]["external_pending"] is True
+
+    await remove_current(store, allocation_id)
+
+    assert await repo.get_allocation(allocation_id) is None
+    assert await hosts.get_host(host="expired") is None
+
+
+async def test_acquisition_its_release_cancelled_does_not_keep_the_server(db, store):
+    """The release cancels an acquisition stopped for attention, keeping its result.
+
+    It had been waiting for CloudLab to make the experiment ready, and stopped
+    once the experiment could no longer be seen. The administrator released
+    the server after its lease ran out, and the experiment was confirmed gone.
+    """
+    repo = store.compute_resources
+    allocation_id, acquisition = await pending_allocation(store)
+    claimed = await repo.claim_operation(worker_id="worker")
+    assert claimed["id"] == acquisition["id"]
+    ref = {"external_id": "provisioning", "config": {}}
+    assert await repo.checkpoint_operation(
+        **fence(claimed),
+        step="resource_identified",
+        result={"resource_ref": ref, "external_id": "provisioning"},
+    )
+    await repo.observe_allocation(
+        allocation_id=allocation_id,
+        observation={"external_id": "provisioning", "observed_state": "pending"},
+        **fence(claimed),
+    )
+    claimed = await confirm_again(db, repo, claimed, step="waiting_for_resource")
+    assert await repo.finish_operation(
+        **fence(claimed),
+        state="blocked",
+        step="waiting_for_resource",
+        message="CloudLab cannot confirm this experiment's existence or visibility",
+        result={"blocked_reasons": [{"code": "resource_visibility_unknown", "message": "hidden"}]},
+    )
+    retire = await operation(repo, allocation_id)
+    await repo.begin_retirement(allocation_id=allocation_id, **fence(retire))
+    await repo.observe_allocation(
+        allocation_id=allocation_id,
+        observation={"observed_state": "terminated", "scope_complete": True},
+        **fence(retire),
+    )
+    assert (await repo.commit_release(allocation_id=allocation_id, **fence(retire)))[
+        "release_committed"
+    ]
+    assert await repo.finish_operation(
+        **fence(retire),
+        state="succeeded",
+        step="released",
+        result={"external_pending": False, "blocked_reasons": []},
+    )
+    cancelled = await repo.get_operation(acquisition["id"])
+    assert cancelled["state"] == "cancelled"
+    assert cancelled["result"]["external_pending"] is True
+
+    await remove_current(store, allocation_id)
+
+    assert await repo.get_allocation(allocation_id) is None
 
 
 @pytest.mark.parametrize(

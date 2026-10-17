@@ -727,9 +727,17 @@ class PostgresComputeResourceRepository:
                 allocation_id,
             ):
                 raise ValueError("rotation_in_progress")
+            # Only an operation that can still act holds the records: one a
+            # worker runs, one whose outcome is unknown, or one still confirming
+            # a provider call, as the dispatcher and release count them. One
+            # that stopped keeps the flag of the call it last confirmed, since
+            # finishing merges results and a release cancels the rest as they
+            # stand. Once the provider confirms the machine gone, that call can
+            # change nothing; until then a resource must be released anyway,
+            # and without one the flag is a provider receipt like those below.
             if any(
                 operation["state"] in {"running", "unknown"}
-                or operation["result"].get("external_pending")
+                or (operation["state"] == "waiting" and operation["result"].get("external_pending"))
                 for operation in operations
             ):
                 raise ValueError("external_operation_unresolved")
@@ -773,6 +781,7 @@ class PostgresComputeResourceRepository:
                         operation["result"].get("resource_ref")
                         or operation["result"].get("external_id")
                         or operation["result"].get("resolved_external_id")
+                        or operation["result"].get("external_pending")
                         or (
                             operation["kind"] in {"acquire", "add", "import"}
                             and operation["step"] != "pending"
