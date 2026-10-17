@@ -294,17 +294,26 @@ class SandboxManagerClient:
 
         Owner inference credentials need a broker that keeps them from the CLI.
         Return all declared capabilities so callers only send supported fields.
+        The answer is read under the same ceiling as every other reply: the
+        host chooses how much it sends, on the claim path among others.
         """
         required = {ENVIRONMENT_CAPABILITY}
         if environment is not None and uses_inference_names(environment):
             required.add(ENVIRONMENT_INFERENCE_CAPABILITY)
         try:
             async with self._http(5) as client:
-                response = await client.get(
-                    f"{self._base_url}/health", headers=self._headers, timeout=5
+                status_code, body = await self._exchange(
+                    client,
+                    "GET",
+                    f"{self._base_url}/health",
+                    limit=MAX_SANDBOX_MANAGER_CONTROL_BYTES,
+                    headers=self._headers,
+                    timeout=5,
                 )
-                response.raise_for_status()
-                capabilities = [str(c) for c in response.json().get("capabilities", [])]
+            answer = _json_object(body) if status_code < 400 and body is not None else None
+            if answer is None:
+                raise ValueError("the sandbox manager gave no capability answer")
+            capabilities = [str(c) for c in answer.get("capabilities", [])]
         except (httpx.HTTPError, ValueError, AttributeError, TypeError):
             raise SandboxManagerError(
                 503, "Sandbox manager environment capability is unavailable"
