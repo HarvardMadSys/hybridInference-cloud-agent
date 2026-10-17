@@ -188,6 +188,16 @@ GRANT_RENEWAL_CONCURRENCY = 16
 GRANT_RENEWAL_PASS_DEADLINE_S = (GRANT_TTL_S - RENEWAL_INTERVAL_S) / 2
 
 
+#: How long the reaper waits for a host's sandbox manager to stop one member
+#: process it has fenced out. The store has already closed that residency
+#: generation, and the host's next heartbeat is told so and stops the process
+#: itself, so the call only makes that prompt. Most attempts the reaper ends
+#: expired because their host went away, and a host that no longer answers
+#: must not hold the pass -- every other host's reaping, queue settlement and
+#: grant revocation -- for a whole request timeout per member.
+RESIDENCY_CLEANUP_TIMEOUT_S = 5.0
+
+
 async def _reconcile_settled_terminals(store: _SettledTerminals) -> None:
     """Replay durable settled-terminal recovery markers after restarts.
 
@@ -555,7 +565,15 @@ async def _cleanup_reaped_shared_residencies(
     actions: list[dict[str, Any]],
     grants: Any | None,
 ) -> None:
-    """Fence exact shared member processes orphaned by attempt expiry."""
+    """Fence exact shared member processes orphaned by attempt expiry.
+
+    The members a pass reaps mostly share the host that went away, so each
+    member's cleanup runs beside the others, at most
+    :data:`GRANT_RENEWAL_CONCURRENCY` at once, and waits for its host for at
+    most :data:`RESIDENCY_CLEANUP_TIMEOUT_S`. Taken one after another, with
+    only the client's own timeout, an unanswering host would hold the rest of
+    the pass for that whole timeout per member.
+    """
     cleanups: list[tuple[Any, Any]] = [
         (action, residency_cleanup)
         for action in actions
@@ -566,31 +584,37 @@ async def _cleanup_reaped_shared_residencies(
 
     from cloud_agent.sandbox_manager_routing import sandbox_manager_for_job
 
-    for action, cleanup in cleanups:
-        try:
-            sandbox_manager = await sandbox_manager_for_job(store, str(action["job_id"]))
-            if sandbox_manager is not None:
-                await sandbox_manager.shared_residency_lost(
-                    str(cleanup["thread_id"]),
-                    generation=int(cleanup["generation"]),
+    limit = asyncio.Semaphore(GRANT_RENEWAL_CONCURRENCY)
+
+    async def cleanup_one(action: dict[str, Any], cleanup: Any) -> None:
+        async with limit:
+            try:
+                async with asyncio.timeout(RESIDENCY_CLEANUP_TIMEOUT_S):
+                    sandbox_manager = await sandbox_manager_for_job(store, str(action["job_id"]))
+                    if sandbox_manager is not None:
+                        await sandbox_manager.shared_residency_lost(
+                            str(cleanup["thread_id"]),
+                            generation=int(cleanup["generation"]),
+                        )
+            except Exception:
+                # The durable residency generation is already closed. A later
+                # host heartbeat echoes the dead generation and retries local
+                # process cleanup, so sandbox manager reachability cannot block reaping.
+                logger.warning(
+                    "agent_reaped_shared_residency_cleanup_failed",
+                    extra={
+                        "event": "agent_reaped_shared_residency_cleanup_failed",
+                        "thread_id": cleanup["thread_id"],
+                        "generation": cleanup["generation"],
+                    },
+                    exc_info=True,
                 )
-        except Exception:
-            # The durable residency generation is already closed. A later
-            # host heartbeat echoes the dead generation and retries local
-            # process cleanup, so sandbox manager reachability cannot block reaping.
-            logger.warning(
-                "agent_reaped_shared_residency_cleanup_failed",
-                extra={
-                    "event": "agent_reaped_shared_residency_cleanup_failed",
-                    "thread_id": cleanup["thread_id"],
-                    "generation": cleanup["generation"],
-                },
-                exc_info=True,
-            )
-        grant_id = cleanup.get("grant_id")
-        if grant_id and grants is not None:
-            with contextlib.suppress(Exception):
-                await grants.revoke(grant_id)
+            grant_id = cleanup.get("grant_id")
+            if grant_id and grants is not None:
+                with contextlib.suppress(Exception):
+                    await grants.revoke(grant_id)
+
+    await asyncio.gather(*(cleanup_one(action, cleanup) for action, cleanup in cleanups))
 
 
 async def _cleanup_failed_session_fork(
@@ -603,6 +627,8 @@ async def _cleanup_failed_session_fork(
     cleanup it gets. A sandbox manager that cannot be resolved or reached still leaves
     the revocations to run: a later host heartbeat is told the residency was
     lost and stops its process, but nothing else would end its grant early.
+    One that does not answer is given :data:`RESIDENCY_CLEANUP_TIMEOUT_S` per
+    member, like a reaped attempt's.
     """
     from cloud_agent.sandbox_manager_routing import sandbox_manager_for_job
 
@@ -621,10 +647,11 @@ async def _cleanup_failed_session_fork(
     for residency in operation.get("cleanup_residencies") or []:
         if sandbox_manager is not None:
             with contextlib.suppress(Exception):
-                await sandbox_manager.shared_residency_lost(
-                    str(residency["thread_id"]),
-                    generation=int(residency["generation"]),
-                )
+                async with asyncio.timeout(RESIDENCY_CLEANUP_TIMEOUT_S):
+                    await sandbox_manager.shared_residency_lost(
+                        str(residency["thread_id"]),
+                        generation=int(residency["generation"]),
+                    )
         grant_id = residency.get("grant_id")
         if grant_id and grants is not None:
             with contextlib.suppress(Exception):

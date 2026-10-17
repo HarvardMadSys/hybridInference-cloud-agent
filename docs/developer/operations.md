@@ -2307,7 +2307,12 @@ On the host, the reaper's close of that member's residency also ends the
 activation that ran on it, as an abandon would, so a Fork sibling's group can
 still go idle and its publication snapshot is not refused as an active
 mutation. A turn that was running when the runner died was already aborted
-when the runner's turn stream to the sandbox manager closed.
+when the runner's turn stream to the sandbox manager closed. The reaper waits
+for the host's sandbox manager at most 5 seconds per member for that close,
+the members one pass reaps side by side, and revokes each member's grant
+either way: the host's next heartbeat is told the generation is lost and
+closes the process itself, so a host that no longer answers, usually the
+reason the lease expired, does not hold up the pass for every other host.
 
 #### Safety watchdogs
 

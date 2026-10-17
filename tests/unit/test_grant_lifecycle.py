@@ -761,3 +761,46 @@ async def test_reaped_shared_members_close_processes_and_grants_independently(
 
     assert sandbox_manager_calls == [("thread-two", 4)]
     assert grants.revoked == ["grant-one", "grant-two"]
+
+
+async def test_a_host_that_never_answers_does_not_hold_up_the_reapers_pass(monkeypatch) -> None:
+    """A dead host's reaped turns cost the pass one short wait, not a full request each.
+
+    Most attempts the reaper ends expired because their host died, and every
+    one whose member was resident is cleaned up through that host's sandbox
+    manager, in the reaper's own pass. A host that no longer answers held the
+    pass for the client's whole timeout per member, one after another, and
+    lease reaping, queue settlement and grant revocation for every other host
+    waited behind it. The store has already closed the generation and the
+    host's next heartbeat closes the process, so the call is only a courtesy.
+    """
+    monkeypatch.setattr(control_plane, "RESIDENCY_CLEANUP_TIMEOUT_S", 0.05)
+    gone = asyncio.Event()
+
+    class _GoneHost:
+        async def shared_residency_lost(self, thread_id: str, *, generation: int) -> None:
+            # The connection is never answered.
+            await gone.wait()
+
+    async def route(_store, _job_id: str):
+        return _GoneHost()
+
+    from cloud_agent import sandbox_manager_routing
+
+    monkeypatch.setattr(sandbox_manager_routing, "sandbox_manager_for_job", route)
+    grants = _Grants()
+    actions = [
+        {
+            "job_id": f"job-{member}",
+            "cleanup_residency": {
+                "thread_id": f"thread-{member}",
+                "generation": 1,
+                "grant_id": f"grant-{member}",
+            },
+        }
+        for member in range(3)
+    ]
+
+    await asyncio.wait_for(_cleanup_reaped_shared_residencies(object(), actions, grants), 2)
+
+    assert sorted(grants.revoked) == ["grant-0", "grant-1", "grant-2"]
