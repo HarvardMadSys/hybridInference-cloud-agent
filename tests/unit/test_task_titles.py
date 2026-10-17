@@ -148,6 +148,38 @@ async def test_failed_generation_preserves_fallback_without_retry_or_sensitive_l
     assert "secret prompt" not in caplog.text
 
 
+@pytest.mark.parametrize("finish_reason", ["length", "content_filter"])
+async def test_incomplete_completion_with_plausible_text_is_not_saved(monkeypatch, finish_reason):
+    """A non-stop finish is not a title, even when its partial text looks usable.
+
+    A truncated generation can return a plausible opening. Persisting it would
+    make a permanent conversation title out of an incomplete answer, so the
+    fallback must survive instead.
+    """
+    monkeypatch.setenv("GATEWAY_BASE_URL", "https://gateway.example")
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "finish_reason": finish_reason,
+                        "message": {"content": "SPRUCE_8462 CSV export"},
+                    }
+                ]
+            },
+        )
+
+    store = AsyncMock()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        await _generate(store, client)
+    assert len(requests) == 1
+    store.set_generated_thread_title.assert_not_awaited()
+
+
 async def test_generation_has_total_deadline(monkeypatch):
     monkeypatch.setenv("GATEWAY_BASE_URL", "https://gateway.example")
     monkeypatch.setattr(task_titles, "_TOTAL_TIMEOUT_S", 0.01)

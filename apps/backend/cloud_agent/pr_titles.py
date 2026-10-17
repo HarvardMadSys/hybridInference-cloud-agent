@@ -14,7 +14,7 @@ import httpx
 from cloud_agent.gateway import ENV_BASE_URL
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.settings import setting_env
-from cloud_agent.task_titles import is_warmup_title
+from cloud_agent.task_titles import is_incomplete_completion, is_warmup_title
 
 if TYPE_CHECKING:
     from cloud_agent.grants import GrantClient
@@ -164,10 +164,12 @@ async def generate_pr_title(
                         follow_redirects=False,
                     )
                     response.raise_for_status()
-                    content = response.json()["choices"][0]["message"]["content"]
+                    choice = response.json()["choices"][0]
+                    content = choice["message"]["content"]
                     if (
                         isinstance(content, str)
                         and content.strip()
+                        and not is_incomplete_completion(choice)
                         and not is_warmup_title(content)
                         and (not title_only or _normalize_title(content) is not None)
                     ):

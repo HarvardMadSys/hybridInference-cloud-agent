@@ -313,6 +313,68 @@ async def test_generic_completion_responses_use_fallback_and_revoke_grant(caplog
     assert failures[0].reason == "invalid_title"
 
 
+@pytest.mark.parametrize("finish_reason", ["length", "content_filter"])
+async def test_incomplete_completion_uses_fallback_and_revokes_grant(finish_reason, caplog):
+    """A truncated title completion is never published, even with usable text."""
+    caplog.set_level(logging.INFO, logger="cloud_agent.pr_titles")
+    grants = _grants()
+
+    def handle(request):
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "finish_reason": finish_reason,
+                        "message": {"content": "Add retry backoff and regression tests"},
+                    }
+                ]
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        assert await generate_pr_title(_JOB, ["x"], grants=grants, client=client) is None
+
+    grants.revoke.assert_awaited_once_with("publication-grant")
+    failures = [
+        record
+        for record in caplog.records
+        if record.getMessage() == "agent_pr_title_generation_failed"
+    ]
+    assert [failure.reason for failure in failures] == ["invalid_title"]
+
+
+async def test_incomplete_fragment_summary_uses_fallback(caplog):
+    """A truncated fragment summary is not combined into the published title."""
+    caplog.set_level(logging.INFO, logger="cloud_agent.pr_titles")
+    grants = _grants()
+    job = {**_JOB, "session_messages": _session_of(2)}
+
+    def handle(request):
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "finish_reason": "length",
+                        "message": {"content": "Partial fragment summary"},
+                    }
+                ]
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        assert await generate_pr_title(job, ["x"], grants=grants, client=client) is None
+
+    grants.revoke.assert_awaited_once_with("publication-grant")
+    failures = [
+        record
+        for record in caplog.records
+        if record.getMessage() == "agent_pr_title_generation_failed"
+    ]
+    assert [failure.reason for failure in failures] == ["inference_failed"]
+
+
 async def test_missing_grants_logs_the_fallback_reason(caplog):
     caplog.set_level(logging.INFO, logger="cloud_agent.pr_titles")
 
