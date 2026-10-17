@@ -57,6 +57,7 @@ from cloud_agent_host.runtimes import (
     ReplyPreview,
     RuntimeMCPConfig,
     get_runtime,
+    merged_mcp_server,
 )
 from cloud_agent_host.sandbox import STATE_MOUNT_TARGET
 from cloud_agent_host.tool_windows import TOOL_MARK_FILE, hook_settings
@@ -2253,6 +2254,8 @@ class HttpAgentLiveSession(_JsonResidentSession[ResidentLiveRuntime]):
                             "name": part.get("tool"),
                             "id": call_id,
                             "input": state.get("input"),
+                            # Both servers name a relay tool `session_<alias>__<tool>`.
+                            **merged_mcp_server(part.get("tool"), separator="_"),
                         },
                         raw_line=line,
                     )

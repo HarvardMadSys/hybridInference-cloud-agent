@@ -1085,6 +1085,101 @@ def test_pi_rpc_turn_fails_with_the_run_pi_stops_retrying(tmp_path):
     assert turn.wait().status == "failed"
 
 
+def test_pi_records_the_server_an_mcp_call_went_to(tmp_path):
+    """pi's bridge registers a relay tool as ``session__<alias>__<tool>``.
+
+    The relay's tool may be called "task", so the call names the server, as a
+    Codex call does, and the trajectory does not read it as a delegation. A
+    tool of pi's own names none.
+    """
+    process, turn, prompt_id = _pi_turn(tmp_path)
+    arguments = {"description": "Review", "prompt": "Review this change."}
+
+    def call(call_id: str, name: str, arguments: dict) -> dict:
+        return {
+            "type": "message_update",
+            "message": {"role": "assistant", "content": []},
+            "assistantMessageEvent": {
+                "type": "toolcall_end",
+                "contentIndex": 0,
+                "toolCall": {
+                    "type": "toolCall",
+                    "id": call_id,
+                    "name": name,
+                    "arguments": arguments,
+                },
+            },
+        }
+
+    process.feed = _turn_lines(
+        {"id": prompt_id, "type": "response", "command": "prompt", "success": True},
+        call("mcp-1", "session__review__task", arguments),
+        call("bash-1", "bash", {"command": "ls"}),
+        {"type": "agent_end", "messages": []},
+    )
+    calls = [event.payload for event in turn.iter_events() if event.event_type == "tool_use"]
+
+    assert calls == [
+        {
+            "name": "session__review__task",
+            "id": "mcp-1",
+            "input": arguments,
+            "mcp_server": "session",
+        },
+        {"name": "bash", "id": "bash-1", "input": {"command": "ls"}},
+    ]
+
+
+@pytest.mark.parametrize(
+    ("driver", "runtime"), [(OpenCodeDriver, OpencodeRuntime), (KiloDriver, KiloRuntime)]
+)
+def test_http_runtimes_record_the_server_an_mcp_call_went_to(tmp_path, driver, runtime):
+    """OpenCode and Kilo name a relay tool ``session_<alias>__<tool>``.
+
+    Their own ``task`` is a delegation and names no server; the relay's tool of
+    the same name is not, so it names the server it went to.
+    """
+    process = _LiveProcess()
+    context, _spawned = _protocol_context(process, tmp_path)
+    process.feed = _turn_lines({"bridge": "ready", "session_id": "ses-a"})
+    session = driver(runtime()).launch_live(context)
+    session.ensure_started(model="m", reasoning_effort=None)
+    turn = session.start_turn(TurnInput(prompt="hello", model="m"))
+    turn_id = json.loads(process.sent[-1])["id"]
+    arguments = {"description": "Review", "prompt": "Review this change."}
+
+    def tool(call_id: str, name: str) -> dict:
+        part = {
+            "id": f"part-{call_id}",
+            "callID": call_id,
+            "type": "tool",
+            "tool": name,
+            "state": {"status": "running", "input": arguments},
+        }
+        return {
+            "bridge": "event",
+            "turn_id": turn_id,
+            "event": {"type": "message.part.updated", "properties": {"part": part}},
+        }
+
+    process.feed = _turn_lines(
+        tool("mcp-1", "session_review__task"),
+        tool("task-1", "task"),
+        {"bridge": "settled", "turn_id": turn_id, "status": "completed"},
+    )
+    calls = [event.payload for event in turn.iter_events() if event.event_type == "tool_use"]
+
+    assert calls == [
+        {
+            "name": "session_review__task",
+            "id": "mcp-1",
+            "input": arguments,
+            "mcp_server": "session",
+        },
+        {"name": "task", "id": "task-1", "input": arguments},
+    ]
+
+
 def test_pi_rpc_forks_before_the_next_native_prompt(tmp_path):
     process = _LiveProcess()
     context, _spawned = _protocol_context(process, tmp_path)

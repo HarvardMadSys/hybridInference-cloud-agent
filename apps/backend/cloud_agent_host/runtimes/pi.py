@@ -7,7 +7,12 @@ from typing import TYPE_CHECKING, Any
 
 from cloud_agent_shared.runtime_catalog import PI
 
-from .base import EMPTY_RUNTIME_MCP_CONFIG, RuntimeCapabilities, RuntimeMCPConfig
+from .base import (
+    EMPTY_RUNTIME_MCP_CONFIG,
+    RuntimeCapabilities,
+    RuntimeMCPConfig,
+    merged_mcp_server,
+)
 from .events import (
     ERROR,
     LIFECYCLE,
@@ -387,6 +392,8 @@ class PiRuntime(GenericRuntime):
                 # Keyed `input` like every other adapter, because that is what
                 # the UI reads to render the command.
                 "input": tool_call.get("arguments"),
+                # The bridge registers a relay tool as `session__<alias>__<tool>`.
+                **merged_mcp_server(tool_call.get("name"), separator="__"),
                 **response,
             },
         )

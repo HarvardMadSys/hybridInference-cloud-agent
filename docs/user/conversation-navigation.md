@@ -87,8 +87,8 @@ long:
 - pi has no subagents.
 
 A tool from an MCP server is never shown as a task list or a subagent, whatever
-its name. Codex sessions recorded before each call stored its MCP server can
-still show such a tool as a subagent.
+its name. Codex, pi, OpenCode and Kilo sessions recorded before each call
+stored its MCP server can still show such a tool as a subagent.
 
 A card says when a reply is still pending, was not recorded, or was stored
 only in part. A failed or interrupted launch stays listed with what it
