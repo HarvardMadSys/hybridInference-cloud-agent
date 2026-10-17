@@ -2151,6 +2151,14 @@ old host still holds is fenced out. The new host's Sandbox Manager:
    network, labelled with the checkpoint id, and resumes each native session as
    after any restart.
 
+The loaded image, `freeinference-checkpoint/<sandbox hash>:<checkpoint id>`,
+is that container's alone, and it goes with the container: when the group is
+deleted or discarded, and when a later move back onto the same host replaces
+the older container. A restore retrying the same checkpoint on that host keeps
+it and loads nothing again. A failure to remove it is logged as
+`sandbox_checkpoint_image_remove_failed` and leaves only the image, which
+`docker image rm` clears.
+
 A restore that fails before the turn is admitted returns the group to `cold`
 and the turn to the queue without spending an attempt. The group is not
 claimed again until 30 seconds after its first failure, 5 minutes after its

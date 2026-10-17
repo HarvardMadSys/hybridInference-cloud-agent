@@ -1952,7 +1952,7 @@ class SharedChatSessionSupervisor:
         if hook is None:
             raise SandboxRestoreFailed("this sandbox manager cannot restore checkpoints")
         try:
-            self._manager.remove_superseded(spec)
+            self._manager.remove_superseded(spec, keep_checkpoint=restore.checkpoint_id)
             image = hook(spec.sandbox_id, restore)
             return self._manager.create(
                 spec,
@@ -1975,7 +1975,7 @@ class SharedChatSessionSupervisor:
                 },
             )
             with contextlib.suppress(Exception):
-                self._manager.remove_superseded(spec)
+                self._manager.remove_superseded(spec, keep_checkpoint=restore.checkpoint_id)
             raise SandboxRestoreFailed(f"sandbox checkpoint could not be restored: {exc}") from exc
 
     def _create_from_snapshot(

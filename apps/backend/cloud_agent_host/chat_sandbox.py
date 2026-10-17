@@ -1069,13 +1069,18 @@ class ChatSandboxManager:
         self._verify_identity(inspected, spec)
         return inspected
 
-    def remove_superseded(self, spec: ChatSandboxSpec) -> bool:
+    def remove_superseded(
+        self, spec: ChatSandboxSpec, *, keep_checkpoint: str | None = None
+    ) -> bool:
         """Remove this group's container from an older generation, if one holds its name.
 
         A group moved here was rehomed under a new generation; whatever an
         earlier attempt left on this host under the old one is fenced out by
         the control plane and can never run again. Anything else holding the
         name is left alone. Returns whether a container was removed.
+
+        A container recreated from a checkpoint takes that checkpoint's image
+        with it, unless it is ``keep_checkpoint``, the one about to be loaded.
         """
         current = self.inspect(spec.container_name)
         if current is None:
@@ -1098,6 +1103,9 @@ class ChatSandboxManager:
             raise SandboxError(
                 "superseded chat sandbox could not be removed: " + removed.stderr.strip()[:300]
             )
+        checkpoint_id = labels.get(CHAT_CHECKPOINT_LABEL)
+        if checkpoint_id and checkpoint_id != keep_checkpoint:
+            self._remove_checkpoint_image(spec, checkpoint_id)
         return True
 
     def require_existing(
@@ -1290,6 +1298,32 @@ class ChatSandboxManager:
                 # The container is already absent. Normal orphan-network
                 # pruning can retry cleanup, fenced to that network's labels.
                 logger.warning("archived sandbox network cleanup needs reconciliation")
+        checkpoint_id = current.labels.get(CHAT_CHECKPOINT_LABEL)
+        if checkpoint_id:
+            self._remove_checkpoint_image(spec, checkpoint_id)
+
+    def _remove_checkpoint_image(self, spec: ChatSandboxSpec, checkpoint_id: str) -> None:
+        """Drop the image a removed container was recreated from.
+
+        The image is named for this group's checkpoint, and only the group's
+        container on this host ever ran it, so nothing else needs its layers.
+        Best effort: the container is already gone, and an image left behind
+        costs disk, not correctness.
+        """
+        reference = checkpoint_image_reference(spec.sandbox_id, checkpoint_id)
+        try:
+            removed = self._run([self.backend.docker_binary, "image", "rm", reference], timeout=120)
+        except SandboxError:
+            removed = None
+        if removed is None or removed.returncode != 0:
+            logger.warning(
+                "restored checkpoint image could not be removed",
+                extra={
+                    "event": "sandbox_checkpoint_image_remove_failed",
+                    "sandbox_id": spec.sandbox_id,
+                    "checkpoint_id": checkpoint_id,
+                },
+            )
 
     def inspect(
         self, container: str, *, verify_mounts: bool = True

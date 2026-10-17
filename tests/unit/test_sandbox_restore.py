@@ -17,6 +17,8 @@ from tests.unit.test_shared_session_supervisor import _Manager, _members, _spec
 
 from cloud_agent_host.chat_sandbox import (
     CHAT_CHECKPOINT_LABEL,
+    CHAT_GENERATION_LABEL,
+    CHAT_NAMESPACE_LABEL,
     ChatSandboxInspection,
     ChatSandboxManager,
     ChatSandboxSpec,
@@ -442,6 +444,89 @@ def test_identity_accepts_a_checkpoint_image_only_for_the_checkpoint_it_names():
             manager._verify_identity(_inspection(spec, image=image, labels=labels), spec)
 
 
+def _stopped_container(
+    spec: ChatSandboxSpec, *, checkpoint_id: str | None, generation: int | None = None
+) -> str:
+    """``docker container inspect`` of a stopped group container on this host."""
+    labels = {**spec.docker_labels(), CHAT_NAMESPACE_LABEL: "default"}
+    image = spec.sandbox_image_digest
+    if checkpoint_id is not None:
+        labels[CHAT_CHECKPOINT_LABEL] = checkpoint_id
+        image = checkpoint_image_reference(spec.sandbox_id, checkpoint_id)
+    if generation is not None:
+        labels[CHAT_GENERATION_LABEL] = str(generation)
+    return json.dumps(
+        [
+            {
+                "Id": "container-restored",
+                "Name": f"/{spec.container_name}",
+                "Image": "sha256:local-image-id",
+                "Config": {"Image": image, "Labels": labels},
+                "State": {"Status": "exited", "Running": False, "Paused": False},
+                "HostConfig": {"Runtime": ""},
+                "Mounts": [],
+                "NetworkSettings": {"Networks": {}},
+            }
+        ]
+    )
+
+
+class _Daemon:
+    """Answer the commands that remove one group container and its image."""
+
+    def __init__(self, container: str) -> None:
+        self.container: str | None = container
+        self.commands: list[list[str]] = []
+
+    def run(self, argv: list[str], *, timeout: float) -> SimpleNamespace:
+        self.commands.append(list(argv))
+        if argv[1:3] == ["container", "inspect"]:
+            if self.container is None:
+                return SimpleNamespace(returncode=1, stdout="", stderr="Error: No such container")
+            return SimpleNamespace(returncode=0, stdout=self.container, stderr="")
+        if argv[1] == "rm" or argv[1:3] == ["container", "rm"]:
+            self.container = None
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if argv[1:3] == ["image", "rm"]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        raise AssertionError(argv)
+
+    def removed_images(self) -> list[str]:
+        return [argv[-1] for argv in self.commands if argv[1:3] == ["image", "rm"]]
+
+
+@pytest.mark.parametrize("checkpoint_id", [_CHECKPOINT, None])
+def test_deleting_a_restored_group_removes_the_checkpoint_image_it_ran(monkeypatch, checkpoint_id):
+    spec = _moved_spec()
+    manager = ChatSandboxManager(ContainerBackend(image="img"))
+    daemon = _Daemon(_stopped_container(spec, checkpoint_id=checkpoint_id))
+    monkeypatch.setattr(manager, "_run", daemon.run)
+
+    manager.remove_stopped_archived(spec, container_id="container-restored")
+
+    # Only that container ran the checkpoint's image, so its layers go with it.
+    # A group created from its sandbox image leaves that image alone.
+    assert daemon.removed_images() == ([_REFERENCE] if checkpoint_id else [])
+
+
+def test_a_superseded_restored_container_takes_its_checkpoint_image_with_it(monkeypatch):
+    spec = _moved_spec()
+    manager = ChatSandboxManager(ContainerBackend(image="img"))
+    older = "d" * 32
+    daemon = _Daemon(_stopped_container(spec, checkpoint_id=older, generation=1))
+    monkeypatch.setattr(manager, "_run", daemon.run)
+
+    assert manager.remove_superseded(spec)
+    assert daemon.removed_images() == [checkpoint_image_reference(spec.sandbox_id, older)]
+
+    # The checkpoint about to be loaded again stays, so it is not downloaded twice.
+    daemon = _Daemon(_stopped_container(spec, checkpoint_id=_CHECKPOINT, generation=1))
+    monkeypatch.setattr(manager, "_run", daemon.run)
+
+    assert manager.remove_superseded(spec, keep_checkpoint=_CHECKPOINT)
+    assert daemon.removed_images() == []
+
+
 # -- the supervisor's restore path ----------------------------------------------
 
 
@@ -450,13 +535,15 @@ class _RestoringManager(_Manager):
         super().__init__()
         self.created: list[dict[str, Any]] = []
         self.superseded: list[str] = []
+        self.kept: list[str | None] = []
 
     def create(self, spec, *, image=None, checkpoint_id=None, facts=None, observer=None):
         self.created.append({"image": image, "checkpoint_id": checkpoint_id})
         return super().create(spec, facts=facts, observer=observer)
 
-    def remove_superseded(self, spec):
+    def remove_superseded(self, spec, *, keep_checkpoint=None):
         self.superseded.append(spec.container_name)
+        self.kept.append(keep_checkpoint)
         return False
 
 
@@ -485,6 +572,8 @@ def test_a_moved_group_is_recreated_from_the_image_its_checkpoint_loads():
     assert hooked == [("asbx_shared", _CHECKPOINT)]
     assert manager.created == [{"image": _REFERENCE, "checkpoint_id": _CHECKPOINT}]
     assert manager.superseded == [_moved_spec().container_name]
+    # An older container's image goes, unless it is the checkpoint loaded now.
+    assert manager.kept == [_CHECKPOINT]
 
 
 def test_a_failed_restore_says_so_without_losing_the_chat():

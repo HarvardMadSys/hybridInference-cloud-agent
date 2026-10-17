@@ -247,6 +247,7 @@
    - 用检查点镜像，按 `ChatSandboxSpec` 重新指定启动配置、网络、资源上限和磁盘配额，因为 commit 会把镜像的 Entrypoint/Cmd 换成提交时容器的配置；
    - 基础镜像标签保持原值，新增 `org.freeinference.chat-checkpoint=<检查点 id>`，generation 用新值；
    - 身份校验改为：容器创建时用的镜像名，等于基础镜像，或者等于标签所写检查点的镜像名。
+   - **检查点镜像随容器删除（2026-10-17 修订）。** 这个镜像只有这台机器上这个组的容器用。原来容器删掉以后镜像一直留着，每个迁移过来、后来被删除的组都在机器上留下自己的全部改动，直到 Docker 数据盘写满。现在删除或丢弃这个组时（`remove_stopped_archived`），以及组再迁回这台机器、替换掉旧 generation 的容器时（`remove_superseded`），镜像跟着容器一起删掉；要恢复的正是旧容器那个检查点时保留，重试不必再下载。删除失败只记 `sandbox_checkpoint_image_remove_failed`，不影响删除本身。
 6. **启动：** 走现有的启动、原生 resume 和恢复边界验证。通过后组变成 `running`，成员的 `context_status = restored`，回执写 `verified`。
 
 ### 6.6 失败与回退
