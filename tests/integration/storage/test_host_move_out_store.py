@@ -352,3 +352,154 @@ async def test_a_checkpoint_failing_during_the_move_holds_the_removal_for_consen
     assert await store.host_pool.remove_host(host="runner-a", allow_unmoved=True) == "moving_out"
     assert await store.host_pool.finish_host_removals() == ["runner-a"]
     assert (await _state(pool))["host"] == "runner-a"
+
+
+async def _on_machine(pool, allocation_id: str, *, observed_state: str = "ready") -> None:
+    """Bind ``runner-a`` to one provider machine in ``observed_state``."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO agent_compute_allocations (id,name,provider_id,mode,observed_state) "
+            "VALUES ($1,$1,'cloudlab','provision',$2)",
+            allocation_id,
+            observed_state,
+        )
+        await conn.execute(
+            "INSERT INTO agent_compute_nodes "
+            "(id,allocation_id,provider_node_id,instance_identity,name) "
+            "VALUES ($1 || '-node',$1,'node0',$1 || ':node0',$1)",
+            allocation_id,
+        )
+        await conn.execute(
+            "UPDATE agent_runner_hosts SET compute_node_id=$1 || '-node' WHERE host='runner-a'",
+            allocation_id,
+        )
+
+
+async def _silent(pool, host: str = "runner-a", minutes: int = 20) -> None:
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_runner_hosts "
+            "SET last_heartbeat_at = NOW() - make_interval(mins => $2) WHERE host = $1",
+            host,
+            minutes,
+        )
+
+
+async def test_a_reclaimed_machines_uncovered_group_is_lost_once_its_host_is_silent(
+    pool, store: Storage
+):
+    """Its only Docker copy is gone; its queued turns get an answer instead of waiting."""
+    job, group = await _settled_stopped_group(pool, store)
+    follow_up = await store.conversation_commands.create_follow_up(
+        parent_job_id=job["id"], user_id="user-1", prompt="continue"
+    )
+    assert follow_up is not None
+    await _on_machine(pool, "ended", observed_state="terminated")
+    repo = store.compute_resources
+
+    # The Host still beat moments ago: the attempt reaper and the Host itself go first.
+    assert await repo.lose_reclaimed_groups(allocation_id="ended", quiet_seconds=600) == []
+    assert (await _state(pool))["state"] == "stopped"
+
+    await _silent(pool)
+    assert await repo.lose_reclaimed_groups(allocation_id="ended", quiet_seconds=600) == [
+        group["sandbox_id"]
+    ]
+    assert (await _state(pool))["state"] == "lost"
+    async with pool.acquire() as conn:
+        member = await conn.fetchrow(
+            "SELECT context_status, native_state FROM agent_thread_sandbox_memberships "
+            "WHERE thread_id = $1",
+            job["thread_id"],
+        )
+        queued = await conn.fetchrow(
+            "SELECT state, detail FROM agent_jobs WHERE id = $1", follow_up["id"]
+        )
+        event = await conn.fetchrow(
+            "SELECT event_type, from_state, to_state, details FROM agent_sandbox_events "
+            "WHERE sandbox_id = $1 ORDER BY id DESC LIMIT 1",
+            group["sandbox_id"],
+        )
+    assert (member["context_status"], member["native_state"]) == ("lost", "lost")
+    assert queued["state"] == "failed"
+    assert "reclaimed by its provider" in queued["detail"]
+    assert (event["event_type"], event["from_state"], event["to_state"]) == (
+        "server_reclaimed",
+        "stopped",
+        "lost",
+    )
+    # Once lost, a later pass changes nothing.
+    assert await repo.lose_reclaimed_groups(allocation_id="ended", quiet_seconds=600) == []
+
+
+async def test_a_reclaimed_machines_covered_group_moves_instead_of_being_lost(pool, store: Storage):
+    await _covered(pool, store)
+    await _on_machine(pool, "ended")
+    await store.compute_resources.observe_allocation(
+        allocation_id="ended", observation={"observed_state": "terminated"}
+    )
+    await _silent(pool)
+
+    assert (
+        await store.compute_resources.lose_reclaimed_groups(
+            allocation_id="ended", quiet_seconds=600
+        )
+        == []
+    )
+    assert (await _state(pool))["state"] == "cold"
+
+
+async def test_a_machine_the_provider_still_runs_keeps_its_groups(pool, store: Storage):
+    await _settled_stopped_group(pool, store)
+    await _on_machine(pool, "running")
+    await _silent(pool)
+
+    assert (
+        await store.compute_resources.lose_reclaimed_groups(
+            allocation_id="running", quiet_seconds=600
+        )
+        == []
+    )
+    assert (await _state(pool))["state"] == "stopped"
+
+
+async def test_a_group_with_a_turn_in_flight_waits_for_the_reaper(pool, store: Storage):
+    job, _ = await _settled_stopped_group(pool, store)
+    await _on_machine(pool, "ended", observed_state="terminated")
+    await _silent(pool)
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_jobs SET state = 'running' WHERE id = $1",
+            job["id"],
+        )
+
+    assert (
+        await store.compute_resources.lose_reclaimed_groups(
+            allocation_id="ended", quiet_seconds=600
+        )
+        == []
+    )
+    assert (await _state(pool))["state"] == "stopped"
+
+
+async def test_the_move_out_report_names_why_groups_would_stay(pool, store: Storage):
+    await _settled_stopped_group(pool, store)
+    await _on_machine(pool, "leaving")
+    repo = store.compute_resources
+
+    # runner-a archives but does not capture checkpoints.
+    report = await repo.move_out_report(allocation_id="leaving")
+    assert report == {
+        "moving": False,
+        "blocker": "host_without_checkpoints",
+        "unmoved": 1,
+        "unmovable": 1,
+    }
+
+    await _host(store, "runner-a", [*_RESTORE_HOST, "sandbox-checkpoints-v1"])
+    assert (await repo.move_out_report(allocation_id="leaving"))["blocker"] == "no_restore_target"
+
+    await _host(store, "runner-c", _RESTORE_HOST)
+    report = await repo.move_out_report(allocation_id="leaving")
+    # The move can start, but this stopped group has no checkpoint to move with.
+    assert (report["blocker"], report["unmoved"], report["unmovable"]) == (None, 1, 1)

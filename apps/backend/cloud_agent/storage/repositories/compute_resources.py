@@ -24,8 +24,18 @@ from cloud_agent.domain.compute import (
     provider_resource_absent,
 )
 from cloud_agent.storage._sql.compute_admission import host_compute_admission, lock_compute_entry
-from cloud_agent.storage._sql.hosts import release_covered_sandboxes, revoke_host_credentials
-from cloud_agent.storage._sql.move_out import move_out_possible
+from cloud_agent.storage._sql.hosts import (
+    GROUP_TURN_CLAIMED_SQL,
+    release_covered_sandboxes,
+    revoke_host_credentials,
+)
+from cloud_agent.storage._sql.jobs import fail_unrunnable_follow_ups
+from cloud_agent.storage._sql.move_out import (
+    UNMOVABLE_GROUP_SQL,
+    UNMOVED_GROUP_SQL,
+    move_out_blocker,
+    move_out_possible,
+)
 from cloud_agent.storage._sql.rows import load_json
 
 if TYPE_CHECKING:
@@ -44,6 +54,27 @@ _JSON_FIELDS = {
     "last_decision",
 }
 _JSON_ARRAY_FIELDS = {"slot_status"}
+
+#: A group whose only Docker copy went with a machine its provider reclaimed:
+#: still bound to that machine's Host, not handed over through a checkpoint,
+#: and with no turn, claim or Fork in flight. ``g`` is the group and ``h`` its
+#: Host; ``$2`` is how long the Host must have been silent.
+_RECLAIMED_GROUP_SQL = f"""(
+    g.deletion_state = 'none'
+    AND g.state NOT IN ('cold', 'restoring', 'lost')
+    AND (h.last_heartbeat_at IS NULL
+         OR h.last_heartbeat_at < NOW() - make_interval(secs => $2))
+    AND NOT EXISTS (
+        SELECT 1 FROM agent_thread_sandbox_memberships busy
+        WHERE busy.sandbox_id = g.id
+          AND (busy.active_attempt_id IS NOT NULL OR busy.fork_operation_id IS NOT NULL)
+    )
+    AND NOT {GROUP_TURN_CLAIMED_SQL}
+)"""
+
+_RECLAIMED_DETAIL = (
+    "not run because the server holding this conversation's sandbox was reclaimed by its provider"
+)
 
 
 def _in_move_out_window(member: dict[str, Any]) -> bool:
@@ -2652,6 +2683,150 @@ class PostgresComputeResourceRepository:
                     allocation_id,
                 )
             )
+
+    async def move_out_report(self, *, allocation_id: str) -> dict[str, Any]:
+        """Whether this allocation's groups are moving out, why not, and what stays.
+
+        ``moving`` is whether its ``move_out`` hold is in place, ``blocker`` the
+        reason code a move could not start or continue with now (``None`` when
+        it can), ``unmoved`` the groups still held only by its Hosts, and
+        ``unmovable`` those that will stay whatever happens: no checkpoint
+        covers them, or their image cannot be pulled elsewhere.
+        """
+        async with self._pool.acquire() as conn:
+            hosts = [
+                row["host"]
+                for row in await conn.fetch(
+                    """SELECT h.host FROM agent_compute_nodes n
+                       JOIN agent_runner_hosts h ON h.compute_node_id=n.id
+                       WHERE n.allocation_id=$1 ORDER BY h.host""",
+                    allocation_id,
+                )
+            ]
+            moving = bool(
+                await conn.fetchval(
+                    "SELECT 1 FROM agent_host_admission_holds "
+                    "WHERE allocation_id=$1 AND purpose='move_out' LIMIT 1",
+                    allocation_id,
+                )
+            )
+            blocker = await move_out_blocker(conn, hosts, need_target=not moving)
+            counts = await conn.fetchrow(
+                f"""SELECT count(*) FILTER (WHERE {UNMOVED_GROUP_SQL}) AS unmoved,
+                           count(*) FILTER (WHERE {UNMOVABLE_GROUP_SQL}) AS unmovable
+                    FROM agent_sandboxes g
+                    JOIN agent_runner_hosts h ON h.host=g.host
+                    JOIN agent_compute_nodes n ON n.id=h.compute_node_id
+                    WHERE n.allocation_id=$1""",
+                allocation_id,
+            )
+        return {
+            "moving": moving,
+            "blocker": blocker,
+            "unmoved": int(counts["unmoved"]),
+            "unmovable": int(counts["unmovable"]),
+        }
+
+    async def lose_reclaimed_groups(self, *, allocation_id: str, quiet_seconds: int) -> list[str]:
+        """Mark LOST each group that went with a machine its provider reclaimed.
+
+        Once the provider confirms the allocation ``terminated``, its disk is
+        gone, and with it the only Docker copy of every group its Hosts still
+        hold. Covered stopped groups were already handed over through their
+        checkpoints; the rest can never continue. Leaving them bound to the
+        Host would queue their chats' messages forever and keep the Host from
+        being removed, so each becomes ``lost`` as a confirmed Docker data loss
+        does, and its queued turns fail with a reason.
+
+        A group is left alone while its Host beat within ``quiet_seconds`` or
+        it has a turn, claim or Fork in flight; the attempt reaper settles
+        those first, and a later pass takes the group. Returns the groups
+        marked lost.
+        """
+        async with self._pool.acquire() as conn:
+            candidates = await conn.fetch(
+                f"""SELECT g.id FROM agent_compute_allocations a
+                    JOIN agent_compute_nodes n ON n.allocation_id=a.id
+                    JOIN agent_runner_hosts h ON h.compute_node_id=n.id
+                    JOIN agent_sandboxes g ON g.host=h.host
+                    WHERE a.id=$1 AND a.observed_state='terminated'
+                      AND {_RECLAIMED_GROUP_SQL}
+                    ORDER BY g.id""",
+                allocation_id,
+                quiet_seconds,
+            )
+        lost = []
+        for candidate in candidates:
+            if await self._lose_reclaimed_group(
+                sandbox_id=candidate["id"],
+                allocation_id=allocation_id,
+                quiet_seconds=quiet_seconds,
+            ):
+                lost.append(str(candidate["id"]))
+        return lost
+
+    async def _lose_reclaimed_group(
+        self, *, sandbox_id: str, allocation_id: str, quiet_seconds: int
+    ) -> bool:
+        # Conversations, then memberships, then the group: the order every
+        # writer of these rows keeps.
+        async with self._pool.acquire() as conn, conn.transaction():
+            await conn.execute(
+                "SELECT t.id FROM agent_threads t "
+                "JOIN agent_thread_sandbox_memberships m ON m.thread_id = t.id "
+                "WHERE m.sandbox_id = $1 ORDER BY t.id FOR UPDATE OF t",
+                sandbox_id,
+            )
+            members = await conn.fetch(
+                "SELECT thread_id FROM agent_thread_sandbox_memberships "
+                "WHERE sandbox_id = $1 ORDER BY thread_id FOR UPDATE",
+                sandbox_id,
+            )
+            group = await conn.fetchrow(
+                f"""SELECT g.id, g.generation, g.state, g.host FROM agent_sandboxes g
+                    JOIN agent_runner_hosts h ON h.host=g.host
+                    JOIN agent_compute_nodes n ON n.id=h.compute_node_id
+                    JOIN agent_compute_allocations a ON a.id=n.allocation_id
+                    WHERE g.id=$1 AND a.id=$3 AND a.observed_state='terminated'
+                      AND {_RECLAIMED_GROUP_SQL}
+                    FOR UPDATE OF g""",
+                sandbox_id,
+                quiet_seconds,
+                allocation_id,
+            )
+            if group is None:
+                return False
+            await conn.execute(
+                """UPDATE agent_sandboxes
+                   SET state='lost', idle_deadline=NULL, stop_requested_at=NULL,
+                       last_error='the server holding this sandbox was reclaimed by its provider',
+                       updated_at=NOW()
+                   WHERE id=$1""",
+                sandbox_id,
+            )
+            await conn.execute(
+                """UPDATE agent_thread_sandbox_memberships
+                   SET native_state='lost', context_status='lost', resident_state='lost',
+                       updated_at=NOW()
+                   WHERE sandbox_id=$1""",
+                sandbox_id,
+            )
+            await conn.execute(
+                """INSERT INTO agent_sandbox_events (
+                       sandbox_id, generation, event_type, from_state, to_state,
+                       source, actor_id, details
+                   ) VALUES ($1, $2, 'server_reclaimed', $3, 'lost', 'system',
+                             'compute-reconciler', $4::jsonb)""",
+                sandbox_id,
+                group["generation"],
+                group["state"],
+                json.dumps({"allocation_id": allocation_id, "host": group["host"]}),
+            )
+            for member in members:
+                await fail_unrunnable_follow_ups(
+                    conn, thread_id=member["thread_id"], detail=_RECLAIMED_DETAIL
+                )
+        return True
 
     async def running_attempts(self, *, host: str) -> int:
         """Count the turns a Host is executing now."""

@@ -173,6 +173,12 @@ readiness check does not wait for managed hosts; they take new chats again
 when they report the new commit.
 A rollout that takes the running generation down and then fails restores the
 previous stored bundle. File-backed profile files are not rewritten.
+A rollout waits while the Host carries a deployment drain fence. If the fence
+stays for 30 minutes on a Host that is off the control plane's commit,
+`compute_host_release_blocked` alerts once per release: the Host takes no work
+and will not be rolled forward until the deployment that drained it releases
+the fence, or an administrator overrides it with
+`POST /admin/agent/runner-hosts/<host>/undrain?force=true`.
 
 When the registry named by `AGENT_COMPUTE_SANDBOX_IMAGE_REPOSITORY` (default
 `ghcr.io/harvardmadsys/cloud-agent-sandbox`) holds `sandbox-<commit>` for this
@@ -530,6 +536,22 @@ shows such a member as _moving out_; it is released at its lease end as
 before. If groups are still unmoved five minutes before the lease ends (or the
 claim-stop lead, if longer), because a turn is still running, a checkpoint is
 missing or no Host can take them, `compute_move_out_unfinished` alerts once.
+
+So that there is still time to act, `compute_move_out_blocked` alerts once when
+the window opens and groups would stay. Its reason is either why the move
+cannot start, followed by how many groups would stay, or how many groups can
+never move because no checkpoint covers them or their image cannot be pulled
+elsewhere. The reasons are `archives_disabled`, `checkpoints_disabled`,
+`host_offline`, `host_without_checkpoints` (the Host runs a release from before
+checkpoints), `archive_settings_not_applied` and `no_restore_target`.
+
+When the provider confirms the machine is gone (`terminated`), covered stopped
+groups become `cold` as above. Every other group its Host still holds lost its
+only Docker copy with the machine: once the Host has been silent for 10
+minutes and no turn, claim or Fork of the group is in flight, the group and its
+chats become LOST, their queued turns fail with a reason, and
+`compute_groups_lost_with_server` reports how many. The Host row stays for
+**Remove from pool**.
 
 ## Automatic CloudLab node replacement
 

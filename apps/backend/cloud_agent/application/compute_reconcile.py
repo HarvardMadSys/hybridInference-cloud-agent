@@ -97,6 +97,13 @@ _RELEASE_ACTIVE = {"pending", "running", "waiting", "unknown"}
 # Prepare can fail without draining. Stop retrying a release that keeps failing
 # that way; an administrator retry clears the counter and tries again.
 _RELEASE_ATTEMPTS = 3
+# A deployment drain fence normally lasts one rollout. Kept this long on a Host
+# that is off the control plane's commit, it is reported: the Host can neither
+# take work nor be rolled forward until someone resumes it.
+_RELEASE_FENCE_ALERT_AFTER = timedelta(minutes=30)
+# After its provider confirms a machine is gone, how long its Host must have
+# been silent before the groups it still holds are marked lost.
+_RECLAIMED_QUIET_SECONDS = 600
 
 
 # How long past its recorded deadline a missing resource is taken as ended.
@@ -153,6 +160,9 @@ class ComputeReconciler:
         self.bootstrap = bootstrap
         self.rotation = ComputeRotation(self)
         self._move_out_reminded: set[str] = set()
+        self._move_out_blocked_reported: set[str] = set()
+        self._release_fenced_since: dict[str, datetime] = {}
+        self._release_fence_reported: set[str] = set()
 
     async def schedule(self) -> None:
         """Observe leases and submit renewals even while retirement is blocked."""
@@ -160,6 +170,8 @@ class ComputeReconciler:
         observation_seconds = current_observation_seconds(self.commands.configuration)
         release = load_control_plane_host_release()
         for row in await self.repository.list_allocations():
+            if row.get("observed_state") == "terminated":
+                await self._lose_reclaimed_groups(row)
             if row.get("release_committed_at") or row.get("observed_state") in {
                 "terminated",
                 "absent",
@@ -180,10 +192,11 @@ class ComputeReconciler:
                         row, request_key=f"inspect:{row['id']}:{slot}"
                     )
             if release is not None and row.get("desired_state") == "present":
-                await self._queue_host_release(row, operations, release)
+                await self._queue_host_release(row, operations, release, now)
             policy = RenewalPolicy.model_validate(row.get("policy") or {})
             expires = _moment(row.get("expires_at"))
             if expires is not None and row.get("expiration_known"):
+                await self._report_blocked_move_out(row, policy, now, expires)
                 await self._remind_unfinished_move_out(row, policy, now, expires)
             if not policy.enabled or expires is None or not row.get("expiration_known"):
                 continue
@@ -236,6 +249,53 @@ class ComputeReconciler:
             except (ComputeRefusal, ValueError):
                 # Concurrent schedulers may have already persisted a fixed target.
                 logger.warning("compute_renewal_not_submitted", extra={"allocation_id": row["id"]})
+
+    async def _report_blocked_move_out(
+        self, row: dict[str, Any], policy: RenewalPolicy, now: datetime, expires: datetime
+    ) -> None:
+        """Alert once, inside the move-out window, when groups will stay with the machine.
+
+        Either the move cannot start (or continue) and the reason code says
+        why, or it runs but some groups can never move: no checkpoint covers
+        them, or their image cannot be pulled elsewhere. Reported while there
+        is still time to act, unlike the reminder just before the lease ends.
+        """
+        window = move_out_window_seconds(policy.model_dump())
+        if window == 0 or expires <= now or expires - now > timedelta(seconds=window):
+            return
+        key = f"{row['id']}:{int(expires.timestamp())}"
+        if key in self._move_out_blocked_reported:
+            return
+        report = await self.repository.move_out_report(allocation_id=row["id"])
+        if report["unmoved"] == 0:
+            return
+        if report["blocker"] is not None:
+            reason = f"{report['blocker']}; {report['unmoved']} groups would stay"
+        elif report["unmovable"]:
+            reason = f"{report['unmovable']} of {report['unmoved']} groups cannot move"
+        else:
+            return
+        self._move_out_blocked_reported.add(key)
+        hosts = row.get("hosts") or []
+        await self.rotation._notify(
+            "compute_move_out_blocked",
+            host=hosts[0]["host"] if hosts else row["name"],
+            reason=reason,
+        )
+
+    async def _lose_reclaimed_groups(self, row: dict[str, Any]) -> None:
+        """End the chats whose sandboxes went with a machine its provider reclaimed."""
+        lost = await self.repository.lose_reclaimed_groups(
+            allocation_id=row["id"], quiet_seconds=_RECLAIMED_QUIET_SECONDS
+        )
+        if not lost:
+            return
+        hosts = row.get("hosts") or []
+        await self.rotation._notify(
+            "compute_groups_lost_with_server",
+            host=hosts[0]["host"] if hosts else row["name"],
+            reason=f"{len(lost)} groups lost",
+        )
 
     async def _remind_unfinished_move_out(
         self, row: dict[str, Any], policy: RenewalPolicy, now: datetime, expires: datetime
@@ -611,7 +671,11 @@ class ComputeReconciler:
         )
 
     async def _queue_host_release(
-        self, row: dict[str, Any], operations: list[dict[str, Any]], release: HostRelease
+        self,
+        row: dict[str, Any],
+        operations: list[dict[str, Any]],
+        release: HostRelease,
+        now: datetime | None = None,
     ) -> None:
         """Queue one rollout when a managed host is not on this control-plane commit."""
         if row.get("management_mode") != "manage" or not row.get("external_id"):
@@ -622,8 +686,12 @@ class ComputeReconciler:
         if not profile.get("deployment_sha") or not profile.get("source_sha256"):
             return
         hosts = row.get("hosts") or []
-        if len(hosts) != 1 or any(host.get("drain_fence_active") for host in hosts):
+        if len(hosts) != 1:
             return
+        if hosts[0].get("drain_fence_active"):
+            await self._report_release_fence(row, release, profile, now or _now())
+            return
+        self._release_fenced_since.pop(row["id"], None)
         if any(
             op.get("kind") in _RELEASE_MUTATIONS and op.get("state") in _RELEASE_ACTIVE
             for op in operations
@@ -635,12 +703,7 @@ class ComputeReconciler:
         host = await self.host_pool.get_host(host=hosts[0]["host"])
         if host is None or host.get("status") != "online" or not host.get("enrolled"):
             return
-        on_release = shared_deployment_capability(release.sha) in (host.get("capabilities") or [])
-        profile_current = (
-            profile.get("deployment_sha") == release.sha
-            and profile.get("source_sha256") == release.digest
-        )
-        if on_release and profile_current:
+        if self._on_release(host, profile, release):
             return
         parameters = {"allocation_id": row["id"], "deployment_sha": release.sha}
         await self.repository.create_operation(
@@ -654,6 +717,44 @@ class ComputeReconciler:
         logger.info(
             "compute_host_release_queued",
             extra={"allocation_id": row["id"], "deployment_sha": release.sha},
+        )
+
+    @staticmethod
+    def _on_release(host: dict[str, Any], profile: dict[str, Any], release: HostRelease) -> bool:
+        """Whether the Host runs this release and its stored profile pins it."""
+        return shared_deployment_capability(release.sha) in (host.get("capabilities") or []) and (
+            profile.get("deployment_sha") == release.sha
+            and profile.get("source_sha256") == release.digest
+        )
+
+    async def _report_release_fence(
+        self,
+        row: dict[str, Any],
+        release: HostRelease,
+        profile: dict[str, Any],
+        now: datetime,
+    ) -> None:
+        """Alert once when a deployment drain fence keeps a Host off this release.
+
+        The rollout waits for the fence, which a deployment normally clears
+        within one run. Left behind, it keeps the Host from taking work and
+        from being rolled forward, so it never gains what a newer release
+        adds, such as checkpoints its groups would need to move out.
+        """
+        hosts = row.get("hosts") or []
+        host = await self.host_pool.get_host(host=hosts[0]["host"])
+        if host is None or not host.get("enrolled") or self._on_release(host, profile, release):
+            self._release_fenced_since.pop(row["id"], None)
+            return
+        since = self._release_fenced_since.setdefault(row["id"], now)
+        key = f"{row['id']}:{release.sha}"
+        if now - since < _RELEASE_FENCE_ALERT_AFTER or key in self._release_fence_reported:
+            return
+        self._release_fence_reported.add(key)
+        await self.rotation._notify(
+            "compute_host_release_blocked",
+            host=hosts[0]["host"],
+            reason="deployment drain fence active",
         )
 
     @staticmethod

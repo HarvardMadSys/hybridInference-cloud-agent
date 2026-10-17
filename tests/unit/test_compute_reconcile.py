@@ -161,6 +161,10 @@ def harness(monkeypatch, *, kind="acquire", identified=False):
         set_admission_hold=AsyncMock(),
         set_move_out_hold=AsyncMock(return_value=False),
         unmoved_groups=AsyncMock(return_value=0),
+        move_out_report=AsyncMock(
+            return_value={"moving": False, "blocker": None, "unmoved": 0, "unmovable": 0}
+        ),
+        lose_reclaimed_groups=AsyncMock(return_value=[]),
         prepare_bootstrap_binding=AsyncMock(),
         clear_bootstrap_hold=AsyncMock(return_value=True),
         renew_operation_lease=AsyncMock(return_value=True),
@@ -1469,3 +1473,150 @@ async def test_groups_still_unmoved_near_the_lease_end_alert_once(monkeypatch):
     await h.reconciler.schedule()
 
     assert events == [("compute_move_out_unfinished", "compute-nodeid", "2 groups not moved")]
+
+
+def _recorded_events(monkeypatch, h) -> list:
+    events = []
+
+    async def notify(event, *, host, reason):
+        events.append((event, host, reason))
+
+    monkeypatch.setattr(h.reconciler.rotation, "_notify", notify)
+    return events
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("report", "reason"),
+    [
+        (
+            {"moving": False, "blocker": "host_without_checkpoints", "unmoved": 2, "unmovable": 2},
+            "host_without_checkpoints; 2 groups would stay",
+        ),
+        (
+            {"moving": True, "blocker": None, "unmoved": 3, "unmovable": 1},
+            "1 of 3 groups cannot move",
+        ),
+    ],
+)
+async def test_groups_that_will_stay_are_reported_once_when_the_window_opens(
+    monkeypatch, report, reason
+):
+    """Early enough to act, unlike the reminder just before the lease ends."""
+    h = harness(monkeypatch, kind="inspect", identified=True)
+    h.allocation["expires_at"] = NOW + timedelta(minutes=110)
+    h.repository.move_out_report.return_value = report
+    events = _recorded_events(monkeypatch, h)
+
+    await h.reconciler.schedule()
+    await h.reconciler.schedule()
+
+    assert events == [("compute_move_out_blocked", "compute-nodeid", reason)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("expires_in", "report"),
+    [
+        # Before the window opens nothing is asked.
+        (timedelta(hours=3), {"moving": False, "blocker": "no_restore_target", "unmoved": 2}),
+        # Every group can move.
+        (timedelta(minutes=90), {"moving": True, "blocker": None, "unmoved": 2, "unmovable": 0}),
+        # Nothing left to move.
+        (timedelta(minutes=90), {"moving": False, "blocker": "no_restore_target", "unmoved": 0}),
+    ],
+)
+async def test_a_move_out_that_can_finish_is_not_reported(monkeypatch, expires_in, report):
+    h = harness(monkeypatch, kind="inspect", identified=True)
+    h.allocation["expires_at"] = NOW + expires_in
+    h.repository.move_out_report.return_value = {"unmovable": 0, **report}
+    events = _recorded_events(monkeypatch, h)
+
+    await h.reconciler.schedule()
+
+    assert [event for event in events if event[0] == "compute_move_out_blocked"] == []
+
+
+@pytest.mark.asyncio
+async def test_a_reclaimed_machines_stranded_groups_are_lost_and_reported(monkeypatch):
+    h = harness(monkeypatch, kind="inspect", identified=True)
+    h.allocation["observed_state"] = "terminated"
+    h.repository.lose_reclaimed_groups.return_value = ["asbx_a", "asbx_b"]
+    events = _recorded_events(monkeypatch, h)
+
+    await h.reconciler.schedule()
+
+    h.repository.lose_reclaimed_groups.assert_awaited_once_with(
+        allocation_id=h.allocation["id"], quiet_seconds=600
+    )
+    assert events == [("compute_groups_lost_with_server", "compute-nodeid", "2 groups lost")]
+    # A terminated machine is otherwise left alone.
+    h.commands.queue_inspection.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_live_machine_loses_no_groups(monkeypatch):
+    h = harness(monkeypatch, kind="inspect", identified=True)
+
+    await h.reconciler.schedule()
+
+    h.repository.lose_reclaimed_groups.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_drain_fence_left_on_a_host_off_the_release_is_reported_once(monkeypatch):
+    """It keeps the Host from taking work and from ever being rolled forward."""
+    h = harness(monkeypatch, identified=True)
+    h.allocation["observed_state"] = "ready"
+    h.allocation["hosts"][0]["drain_fence_active"] = True
+    h.repository.create_operation = AsyncMock()
+    events = _recorded_events(monkeypatch, h)
+    row = h.allocation
+
+    await h.reconciler._queue_host_release(row, [], RELEASE, NOW)
+    await h.reconciler._queue_host_release(row, [], RELEASE, NOW + timedelta(minutes=29))
+    assert events == []
+    await h.reconciler._queue_host_release(row, [], RELEASE, NOW + timedelta(minutes=31))
+    await h.reconciler._queue_host_release(row, [], RELEASE, NOW + timedelta(minutes=45))
+
+    assert events == [
+        ("compute_host_release_blocked", "compute-nodeid", "deployment drain fence active")
+    ]
+    h.repository.create_operation.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_fence_that_is_lifted_in_time_is_never_reported(monkeypatch):
+    h = harness(monkeypatch, identified=True)
+    h.allocation["observed_state"] = "ready"
+    h.repository.create_operation = AsyncMock()
+    events = _recorded_events(monkeypatch, h)
+    row = h.allocation
+
+    row["hosts"][0]["drain_fence_active"] = True
+    await h.reconciler._queue_host_release(row, [], RELEASE, NOW)
+    row["hosts"][0]["drain_fence_active"] = False
+    await h.reconciler._queue_host_release(row, [], RELEASE, NOW + timedelta(minutes=20))
+    row["hosts"][0]["drain_fence_active"] = True
+    await h.reconciler._queue_host_release(row, [], RELEASE, NOW + timedelta(minutes=40))
+
+    assert events == []
+
+
+@pytest.mark.asyncio
+async def test_a_fenced_host_already_on_the_release_is_not_reported(monkeypatch):
+    h = harness(monkeypatch, identified=True)
+    h.allocation["observed_state"] = "ready"
+    h.allocation["deployment_profile"].update(
+        deployment_sha=RELEASE.sha, source_sha256=RELEASE.digest
+    )
+    h.allocation["hosts"][0].update(
+        drain_fence_active=True, capabilities=[shared_deployment_capability(RELEASE.sha)]
+    )
+    events = _recorded_events(monkeypatch, h)
+    row = h.allocation
+
+    await h.reconciler._queue_host_release(row, [], RELEASE, NOW)
+    await h.reconciler._queue_host_release(row, [], RELEASE, NOW + timedelta(hours=2))
+
+    assert events == []
