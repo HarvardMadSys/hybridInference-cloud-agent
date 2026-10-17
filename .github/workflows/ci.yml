@@ -825,11 +825,39 @@ jobs:
         working-directory: ./apps/frontend
         run: node scripts/check-runtime-site-config.mjs
 
+      - name: Browser recovery regressions
+        id: browser
+        continue-on-error: true
+        working-directory: ./apps/frontend
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/playwright
+        run: |
+          set -euo pipefail
+          # Only disposable hosted runners may install OS packages. Shared
+          # runners must have Chromium's runtime libraries provisioned already.
+          if [ "${{ runner.environment }}" = github-hosted ]; then
+            npx playwright install --with-deps chromium
+          else
+            npx playwright install chromium
+          fi
+          npm run test:browser
+
+      - name: Browser failure evidence
+        if: always() && steps.browser.outcome == 'failure'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: browser-recovery-failure
+          path: |
+            apps/frontend/test-results/**
+            apps/frontend/playwright-report/**
+          retention-days: 7
+
       - name: Every check passed
         env:
           RESULTS: >-
             server-only=${{ steps.server-only.outcome }}
             runtime-config=${{ steps.runtime-config.outcome }}
+            browser=${{ steps.browser.outcome }}
         run: |
           set -euo pipefail
           failed=0

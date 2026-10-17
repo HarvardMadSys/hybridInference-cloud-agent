@@ -15,6 +15,8 @@ venv/
 coverage.xml
 htmlcov/
 .local-ci/
+apps/frontend/playwright-report/
+apps/frontend/test-results/
 
 # Environment — never commit secrets; see ENVIRONMENT.md
 .env

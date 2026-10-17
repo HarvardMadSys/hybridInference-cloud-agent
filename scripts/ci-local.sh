@@ -191,6 +191,10 @@ if [[ "$CI_TIER" == all || "$CI_TIER" == frontend ]]; then
   # Both guards write .next, so run them sequentially.
   run_check server-only node scripts/check-server-only-guard.mjs
   run_check runtime-config node scripts/check-runtime-site-config.mjs
+  # Chromium's OS libraries must already be provisioned on shared test hosts.
+  # Download only the locked browser; never run a privileged system install.
+  run_check browser-install npx playwright install chromium
+  run_check browser npm run test:browser
 fi
 
 printf '\n'
