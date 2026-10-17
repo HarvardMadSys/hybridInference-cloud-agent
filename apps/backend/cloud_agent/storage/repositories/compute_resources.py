@@ -1750,7 +1750,14 @@ class PostgresComputeResourceRepository:
         request_id: str | None = None,
         kinds: list[str] | None = None,
     ) -> list[dict[str, Any]]:
-        """Find recent operation state, including recovery by request ID."""
+        """Find recent operation state, including recovery by request ID.
+
+        Newest first: the 200 newest matches, and every match not yet settled
+        however old. Each live server is inspected every few minutes, so newer
+        rows soon push an acquisition out of the window; one whose outcome is
+        unknown holds its server until an administrator adopts or retries it,
+        and the Servers page reaches it only through this listing.
+        """
         async with self._pool.acquire() as conn:
             return [
                 _row(r)
@@ -1758,7 +1765,13 @@ class PostgresComputeResourceRepository:
                     """SELECT * FROM agent_compute_operations
                 WHERE ($1::text IS NULL OR allocation_id=$1) AND ($2::text IS NULL OR request_id=$2)
                   AND ($3::text[] IS NULL OR kind=ANY($3::text[]))
-                ORDER BY created_at DESC LIMIT 200""",
+                  AND (state IN ('pending','running','waiting','unknown') OR id IN (
+                      SELECT id FROM agent_compute_operations
+                      WHERE ($1::text IS NULL OR allocation_id=$1)
+                        AND ($2::text IS NULL OR request_id=$2)
+                        AND ($3::text[] IS NULL OR kind=ANY($3::text[]))
+                      ORDER BY created_at DESC LIMIT 200))
+                ORDER BY created_at DESC""",
                     allocation_id,
                     request_id,
                     kinds,

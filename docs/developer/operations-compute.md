@@ -439,7 +439,10 @@ active Host bindings and verified inventory.
 
 Reuse the recorded operation after browser disconnects or worker restarts. It
 persists request ID, exact parameters, step and resource ID. A new request ID
-creates a new command.
+creates a new command. **Activity**, and each server's **Activity** tab, list
+the 200 most recent operations and every one still pending, running, waiting or
+`unknown`, however old, so an operation waiting for an administrator stays
+there with its controls.
 
 | Result | Recovery |
 | --- | --- |

@@ -250,7 +250,10 @@ class ComputeResourceRepository(Protocol):
         request_id: str | None = None,
         kinds: list[str] | None = None,
     ) -> list[dict[str, Any]]:
-        """Find recent operation state, including recovery by request ID."""
+        """Find recent operation state, including recovery by request ID.
+
+        Newest first, keeping every operation not yet settled however old.
+        """
         ...
 
     async def update_policy(
