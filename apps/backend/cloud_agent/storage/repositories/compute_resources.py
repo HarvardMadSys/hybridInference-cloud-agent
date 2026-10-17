@@ -3188,10 +3188,13 @@ class PostgresComputeResourceRepository:
                 allocation_id,
             )
             await revoke_host_credentials(conn, [h["host"] for h in impact["hosts"]])
-            # Later pending extensions must never escape after the commit.
+            # Later pending extensions must never escape after the commit. Nor
+            # is an upgrade claimed after it (claim_operation), and one left
+            # waiting would hold its deployment profile back from every later
+            # host release, as if it were still being installed.
             await conn.execute(
                 """UPDATE agent_compute_operations SET state='cancelled',message='release_committed',completed_at=NOW()
-                WHERE allocation_id=$1 AND id<>$2 AND kind='extend' AND state IN ('pending','waiting','blocked')""",
+                WHERE allocation_id=$1 AND id<>$2 AND kind IN ('extend','upgrade') AND state IN ('pending','waiting','blocked')""",
                 allocation_id,
                 operation_id,
             )

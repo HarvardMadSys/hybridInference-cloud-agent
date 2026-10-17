@@ -3224,6 +3224,83 @@ async def test_retiring_an_autoscaled_server_mid_acquisition_frees_its_route(db,
     assert replacement["operation"]["allocation_id"] != allocation_id
 
 
+async def test_a_server_released_while_its_upgrade_waits_holds_back_no_later_release(db, store):
+    """A release commit cancels the server's waiting upgrade, which nothing can run after it.
+
+    Every control-plane release queues an upgrade for each managed Host, and a
+    retirement does not wait for one that is between its checks. After the
+    commit the dispatcher claims only retirements, inspections and discards,
+    so that upgrade stayed waiting for good, and its deployment profile read as
+    one being installed: no later release moved it.
+    """
+    repo = store.compute_resources
+    await repo.save_deployment_profile(
+        profile_id="profile-shared",
+        label="profile-shared",
+        configuration={"deployment_sha": OLD_SHA, "deploy_root": "/opt/profile-shared"},
+        source_bundle=b"shared-old",
+        source_sha256=OLD_DIGEST,
+        secret_ciphertext="cipher-profile-shared",
+    )
+    snapshot = _profile_snapshot(
+        "profile-shared", OLD_SHA, OLD_DIGEST, "stored-profile:profile-shared:bundle"
+    )
+    retired, _, _ = await resource(store, name="retired-mid-upgrade")
+    async with db.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_compute_allocations SET deployment_profile=$2::jsonb WHERE id=$1",
+            retired,
+            json.dumps(snapshot),
+        )
+    upgrade = await operation(repo, retired, "upgrade")
+    assert upgrade is not None and upgrade["kind"] == "upgrade"
+    assert await repo.finish_operation(
+        **fence(upgrade),
+        state="waiting",
+        step="waiting_for_generation",
+        message="Waiting for the Host to advertise the release.",
+        retry_after_seconds=600,
+    )
+
+    retire = await operation(repo, retired, "retire")
+    assert retire is not None and retire["kind"] == "retire"
+    await repo.begin_retirement(allocation_id=retired, **fence(retire))
+    nodes = (await repo.get_allocation(retired))["nodes"]
+    assert await repo.record_inventory(
+        allocation_id=retired,
+        hosts=[],
+        empty=True,
+        verified_node_ids=[node["id"] for node in nodes],
+        **fence(retire),
+    )
+    committed = await repo.commit_release(allocation_id=retired, **fence(retire))
+    assert committed["release_committed"] is True
+    await repo.observe_allocation(
+        allocation_id=retired,
+        observation={"observed_state": "terminated", "scope_complete": True},
+        **fence(retire),
+    )
+    assert await repo.finish_operation(**fence(retire), state="succeeded", step="released")
+
+    # The profile serves the next server; a later release has to move it.
+    current = await _ready_allocation(repo, "current-on-shared", snapshot)
+    rollout = await operation(repo, current, "upgrade")
+    assert rollout is not None and rollout["allocation_id"] == current
+    await repo.advance_host_release(
+        allocation_id=current,
+        previous_sha=OLD_SHA,
+        previous_digest=OLD_DIGEST,
+        deployment_sha=NEW_SHA,
+        source_sha256=NEW_DIGEST,
+        source_bundle=b"replacement",
+        release_bundle_path="/app/compute-host-release/source.tar.gz",
+        **fence(rollout),
+    )
+    assert (await repo.get_deployment_profile("profile-shared"))["source_bundle"] == b"replacement"
+    # Nothing can run the upgrade now; it ends with its server.
+    assert (await repo.get_operation(upgrade["id"]))["state"] == "cancelled"
+
+
 OLD_SHA = "d" * 40
 NEW_SHA = "e" * 40
 OTHER_SHA = "f" * 40
