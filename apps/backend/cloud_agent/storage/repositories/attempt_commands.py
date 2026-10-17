@@ -55,6 +55,7 @@ from cloud_agent.storage._sql.ledger import (
 from cloud_agent.storage._sql.pending_messages import PAUSE_QUEUE_SQL
 from cloud_agent.storage._sql.rows import job_row_to_dict, load_json
 from cloud_agent.storage._sql.sandbox import (
+    THREAD_SANDBOX_CLAIM_SOURCE,
     THREAD_SANDBOX_SOURCE,
     release_restore,
     restore_claim_due,
@@ -285,11 +286,17 @@ class PostgresAttemptCommands:
             )
             job_row = await conn.fetchrow(
                 f"""
-                SELECT {QUALIFIED_JOB_COLUMNS}, to_jsonb(s) AS thread_sandbox,
+                SELECT {QUALIFIED_JOB_COLUMNS},
+                       -- Read for the turn this hands out, once every condition
+                       -- below has passed, not for each queued turn before it.
+                       (
+                           SELECT to_jsonb(s) FROM {THREAD_SANDBOX_SOURCE}
+                           WHERE s.thread_id = j.thread_id
+                       ) AS thread_sandbox,
                        t.title_source, t.title
                 FROM agent_jobs j
                 JOIN agent_threads t ON t.id = j.thread_id
-                LEFT JOIN {THREAD_SANDBOX_SOURCE} ON s.thread_id = j.thread_id
+                LEFT JOIN {THREAD_SANDBOX_CLAIM_SOURCE} ON s.thread_id = j.thread_id
                 WHERE j.state = 'queued' AND j.cancel_requested = FALSE
                   AND (j.claim_retry_at IS NULL OR j.claim_retry_at <= clock_timestamp())
                   AND NOT EXISTS (

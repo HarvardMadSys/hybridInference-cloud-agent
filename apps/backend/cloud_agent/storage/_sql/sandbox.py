@@ -189,6 +189,23 @@ THREAD_SANDBOX_SOURCE = f"""
 ) AS s
 """
 
+# The columns of ``THREAD_SANDBOX_SOURCE`` a claim chooses its turn by, under
+# the same names, and none of the projections. A claim walks every queued turn
+# until one is runnable on the claiming host; joined to the full source, each
+# turn it passed paid for its group's publication state, members and host
+# capabilities, which only the turn handed out returns.
+THREAD_SANDBOX_CLAIM_SOURCE = """
+(
+    SELECT
+        m.thread_id, g.id AS sandbox_id, g.host, g.container_id, g.state,
+        m.fork_operation_id, m.context_status, m.native_state,
+        TRUE AS shared_live, g.restore_attempts,
+        g.last_activity_at AS group_last_activity_at
+    FROM agent_thread_sandbox_memberships m
+    JOIN agent_sandboxes g ON g.id = m.sandbox_id
+) AS s
+"""
+
 # SET-clause fragment for ``agent_sandboxes``: count one more start the
 # control plane let through and drop the restore point a start would make
 # stale. A checkpoint receipt covers the group only while the sequence it
