@@ -45,6 +45,55 @@ afterEach(() => {
 });
 
 describe('job submission recovery', () => {
+  it.each([false, true])(
+    'preserves a newer submission receipt after an older response (reload: %s)',
+    async (reload) => {
+      const { createAgentJob } = await import('../agents');
+      const committed = new Map<string, { body: string; id: string }>();
+      let finishFirst!: () => void;
+      let loseSecondResponse = true;
+      let secondId: string | undefined;
+      transport.fetchWithAuth.mockImplementation(async (_base, _path, init) => {
+        const key = new Headers(init?.headers).get('Idempotency-Key')!;
+        const body = String(init?.body);
+        const prior = committed.get(key);
+        if (prior && prior.body !== body) {
+          return jsonResponse(
+            { detail: { error: { type: 'idempotency_conflict', message: 'Different content' } } },
+            409,
+          );
+        }
+        const saved = prior ?? { body, id: `job-${committed.size + 1}` };
+        committed.set(key, saved);
+        if (JSON.parse(body).task_prompt === request.task_prompt && !prior) {
+          return new Promise<Response>((resolve) => {
+            finishFirst = () => resolve(jsonResponse(saved, 201));
+          });
+        }
+        if (loseSecondResponse) {
+          loseSecondResponse = false;
+          secondId = saved.id;
+          throw new TypeError('Second response lost after commit');
+        }
+        return jsonResponse(saved, 201);
+      });
+
+      const first = createAgentJob(request);
+      // Leave the first composer and start another task while its response is slow.
+      const second = { ...request, task_prompt: 'A different task' };
+      await expect(createAgentJob(second)).rejects.toThrow('Second response lost');
+      expect(committed.size).toBe(2);
+      finishFirst();
+      await first;
+
+      if (reload) vi.resetModules();
+      const retryApi = await import('../agents');
+      const retried = await retryApi.createAgentJob(second);
+      expect(retried.id).toBe(secondId);
+      expect(committed.size).toBe(2);
+    },
+  );
+
   it.each(['lost response', 'temporary server failure'] as const)(
     'reuses a pending request after a %s without retrying it automatically',
     async (failure) => {
