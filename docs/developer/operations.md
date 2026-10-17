@@ -3669,8 +3669,9 @@ image's own parser before any runner is drained, and a refusal prints
 these:
 
 - `AGENT_EGRESS_CHAT_NETWORK_POOL must name this deployment's group address pool`
-  or `… must be RFC1918 space holding at least one /29` — unset, not private,
-  or smaller than a `/29`;
+  or `… must be RFC1918 space holding at least one /29` — unset, outside
+  `10.0.0.0/8`, `172.16.0.0/12` and `192.168.0.0/16` (link-local, loopback and
+  the other special-purpose blocks are refused too), or smaller than a `/29`;
 - `AGENT_EGRESS_DNS_SERVER='…' must be one IPv4 resolver address` or
   `… must be reachable from a group bridge` — unset, not IPv4, loopback,
   unspecified, or inside the pool;
