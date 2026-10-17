@@ -1811,6 +1811,18 @@
             ],
             "title": "Deletion Requested At"
           },
+          "deletion_retry_exhausted_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deletion Retry Exhausted At"
+          },
           "deletion_sha256": {
             "anyOf": [
               {
