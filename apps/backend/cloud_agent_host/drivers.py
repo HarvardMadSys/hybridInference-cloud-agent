@@ -2056,6 +2056,9 @@ class HttpAgentLiveTurn(_JsonResidentTurn[ResidentLiveRuntime]):
         #: Each part's kind, from its first update: a ``message.part.delta``
         #: does not say whether it extends answer text or reasoning.
         self.part_types: dict[str, str] = {}
+        #: The call of a tool part that ended without running, reported just
+        #: ahead of the result the same update carries.
+        self.unopened_call: HarnessEvent | None = None
 
 
 class HttpAgentLiveSession(_JsonResidentSession[ResidentLiveRuntime]):
@@ -2246,20 +2249,19 @@ class HttpAgentLiveSession(_JsonResidentSession[ResidentLiveRuntime]):
                 state = state if isinstance(state, dict) else {}
                 call_id = str(part.get("callID") or part_id)
                 status = state.get("status")
-                if status in {"pending", "running"} and call_id not in turn.reported_tools:
+                # Both servers open a tool part as pending, with an empty input,
+                # while the model is still writing the call's arguments. The
+                # call is reported from the update that starts it running,
+                # which is the first to carry them.
+                if status == "running" and call_id not in turn.reported_tools:
                     turn.reported_tools.add(call_id)
-                    return HarnessEvent(
-                        TOOL_USE,
-                        {
-                            "name": part.get("tool"),
-                            "id": call_id,
-                            "input": state.get("input"),
-                            # Both servers name a relay tool `session_<alias>__<tool>`.
-                            **merged_mcp_server(part.get("tool"), separator="_"),
-                        },
-                        raw_line=line,
-                    )
+                    return self._tool_call(part, state, call_id, line)
                 if status in {"completed", "error"}:
+                    if call_id not in turn.reported_tools:
+                        # It never ran, as when an interrupt stops a pending
+                        # call: the update that ends it opens it as well.
+                        turn.reported_tools.add(call_id)
+                        turn.unopened_call = self._tool_call(part, state, call_id, line)
                     content = str(state.get("output") or state.get("error") or "")
                     # A task's result is its subagent's whole answer, so only the
                     # marked event bound applies to it. Other tools keep a short
@@ -2292,6 +2294,23 @@ class HttpAgentLiveSession(_JsonResidentSession[ResidentLiveRuntime]):
         return HarnessEvent(RAW, {"text": line[:4000]}, raw_line=line)
 
     @staticmethod
+    def _tool_call(
+        part: dict[str, Any], state: dict[str, Any], call_id: str, line: str
+    ) -> HarnessEvent:
+        """The call a tool part stands for, with the input its state carries."""
+        return HarnessEvent(
+            TOOL_USE,
+            {
+                "name": part.get("tool"),
+                "id": call_id,
+                "input": state.get("input"),
+                # Both servers name a relay tool `session_<alias>__<tool>`.
+                **merged_mcp_server(part.get("tool"), separator="_"),
+            },
+            raw_line=line,
+        )
+
+    @staticmethod
     def _answer_preview(
         turn: HttpAgentLiveTurn, part_id: str, *, ended: bool, line: str
     ) -> HarnessEvent:
@@ -2319,6 +2338,9 @@ class HttpAgentLiveSession(_JsonResidentSession[ResidentLiveRuntime]):
         Each carries its part's ``preview_id``, so the complete text takes the
         place of its preview, between the tool calls it was written around.
         The turn's final output is still every part joined, as before.
+
+        The update ending a call that never ran also stands for its call, which
+        comes first.
         """
         assert isinstance(turn, HttpAgentLiveTurn)
         value = self._object(line)
@@ -2327,7 +2349,9 @@ class HttpAgentLiveSession(_JsonResidentSession[ResidentLiveRuntime]):
             or value.get("bridge") != "settled"
             or value.get("turn_id") != turn.protocol_turn_id
         ):
-            return [self.event_for_protocol_line(line, turn)]
+            event = self.event_for_protocol_line(line, turn)
+            opened, turn.unopened_call = turn.unopened_call, None
+            return [event] if opened is None else [opened, event]
         turn.preview.clear()
         answer = [
             HarnessEvent(MESSAGE, {"text": text, "preview_id": part_id}, raw_line=line)
