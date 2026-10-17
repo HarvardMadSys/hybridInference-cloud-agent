@@ -808,3 +808,53 @@ async def test_a_reclaimed_machine_loses_a_group_whose_deletion_failed(pool, sto
     async with pool.acquire() as conn:
         queued = await conn.fetchval("SELECT state FROM agent_jobs WHERE id = $1", follow_up["id"])
     assert queued == "failed"
+
+
+async def _waiting(pool, job_id: str) -> None:
+    """The turn has waited longer than the queue alert allows."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_jobs SET updated_at = NOW() - INTERVAL '11 minutes' WHERE id = $1",
+            job_id,
+        )
+
+
+async def _queue(store: Storage) -> tuple[int, int]:
+    health = await store.host_pool.queue_health(expected_deployment_sha="test-deployment")
+    return health["queued"], health["unavailable"]
+
+
+async def test_queue_health_reports_a_moved_groups_turn_no_host_can_restore(pool, store: Storage):
+    """The Host the group left still serves, but never claims its own cold group."""
+    job, _ = await _covered(pool, store)
+    follow_up = await store.conversation_commands.create_follow_up(
+        parent_job_id=job["id"], user_id="user-1", prompt="continue"
+    )
+    assert follow_up is not None
+    await _moving_out(pool)
+    assert await store.sandbox.release_moving_out_groups() == ["asbx_restore"]
+    await _waiting(pool, follow_up["id"])
+
+    assert await _queue(store) == (1, 1)
+
+    await _host(store, "runner-c", _RESTORE_HOST)
+    assert await _queue(store) == (1, 0)
+
+
+async def test_queue_health_lets_any_restore_host_take_a_removed_hosts_cold_group(
+    pool, store: Storage
+):
+    """The Host it left is gone, which strands nothing while another can restore it."""
+    job, _ = await _covered(pool, store)
+    follow_up = await store.conversation_commands.create_follow_up(
+        parent_job_id=job["id"], user_id="user-1", prompt="continue"
+    )
+    assert follow_up is not None
+    assert await store.host_pool.remove_host(host="runner-a") == "ok"
+    assert (await _state(pool))["state"] == "cold"
+    await _waiting(pool, follow_up["id"])
+
+    assert await _queue(store) == (1, 1)
+
+    await _host(store, "runner-c", _RESTORE_HOST)
+    assert await _queue(store) == (1, 0)

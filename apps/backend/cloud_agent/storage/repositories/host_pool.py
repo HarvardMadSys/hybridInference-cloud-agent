@@ -72,6 +72,7 @@ from cloud_agent_shared.sandbox_archive_settings import (
     SandboxArchivePolicy,
     SandboxArchivePolicyError,
 )
+from cloud_agent_shared.sandbox_restore import SANDBOX_RESTORE_CAPABILITY
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -1491,6 +1492,9 @@ class PostgresHostPoolRepository:
         Occupied slots are ordinary backpressure. Missing/stale/disabled hosts,
         lost deployment markers and a wrong placement pin are not. Retained
         members use their owner, independent of the pin for new conversations.
+        A ``cold`` group lives in its checkpoint instead: any host that
+        restores may take it, except the one it left while that one still
+        names its container, as the claim's cold branch reads it.
         No user content, job identifiers or credentials leave this projection.
         """
         async with self._pool.acquire() as conn, conn.transaction():
@@ -1520,6 +1524,8 @@ class PostgresHostPoolRepository:
                 """
                 WITH waiting AS (
                     SELECT g.host AS owner, t.execution_profile,
+                           COALESCE(g.state = 'cold', FALSE) AS cold,
+                           g.container_id IS NULL AS uncontained,
                            COALESCE(j.metadata->'requires', '[]'::jsonb) AS requires
                     FROM agent_jobs j
                     JOIN agent_threads t ON t.id = j.thread_id
@@ -1556,7 +1562,11 @@ class PostgresHostPoolRepository:
                            WHERE waiting.requires <@ h.capabilities
                              AND (waiting.execution_profile = 'trusted-v1' OR h.sandbox_runtime = $2)
                              AND (
-                                 (waiting.owner IS NOT NULL AND h.host = waiting.owner)
+                                 (waiting.owner IS NOT NULL AND NOT waiting.cold
+                                  AND h.host = waiting.owner)
+                                 OR (waiting.cold AND $4::boolean
+                                     AND h.capabilities @> $7::jsonb
+                                     AND (waiting.uncontained OR h.host <> waiting.owner))
                                  OR (waiting.owner IS NULL
                                      AND h.capabilities @> '["native-fork-at-anchor-v1"]'::jsonb
                                      AND ($1 = '' OR h.capabilities ? ('shared-sandbox-deployment:' || $1))
@@ -1573,6 +1583,7 @@ class PostgresHostPoolRepository:
                 archive_required,
                 archive_revision,
                 json.dumps([SANDBOX_ARCHIVE_CAPABILITY]),
+                json.dumps([SANDBOX_RESTORE_CAPABILITY]),
                 timeout=10,
             )
         return {key: int(row[key]) for key in ("queued", "unavailable", "running")}
