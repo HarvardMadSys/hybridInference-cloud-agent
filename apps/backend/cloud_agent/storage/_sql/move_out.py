@@ -99,12 +99,22 @@ UNMOVED_GROUP_SQL = """g.deletion_state = 'none' AND g.state NOT IN ('cold', 're
 #: now, or it has not stopped yet and its stop will record a checkpoint of an
 #: image another Host can pull. Nothing else ever moves: no checkpoint is
 #: taken of a group already stopped, so one whose checkpoint failed, a dirty
-#: stop, or a group on a local image stays with this Host.
+#: stop, or a group on a local image stays with this Host. Nor is one taken of
+#: a group whose container was never created, as when its first turn gave up
+#: before Docker made one: it has nothing to stop until a turn of its own
+#: creates the container, and its Host claims none while it moves out.
 MOVABLE_GROUP_SQL = f"""({UNMOVED_GROUP_SQL} AND (
     {COVERED_GROUP_SQL}
     OR (
         g.state IN ('provisioning', 'starting', 'running', 'stopping')
         AND g.sandbox_image_digest ~ '{PULLABLE_IMAGE_PATTERN}'
+        AND (
+            g.container_id IS NOT NULL
+            OR EXISTS (
+                SELECT 1 FROM agent_thread_sandbox_memberships creating
+                WHERE creating.sandbox_id = g.id AND creating.active_attempt_id IS NOT NULL
+            )
+        )
     )
 ))"""
 

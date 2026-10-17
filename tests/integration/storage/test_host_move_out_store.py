@@ -5,11 +5,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pytest
+from tests.integration.storage.test_agent_job_store import _create_job
 from tests.integration.storage.test_sandbox_restore_store import (
     _ARCHIVE_HOST,
     _RESTORE_HOST,
     _claim,
     _covered,
+    _enable_archives,
     _fence,
     _host,
     _receipt,
@@ -468,3 +470,45 @@ async def test_removing_a_host_while_it_restores_a_group_moves_that_group_out(po
     assert removal == "moving_out"
     [row] = await store.sandbox.sandboxes_moving_out()
     assert row["sandbox_id"] == "asbx_restore" and row["host"] == "runner-c"
+
+
+async def test_a_group_whose_container_was_never_created_does_not_hold_the_removal(
+    pool, store: Storage
+):
+    """Nothing can stop it into a checkpoint, so a move would wait for it forever."""
+    await _enable_archives(store)
+    await _host(store, "runner-a", _ARCHIVE_HOST)
+    job = await _create_job(store)
+    claim = await _claim(store, "runner-a", _ARCHIVE_HOST)
+    assert claim is not None and claim["id"] == job["id"]
+    sandbox = await _reserve(store, job, claim, "runner-a")
+    # Docker never created the container: the first turn gives up before
+    # admission, as the runner does when its image cannot be pulled.
+    abandoned = await store.sandbox.abandon_thread_sandbox(
+        **_fence(job, claim, sandbox),
+        lost=False,
+        detail="image pull failed",
+        idle_timeout_seconds=15,
+    )
+    assert abandoned is not None and abandoned["state"] == "provisioning"
+    assert abandoned["container_id"] is None
+    assert await store.attempt_commands.transition(
+        job_id=job["id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        from_states=("running",),
+        to_state="failed",
+    )
+    await _captures(pool)
+    await _host(store, "runner-c", _RESTORE_HOST)
+
+    removal = await store.host_pool.remove_host(host="runner-a")
+
+    # The sweep has nothing it could stop, so a move would never end.
+    assert await store.sandbox.sandboxes_moving_out() == []
+    assert removal == "cannot_move"
+    hosts, *_ = await store.host_pool.runner_pool()
+    [kept] = [row for row in hosts if row["host"] == "runner-a"]
+    assert kept["sandboxes_left"] == 0 and kept["sandboxes_unmovable"] == 1
+    assert await store.host_pool.remove_host(host="runner-a", allow_unmoved=True) == "ok"
+    assert not (await store.host_pool.get_host(host="runner-a"))["enrolled"]
