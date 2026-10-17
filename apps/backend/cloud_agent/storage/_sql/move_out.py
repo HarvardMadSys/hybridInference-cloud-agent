@@ -28,21 +28,28 @@ _LIVE_HEARTBEAT_SECONDS = 120
 
 
 async def move_out_possible(conn: Any, leaving: list[str], *, need_target: bool) -> bool:
-    """Whether ``leaving`` can stop its groups into checkpoints another Host restores.
+    """Whether ``leaving`` can stop its groups into checkpoints another Host restores."""
+    return await move_out_blocker(conn, leaving, need_target=need_target) is None
 
-    Checkpoints must work: archives and checkpoints on, and every leaving Host
-    alive and capturing on the current archive revision. Otherwise its stopped
-    groups would have no checkpoint and their chats would only wait. With
-    ``need_target``, another Host must also pass the claim's own admission for
-    new groups now, since restoring creates the group's container there.
+
+async def move_out_blocker(conn: Any, leaving: list[str], *, need_target: bool) -> str | None:
+    """Why ``leaving`` cannot stop its groups into checkpoints another Host restores.
+
+    ``None`` means it can. Checkpoints must work: archives and checkpoints on,
+    and every leaving Host alive and capturing on the current archive
+    revision. Otherwise its stopped groups would have no checkpoint and their
+    chats would only wait. With ``need_target``, another Host must also pass
+    the claim's own admission for new groups now, since restoring creates the
+    group's container there. The reason is a fixed code an operator alert can
+    name, never remote output.
     """
     if not leaving:
-        return False
+        return "no_host"
     policy = await conn.fetchrow(
         "SELECT sandbox_archive_settings, sandbox_archive_revision FROM agent_runner_policy WHERE id"
     )
     if policy is None:
-        return False
+        return "archives_disabled"
     try:
         archive = load_stored_archive_policy(
             {
@@ -51,9 +58,11 @@ async def move_out_possible(conn: Any, leaving: list[str], *, need_target: bool)
             }
         )
     except ValueError:
-        return False
-    if not (archive.enabled and archive.checkpoints_enabled):
-        return False
+        return "archives_disabled"
+    if not archive.enabled:
+        return "archives_disabled"
+    if not archive.checkpoints_enabled:
+        return "checkpoints_disabled"
     hosts = await conn.fetch(
         """SELECT capabilities, sandbox_archive_settings_applied_revision,
                   credential_hash IS NOT NULL AS enrolled,
@@ -63,15 +72,18 @@ async def move_out_possible(conn: Any, leaving: list[str], *, need_target: bool)
         _LIVE_HEARTBEAT_SECONDS,
     )
     if len(hosts) != len(set(leaving)) or any(
-        not host["enrolled"]
-        or not host["alive"]
-        or SANDBOX_CHECKPOINT_CAPABILITY not in (load_json(host["capabilities"]) or [])
-        or host["sandbox_archive_settings_applied_revision"] != archive.revision
+        not host["enrolled"] or not host["alive"] for host in hosts
+    ):
+        return "host_offline"
+    if any(
+        SANDBOX_CHECKPOINT_CAPABILITY not in (load_json(host["capabilities"]) or [])
         for host in hosts
     ):
-        return False
+        return "host_without_checkpoints"
+    if any(host["sandbox_archive_settings_applied_revision"] != archive.revision for host in hosts):
+        return "archive_settings_not_applied"
     if not need_target:
-        return True
+        return None
     candidates = await conn.fetch(
         """SELECT host FROM agent_runner_hosts
            WHERE status = 'online' AND credential_hash IS NOT NULL
@@ -88,8 +100,8 @@ async def move_out_possible(conn: Any, leaving: list[str], *, need_target: bool)
         # admission a new group does.
         may_create, may_claim = await host_compute_admission(conn, candidate["host"])
         if may_create and may_claim:
-            return True
-    return False
+            return None
+    return "no_restore_target"
 
 
 #: Groups still held only by a Host: not yet handed over, lost or deleted.

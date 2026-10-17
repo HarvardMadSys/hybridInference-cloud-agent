@@ -236,7 +236,7 @@ Docker 客户端名单包含 `DOCKER_`、`BUILDKIT_`、`BUILDX_`、`COMPOSE_`、
 | `POST /v1/agent/environment-runs` | 固定环境和全局版本、repo/ref，创建独立测试 |
 | `GET /v1/agent/environment-runs/{id}` | 测试状态、步骤与有界脱敏输出 |
 | `POST /v1/agent/environment-runs/{id}/cancel` | 幂等取消测试并触发清理 |
-| `GET /v1/agent/jobs/{job_id}/thread/environment` | 读取实际绑定配置、来源和准备结果；另返回是否有新版本 |
+| `GET /v1/agent/jobs/{job_id}/thread/environment` | 读取实际绑定配置、来源和准备结果；另返回是否有新版本，以及每个操作最近一次运行（不含输出，供面板重新打开时恢复“停止”） |
 | `POST /v1/agent/jobs/{job_id}/thread/environment/retry` | 重试当前绑定的失败准备步骤；不更换版本、不重复提交 agent 消息 |
 | `POST /v1/agent/jobs/{job_id}/thread/environment/actions/{action_id}/runs` | 在当前工作区执行绑定版本中的操作，返回运行/终端 ID |
 | `GET /v1/agent/environment-action-runs/{id}` | 操作状态、退出码、有界输出摘要与终端链接 |

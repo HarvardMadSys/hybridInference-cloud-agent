@@ -184,3 +184,66 @@ describe('useAttachments reservation ownership', () => {
     expect(result.current.totalBytes).toBe(0);
   });
 });
+
+describe('uploads a composer leaves behind', () => {
+  it('deletes ready and late uploads that were never sent', async () => {
+    const late = deferredUpload();
+    vi.mocked(uploadAttachment).mockResolvedValueOnce(saved(1)).mockReturnValueOnce(late.promise);
+    const bounds = { ...limits, max_files: 10 };
+    const { result, unmount } = renderHook(() => useAttachments(t, bounds), { wrapper });
+    await act(async () => result.current.add([file('ready.txt')]));
+    act(() => result.current.add([file('late.txt')]));
+
+    unmount();
+    await act(async () => late.resolve(saved(2)));
+
+    expect(
+      vi
+        .mocked(deleteAttachment)
+        .mock.calls.map(([id]) => id)
+        .sort(),
+    ).toEqual([1, 2]);
+  });
+
+  it.each([true, false])(
+    'waits for a submission in flight, and keeps what it delivered (accepted: %s)',
+    async (accepted) => {
+      vi.mocked(uploadAttachment).mockResolvedValueOnce(saved(1));
+      const { result, unmount } = renderHook(() => useAttachments(t, limits), { wrapper });
+      await act(async () => result.current.add([file('sent.txt')]));
+      let answer!: { resolve: () => void; reject: (cause: Error) => void };
+      const submission = new Promise<void>((resolve, reject) => (answer = { resolve, reject }));
+      const sent = result.current.whileSending(submission).catch(() => {});
+
+      unmount();
+      await act(async () => Promise.resolve());
+      expect(deleteAttachment).not.toHaveBeenCalled();
+      await act(async () => {
+        if (accepted) answer.resolve();
+        else answer.reject(new Error('refused'));
+        await sent;
+      });
+
+      if (accepted) expect(deleteAttachment).not.toHaveBeenCalled();
+      else expect(deleteAttachment).toHaveBeenCalledExactlyOnceWith(1);
+    },
+  );
+
+  it.each([
+    ['a closed page', false, false, true],
+    ['a page kept for Back', true, false, false],
+    ['a page closed mid-submission', false, true, false],
+  ] as const)('on %s', async (_name, persisted, submitting, deletes) => {
+    vi.mocked(uploadAttachment).mockResolvedValueOnce(saved(1));
+    const { result } = renderHook(() => useAttachments(t, limits), { wrapper });
+    await act(async () => result.current.add([file('draft.txt')]));
+    if (submitting) void result.current.whileSending(new Promise(() => {}));
+
+    const event = new Event('pagehide') as PageTransitionEvent;
+    Object.defineProperty(event, 'persisted', { value: persisted });
+    window.dispatchEvent(event);
+
+    if (deletes) expect(deleteAttachment).toHaveBeenCalledExactlyOnceWith(1, { keepalive: true });
+    else expect(deleteAttachment).not.toHaveBeenCalled();
+  });
+});

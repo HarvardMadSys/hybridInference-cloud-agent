@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useRef, useState, type ClipboardEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type ClipboardEvent } from 'react';
 import {
   DEFAULT_ATTACHMENT_LIMITS,
   formatBytes,
@@ -56,6 +56,63 @@ export function useAttachments(
     tally.current.count -= 1;
     tally.current.bytes -= reservation.size;
     return reservation;
+  }, []);
+  // Submissions naming these uploads, and the uploads one of them delivered.
+  // An accepted upload belongs to the task or message it went with; one that
+  // never went anywhere is the user's to discard, and leaving discards it.
+  const sending = useRef(new Set<Promise<unknown>>());
+  const claimed = useRef(new Set<number>());
+  const unsent = useCallback(
+    () =>
+      [...reservations.current.values()].flatMap((reservation) =>
+        reservation.id === undefined || claimed.current.has(reservation.id) ? [] : [reservation.id],
+      ),
+    [],
+  );
+
+  // A staged upload counts against its owner's quota until it is sent or
+  // deleted, and nothing else on screen will ever offer it again: a composer
+  // left behind would otherwise hold its files' bytes, unseen, for a day.
+  useEffect(() => {
+    const onPageHide = (event: PageTransitionEvent) => {
+      // A page kept for Back returns with these files on screen. A request
+      // still in flight may name them, and cannot be waited for here.
+      if (event.persisted || sending.current.size) return;
+      for (const id of unsent()) void deleteAttachment(id, { keepalive: true }).catch(() => {});
+    };
+    window.addEventListener('pagehide', onPageHide);
+    const pending = sending.current;
+    const delivered = claimed.current;
+    const held = reservations.current;
+    return () => {
+      window.removeEventListener('pagehide', onPageHide);
+      const ids = unsent();
+      // An upload still in flight deletes itself on arrival (see `add`).
+      held.clear();
+      tally.current = { count: 0, bytes: 0 };
+      // Deleting a file a submission in flight names would fail that
+      // submission, so wait for its answer; it may have delivered them.
+      void Promise.allSettled([...pending]).then(() => {
+        for (const id of ids) {
+          if (!delivered.has(id)) void deleteAttachment(id).catch(() => {});
+        }
+      });
+    };
+  }, [unsent]);
+
+  /** Track a submission naming the ready uploads, so leaving keeps them for it. */
+  const whileSending = useCallback(<T>(request: Promise<T>): Promise<T> => {
+    const named = [...reservations.current.values()].flatMap((reservation) =>
+      reservation.id === undefined ? [] : [reservation.id],
+    );
+    sending.current.add(request);
+    void request
+      .then(
+        () => named.forEach((id) => claimed.current.add(id)),
+        () => {},
+      )
+      .finally(() => sending.current.delete(request));
+    return request;
   }, []);
 
   const add = useCallback(
@@ -164,6 +221,7 @@ export function useAttachments(
     onPaste,
     remove,
     reset,
+    whileSending,
     /** What the create request sends. Empty until every upload has landed. */
     ids: live.flatMap((entry) => (entry.id === undefined ? [] : [entry.id])),
     uploading: live.some((entry) => entry.status === 'uploading'),

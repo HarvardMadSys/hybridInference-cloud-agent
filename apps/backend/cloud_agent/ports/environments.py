@@ -106,7 +106,7 @@ class EnvironmentRepository(Protocol):
         ...
 
     async def workspace_environment_view(self, user_id: str, thread_id: str) -> dict[str, Any]:
-        """Read bound configuration and preparation facts for an owned thread."""
+        """Read bound configuration, preparation facts and each action's latest run."""
         ...
 
     async def find_environment_run(

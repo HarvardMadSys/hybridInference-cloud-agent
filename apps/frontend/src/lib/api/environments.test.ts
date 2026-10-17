@@ -4,6 +4,7 @@ import {
   saveEnvironment,
   saveGlobalVariables,
   startEnvironmentAction,
+  testEnvironment,
 } from './environments';
 import { variableEdits } from '@/components/features/agents/environment/VariableEditor';
 import * as client from './client';
@@ -144,5 +145,24 @@ describe('environment credentials and commands', () => {
     expect(fetch.mock.calls[0][1]).toBe('/v1/agent/jobs/job/thread/environment/actions/build/runs');
     expect(fetch.mock.calls[0][2]?.body).toBeUndefined();
     expect(fetch.mock.calls[0][2]?.headers).toHaveProperty('Idempotency-Key');
+  });
+  it('resends a test whose answer was lost under its key, and starts the next one afresh', async () => {
+    const run = { id: 'run-1', state: 'queued', steps: [] };
+    const fetch = vi
+      .spyOn(client, 'fetchWithAuth')
+      .mockRejectedValueOnce(new TypeError('response lost'))
+      .mockImplementation(
+        async () =>
+          new Response(JSON.stringify(run), { headers: { 'Content-Type': 'application/json' } }),
+      );
+    await expect(testEnvironment('env-1', 3, 1)).rejects.toThrow('response lost');
+    await expect(testEnvironment('env-1', 3, 1)).resolves.toMatchObject({ id: 'run-1' });
+    await testEnvironment('env-1', 3, 1);
+    await testEnvironment('env-1', 4, 1);
+    const keys = fetch.mock.calls.map(
+      ([, , init]) => (init?.headers as Record<string, string>)['Idempotency-Key'],
+    );
+    expect(keys[1]).toBe(keys[0]);
+    expect(new Set(keys).size).toBe(3);
   });
 });

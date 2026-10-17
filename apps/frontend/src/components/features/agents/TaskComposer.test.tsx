@@ -347,6 +347,7 @@ describe('TaskComposer source-control onboarding', () => {
           environment_revision: 4,
           global_revision: 2,
         }),
+        { account: account.id },
       ),
     );
   });
@@ -422,6 +423,7 @@ describe('TaskComposer source-control onboarding', () => {
     await waitFor(() =>
       expect(createAgentJob).toHaveBeenCalledWith(
         expect.objectContaining({ repo: null, environment_id: null, global_revision: 3 }),
+        { account: account.id },
       ),
     );
     expect(vi.mocked(createAgentJob).mock.calls[0][0]).not.toHaveProperty('environment_overrides');
@@ -454,6 +456,7 @@ describe('TaskComposer source-control onboarding', () => {
           environment_id: null,
           global_revision: 0,
         }),
+        { account: account.id },
       ),
     );
   });
@@ -675,6 +678,7 @@ describe('TaskComposer source-control onboarding', () => {
         expect.objectContaining({
           task_prompt: 'Add CSV export with accessible controls and clear error feedback.',
         }),
+        { account: account.id },
       ),
     );
   });
@@ -798,7 +802,9 @@ describe('TaskComposer source-control onboarding', () => {
     await runWhenReady();
 
     await waitFor(() =>
-      expect(createAgentJob).toHaveBeenCalledWith(expect.objectContaining({ repo: null })),
+      expect(createAgentJob).toHaveBeenCalledWith(expect.objectContaining({ repo: null }), {
+        account: account.id,
+      }),
     );
     expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
   });
@@ -916,6 +922,7 @@ describe('TaskComposer source-control onboarding', () => {
     await waitFor(() =>
       expect(createAgentJob).toHaveBeenCalledWith(
         expect.objectContaining({ repo: 'owner/repository', task_prompt: 'Fix the flaky test' }),
+        { account: account.id },
       ),
     );
   });
@@ -1314,16 +1321,19 @@ describe('TaskComposer source-control onboarding', () => {
     await runWhenReady();
 
     await waitFor(() =>
-      expect(createAgentJob).toHaveBeenCalledWith({
-        repo: 'owner/repository',
-        task_prompt: 'Fix the flaky test',
-        runtime: 'claude-code',
-        model: 'model-a',
-        base_ref: 'dev',
-        environment_id: null,
-        environment_revision: 0,
-        global_revision: 0,
-      }),
+      expect(createAgentJob).toHaveBeenCalledWith(
+        {
+          repo: 'owner/repository',
+          task_prompt: 'Fix the flaky test',
+          runtime: 'claude-code',
+          model: 'model-a',
+          base_ref: 'dev',
+          environment_id: null,
+          environment_revision: 0,
+          global_revision: 0,
+        },
+        { account: account.id },
+      ),
     );
     expect(navigation.push).toHaveBeenCalledWith('/ajob_1');
   });
@@ -1357,7 +1367,9 @@ describe('TaskComposer source-control onboarding', () => {
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Review the diff' } });
     await runWhenReady();
     await waitFor(() =>
-      expect(createAgentJob).toHaveBeenCalledWith(expect.objectContaining({ skill_ids: [] })),
+      expect(createAgentJob).toHaveBeenCalledWith(expect.objectContaining({ skill_ids: [] }), {
+        account: account.id,
+      }),
     );
   });
 
@@ -1460,6 +1472,7 @@ describe('TaskComposer source-control onboarding', () => {
     await waitFor(() =>
       expect(createAgentJob).toHaveBeenCalledWith(
         expect.objectContaining({ attachment_ids: [41] }),
+        { account: account.id },
       ),
     );
   });
@@ -1510,6 +1523,7 @@ describe('TaskComposer source-control onboarding', () => {
     await waitFor(() =>
       expect(createAgentJob).toHaveBeenCalledWith(
         expect.objectContaining({ attachment_ids: [41, 42] }),
+        { account: account.id },
       ),
     );
 
@@ -1584,6 +1598,7 @@ describe('TaskComposer source-control onboarding', () => {
     await waitFor(() =>
       expect(createAgentJob).toHaveBeenCalledWith(
         expect.objectContaining({ repo: null, attachment_ids: [7] }),
+        { account: account.id },
       ),
     );
   });
@@ -2028,6 +2043,7 @@ describe('TaskComposer source-control onboarding', () => {
     await waitFor(() =>
       expect(createAgentJob).toHaveBeenCalledWith(
         expect.objectContaining({ repo: 'owner/repository', base_ref: 'dev' }),
+        { account: account.id },
       ),
     );
   });
@@ -2262,16 +2278,19 @@ describe('TaskComposer source-control onboarding', () => {
     fireEvent.keyDown(composer, { key: 'Enter' });
 
     await waitFor(() =>
-      expect(createAgentJob).toHaveBeenCalledWith({
-        repo: 'owner/repository',
-        task_prompt: 'Fix the flaky test',
-        runtime: 'claude-code',
-        model: 'model-a',
-        base_ref: 'dev',
-        environment_id: null,
-        environment_revision: 0,
-        global_revision: 0,
-      }),
+      expect(createAgentJob).toHaveBeenCalledWith(
+        {
+          repo: 'owner/repository',
+          task_prompt: 'Fix the flaky test',
+          runtime: 'claude-code',
+          model: 'model-a',
+          base_ref: 'dev',
+          environment_id: null,
+          environment_revision: 0,
+          global_revision: 0,
+        },
+        { account: account.id },
+      ),
     );
     expect(navigation.push).toHaveBeenCalledWith('/ajob_1');
   });

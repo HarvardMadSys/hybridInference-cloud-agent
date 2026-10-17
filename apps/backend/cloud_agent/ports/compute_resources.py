@@ -455,6 +455,14 @@ class ComputeResourceRepository(Protocol):
         """Count the groups still held only by this allocation's Hosts."""
         ...
 
+    async def move_out_report(self, *, allocation_id: str) -> dict[str, Any]:
+        """Whether this allocation's groups are moving out, why not, and what stays."""
+        ...
+
+    async def lose_reclaimed_groups(self, *, allocation_id: str, quiet_seconds: int) -> list[str]:
+        """Mark LOST each group that went with a machine its provider reclaimed."""
+        ...
+
     async def running_attempts(self, *, host: str) -> int:
         """Count the turns a Host is executing now."""
         ...

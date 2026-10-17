@@ -130,7 +130,11 @@ export function TerminalWorkspace({
   useEffect(() => {
     // The click that needs these has not happened yet; the fetch belongs
     // beside the create request, not after it.
-    if (active) void loadTerminalRuntime();
+    if (active) {
+      // Prefetch is best effort. A pane reports its own load failure and a
+      // later open can retry after the network recovers.
+      void loadTerminalRuntime().catch(() => {});
+    }
   }, [active]);
 
   // Keep the panes pointing at terminals that still exist, and keep one open

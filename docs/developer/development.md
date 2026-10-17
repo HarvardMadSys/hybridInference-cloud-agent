@@ -292,7 +292,34 @@ node scripts/check-server-only-guard.mjs
 node scripts/check-runtime-site-config.mjs
 ```
 
-The `make ci-frontend` target runs all six frontend checks above. Hosted CI also
+Browser recovery regressions run the production Next.js app in Chromium:
+
+```bash
+npx playwright install chromium
+npm run test:browser
+```
+
+Run these in an isolated checkout on the test host with Node 22. Chromium's
+system libraries must be provisioned there; this command does not install OS
+packages. `PLAYWRIGHT_BROWSERS_PATH` can keep the browser download in that
+checkout's disposable test directory. The runner builds the root web variant,
+allocates its own loopback ports, and shuts down its servers afterwards. Do not
+run another build against the same `.next` directory concurrently.
+
+The tests use real page navigation, browser offline mode, and failed JavaScript
+chunk downloads. A separate HTTP fixture supplies explicit API responses and
+delays or truncates responses after recording a creation. Unknown API requests
+fail the suite. This covers browser recovery and client/API interactions; it
+does not exercise the Python control plane, database, authentication provider,
+or sandbox hosts. Those still need their integration and staging checks.
+
+Failures retain screenshots and Playwright traces in `apps/frontend/test-results/`
+and an HTML report in `apps/frontend/playwright-report/`; CI uploads both. To
+iterate on fixture/spec changes after a successful root build, use
+`CLOUD_AGENT_E2E_SKIP_BUILD=1 npm run test:browser`. Rebuild after app changes.
+
+The `make ci-frontend` target runs the checks above, including browser recovery.
+Hosted CI also
 builds and smoke-tests both the root and `/agents` web variants when image
 changes are selected. See
 [CONTRIBUTING.md](../../CONTRIBUTING.md#continuous-integration) for the wider CI gate.

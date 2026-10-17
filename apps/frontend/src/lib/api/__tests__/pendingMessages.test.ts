@@ -103,6 +103,44 @@ describe('pending messages api', () => {
     expect(second['Idempotency-Key']).not.toBe(first['Idempotency-Key']);
   });
 
+  it('keeps the key of a newer message when an older send answers after it', async () => {
+    const committed = new Map<string, { body: string; id: string }>();
+    let finishFirst!: () => void;
+    let loseSecond = true;
+    fetchWithAuth.mockImplementation(async (_base: string, _path: string, init?: RequestInit) => {
+      const key = new Headers(init?.headers).get('Idempotency-Key')!;
+      const body = String(init?.body);
+      const prior = committed.get(key);
+      if (prior && prior.body !== body) {
+        return jsonResponse({ detail: { error: { type: 'idempotency_conflict' } } }, 409);
+      }
+      const saved = prior ?? { body, id: `apmsg_${committed.size + 1}` };
+      committed.set(key, saved);
+      const answer = jsonResponse({ pending: { ...waiting, id: saved.id }, job: null }, 201);
+      if (!prior && JSON.parse(body).prompt === 'first') {
+        return new Promise<Response>((resolve) => (finishFirst = () => resolve(answer)));
+      }
+      if (loseSecond) {
+        loseSecond = false;
+        throw new TypeError('second response lost after commit');
+      }
+      return answer;
+    });
+
+    // The first send is slow; the page is left and opened again, and a second
+    // message goes before the first is answered.
+    const first = submitThreadMessage('athr_late', { prompt: 'first' });
+    await expect(submitThreadMessage('athr_late', { prompt: 'second' })).rejects.toThrow(
+      'second response lost',
+    );
+    finishFirst();
+    await first;
+
+    const retried = await submitThreadMessage('athr_late', { prompt: 'second' });
+    expect(retried.pending?.id).toBe('apmsg_2');
+    expect(committed.size).toBe(2);
+  });
+
   it('rotates the key when the server reports different content under it', async () => {
     fetchWithAuth
       .mockResolvedValueOnce(

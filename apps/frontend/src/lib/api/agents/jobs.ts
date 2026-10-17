@@ -188,9 +188,19 @@ export async function getAgentJob(jobId: string): Promise<AgentJobApi> {
     : job;
 }
 
-export async function createAgentJob(body: CreateAgentJobRequest): Promise<AgentJobApi> {
+/**
+ * ``account`` scopes the pending key to the signed-in account. A key outlives
+ * a lost response so a retry can recover what the first send made, and the
+ * control plane matches it per account: another account signed in to this tab
+ * must neither reuse it nor retire it.
+ */
+export async function createAgentJob(
+  body: CreateAgentJobRequest,
+  options: { account?: string } = {},
+): Promise<AgentJobApi> {
   const request = { ...body, task_prompt: body.task_prompt.trim() };
-  return submitOnce('create', (requestId) =>
+  const scope = options.account ? `create:${options.account}` : 'create';
+  return submitOnce(scope, (requestId) =>
     fetchWithAuth(API_BASE, '/v1/agent/jobs', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Idempotency-Key': requestId },
