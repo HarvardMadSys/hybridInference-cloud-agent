@@ -2153,9 +2153,167 @@
         "title": "AdminSandboxCheckpoint",
         "type": "object"
       },
+      "AdminSandboxDeletionAttempt": {
+        "description": "Sanitized, bounded diagnostics for one deletion worker attempt.",
+        "properties": {
+          "attempt_number": {
+            "minimum": 1.0,
+            "title": "Attempt Number",
+            "type": "integer"
+          },
+          "cleanup_outcome": {
+            "default": "not_required",
+            "enum": [
+              "not_required",
+              "pending",
+              "acknowledged",
+              "unconfirmed"
+            ],
+            "title": "Cleanup Outcome",
+            "type": "string"
+          },
+          "correlation_id": {
+            "title": "Correlation Id",
+            "type": "string"
+          },
+          "failure_code": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "pattern": "^[a-z][a-z0-9_]{0,63}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Failure Code"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "host_id": {
+            "title": "Host Id",
+            "type": "string"
+          },
+          "outcome": {
+            "enum": [
+              "running",
+              "retrying",
+              "succeeded",
+              "failed",
+              "lease_expired"
+            ],
+            "title": "Outcome",
+            "type": "string"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          },
+          "retry_class": {
+            "anyOf": [
+              {
+                "enum": [
+                  "transient",
+                  "permanent",
+                  "operator_action"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retry Class"
+          },
+          "retry_scheduled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retry Scheduled"
+          },
+          "sandbox_manager_status": {
+            "anyOf": [
+              {
+                "maximum": 599.0,
+                "minimum": 100.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sandbox Manager Status"
+          },
+          "stage": {
+            "enum": [
+              "sandbox_manager_resolution",
+              "stop_verification",
+              "archive_prepare",
+              "upload_authorization",
+              "archive_upload",
+              "archive_verification",
+              "durable_receipt",
+              "container_removal",
+              "database_finalization",
+              "discard_container_removal",
+              "discard_receipt_validation",
+              "cleanup_claim_renewal",
+              "cleanup_abort"
+            ],
+            "title": "Stage",
+            "type": "string"
+          },
+          "started_at": {
+            "format": "date-time",
+            "title": "Started At",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "correlation_id",
+          "request_id",
+          "host_id",
+          "attempt_number",
+          "stage",
+          "outcome",
+          "started_at",
+          "updated_at"
+        ],
+        "title": "AdminSandboxDeletionAttempt",
+        "type": "object"
+      },
       "AdminSandboxDetail": {
         "description": "A consistent sandbox inspection with at most 128 current members.",
         "properties": {
+          "deletion_attempts": {
+            "items": {
+              "$ref": "#/components/schemas/AdminSandboxDeletionAttempt"
+            },
+            "maxItems": 50,
+            "title": "Deletion Attempts",
+            "type": "array"
+          },
           "latest_checkpoint": {
             "anyOf": [
               {

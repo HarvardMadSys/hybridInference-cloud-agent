@@ -655,6 +655,37 @@ describe('archive before physical sandbox deletion', () => {
     vi.mocked(getAdminSandbox).mockResolvedValue(detail({ state: 'stopped' }));
   });
 
+  it('shows bounded deletion-attempt diagnostics to administrators', async () => {
+    const response = detail({ state: 'stopped', deletion_state: 'failed' });
+    response.deletion_attempts = [
+      {
+        correlation_id: 'corr-001',
+        request_id: 'request-001',
+        host_id: 'host-one',
+        attempt_number: 2,
+        stage: 'archive_upload',
+        outcome: 'retrying',
+        failure_code: 'sandbox_manager_unavailable',
+        sandbox_manager_status: 503,
+        retry_class: 'transient',
+        retry_scheduled: true,
+        cleanup_outcome: 'acknowledged',
+        started_at: observedAt,
+        updated_at: observedAt,
+        finished_at: observedAt,
+      },
+    ];
+    vi.mocked(getAdminSandbox).mockResolvedValue(response);
+    mount();
+
+    const attempts = await screen.findByRole('region', { name: 'Deletion attempts' });
+    expect(attempts).toHaveTextContent('Attempt 2 · retrying · archive upload');
+    expect(attempts).toHaveTextContent('corr-001');
+    expect(attempts).toHaveTextContent('sandbox_manager_unavailable');
+    expect(attempts).toHaveTextContent('Sandbox manager HTTP 503');
+    expect(attempts).toHaveTextContent('Retry scheduled: yes · Cleanup: acknowledged');
+  });
+
   it('offers guarded force deletion for a reviewed idle sandbox still recorded as running', async () => {
     vi.mocked(getAdminSandbox).mockResolvedValue(detail({ state: 'running' }));
     vi.mocked(deleteAdminSandbox).mockResolvedValue(

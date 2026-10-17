@@ -50,6 +50,31 @@ class SandboxRepository(Protocol):
         """Lease one pending or archive-verified deletion without duplicate workers."""
         ...
 
+    async def update_admin_sandbox_deletion_attempt_stage(
+        self,
+        *,
+        correlation_id: str,
+        stage: str,
+        sandbox_manager_status: int | None = None,
+        cleanup_outcome: str | None = None,
+    ) -> bool:
+        """Record best-effort diagnostics without changing deletion fencing."""
+        ...
+
+    async def finish_admin_sandbox_deletion_attempt(
+        self,
+        *,
+        correlation_id: str,
+        outcome: str,
+        failure_code: str | None = None,
+        sandbox_manager_status: int | None = None,
+        retry_class: str | None = None,
+        retry_scheduled: bool | None = None,
+        cleanup_outcome: str = "not_required",
+    ) -> bool:
+        """Persist one attempt's sanitized result after its business decision."""
+        ...
+
     async def record_admin_sandbox_archive(
         self,
         *,

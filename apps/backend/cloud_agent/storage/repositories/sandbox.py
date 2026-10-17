@@ -7,6 +7,7 @@ they were, and only the class holding them changed.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from datetime import datetime
@@ -37,6 +38,7 @@ if TYPE_CHECKING:
     import asyncpg
 
 logger = get_logger(__name__)
+_DELETION_ATTEMPT_TELEMETRY_TIMEOUT_SECONDS = 0.25
 
 #: Work a stop or deletion must wait for: a member turn or Fork, a running job,
 #: or a workspace snapshot on its way to publication. ``$1`` is the sandbox.
@@ -377,7 +379,169 @@ class PostgresSandboxRepository:
                 str(uuid4()),
                 ttl_seconds,
             )
-        return None if row is None else dict(row)
+            if row is not None:
+                correlation_id: str | None = str(uuid4())
+                attempt_number: int | None = 1
+                try:
+                    # Keep attempt creation in the claim transaction so a
+                    # worker crash cannot leave a lease without a ledger row.
+                    # The savepoint lets a diagnostic failure roll back only
+                    # telemetry while preserving the existing deletion claim.
+                    async with asyncio.timeout(_DELETION_ATTEMPT_TELEMETRY_TIMEOUT_SECONDS):
+                        async with conn.transaction():
+                            attempt_number = int(
+                                await conn.fetchval(
+                                    """
+                                    SELECT COALESCE(MAX(attempt_number), 0) + 1
+                                    FROM agent_sandbox_deletion_attempts WHERE request_id=$1
+                                    """,
+                                    row["deletion_request_id"],
+                                )
+                            )
+                            await conn.execute(
+                                """
+                                UPDATE agent_sandbox_deletion_attempts
+                                SET outcome='lease_expired', failure_code='claim_lease_expired',
+                                    retry_class='transient', retry_scheduled=TRUE,
+                                    finished_at=NOW(), updated_at=NOW()
+                                WHERE request_id=$1 AND outcome='running'
+                                """,
+                                row["deletion_request_id"],
+                            )
+                            await conn.execute(
+                                """
+                                INSERT INTO agent_sandbox_deletion_attempts
+                                    (correlation_id, sandbox_id, request_id, host_id, attempt_number,
+                                     stage, outcome)
+                                VALUES ($1, $2, $3, $4, $5, 'sandbox_manager_resolution', 'running')
+                                """,
+                                correlation_id,
+                                row["id"],
+                                row["deletion_request_id"],
+                                row["host"],
+                                attempt_number,
+                            )
+                except Exception:
+                    correlation_id = None
+                    logger.warning(
+                        "Sandbox deletion attempt telemetry could not be initialized",
+                        extra={"sandbox_id": row["id"]},
+                    )
+        if row is None:
+            return None
+        return {
+            **dict(row),
+            "deletion_attempt_correlation_id": correlation_id,
+            "deletion_attempt_number": attempt_number,
+        }
+
+    async def update_admin_sandbox_deletion_attempt_stage(
+        self,
+        *,
+        correlation_id: str,
+        stage: str,
+        sandbox_manager_status: int | None = None,
+        cleanup_outcome: str | None = None,
+    ) -> bool:
+        """Best-effort telemetry update; it never participates in deletion fencing."""
+        allowed_stages = {
+            "sandbox_manager_resolution",
+            "stop_verification",
+            "archive_prepare",
+            "upload_authorization",
+            "archive_upload",
+            "archive_verification",
+            "durable_receipt",
+            "container_removal",
+            "database_finalization",
+            "discard_container_removal",
+            "discard_receipt_validation",
+            "cleanup_claim_renewal",
+            "cleanup_abort",
+        }
+        allowed_cleanup = {None, "not_required", "pending", "acknowledged", "unconfirmed"}
+        if stage not in allowed_stages or cleanup_outcome not in allowed_cleanup:
+            return False
+        if sandbox_manager_status is not None and not 100 <= sandbox_manager_status <= 599:
+            sandbox_manager_status = None
+        try:
+            async with self._pool.acquire() as conn, conn.transaction():
+                result = await conn.execute(
+                    """
+                    UPDATE agent_sandbox_deletion_attempts
+                    SET stage=$2,
+                        sandbox_manager_status=COALESCE($3, sandbox_manager_status),
+                        cleanup_outcome=COALESCE($4, cleanup_outcome),
+                        updated_at=NOW()
+                    WHERE correlation_id=$1 AND outcome='running'
+                    """,
+                    correlation_id,
+                    stage,
+                    sandbox_manager_status,
+                    cleanup_outcome,
+                )
+            return result.endswith(" 1")
+        except Exception:
+            logger.warning(
+                "Sandbox deletion attempt telemetry update failed",
+                extra={"correlation_id": correlation_id},
+            )
+            return False
+
+    async def finish_admin_sandbox_deletion_attempt(
+        self,
+        *,
+        correlation_id: str,
+        outcome: str,
+        failure_code: str | None = None,
+        sandbox_manager_status: int | None = None,
+        retry_class: str | None = None,
+        retry_scheduled: bool | None = None,
+        cleanup_outcome: str = "not_required",
+    ) -> bool:
+        """Best-effort attempt result written after the deletion decision commits."""
+        if outcome not in {"retrying", "succeeded", "failed", "lease_expired"}:
+            return False
+        if failure_code is not None and not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", failure_code):
+            return False
+        if retry_class not in {None, "transient", "permanent", "operator_action"}:
+            return False
+        if (failure_code is None) != (retry_class is None):
+            return False
+        if sandbox_manager_status is not None and not 100 <= sandbox_manager_status <= 599:
+            sandbox_manager_status = None
+        if cleanup_outcome not in {"not_required", "pending", "acknowledged", "unconfirmed"}:
+            cleanup_outcome = "unconfirmed"
+        if outcome == "retrying":
+            retry_scheduled = True
+        elif outcome in {"succeeded", "failed"}:
+            retry_scheduled = False
+        try:
+            async with self._pool.acquire() as conn, conn.transaction():
+                result = await conn.execute(
+                    """
+                    UPDATE agent_sandbox_deletion_attempts
+                    SET outcome=$2, failure_code=$3,
+                        sandbox_manager_status=COALESCE($4, sandbox_manager_status),
+                        retry_class=$5, retry_scheduled=$6, cleanup_outcome=$7,
+                        finished_at=NOW(), updated_at=NOW()
+                    WHERE correlation_id=$1 AND outcome='running'
+                    """,
+                    correlation_id,
+                    outcome,
+                    failure_code,
+                    sandbox_manager_status,
+                    retry_class,
+                    retry_scheduled,
+                    cleanup_outcome,
+                )
+            return result.endswith(" 1")
+        except Exception:
+            logger.warning(
+                "Sandbox deletion attempt result could not be recorded",
+                extra={"correlation_id": correlation_id},
+            )
+            return False
 
     async def record_admin_sandbox_archive(
         self,
