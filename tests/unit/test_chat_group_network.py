@@ -1310,6 +1310,25 @@ def test_a_flushed_table_gives_each_running_group_its_exceptions_back(monkeypatc
     assert guard.ssh_target_endpoints(bridge) == {("93.184.216.34", 22)}
 
 
+def test_a_relay_exception_lost_on_its_own_comes_back(monkeypatch):
+    """One endpoint gone cuts the group off from that relay as surely as both."""
+    manager, docker, guard, nft = _guarded_world(monkeypatch)
+    spec = _spec()
+    bridge = manager._network().bridge_name(_running_on_its_bridge(manager, docker, spec))
+    relays = guard.relay_endpoints(bridge)
+    _address, port = max(relays, key=lambda relay: relay[1])
+    for table in nft.tables.values():
+        if "relays" in table["sets"]:
+            table["sets"]["relays"] = [
+                element for element in table["sets"]["relays"] if element["concat"][2] != port
+            ]
+    assert len(guard.relay_endpoints(bridge)) == 1
+
+    manager.verify_host_rules([spec])
+
+    assert guard.relay_endpoints(bridge) == relays
+
+
 def test_a_running_group_whose_exceptions_are_held_costs_the_check_no_docker_call(monkeypatch):
     manager, docker, _guard, _nft = _guarded_world(monkeypatch)
     spec = _spec()
