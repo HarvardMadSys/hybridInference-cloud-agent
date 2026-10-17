@@ -1601,7 +1601,7 @@ def test_retiring_a_cli_at_settlement_does_not_hold_the_supervisor_lock():
 
     def flushing_close() -> None:
         entered.set()
-        assert release.wait(timeout=2)
+        assert release.wait(timeout=_HELD_S)
         retiring.alive = False
 
     retiring.close = flushing_close
@@ -1614,7 +1614,7 @@ def test_retiring_a_cli_at_settlement_does_not_hold_the_supervisor_lock():
     try:
         assert entered.wait(timeout=1)
         status_thread, status_outcome = _in_thread(lambda: supervisor.status(other.thread_id))
-        status_thread.join(timeout=0.5)
+        status_thread.join(timeout=_UNBLOCKED_S)
         assert not status_thread.is_alive(), "a retiring CLI's close held the supervisor lock"
         assert "error" not in status_outcome
         nxt = supervisor.acquire(
