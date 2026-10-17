@@ -4869,6 +4869,46 @@ describe('JobDetail', () => {
     await waitFor(() => expect(getAgentJobGit).toHaveBeenCalledWith('ajob_1'));
   });
 
+  it('lists a file that became a symlink once, with both halves of its change', async () => {
+    // Git writes a change of file type as a deletion and a creation under one
+    // name. Read as two files they shared one key, and selecting by name
+    // could never show the second: what the path holds now.
+    vi.mocked(getAgentJobGit).mockResolvedValue({
+      available: true,
+      branch: 'agent/ajob_1',
+      changes: [],
+      patch: [
+        'diff --git a/config.yml b/config.yml',
+        'deleted file mode 100644',
+        'index a52e282..0000000',
+        '--- a/config.yml',
+        '+++ /dev/null',
+        '@@ -1 +0,0 @@',
+        '-plain text',
+        'diff --git a/config.yml b/config.yml',
+        'new file mode 120000',
+        'index 0000000..0190743',
+        '--- /dev/null',
+        '+++ b/config.yml',
+        '@@ -0,0 +1 @@',
+        '+shared/config.yml',
+        '\\ No newline at end of file',
+      ].join('\n'),
+      commits: [],
+    });
+    render(<JobDetail job={makeJob({ state: 'done' })} />);
+    openWorkspace();
+
+    const git = screen.getByLabelText('Git workspace');
+    await waitFor(() => expect(within(git).getByText('-plain text')).toBeInTheDocument());
+    expect(
+      within(git)
+        .getAllByRole('option')
+        .map((option) => option.textContent),
+    ).toEqual(['config.yml (+1 −1)']);
+    expect(within(git).getByText('+shared/config.yml')).toBeInTheDocument();
+  });
+
   it('navigates Git views from the keyboard and associates the selected panel', async () => {
     render(<JobDetail job={makeJob({ state: 'done' })} />);
     openWorkspace();

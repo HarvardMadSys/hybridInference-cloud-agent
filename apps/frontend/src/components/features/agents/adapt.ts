@@ -394,12 +394,16 @@ export function toDiffFileDetails(patch: string): AgentDiffFile[] {
 
   for (const line of patch.split('\n')) {
     if (line.startsWith('diff --git ')) {
-      // Every header starts a new file. One the workspace cannot name is left
-      // out with its lines, rather than adding them to the file before it.
+      // Every header starts a new file but one naming the file just read: Git
+      // writes a change of file type, such as a file that became a symlink,
+      // as a deletion and a creation under one name. A file the workspace
+      // cannot name is left out with its lines, rather than adding them to
+      // the file before it.
       const path = diffHeaderPath(line);
+      inHunk = false;
+      if (current !== null && path === current.path) continue;
       current = path === null ? null : { path, add: 0, del: 0, lines: [] };
       if (current) files.push(current);
-      inHunk = false;
       continue;
     }
     if (!current || line.startsWith('index ')) continue;
