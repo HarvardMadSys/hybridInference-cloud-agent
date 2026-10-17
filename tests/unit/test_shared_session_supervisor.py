@@ -1983,6 +1983,64 @@ async def test_a_lost_group_does_not_fail_the_host_listing_of_the_others():
     assert stopped.running is False
 
 
+@pytest.mark.asyncio
+async def test_a_group_changed_while_it_is_reconciled_does_not_fail_the_host_listing():
+    """Reconciliation reads a group's archive marker outside the lock, under a check.
+
+    A container that stopped on its own keeps its bridge, so the next listing
+    reads its marker to classify that stop. Another call can change the group
+    meanwhile: here a targeted listing finds the container removed and marks
+    the group lost. The check then refused the marker's result, and the
+    refusal failed the whole host listing, so GET /sandboxes answered 409 and
+    the heartbeat carried no group's observation.
+    """
+    manager = _Manager()
+    other = replace(_spec(), thread_id="athr_other", sandbox_id="asbx_other")
+    supervisor = SharedChatSessionSupervisor(manager)
+    supervisor.register_manifest(_spec(), _members())
+    supervisor.register_manifest(other, [replace(_members()[0], thread_id=other.thread_id)])
+    name = _spec().container_name
+    manager.items[name] = replace(
+        manager.items[name], running=False, status=ChatSandboxStatus.STOPPED
+    )
+    read_marker = manager.read_stopped_final_archive_marker_optional
+    concurrent: list[BaseException] = []
+
+    def removed_while_read(spec, *, expected_container_id):
+        if spec.sandbox_id == _spec().sandbox_id and name in manager.items:
+            del manager.items[name]
+            try:
+                supervisor.list_for_thread("athr_source")
+            except RetainedChatLost as exc:
+                concurrent.append(exc)
+        return read_marker(spec, expected_container_id=expected_container_id)
+
+    manager.read_stopped_final_archive_marker_optional = removed_while_read
+    app = create_app(
+        backend=ProcessBackend(acknowledged_unsafe=True),
+        token="sandbox-manager-secret",
+        shared_session_supervisor=supervisor,
+    )
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://sandbox_manager"
+    ) as client:
+        listed = await client.get(
+            "/sandboxes", headers={"X-Agent-Workspace-Token": "sandbox-manager-secret"}
+        )
+
+    assert len(concurrent) == 1
+    assert listed.status_code == 200, listed.text
+    groups = {row["sandbox_id"]: row for row in listed.json()["sandboxes"]}
+    assert set(groups) == {"asbx_shared", "asbx_other"}
+    assert {member["context_status"] for member in groups["asbx_shared"]["members"]} == {"lost"}
+    assert groups["asbx_other"]["running"] is True
+    assert manager.pruned_specs == [_spec(), other]
+    assert supervisor._members["athr_source"].container_lost is True
+    rows = {row.thread_id: row.context_status for row in supervisor.list()}
+    assert rows == {"athr_source": "lost", "athr_peer": "lost", "athr_other": "live"}
+    assert supervisor.stop_if_idle(other.thread_id, generation=other.generation).running is False
+
+
 def test_status_blocks_an_externally_stopped_group_without_a_final_marker():
     manager = _Manager()
     spec = _spec()
@@ -7590,8 +7648,12 @@ def test_lifecycle_io_leaves_other_groups_available(monkeypatch, operation):
 
 @pytest.mark.parametrize("operation", ["idle_stop", "begin_archive", "reconcile_marker"])
 @pytest.mark.parametrize("fence", ["index", "lifecycle", "spec", "container"])
-def test_lifecycle_check_rejects_superseded_observations(monkeypatch, operation, fence):
-    """An observation cannot commit to a group whose authority changed."""
+def test_lifecycle_check_rejects_superseded_observations(monkeypatch, caplog, operation, fence):
+    """An observation cannot commit to a group whose authority changed.
+
+    Reconciliation rejects it for that group alone: it logs the refusal and
+    goes on with the host's other groups rather than failing their listing.
+    """
     manager = _Manager()
     supervisor = SharedChatSessionSupervisor(manager)
     spec = _spec()
@@ -7631,8 +7693,19 @@ def test_lifecycle_check_rejects_superseded_observations(monkeypatch, operation,
                 container_id=observed.container_id,
             )
 
-    with pytest.raises(SessionLeaseLost, match="lifecycle changed"):
-        call()
+    if operation == "reconcile_marker":
+        with caplog.at_level(logging.WARNING):
+            call()
+        refusals = [
+            str(getattr(record, "detail", ""))
+            for record in caplog.records
+            if getattr(record, "event", None) == "shared_sandbox_reconcile_group_failed"
+        ]
+        assert len(refusals) == 1
+        assert "lifecycle changed" in refusals[0]
+    else:
+        with pytest.raises(SessionLeaseLost, match="lifecycle changed"):
+            call()
     assert manager.stop_count == 0
     assert group.inspection.running is True
     assert group.archive_request_id is None

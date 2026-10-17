@@ -1447,16 +1447,36 @@ class SharedChatSessionSupervisor:
                     found.extend(self._descriptors(group))
                     continue
                 check = self._begin_lifecycle_check_locked(group)
+            reconciled: builtins.list[SharedSessionDescriptor] | None = None
             try:
-                descriptors = self._reconcile_checked_group(
+                reconciled = self._reconcile_checked_group(
                     check, inspection, discovered=discovered, read_marker=read_marker
+                )
+            except SandboxError as exc:
+                # Another call changed this group while its marker was read
+                # without the lock, or the group was lost while its recovery
+                # failed. It is reported as it stands and reconciled again by
+                # the next listing; it must not cost every other group on this
+                # host its listing.
+                logger.warning(
+                    "shared sandbox group was not reconciled",
+                    extra={
+                        "event": "shared_sandbox_reconcile_group_failed",
+                        "sandbox_id": spec.sandbox_id,
+                        "generation": spec.generation,
+                        "detail": str(exc)[:300],
+                    },
                 )
             finally:
                 with self._lock:
                     self._end_lifecycle_check_locked(check)
             with self._lock:
+                if reconciled is None:
+                    if self._groups.get(spec.sandbox_id) is group:
+                        found.extend(self._descriptors(group))
+                    continue
                 found.extend(
-                    replace(item, group_busy=not self._is_quiescent(group)) for item in descriptors
+                    replace(item, group_busy=not self._is_quiescent(group)) for item in reconciled
                 )
         self._manager.prune_orphan_networks(specs)
         return found

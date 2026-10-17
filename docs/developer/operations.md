@@ -2279,7 +2279,11 @@ chat containers untouched.
 At sandbox manager startup, reconciliation stops running orphans before readmission.
 It never adopts resident processes on the strength of an unproven in-memory
 lease or infers an active turn from an empty lease table. Docker observations
-travel in the enrolled heartbeat. The control plane checks the durable attempt
+travel in the enrolled heartbeat. A group the host listing cannot reconcile,
+because its container was lost or relabelled or another call changed it while
+its archive marker was read, is logged as `shared_sandbox_reconcile_group_failed`
+and reported as it stands; it never costs the host's other groups their
+observations. The control plane checks the durable attempt
 fence and idle deadline before returning a generation-scoped stop command; the
 next heartbeat records Docker's STOPPED state.
 
