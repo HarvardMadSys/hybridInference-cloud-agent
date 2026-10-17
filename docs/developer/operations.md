@@ -1547,7 +1547,8 @@ GitHub repositories retain the complete Agent lifecycle: checkout, branch
 discovery, push, and draft PR publishing use short-lived GitHub App installation
 tokens. Draft PR titles summarize the captured user and assistant messages across
 the shared session through a bounded inference request under a separate,
-owner-scoped grant. A Fork's copies of earlier turns are read once, in the chat
+owner-scoped grant, which each try of a publication mints for itself and revokes
+when its title is written. A Fork's copies of earlier turns are read once, in the chat
 they were copied from. A session longer than one request is summarized in at
 most four fragments, all at once, and the title is written from their summaries
 within the same one-minute budget. A longer session is not sent to the model at

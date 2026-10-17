@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from typing import Any
 from unittest.mock import AsyncMock
 
 import httpx
@@ -16,6 +17,7 @@ from cloud_agent.pr_titles import generate_pr_title
 _JOB = {
     "job_id": "ajob_2",
     "snapshot_id": 9,
+    "publish_attempt_count": 0,
     "user_id": "owner",
     "model": "session-model",
     "session_messages": [
@@ -81,11 +83,70 @@ async def test_title_summarizes_all_user_and_assistant_messages():
     grants.mint.assert_awaited_once_with(
         user_id="owner",
         job_id="ajob_2",
-        attempt_id="pr-title:9",
+        attempt_id="pr-title:9:0",
         models=["session-model"],
         ttl_seconds=120,
     )
     grants.revoke.assert_awaited_once_with("publication-grant")
+
+
+class _IdempotentGrants:
+    """The gateway's mint: one grant per job and attempt, kept after its revoke."""
+
+    def __init__(self) -> None:
+        self.issued: dict[tuple[str, str], dict[str, Any]] = {}
+        self.revoked: set[str] = set()
+
+    async def mint(
+        self, *, job_id: str, attempt_id: str, models: list[str], **_kwargs: Any
+    ) -> dict[str, Any]:
+        number = len(self.issued) + 1
+        return self.issued.setdefault(
+            (job_id, attempt_id),
+            {"grant_id": f"grant-{number}", "token": f"token-{number}", "allowed_models": models},
+        )
+
+    async def revoke(self, grant_id: str) -> bool:
+        self.revoked.add(grant_id)
+        return True
+
+    def live(self, token: str) -> bool:
+        return any(
+            grant["token"] == token and grant["grant_id"] not in self.revoked
+            for grant in self.issued.values()
+        )
+
+
+async def test_a_retried_publication_titles_its_pull_request_again():
+    """A publication tried again after its title was written is titled again.
+
+    The title's grant is revoked once the title is written, and the gateway's
+    mint returns the grant a job and attempt already have, revoked or not.
+    Every try of one snapshot's publication asked for the same attempt, so a
+    try after a failed pull-request call was handed the revoked grant, every
+    completion was refused, and the retry renamed the pull request to the
+    fallback title.
+    """
+    grants = _IdempotentGrants()
+
+    def handle(request):
+        token = request.headers["Authorization"].removeprefix("Bearer ")
+        if not grants.live(token):
+            return httpx.Response(401, json={"error": {"type": "invalid_grant"}})
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": "Add retry backoff"}}]}
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        titles = [
+            await generate_pr_title(
+                {**_JOB, "publish_attempt_count": count}, ["retry.py"], grants=grants, client=client
+            )
+            for count in (0, 1)
+        ]
+
+    assert titles == ["[agent] Add retry backoff"] * 2
+    assert len(grants.issued) == len(grants.revoked) == 2
 
 
 async def test_long_transcripts_include_every_message_through_chunk_summaries():

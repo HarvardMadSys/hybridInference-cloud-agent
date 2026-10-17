@@ -97,7 +97,8 @@ async def generate_pr_title(
     transcript longer than :data:`_MAX_FRAGMENTS` chunks returns None without
     asking the model anything. The publication owns its own grant: it cannot
     revive or revoke an Agent turn's credential, and it never renews this
-    bounded capability.
+    bounded capability. Each try of a publication has its own, because each
+    try revokes the one it used.
     """
     base_url = (setting_env(ENV_BASE_URL) or "").strip().rstrip("/")
     model = job.get("model")
@@ -131,10 +132,14 @@ async def generate_pr_title(
             fallback("conversation_too_long")
             return None
         async with asyncio.timeout(_TOTAL_TIMEOUT_S), contextlib.AsyncExitStack() as stack:
+            # The gateway's mint is idempotent on (job, attempt), even after
+            # revoke, and every try revokes its grant: a retry asking for the
+            # same attempt had every completion refused, and renamed its pull
+            # request to the fallback title. A claim's attempt count is its own.
             grant = await grants.mint(
                 user_id=job["user_id"],
                 job_id=job["job_id"],
-                attempt_id=f"pr-title:{job['snapshot_id']}",
+                attempt_id=f"pr-title:{job['snapshot_id']}:{job['publish_attempt_count']}",
                 models=[model],
                 ttl_seconds=120,
             )
