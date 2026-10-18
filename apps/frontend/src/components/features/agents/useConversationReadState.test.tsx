@@ -34,6 +34,7 @@ const page = (
   user_id: userId,
   receipts,
   next_cursor: null,
+  sync_cursor: null,
 });
 
 function row(overrides: Partial<AgentJob> = {}, key = 'thread-1'): SidebarConversation {
@@ -284,14 +285,17 @@ describe('conversation completion read receipts', () => {
     expect(save).toHaveBeenCalledTimes(2);
   });
 
-  it('loads every cloud page before declaring read state ready', async () => {
+  it('shows confirmed rows while later cloud pages are still loading', async () => {
     let finish!: (value: AgentReadReceiptsResponse) => void;
-    list.mockResolvedValueOnce({ ...page([cloudReceipt]), next_cursor: 'thread-1' });
+    list.mockResolvedValueOnce({ ...page([cloudReceipt]), next_cursor: '1', sync_cursor: '1' });
     list.mockImplementationOnce(() => new Promise((resolve) => (finish = resolve)));
     const { result } = renderHook(() => useConversationReadState('alice'));
     await waitFor(() => expect(list).toHaveBeenCalledTimes(2));
     expect(result.current.ready).toBe(false);
-    expect(list.mock.calls[1][0]).toBe('thread-1');
+    expect(result.current.isReady(row({ currentAttemptId: 2 }))).toBe(true);
+    expect(result.current.isUnread(row({ currentAttemptId: 2 }))).toBe(true);
+    expect(result.current.isReady(row({ id: 'job-2' }, 'thread-2'))).toBe(false);
+    expect(list.mock.calls[1][0]).toBe('1');
     await act(async () =>
       finish(page([{ ...cloudReceipt, thread_id: 'thread-2', job_id: 'job-2' }])),
     );
@@ -435,5 +439,97 @@ describe('conversation completion read receipts', () => {
     await act(async () => markConversationRead(row(), 'alice'));
     expect(save.mock.calls[0][0]).toEqual([{ job_id: 'job-1', attempt_id: 1 }]);
     expect(result.current.isUnread(row())).toBe(false);
+  });
+
+  it('queues reconnection during a failing write and retries even after the tab is hidden', async () => {
+    list.mockResolvedValue(page());
+    let fail!: (error: Error) => void;
+    save.mockImplementationOnce(() => new Promise((_, reject) => (fail = reject)));
+    const { result } = renderHook(() => useConversationReadState('alice'));
+    await waitFor(() => expect(result.current.ready).toBe(true));
+    act(() => result.current.markRead(row()));
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
+    act(() => {
+      window.dispatchEvent(new Event('online'));
+      window.dispatchEvent(new Event('online'));
+    });
+    await act(async () => fail(new Error('old request failed')));
+    expect(list).toHaveBeenCalledTimes(2);
+    expect(save).toHaveBeenCalledTimes(2);
+    expect(save.mock.calls[1][0]).toEqual([{ job_id: 'job-1', attempt_id: 1 }]);
+    expect(result.current.isUnread(row())).toBe(false);
+  });
+
+  it('does not run queued retries after an account switch', async () => {
+    list.mockResolvedValue(page());
+    let fail!: (error: Error) => void;
+    save.mockImplementationOnce(() => new Promise((_, reject) => (fail = reject)));
+    const first = renderHook(({ id }) => useConversationReadState(id), {
+      initialProps: { id: 'alice' },
+    });
+    await waitFor(() => expect(first.result.current.ready).toBe(true));
+    act(() => first.result.current.markRead(row()));
+    act(() => window.dispatchEvent(new Event('online')));
+    list.mockResolvedValue(page([], 'bob'));
+    first.rerender({ id: 'bob' });
+    await act(async () => fail(new Error('old request failed')));
+    expect(save).toHaveBeenCalledOnce();
+    expect(localStorage.getItem(conversationReadStorageKey('bob'))).toBeNull();
+  });
+
+  it('remembers ignored uploads across remounts but still sends newer reads', async () => {
+    list.mockResolvedValue(page());
+    markConversationRead(row(), 'alice');
+    const first = renderHook(() => useConversationReadState('alice'));
+    await waitFor(() => expect(save).toHaveBeenCalledOnce());
+    await act(async () => {});
+    first.unmount();
+    const second = renderHook(() => useConversationReadState('alice'));
+    await waitFor(() => expect(second.result.current.ready).toBe(true));
+    expect(save).toHaveBeenCalledOnce();
+    await act(async () => second.result.current.markRead(row({ currentAttemptId: 2 })));
+    expect(save).toHaveBeenCalledTimes(2);
+    expect(save.mock.calls[1][0]).toEqual([{ job_id: 'job-1', attempt_id: 2 }]);
+  });
+
+  it('does not POST cloud receipts or acknowledged imports received from another tab', async () => {
+    list.mockResolvedValue(page());
+    const { result } = renderHook(() => useConversationReadState('alice'));
+    await waitFor(() => expect(result.current.ready).toBe(true));
+    const receipts = { 'thread-1': { jobId: 'job-1', attemptId: 1, turnNo: 1 } };
+    const cache = JSON.stringify({ version: 2, receipts, acknowledged: receipts });
+    localStorage.setItem(conversationReadStorageKey('alice'), cache);
+    await act(async () =>
+      window.dispatchEvent(
+        new StorageEvent('storage', {
+          key: conversationReadStorageKey('alice'),
+          newValue: cache,
+        }),
+      ),
+    );
+    expect(result.current.isUnread(row())).toBe(false);
+    expect(save).not.toHaveBeenCalled();
+    await act(async () => result.current.markRead(row({ currentAttemptId: 2 })));
+    expect(save).toHaveBeenCalledOnce();
+  });
+
+  it('resumes incremental paging after failure without jumping past another device on upload', async () => {
+    list.mockResolvedValueOnce({ ...page([cloudReceipt]), next_cursor: '10', sync_cursor: '10' });
+    list.mockRejectedValueOnce(new Error('second page offline'));
+    const { result } = renderHook(() => useConversationReadState('alice'));
+    await waitFor(() => expect(result.current.ready).toBe(true));
+    save.mockResolvedValue({ ...page(), sync_cursor: '99' });
+    await act(async () => result.current.markRead(row({ currentAttemptId: 2 })));
+    list.mockResolvedValue({
+      ...page([{ ...cloudReceipt, thread_id: 'thread-2', job_id: 'job-2' }]),
+      sync_cursor: '11',
+    });
+    await act(async () => window.dispatchEvent(new Event('focus')));
+    expect(list.mock.calls[2][0]).toBe('10');
+    expect(result.current.isUnread(row({ id: 'job-2' }, 'thread-2'))).toBe(false);
+    list.mockResolvedValue({ ...page(), sync_cursor: '11' });
+    await act(async () => window.dispatchEvent(new Event('focus')));
+    expect(list.mock.calls[3][0]).toBe('11');
+    expect(save).toHaveBeenCalledOnce();
   });
 });

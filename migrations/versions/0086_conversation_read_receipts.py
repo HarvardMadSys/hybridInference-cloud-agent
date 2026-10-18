@@ -22,6 +22,7 @@ def upgrade() -> None:
             job_id TEXT NOT NULL,
             turn_no INTEGER NOT NULL CHECK (turn_no > 0),
             attempt_id BIGINT,
+            revision BIGSERIAL NOT NULL,
             PRIMARY KEY (user_id, thread_id),
             FOREIGN KEY (thread_id, user_id)
                 REFERENCES agent_threads (id, user_id) ON DELETE CASCADE,
@@ -31,6 +32,14 @@ def upgrade() -> None:
                 REFERENCES agent_attempts (job_id, id) ON DELETE CASCADE
         )
         """
+    )
+    op.execute(
+        "CREATE INDEX idx_agent_read_receipts_revision "
+        "ON agent_conversation_read_receipts (user_id, revision)"
+    )
+    op.execute(
+        "CREATE INDEX idx_agent_read_receipts_job_attempt "
+        "ON agent_conversation_read_receipts (job_id, attempt_id)"
     )
 
 

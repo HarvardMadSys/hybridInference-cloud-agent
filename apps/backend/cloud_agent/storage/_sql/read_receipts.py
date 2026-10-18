@@ -44,7 +44,7 @@ async def merge_read_receipts(
         SELECT $1, thread_id, job_id, turn_no, attempt_id FROM incoming ORDER BY thread_id
         ON CONFLICT (user_id, thread_id) DO UPDATE
         SET job_id = EXCLUDED.job_id, turn_no = EXCLUDED.turn_no,
-            attempt_id = EXCLUDED.attempt_id
+            attempt_id = EXCLUDED.attempt_id, revision = EXCLUDED.revision
         WHERE (saved.turn_no, COALESCE(saved.attempt_id, 0))
             < (EXCLUDED.turn_no, COALESCE(EXCLUDED.attempt_id, 0))
         RETURNING thread_id, job_id, turn_no, attempt_id

@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Protocol
 
+from cloud_agent.domain.read_receipts import READ_RECEIPT_BATCH_SIZE
+
 if TYPE_CHECKING:
     from cloud_agent.domain.execution import JobStreamState
 
@@ -19,7 +21,7 @@ class ConversationQueries(Protocol):
     """Port: reading conversations, their jobs, and the project list."""
 
     async def list_read_receipts(
-        self, *, user_id: str, after: str | None = None, limit: int = 200
+        self, *, user_id: str, after: int | None = None, limit: int = READ_RECEIPT_BATCH_SIZE
     ) -> dict[str, Any]:
         """Page the owner's completion receipts, including archived but not deleted chats."""
         ...

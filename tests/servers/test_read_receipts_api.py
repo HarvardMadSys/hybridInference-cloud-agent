@@ -23,7 +23,11 @@ def app(monkeypatch):
     application.include_router(catalog.router)
     install_admin_no_store(application, prefixes=(PATH,))
     queries = AsyncMock()
-    queries.list_read_receipts.return_value = {"receipts": [], "next_cursor": "thread-next"}
+    queries.list_read_receipts.return_value = {
+        "receipts": [],
+        "next_cursor": "12",
+        "sync_cursor": "12",
+    }
     commands = AsyncMock()
     commands.merge_read_receipts.return_value = [
         {"thread_id": "thread-1", "job_id": "job-1", "turn_no": 2, "attempt_id": 7}
@@ -51,9 +55,7 @@ async def test_owner_is_session_bound_and_client_cannot_choose_thread_or_turn(ap
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="https://agent.example"
     ) as client:
-        read = await client.get(
-            PATH + "?user_id=bob&cursor=thread-before&limit=2", headers=headers()
-        )
+        read = await client.get(PATH + "?user_id=bob&cursor=10&limit=2", headers=headers())
         saved = await client.post(
             PATH,
             headers=headers(),
@@ -66,12 +68,17 @@ async def test_owner_is_session_bound_and_client_cannot_choose_thread_or_turn(ap
         )
     assert read.status_code == saved.status_code == 200
     assert read.headers["Cache-Control"] == saved.headers["Cache-Control"] == "no-store"
-    assert read.json() == {"user_id": "alice", "receipts": [], "next_cursor": "thread-next"}
+    assert read.json() == {
+        "user_id": "alice",
+        "receipts": [],
+        "next_cursor": "12",
+        "sync_cursor": "12",
+    }
     assert saved.json()["receipts"] == [
         {"thread_id": "thread-1", "job_id": "job-1", "turn_no": 2, "attempt_id": 7}
     ]
     app.state.queries.list_read_receipts.assert_awaited_once_with(
-        user_id="alice", after="thread-before", limit=2
+        user_id="alice", after=10, limit=2
     )
     app.state.commands.merge_read_receipts.assert_awaited_once_with(
         user_id="alice", receipts=[{"job_id": "job-1", "attempt_id": 7}]
@@ -113,3 +120,13 @@ async def test_requires_owner_authentication_and_bounds_batches(app):
         assert result.status_code == 422
     app.state.queries.list_read_receipts.assert_not_awaited()
     app.state.commands.merge_read_receipts.assert_not_awaited()
+
+
+@pytest.mark.parametrize("cursor", ["-1", "9223372036854775808", "thread-id"])
+async def test_rejects_invalid_revision_cursors(app, cursor):
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="https://agent.example"
+    ) as client:
+        result = await client.get(PATH, params={"cursor": cursor}, headers=headers())
+    assert result.status_code == 422
+    app.state.queries.list_read_receipts.assert_not_awaited()

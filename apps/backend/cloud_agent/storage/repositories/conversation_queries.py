@@ -13,6 +13,7 @@ import json
 from typing import TYPE_CHECKING
 
 from cloud_agent.domain.execution import JobStreamState
+from cloud_agent.domain.read_receipts import READ_RECEIPT_BATCH_SIZE
 from cloud_agent.storage._sql.jobs import (
     CONVERSATION_STATE_SQL,
     JOB_SELECT,
@@ -45,28 +46,36 @@ class PostgresConversationQueries:
         self._pool = pool
 
     async def list_read_receipts(
-        self, *, user_id: str, after: str | None = None, limit: int = 200
+        self, *, user_id: str, after: int | None = None, limit: int = READ_RECEIPT_BATCH_SIZE
     ) -> dict[str, Any]:
-        """Page receipts independently of the visible sidebar's history window."""
-        if not 1 <= limit <= 200:
-            raise ValueError("Read receipt page size must be between 1 and 200")
+        """Page changed receipts after a committed revision, including an empty checkpoint."""
+        if not 1 <= limit <= READ_RECEIPT_BATCH_SIZE:
+            raise ValueError(
+                f"Read receipt page size must be between 1 and {READ_RECEIPT_BATCH_SIZE}"
+            )
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                SELECT r.thread_id, r.job_id, r.turn_no, r.attempt_id
+                SELECT r.thread_id, r.job_id, r.turn_no, r.attempt_id, r.revision
                 FROM agent_conversation_read_receipts r
                 JOIN agent_threads t ON t.id = r.thread_id AND t.user_id = r.user_id
                 WHERE r.user_id = $1 AND t.deleted_at IS NULL
-                  AND ($2::text IS NULL OR r.thread_id > $2)
-                ORDER BY r.thread_id LIMIT $3
+                  AND r.revision > $2
+                ORDER BY r.revision LIMIT $3
                 """,
                 user_id,
-                after,
+                after or 0,
                 limit + 1,
             )
+        page = rows[:limit]
+        cursor = str(page[-1]["revision"]) if page else str(after or 0)
         return {
-            "receipts": [dict(row) for row in rows[:limit]],
-            "next_cursor": rows[limit - 1]["thread_id"] if len(rows) > limit else None,
+            "receipts": [
+                {key: value for key, value in dict(row).items() if key != "revision"}
+                for row in page
+            ],
+            "next_cursor": cursor if len(rows) > limit else None,
+            "sync_cursor": cursor,
         }
 
     async def get_thread_for_job(self, *, job_id: str, user_id: str) -> dict[str, Any] | None:

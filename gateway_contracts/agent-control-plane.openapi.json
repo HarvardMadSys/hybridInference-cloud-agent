@@ -6561,6 +6561,18 @@
             "title": "Receipts",
             "type": "array"
           },
+          "sync_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "GET checkpoint for the next incremental poll; null on POST.",
+            "title": "Sync Cursor"
+          },
           "user_id": {
             "title": "User Id",
             "type": "string"
@@ -28037,10 +28049,9 @@
             "schema": {
               "anyOf": [
                 {
-                  "maxLength": 128,
-                  "minLength": 1,
-                  "pattern": "^[^\\x00]+$",
-                  "type": "string"
+                  "maximum": 9223372036854775807,
+                  "minimum": 0,
+                  "type": "integer"
                 },
                 {
                   "type": "null"

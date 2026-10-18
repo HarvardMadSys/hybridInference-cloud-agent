@@ -45,10 +45,9 @@ async def test_receipts_survive_new_storage_and_do_not_change_activity(pool, sto
     assert before == after
     new_client = Storage(pool)
     page = await new_client.conversation_queries.list_read_receipts(user_id="user-1")
-    assert page == {
-        "receipts": [{**receipt, "thread_id": job["thread_id"], "turn_no": 1}],
-        "next_cursor": None,
-    }
+    assert page["receipts"] == [{**receipt, "thread_id": job["thread_id"], "turn_no": 1}]
+    assert page["next_cursor"] is None
+    assert int(page["sync_cursor"]) > 0
     assert (
         await store.conversation_commands.merge_read_receipts(user_id="user-1", receipts=[receipt])
         == []
@@ -139,7 +138,7 @@ async def test_cancelled_without_attempt_pagination_archive_and_deletion(pool, s
     cursor = None
     while True:
         page = await store.conversation_queries.list_read_receipts(
-            user_id="user-1", limit=1, after=cursor
+            user_id="user-1", limit=1, after=int(cursor) if cursor else None
         )
         seen.extend(page["receipts"])
         cursor = page["next_cursor"]
@@ -153,3 +152,95 @@ async def test_cancelled_without_attempt_pagination_archive_and_deletion(pool, s
         )
     remaining = await store.conversation_queries.list_read_receipts(user_id="user-1")
     assert len(remaining["receipts"]) == 2
+
+
+async def test_delta_pages_include_updates_without_replaying_unchanged_history(pool, store):
+    first, second = await _create_job(store), await _create_job(store)
+    old = await finish(pool, first)
+    await store.conversation_commands.merge_read_receipts(user_id="user-1", receipts=[old])
+    initial = await store.conversation_queries.list_read_receipts(user_id="user-1")
+    cursor = int(initial["sync_cursor"])
+    await store.conversation_commands.merge_read_receipts(user_id="user-1", receipts=[old])
+    empty = await store.conversation_queries.list_read_receipts(user_id="user-1", after=cursor)
+    assert empty == {"receipts": [], "next_cursor": None, "sync_cursor": str(cursor)}
+
+    new = await finish(pool, second)
+    await store.conversation_commands.merge_read_receipts(user_id="user-1", receipts=[new])
+    retry = await finish(pool, first, 2)
+    await store.conversation_commands.merge_read_receipts(user_id="user-1", receipts=[retry])
+    page = await store.conversation_queries.list_read_receipts(
+        user_id="user-1", after=cursor, limit=1
+    )
+    assert page["receipts"] == [{**new, "thread_id": second["thread_id"], "turn_no": 1}]
+    assert page["next_cursor"] == page["sync_cursor"]
+    last = await store.conversation_queries.list_read_receipts(
+        user_id="user-1", after=int(page["next_cursor"]), limit=1
+    )
+    assert last["receipts"] == [{**retry, "thread_id": first["thread_id"], "turn_no": 1}]
+    assert last["next_cursor"] is None
+    assert int(last["sync_cursor"]) > int(page["sync_cursor"]) > cursor
+    await store.conversation_commands.merge_read_receipts(user_id="user-1", receipts=[old])
+    assert (
+        await store.conversation_queries.list_read_receipts(
+            user_id="user-1", after=int(last["sync_cursor"])
+        )
+    )["receipts"] == []
+
+
+async def test_polling_cannot_skip_a_receipt_that_commits_late(pool, store, monkeypatch):
+    from cloud_agent.storage.repositories import conversation_commands
+
+    first, second = await _create_job(store), await _create_job(store)
+    first_receipt, second_receipt = await finish(pool, first), await finish(pool, second)
+    written, release = asyncio.Event(), asyncio.Event()
+    merge = conversation_commands.merge_read_receipts
+
+    async def pause_first_commit(conn, *, user_id, receipts):
+        result = await merge(conn, user_id=user_id, receipts=receipts)
+        if receipts == [first_receipt]:
+            written.set()
+            await release.wait()
+        return result
+
+    monkeypatch.setattr(conversation_commands, "merge_read_receipts", pause_first_commit)
+    first_write = asyncio.create_task(
+        store.conversation_commands.merge_read_receipts(user_id="user-1", receipts=[first_receipt])
+    )
+    await asyncio.wait_for(written.wait(), 5)
+    second_write = asyncio.create_task(
+        store.conversation_commands.merge_read_receipts(user_id="user-1", receipts=[second_receipt])
+    )
+    try:
+        # A later revision must not become visible while an earlier one is
+        # uncommitted, or the next poll could permanently skip the earlier read.
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(asyncio.shield(second_write), 0.1)
+        during = await store.conversation_queries.list_read_receipts(user_id="user-1")
+        assert during == {"receipts": [], "next_cursor": None, "sync_cursor": "0"}
+    finally:
+        release.set()
+        await asyncio.gather(first_write, second_write)
+    after = await store.conversation_queries.list_read_receipts(
+        user_id="user-1", after=int(during["sync_cursor"])
+    )
+    assert [receipt["job_id"] for receipt in after["receipts"]] == [first["id"], second["id"]]
+
+
+async def test_attempt_cleanup_has_an_index_and_cascades_receipts(pool, store):
+    job = await _create_job(store)
+    receipt = await finish(pool, job)
+    await store.conversation_commands.merge_read_receipts(user_id="user-1", receipts=[receipt])
+    async with pool.acquire() as conn, conn.transaction():
+        await conn.execute("SET LOCAL enable_seqscan = off")
+        plan = await conn.fetch(
+            "EXPLAIN SELECT 1 FROM agent_conversation_read_receipts "
+            "WHERE job_id = $1 AND attempt_id = $2",
+            job["id"],
+            receipt["attempt_id"],
+        )
+        assert "idx_agent_read_receipts_job_attempt" in str(plan)
+        await conn.execute(
+            "UPDATE agent_jobs SET current_attempt_id = NULL WHERE id = $1", job["id"]
+        )
+        await conn.execute("DELETE FROM agent_attempts WHERE id = $1", receipt["attempt_id"])
+    assert (await store.conversation_queries.list_read_receipts(user_id="user-1"))["receipts"] == []

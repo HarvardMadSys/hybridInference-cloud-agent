@@ -7,6 +7,7 @@ import {
 import type { SidebarConversation } from './useConversationList';
 import { getConversationState } from './conversationState';
 
+const READ_RECEIPT_BATCH_SIZE = 200;
 const COMPLETED_STATES = new Set(['done', 'needs_review', 'failed', 'cancelled']);
 interface Receipt {
   jobId: string;
@@ -14,6 +15,10 @@ interface Receipt {
   turnNo: number | null;
 }
 type Receipts = Record<string, Receipt>;
+interface ReadCache {
+  receipts: Receipts;
+  acknowledged: Receipts;
+}
 interface ReadState {
   userId: string | undefined;
   receipts: Receipts;
@@ -62,46 +67,72 @@ function fromApi(receipts: AgentReadReceiptApi[]): Receipts {
     ]),
   );
 }
-function parseReceipts(raw: string | null): Receipts {
+function parseReceipts(data: unknown): Receipts {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return {};
+  const receipts: Receipts = {};
+  for (const [key, value] of Object.entries(data)) {
+    if (
+      !value ||
+      typeof value !== 'object' ||
+      !('jobId' in value) ||
+      typeof value.jobId !== 'string' ||
+      !value.jobId ||
+      value.jobId.length > 128 ||
+      value.jobId.includes('\0')
+    )
+      continue;
+    receipts[key] = {
+      jobId: value.jobId,
+      attemptId: numberOrNull('attemptId' in value ? value.attemptId : null),
+      turnNo: numberOrNull('turnNo' in value ? value.turnNo : null),
+    };
+  }
+  return receipts;
+}
+function parseCache(raw: string | null): ReadCache {
   try {
     const data = JSON.parse(raw ?? 'null');
-    if (
-      data?.version !== 2 ||
-      !data.receipts ||
-      typeof data.receipts !== 'object' ||
-      Array.isArray(data.receipts)
-    )
-      return {};
-    const receipts: Receipts = {};
-    for (const [key, value] of Object.entries(data.receipts)) {
-      if (
-        !value ||
-        typeof value !== 'object' ||
-        !('jobId' in value) ||
-        typeof value.jobId !== 'string' ||
-        !value.jobId ||
-        value.jobId.length > 128 ||
-        value.jobId.includes('\0')
-      )
-        continue;
-      receipts[key] = {
-        jobId: value.jobId,
-        attemptId: numberOrNull('attemptId' in value ? value.attemptId : null),
-        turnNo: numberOrNull('turnNo' in value ? value.turnNo : null),
+    if (data?.version === 2)
+      return {
+        receipts: parseReceipts(data.receipts),
+        acknowledged: parseReceipts(data.acknowledged),
       };
-    }
-    return receipts;
   } catch {
-    return {};
+    // Ignore malformed browser caches.
+  }
+  return { receipts: {}, acknowledged: {} };
+}
+function storedCache(userId: string | undefined): ReadCache {
+  try {
+    return parseCache(userId ? localStorage.getItem(conversationReadStorageKey(userId)) : null);
+  } catch {
+    return parseCache(null);
   }
 }
-function storedReceipts(userId: string | undefined): Receipts {
-  if (!userId) return {};
-  try {
-    return parseReceipts(localStorage.getItem(conversationReadStorageKey(userId)));
-  } catch {
-    return {};
+/** Keep progress and server acknowledgments together so other tabs cannot echo cloud reads. */
+function persistCache(userId: string | undefined, incoming: ReadCache): ReadCache {
+  const stored = storedCache(userId);
+  const merged = {
+    receipts: mergeReceipts(stored.receipts, incoming.receipts),
+    acknowledged: mergeReceipts(stored.acknowledged, incoming.acknowledged),
+  };
+  const advances = (before: Receipts, after: Receipts) =>
+    Object.entries(after).some(([key, receipt]) => !covers(before[key], receipt));
+  if (
+    userId &&
+    (advances(stored.receipts, merged.receipts) ||
+      advances(stored.acknowledged, merged.acknowledged))
+  ) {
+    try {
+      localStorage.setItem(
+        conversationReadStorageKey(userId),
+        JSON.stringify({ version: 2, ...merged }),
+      );
+    } catch {
+      // Reads and acknowledgments remain usable in memory when storage is blocked.
+    }
   }
+  return merged;
 }
 function recordCompletion(
   row: SidebarConversation,
@@ -110,25 +141,15 @@ function recordCompletion(
 ): Receipts {
   const completion = completionReceipt(row);
   if (!completion) return local;
-  const persisted = storedReceipts(userId);
-  const receipts = mergeReceipts(local, persisted);
+  const receipts = mergeReceipts(local, storedCache(userId).receipts);
   if (!covers(receipts[row.key], completion)) receipts[row.key] = completion;
-  if (userId && !covers(persisted[row.key], receipts[row.key])) {
-    try {
-      localStorage.setItem(
-        conversationReadStorageKey(userId),
-        JSON.stringify({ version: 2, receipts }),
-      );
-    } catch {
-      // Opening a task still clears its dot when persistence is unavailable.
-    }
-  }
+  const saved = persistCache(userId, { receipts, acknowledged: {} });
   window.dispatchEvent(
     new CustomEvent<ReadEventDetail>(CONVERSATION_READ_EVENT, {
-      detail: { userId, receipts, key: row.key },
+      detail: { userId, receipts: saved.receipts, key: row.key },
     }),
   );
-  return receipts;
+  return saved.receipts;
 }
 
 /** Detail views can mark a completion read even while its sidebar row is not rendered. */
@@ -139,50 +160,63 @@ export function markConversationRead(row: SidebarConversation, userId?: string):
 /** Remember only completions the user opened; listing history does not mark it read. */
 export function useConversationReadState(userId?: string): {
   ready: boolean;
+  isReady: (row: SidebarConversation) => boolean;
   isUnread: (row: SidebarConversation) => boolean;
   markRead: (row: SidebarConversation) => void;
 } {
   const [state, setState] = useState<ReadState>({ userId, receipts: {} });
   const [readyOwner, setReadyOwner] = useState<string>();
+  const [confirmed, setConfirmed] = useState<{ userId?: string; keys: Set<string> }>({
+    keys: new Set(),
+  });
   const current = useRef(state);
   const owner = useRef(userId);
   owner.current = userId;
 
   useEffect(() => {
+    const cached = storedCache(userId);
     const receipts = mergeReceipts(
-      storedReceipts(userId),
+      cached.receipts,
       // A child may mark an active completion before this mount effect runs.
       current.current.userId === userId ? current.current.receipts : {},
     );
     current.current = { userId, receipts };
     setState(current.current);
     setReadyOwner(undefined);
+    setConfirmed({ userId, keys: new Set() });
     let disposed = false;
     let busy = false;
     let request: AbortController | undefined;
-    let acknowledged: Receipts = {};
+    let acknowledged = cached.acknowledged;
+    let queuedRefresh = false;
+    let queuedUpload = false;
+    let syncCursor: string | undefined;
+    const confirmedKeys = new Set<string>();
     const active = () => !disposed && owner.current === userId;
     const apply = (incoming: Receipts, persist = false) => {
-      const merged = mergeReceipts(current.current.receipts, incoming);
+      let merged = mergeReceipts(current.current.receipts, incoming);
+      if (persist) {
+        const saved = persistCache(userId, { receipts: merged, acknowledged });
+        merged = saved.receipts;
+        acknowledged = saved.acknowledged;
+      }
       current.current = { userId, receipts: merged };
       setState(current.current);
-      if (persist && userId) {
-        try {
-          const stored = storedReceipts(userId);
-          const next = mergeReceipts(stored, merged);
-          if (Object.entries(next).some(([key, receipt]) => !covers(stored[key], receipt))) {
-            localStorage.setItem(
-              conversationReadStorageKey(userId),
-              JSON.stringify({ version: 2, receipts: next }),
-            );
-          }
-        } catch {
-          // Memory and cloud synchronization still work with blocked storage.
-        }
-      }
+    };
+    const applyCloud = (receipts: AgentReadReceiptApi[]) => {
+      const cloud = fromApi(receipts);
+      acknowledged = mergeReceipts(acknowledged, cloud);
+      for (const key of Object.keys(cloud)) confirmedKeys.add(key);
+      setConfirmed({ userId, keys: new Set(confirmedKeys) });
+      apply(cloud, true);
     };
     const sync = async (refresh: boolean) => {
-      if (!userId || !active() || busy) return;
+      if (!userId || !active()) return;
+      if (busy) {
+        queuedRefresh ||= refresh;
+        queuedUpload ||= !refresh;
+        return;
+      }
       busy = true;
       request = new AbortController();
       const controller = request;
@@ -196,22 +230,24 @@ export function useConversationReadState(userId?: string): {
       };
       try {
         if (refresh) {
-          let cursor: string | undefined;
+          let cursor = syncCursor;
           do {
             const page = await withTimeout(() => listAgentReadReceipts(cursor, controller.signal));
             if (!active() || page.user_id !== userId) return;
-            const cloud = fromApi(page.receipts);
-            acknowledged = mergeReceipts(acknowledged, cloud);
-            apply(cloud, true);
+            applyCloud(page.receipts);
+            // Advance only after applying this page, and never from a POST response:
+            // other devices may have written revisions before our own upload.
+            syncCursor = page.sync_cursor ?? syncCursor;
             cursor = page.next_cursor ?? undefined;
           } while (cursor);
+          setReadyOwner(userId);
         }
         // Import the old version-2 browser cache and retry offline reads in
         // bounded batches. Reads arriving during an upload join the next batch.
         while (active()) {
           const pending = Object.entries(current.current.receipts)
             .filter(([key, receipt]) => !covers(acknowledged[key], receipt))
-            .slice(0, 200);
+            .slice(0, READ_RECEIPT_BATCH_SIZE);
           if (!pending.length) break;
           const response = await withTimeout(() =>
             saveAgentReadReceipts(
@@ -226,15 +262,20 @@ export function useConversationReadState(userId?: string): {
           // The server also acknowledges obsolete/deleted local records by
           // ignoring them; they must not stall the rest of the migration.
           acknowledged = mergeReceipts(acknowledged, Object.fromEntries(pending));
-          const cloud = fromApi(response.receipts);
-          acknowledged = mergeReceipts(acknowledged, cloud);
-          apply(cloud, true);
+          applyCloud(response.receipts);
         }
       } catch {
         // Keep the local receipt; reconnect, focus and periodic refresh retry it.
       } finally {
         busy = false;
-        if (active()) setReadyOwner(userId);
+        if (active()) {
+          setReadyOwner(userId);
+          if (queuedRefresh || queuedUpload) {
+            const refreshAgain = queuedRefresh;
+            queuedRefresh = queuedUpload = false;
+            void sync(refreshAgain);
+          }
+        }
       }
     };
     const onRead = (event: Event) => {
@@ -257,7 +298,9 @@ export function useConversationReadState(userId?: string): {
       } catch {
         return;
       }
-      apply(parseReceipts(event.newValue));
+      const cache = parseCache(event.newValue);
+      acknowledged = mergeReceipts(acknowledged, cache.acknowledged);
+      apply(cache.receipts);
       void sync(false);
     };
     const refresh = () => {
@@ -266,7 +309,8 @@ export function useConversationReadState(userId?: string): {
     window.addEventListener(CONVERSATION_READ_EVENT, onRead);
     window.addEventListener('storage', onStorage);
     window.addEventListener('focus', refresh);
-    window.addEventListener('online', refresh);
+    const reconnect = () => void sync(true);
+    window.addEventListener('online', reconnect);
     document.addEventListener('visibilitychange', refresh);
     const timer = window.setInterval(refresh, 30_000);
     void sync(true);
@@ -277,7 +321,7 @@ export function useConversationReadState(userId?: string): {
       window.removeEventListener(CONVERSATION_READ_EVENT, onRead);
       window.removeEventListener('storage', onStorage);
       window.removeEventListener('focus', refresh);
-      window.removeEventListener('online', refresh);
+      window.removeEventListener('online', reconnect);
       document.removeEventListener('visibilitychange', refresh);
     };
   }, [userId]);
@@ -307,5 +351,8 @@ export function useConversationReadState(userId?: string): {
     [userId],
   );
 
-  return { isUnread, markRead, ready: !userId || readyOwner === userId };
+  const ready = !userId || readyOwner === userId;
+  const isReady = (row: SidebarConversation) =>
+    ready || (confirmed.userId === userId && confirmed.keys.has(row.key));
+  return { isUnread, markRead, ready, isReady };
 }

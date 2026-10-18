@@ -6,6 +6,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
+from cloud_agent.domain.read_receipts import READ_RECEIPT_BATCH_SIZE
 from cloud_agent.schemas.jobs import (
     AgentJobResponse,  # noqa: TC001 — Pydantic resolves annotations at runtime.
 )
@@ -110,7 +111,9 @@ class AgentReadReceipt(AgentReadReceiptInput):
 class AgentReadReceiptsRequest(BaseModel):
     """A bounded batch, also used to import existing browser receipts."""
 
-    receipts: list[AgentReadReceiptInput] = Field(..., min_length=1, max_length=200)
+    receipts: list[AgentReadReceiptInput] = Field(
+        ..., min_length=1, max_length=READ_RECEIPT_BATCH_SIZE
+    )
 
 
 class AgentReadReceiptsResponse(BaseModel):
@@ -119,6 +122,9 @@ class AgentReadReceiptsResponse(BaseModel):
     user_id: str
     receipts: list[AgentReadReceipt]
     next_cursor: str | None = None
+    sync_cursor: str | None = Field(
+        default=None, description="GET checkpoint for the next incremental poll; null on POST."
+    )
 
 
 class AgentProject(BaseModel):

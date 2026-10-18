@@ -16,6 +16,7 @@ from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api._project_filter import TemporaryFilter, require_single_project_filter
 from cloud_agent.api.deps import get_grant_client, get_storage, require_store
 from cloud_agent.application.residency import close_released_residencies
+from cloud_agent.domain.read_receipts import READ_RECEIPT_BATCH_SIZE
 from cloud_agent.entitlement import REPO_PATTERN
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.schemas import (
@@ -178,8 +179,8 @@ async def delete_agent_sessions(
 @router.get("/conversations/read-receipts", response_model=AgentReadReceiptsResponse)
 async def list_agent_read_receipts(
     response: Response,
-    cursor: str | None = Query(None, min_length=1, max_length=128, pattern=r"^[^\x00]+$"),
-    limit: int = Query(200, ge=1, le=200),
+    cursor: int | None = Query(None, ge=0, le=9223372036854775807),
+    limit: int = Query(READ_RECEIPT_BATCH_SIZE, ge=1, le=READ_RECEIPT_BATCH_SIZE),
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _CatalogStorage | None = Depends(get_storage),
 ) -> AgentReadReceiptsResponse:

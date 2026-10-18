@@ -11,6 +11,7 @@ export interface AgentReadReceiptsResponse {
   user_id: string;
   receipts: AgentReadReceiptApi[];
   next_cursor: string | null;
+  sync_cursor: string | null;
 }
 const PATH = '/v1/agent/conversations/read-receipts';
 
