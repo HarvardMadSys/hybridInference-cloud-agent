@@ -12,6 +12,8 @@ from tests.integration.storage.test_agent_job_store import (
 )
 from tests.integration.storage.test_attempt_ledger import db as db, store as store
 from tests.integration.storage.test_sandbox_restore_store import _RESTORE_HOST, _host
+from tests.integration.storage.test_schema_upgrade import _db_config
+from tests.support.migrations import apply_migrations, downgrade_to
 from tests.unit.test_ledger_snapshots import START
 
 from cloud_agent.storage.repositories.sandbox import _DELETION_RETRY_EXHAUSTION_BATCH
@@ -920,6 +922,82 @@ async def test_automatic_retry_budget_exhaustion_preserves_receipt_and_resumes_s
     assert claim["deletion_retry_count"] == 1
     assert claim["deletion_attempt_number"] == 9
     assert claim["deletion_archive_key"] == ARCHIVE_URI
+
+
+async def test_retry_budget_migrations_upgrade_previous_release_request(db, store):
+    """The previous release's pending request survives the merged migration chain."""
+    sandbox_id = "asbx_retry_budget_upgrade"
+    await seed(db, store, sandbox_id, state="stopped")
+    assert await request_delete(store, sandbox_id) == "accepted"
+    before = await store.admin_sandboxes.detail(sandbox_id)
+    assert before is not None
+    request_id = before.sandbox.deletion_request_id
+    requested_at = before.sandbox.deletion_requested_at
+    assert request_id is not None
+    assert requested_at is not None
+
+    config = _db_config()
+    try:
+        downgrade_to(config, "0085_terminal_resume_index")
+        async with db.acquire() as conn:
+            versions = {
+                row["version_num"]
+                for row in await conn.fetch("SELECT version_num FROM alembic_version")
+            }
+            attempt_table = await conn.fetchval(
+                "SELECT to_regclass('agent_sandbox_deletion_attempts')"
+            )
+            retry_columns = {
+                row["column_name"]
+                for row in await conn.fetch(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name='agent_sandboxes' AND column_name IN "
+                    "('deletion_retry_started_at', 'deletion_retry_count', "
+                    "'deletion_retry_exhausted_at')"
+                )
+            }
+            old_request = await conn.fetchrow(
+                "SELECT deletion_state, deletion_request_id, deletion_requested_at "
+                "FROM agent_sandboxes WHERE id=$1",
+                sandbox_id,
+            )
+        assert versions == {"0085_terminal_resume_index"}
+        assert attempt_table is None
+        assert retry_columns == set()
+        assert old_request["deletion_state"] == "pending"
+        assert old_request["deletion_request_id"] == request_id
+        assert old_request["deletion_requested_at"] == requested_at
+
+        apply_migrations(config)
+
+        async with db.acquire() as conn:
+            versions = {
+                row["version_num"]
+                for row in await conn.fetch("SELECT version_num FROM alembic_version")
+            }
+            attempt_table = await conn.fetchval(
+                "SELECT to_regclass('agent_sandbox_deletion_attempts')"
+            )
+            row = await conn.fetchrow(
+                "SELECT deletion_state, deletion_request_id, deletion_requested_at, "
+                "deletion_retry_started_at, deletion_retry_count, "
+                "deletion_retry_exhausted_at FROM agent_sandboxes WHERE id=$1",
+                sandbox_id,
+            )
+            attempt_count = await conn.fetchval(
+                "SELECT COUNT(*) FROM agent_sandbox_deletion_attempts WHERE sandbox_id=$1",
+                sandbox_id,
+            )
+        assert versions == {"0088_sandbox_retry_budget"}
+        assert attempt_table == "agent_sandbox_deletion_attempts"
+        assert row["deletion_state"] == "pending"
+        assert row["deletion_request_id"] == request_id
+        assert row["deletion_retry_started_at"] == requested_at
+        assert row["deletion_retry_count"] == 0
+        assert row["deletion_retry_exhausted_at"] is None
+        assert attempt_count == 0
+    finally:
+        apply_migrations(config)
 
 
 @pytest.mark.parametrize("retry_stop_mode", ["budget_exhausted", "operator_action"])
