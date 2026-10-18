@@ -426,7 +426,7 @@ for deployment profiles, verified SSH access and CloudLab endpoint setup.
 | `AGENT_COMPUTE_DIRECTORY` | Absolute host directory mounted read-only at `/run/compute` by the optional Compose overlay; `deploy.sh` includes the overlay when this is set. |
 | `AGENT_CONTROL_PLANE_SSH_HOST` | Editable first-time Server setup address for the service node. The supported deployer defaults to the node's FQDN, falling back to its hostname; set an SSH address explicitly when using another deployment system or a different SSH alias. Saved setups take precedence. |
 | `AGENT_GATEWAY_SSH_HOST` | Optional first-time Server setup gateway address override. Defaults to the hostname of the saved Gateway API URL, such as `gateway.example.org`; use an override when SSH uses a different address. |
-| `AGENT_CLOUDLAB_API_URL` | Operator-verified HTTPS Portal API base. Leave unset to disable the CloudLab adapter. |
+| `AGENT_CLOUDLAB_API_URL` | Operator-verified HTTPS Portal API base: `https://boss.emulab.net:43794` for CloudLab, not the portal's web address `www.cloudlab.us`. Leave unset to disable the CloudLab adapter. |
 | `AGENT_COMPUTE_REGISTRATION_URL` | Optional. The HTTPS address new CloudLab nodes post their SSH host keys to, ending in `/v1/compute/node-registrations`. When unset it is derived from `AGENT_SESSION_REDIRECT_URI` (its `/v1/session/callback` suffix replaced), like MCP callbacks. Only HTTPS is used: a node checks the control plane's certificate before sending its one-time token. Without either, nodes set to register their keys cannot be created. |
 
 Without this configuration the existing Host management remains available;

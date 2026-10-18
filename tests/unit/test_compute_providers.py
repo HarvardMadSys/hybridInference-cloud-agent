@@ -5,17 +5,25 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import socket
+import ssl
+import struct
 import sys
 import time
+from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import httpx
 import pytest
-from cryptography.hazmat.primitives import serialization
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.x509.oid import NameOID
 from pydantic import ValidationError
 
 from cloud_agent.ports.external.compute_provider import (
@@ -32,6 +40,9 @@ from cloud_agent.ports.external.compute_provider import (
 from cloud_agent.providers.compute.cloudlab import CloudLabProvider
 from cloud_agent.providers.compute.existing_ssh import ExistingSSHProvider
 from cloud_agent.providers.compute.ssh import OpenSshTransport
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 EXPERIMENT = "f47eb2a4-a0ac-4656-80da-8a638d2d263c"
 NOW = datetime(2026, 10, 4, 12, tzinfo=timezone.utc)
@@ -1607,6 +1618,277 @@ async def test_a_request_that_never_left_is_retryable_even_when_it_mutates(failu
         )
     assert (extended.value.code, extended.value.retryable) == ("temporarily_unavailable", True)
     assert TOKEN not in str(created.value) + str(extended.value)
+
+
+@pytest.fixture(scope="module")
+def tls_files(tmp_path_factory: pytest.TempPathFactory) -> SimpleNamespace:
+    """A test CA, and a current and an expired certificate it signed for localhost."""
+    directory = tmp_path_factory.mktemp("cloudlab-tls")
+    now = datetime.now(timezone.utc)
+    ca_key = ec.generate_private_key(ec.SECP256R1())
+    ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Test CA")])
+    ca = (
+        x509.CertificateBuilder()
+        .subject_name(ca_name)
+        .issuer_name(ca_name)
+        .public_key(ca_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(days=1))
+        .not_valid_after(now + timedelta(days=1))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .add_extension(
+            x509.KeyUsage(False, False, False, False, False, True, True, False, False),
+            critical=True,
+        )
+        .add_extension(x509.SubjectKeyIdentifier.from_public_key(ca_key.public_key()), False)
+        .sign(ca_key, hashes.SHA256())
+    )
+    (directory / "ca.pem").write_bytes(ca.public_bytes(serialization.Encoding.PEM))
+
+    def signed(name: str, not_after: datetime) -> tuple[Path, Path]:
+        key = ec.generate_private_key(ec.SECP256R1())
+        certificate = (
+            x509.CertificateBuilder()
+            .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "localhost")]))
+            .issuer_name(ca_name)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(not_after - timedelta(days=2))
+            .not_valid_after(not_after)
+            .add_extension(x509.SubjectAlternativeName([x509.DNSName("localhost")]), False)
+            .add_extension(
+                x509.AuthorityKeyIdentifier.from_issuer_public_key(ca_key.public_key()), False
+            )
+            .sign(ca_key, hashes.SHA256())
+        )
+        paths = directory / f"{name}.pem", directory / f"{name}.key"
+        paths[0].write_bytes(certificate.public_bytes(serialization.Encoding.PEM))
+        paths[1].write_bytes(
+            key.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.PKCS8,
+                serialization.NoEncryption(),
+            )
+        )
+        return paths
+
+    return SimpleNamespace(
+        ca=directory / "ca.pem",
+        current=signed("current", now + timedelta(days=1)),
+        expired=signed("expired", now - timedelta(days=1)),
+    )
+
+
+def _closed_port() -> int:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+@asynccontextmanager
+async def _local_endpoint(behave, tls: ssl.SSLContext | None):
+    """Serve ``behave(reader, writer, released)`` on 127.0.0.1 and yield its port."""
+    released = asyncio.Event()
+
+    async def handle(reader, writer):
+        with suppress(ConnectionError, asyncio.IncompleteReadError):
+            await behave(reader, writer, released)
+        writer.close()
+
+    server = await asyncio.start_server(handle, "127.0.0.1", 0, ssl=tls)
+    try:
+        yield server.sockets[0].getsockname()[1]
+    finally:
+        released.set()
+        server.close()
+        await server.wait_closed()
+
+
+async def _stall(reader, writer, released):
+    await released.wait()
+
+
+async def _reset(reader, writer, released):
+    await reader.read(65536)  # the TLS ClientHello
+    linger = struct.pack("ii", 1, 0)
+    writer.get_extra_info("socket").setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, linger)
+    writer.transport.abort()
+
+
+async def _answer_in_plain_http(reader, writer, released):
+    await reader.read(65536)  # the TLS ClientHello
+    writer.write(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n")
+    await writer.drain()
+
+
+async def _stall_after_request(reader, writer, released):
+    await reader.readuntil(b"\r\n\r\n")
+    await released.wait()
+
+
+async def _close_after_request(reader, writer, released):
+    await reader.readuntil(b"\r\n\r\n")
+
+
+_CHECK_URL = "Check the CloudLab API URL setting."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "behave,certificate,trusted,host,message,reason",
+    [
+        pytest.param(
+            None,
+            None,
+            True,
+            "127.0.0.1",
+            f"CloudLab could not be reached: {{endpoint}} refused the connection. {_CHECK_URL}",
+            "connect_failed",
+            id="refused",
+        ),
+        pytest.param(
+            _stall,
+            None,
+            True,
+            "127.0.0.1",
+            "CloudLab could not be reached: {endpoint} did not accept a connection within 0.5 "
+            "seconds. Check the CloudLab API URL setting and any firewall between this server "
+            "and CloudLab.",
+            "connect_failed",
+            id="connect-timeout-is-no-certificate-failure",
+        ),
+        pytest.param(
+            _reset,
+            None,
+            True,
+            "127.0.0.1",
+            "CloudLab could not be reached: the connection to {endpoint} was reset. Check for a "
+            "firewall or proxy between this server and CloudLab.",
+            "connect_failed",
+            id="reset-is-no-certificate-failure",
+        ),
+        pytest.param(
+            _answer_in_plain_http,
+            None,
+            True,
+            "127.0.0.1",
+            "CloudLab could not be reached: the TLS handshake with {endpoint} failed. Check that "
+            "the CloudLab API URL setting names CloudLab's HTTPS port.",
+            "tls_verification_failed",
+            id="plain-http-port",
+        ),
+        pytest.param(
+            _stall,
+            "expired",
+            True,
+            "localhost",
+            "CloudLab could not be reached: the certificate at {endpoint} has expired.",
+            "tls_verification_failed",
+            id="expired-certificate",
+        ),
+        pytest.param(
+            _stall,
+            "current",
+            True,
+            "127.0.0.1",
+            "CloudLab could not be reached: the certificate at {endpoint} is not valid for "
+            f"127.0.0.1. {_CHECK_URL}",
+            "tls_verification_failed",
+            id="certificate-for-another-name",
+        ),
+        pytest.param(
+            _stall,
+            "current",
+            False,
+            "localhost",
+            "CloudLab could not be reached: the certificate at {endpoint} could not be verified.",
+            "tls_verification_failed",
+            id="untrusted-certificate",
+        ),
+        pytest.param(
+            _stall_after_request,
+            "current",
+            True,
+            "localhost",
+            "CloudLab at {endpoint} did not answer within 0.5 seconds.",
+            "request_failed",
+            id="no-answer",
+        ),
+        pytest.param(
+            _close_after_request,
+            "current",
+            True,
+            "localhost",
+            "CloudLab at {endpoint} did not return a complete response.",
+            "request_failed",
+            id="closed-before-answering",
+        ),
+    ],
+)
+async def test_cloudlab_says_what_failed_and_where_when_it_cannot_be_used(
+    monkeypatch, tls_files, behave, certificate, trusted, host, message, reason
+):
+    """Real sockets and TLS: the shapes httpx actually raises, not hand-built errors."""
+    monkeypatch.setattr("cloud_agent.providers.compute.cloudlab._STEP_TIMEOUT_S", 0.5)
+    tls = None
+    if certificate is not None:
+        tls = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+        tls.load_cert_chain(*getattr(tls_files, certificate))
+    verify = ssl.create_default_context(cafile=str(tls_files.ca)) if trusted else True
+    resolver = AsyncMock()
+    resolver.resolve.return_value = TOKEN
+    async with AsyncExitStack() as stack:
+        if behave is None:
+            port = _closed_port()
+        else:
+            port = await stack.enter_async_context(_local_endpoint(behave, tls))
+        client = await stack.enter_async_context(httpx.AsyncClient(verify=verify, trust_env=False))
+        adapter = CloudLabProvider(
+            api_url=f"https://{host}:{port}", resolver=resolver, client=client
+        )
+        with pytest.raises(ProviderError) as failed:
+            await adapter.validate_connection("account-1")
+
+    assert str(failed.value) == message.format(endpoint=f"{host}:{port}")
+    assert (failed.value.code, failed.value.retryable) == ("temporarily_unavailable", True)
+    assert failed.value.diagnostics["provider_reason_code"] == reason
+    assert TOKEN not in str(failed.value)
+
+
+@pytest.mark.asyncio
+async def test_cloudlab_names_a_refusal_from_every_address_of_its_host(monkeypatch):
+    # Two addresses make anyio report one refusal per address, in an exception group.
+    port = _closed_port()
+    addresses = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port))] * 2
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *args, **kwargs: addresses)
+    resolver = AsyncMock()
+    resolver.resolve.return_value = TOKEN
+    async with httpx.AsyncClient(trust_env=False) as client:
+        adapter = CloudLabProvider(
+            api_url=f"https://cloudlab-api.example.org:{port}", resolver=resolver, client=client
+        )
+        with pytest.raises(ProviderError) as failed:
+            await adapter.validate_connection("account-1")
+    assert str(failed.value) == (
+        f"CloudLab could not be reached: cloudlab-api.example.org:{port} refused the "
+        f"connection. {_CHECK_URL}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_cloudlab_names_an_api_host_that_does_not_resolve():
+    def respond(request):
+        # As httpcore raises it, with the resolver's error as the cause.
+        raise httpx.ConnectError("[Errno -2] Name or service not known") from socket.gaierror(
+            socket.EAI_NONAME, "Name or service not known"
+        )
+
+    with pytest.raises(ProviderError) as failed:
+        await provider(respond).validate_connection("account-1")
+    assert str(failed.value) == (
+        f"CloudLab could not be reached: cloudlab-api.example.org does not resolve. {_CHECK_URL}"
+    )
+    assert failed.value.diagnostics["provider_reason_code"] == "connect_failed"
 
 
 REGISTERING = {
