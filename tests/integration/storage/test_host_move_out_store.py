@@ -934,6 +934,34 @@ async def test_a_discard_on_a_machine_its_provider_still_runs_keeps_waiting_for_
     deletion = await _deletion(pool)
     assert (deletion["state"], deletion["deletion_state"]) == ("stopped", "pending")
     discard.assert_awaited_once()
+    # The page shows what the deletion is waiting for, and what ends the wait.
+    assert deletion["deletion_error"] == (
+        "Container removal without an archive could not be confirmed. "
+        "The owning host is offline, and only it can remove the container: "
+        "deletion finishes when the host reconnects, "
+        "or without it once its provider confirms the machine is gone. "
+        "Deletion will be retried."
+    )
+
+
+async def test_a_discard_on_a_removed_host_says_it_waits_for_that_host(
+    pool, store: Storage, monkeypatch
+):
+    """A removed Host keeps its machine; enrolled again, it removes the container."""
+    await _settled_stopped_group(pool, store)
+    await _request_discard(store)
+    _unreachable_sandbox_manager(monkeypatch)
+    assert await store.host_pool.remove_host(host="runner-a") == "ok"
+
+    assert await sandbox_deletion.delete_one_archived_sandbox(store)
+
+    deletion = await _deletion(pool)
+    assert (deletion["state"], deletion["deletion_state"]) == ("stopped", "pending")
+    assert deletion["deletion_error"] == (
+        "Container removal without an archive could not be confirmed. "
+        "The owning host was removed from the pool, and only it can remove the container: "
+        "deletion finishes if that host is enrolled again. Deletion will be retried."
+    )
 
 
 async def _waiting(pool, job_id: str) -> None:

@@ -669,7 +669,9 @@ acknowledgement can survive a sandbox manager restart.
 uploading workspace files or native session history. It does not require an S3
 bucket. The host still refuses a running, busy, or changed container, and the
 control plane marks native resume lost only after the host confirms removal.
-The one exception is a host whose server its provider confirmed `terminated`:
+While that host is offline or removed from the pool, the details say so and
+what ends the wait: the host reconnecting, or being enrolled again. The one
+exception is a host whose server its provider confirmed `terminated`:
 once that host has been silent for 10 minutes, the container is taken as gone
 with the machine and the deletion finishes without it, the rule that marks the
 machine's other sandboxes lost. Its trajectory and audit record
