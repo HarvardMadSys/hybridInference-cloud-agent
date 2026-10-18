@@ -5,11 +5,14 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import re
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol, TypedDict
 from urllib.parse import urlparse
 
 import httpx
 
+from cloud_agent.capacity_protocol import FRESH_AFTER_SECONDS
+from cloud_agent.domain.compute import RECLAIMED_QUIET_SECONDS
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.sandbox_archive import (
     S3SandboxArchiveStore,
@@ -62,9 +65,42 @@ def _validate_receipt(receipt: dict[str, Any], expected: dict[str, Any]) -> None
         raise ValueError("Sandbox archive receipt did not match the reviewed container.")
 
 
-def _discard_failure_reason(cause: BaseException) -> str:
-    """Classify sandbox manager failures without persisting their text or request URLs."""
+def _host_away_reason(host: dict[str, Any] | None) -> str:
+    """Name the absent host a discard waits for, and what ends the wait.
+
+    Only that host can remove the container it may still hold. Empty while the
+    host reports as usual, when an unreachable sandbox manager is a connection
+    problem instead.
+    """
+    if host is None:
+        return ""
+    if not host.get("enrolled", True) and host.get("status") == "disabled":
+        state, ends = "was removed from the pool", "if that host is enrolled again"
+    else:
+        beat = host.get("last_heartbeat_at")
+        if not isinstance(beat, datetime):
+            return ""
+        if beat.tzinfo is None:
+            beat = beat.replace(tzinfo=UTC)
+        if (datetime.now(UTC) - beat).total_seconds() <= FRESH_AFTER_SECONDS:
+            return ""
+        state, ends = "is offline", "when the host reconnects"
+    if host.get("compute_node_id") is not None:
+        ends += ", or without it once its provider confirms the machine is gone"
+    return (
+        f"The owning host {state}, and only it can remove the container: deletion finishes {ends}."
+    )
+
+
+def _discard_failure_reason(cause: BaseException, host: dict[str, Any] | None = None) -> str:
+    """Classify sandbox manager failures without persisting their text or request URLs.
+
+    A host the request cannot reach because it is offline or was removed is
+    named as what the deletion waits for.
+    """
     transport = cause.__cause__ if isinstance(cause, SandboxManagerError) else cause
+    if isinstance(transport, httpx.TransportError) and (away := _host_away_reason(host)):
+        return away
     if isinstance(transport, httpx.TimeoutException):
         return "The owning host's sandbox manager timed out before confirming removal."
     if isinstance(transport, httpx.TransportError):
@@ -248,6 +284,10 @@ async def delete_one_archived_sandbox(
     blocked and retries the same deletion; it never reopens a possibly removed
     native session. A verified object is checked again on every retry.
     """
+    if await store.sandbox.recover_reclaimed_admin_sandbox_discard(
+        reclaimed_quiet_seconds=RECLAIMED_QUIET_SECONDS
+    ):
+        return True
     claim = await store.sandbox.claim_due_admin_sandbox_deletion(ttl_seconds=CLAIM_TTL_SECONDS)
     if claim is None:
         return False
@@ -270,11 +310,23 @@ async def delete_one_archived_sandbox(
     verified = claim["deletion_state"] == "archived"
     archive_verified = verified
     configuration_error = None
+    host: dict[str, Any] | None = None
     request_phase = "resolve_sandbox_manager"
     await _record_attempt_stage(store, correlation_id=correlation_id, stage=stage)
     try:
         if discarding:
             host = await store.host_pool.get_host(host=str(claim["host"]))
+            if host is not None and host.get("compute_node_id") is not None:
+                request_phase = "complete_reclaimed_discard"
+                if await store.sandbox.complete_admin_sandbox_discard(
+                    **fence,
+                    attempt_correlation_id=correlation_id,
+                    reclaimed_quiet_seconds=RECLAIMED_QUIET_SECONDS,
+                ):
+                    # Its provider reclaimed the machine, and the container
+                    # with it: the host this would wait for never answers.
+                    return True
+                request_phase = "resolve_sandbox_manager"
             sandbox_manager = sandbox_manager_for_host(host) if host is not None else None
             if sandbox_manager is None:
                 configuration_error = sandbox_manager_configuration_error(host)
@@ -516,7 +568,7 @@ async def delete_one_archived_sandbox(
         # instead of aborting it or starting an archive for a missing container.
         retain_pending = discarding or archive_verified or not abort_acknowledged
         if discarding:
-            reason = configuration_error or _discard_failure_reason(cause)
+            reason = configuration_error or _discard_failure_reason(cause, host)
             error = (
                 "Container removal without an archive could not be confirmed. "
                 + (f"{reason} " if reason else "")

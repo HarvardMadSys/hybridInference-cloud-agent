@@ -54,6 +54,14 @@ _STORAGE_ERRORS: dict[str, tuple[int, str]] = {
     "deployment_profile_exists": (409, "A deployment profile with this ID already exists."),
     "resource_already_managed": (409, "This resource already belongs to a managed allocation."),
     "operation_not_resolvable": (409, "This operation can no longer adopt an external result."),
+    "absence_not_confirmable": (
+        409,
+        "Only a manual acquisition that recorded no resource can be closed as never created.",
+    ),
+    "provider_node_registered": (
+        409,
+        "A node of this request registered, so a machine was created; adopt its experiment.",
+    ),
     "record_not_found": (404, "The resource no longer exists."),
     "allocation_not_found": (404, "The allocation does not exist."),
     "operation_not_found": (404, "The operation does not exist."),
@@ -597,4 +605,26 @@ async def resolve(
     """Adopt an explicitly identified result of an unknown acquisition."""
     result = await commands.resolve_operation(operation_id, payload.external_id)
     await _audit(request, actor, "operation.resolve", operation_id=operation_id)
+    return {"operation": result}
+
+
+@router.post("/compute-operations/{operation_id}/confirm-absent", status_code=202)
+async def confirm_absent(
+    operation_id: str,
+    request: Request,
+    payload: ComputeOperationAction,
+    actor: str = Depends(verify_admin_access),
+    commands: ComputeCommands = Depends(get_compute_commands),
+) -> dict[str, Any]:
+    """Close an acquisition the administrator confirmed created nothing at its provider."""
+    view = await _operation(commands, operation_id)
+    if "confirm_absent" not in view["allowed_actions"]:
+        raise ComputeRefusal(
+            "absence_not_confirmable", _STORAGE_ERRORS["absence_not_confirmable"][1]
+        )
+    # The repository repeats this check under the operation and allocation locks.
+    result = await commands.operation_view(
+        await commands.repository.confirm_acquisition_absent(operation_id=operation_id)
+    )
+    await _audit(request, actor, "operation.confirm_absent", operation_id=operation_id)
     return {"operation": result}

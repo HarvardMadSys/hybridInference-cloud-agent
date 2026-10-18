@@ -672,9 +672,19 @@ acknowledgement can survive a sandbox manager restart.
 uploading workspace files or native session history. It does not require an S3
 bucket. The host still refuses a running, busy, or changed container, and the
 control plane marks native resume lost only after the host confirms removal.
-Chat history and the lifecycle audit remain. There is no S3 object to restore
-from. An archive deletion that is already pending or verified is left unchanged;
-wait for it to finish or fail before choosing this action.
+While that host is offline or removed from the pool, the details say so and
+what ends the wait: the host reconnecting, or being enrolled again. The one
+exception is a host whose server its provider confirmed `terminated`:
+once that host has been silent for 10 minutes, the container is taken as gone
+with the machine and the deletion finishes without it, the rule that marks the
+machine's other sandboxes lost. Its trajectory and audit record
+`host_reclaimed`. Chat history and the lifecycle audit remain. There is no S3
+object to restore from. An archive deletion that is already pending or verified
+is left unchanged; wait for it to finish or fail before choosing this action.
+If the automatic host-attempt budget has stopped a discard, the worker still
+checks for this provider-confirmed outcome. That recovery makes no host call and
+does not consume another retry; it requires the same provider termination and
+10-minute silence conditions.
 
 One deletion worker handles requests one at a time, in the order they became
 due. Only transient failures retry automatically, with exponential backoff from
@@ -1881,9 +1891,30 @@ Release cloud resources before removing their records. Attached servers without
 release support can be removed after their hosts are disabled. Remove retained
 sandboxes through the sandbox deletion flow and wait for cleanup to finish; clear
 the default placement pin, running attempts, and deployment drains first. Removal
-checks these dependencies in the same transaction as cleanup and refuses work
-whose provider result is unresolved. An acquisition that never submitted to its
-provider can be removed even when resource observation is unavailable.
+checks these dependencies in the same transaction as cleanup. An acquisition that
+never submitted to its provider can be removed even when resource observation is
+unavailable.
+
+Removal also refuses with _The external operation is unresolved_ in three cases.
+The server's **Activity** tab lists the operations involved:
+
+- An operation that is running, or waiting while it confirms a provider call (an
+  acquisition waiting for its experiment, an extension or a release waiting for
+  the provider's answer), is still in progress. Wait for it to finish or stop.
+- An operation whose outcome is `unknown`, such as an acquisition whose create
+  request timed out, waits for an administrator, and a release requested
+  meanwhile waits behind it. Open it and retry it or, for an acquisition, adopt
+  the experiment it created.
+- A server that never recorded its provider resource is refused while one of its
+  operations suggests the provider has one: an answer that named it, an
+  acquisition past submission, a registered node, or a call never confirmed.
+  Release the server. The release deletes a resource an operation named, and
+  otherwise records that there is none, so first check the provider for one the
+  request created.
+
+Once the provider has confirmed the machine gone, an operation that stopped
+(blocked, failed or cancelled) no longer keeps the server, even one that stopped
+while it was confirming a provider call: that call can change nothing now.
 
 The compute API is `DELETE /admin/agent/servers/<allocation_id>` with
 `{"expected_revision": N}`. A revision conflict requires refreshing the server.

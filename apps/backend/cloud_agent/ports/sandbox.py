@@ -128,8 +128,26 @@ class SandboxRepository(Protocol):
         generation: int,
         container_id: str,
         attempt_correlation_id: str | None = None,
+        reclaimed_quiet_seconds: float | None = None,
     ) -> bool:
-        """Mark native context lost after the host removes a container with no archive."""
+        """Mark native context lost after the host removes a container with no archive.
+
+        With ``reclaimed_quiet_seconds``, finish without the host only when its
+        provider confirmed the machine terminated and the host has been silent
+        that long. ``attempt_correlation_id`` closes the external attempt in
+        the same fenced transition.
+        """
+        ...
+
+    async def recover_reclaimed_admin_sandbox_discard(
+        self, *, reclaimed_quiet_seconds: float
+    ) -> bool:
+        """Finalize one provider-confirmed discard without claiming another host attempt.
+
+        This recovery remains available after the external retry budget is
+        exhausted. Provider reclamation and the quiet-host interval fence the
+        state transition; no retry counter is consumed.
+        """
         ...
 
     async def fail_admin_sandbox_deletion(

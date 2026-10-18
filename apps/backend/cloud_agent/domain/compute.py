@@ -38,6 +38,11 @@ def discard_request_id(allocation_id: str) -> str:
     return "discard:" + allocation_id
 
 
+#: After its provider confirms a machine is gone, how long its Host must have
+#: been silent before what it still holds is taken as gone with it: the groups
+#: are marked lost, and a deletion without an archive finishes without it.
+RECLAIMED_QUIET_SECONDS = 600
+
 #: How long before its lease ends a Host starts moving its groups out.
 DEFAULT_MOVE_OUT_BEFORE_SECONDS = 7200
 #: How long before that window opens its lease is renewed. An extension the
@@ -139,6 +144,44 @@ def provider_resource_absent(allocation: dict[str, Any] | None) -> bool:
         not allocation.get("external_id")
         and not allocation.get("nodes")
         and not allocation.get("hosts")
+    )
+
+
+def acquisition_absence_confirmable(
+    operation: dict[str, Any], allocation: dict[str, Any] | None
+) -> bool:
+    """Identify a manual acquisition an administrator may confirm created nothing.
+
+    Its provider call stopped without a result to trust, or failed or blocked
+    after it may have reached the provider, and nothing recorded names a
+    resource: no identity, node or Host. Only the provider's own portal can
+    settle that, so closing it is the administrator's statement, never an
+    observation of ours. A provider diagnostic that names an experiment or
+    says a create was accepted is the provider's word that something was
+    created, so it refuses the statement as well; one that only records an
+    ambiguous failure does not. Autoscaled acquisitions keep their own
+    lifecycle.
+    """
+    internal = operation.get("result") or {}
+    diagnostic = internal.get("provider_diagnostic")
+    if not isinstance(diagnostic, dict):
+        diagnostic = {}
+    return bool(
+        allocation
+        and not allocation.get("autoscaling_owned")
+        and allocation.get("mode") == "provision"
+        and operation.get("kind") == "acquire"
+        and operation.get("state") in {"unknown", "failed", "blocked"}
+        and not internal.get("resource_ref")
+        and not internal.get("external_id")
+        and not internal.get("resolved_external_id")
+        and not diagnostic.get("external_id")
+        and not diagnostic.get("submission_request_id")
+        and diagnostic.get("operation_outcome") != "accepted"
+        and diagnostic.get("provider_reason_code") != "request_accepted"
+        and provider_resource_absent(allocation)
+        and not allocation.get("release_committed_at")
+        and allocation.get("observed_state") not in {"terminated", "absent"}
     )
 
 

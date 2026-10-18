@@ -20,6 +20,7 @@ import { APIError, getErrorMessage } from '@/lib/utils/errors';
 import AddComputeServer from './AddComputeServer';
 import CloudLabAutoscaling from './CloudLabAutoscaling';
 import ComputeSetup from './ComputeSetup';
+import ConfirmNothingCreated from './ConfirmNothingCreated';
 import RemoveComputeServer from './RemoveComputeServer';
 import ServerAccess from './ServerAccess';
 import ServerActions from './ServerActions';
@@ -28,6 +29,7 @@ import ComputeServerList, { type ComputeServerGroup } from './ComputeServerList'
 import {
   absoluteTime,
   buttonClass,
+  dangerClass,
   ErrorNotice,
   Field,
   inputClass,
@@ -270,6 +272,26 @@ export default function ComputeResources({
       ))
     );
   }
+  // Removal comes last, usually after a release, so both stay in view on the
+  // server itself and not only in its actions menu.
+  function removalControls(hint: string, release?: { label: string; onSelect: () => void }) {
+    return (
+      <div className="mt-6 space-y-3 border-t border-gray-200 pt-5 dark:border-white/10">
+        <h3 className="text-sm font-semibold">Remove from inventory</h3>
+        <p className="text-sm text-gray-500 dark:text-gray-400">{hint}</p>
+        <div className="flex flex-wrap gap-2">
+          {release && (
+            <button type="button" className={buttonClass} onClick={release.onSelect}>
+              {release.label}
+            </button>
+          )}
+          <button type="button" className={dangerClass} onClick={() => setServerTab('remove')}>
+            Remove server
+          </button>
+        </div>
+      </div>
+    );
+  }
   const operationAllocation = allocations.find(
     (item) => item.id === currentOperation?.allocation_id,
   );
@@ -282,16 +304,18 @@ export default function ComputeResources({
   );
   const shownOperations = showAllOperations ? visibleOperations : pending;
 
-  const resourceActions = [];
-  if (catalog)
-    resourceActions.push({ label: 'Access settings', onSelect: () => setServerTab('access') });
+  let releaseAction: { label: string; onSelect: () => void } | undefined;
   if (currentAllocation?.allowed_actions.includes('retire')) {
-    resourceActions.push({
+    releaseAction = {
       label:
         currentAllocation.provider_id === 'existing_ssh' ? 'Disconnect server' : 'Release server',
       onSelect: () => setServerTab('retire'),
-    });
+    };
   }
+  const resourceActions = [];
+  if (catalog)
+    resourceActions.push({ label: 'Access settings', onSelect: () => setServerTab('access') });
+  if (releaseAction) resourceActions.push(releaseAction);
   if (currentAllocation) {
     resourceActions.push({ label: 'Remove server', onSelect: () => setServerTab('remove') });
   }
@@ -512,6 +536,9 @@ export default function ComputeResources({
               {hostFeedback}
               {placementControls(panel.hosts)}
               {renderHostControls?.(panel.hosts)}
+              {removalControls(
+                'Stop the host agent first, then remove its records. The machine and its files stay intact.',
+              )}
             </>
           )}
         </Panel>
@@ -562,6 +589,14 @@ export default function ComputeResources({
                 Access settings
               </button>
             )}
+            {removalControls(
+              releaseAction
+                ? currentAllocation.provider_id === 'existing_ssh'
+                  ? 'Disconnect the server first, then remove its records. The machine and its files stay intact.'
+                  : 'Release the cloud resource first, then remove its records.'
+                : 'Delete this server and its records from the inventory.',
+              releaseAction,
+            )}
           </div>
           {(serverTab === 'access' || serverTab === 'retire' || serverTab === 'remove') && (
             <button
@@ -600,6 +635,8 @@ export default function ComputeResources({
               onRemoved={() => removedServer(currentAllocation.name)}
               onPartialRemoval={partialRemoval}
               onCancel={() => setServerTab('overview')}
+              onShowActivity={() => setServerTab('activity')}
+              release={releaseAction}
             />
           )}
           <div hidden={serverTab !== 'lease'}>
@@ -696,6 +733,13 @@ export default function ComputeResources({
                 Adopt this experiment and continue
               </button>
             </form>
+          )}
+          {currentOperation.allowed_actions.includes('confirm_absent') && (
+            <ConfirmNothingCreated
+              key={currentOperation.id}
+              operation={currentOperation}
+              onConfirmed={(operation) => receiveOperation(operation)}
+            />
           )}
           <p className="mt-3 break-all text-xs text-gray-500 dark:text-gray-400">
             Request: {currentOperation.request_id}

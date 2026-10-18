@@ -22,6 +22,7 @@ from cloud_agent.ports.sandbox import DeletionFailureDecision
 from cloud_agent.storage._sql.compute_admission import lock_compute_entry
 from cloud_agent.storage._sql.hosts import (
     MOVING_OUT_HOST_SQL,
+    RECLAIMED_HOST_SQL,
     UNDELETED_GROUP_SQL,
     moving_out_hosts,
     release_covered_sandboxes,
@@ -946,8 +947,17 @@ class PostgresSandboxRepository:
         generation: int,
         container_id: str,
         attempt_correlation_id: str | None = None,
+        reclaimed_quiet_seconds: float | None = None,
     ) -> bool:
-        """Mark native context lost after the host removes a container with no archive."""
+        """Mark native context lost after the host removes a container with no archive.
+
+        With ``reclaimed_quiet_seconds`` the discard finishes without that
+        host, which can never confirm it: only when its provider confirmed the
+        machine it ran on terminated and it has been silent that long
+        (``RECLAIMED_HOST_SQL``). The container went with the machine.
+        Otherwise this returns ``False`` and changes nothing. The optional
+        attempt id closes the external attempt in the same fenced transition.
+        """
         async with self._pool.acquire() as conn, conn.transaction():
             await conn.fetch(
                 "SELECT t.id FROM agent_threads t "
@@ -969,54 +979,173 @@ class PostgresSandboxRepository:
                 return bool(group["deletion_discard"])
             if group["deletion_state"] != "pending" or not group["deletion_discard"]:
                 return False
-            await self._record_trajectory_event(
+            host_reclaimed = reclaimed_quiet_seconds is not None
+            if host_reclaimed and not await conn.fetchval(
+                "SELECT " + RECLAIMED_HOST_SQL.format(host="$1", quiet="$2"),
+                group["host"],
+                reclaimed_quiet_seconds,
+            ):
+                return False
+            await self._complete_admin_sandbox_discard_in_transaction(
                 conn,
                 group=group,
-                event_type="deletion_completed",
-                source="system",
-                actor_id="sandbox-deletion-worker",
-                from_state="pending",
-                to_state="deleted",
-                details={"request_id": request_id, "discard": True},
-            )
-            await conn.execute(
-                """
-                UPDATE agent_sandboxes
-                SET state = 'lost', deletion_state = 'deleted', deleted_at = NOW(),
-                    deletion_error = NULL, idle_deadline = NULL, stop_requested_at = NULL,
-                    deletion_retry_at = NULL, deletion_claim_expires_at = NULL,
-                    deletion_retry_exhausted_at = NULL,
-                    resource_snapshot = NULL, resource_sampled_at = NULL,
-                    resource_received_at = NULL, terminal_count = NULL,
-                    terminal_count_observed_at = NULL, updated_at = NOW()
-                WHERE id = $1
-                """,
-                sandbox_id,
-            )
-            if attempt_correlation_id is not None:
-                await self._finish_deletion_attempt_in_transaction(
-                    conn,
-                    correlation_id=attempt_correlation_id,
-                    outcome="succeeded",
-                )
-            await conn.execute(
-                """
-                UPDATE agent_thread_sandbox_memberships
-                SET native_state = 'lost', context_status = 'lost', resident_state = 'lost',
-                    updated_at = NOW()
-                WHERE sandbox_id = $1
-                """,
-                sandbox_id,
-            )
-            for member in members:
-                await fail_unrunnable_follow_ups(conn, thread_id=member["thread_id"])
-            await self._audit_admin_deletion(
-                conn,
-                group=group,
-                request_id=request_id,
-                action="agent.sandbox.delete.discarded",
+                members=members,
+                attempt_correlation_id=attempt_correlation_id,
+                host_reclaimed=host_reclaimed,
             )
         return True
+
+    async def recover_reclaimed_admin_sandbox_discard(
+        self, *, reclaimed_quiet_seconds: float
+    ) -> bool:
+        """Finish one provider-confirmed discard without spending another host attempt.
+
+        The provider state and quiet-host interval are checked again under the
+        sandbox row lock. This recovery remains available after the bounded
+        external retry budget is exhausted.
+        """
+        async with self._pool.acquire() as conn, conn.transaction():
+            candidate = await conn.fetchrow(
+                """
+                SELECT g.id, g.deletion_request_id, g.generation, g.container_id
+                FROM agent_sandboxes g
+                WHERE g.deletion_state = 'pending' AND g.deletion_discard
+                  AND g.deletion_retry_exhausted_at IS NOT NULL
+                  AND g.deletion_request_id IS NOT NULL
+                  AND g.generation = g.deletion_generation
+                  AND g.container_id = g.deletion_container_id
+                  AND g.last_activity_at = g.deletion_last_activity_at
+                  AND (g.deletion_claim_expires_at IS NULL
+                       OR g.deletion_claim_expires_at <= clock_timestamp())
+                  AND """
+                + RECLAIMED_HOST_SQL.format(host="g.host", quiet="$1")
+                + " ORDER BY g.deletion_requested_at, g.id LIMIT 1",
+                reclaimed_quiet_seconds,
+            )
+            if candidate is None:
+                return False
+
+            sandbox_id = str(candidate["id"])
+            await conn.fetch(
+                "SELECT t.id FROM agent_threads t "
+                "JOIN agent_thread_sandbox_memberships m ON m.thread_id = t.id "
+                "WHERE m.sandbox_id = $1 ORDER BY t.id FOR UPDATE OF t",
+                sandbox_id,
+            )
+            members = await conn.fetch(
+                "SELECT thread_id FROM agent_thread_sandbox_memberships "
+                "WHERE sandbox_id = $1 ORDER BY thread_id FOR UPDATE",
+                sandbox_id,
+            )
+            group = await conn.fetchrow(
+                """
+                SELECT * FROM agent_sandboxes
+                WHERE id = $1 AND deletion_request_id = $2
+                  AND generation = $3 AND container_id = $4
+                  AND deletion_state = 'pending' AND deletion_discard
+                  AND deletion_retry_exhausted_at IS NOT NULL
+                  AND generation = deletion_generation
+                  AND container_id = deletion_container_id
+                  AND last_activity_at = deletion_last_activity_at
+                  AND (deletion_claim_expires_at IS NULL
+                       OR deletion_claim_expires_at <= clock_timestamp())
+                FOR UPDATE
+                """,
+                sandbox_id,
+                candidate["deletion_request_id"],
+                candidate["generation"],
+                candidate["container_id"],
+            )
+            if group is None or not await conn.fetchval(
+                "SELECT " + RECLAIMED_HOST_SQL.format(host="$1", quiet="$2"),
+                group["host"],
+                reclaimed_quiet_seconds,
+            ):
+                return False
+
+            await self._complete_admin_sandbox_discard_in_transaction(
+                conn,
+                group=group,
+                members=members,
+                attempt_correlation_id=None,
+                host_reclaimed=True,
+            )
+            running_attempts = await conn.fetch(
+                "SELECT correlation_id FROM agent_sandbox_deletion_attempts "
+                "WHERE request_id = $1 AND sandbox_id = $2 AND outcome = 'running' "
+                "ORDER BY attempt_number",
+                candidate["deletion_request_id"],
+                sandbox_id,
+            )
+            for attempt in running_attempts:
+                await self._finish_deletion_attempt_in_transaction(
+                    conn,
+                    correlation_id=str(attempt["correlation_id"]),
+                    outcome="succeeded",
+                )
+        return True
+
+    async def _complete_admin_sandbox_discard_in_transaction(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        group: Any,
+        members: Any,
+        attempt_correlation_id: str | None,
+        host_reclaimed: bool,
+    ) -> None:
+        """Apply one locked discard finalization and its durable audit trail."""
+        request_id = str(group["deletion_request_id"])
+        sandbox_id = str(group["id"])
+        await self._record_trajectory_event(
+            conn,
+            group=group,
+            event_type="deletion_completed",
+            source="system",
+            actor_id="sandbox-deletion-worker",
+            from_state="pending",
+            to_state="deleted",
+            details={"request_id": request_id, "discard": True}
+            | ({"host_reclaimed": True} if host_reclaimed else {}),
+        )
+        await conn.execute(
+            """
+            UPDATE agent_sandboxes
+            SET state = 'lost', deletion_state = 'deleted', deleted_at = NOW(),
+                deletion_error = NULL, idle_deadline = NULL, stop_requested_at = NULL,
+                deletion_retry_at = NULL, deletion_claim_expires_at = NULL,
+                deletion_retry_exhausted_at = NULL,
+                resource_snapshot = NULL, resource_sampled_at = NULL,
+                resource_received_at = NULL, terminal_count = NULL,
+                terminal_count_observed_at = NULL, updated_at = NOW()
+            WHERE id = $1
+            """,
+            sandbox_id,
+        )
+        if attempt_correlation_id is not None:
+            await self._finish_deletion_attempt_in_transaction(
+                conn,
+                correlation_id=attempt_correlation_id,
+                outcome="succeeded",
+            )
+        await conn.execute(
+            """
+            UPDATE agent_thread_sandbox_memberships
+            SET native_state = 'lost', context_status = 'lost', resident_state = 'lost',
+                updated_at = NOW()
+            WHERE sandbox_id = $1
+            """,
+            sandbox_id,
+        )
+        for member in members:
+            await fail_unrunnable_follow_ups(conn, thread_id=member["thread_id"])
+        await self._audit_admin_deletion(
+            conn,
+            group=group,
+            request_id=request_id,
+            action="agent.sandbox.delete.discarded",
+            host_reclaimed=host_reclaimed,
+        )
 
     async def fail_admin_sandbox_deletion(
         self,
@@ -1222,6 +1351,7 @@ class PostgresSandboxRepository:
         archive_version_id: str | None = None,
         sandbox_manager_confirmed_stopped: bool = False,
         confirmed_docker_status: str | None = None,
+        host_reclaimed: bool = False,
     ) -> None:
         """Keep each deletion transition and content-free audit atomic."""
         await conn.execute(
@@ -1253,6 +1383,7 @@ class PostgresSandboxRepository:
                     if sandbox_manager_confirmed_stopped
                     else {}
                 )
+                | ({"host_reclaimed": True} if host_reclaimed else {})
             ),
             action != "agent.sandbox.delete.failed",
         )

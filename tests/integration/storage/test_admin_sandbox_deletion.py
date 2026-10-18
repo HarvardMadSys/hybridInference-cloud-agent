@@ -11,9 +11,11 @@ from tests.integration.storage.test_agent_job_store import (
     _shared_claim_attestation,
 )
 from tests.integration.storage.test_attempt_ledger import db as db, store as store
+from tests.integration.storage.test_sandbox_restore_store import _RESTORE_HOST, _host
 from tests.unit.test_ledger_snapshots import START
 
 from cloud_agent.storage.repositories.sandbox import _DELETION_RETRY_EXHAUSTION_BATCH
+from cloud_agent.workers import sandbox_deletion
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
@@ -918,6 +920,102 @@ async def test_automatic_retry_budget_exhaustion_preserves_receipt_and_resumes_s
     assert claim["deletion_retry_count"] == 1
     assert claim["deletion_attempt_number"] == 9
     assert claim["deletion_archive_key"] == ARCHIVE_URI
+
+
+async def test_reclaimed_discard_recovers_after_automatic_retry_budget_exhaustion(db, store):
+    sandbox_id = "asbx_reclaimed_after_exhaustion"
+    origin = await seed(db, store, sandbox_id, state="stopped")
+    await member(db, sandbox_id, origin, 0)
+    assert await request_delete(store, sandbox_id, discard=True) == "accepted"
+
+    for attempt_number in range(1, 9):
+        if attempt_number > 1:
+            async with db.acquire() as conn:
+                await conn.execute(
+                    "UPDATE agent_sandboxes SET deletion_retry_at=NOW() WHERE id=$1",
+                    sandbox_id,
+                )
+        claim = await store.sandbox.claim_due_admin_sandbox_deletion(ttl_seconds=3600)
+        assert claim is not None and claim["deletion_retry_count"] == attempt_number
+        decision = await store.sandbox.fail_admin_sandbox_deletion(
+            **worker_fence(claim),
+            error="The host timed out.",
+            retain_pending=True,
+            attempt_correlation_id=claim["deletion_attempt_correlation_id"],
+            failure_code="sandbox_manager_unavailable",
+            retry_class="transient",
+        )
+        assert decision.recorded is True
+        assert decision.retry_scheduled is (attempt_number < 8)
+
+    await _host(store, "runner-one", _RESTORE_HOST)
+    allocation_id = f"{sandbox_id}_allocation"
+    async with db.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO agent_compute_allocations "
+            "(id,name,provider_id,mode,observed_state) "
+            "VALUES ($1,$1,'cloudlab','provision','ready')",
+            allocation_id,
+        )
+        await conn.execute(
+            "INSERT INTO agent_compute_nodes "
+            "(id,allocation_id,provider_node_id,instance_identity,name) "
+            "VALUES ($1 || '-node',$1,'node0',$1 || ':node0',$1)",
+            allocation_id,
+        )
+        await conn.execute(
+            "UPDATE agent_runner_hosts SET compute_node_id=$1 || '-node', "
+            "last_heartbeat_at=clock_timestamp() WHERE host='runner-one'",
+            allocation_id,
+        )
+
+    # Exhaustion remains terminal while the provider still says the host is live.
+    assert not await store.sandbox.recover_reclaimed_admin_sandbox_discard(
+        reclaimed_quiet_seconds=600
+    )
+    assert await store.sandbox.claim_due_admin_sandbox_deletion(ttl_seconds=3600) is None
+
+    async with db.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_compute_allocations SET observed_state='terminated' WHERE id=$1",
+            allocation_id,
+        )
+        await conn.execute(
+            "UPDATE agent_runner_hosts SET last_heartbeat_at="
+            "clock_timestamp()-INTERVAL '20 minutes' WHERE host='runner-one'"
+        )
+
+    # The storage-only recovery completes without another worker lease or host call.
+    assert await sandbox_deletion.delete_one_archived_sandbox(store)
+
+    async with db.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT state, deletion_state, deletion_retry_count, "
+            "deletion_retry_exhausted_at, deletion_error "
+            "FROM agent_sandboxes WHERE id=$1",
+            sandbox_id,
+        )
+        attempt_counts = await conn.fetchrow(
+            "SELECT COUNT(*) AS total, COUNT(*) FILTER (WHERE outcome='running') AS running "
+            "FROM agent_sandbox_deletion_attempts WHERE sandbox_id=$1",
+            sandbox_id,
+        )
+        event = await conn.fetchrow(
+            "SELECT details->>'host_reclaimed' AS host_reclaimed "
+            "FROM agent_sandbox_events WHERE sandbox_id=$1 "
+            "AND event_type='deletion_completed' ORDER BY id DESC LIMIT 1",
+            sandbox_id,
+        )
+    assert dict(row) == {
+        "state": "lost",
+        "deletion_state": "deleted",
+        "deletion_retry_count": 8,
+        "deletion_retry_exhausted_at": None,
+        "deletion_error": None,
+    }
+    assert dict(attempt_counts) == {"total": 8, "running": 0}
+    assert event["host_reclaimed"] == "true"
+    assert await store.sandbox.claim_due_admin_sandbox_deletion(ttl_seconds=3600) is None
 
 
 async def test_expired_final_attempt_marks_budget_exhausted_without_reclaiming(db, store):

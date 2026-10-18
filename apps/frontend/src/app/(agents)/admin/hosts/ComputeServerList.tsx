@@ -4,7 +4,7 @@ import { useState } from 'react';
 
 import type { ComputeAllocation, ComputeCatalog, ComputeServerSnapshot } from '@/lib/api/compute';
 
-import { absoluteTime, inputClass, remainingTime } from './compute-ui';
+import { absoluteTime, inputClass, neverCreated, remainingTime } from './compute-ui';
 import { hostStatusLabel } from './format';
 
 type InventoryHost = ComputeServerSnapshot['hosts'][number];
@@ -20,7 +20,8 @@ export interface ComputeServerGroup {
 }
 
 function serverStatus(allocation: ComputeAllocation, hosts: InventoryHost[]): string {
-  if (allocation.state === 'absent') return 'Disconnected';
+  if (allocation.state === 'absent')
+    return neverCreated(allocation) ? 'Not created' : 'Disconnected';
   if (allocation.state === 'terminated') return 'Released';
   if (allocation.state !== 'ready') return allocation.state.replaceAll('_', ' ');
   if (hosts.length === 0) return 'Awaiting agent';
@@ -36,7 +37,7 @@ function serverStatus(allocation: ComputeAllocation, hosts: InventoryHost[]): st
 
 function State({ label }: { label: string }) {
   const ready = label === 'Online' || label === 'online';
-  const inactive = ['Disconnected', 'Released', 'disabled'].includes(label);
+  const inactive = ['Disconnected', 'Not created', 'Released', 'disabled'].includes(label);
   return (
     <span
       className={`inline-flex items-center gap-2 text-sm capitalize ${ready ? 'text-emerald-700 dark:text-emerald-400' : inactive ? 'text-gray-500 dark:text-gray-400' : 'text-amber-700 dark:text-amber-300'}`}

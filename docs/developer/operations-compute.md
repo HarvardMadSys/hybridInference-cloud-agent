@@ -439,12 +439,17 @@ active Host bindings and verified inventory.
 
 Reuse the recorded operation after browser disconnects or worker restarts. It
 persists request ID, exact parameters, step and resource ID. A new request ID
-creates a new command.
+creates a new command. **Activity**, and each server's **Activity** tab, list
+the 200 most recent operations and every one still pending, running, waiting or
+`unknown`, however old, so an operation waiting for an administrator stays
+there with its controls. So does a failed or blocked acquisition of a server
+not confirmed gone, which can still hold the server until a retry or
+**Nothing was created** settles it.
 
 | Result | Recovery |
 | --- | --- |
 | SSH key or identity refused | Verify the machine/key, update the selected connection and retry the same operation. Existing-SSH and registered CloudLab connections keep host-key checks enabled. |
-| Cloud create outcome unknown, no UUID saved | Identify the actual experiment in the exact account/project and resolve explicitly. The worker never repeats POST or adopts an experiment by name. |
+| Cloud create outcome unknown, no UUID saved | Identify the actual experiment in the exact account/project and resolve explicitly. The worker never repeats POST or adopts an experiment by name. If the portal has no experiment for the request, **Nothing was created** closes it: the operation is cancelled, never retried, and the server shows as not created and can be removed. That is the administrator's statement, made without asking the provider, so check the portal first. A node of the request that registered refuses it, and so does any saved UUID, node or Host, or a provider diagnostic that names an experiment or says the create was accepted. Autoscaled acquisitions keep their own cancellation. |
 | UUID saved, later observation failed | Repair access and resume the same resource. Releasing the server instead deletes that experiment by its saved UUID. |
 | Installation or readiness failed | Inspect deployment checks, repair prerequisites/profile and retry the same resource. Failure does not destroy it. |
 | Extension pending or unknown | Check actual expiry. Retries retain the fixed absolute target; shorter extensions are not successful. The provider may reject or limit extensions. An expiry that has not moved ten minutes after the request blocks as `extension_unconfirmed`, so the server's other operations and a replacement can proceed; retry sends the same target again. |
@@ -480,6 +485,7 @@ Pool and resource actions have different effects:
 | `Remove now` | Revokes a `removing` Host at once and ends its running turns: they are requeued once, or a chat whose turn may already have run is marked lost. Sandboxes not yet moved stay on the removed Host. |
 | `Forget` | Removes an eligible history record. A `cold` sandbox, which waits in its checkpoint for any Host, does not block it. |
 | `Retire/release` | Releases the complete allocation; for CloudLab, the whole experiment. An acquisition still waiting on the server, for its Host's first heartbeat say, is cancelled when the release commits, and so is an upgrade a control-plane release queued for it: nothing can run either afterwards. An autoscaled server's profile is then free for the pool once the release is confirmed, and later releases move its deployment profile as usual. Existing SSH has no cloud-destruction capability. |
+| `Remove server` | Deletes the server's records once its resource is released, was never created, or (attached without release) its Hosts are disabled; it calls no provider. An operation still running, still confirming a provider call, or whose outcome is `unknown` keeps them: [Removing a server](operations.md#removing-a-server) says what ends each. One that stopped while confirming a call no longer keeps a server whose provider confirmed the machine gone. |
 
 The page has no separate pause action. A Host held by a deployment drain shows
 `updating`; one drained through the `/drain` API shows `paused` and offers
@@ -534,7 +540,8 @@ chat's next turn is claimed by another Host and restored there; to the user,
 that message waits a little longer than usual. A sandbox whose deletion failed
 before its archive still serves its chats, so it is counted, moved and, with a
 reclaimed machine, lost like any other; one whose deletion is pending or
-verified is left to that deletion.
+verified is left to that deletion. A pending deletion without an archive
+finishes without the Host once the machine is reclaimed, as below.
 
 In an autoscaled CloudLab pool a moving-out member stops counting toward
 `min_hosts`, so its replacement is acquired while it still serves. It still
@@ -558,8 +565,10 @@ groups become `cold` as above. Every other group its Host still holds lost its
 only Docker copy with the machine: once the Host has been silent for 10
 minutes and no turn, claim or Fork of the group is in flight, the group and its
 chats become LOST, their queued turns fail with a reason, and
-`compute_groups_lost_with_server` reports how many. The Host row stays for
-**Remove from pool**.
+`compute_groups_lost_with_server` reports how many. A group an administrator
+was already deleting without an archive is deleted instead, by the deletion
+worker's next attempt after those 10 minutes, without asking the Host. The
+Host row stays for **Remove from pool**.
 
 ## Automatic CloudLab node replacement
 

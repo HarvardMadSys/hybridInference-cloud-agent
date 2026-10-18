@@ -363,6 +363,12 @@ export const resolveComputeOperation = (id: string, externalId: string) =>
     external_id: externalId,
   });
 
+export const confirmComputeOperationAbsent = (id: string) =>
+  write<{ operation: ComputeOperation }>(
+    `/compute-operations/${encodeURIComponent(id)}/confirm-absent`,
+    {},
+  );
+
 export interface CloudLabAutoscalingConfiguration {
   project?: string;
   group?: string;
