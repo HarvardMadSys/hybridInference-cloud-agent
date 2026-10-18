@@ -8,6 +8,8 @@ export const inputClass =
   'ui-input min-h-11 w-full disabled:cursor-not-allowed disabled:opacity-50 aria-[invalid=true]:border-status-error';
 export const buttonClass = 'ui-button ui-button-secondary min-h-11';
 export const primaryClass = 'ui-button ui-button-primary min-h-11';
+export const dangerClass =
+  'ui-button min-h-11 border border-status-error/25 bg-status-error/10 text-status-error hover:bg-status-error/20';
 
 export function Panel({
   title,
