@@ -1753,11 +1753,15 @@ class PostgresComputeResourceRepository:
     ) -> list[dict[str, Any]]:
         """Find recent operation state, including recovery by request ID.
 
-        Newest first: the 200 newest matches, and every match not yet settled
-        however old. Each live server is inspected every few minutes, so newer
-        rows soon push an acquisition out of the window; one whose outcome is
-        unknown holds its server until an administrator adopts or retries it,
-        and the Servers page reaches it only through this listing.
+        Newest first: the 200 newest matches, every match not yet settled
+        however old, and every failed or blocked acquisition of a server not
+        confirmed gone. Each live server is inspected every few minutes, so
+        newer rows soon push an acquisition out of the window. One whose
+        outcome is unknown holds its server until an administrator adopts or
+        retries it, and one that stopped past its first step holds it until a
+        retry or "Nothing was created" settles it; the Servers page reaches
+        either only through this listing. A server has one acquisition, so
+        this stays small, unlike its stream of inspections.
         """
         async with self._pool.acquire() as conn:
             return [
@@ -1766,7 +1770,12 @@ class PostgresComputeResourceRepository:
                     """SELECT * FROM agent_compute_operations
                 WHERE ($1::text IS NULL OR allocation_id=$1) AND ($2::text IS NULL OR request_id=$2)
                   AND ($3::text[] IS NULL OR kind=ANY($3::text[]))
-                  AND (state IN ('pending','running','waiting','unknown') OR id IN (
+                  AND (state IN ('pending','running','waiting','unknown')
+                       OR (state IN ('failed','blocked') AND kind IN ('acquire','add','import')
+                           AND allocation_id IN (
+                               SELECT id FROM agent_compute_allocations
+                               WHERE observed_state NOT IN ('terminated','absent')))
+                       OR id IN (
                       SELECT id FROM agent_compute_operations
                       WHERE ($1::text IS NULL OR allocation_id=$1)
                         AND ($2::text IS NULL OR request_id=$2)

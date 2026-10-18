@@ -442,7 +442,9 @@ persists request ID, exact parameters, step and resource ID. A new request ID
 creates a new command. **Activity**, and each server's **Activity** tab, list
 the 200 most recent operations and every one still pending, running, waiting or
 `unknown`, however old, so an operation waiting for an administrator stays
-there with its controls.
+there with its controls. So does a failed or blocked acquisition of a server
+not confirmed gone, which can still hold the server until a retry or
+**Nothing was created** settles it.
 
 | Result | Recovery |
 | --- | --- |

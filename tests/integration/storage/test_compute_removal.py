@@ -438,14 +438,16 @@ async def test_acquisition_its_release_cancelled_does_not_keep_the_server(db, st
     assert await repo.get_allocation(allocation_id) is None
 
 
-@pytest.mark.parametrize("state", ["pending", "running", "waiting", "unknown"])
+@pytest.mark.parametrize("state", ["pending", "running", "waiting", "unknown", "failed", "blocked"])
 async def test_operation_keeping_a_server_stays_listed_behind_newer_inspections(db, store, state):
     """The Servers page reaches an operation only through this listing.
 
     Each live server is inspected every two minutes by default, so a few of
     them put 200 newer operations ahead of an acquisition within hours. One
     whose outcome is unknown then left the page, and with it the adopt and
-    retry controls that alone settle it, while it still refused removal.
+    retry controls that alone settle it, while it still refused removal. So
+    did one that failed or blocked past its first step, which only a retry or
+    "Nothing was created" settles.
     """
     repo = store.compute_resources
     _, _, settled = await resource(store, name="busy")
@@ -474,6 +476,38 @@ async def test_operation_keeping_a_server_stays_listed_behind_newer_inspections(
     ]
     with pytest.raises(ValueError, match=r"^external_operation_unresolved$"):
         await remove_current(store, allocation_id)
+
+
+async def test_a_stopped_acquisition_of_a_server_confirmed_gone_ages_out_of_the_listing(db, store):
+    """Only a stopped acquisition that can still hold its server outlives the window."""
+    repo = store.compute_resources
+    _, _, settled = await resource(store, name="busy")
+    allocation_id, acquisition = await pending_allocation(store)
+    async with db.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_compute_operations SET state='failed',step='acquiring' WHERE id=$1",
+            acquisition["id"],
+        )
+        await conn.execute(
+            """UPDATE agent_compute_allocations
+               SET observed_state='terminated',observed_at=NOW() WHERE id=$1""",
+            allocation_id,
+        )
+        await conn.execute(
+            """INSERT INTO agent_compute_operations
+               (id,request_id,fingerprint,kind,allocation_id,state,step,created_at)
+               SELECT 'inspection-' || n, 'inspect:busy:' || n, 'inspect', 'inspect',
+                      $1, 'succeeded', 'observed', NOW() + make_interval(secs => n)
+               FROM generate_series(1, 200) AS n""",
+            settled["allocation_id"],
+        )
+
+    listed = await repo.list_operations()
+
+    assert [row["id"] for row in listed] == [f"inspection-{n}" for n in range(200, 0, -1)]
+    # Nothing it records can hold a server its provider confirmed gone.
+    await remove_current(store, allocation_id)
+    assert await repo.get_allocation(allocation_id) is None
 
 
 @pytest.mark.parametrize(
