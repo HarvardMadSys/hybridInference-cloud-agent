@@ -12,6 +12,7 @@ from tests.integration.storage.test_admin_sandbox_queries import member, seed
 from tests.integration.storage.test_attempt_ledger import _seed_attempt
 from tests.integration.storage.test_compute_resources import fence, operation, resource
 from tests.integration.storage.test_host_pool_store import db as db, hosts as hosts, store as store
+from tests.integration.storage.test_source_control_store import _wait_for_lock_wait
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
@@ -683,6 +684,86 @@ async def test_a_registered_node_keeps_an_acquisition_from_closing_as_never_crea
         await repo.confirm_acquisition_absent(operation_id=operation["id"])
     assert (await repo.get_operation(operation["id"]))["state"] == "unknown"
     assert (await repo.get_allocation(allocation_id))["observed_state"] != "absent"
+
+
+async def lost_acquisition_with_open_registration(store, token_hash):
+    """An acquisition whose outcome is unknown while its node's token is still open."""
+    repo = store.compute_resources
+    allocation_id, operation = await pending_allocation(store)
+    claimed = await repo.claim_operation(worker_id="registration-worker")
+    assert claimed["id"] == operation["id"]
+    await repo.create_node_registration(
+        allocation_id=allocation_id,
+        token_hash=token_hash,
+        ttl_seconds=3600,
+        operation_id=claimed["id"],
+        generation=claimed["generation"],
+        worker_id="registration-worker",
+    )
+    assert await repo.finish_operation(
+        operation_id=claimed["id"],
+        generation=claimed["generation"],
+        worker_id="registration-worker",
+        state="unknown",
+        step="acquiring",
+        result={"external_pending": True},
+    )
+    return allocation_id, operation
+
+
+async def test_a_registration_in_flight_keeps_an_acquisition_from_closing_as_never_created(
+    db, store
+):
+    """A node's first boot registers under its registration row alone.
+
+    The statement waits for that registration to commit, then sees the
+    machine it proves, instead of reading past it and closing the request.
+    """
+    repo = store.compute_resources
+    allocation_id, operation = await lost_acquisition_with_open_registration(store, "in-flight")
+    registering = await db.acquire()
+    try:
+        transaction = registering.transaction()
+        await transaction.start()
+        # As complete_node_registration does: the row, then its keys.
+        await registering.execute(
+            "SELECT 1 FROM agent_compute_node_registrations WHERE token_hash='in-flight' FOR UPDATE"
+        )
+        await registering.execute(
+            """UPDATE agent_compute_node_registrations
+               SET host_keys='["ssh-ed25519 AAAAin-flight"]'::jsonb,registered_at=NOW()
+               WHERE token_hash='in-flight'"""
+        )
+        confirming = asyncio.create_task(
+            repo.confirm_acquisition_absent(operation_id=operation["id"])
+        )
+        try:
+            await _wait_for_lock_wait(db, "agent_compute_node_registrations")
+            assert not confirming.done()
+        finally:
+            await transaction.commit()
+    finally:
+        await db.release(registering)
+
+    with pytest.raises(ValueError, match=r"^provider_node_registered$"):
+        await confirming
+    assert (await repo.get_operation(operation["id"]))["state"] == "unknown"
+    assert (await repo.get_allocation(allocation_id))["observed_state"] != "absent"
+
+
+async def test_a_node_registering_after_its_request_closed_as_never_created_is_refused(store):
+    repo = store.compute_resources
+    allocation_id, operation = await lost_acquisition_with_open_registration(store, "late-node")
+
+    await repo.confirm_acquisition_absent(operation_id=operation["id"])
+
+    assert (
+        await repo.complete_node_registration(
+            token_hash="late-node", host_keys=["ssh-ed25519 AAAAlate-node"]
+        )
+        == "invalid"
+    )
+    assert await repo.node_registration(allocation_id=allocation_id) is None
 
 
 @pytest.mark.parametrize("state", ["terminated", "absent"])

@@ -3686,6 +3686,15 @@ class PostgresComputeResourceRepository:
             if not acquisition_absence_confirmable(_row(operation), allocation):
                 raise ValueError("absence_not_confirmable")
             assert allocation is not None
+            # A node's first boot registers under its registration row alone,
+            # without the compute fence. Taking the open rows waits for one
+            # still in flight, which the check below then sees, and leaves a
+            # node that boots later no token to register with.
+            await conn.execute(
+                "DELETE FROM agent_compute_node_registrations "
+                "WHERE allocation_id=$1 AND registered_at IS NULL",
+                allocation["id"],
+            )
             if await conn.fetchval(
                 "SELECT 1 FROM agent_compute_node_registrations "
                 "WHERE allocation_id=$1 AND registered_at IS NOT NULL LIMIT 1",
