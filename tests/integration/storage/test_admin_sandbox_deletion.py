@@ -1036,6 +1036,72 @@ async def test_reclaimed_discard_recovers_after_automatic_retries_stop(db, store
     assert await store.sandbox.claim_due_admin_sandbox_deletion(ttl_seconds=3600) is None
 
 
+async def test_concurrent_reclaimed_discard_recovery_finalizes_once(db, store):
+    """Competing recovery sweeps cannot double-finalize a reclaimed container."""
+    sandbox_id = "asbx_concurrent_reclaimed_recovery"
+    origin = await seed(db, store, sandbox_id, state="stopped")
+    await member(db, sandbox_id, origin, 0)
+    assert await request_delete(store, sandbox_id, discard=True) == "accepted"
+    claim = await store.sandbox.claim_due_admin_sandbox_deletion(ttl_seconds=3600)
+    assert claim is not None
+    decision = await store.sandbox.fail_admin_sandbox_deletion(
+        **worker_fence(claim),
+        error="The sandbox manager needs operator action.",
+        retain_pending=True,
+        attempt_correlation_id=claim["deletion_attempt_correlation_id"],
+        failure_code="sandbox_manager_resolution_rejected",
+        retry_class="operator_action",
+    )
+    assert decision.retry_scheduled is False
+
+    await _host(store, "runner-one", _RESTORE_HOST)
+    allocation_id = f"{sandbox_id}_allocation"
+    async with db.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO agent_compute_allocations "
+            "(id,name,provider_id,mode,observed_state) "
+            "VALUES ($1,$1,'cloudlab','provision','terminated')",
+            allocation_id,
+        )
+        await conn.execute(
+            "INSERT INTO agent_compute_nodes "
+            "(id,allocation_id,provider_node_id,instance_identity,name) "
+            "VALUES ($1 || '-node',$1,'node0',$1 || ':node0',$1)",
+            allocation_id,
+        )
+        await conn.execute(
+            "UPDATE agent_runner_hosts SET compute_node_id=$1 || '-node', "
+            "last_heartbeat_at=clock_timestamp()-INTERVAL '20 minutes' "
+            "WHERE host='runner-one'",
+            allocation_id,
+        )
+
+    outcomes = await asyncio.gather(
+        store.sandbox.recover_reclaimed_admin_sandbox_discard(reclaimed_quiet_seconds=600),
+        store.sandbox.recover_reclaimed_admin_sandbox_discard(reclaimed_quiet_seconds=600),
+    )
+    assert sorted(outcomes) == [False, True]
+
+    async with db.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT state, deletion_state FROM agent_sandboxes WHERE id=$1",
+            sandbox_id,
+        )
+        completion_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM agent_sandbox_events "
+            "WHERE sandbox_id=$1 AND event_type='deletion_completed'",
+            sandbox_id,
+        )
+        attempts = await conn.fetchrow(
+            "SELECT COUNT(*) AS total, COUNT(*) FILTER (WHERE outcome='running') AS running "
+            "FROM agent_sandbox_deletion_attempts WHERE sandbox_id=$1",
+            sandbox_id,
+        )
+    assert dict(row) == {"state": "lost", "deletion_state": "deleted"}
+    assert completion_count == 1
+    assert dict(attempts) == {"total": 1, "running": 0}
+
+
 async def test_expired_final_attempt_marks_budget_exhausted_without_reclaiming(db, store):
     await seed(db, store, "asbx_crashed_final_attempt", state="stopped")
     assert await request_delete(store, "asbx_crashed_final_attempt") == "accepted"

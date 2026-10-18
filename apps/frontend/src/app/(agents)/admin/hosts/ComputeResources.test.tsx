@@ -280,6 +280,46 @@ describe('server acquisition UI', () => {
     );
   });
 
+  it("starts a new CloudLab server's storage where small-lan mounts its data disk", async () => {
+    vi.mocked(api.createComputeServer).mockResolvedValue({ operation: operation() });
+    renderAdd();
+    expect(screen.getByLabelText('Sandbox storage path')).toHaveValue('');
+    fireEvent.click(screen.getByRole('radio', { name: /CloudLab/ }));
+    expect(screen.getByLabelText('Sandbox storage path')).toHaveValue('/mydata');
+    expect(
+      screen.getByText(/small-lan profile mounts its data disk at \/mydata/),
+    ).toBeInTheDocument();
+    // An existing experiment's disk is wherever its own profile put it.
+    fireEvent.click(screen.getByRole('radio', { name: 'Connect existing' }));
+    expect(screen.getByLabelText('Sandbox storage path')).toHaveValue('');
+    fireEvent.click(screen.getByRole('radio', { name: 'Create new' }));
+    fireEvent.change(screen.getByLabelText('Server name'), { target: { value: 'Cloud machine' } });
+    fireEvent.change(screen.getByLabelText('Project'), { target: { value: 'FAST25-AE' } });
+    fireEvent.change(screen.getByLabelText('Profile'), { target: { value: 'small-lan' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create server' }));
+    await waitFor(() =>
+      expect(api.createComputeServer).toHaveBeenCalledWith(
+        expect.objectContaining({
+          provider_id: 'cloudlab',
+          mode: 'provision',
+          sandbox_storage_path: '/mydata',
+        }),
+      ),
+    );
+  });
+
+  it('keeps a storage path the administrator typed when the server type changes', () => {
+    renderAdd();
+    fireEvent.click(screen.getByRole('radio', { name: /CloudLab/ }));
+    fireEvent.change(screen.getByLabelText('Sandbox storage path'), {
+      target: { value: '/data/cloudlab' },
+    });
+    fireEvent.click(screen.getByRole('radio', { name: 'Connect existing' }));
+    expect(screen.getByLabelText('Sandbox storage path')).toHaveValue('/data/cloudlab');
+    fireEvent.click(screen.getByRole('radio', { name: /Existing SSH server/ }));
+    expect(screen.getByLabelText('Sandbox storage path')).toHaveValue('/data/cloudlab');
+  });
+
   it('keeps verified host keys when an older catalog does not advertise unchecked CloudLab SSH', () => {
     const providers = catalog.providers.map((provider) => {
       if (provider.id !== 'cloudlab') return provider;

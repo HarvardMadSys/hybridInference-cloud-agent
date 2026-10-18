@@ -2,8 +2,8 @@
 
 from alembic import op
 
-revision = "0086_sandbox_deletion_attempts"
-down_revision = "0085_terminal_resume_index"
+revision = "0087_sandbox_deletion_attempts"
+down_revision = "0086_conversation_read_receipts"
 branch_labels = None
 depends_on = None
 

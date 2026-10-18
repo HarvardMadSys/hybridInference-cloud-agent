@@ -89,7 +89,9 @@ selection. Profiles with a different hardware parameter can use
 
 When adding or creating a server, enter **Sandbox storage path**, for example
 `/mydata`. This must be an existing writable mounted data disk on the remote
-server.
+server. A new CloudLab server starts with `/mydata`, where the `small-lan`
+profile and the Cloud Agent profile mount their data disk by default; change it
+when the server template mounts its disk elsewhere.
 Bootstrap stores sandbox workspaces and native session data in `<path>/docker`
 and `<path>/containerd`, binding these directories to the daemons' standard
 `/var/lib/docker` and `/var/lib/containerd` paths. The server overview shows the
@@ -389,11 +391,16 @@ privilege. Apply database migrations before starting the worker.
 
 Existing-SSH deployments can leave `AGENT_CLOUDLAB_API_URL` unset. CloudLab has
 no guessed endpoint default: the public specification's development HTTP example
-is unsuitable for credentials. Verify the production HTTPS Portal API base
-with the provider or deployment documentation, then run **Connections →
-Validate**. Validation makes a read-only authenticated experiment-list request,
-checks its response shape and refuses redirects. Local downloaded tokens are
-never uploaded automatically.
+is unsuitable for credentials. CloudLab's
+[portal-api README](https://gitlab.flux.utah.edu/emulab/portal-api) gives the
+production HTTPS Portal API as `https://boss.emulab.net:43794`. Set that as the
+**CloudLab API URL** setting (or `AGENT_CLOUDLAB_API_URL`), then run
+**Connections → Validate**. The portal's web address, `www.cloudlab.us`, is
+another machine and does not serve the API: its port 43794 is filtered, so a URL
+naming it waits out the 60-second connect timeout and reports that CloudLab could
+not be reached. Validation makes a read-only authenticated experiment-list
+request, checks its response shape and refuses redirects. Local downloaded tokens
+are never uploaded automatically.
 
 Provider references:
 
@@ -448,6 +455,7 @@ not confirmed gone, which can still hold the server until a retry or
 
 | Result | Recovery |
 | --- | --- |
+| CloudLab could not be reached | The message names the endpoint it tried and why. A host name that does not resolve, a refused connection, or no connection within 60 seconds points at the **CloudLab API URL** setting or a firewall between the control plane and CloudLab: the URL is `https://boss.emulab.net:43794`, and the control plane must reach that port. A reset connection usually means a proxy or firewall in between. A failed TLS handshake usually means the URL names a port that does not speak HTTPS. An expired certificate is CloudLab's to replace: the Portal API has intermittently served one, so report it to CloudLab. The operation retries every 30 seconds on its own; **Connections → Validate** checks the setting immediately. |
 | SSH key or identity refused | Verify the machine/key, update the selected connection and retry the same operation. Existing-SSH and registered CloudLab connections keep host-key checks enabled. |
 | Cloud create outcome unknown, no UUID saved | Identify the actual experiment in the exact account/project and resolve explicitly. The worker never repeats POST or adopts an experiment by name. If the portal has no experiment for the request, **Nothing was created** closes it: the operation is cancelled, never retried, and the server shows as not created and can be removed. That is the administrator's statement, made without asking the provider, so check the portal first. A node of the request that registered refuses it, and so does any saved UUID, node or Host, or a provider diagnostic that names an experiment or says the create was accepted. Autoscaled acquisitions keep their own cancellation. |
 | UUID saved, later observation failed | Repair access and resume the same resource. Releasing the server instead deletes that experiment by its saved UUID. |

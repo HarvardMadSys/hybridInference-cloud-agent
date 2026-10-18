@@ -571,6 +571,11 @@ SETTINGS: tuple[Setting, ...] = (
         "",
         env="AGENT_CLOUDLAB_API_URL",
         url=True,
+        description=(
+            "CloudLab's Portal API: https://boss.emulab.net:43794. The portal's web address, "
+            "www.cloudlab.us, does not serve it. Empty disables CloudLab. Applies to "
+            "subsequent operations after settings synchronize."
+        ),
     ),
     Setting(
         "compute.registration_url",

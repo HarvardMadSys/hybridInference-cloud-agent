@@ -86,7 +86,15 @@ changing its activity time.
 
 Queued and running conversations show a spinner. A completed turn shows a blue
 unread dot until it is opened. A completion already being viewed is marked read
-automatically. Read receipts are stored per signed-in user in this browser.
+automatically. Read receipts are saved to your account and restored after sign-in
+on another browser or device. Open tabs synchronize on focus, reconnection and
+every 30 seconds while visible, fetching only changes after the initial sync.
+Existing browser receipts are imported automatically; offline reads are cached
+locally and uploaded when the connection returns. The browser remembers server
+acknowledgments so reopening it or synchronizing tabs does not repeat old uploads.
+To carry over reads from before cloud synchronization, open the updated app once
+in the browser that still holds those receipts. Receipts already cleared from that
+browser cannot be reconstructed from conversation history.
 
 New turns and newly completed retries can produce another unread dot. Pinning,
 archiving and title changes do not reset read state. Read success/failure details

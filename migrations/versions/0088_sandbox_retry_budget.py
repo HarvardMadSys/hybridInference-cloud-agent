@@ -2,8 +2,8 @@
 
 from alembic import op
 
-revision = "0087_sandbox_retry_budget"
-down_revision = "0086_sandbox_deletion_attempts"
+revision = "0088_sandbox_retry_budget"
+down_revision = "0087_sandbox_deletion_attempts"
 branch_labels = None
 depends_on = None
 

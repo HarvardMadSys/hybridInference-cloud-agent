@@ -300,6 +300,7 @@ def create_app() -> FastAPI:
             "/v1/agent/memories",
             "/v1/agent/insights",
             "/v1/agent/profile",
+            "/v1/agent/conversations/read-receipts",
         ),
     )
     install_repository_access_errors(app)

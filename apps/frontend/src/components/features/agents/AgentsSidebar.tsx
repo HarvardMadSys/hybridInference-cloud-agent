@@ -69,7 +69,7 @@ export function AgentsSidebar({
   const scrollRef = useSidebarScroll(active && !collapsed, userId);
   const reads = useAgentReads();
   const [preferences, updatePreferences] = useSidebarPreferences(userId);
-  const { isUnread, markRead } = useConversationReadState(userId);
+  const { isUnread, markRead, isReady } = useConversationReadState(userId);
   const knownRows = useMemo(
     () => ({ userId, rows: new Map<string, SidebarConversation>() }),
     [userId],
@@ -627,7 +627,7 @@ export function AgentsSidebar({
   }
   const actions: RowActions = {
     activeKey,
-    isUnread,
+    isUnread: (row) => isReady(row) && isUnread(row),
     onRead: markRead,
     archiving,
     pinning,

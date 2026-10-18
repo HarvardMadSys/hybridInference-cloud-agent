@@ -11,6 +11,18 @@ const fixture = vi.hoisted(() => ({
   error: null as string | null,
   reload: vi.fn(),
 }));
+vi.mock('@/lib/api/agents/readReceipts', () => ({
+  listAgentReadReceipts: vi.fn(async () => ({
+    user_id: 'reader',
+    receipts: [],
+    next_cursor: null,
+  })),
+  saveAgentReadReceipts: vi.fn(async () => ({
+    user_id: 'reader',
+    receipts: [],
+    next_cursor: null,
+  })),
+}));
 vi.mock('next/navigation', () => ({ usePathname: () => `/${fixture.id}` }));
 vi.mock('@/components/providers', () => ({
   useAuth: () => ({ state: { user: { id: 'reader' } } }),
