@@ -51,6 +51,7 @@ export interface AdminSandbox {
   deletion_size_bytes?: number | null;
   deleted_at?: string | null;
   deletion_error?: string | null;
+  deletion_retry_exhausted_at?: string | null;
   memory_limit: string;
   cpu_limit: string;
   /** Retained writable-layer quota; zero or absent on older responses means no quota. */

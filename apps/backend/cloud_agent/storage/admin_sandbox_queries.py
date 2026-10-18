@@ -66,7 +66,7 @@ class AdminSandboxQueries:
                     SELECT g.id, g.generation, g.stop_requested_at, g.archived_at,
                            g.deletion_state, g.deletion_discard, g.deletion_request_id, g.deletion_requested_at,
                            g.deletion_archive_key, g.deletion_archive_version_id,
-                           g.deletion_sha256, g.deletion_size_bytes, g.deletion_error, g.deleted_at,
+                           g.deletion_sha256, g.deletion_size_bytes, g.deletion_error, g.deletion_retry_exhausted_at, g.deleted_at,
                            g.origin_thread_id, g.user_id, g.host,
                            g.container_id, g.container_name,
                            g.runtime_id, g.runtime_version, g.execution_profile,
@@ -84,7 +84,7 @@ class AdminSandboxQueries:
                 SELECT g.id, g.generation, g.stop_requested_at, g.archived_at, g.origin_thread_id,
                        g.deletion_state, g.deletion_discard, g.deletion_request_id, g.deletion_requested_at,
                        g.deletion_archive_key, g.deletion_archive_version_id,
-                       g.deletion_sha256, g.deletion_size_bytes, g.deletion_error, g.deleted_at,
+                       g.deletion_sha256, g.deletion_size_bytes, g.deletion_error, g.deletion_retry_exhausted_at, g.deleted_at,
                        CASE WHEN t.title_source IN ('generated', 'manual')
                             THEN LEFT(t.title, 160) END AS title,
                        LEFT(t.repo, 256) AS repo, LEFT(g.user_id, 256) AS user_id,
@@ -150,7 +150,7 @@ class AdminSandboxQueries:
                 SELECT g.id, g.generation, g.stop_requested_at, g.archived_at, g.origin_thread_id,
                        g.deletion_state, g.deletion_discard, g.deletion_request_id, g.deletion_requested_at,
                        g.deletion_archive_key, g.deletion_archive_version_id,
-                       g.deletion_sha256, g.deletion_size_bytes, g.deletion_error, g.deleted_at,
+                       g.deletion_sha256, g.deletion_size_bytes, g.deletion_error, g.deletion_retry_exhausted_at, g.deleted_at,
                        CASE WHEN t.title_source IN ('generated', 'manual')
                             THEN LEFT(t.title, 160) END AS title,
                        LEFT(t.repo, 256) AS repo, LEFT(g.user_id, 256) AS user_id,
@@ -243,7 +243,7 @@ class AdminSandboxQueries:
                 SELECT g.id, g.generation, g.stop_requested_at, g.archived_at, g.origin_thread_id,
                        g.deletion_state, g.deletion_discard, g.deletion_request_id, g.deletion_requested_at,
                        g.deletion_archive_key, g.deletion_archive_version_id,
-                       g.deletion_sha256, g.deletion_size_bytes, g.deletion_error, g.deleted_at,
+                       g.deletion_sha256, g.deletion_size_bytes, g.deletion_error, g.deletion_retry_exhausted_at, g.deleted_at,
                        CASE WHEN t.title_source IN ('generated', 'manual')
                             THEN LEFT(t.title, 160) END AS title,
                        LEFT(t.repo, 256) AS repo, LEFT(g.user_id, 256) AS user_id,
