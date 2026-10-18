@@ -22729,6 +22729,74 @@
         "summary": "Cancel"
       }
     },
+    "/admin/agent/compute-operations/{operation_id}/confirm-absent": {
+      "post": {
+        "description": "Close an acquisition the administrator confirmed created nothing at its provider.",
+        "operationId": "confirm_absent_admin_agent_compute_operations__operation_id__confirm_absent_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "operation_id",
+            "required": true,
+            "schema": {
+              "title": "Operation Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ComputeOperationAction"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Confirm Absent Admin Agent Compute Operations  Operation Id  Confirm Absent Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Confirm Absent"
+      }
+    },
     "/admin/agent/compute-operations/{operation_id}/resolve": {
       "post": {
         "description": "Adopt an explicitly identified result of an unknown acquisition.",
