@@ -156,9 +156,16 @@ def acquisition_absence_confirmable(
     after it may have reached the provider, and nothing recorded names a
     resource: no identity, node or Host. Only the provider's own portal can
     settle that, so closing it is the administrator's statement, never an
-    observation of ours. Autoscaled acquisitions keep their own lifecycle.
+    observation of ours. A provider diagnostic that names an experiment or
+    says a create was accepted is the provider's word that something was
+    created, so it refuses the statement as well; one that only records an
+    ambiguous failure does not. Autoscaled acquisitions keep their own
+    lifecycle.
     """
     internal = operation.get("result") or {}
+    diagnostic = internal.get("provider_diagnostic")
+    if not isinstance(diagnostic, dict):
+        diagnostic = {}
     return bool(
         allocation
         and not allocation.get("autoscaling_owned")
@@ -168,6 +175,10 @@ def acquisition_absence_confirmable(
         and not internal.get("resource_ref")
         and not internal.get("external_id")
         and not internal.get("resolved_external_id")
+        and not diagnostic.get("external_id")
+        and not diagnostic.get("submission_request_id")
+        and diagnostic.get("operation_outcome") != "accepted"
+        and diagnostic.get("provider_reason_code") != "request_accepted"
         and provider_resource_absent(allocation)
         and not allocation.get("release_committed_at")
         and allocation.get("observed_state") not in {"terminated", "absent"}

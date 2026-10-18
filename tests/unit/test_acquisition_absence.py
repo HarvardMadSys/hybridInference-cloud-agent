@@ -31,6 +31,20 @@ def test_a_stopped_acquisition_that_named_nothing_can_be_closed(state):
     assert acquisition_absence_confirmable(operation(state=state), allocation())
 
 
+def test_an_ambiguous_provider_failure_does_not_refuse_the_statement():
+    ambiguous = {
+        "provider_operation": "experiments.create",
+        "provider_reason_code": "request_outcome_unknown",
+        "provider_request_id": "6d2c5a8e-3c1f-4b8e-9a51-0f3c2d7e8b14",
+        "http_status": 504,
+        "operation_outcome": "unknown",
+    }
+    assert acquisition_absence_confirmable(
+        operation(result={"external_pending": True, "provider_diagnostic": ambiguous}),
+        allocation(),
+    )
+
+
 @pytest.mark.parametrize(
     ("operation_over", "allocation_over"),
     [
@@ -48,6 +62,11 @@ def test_a_stopped_acquisition_that_named_nothing_can_be_closed(state):
         ({"result": {"external_id": "experiment"}}, {}),
         ({"result": {"resolved_external_id": "experiment"}}, {}),
         ({}, {"external_id": "experiment"}),
+        # The provider's own diagnostic names an experiment or accepted a create.
+        ({"result": {"provider_diagnostic": {"external_id": "experiment"}}}, {}),
+        ({"result": {"provider_diagnostic": {"submission_request_id": "request"}}}, {}),
+        ({"result": {"provider_diagnostic": {"operation_outcome": "accepted"}}}, {}),
+        ({"result": {"provider_diagnostic": {"provider_reason_code": "request_accepted"}}}, {}),
         ({}, {"nodes": [{"id": "node"}]}),
         ({}, {"hosts": [{"host": "host-a"}]}),
         # Already settled another way, or not a request of this kind.
