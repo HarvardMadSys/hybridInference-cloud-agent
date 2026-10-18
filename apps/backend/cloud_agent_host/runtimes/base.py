@@ -41,6 +41,21 @@ MCP_SERVERS_ENV = "AGENT_MCP_SERVERS"
 MERGED_MCP_SERVER_NAME = "session"
 
 
+def merged_mcp_server(tool_name: object, *, separator: str) -> dict[str, str]:
+    """``{"mcp_server": ...}`` for a call named under the merged entry, else ``{}``.
+
+    Codex records the server beside a call's own name. pi's bridge and
+    OpenCode and Kilo instead prefix the entry's name onto the relay's
+    ``<alias>__<tool>``, each with its own ``separator``, so the server is read
+    back from that prefix. A relay tool may be called "task" or "list_agents",
+    and the server is what says it is not the runtime's own delegation.
+    """
+    prefix = f"{MERGED_MCP_SERVER_NAME}{separator}"
+    if isinstance(tool_name, str) and tool_name.startswith(prefix) and tool_name != prefix:
+        return {"mcp_server": MERGED_MCP_SERVER_NAME}
+    return {}
+
+
 @dataclass(frozen=True)
 class RuntimeCapabilities:
     """What a runtime can do, so the platform does not assume.

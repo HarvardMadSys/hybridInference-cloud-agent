@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
 
-import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, expect, it, vi } from 'vitest';
 
 import { cancelAgentJob } from '@/lib/api/agents';
@@ -125,7 +125,9 @@ it('owns focus and Escape while the skills dialog downloads without stopping the
     await skillLoad.pending;
   });
   await screen.findByRole('button', { name: 'Apply' });
-  expect(listSkills).toHaveBeenCalledTimes(1);
+  // The dialog asks for the list in an effect, which React can run after the
+  // button first appears.
+  await waitFor(() => expect(listSkills).toHaveBeenCalledTimes(1));
   fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   expect(cancelAgentJob).not.toHaveBeenCalled();

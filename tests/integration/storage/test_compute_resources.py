@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
@@ -322,6 +323,56 @@ async def test_external_uuid_cannot_be_adopted_through_alias_connection(db, stor
         await repo.observe_allocation(
             allocation_id=two,
             observation={"external_id": existing["external_id"], "observed_state": "ready"},
+        )
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "scope_complete=FALSE",
+        "observed_state='pending'",
+        "observation_error='provider read failed'",
+        "observed_at=NOW()-INTERVAL '10 minutes'",
+    ],
+)
+async def test_bootstrap_binding_requires_a_current_complete_ready_allocation(db, store, change):
+    repo = store.compute_resources
+    allocation_id, node, op = await resource(store)
+    async with db.acquire() as conn:
+        await conn.execute(
+            f"UPDATE agent_compute_allocations SET {change} WHERE id=$1", allocation_id
+        )
+
+    with pytest.raises(ValueError, match="resource_observation_not_ready"):
+        await repo.prepare_bootstrap_binding(
+            node_id=node["id"], host="machine", operation_id=op["id"]
+        )
+
+    async with db.acquire() as conn:
+        assert (
+            await conn.fetchval("SELECT COUNT(*) FROM agent_runner_hosts WHERE host='machine'") == 0
+        )
+        assert (
+            await conn.fetchval(
+                "SELECT COUNT(*) FROM agent_host_admission_holds "
+                "WHERE purpose='bootstrap' AND source_id=$1",
+                op["id"],
+            )
+            == 0
+        )
+
+
+async def test_bootstrap_binding_requires_exactly_one_observed_node(db, store):
+    repo = store.compute_resources
+    allocation_id, node, op = await resource(store)
+    await repo.upsert_node(
+        allocation_id=allocation_id,
+        node={"provider_node_id": "node-2", "instance_identity": "second", "name": "second"},
+    )
+
+    with pytest.raises(ValueError, match="resource_observation_not_ready"):
+        await repo.prepare_bootstrap_binding(
+            node_id=node["id"], host="machine", operation_id=op["id"]
         )
 
 
@@ -2141,6 +2192,96 @@ async def test_terminal_observation_fences_running_autoscale_extension(db, store
     assert await repo.claim_operation(worker_id="other") is None
 
 
+@pytest.mark.parametrize("release", ["autoscaled_termination", "retirement_commit"])
+async def test_a_terminal_release_takes_its_hosts_attempts_before_their_host_rows(
+    db, store, hosts, release
+):
+    """Revoking a released server's Host waits for a turn ending there, holding nothing.
+
+    Ending an attempt -- the reaper's pass, a finish, a hand-back -- takes the
+    attempt, writes its group and gives its slot back on the host row last.
+    The provider's terminal answer for an autoscaled server, and a retirement
+    committing once the provider has ended the server, locked the host row
+    first and then brought the Host's attempt leases forward, so a turn the
+    reaper was ending on that Host at the same moment deadlocked with them.
+    """
+    repo = store.compute_resources
+    allocation_id, _, _ = await resource(store, hosts)
+    if release == "autoscaled_termination":
+        async with db.acquire() as conn:
+            await conn.execute(
+                """INSERT INTO agent_cloudlab_autoscaling_members
+                   (allocation_id,deployment_profile,state)
+                   VALUES ($1,'terminal-release-route','active')""",
+                allocation_id,
+            )
+            await conn.execute(
+                """INSERT INTO agent_cloudlab_autoscaling_profile_reservations
+                   (deployment_profile,profile_snapshot,allocation_id)
+                   VALUES ('terminal-release-route','{"id":"terminal-release-route"}',$1)""",
+                allocation_id,
+            )
+    await _create_job(store)
+    claim = await _claim(store, worker_id="runner", lease_ttl_seconds=90, host="machine")
+    assert claim is not None
+    if release == "autoscaled_termination":
+        releasing_call = repo.observe_allocation(
+            allocation_id=allocation_id,
+            observation={"observed_state": "terminated", "scope_complete": True},
+        )
+    else:
+        # The provider ended the server while it was being retired.
+        retire = await operation(repo, allocation_id, "retire")
+        assert retire is not None and retire["kind"] == "retire"
+        await repo.begin_retirement(allocation_id=allocation_id, **fence(retire))
+        await repo.observe_allocation(
+            allocation_id=allocation_id,
+            observation={"observed_state": "terminated", "scope_complete": True},
+            **fence(retire),
+        )
+        releasing_call = repo.commit_release(allocation_id=allocation_id, **fence(retire))
+
+    releasing = None
+    async with db.acquire() as reaper:
+        try:
+            async with reaper.transaction():
+                # The reaper ending this attempt: the attempt first.
+                await reaper.execute(
+                    "SELECT id FROM agent_attempts WHERE id = $1 FOR UPDATE", claim["attempt_id"]
+                )
+                releasing = asyncio.create_task(releasing_call)
+                reaper_pid = await reaper.fetchval("SELECT pg_backend_pid()")
+                async with asyncio.timeout(10):
+                    while not await reaper.fetchval(
+                        "SELECT EXISTS (SELECT 1 FROM pg_locks "
+                        "WHERE NOT granted AND $1 = ANY(pg_blocking_pids(pid)))",
+                        reaper_pid,
+                    ):
+                        await asyncio.sleep(0.01)
+                # Its slot back last, which the waiting release must not hold.
+                await reaper.execute(
+                    "SELECT host FROM agent_runner_hosts WHERE host = 'machine' FOR UPDATE NOWAIT"
+                )
+            settled = await asyncio.wait_for(releasing, timeout=10)
+        finally:
+            if releasing is not None and not releasing.done():
+                releasing.cancel()
+                await asyncio.gather(releasing, return_exceptions=True)
+
+    assert (await repo.get_allocation(allocation_id))["release_committed_at"] is not None
+    if release == "autoscaled_termination":
+        snapshot = await repo.get_cloudlab_autoscaling()
+        assert snapshot["members"][0]["state"] == "released"
+        assert all(
+            reservation["allocation_id"] != allocation_id
+            for reservation in snapshot["profile_reservations"]
+        )
+    else:
+        assert settled["release_committed"] is True
+    revoked = await hosts.get_host(host="machine")
+    assert revoked is not None and revoked["status"] == "disabled"
+
+
 @pytest.mark.parametrize("operation_state", ["blocked", "unknown"])
 async def test_terminal_observation_releases_nonrunning_autoscale_discard_history(
     db, store, operation_state
@@ -3056,6 +3197,160 @@ async def test_running_autoscale_acquisition_cannot_be_cancelled(db, store):
         await repo.cancel_operation(operation_row["id"])
 
 
+async def test_retiring_an_autoscaled_server_mid_acquisition_frees_its_route(db, store):
+    """An administrator retires an autoscaled server whose Host never heartbeat.
+
+    Its acquisition waits between checks for the deployed Host, and the
+    retirement is claimed in that window. Once the release commits the
+    dispatcher never claims the acquisition again, so it stayed waiting for
+    good, and the route it reserved stayed reserved with it: the autoscaler
+    could not deploy another member there.
+    """
+    repo = store.compute_resources
+    allocation_id, acquire = await autoscale_acquisition(
+        db, store, request_id="retired-mid-acquisition", state=None
+    )
+    await repo.observe_allocation(
+        allocation_id=allocation_id,
+        observation={
+            "external_id": "experiment-retired-mid-acquisition",
+            "observed_state": "ready",
+            "expiration_known": True,
+            "expires_at": datetime.now(UTC) + timedelta(hours=4),
+            "scope_complete": True,
+            "nodes": [
+                {"provider_node_id": "node-1", "instance_identity": "vm-1", "name": "node-1"}
+            ],
+        },
+        **fence(acquire),
+    )
+    assert await repo.checkpoint_operation(
+        **fence(acquire), step="verifying_host", result={"external_pending": False}
+    )
+    assert await repo.finish_operation(
+        **fence(acquire),
+        state="waiting",
+        step="waiting_for_heartbeat",
+        message="Waiting for the deployed Host to register and heartbeat.",
+        retry_after_seconds=15,
+    )
+
+    retire = await operation(repo, allocation_id, "retire")
+    assert retire is not None and retire["kind"] == "retire"
+    await repo.begin_retirement(allocation_id=allocation_id, **fence(retire))
+    nodes = (await repo.get_allocation(allocation_id))["nodes"]
+    assert await repo.record_inventory(
+        allocation_id=allocation_id,
+        hosts=[],
+        empty=True,
+        verified_node_ids=[node["id"] for node in nodes],
+        **fence(retire),
+    )
+    committed = await repo.commit_release(allocation_id=allocation_id, **fence(retire))
+    assert committed["release_committed"] is True
+    await repo.observe_allocation(
+        allocation_id=allocation_id,
+        observation={"observed_state": "terminated", "scope_complete": True},
+        **fence(retire),
+    )
+    assert await repo.finish_operation(**fence(retire), state="succeeded", step="released")
+
+    snapshot = await repo.get_cloudlab_autoscaling()
+    assert snapshot["profile_reservations"][0]["allocation_id"] is None
+    assert snapshot["members"][0]["state"] == "released"
+    # Nothing can run the acquisition now; it ends with its server.
+    assert (await repo.get_operation(acquire["id"]))["state"] == "cancelled"
+    replacement = await repo.create_autoscale_allocation_operation(
+        expected_revision=0,
+        expected_generation=snapshot["runtime"]["generation"],
+        request_id="after-retired-mid-acquisition",
+        fingerprint="after-retired-mid-acquisition",
+        allocation={"name": "replacement"},
+        parameters={},
+        requested_by="system:cloudlab-autoscaler",
+        decision={"action": "scale_up"},
+        cooldown_seconds=60,
+    )
+    assert replacement["operation"]["allocation_id"] != allocation_id
+
+
+async def test_a_server_released_while_its_upgrade_waits_holds_back_no_later_release(db, store):
+    """A release commit cancels the server's waiting upgrade, which nothing can run after it.
+
+    Every control-plane release queues an upgrade for each managed Host, and a
+    retirement does not wait for one that is between its checks. After the
+    commit the dispatcher claims only retirements, inspections and discards,
+    so that upgrade stayed waiting for good, and its deployment profile read as
+    one being installed: no later release moved it.
+    """
+    repo = store.compute_resources
+    await repo.save_deployment_profile(
+        profile_id="profile-shared",
+        label="profile-shared",
+        configuration={"deployment_sha": OLD_SHA, "deploy_root": "/opt/profile-shared"},
+        source_bundle=b"shared-old",
+        source_sha256=OLD_DIGEST,
+        secret_ciphertext="cipher-profile-shared",
+    )
+    snapshot = _profile_snapshot(
+        "profile-shared", OLD_SHA, OLD_DIGEST, "stored-profile:profile-shared:bundle"
+    )
+    retired, _, _ = await resource(store, name="retired-mid-upgrade")
+    async with db.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_compute_allocations SET deployment_profile=$2::jsonb WHERE id=$1",
+            retired,
+            json.dumps(snapshot),
+        )
+    upgrade = await operation(repo, retired, "upgrade")
+    assert upgrade is not None and upgrade["kind"] == "upgrade"
+    assert await repo.finish_operation(
+        **fence(upgrade),
+        state="waiting",
+        step="waiting_for_generation",
+        message="Waiting for the Host to advertise the release.",
+        retry_after_seconds=600,
+    )
+
+    retire = await operation(repo, retired, "retire")
+    assert retire is not None and retire["kind"] == "retire"
+    await repo.begin_retirement(allocation_id=retired, **fence(retire))
+    nodes = (await repo.get_allocation(retired))["nodes"]
+    assert await repo.record_inventory(
+        allocation_id=retired,
+        hosts=[],
+        empty=True,
+        verified_node_ids=[node["id"] for node in nodes],
+        **fence(retire),
+    )
+    committed = await repo.commit_release(allocation_id=retired, **fence(retire))
+    assert committed["release_committed"] is True
+    await repo.observe_allocation(
+        allocation_id=retired,
+        observation={"observed_state": "terminated", "scope_complete": True},
+        **fence(retire),
+    )
+    assert await repo.finish_operation(**fence(retire), state="succeeded", step="released")
+
+    # The profile serves the next server; a later release has to move it.
+    current = await _ready_allocation(repo, "current-on-shared", snapshot)
+    rollout = await operation(repo, current, "upgrade")
+    assert rollout is not None and rollout["allocation_id"] == current
+    await repo.advance_host_release(
+        allocation_id=current,
+        previous_sha=OLD_SHA,
+        previous_digest=OLD_DIGEST,
+        deployment_sha=NEW_SHA,
+        source_sha256=NEW_DIGEST,
+        source_bundle=b"replacement",
+        release_bundle_path="/app/compute-host-release/source.tar.gz",
+        **fence(rollout),
+    )
+    assert (await repo.get_deployment_profile("profile-shared"))["source_bundle"] == b"replacement"
+    # Nothing can run the upgrade now; it ends with its server.
+    assert (await repo.get_operation(upgrade["id"]))["state"] == "cancelled"
+
+
 OLD_SHA = "d" * 40
 NEW_SHA = "e" * 40
 OTHER_SHA = "f" * 40
@@ -3268,6 +3563,111 @@ async def test_host_release_moves_shared_profiles_and_live_snapshots(store):
     retried = await repo.retry_operation(upgrade["id"])
     assert retried["state"] == "pending"
     assert retried["result"] == {"kept": True}
+
+
+async def test_host_release_moves_reserved_routes_with_their_stored_profiles(db, store):
+    """A new pool member is deployed from its route's snapshot, which names the stored bundle.
+
+    The snapshot must keep pinning the bundle its stored profile holds, or the
+    deployment refuses it after the experiment is created.
+    """
+    repo = store.compute_resources
+    for profile_id in ("pool-serving", "pool-installing", "pool-spare"):
+        await repo.save_deployment_profile(
+            profile_id=profile_id,
+            label=profile_id,
+            configuration={"deployment_sha": OLD_SHA, "deploy_root": "/opt/" + profile_id},
+            source_bundle=b"old-" + profile_id.encode(),
+            source_sha256=OLD_DIGEST,
+            secret_ciphertext="cipher-" + profile_id,
+        )
+    serving = await _ready_allocation(
+        repo,
+        "pool-serving",
+        _profile_snapshot(
+            "pool-serving", OLD_SHA, OLD_DIGEST, "stored-profile:pool-serving:bundle"
+        ),
+    )
+    upgrade = await operation(repo, serving, "upgrade")
+    assert upgrade["kind"] == "upgrade"
+    async with db.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO agent_compute_connections
+               (id,name,provider_id,secret_ciphertext,status)
+               VALUES ('pool-cloudlab','CloudLab','cloudlab','ciphertext','verified'),
+                      ('pool-ssh','SSH','existing_ssh','ciphertext','verified')"""
+        )
+        await conn.execute(
+            """UPDATE agent_cloudlab_autoscaling_policy
+               SET enabled=TRUE,min_hosts=0,max_hosts=2,
+                   connection_id='pool-cloudlab',ssh_connection_id='pool-ssh',
+                   deployment_profiles=ARRAY['pool-installing','pool-spare']"""
+        )
+        for profile_id in ("pool-installing", "pool-spare"):
+            await conn.execute(
+                """INSERT INTO agent_cloudlab_autoscaling_profile_reservations
+                   (deployment_profile,profile_snapshot) VALUES ($1,$2::jsonb)""",
+                profile_id,
+                json.dumps(
+                    _profile_snapshot(
+                        profile_id, OLD_SHA, OLD_DIGEST, f"stored-profile:{profile_id}:bundle"
+                    )
+                ),
+            )
+
+    async def scale_up(request_id: str, generation: int) -> dict:
+        created = await repo.create_autoscale_allocation_operation(
+            expected_revision=0,
+            expected_generation=generation,
+            request_id=request_id,
+            fingerprint=request_id,
+            allocation={"name": request_id},
+            parameters={},
+            requested_by="system:cloudlab-autoscaler",
+            decision={"action": "scale_up_pressure"},
+            cooldown_seconds=0,
+        )
+        return created["operation"]
+
+    # A member is being installed from the first route when the release lands.
+    installing = await scale_up("pool-member-installing", 0)
+    await repo.advance_host_release(
+        allocation_id=serving,
+        previous_sha=OLD_SHA,
+        previous_digest=OLD_DIGEST,
+        deployment_sha=NEW_SHA,
+        source_sha256=NEW_DIGEST,
+        source_bundle=b"replacement",
+        release_bundle_path="/app/compute-host-release/source.tar.gz",
+        **fence(upgrade),
+    )
+
+    # The route being installed keeps its bundle, and its snapshot with it.
+    assert (await repo.get_deployment_profile("pool-installing"))["source_sha256"] == OLD_DIGEST
+    async with db.acquire() as conn:
+        snapshot = await conn.fetchrow(
+            """SELECT profile_snapshot->>'deployment_sha' AS sha,
+                      profile_snapshot->>'source_sha256' AS digest
+               FROM agent_cloudlab_autoscaling_profile_reservations
+               WHERE deployment_profile='pool-installing'"""
+        )
+    assert (snapshot["sha"], snapshot["digest"]) == (OLD_SHA, OLD_DIGEST)
+    claimed = await repo.claim_operation(worker_id="worker")
+    assert claimed["id"] == installing["id"]
+    assert await repo.finish_operation(**fence(claimed), state="succeeded", step="ready")
+
+    # The spare route moved: the next member must pin what it now holds.
+    spare = await repo.get_deployment_profile("pool-spare")
+    assert spare["source_bundle"] == b"replacement"
+    scaled = await scale_up("pool-member-scaled", 1)
+    profile = (await repo.get_allocation(scaled["allocation_id"]))["deployment_profile"]
+    assert profile["id"] == "pool-spare"
+    assert profile["source_bundle"] == "stored-profile:pool-spare:bundle"
+    assert (profile["deployment_sha"], profile["source_sha256"]) == (
+        spare["configuration"]["deployment_sha"],
+        spare["source_sha256"],
+    )
+    assert (profile["deployment_sha"], profile["source_sha256"]) == (NEW_SHA, NEW_DIGEST)
 
 
 _MOVE_OUT_ARCHIVES = {

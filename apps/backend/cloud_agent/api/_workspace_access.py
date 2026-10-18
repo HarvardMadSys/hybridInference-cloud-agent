@@ -62,19 +62,38 @@ def _workspace_restoring() -> HTTPException:
     )
 
 
+def _workspace_host_removed() -> HTTPException:
+    return HTTPException(
+        status_code=409,
+        detail={
+            "error": {
+                "type": "workspace_unavailable",
+                "message": (
+                    "This workspace is on a server that has been removed. "
+                    "It is available again only if that server is added back."
+                ),
+            }
+        },
+    )
+
+
 async def fence_workspace_start(store: _WorkspaceAccessStorage, job: dict[str, Any]) -> None:
     """Fence a request that may start the chat's stopped container.
 
     Every workspace operation and terminal opens the container. Counting the
     start before the request leaves stops the last checkpoint from covering a
     group whose files are about to change. A group only a checkpoint holds is
-    refused instead: its next turn recreates it.
+    refused instead: its next turn recreates it. So is a group still on a
+    host that has left the pool, which nothing may start any more.
     """
     thread_id = job.get("thread_id")
     if not thread_id:
         return
-    if await store.sandbox.fence_workspace_start(thread_id=str(thread_id)) in _RESTORE_STATES:
+    state = await store.sandbox.fence_workspace_start(thread_id=str(thread_id))
+    if state in _RESTORE_STATES:
         raise _workspace_restoring()
+    if state == "host_revoked":
+        raise _workspace_host_removed()
 
 
 _TERMINAL_ID_PATTERN = r"^term_[A-Za-z0-9_-]{1,80}$"

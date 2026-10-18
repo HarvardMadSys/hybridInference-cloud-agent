@@ -792,6 +792,89 @@ def test_a_task_result_keeps_its_whole_answer_and_other_clipped_results_say_so(
 @pytest.mark.parametrize(
     "driver,runtime", [(OpenCodeDriver, OpencodeRuntime), (KiloDriver, KiloRuntime)]
 )
+def test_a_tool_call_is_reported_with_the_input_it_runs_with(tmp_path, driver, runtime):
+    """The pinned 1.18.9 (and Kilo) open a tool part before its input is known.
+
+    The part is pending, with an empty input, while the model is still writing
+    the call's arguments; it carries them from the update that starts it
+    running. A call stopped while pending, as an interrupt stops one, goes
+    straight to an error and is reported with it, ahead of its result.
+    """
+    process = _LiveProcess()
+    context, _ = _protocol_context(process, tmp_path)
+    process.feed = _turn_lines({"bridge": "ready", "session_id": "session-a"})
+    session = driver(runtime()).launch_live(context)
+    session.ensure_started(model="deepseek-v4-flash", reasoning_effort=None)
+
+    def tool(turn_id, call_id, status, **state):
+        return {
+            "bridge": "event",
+            "turn_id": turn_id,
+            "event": {
+                "type": "message.part.updated",
+                "properties": {
+                    "part": {
+                        "id": f"part-{call_id}",
+                        "callID": call_id,
+                        "type": "tool",
+                        "tool": "bash",
+                        "state": {"status": status, **state},
+                    }
+                },
+            },
+        }
+
+    def tool_events(prompt, *lines):
+        turn = session.start_turn(TurnInput(prompt=prompt, model="deepseek-v4-flash"))
+        turn_id = json.loads(process.sent[-1])["id"]
+        process.feed = _turn_lines(
+            *(line(turn_id) for line in lines),
+            {"bridge": "settled", "turn_id": turn_id, "status": "completed"},
+        )
+        return [
+            (event.event_type, event.payload)
+            for event in turn.iter_events()
+            if event.event_type in {"tool_use", "tool_result"}
+        ]
+
+    command = {"command": "pwd"}
+    assert tool_events(
+        "where am I",
+        lambda turn_id: tool(turn_id, "call-1", "pending", input={}, raw=""),
+        lambda turn_id: tool(turn_id, "call-1", "running", input=command, time={"start": 1}),
+        lambda turn_id: tool(
+            turn_id, "call-1", "running", input=command, title="pwd", time={"start": 1}
+        ),
+        lambda turn_id: tool(
+            turn_id, "call-1", "completed", input=command, output="/w", time={"start": 1, "end": 2}
+        ),
+    ) == [
+        ("tool_use", {"name": "bash", "id": "call-1", "input": command}),
+        ("tool_result", {"tool_use_id": "call-1", "is_error": False, "content": "/w"}),
+    ]
+    assert tool_events(
+        "stop",
+        lambda turn_id: tool(turn_id, "call-2", "pending", input={}, raw=""),
+        lambda turn_id: tool(
+            turn_id,
+            "call-2",
+            "error",
+            input={},
+            error="Tool execution aborted",
+            time={"start": 3, "end": 3},
+        ),
+    ) == [
+        ("tool_use", {"name": "bash", "id": "call-2", "input": {}}),
+        (
+            "tool_result",
+            {"tool_use_id": "call-2", "is_error": True, "content": "Tool execution aborted"},
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    "driver,runtime", [(OpenCodeDriver, OpencodeRuntime), (KiloDriver, KiloRuntime)]
+)
 def test_the_answer_is_previewed_and_each_part_completes_in_its_place(tmp_path, driver, runtime):
     """The pinned 1.18.9 shape: an empty part, a delta per token, the whole part."""
     process = _LiveProcess()

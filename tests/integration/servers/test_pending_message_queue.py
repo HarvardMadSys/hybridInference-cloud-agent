@@ -17,6 +17,7 @@ database that is not there is a failure to report, never a reason to skip.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 from types import SimpleNamespace
@@ -42,6 +43,7 @@ from cloud_agent.api.deps import (
 )
 from cloud_agent.api.worker import verify_claiming_host
 from cloud_agent.application.pending_messages import settle_queue, settle_waiting_queues
+from cloud_agent.goals.controller import run_goal_wakeups
 from cloud_agent.source_control_runtime import SourceControlUnavailable
 from cloud_agent.storage.assembly import Storage
 from cloud_agent.storage.repositories import pending_messages as pending_message_storage
@@ -2120,6 +2122,70 @@ async def test_the_owners_waiting_message_runs_before_the_goal_continues(api: Ap
     assert turns[2]["parent_job_id"] == turns[1]["id"]
 
 
+#: The owner's goal writes that withdraw a queued automatic round, as the goal
+#: band sends them: method, path after ``/goal``, and body.
+_ROUND_WITHDRAWING_WRITES = {
+    "edit": ("PUT", "", {"goal": {"objective": "the export works, as CSV"}}),
+    "pause": ("POST", "/pause", None),
+    "clear": ("DELETE", "", None),
+}
+
+
+@pytest.mark.parametrize("write", list(_ROUND_WITHDRAWING_WRITES))
+async def test_a_round_the_goal_withdraws_lets_the_owners_waiting_message_go_next(
+    api: Api, write: str
+):
+    """Editing, pausing or clearing a goal is not a Stop for the owner's waiting message.
+
+    Each of the three cancels the automatic round that was waiting for a host,
+    and the owner's message was waiting behind that round. A cancelled newest
+    turn is what a settlement reads as the owner pressing Stop, so the message
+    used to sit in a queue marked ``stopped`` while an edited goal went on
+    queueing rounds ahead of it. The platform withdrew that round; nobody
+    stopped anything. One reaper pass — its goal wakeups, then its queue sweep,
+    in the loop's order — sends the message as the next turn.
+    """
+    job = await api.create(prompt="ship the export", goal={"objective": "the export works"})
+    thread_id = job["thread_id"]
+    await api.run(job)
+    assert [(turn["turn_source"], turn["state"]) for turn in await api.turns(thread_id)] == [
+        ("human", "succeeded"),
+        ("goal", "queued"),
+    ]
+    waiting = await api.send(thread_id, "use CSV, not JSON")
+    assert waiting.status_code == 201, waiting.text
+    assert waiting.json()["pending"] is not None
+    method, path, body = _ROUND_WITHDRAWING_WRITES[write]
+    written = await api.client.request(
+        method, f"/v1/agent/threads/{thread_id}/goal{path}", json=body
+    )
+    assert written.status_code == 200, written.text
+
+    await run_goal_wakeups(store=api.store, gateway=api.gateway)
+    await settle_waiting_queues(api.store, gateway=api.gateway, github_app=None)
+
+    turns = await api.turns(thread_id)
+    assert [(turn["turn_source"], turn["state"]) for turn in turns] == [
+        ("human", "succeeded"),
+        ("goal", "cancelled"),
+        ("human", "queued"),
+    ]
+    assert turns[2]["task_prompt"] == "use CSV, not JSON"
+    queue = await api.queue(thread_id)
+    assert (queue["queue_paused_reason"], queue["messages"]) == (None, [])
+    async with api.pool.acquire() as conn:
+        parked = await conn.fetch(
+            "SELECT waiting_job_id FROM agent_goal_wakeups "
+            "WHERE thread_id = $1 AND state = 'pending'",
+            thread_id,
+        )
+    # An edited goal is still active and waits behind the owner's turn; a
+    # paused or cleared one has nothing to schedule.
+    assert [row["waiting_job_id"] for row in parked] == (
+        [turns[2]["id"]] if write == "edit" else []
+    )
+
+
 # -- the rest of the design's behaviour ---------------------------------------------
 
 
@@ -2263,6 +2329,50 @@ async def test_a_publication_takes_the_workspaces_own_turns_and_not_a_forks_copi
     assert included == [job["id"]]
     child_view = await api.store.sandbox.thread_sandbox(thread_id=child["thread_id"])
     assert child_view is not None and child_view["workspace_unpublished_changes"] is False
+
+
+async def test_a_publication_titles_the_session_from_each_turn_once_and_not_a_forks_copies(
+    api: Api,
+):
+    """The conversation a draft PR's title is written from holds a Fork's copies once.
+
+    The title reads every chat of the workspace, and a Fork's chat starts with
+    copies of its source's turns. Read in both chats, the source's history
+    counted twice for every Fork, and a forked session reached the length past
+    which no title is asked for sooner.
+    """
+    job = await api.create(prompt="add retry backoff")
+    await api.run(job)
+    child = await api.fork(job)
+    sent = await api.send(child["thread_id"], "also document it")
+    assert sent.status_code == 201, sent.text
+    await api.run(sent.json()["job"])
+    snapshot_id = await _request_publication(api, child["thread_id"])
+    capture = await api.store.snapshot.claim_due_sandbox_snapshot()
+    assert capture is not None and capture["snapshot_id"] == snapshot_id
+    patch = "diff --git a/retry.py b/retry.py\n"
+    assert (
+        await api.store.snapshot.record_sandbox_snapshot_capture(
+            snapshot_id=snapshot_id,
+            sandbox_id=capture["sandbox_id"],
+            sandbox_generation=capture["generation"],
+            container_id=capture["container_id"],
+            workspace_epoch=capture["workspace_epoch"],
+            base_sha=capture["base_sha"],
+            patch=patch,
+            content_sha256=hashlib.sha256(patch.encode()).hexdigest(),
+        )
+        == "captured"
+    )
+
+    publication = await api.store.snapshot.claim_for_publish()
+
+    assert publication is not None and publication["snapshot_id"] == snapshot_id
+    assert sorted(
+        (message["thread_id"], message["content"])
+        for message in publication["session_messages"]
+        if message["role"] == "user"
+    ) == sorted([(job["thread_id"], "add retry backoff"), (child["thread_id"], "also document it")])
 
 
 async def test_a_publication_request_says_why_it_was_refused(api: Api):

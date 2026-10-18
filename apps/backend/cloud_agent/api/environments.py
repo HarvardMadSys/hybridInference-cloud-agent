@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, R
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api._workspace_access import fence_workspace_start
@@ -43,6 +43,7 @@ from cloud_agent_shared.environment import (
     parse_env,
 )
 from cloud_agent_shared.environment_snapshots import ENVIRONMENT_SNAPSHOT_CAPABILITY
+from cloud_agent_shared.storable_text import storable_json
 
 
 class CredentialSafeRoute(APIRoute):
@@ -220,6 +221,16 @@ class TestUpdate(BaseModel):
     cleanup_complete: bool = False
     #: The host's receipt for the installation snapshot this run saved.
     snapshot: dict[str, Any] | None = Field(None, repr=False)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _storable(cls, data: Any) -> Any:
+        """Replace what Postgres cannot store in what the scripts printed.
+
+        Refusing it would refuse the report, and a host stops a test whose
+        report is refused; so it comes before any field is checked.
+        """
+        return storable_json(data)
 
 
 def _snapshots(store: Any) -> Any:

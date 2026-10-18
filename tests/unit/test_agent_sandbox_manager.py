@@ -6,6 +6,7 @@ import asyncio
 import base64
 import contextlib
 import functools
+import gc
 import hashlib
 import json
 import logging
@@ -25,6 +26,7 @@ from fastapi import HTTPException
 from httpx import ASGITransport, AsyncClient
 
 from cloud_agent.sandbox_manager_client import SandboxManagerClient
+from cloud_agent.schemas import RetainedSandboxStop
 from cloud_agent_host import sandbox_manager as sandbox_manager_mod
 from cloud_agent_host.chat_sandbox import (
     ACTIVATION_TMPFS,
@@ -47,6 +49,7 @@ from cloud_agent_host.sandbox_manager import (
     MAX_TERMINAL_BUFFER_BYTES,
     MAX_TERMINAL_BUFFER_EVENTS,
     MAX_TERMINAL_SESSIONS_PER_WORKSPACE,
+    SharedIdleStopRequest,
     SharedTurnRequest,
     TerminalRequest,
     _run_terminal,
@@ -67,6 +70,46 @@ from cloud_agent_host.shared_session_supervisor import (
 )
 from cloud_agent_host.tool_windows import ToolMark
 from cloud_agent_shared.host_settings import SANDBOX_MANAGER_SETTING_KEYS, default_values
+
+
+def test_generation_zero_is_limited_to_fenced_group_stop_requests():
+    with pytest.raises(ValueError, match="generation zero requires"):
+        SharedIdleStopRequest(
+            generation=3,
+            activation_generation=0,
+            reason="idle",
+            member_activation_generations={"athr_source": 0},
+        )
+    with pytest.raises(ValueError, match="generation zero requires"):
+        SharedIdleStopRequest(
+            generation=3,
+            activation_generation=0,
+            reason="orphaned_attempt",
+        )
+
+    orphan_stop = SharedIdleStopRequest(
+        generation=3,
+        activation_generation=0,
+        reason="orphaned_attempt",
+        member_activation_generations={"athr_source": 0},
+    )
+    assert orphan_stop.activation_generation == 0
+
+    with pytest.raises(ValueError, match="generation zero requires"):
+        RetainedSandboxStop(
+            thread_id="athr_source",
+            generation=3,
+            activation_generation=0,
+            reason="idle",
+        )
+    control_plane_orphan_stop = RetainedSandboxStop(
+        thread_id="athr_source",
+        generation=3,
+        activation_generation=0,
+        reason="orphaned_attempt",
+        member_activation_generations={"athr_source": 0},
+    )
+    assert control_plane_orphan_stop.activation_generation == 0
 
 
 @pytest.mark.asyncio
@@ -107,6 +150,68 @@ async def test_resource_checkpoint_is_forwarded_before_any_native_event():
     finally:
         gate.set()
         await response.body_iterator.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cli", ["silent", "speaks"])
+async def test_a_dropped_turn_stream_aborts_its_turn_without_a_collector(cli):
+    """A runner whose turn process dies leaves its turn stream with no reader.
+
+    The turn must be aborted as soon as the client is gone, whether or not the
+    CLI says anything more. A frames generator left suspended runs its cleanup
+    only when a garbage collector reaches it, and until then the member's
+    turn, lease and lock stay held.
+    """
+    disconnected = threading.Event()
+    released = threading.Event()
+    aborted = threading.Event()
+
+    class QuietTurn:
+        @staticmethod
+        def lines():
+            yield SimpleNamespace(event_type="message", payload={"text": "hi"}, raw_line="hi")
+            if cli == "speaks":
+                assert disconnected.wait(5)
+                yield SimpleNamespace(event_type="message", payload={"text": "and"}, raw_line="and")
+            released.wait(10)  # the model keeps working until someone interrupts it
+
+    supervisor = _SharedSupervisor()
+    supervisor.start_turn = lambda *_args, **_kw: QuietTurn()  # type: ignore[attr-defined]
+    supervisor.abort_turn = lambda *_args: aborted.set()  # type: ignore[attr-defined]
+    endpoint = next(
+        route.endpoint
+        for route in _app(supervisor).routes
+        if getattr(route, "path", None) == "/shared-sandboxes/{thread_id}/turn"
+    )
+    response = await endpoint(
+        "athr_source", SharedTurnRequest(token="lease", prompt="work", model="model")
+    )
+    first_frame = asyncio.Event()
+
+    async def send(message):
+        if message["type"] == "http.response.body" and message.get("body"):
+            first_frame.set()
+
+    async def receive():
+        # The runner reads the first frame, then its process dies while the
+        # stream waits on the CLI for the next one.
+        await first_frame.wait()
+        await asyncio.sleep(0.5)
+        disconnected.set()
+        return {"type": "http.disconnect"}
+
+    gc.disable()
+    serving = asyncio.ensure_future(
+        response({"type": "http", "asgi": {"spec_version": "2.3"}}, receive, send)
+    )
+    try:
+        done, _ = await asyncio.wait({serving}, timeout=3)
+        assert serving in done
+        assert aborted.is_set()
+    finally:
+        gc.enable()
+        released.set()
+        await asyncio.wait_for(serving, timeout=10)
 
 
 class _TerminalProcess(TerminalProcess):
@@ -1684,7 +1789,9 @@ async def test_the_import_retry_brings_back_a_base_git_pruned_with_the_one_befor
     async def failed(*, snapshot_id: int, detail: str, delay_s: float | None = None) -> None:
         outcomes.append(("failed", snapshot_id, detail))
 
-    async def completed(*, snapshot_id: int, commit_sha: str) -> bool:
+    async def completed(
+        *, snapshot_id: int, commit_sha: str, generation: int, container_id: str | None
+    ) -> bool:
         outcomes.append(("completed", snapshot_id, commit_sha))
         return True
 
@@ -1706,6 +1813,8 @@ async def test_the_import_retry_brings_back_a_base_git_pruned_with_the_one_befor
         # The second publication was cut from the first: what the retry used.
         "base_sha": first,
         "origin_base_sha": setup.base,
+        "generation": 1,
+        "container_id": "container-gc",
     }
 
     imported = await publish_worker._retry_base_import(
@@ -2859,6 +2968,105 @@ def test_a_slow_terminal_suspension_never_holds_up_another_workspace(tmp_path):
     assert [item["id"] for item in listed] == [other.id]
     assert slow.suspended
     assert terminals._workspace_locks == {}
+
+
+class _SlowSpawner:
+    """A terminal spawn, a Docker inspect and exec in production, held until released."""
+
+    def __init__(self) -> None:
+        self.spawning = threading.Event()
+        self.release = threading.Event()
+
+    @staticmethod
+    def base_env() -> dict[str, str]:
+        return {}
+
+    def spawn_terminal(self, _spec, *, rows: int, cols: int) -> TerminalProcess:
+        self.spawning.set()
+        assert self.release.wait(5)
+        return _RunningTerminalProcess()
+
+
+def test_a_slow_terminal_creation_never_holds_up_another_workspace(tmp_path):
+    """Opening a terminal is a Docker call too, and can take seconds.
+
+    Holding the manager's lock across it stalled every keystroke, listing and
+    suspension in every other workspace on the host, as a slow suspension
+    did. A suspension of its own workspace still waits for it.
+    """
+    terminals = _TerminalManager(idle_ttl_s=1800, hard_ttl_s=28800, max_sessions=8)
+    other = _listed_session(terminals, "athr_other", _SuspendableTerminalProcess(), tmp_path)
+    spawner = _SlowSpawner()
+    creation = threading.Thread(
+        target=functools.partial(
+            terminals.create, "athr_source", "/workspace", rows=24, cols=80, backend=spawner
+        ),
+        daemon=True,
+    )
+    creation.start()
+    assert spawner.spawning.wait(2)
+    own_suspension = threading.Thread(
+        target=functools.partial(
+            terminals.suspend, "athr_source", lease_generation=1, job_id="job-source"
+        ),
+        daemon=True,
+    )
+
+    try:
+        controlled, listed, suspended = _finish_within(
+            1,
+            lambda: (
+                terminals.get_for_control("athr_other", other.id),
+                terminals.list("athr_other"),
+                terminals.suspend("athr_other", lease_generation=1, job_id="job-other"),
+            ),
+        )
+        own_suspension.start()
+        own_suspension.join(0.3)
+        suspended_mid_creation = not own_suspension.is_alive()
+    finally:
+        spawner.release.set()
+        creation.join(5)
+    own_suspension.join(5)
+
+    assert controlled is other
+    assert [item["id"] for item in listed] == [other.id]
+    assert suspended == {"ok": True, "suspended": 1}
+    assert not suspended_mid_creation
+    [created] = terminals._sessions["athr_source"].values()
+    assert created._suspended
+    assert terminals._workspace_locks == {}
+    terminals.delete("athr_source", created.id)
+
+
+def test_a_terminal_still_being_created_counts_against_the_sandbox_managers_limit():
+    terminals = _TerminalManager(idle_ttl_s=1800, hard_ttl_s=28800, max_sessions=1)
+    spawner = _SlowSpawner()
+    creation = threading.Thread(
+        target=functools.partial(
+            terminals.create, "athr_source", "/workspace", rows=24, cols=80, backend=spawner
+        ),
+        daemon=True,
+    )
+    creation.start()
+    assert spawner.spawning.wait(2)
+
+    try:
+        with pytest.raises(HTTPException) as refused:
+            _finish_within(
+                1,
+                lambda: terminals.create(
+                    "athr_other", "/workspace", rows=24, cols=80, backend=_Spawner()
+                ),
+            )
+    finally:
+        spawner.release.set()
+        creation.join(5)
+
+    assert refused.value.status_code == 503
+    assert [row["state"] for row in terminals.list("athr_source")] == ["running"]
+    assert "athr_other" not in terminals._sessions
+    terminals.close()
 
 
 def test_a_resume_waits_for_its_own_workspaces_suspension_to_finish(tmp_path):

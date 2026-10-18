@@ -86,6 +86,10 @@ long:
   agent state its `wait` call reports.
 - pi has no subagents.
 
+A tool from an MCP server is never shown as a task list or a subagent, whatever
+its name. Codex, pi, OpenCode and Kilo sessions recorded before each call
+stored its MCP server can still show such a tool as a subagent.
+
 A card says when a reply is still pending, was not recorded, or was stored
 only in part. A failed or interrupted launch stays listed with what it
 returned. A background launch returns only a launch notice, and its card says
@@ -121,9 +125,10 @@ the page's reading position; reloading opens at the end again.
 
 ## Workspace navigation
 
-Open the workspace from the header or with Ctrl/Command+J. On smaller screens,
-**Back to conversation** returns to Chat and preserves the selected workspace
-view. The task title and controls adapt to the space left by the sidebar.
+Open the workspace from the header, or with Command+J on a Mac and Ctrl+J
+elsewhere. On smaller screens, **Back to conversation** returns to Chat and
+preserves the selected workspace view. The task title and controls adapt to the
+space left by the sidebar.
 
 Workspace, Git, file-list, and terminal tabs use Left/Right arrows, Home, and End
 to select a view while keeping keyboard focus in the tab strip. Narrow Git panes

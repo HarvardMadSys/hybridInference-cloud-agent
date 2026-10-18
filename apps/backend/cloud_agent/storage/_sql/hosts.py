@@ -113,6 +113,25 @@ LIVE_ATTEMPT_HOST = """EXISTS (
 )"""
 
 
+#: Whether group ``g`` still needs the host it names, so that forgetting the
+#: host must wait. Binds the group as ``g``; the caller supplies that alias.
+#:
+#: A deleted group is an audit row. A ``cold`` group lives in its checkpoint:
+#: whichever restore-capable host claims it becomes its host. Until then it
+#: keeps naming the host it last ran on (``host`` is never NULL), and nothing
+#: reads that name for it: no foreign key ties it or its checkpoint's host to
+#: the host row, and the cold claim, the restore it hands out and the
+#: confirmation of the restored container do not look at either.
+HOST_RETAINED_GROUP = "g.deletion_state <> 'deleted' AND g.state <> 'cold'"
+
+
+#: Group ``g`` has no deletion in progress or done, as the claim reads it. A
+#: deletion that failed before its archive (``failed``) kept the container,
+#: and the group serves its chats as one never asked to be deleted: it is
+#: counted, moved out, handed over and lost with its machine like any other.
+UNDELETED_GROUP_SQL = "g.deletion_state NOT IN ('pending', 'archived', 'deleted')"
+
+
 def host_claim_ceiling(slots_total: int | None, slots_desired: int | None) -> int | None:
     """The concurrency a host may be asked for: the lower of its two numbers.
 
@@ -160,6 +179,8 @@ async def revoke_host_credentials(conn: Any, hosts: list[str]) -> None:
 
     Callers own admission locks and busy/retention policy; this is the one
     credential transition shared by Host Remove and committed resource release.
+    Every caller takes the rows this writes below the host rows first: Host
+    Remove itself, a resource release through :func:`lock_hosts_for_revocation`.
 
     **The work the machine was holding ends with its credential.** Clearing
     the hash stops the host's own requests, but its attempts run on worker
@@ -197,6 +218,58 @@ async def revoke_host_credentials(conn: Any, hosts: list[str]) -> None:
     await release_covered_sandboxes(conn, hosts)
 
 
+async def lock_revocation_rows(conn: Any, hosts: list[str]) -> None:
+    """Lock what revoking ``hosts`` reads and writes below their host rows.
+
+    Taken before the host rows, in the documented order: the hot memberships
+    whose residency leases the revocation ends, then every undeleted group
+    the hosts hold. A removal's decision and its hand-over then see the same
+    groups. A workspace request that fenced a covered group between the two
+    would take it out of the hand-over without a word, and leave it on the
+    revoked host with no checkpoint to move it. Locked, the fence waits, and
+    then finds the group ``cold``; one that came first leaves the group
+    uncovered, which the removal counts as a group that cannot move.
+    """
+    await conn.execute(
+        """
+        SELECT m.thread_id FROM agent_thread_sandbox_memberships m
+        JOIN agent_sandboxes g ON g.id = m.sandbox_id
+        WHERE g.host = ANY($1::text[]) AND m.residency_status = 'hot'
+        ORDER BY m.thread_id
+        FOR UPDATE OF m
+        """,
+        hosts,
+    )
+    await conn.execute(
+        "SELECT g.id FROM agent_sandboxes g WHERE g.host = ANY($1::text[]) "
+        f"AND {UNDELETED_GROUP_SQL} ORDER BY g.id FOR UPDATE",
+        hosts,
+    )
+
+
+async def lock_hosts_for_revocation(conn: Any, hosts: list[str]) -> None:
+    """Lock what revoking ``hosts`` writes, the host rows last.
+
+    Their running attempts, then their memberships and groups
+    (:func:`lock_revocation_rows`), then the host rows: the order of every
+    writer that ends an attempt, which moves the attempt, writes its group and
+    gives its slot back on the host row last. A release that locked the host
+    rows first and then brought the attempts' leases forward deadlocked with an
+    attempt the reaper was ending on that host. Host Remove takes the same rows
+    in the same order itself.
+    """
+    await conn.execute(
+        "SELECT id FROM agent_attempts WHERE host_id = ANY($1::text[]) AND status = 'running' "
+        "ORDER BY id FOR UPDATE",
+        hosts,
+    )
+    await lock_revocation_rows(conn, hosts)
+    await conn.execute(
+        "SELECT host FROM agent_runner_hosts WHERE host = ANY($1::text[]) ORDER BY host FOR UPDATE",
+        hosts,
+    )
+
+
 #: Whether stopped group ``g`` moves through its checkpoint: the restore point
 #: of exactly this container, generation and start, taken from an image another
 #: host can pull, recording every member's last settled turn, with no fork or
@@ -204,7 +277,7 @@ async def revoke_host_credentials(conn: Any, hosts: list[str]) -> None:
 #: leave behind, uses this one condition.
 COVERED_GROUP_SQL = f"""(
     g.state = 'stopped'
-    AND g.deletion_state = 'none'
+    AND {UNDELETED_GROUP_SQL}
     AND g.stop_requested_at IS NULL
     AND EXISTS (
         SELECT 1 FROM agent_sandbox_checkpoints c
@@ -286,6 +359,67 @@ async def release_covered_sandboxes(
         live_host,
     )
     return [str(row["id"]) for row in rows]
+
+
+async def release_late_covered_sandboxes(conn: Any) -> list[str]:
+    """Hand on the covered groups of hosts that were already revoked.
+
+    A heartbeat authenticated just before its host was revoked can still be
+    writing when the revocation commits. A checkpoint it carries then lands
+    after :func:`release_covered_sandboxes` looked, and covers a stopped group
+    bound to a host that will never beat again. The same rule moves that group
+    on now. A revoked host has no other way to gain a covered group, so this
+    moves only what the revocation would have moved had the beat been earlier.
+    """
+    hosts = [
+        str(row["host"])
+        for row in await conn.fetch(
+            """
+            SELECT h.host FROM agent_runner_hosts h
+            WHERE h.credential_hash IS NULL AND h.status = 'disabled'
+              AND EXISTS (
+                  SELECT 1 FROM agent_sandboxes g
+                  WHERE g.host = h.host AND g.state = 'stopped'
+                    AND g.restore_checkpoint_id IS NOT NULL
+              )
+            ORDER BY h.host
+            """
+        )
+    ]
+    return await release_covered_sandboxes(conn, hosts) if hosts else []
+
+
+#: Whether host ``{host}`` has been revoked (:func:`revoke_host_credentials`)
+#: and not enrolled again. ``{host}`` names the host column or parameter.
+REVOKED_HOST_SQL = """EXISTS (
+    SELECT 1 FROM agent_runner_hosts revoked
+    WHERE revoked.host = {host}
+      AND revoked.credential_hash IS NULL AND revoked.status = 'disabled'
+)"""
+
+
+async def refuse_start_on_revoked_host(conn: Any, group: Any) -> str | None:
+    """Refuse to start ``group`` on a revoked host; ``None`` lets the start go ahead.
+
+    For a caller about to start a stopped container, which holds the group's
+    row lock and passes its ``id``, ``state`` and ``host``. Read after that
+    lock, the host's revocation is the one any handover of the group saw.
+
+    A revoked host never reports a stop again, so a start there would end the
+    cover of the checkpoint that moves the group, for good. A checkpoint that
+    landed after the revocation already covers it, and the group is handed on
+    now, as the reaper's next pass would do (:func:`release_late_covered_sandboxes`):
+    ``"cold"``. Any other group stays with that host, unstarted, so a checkpoint
+    still in flight covers it when it lands: ``"host_revoked"``. A ``cold`` or
+    ``restoring`` group lives in its checkpoint, whatever host it last named.
+    """
+    if group["state"] in ("cold", "restoring") or not await conn.fetchval(
+        "SELECT " + REVOKED_HOST_SQL.format(host="$1"), group["host"]
+    ):
+        return None
+    if await release_covered_sandboxes(conn, [str(group["host"])], sandbox_ids=[str(group["id"])]):
+        return "cold"
+    return "host_revoked"
 
 
 # A Host moving out, in its lease window or because an administrator removes

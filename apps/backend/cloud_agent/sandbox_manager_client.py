@@ -23,6 +23,7 @@ from cloud_agent_shared.operation_profiling import (
     PROFILING_CONTEXT_HEADER,
     answer_from_headers,
 )
+from cloud_agent_shared.storable_text import storable_json
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Mapping
@@ -294,17 +295,26 @@ class SandboxManagerClient:
 
         Owner inference credentials need a broker that keeps them from the CLI.
         Return all declared capabilities so callers only send supported fields.
+        The answer is read under the same ceiling as every other reply: the
+        host chooses how much it sends, on the claim path among others.
         """
         required = {ENVIRONMENT_CAPABILITY}
         if environment is not None and uses_inference_names(environment):
             required.add(ENVIRONMENT_INFERENCE_CAPABILITY)
         try:
             async with self._http(5) as client:
-                response = await client.get(
-                    f"{self._base_url}/health", headers=self._headers, timeout=5
+                status_code, body = await self._exchange(
+                    client,
+                    "GET",
+                    f"{self._base_url}/health",
+                    limit=MAX_SANDBOX_MANAGER_CONTROL_BYTES,
+                    headers=self._headers,
+                    timeout=5,
                 )
-                response.raise_for_status()
-                capabilities = [str(c) for c in response.json().get("capabilities", [])]
+            answer = _json_object(body) if status_code < 400 and body is not None else None
+            if answer is None:
+                raise ValueError("the sandbox manager gave no capability answer")
+            capabilities = [str(c) for c in answer.get("capabilities", [])]
         except (httpx.HTTPError, ValueError, AttributeError, TypeError):
             raise SandboxManagerError(
                 503, "Sandbox manager environment capability is unavailable"
@@ -316,14 +326,19 @@ class SandboxManagerClient:
         return capabilities
 
     async def prepare_environment(self, workspace_id: str, environment: Any) -> dict[str, Any]:
-        """Require actual broker support before sending value-bearing configuration."""
+        """Require actual broker support before sending value-bearing configuration.
+
+        The steps' output is stored, so what Postgres cannot store is replaced.
+        """
         capabilities = await self.require_environment_capability(environment)
-        return await self._request(
-            "POST",
-            workspace_id,
-            "environment/prepare",
-            json={"environment": environment_payload(environment, capabilities)},
-            timeout=1050,
+        return storable_json(
+            await self._request(
+                "POST",
+                workspace_id,
+                "environment/prepare",
+                json={"environment": environment_payload(environment, capabilities)},
+                timeout=1050,
+            )
         )
 
     async def sync_ssh_access(self, workspace_id: str, access: Any) -> dict[str, Any]:
@@ -671,9 +686,15 @@ class SandboxManagerClient:
         return await self._request("POST", workspace_id, suffix, json={"rows": rows, "cols": cols})
 
     async def terminal_output(self, workspace_id: str, terminal_id: str) -> dict[str, Any]:
-        """Read bounded private terminal output for a redacted operation summary."""
-        return await self._request(
-            "GET", workspace_id, f"terminals/{quote(terminal_id, safe='')}/output"
+        """Read bounded private terminal output for a redacted operation summary.
+
+        The summary is stored, so what Postgres cannot store is replaced: a
+        command that printed a NUL has still finished.
+        """
+        return storable_json(
+            await self._request(
+                "GET", workspace_id, f"terminals/{quote(terminal_id, safe='')}/output"
+            )
         )
 
     async def delete_terminal(self, workspace_id: str, terminal_id: str) -> dict[str, Any]:

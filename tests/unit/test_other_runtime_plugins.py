@@ -40,11 +40,58 @@ def test_installer_returns_only_explicit_member_paths(monkeypatch, runtime):
     )
     assert json.loads(result["AGENT_PLUGIN_PATHS"]) == [expected]
     argv = calls[0][0][2]
-    assert argv[:2] == ["python3", "-c"]
-    assert json.loads(argv[4])[0]["name"] == "@example/plugin"
+    assert argv[:3] == ["python3", "-I", "-c"]
+    assert json.loads(argv[5])[0]["name"] == "@example/plugin"
     assert calls[0][1]["env"]["HOME"] == "/home/agent-member-4"
     assert calls[0][1]["env"]["PATH"] == "/opt/pinned/bin:/usr/bin"
     assert calls[0][1]["slot_id"] == 4
+
+
+def test_installer_starts_in_the_workspace_without_importing_from_it(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(
+        "cloud_agent_host.other_plugins.run_plugin_command",
+        lambda *args, **kwargs: calls.append((args, kwargs)),
+    )
+    tools = tmp_path / "bin"
+    tools.mkdir()
+    (tools / "npm").write_text(
+        f"#!{sys.executable}\n"
+        "import json, pathlib, sys\n"
+        "root = pathlib.Path(sys.argv[sys.argv.index('--prefix') + 1])\n"
+        "package = root / 'node_modules' / 'example-plugin'\n"
+        "package.mkdir(parents=True)\n"
+        "(package / 'package.json').write_text(json.dumps({'main': 'index.mjs'}))\n"
+        "(package / 'index.mjs').write_text('export default {};')\n"
+    )
+    (tools / "npm").chmod(0o700)
+    install_other_runtime_plugins(
+        object(),
+        object(),
+        runtime_id="opencode",
+        plugins=({"plugin": "example-plugin@1.2.3"},),
+        env={"PATH": f"{tools}:/usr/bin:/bin"},
+        slot_id=4,
+    )
+    ((args, kwargs),) = calls
+    home = tmp_path / "member"
+    home.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    # The project's own module, named like the standard library's.
+    (workspace / "types.py").write_text("UserId = int\n")
+    # The installer as run_plugin_command runs it, from the workspace, with
+    # this test's directory as the member's home.
+    result = subprocess.run(
+        [*args[2][:-1], str(home)],
+        cwd=workspace,
+        env={**kwargs["env"], "HOME": str(home)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert len(list(home.glob(".agent-plugins/opencode/*/.complete.json"))) == 1
 
 
 def _run_script(monkeypatch, home, runtime, *, spec="example-plugin@1.2.3"):

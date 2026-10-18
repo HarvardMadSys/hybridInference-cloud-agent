@@ -17,15 +17,22 @@ these six methods turns on: **the scope is in the query, not in the caller**.
 Setup goes through the store, because a job is ConversationCommands' to create
 and that capability has not moved yet. Every assertion goes through this
 repository.
+
+`latest_assistant_message_state` is here for what only Postgres can settle
+about it: which rows it reads. Every automatic round calls it as it finishes.
 """
 
 from __future__ import annotations
 
+import json
 import os
+from typing import Any
 
+import asyncpg
 import pytest
 import pytest_asyncio
 from tests.integration.storage.test_agent_job_store import _create_job
+from tests.integration.storage.test_schema_upgrade import _db_config
 from tests.support.db import reset_agent_tables
 from tests.support.migrations import apply_migrations
 
@@ -238,3 +245,105 @@ async def test_a_row_only_session_page_skips_the_history_aggregate(
 
     assert page["sessions"], "the page should still list the row"
     assert page["total"] is None and page["projects"] is None
+
+
+# ── The final message of a turn ───────────────────────────────────────
+
+#: Conversations whose transcripts share the table with the one under test.
+_TRANSCRIPT_CHATS = 1000
+
+#: The messages the conversation under test holds: two turns, one reply twice.
+_OWN_MESSAGES = 5
+
+
+def _plan_nodes(node: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every node of one ``EXPLAIN (FORMAT JSON)`` plan, subplans included."""
+    return [node, *(item for child in node.get("Plans", []) for item in _plan_nodes(child))]
+
+
+async def _seed_transcripts(conn: asyncpg.Connection, turns: list[int]) -> None:
+    """Every conversation's prompt and reply for ``turns``, oldest first."""
+    await conn.execute(
+        """
+        INSERT INTO agent_thread_messages (thread_id, job_id, role, content)
+        SELECT j.thread_id, j.id, role.name, role.name || ' of ' || j.id
+        FROM agent_jobs j CROSS JOIN (VALUES ('user'), ('assistant')) AS role(name)
+        WHERE j.turn_no = ANY($1::int[])
+        ORDER BY j.turn_no, j.id, role.name DESC
+        """,
+        turns,
+    )
+
+
+async def test_a_turns_final_message_is_read_from_its_own_conversation(db) -> None:
+    """Every automatic round reads its final message as it finishes: one transcript, not all.
+
+    The message table holds every conversation's transcript, and nothing
+    indexes a reply by its job. Read by job alone, each finishing round read
+    the table until it reached that reply -- all of it, in the plan a large
+    table gets -- so the read grew with everything anyone had been answered
+    since. The plan check runs the statement the read actually sends.
+    """
+    async with db.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO agent_threads
+                (id, user_id, repo, title, title_source, setup_script, execution_profile)
+            SELECT 'athr_tx_' || g, $2, 'example-org/example-repo', 'history', 'fallback',
+                   NULL, 'trusted-v1'
+            FROM generate_series(1, $1) g
+            """,
+            _TRANSCRIPT_CHATS,
+            _OWNER,
+        )
+        await conn.execute(
+            """
+            INSERT INTO agent_jobs
+                (id, thread_id, user_id, parent_job_id, turn_no, native_turn_no,
+                 task_prompt, runtime, model, state)
+            SELECT 'ajob_tx_' || g || '_' || turn, 'athr_tx_' || g, $2,
+                   CASE WHEN turn = 2 THEN 'ajob_tx_' || g || '_1' END, turn, turn,
+                   'p', 'claude-code', 'glm-5.1', 'succeeded'
+            FROM generate_series(1, $1) g CROSS JOIN generate_series(1, 2) turn
+            """,
+            _TRANSCRIPT_CHATS,
+            _OWNER,
+        )
+        await _seed_transcripts(conn, [1])
+        # The turn under test answered twice; its last reply is its report.
+        await conn.execute(
+            "INSERT INTO agent_thread_messages (thread_id, job_id, role, content, truncated) "
+            "VALUES ('athr_tx_7', 'ajob_tx_7_1', 'assistant', 'the final answer', TRUE)"
+        )
+        # Every conversation went on talking after it.
+        await _seed_transcripts(conn, [2])
+        await conn.execute("ANALYZE agent_jobs")
+        await conn.execute("ANALYZE agent_thread_messages")
+
+    captured: list[Any] = []
+
+    async def capture_queries(conn: asyncpg.Connection) -> None:
+        conn.add_query_logger(captured.append)
+
+    reading_pool = await asyncpg.create_pool(
+        **_db_config(), min_size=1, max_size=1, init=capture_queries
+    )
+    try:
+        state = await PostgresConversationQueries(reading_pool).latest_assistant_message_state(
+            job_id="ajob_tx_7_1"
+        )
+    finally:
+        await reading_pool.close()
+    assert state == {"content": "the final answer", "truncated": True}
+
+    (statement,) = [item for item in captured if "agent_thread_messages" in item.query]
+    async with db.acquire() as conn:
+        plan = await conn.fetchval(
+            f"EXPLAIN (ANALYZE, FORMAT JSON) {statement.query}", *statement.args
+        )
+    read = sum(
+        (node["Actual Rows"] + node.get("Rows Removed by Filter", 0)) * node["Actual Loops"]
+        for node in _plan_nodes(json.loads(plan)[0]["Plan"])
+        if node.get("Relation Name") == "agent_thread_messages"
+    )
+    assert read <= _OWN_MESSAGES, f"read {read} messages to find one of {_OWN_MESSAGES}"

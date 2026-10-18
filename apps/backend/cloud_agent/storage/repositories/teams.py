@@ -620,6 +620,12 @@ class PostgresTeamRepository:
             )
             if not team_active or invitation is None:
                 raise InvitationUnavailable("This invitation link is no longer valid.")
+            member = await conn.fetchval(
+                "SELECT TRUE FROM agent_team_members "
+                "WHERE team_id = $1 AND user_id = $2 AND state = 'active'",
+                team_id,
+                actor,
+            )
             if invitation["state"] == "claimed":
                 own = await conn.fetchrow(
                     _OWN_REQUEST_VIEW + " WHERE r.invitation_id = $1 AND r.user_id = $2",
@@ -628,15 +634,20 @@ class PostgresTeamRepository:
                 )
                 if own is None:
                     raise InvitationUnavailable("This invitation link is no longer valid.")
+                # Claiming again returns the same request, so a double click or
+                # a reload shows where it stands. An approval stands only while
+                # the membership it made does: after leaving or removal, the
+                # spent link cannot bring the claimant back.
+                if own["state"] == "approved" and not member:
+                    raise TeamConflict(
+                        "You are no longer a member of this team. "
+                        "Ask an owner or admin for a new invitation link.",
+                        code="no_longer_member",
+                    )
                 return _own_request(own)
             if invitation["state"] == "revoked" or invitation["expired"]:
                 raise InvitationUnavailable("This invitation link is no longer valid.")
-            if await conn.fetchval(
-                "SELECT TRUE FROM agent_team_members "
-                "WHERE team_id = $1 AND user_id = $2 AND state = 'active'",
-                team_id,
-                actor,
-            ):
+            if member:
                 raise TeamConflict("You are already a member of this team.", code="already_member")
             # A request whose link has expired can no longer be approved; close
             # it so it does not hold the one pending slot this account has here.

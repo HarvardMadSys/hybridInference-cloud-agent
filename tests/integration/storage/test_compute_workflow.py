@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -10,6 +11,7 @@ from uuid import uuid4
 import pytest
 from tests.integration.storage.test_host_pool_store import db as db, hosts as hosts, store as store
 
+from cloud_agent.application.compute_autoscale import CloudLabAutoscaler
 from cloud_agent.application.compute_reconcile import ComputeReconciler
 from cloud_agent.application.compute_resources import ComputeCommands
 from cloud_agent.compute_config import ComputeConfiguration
@@ -29,6 +31,7 @@ from cloud_agent.ports.external.host_bootstrap import (
     DeploymentProfile,
     HostInventory,
 )
+from cloud_agent.schemas_compute import RenewalPolicy, RetireComputeRequest
 from cloud_agent.storage._sql.compute_admission import host_compute_admission
 from cloud_agent.workers.compute_resources import ComputeResourceWorker
 
@@ -216,3 +219,140 @@ async def test_receipt_survives_failed_observation_and_retry_never_creates_twice
     assert completed["state"] == "succeeded", completed
     r.provider.acquire.assert_awaited_once()
     r.provider.recover_acquire.assert_not_awaited()
+
+
+async def test_retiring_a_server_whose_experiment_was_never_observed_deletes_it(
+    db, store, hosts, monkeypatch
+):
+    """The provider answered the create, then the observation after it failed.
+
+    Only the acquisition knows the experiment. Releasing the server deletes
+    that experiment rather than recording that none was ever created.
+    """
+    from cloud_agent.ports.external.compute_provider import ProviderError
+
+    r = await rig(store, hosts, monkeypatch)
+    experiment = r.observation.ref
+    r.provider.acquire.return_value = ProviderReceipt(outcome="pending", resource=experiment)
+    r.provider.inspect.side_effect = ProviderError(
+        "temporarily_unavailable", "unavailable", retryable=True
+    )
+    waiting = await run_next(r)
+    assert waiting["result"]["resource_ref"]["external_id"] == experiment.external_id
+    allocation = await r.repo.get_allocation(r.op["allocation_id"])
+    assert allocation["external_id"] is None
+    r.provider.inspect.side_effect = None
+    gone = r.observation.model_copy(
+        update={"state": "terminated", "raw_state": "terminated", "nodes": ()}
+    )
+    r.provider.release.return_value = ProviderReceipt(
+        outcome="confirmed", resource=experiment, observation=gone
+    )
+
+    await r.commands.retire(
+        allocation["id"],
+        RetireComputeRequest(request_id="retire", expected_revision=allocation["revision"]),
+        actor="admin",
+    )
+    retired = await run_next(r)
+
+    assert (retired["kind"], retired["state"]) == ("retire", "succeeded"), retired
+    r.provider.release.assert_awaited_once()
+    assert r.provider.release.await_args.args[0].external_id == experiment.external_id
+    released = await r.repo.get_allocation(allocation["id"])
+    assert (released["external_id"], released["observed_state"]) == (
+        experiment.external_id,
+        "terminated",
+    )
+
+
+async def test_a_pool_member_is_not_replaced_while_its_renewal_may_be_granted(db, store):
+    """Each worker pass schedules renewals, then runs the autoscaler.
+
+    The pass that first renews a member's lease must still count it toward
+    the minimum. Replacing it then would leave the pool an experiment larger
+    once the extension is granted.
+    """
+    repo = store.compute_resources
+    policy = RenewalPolicy(enabled=True, reason="Keep the pool")
+    async with db.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO agent_compute_connections
+               (id,name,provider_id,secret_ciphertext,status)
+               VALUES ('pool-cloudlab','CloudLab','cloudlab','ciphertext','verified'),
+                      ('pool-ssh','SSH','existing_ssh','ciphertext','verified')"""
+        )
+        await conn.execute(
+            """UPDATE agent_cloudlab_autoscaling_policy
+               SET enabled=TRUE,min_hosts=1,max_hosts=2,
+                   connection_id='pool-cloudlab',ssh_connection_id='pool-ssh',
+                   deployment_profiles=ARRAY['route-a','route-b'],renewal_policy=$1::jsonb""",
+            json.dumps(policy.model_dump(mode="json")),
+        )
+        await conn.execute(
+            """INSERT INTO agent_cloudlab_autoscaling_profile_reservations
+               (deployment_profile,profile_snapshot)
+               VALUES ('route-a','{"id":"route-a"}'),('route-b','{"id":"route-b"}')"""
+        )
+    created = await repo.create_autoscale_allocation_operation(
+        expected_revision=0,
+        expected_generation=0,
+        request_id="pool-member",
+        fingerprint="pool-member",
+        allocation={"name": "pool member"},
+        parameters={},
+        requested_by="system:cloudlab-autoscaler",
+        decision={"action": "scale_up_minimum"},
+        cooldown_seconds=0,
+    )
+    member = created["operation"]["allocation_id"]
+    claimed = await repo.claim_operation(worker_id="workflow")
+    assert await repo.finish_operation(
+        operation_id=claimed["id"],
+        generation=claimed["generation"],
+        worker_id="workflow",
+        state="succeeded",
+        step="ready",
+    )
+    renewals = []
+
+    async def extend(allocation_id, request, *, actor):
+        renewals.append(allocation_id)
+
+    commands = SimpleNamespace(
+        repository=repo,
+        configuration=ComputeConfiguration(),
+        queue_inspection=AsyncMock(),
+        extend=extend,
+    )
+    reconciler = ComputeReconciler(
+        commands=commands, host_pool=store.host_pool, bootstrap=SimpleNamespace()
+    )
+    autoscaler = CloudLabAutoscaler(
+        repository=repo, host_pool=store.host_pool, expected_deployment_sha=""
+    )
+    experiment = str(uuid4())
+    # A lease just extended to the horizon runs down, one 30-second pass at a time.
+    remaining = policy.extend_to_horizon_seconds
+    while not renewals:
+        remaining -= 30
+        async with db.acquire() as conn:
+            await conn.execute(
+                """UPDATE agent_compute_allocations
+                   SET observed_state='ready',scope_complete=TRUE,external_id=$2,
+                       expiration_known=TRUE,expires_at=NOW()+make_interval(secs=>$3),
+                       observed_at=NOW()
+                   WHERE id=$1""",
+                member,
+                experiment,
+                remaining,
+            )
+        await reconciler.schedule()
+        await autoscaler.reconcile()
+
+    assert renewals == [member]
+    state = await repo.get_cloudlab_autoscaling()
+    assert [(row["allocation_id"], row["moving_out"]) for row in state["members"]] == [
+        (member, False)
+    ]
+    assert state["runtime"]["last_decision"]["action"] == "steady"

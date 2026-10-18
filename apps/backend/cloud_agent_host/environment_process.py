@@ -49,6 +49,7 @@ def kill_identity(backend: RetainedChatBackend, uid: int) -> None:
         backend.spec,
         [
             "python3",
+            "-I",
             "-c",
             """import os,signal,sys,time
 uid=int(sys.argv[1])
@@ -101,7 +102,7 @@ for name in ('status','status.tmp'):
 """
     prepared = manager.exec_capture(
         spec,
-        ["python3", "-c", script, str(uid)],
+        ["python3", "-I", "-c", script, str(uid)],
         user_uid=uid,
         user_gid=manager.backend.gid,
         workdir="/",
@@ -178,9 +179,12 @@ class EnvironmentProcess(SandboxProcess):
             "AGENT_SCRIPT_STATUS": self.status_path,
             "GIT_CONFIG_NOSYSTEM": "1",
         }
+        # Isolated Python never imports the workspace's modules or reads the
+        # owner's PYTHON* variables; the script it runs still starts in the
+        # workspace with all of them.
         self.process = backend.manager.spawn(
             backend.spec,
-            ["python3", "-u", "-c", _HELPER],
+            ["python3", "-I", "-u", "-c", _HELPER],
             env=values,
             workdir="/workspace",
             user_uid=self.uid,

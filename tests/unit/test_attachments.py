@@ -30,6 +30,7 @@ from cloud_agent_shared.errors import SandboxError
 from cloud_agent_shared.git.source_archive import (
     DEFAULT_MAX_UPLOAD_ARCHIVE_BYTES,
     build_upload_archive,
+    upload_archive_size,
 )
 
 
@@ -91,6 +92,38 @@ def test_a_backslash_is_normalized_to_a_separator_then_checked() -> None:
     assert safe_attachment_path("specs\\api.md") == "specs/api.md"
     with pytest.raises(AttachmentError):
         safe_attachment_path("specs\\..\\..\\escape.md")
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "a\nb.txt",
+        "a\rb.txt",
+        "line\nbreak.md",
+        "tab\tname.txt",
+        "nul\x00name.txt",
+        "delete\x7fname.txt",
+        "a/b\nc.txt",
+    ],
+)
+def test_a_name_cannot_carry_a_control_character(path: str) -> None:
+    """A control character would break a file reference out of its line.
+
+    ``prompt_with_attachments`` lists files one per line, so a name carrying a
+    newline reads as a second file that does not exist.
+    """
+    with pytest.raises(AttachmentError):
+        safe_attachment_path(path)
+
+
+def test_the_listing_has_exactly_one_line_per_file() -> None:
+    """The listing's line count is the file count, so no name can add a line."""
+    prompt = prompt_with_attachments("go", [{"path": "a.txt"}, {"path": "specs/api.md"}])
+    listed = [line for line in prompt.splitlines() if line.startswith("- ")]
+    assert listed == [
+        f"- {SANDBOX_UPLOAD_DIR}/a.txt",
+        f"- {SANDBOX_UPLOAD_DIR}/specs/api.md",
+    ]
 
 
 async def test_resolution_preserves_the_order_the_caller_asked_for() -> None:
@@ -206,6 +239,72 @@ def test_the_conversation_cap_fits_the_host_archive_with_its_worst_headers() -> 
         files.append((prefix + "f" * (MAX_ATTACHMENT_PATH_LENGTH - len(prefix)), b"x"))
     overhead = len(build_upload_archive(files)) - len(files)
     assert MAX_THREAD_ATTACHMENT_BYTES + overhead <= DEFAULT_MAX_UPLOAD_ARCHIVE_BYTES
+
+
+def _deepest_upload(first: str) -> str:
+    """The longest path the control plane admits, a one-letter folder every other character."""
+    parts = [first]
+    while len("/".join([*parts, "d", "f"])) <= MAX_ATTACHMENT_PATH_LENGTH:
+        parts.append("d")
+    return "/".join([*parts, "f"])
+
+
+def _deepest_uploads() -> list[tuple[str, bytes]]:
+    """As many one-byte files as a conversation holds, each in a folder chain of its own."""
+    return [(_deepest_upload(f"{index:03d}"), b"x") for index in range(MAX_THREAD_ATTACHMENT_FILES)]
+
+
+def test_a_conversation_never_holds_more_than_the_host_imports() -> None:
+    """Every folder level is one more tar header, which the byte cap never counted.
+
+    At the control plane's own limits, almost no content makes an archive of
+    headers alone, over the host's limit, and every turn of the conversation
+    on a fresh container failed to import what the claim had accepted.
+    """
+    files = _deepest_uploads()
+    rows = [_row(index, path, size=len(content)) for index, (path, content) in enumerate(files)]
+    assert [safe_attachment_path(row["path"]) for row in rows] == [path for path, _ in files]
+
+    with pytest.raises(SandboxError, match="upload import size limit"):
+        build_upload_archive(files)
+    with pytest.raises(AttachmentError, match="Start a new chat"):
+        check_thread_total(rows)
+
+
+def test_the_most_a_conversation_may_hold_is_what_the_host_imports() -> None:
+    """At the limits the two agree to the file: one more and the claim refuses."""
+    files = _deepest_uploads()
+    rows = [_row(index, path, size=len(content)) for index, (path, content) in enumerate(files)]
+
+    def accepted(count: int) -> bool:
+        try:
+            check_thread_total(rows[:count])
+        except AttachmentError:
+            return False
+        return True
+
+    low, high = 1, len(rows)
+    while low < high:
+        middle = (low + high + 1) // 2
+        low, high = (middle, high) if accepted(middle) else (low, middle - 1)
+    assert accepted(low) and not accepted(low + 1)
+    build_upload_archive(files[:low])
+
+
+@pytest.mark.parametrize(
+    "files",
+    [
+        [("a.txt", b"x"), ("block.bin", b"y" * 512), ("over.bin", b"z" * 513)],
+        [("docs/a.md", b"a"), ("docs/b.md", b"b"), ("docs/sub/c.md", b"c" * 1000)],
+        [("空格 和中文.md", b"cv"), ("\U00020000/\U00020001/f", b"x"), ("é" * 101, b"e")],
+        [("d" * 99 + "/f", b"x"), ("e" * 100 + "/f", b"x"), ("g" * 300 + "/" + "h" * 211, b"x")],
+        [(_deepest_upload(f"{index:03d}"), b"x" * index) for index in range(3)],
+    ],
+)
+def test_the_claim_measures_the_upload_archive_exactly(files: list[tuple[str, bytes]]) -> None:
+    """The control plane holds paths and sizes; its count is the archive's own length."""
+    sized = [(path, len(content)) for path, content in files]
+    assert upload_archive_size(sized) == len(build_upload_archive(files))
 
 
 def test_the_server_bounds_the_selection_as_well_as_the_browser() -> None:

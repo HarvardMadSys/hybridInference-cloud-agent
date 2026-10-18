@@ -38,6 +38,8 @@ from cloud_agent.schemas import (
 
 #: The longest search a request may send: a team name or id, or a user id.
 MAX_QUERY_CHARS = 256
+#: The longest team id a page cursor may name.
+MAX_TEAM_ID_CHARS = 64
 
 
 class _AdminTeamsStorage(Protocol):
@@ -75,22 +77,28 @@ async def list_teams(
     q: str | None = Query(None, max_length=MAX_QUERY_CHARS),
     state: Literal["active", "deleted", "all"] = Query("active"),
     limit: int = Query(50, ge=1, le=ADMIN_TEAM_PAGE_LIMIT),
-    offset: int = Query(0, ge=0),
+    before: str | None = Query(
+        None,
+        min_length=1,
+        max_length=MAX_TEAM_ID_CHARS,
+        description="The id of the last team the previous page showed.",
+    ),
     teams: TeamAdminQueries = Depends(get_team_admin_queries),
     gateway: Any = Depends(get_gateway_client),
 ) -> AdminTeamListResponse:
     """Teams newest first.
 
     ``q`` matches part of a team's name, a team id, or the user id of anyone
-    who has been a member.
+    who has been a member. A page continues after the team ``before`` names,
+    so teams created or deleted meanwhile neither repeat nor drop out of view.
     """
     query = (q or "").strip() or None
     rows, more = await teams.list_teams_for_admin(
-        query=query, state=state, limit=limit, offset=offset
+        query=query, state=state, limit=limit, before=before
     )
     return AdminTeamListResponse(
         teams=await admin_team_summaries(gateway, rows),
-        next_offset=offset + len(rows) if more else None,
+        next_before=rows[-1].id if more else None,
     )
 
 

@@ -99,6 +99,12 @@ PROTECTED_IPV4: tuple[str, ...] = (
 #: A group bridge is a /29: its gateway, the sandbox and the two relays.
 GROUP_PREFIX_LENGTH = 29
 
+#: Where a deployment's group bridges may be carved from. Not ``is_private``,
+#: which also admits loopback, link-local, "this network", reserved space and
+#: the documentation and benchmarking blocks: a bridge from 169.254.169.0/24
+#: would route the host's own traffic for the metadata service into a sandbox.
+RFC1918_IPV4: tuple[str, ...] = ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+
 #: Every table this code installs starts with this, so a deployment can find
 #: its neighbours' address pools without being told about them.
 TABLE_PREFIX = "cloud_agent_"
@@ -206,7 +212,8 @@ def network_from_env(env: dict[str, str] | None = None) -> SandboxNetwork:
             "AGENT_EGRESS_CHAT_NETWORK_POOL must name this deployment's group address pool"
         )
     pool = _ipv4_network(pool_raw, var="AGENT_EGRESS_CHAT_NETWORK_POOL")
-    if not pool.is_private or pool.prefixlen > GROUP_PREFIX_LENGTH:
+    rfc1918 = any(pool.subnet_of(ipaddress.IPv4Network(block)) for block in RFC1918_IPV4)
+    if not rfc1918 or pool.prefixlen > GROUP_PREFIX_LENGTH:
         raise SandboxNetworkError(
             f"AGENT_EGRESS_CHAT_NETWORK_POOL={pool} must be RFC1918 space holding at "
             f"least one /{GROUP_PREFIX_LENGTH}"
@@ -405,6 +412,7 @@ __all__ = [
     "PROTECTED_IPV4",
     "PUBLIC_TCP_PORTS",
     "RELAY_FAMILIES",
+    "RFC1918_IPV4",
     "SSH_TARGETS_SET",
     "SSH_TARGET_FAMILIES",
     "TABLE_PREFIX",

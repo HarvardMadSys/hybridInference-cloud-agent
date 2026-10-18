@@ -91,6 +91,7 @@ function detail(): AdminTeamDetail {
       { ...person('dave', 'Dave'), id: 'atjr_1', state: 'pending', created_at: AT, expires_at: AT },
     ],
     invitations: { open: 1, expired: 2, claimed: 3, revoked: 0 },
+    departed_member_count: 1,
   };
 }
 
@@ -145,6 +146,44 @@ describe('Admin → Teams → one team', () => {
     expect(history).toHaveTextContent('created a team environment');
     expect(listAdminTeamAudit).toHaveBeenLastCalledWith('ateam_1', 8);
     expect(within(history).queryByRole('button', { name: 'Show older' })).not.toBeInTheDocument();
+  });
+
+  it('says how many departures it lists of all the team has had', async () => {
+    vi.mocked(getAdminTeam).mockResolvedValue({ ...detail(), departed_member_count: 120 });
+    vi.mocked(listAdminTeamAudit).mockResolvedValue({ events: [], next_before: null });
+
+    render(<AdminTeamPage />);
+
+    const members = await screen.findByRole('region', { name: 'Members (2)' });
+    expect(members).toHaveTextContent(
+      'Showing the latest 1 of 120 people who left or were removed.',
+    );
+  });
+
+  it('does not count departures when it lists them all', async () => {
+    vi.mocked(getAdminTeam).mockResolvedValue(detail());
+    vi.mocked(listAdminTeamAudit).mockResolvedValue({ events: [], next_before: null });
+
+    render(<AdminTeamPage />);
+
+    const members = await screen.findByRole('region', { name: 'Members (2)' });
+    expect(members).not.toHaveTextContent(/Showing the latest/);
+  });
+
+  it('counts every request waiting, not only the oldest ones it lists', async () => {
+    const team = detail();
+    // The list holds the oldest 50 requests; the count is all of them.
+    vi.mocked(getAdminTeam).mockResolvedValue({
+      ...team,
+      team: { ...team.team, pending_request_count: 60 },
+    });
+    vi.mocked(listAdminTeamAudit).mockResolvedValue({ events: [], next_before: null });
+
+    render(<AdminTeamPage />);
+
+    const requests = await screen.findByRole('region', { name: 'Waiting to join (60)' });
+    expect(requests).toHaveTextContent('Dave');
+    expect(requests).toHaveTextContent('Showing the oldest 1 of 60.');
   });
 
   it('says when there is no such team', async () => {

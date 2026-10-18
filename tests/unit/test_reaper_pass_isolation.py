@@ -18,6 +18,7 @@ import pytest
 from tests.support.storage import OneFake
 
 from cloud_agent.workers.attempts import reap_expired_attempts
+from cloud_agent.workers.environment_maintenance import run_environment_maintenance
 
 pytestmark = pytest.mark.asyncio
 
@@ -47,3 +48,43 @@ async def test_each_stalled_work_reaper_runs_when_the_ones_before_it_fail() -> N
     assert inner.reap_expired.await_count
     assert inner.reap_stalled_sandbox_snapshot_captures.await_count
     assert inner.reap_stalled_snapshot_publishes.await_count
+
+
+async def test_stalled_environment_maintenance_does_not_delay_attempt_reaping() -> None:
+    """Environment database work is owned by a worker outside the reaper."""
+    maintenance_started = asyncio.Event()
+
+    async def stalled_maintenance() -> None:
+        maintenance_started.set()
+        await asyncio.Event().wait()
+
+    inner = SimpleNamespace(
+        environments=SimpleNamespace(maintain_environments=stalled_maintenance),
+        environment_snapshots=SimpleNamespace(maintain=AsyncMock(return_value=None)),
+        reap_expired=AsyncMock(return_value=[]),
+        reap_stalled_sandbox_snapshot_captures=AsyncMock(return_value=[]),
+        reap_stalled_snapshot_publishes=AsyncMock(return_value=[]),
+        reap_stalled_session_forks=AsyncMock(return_value=[]),
+    )
+    store = OneFake(inner)
+    maintenance = asyncio.create_task(
+        run_environment_maintenance(
+            inner.environments,
+            inner.environment_snapshots,
+            interval_seconds=0.001,
+            deadline_seconds=1,
+        ),
+        name="stalled-environment-maintenance",
+    )
+    reaper = asyncio.create_task(reap_expired_attempts(store, interval_seconds=0.001, grants=None))
+    try:
+        async with asyncio.timeout(0.5):
+            await maintenance_started.wait()
+            while not inner.reap_expired.await_count:
+                await asyncio.sleep(0.001)
+    finally:
+        reaper.cancel()
+        maintenance.cancel()
+        await asyncio.gather(reaper, maintenance, return_exceptions=True)
+
+    assert inner.reap_expired.await_count

@@ -1,5 +1,7 @@
 'use client';
 import type { Ref, TextareaHTMLAttributes } from 'react';
+import { useApplePlatform } from '@/components/features/settings/keyboardShortcutPreferences';
+import { chordAriaLabel } from '@/lib/keyboardShortcuts';
 import { isComposerSubmit } from './composerKeys';
 import type { AgentJob } from './types';
 
@@ -109,6 +111,7 @@ export function ComposerMessageActions({
   steerTitle?: string;
   onSteer?: () => void;
 }) {
+  const apple = useApplePlatform();
   return (
     <div className="ml-auto flex shrink-0 items-center gap-1.5">
       {onSteer && steerLabel ? (
@@ -116,7 +119,7 @@ export function ComposerMessageActions({
           type="button"
           onClick={onSteer}
           disabled={disabled || busy}
-          aria-keyshortcuts="Meta+Enter Control+Enter"
+          aria-keyshortcuts={chordAriaLabel('Enter', apple)}
           title={steerTitle}
           className="ui-button ui-button-secondary min-h-9 border-border px-3 py-1.5 text-xs [@media(pointer:coarse)]:min-h-11"
         >

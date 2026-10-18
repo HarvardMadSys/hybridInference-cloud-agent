@@ -294,28 +294,50 @@ class _Client:
 
 async def test_a_change_is_pushed_to_every_running_group_it_reaches(monkeypatch) -> None:
     state, _private = _state(monkeypatch)
-    clients = {"job-1": _Client(), "job-2": _Client(SandboxManagerError(503, "down"))}
+    clients = {
+        "host-1": _Client(),
+        "host-2": _Client(SandboxManagerError(503, "down")),
+        "host-4": _Client(),
+    }
+    groups = {
+        "athr_a": ("asbx_1", "host-1", None),
+        "athr_c": ("asbx_2", "host-2", "athr_c2"),
+        "athr_d": ("asbx_3", "host-3", None),
+        "athr_e": ("asbx_4", "host-4", None),
+    }
 
     class Repository:
         async def running_groups_for_ssh_change(self, *, thread_ids=None, server_id=None):
             assert server_id == "srv"
             return [
-                {"sandbox_id": "asbx_1", "thread_id": "athr_a", "job_id": "job-1"},
-                {"sandbox_id": "asbx_2", "thread_id": "athr_c", "job_id": "job-2"},
-                {"sandbox_id": "asbx_3", "thread_id": "athr_d", "job_id": "job-3"},
+                {
+                    "sandbox_id": sandbox_id,
+                    "origin_thread_id": origin,
+                    "host": host,
+                    "resident_thread_id": resident,
+                }
+                for origin, (sandbox_id, host, resident) in groups.items()
             ]
 
         async def ssh_group_state(self, *, thread_id):
-            return None if thread_id == "athr_d" else state
+            if thread_id == "athr_d":
+                return None
+            # athr_e's membership names another group: its state is not asbx_4's.
+            sandbox_id = "asbx_9" if thread_id == "athr_e" else groups[thread_id][0]
+            return {**state, "sandbox_id": sandbox_id}
 
-    async def for_job(host_pool, job_id):
-        return clients.get(job_id)
+    class HostPool:
+        async def get_host(self, *, host):
+            return {"host": host}
 
-    monkeypatch.setattr(app, "sandbox_manager_for_job", for_job)
-    store = type("Store", (), {"ssh_servers": Repository(), "host_pool": object()})()
+    monkeypatch.setattr(app, "sandbox_manager_for_host", lambda host: clients.get(host["host"]))
+    store = type("Store", (), {"ssh_servers": Repository(), "host_pool": HostPool()})()
 
     await app.push_ssh_access(store, server_id="srv")
 
-    assert [workspace for workspace, _ in clients["job-1"].calls] == ["athr_a"]
-    assert clients["job-1"].calls[0][1].revision == 12
-    assert len(clients["job-2"].calls) == 1, "a failed push is logged, not raised"
+    assert [workspace for workspace, _ in clients["host-1"].calls] == ["athr_a"]
+    assert clients["host-1"].calls[0][1].revision == 12
+    assert [workspace for workspace, _ in clients["host-2"].calls] == ["athr_c"], (
+        "a failed push is logged, not raised, and only an unknown chat is tried again"
+    )
+    assert clients["host-4"].calls == [], "a group is sent only its own state"

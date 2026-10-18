@@ -171,9 +171,9 @@ def test_install_command_uses_member_codex_home_and_supplied_base_environment(mo
         slot_id=4,
     )
     args, kwargs = captured[0]
-    assert args[2][:2] == ["python3", "-c"]
-    assert args[2][3] == "/private/codex-member"
-    assert json.loads(args[2][4]) == list(selections)
+    assert args[2][:3] == ["python3", "-I", "-c"]
+    assert args[2][4] == "/private/codex-member"
+    assert json.loads(args[2][5]) == list(selections)
     assert kwargs == {
         "env": {
             "HOME": "/home/member",
@@ -187,3 +187,33 @@ def test_install_command_uses_member_codex_home_and_supplied_base_environment(mo
         None, None, (), state_dir="/private/codex-member", env={}, slot_id=4
     )
     assert len(captured) == 1
+
+
+def test_native_install_starts_in_the_workspace_without_importing_from_it(
+    monkeypatch, tmp_path, native_cli
+):
+    captured = []
+    monkeypatch.setattr(
+        codex_plugins, "run_plugin_command", lambda *args, **kw: captured.append((args, kw))
+    )
+    home = tmp_path / "member"
+    home.mkdir()
+    codex_plugins.install_codex_plugins(
+        None,
+        None,
+        ({"plugin": "review@example", "marketplace": "example/plugins"},),
+        state_dir=str(home),
+        env={"PATH": f"{native_cli}:/usr/bin:/bin"},
+        slot_id=4,
+    )
+    ((args, kwargs),) = captured
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    # The project's own module, named like the standard library's.
+    (workspace / "types.py").write_text("UserId = int\n")
+    # The installer as run_plugin_command runs it, from the workspace.
+    result = subprocess.run(
+        args[2], cwd=workspace, env=kwargs["env"], capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, result.stderr
+    assert len(calls(home)) == 2

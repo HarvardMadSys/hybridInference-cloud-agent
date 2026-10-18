@@ -176,6 +176,7 @@ from cloud_agent_shared.sandbox_archive_settings import (
 )
 from cloud_agent_shared.sandbox_resources import parse_sandbox_resource_sample
 from cloud_agent_shared.sandbox_restore import (
+    RESTORE_FAILED_RELEASE_REASON,
     SANDBOX_RESTORE_CAPABILITY,
 )
 from cloud_agent_shared.secret_redaction import SecretRedactor
@@ -649,16 +650,36 @@ def tracked_lockfiles(workdir: str) -> dict[str, str] | None:
     or when a repository has more manifests than a snapshot records, so that it
     is never matched.
     """
-    listed = _run_git(["ls-files", "-s", "-z"], cwd=workdir)
+    # Bytes, not text: Git keeps each name as the bytes it was committed
+    # with, and ``-z`` prints them unquoted.
+    listed = subprocess.run(
+        ["git", "ls-files", "-s", "-z"],
+        cwd=workdir,
+        env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), **_GIT_ENV},
+        capture_output=True,
+        timeout=_GIT_TIMEOUT_S,
+        stdin=subprocess.DEVNULL,
+        check=False,
+    )
     if listed.returncode != 0:
         return None
     found: dict[str, str] = {}
-    for entry in listed.stdout.split("\0"):
-        meta, _, path = entry.partition("\t")
+    for entry in listed.stdout.split(b"\0"):
+        meta, _, raw = entry.partition(b"\t")
         fields = meta.split()
-        if len(fields) != 3 or not is_lockfile(path):
+        if len(fields) != 3:
             continue
-        found[path] = fields[1]
+        try:
+            path = raw.decode()
+        except UnicodeDecodeError:
+            # A manifest whose own name is text may sit in a directory whose
+            # name is not; no receipt can record it, so Git cannot say.
+            if is_lockfile(raw.rpartition(b"/")[2].decode(errors="replace")):
+                return None
+            continue
+        if not is_lockfile(path):
+            continue
+        found[path] = fields[1].decode()
         if len(found) > MAX_LOCKFILES:
             return None
     return found
@@ -3133,7 +3154,7 @@ def _run_shared_live_attempt(
                 sandbox_generation=spec.generation,
                 activation_generation=activation_generation,
                 lost=False,
-                detail=failure_detail[:1000],
+                detail=failure_detail,
                 idle_timeout_seconds=idle_timeout_s,
             )
         except Exception as abandon_exc:
@@ -3142,7 +3163,7 @@ def _run_shared_live_attempt(
         if isinstance(group, dict) and group.get("state") == "lost":
             report_failure()
             return 2
-        return 0 if control.release_turn("sandbox_restore_failed") else 2
+        return 0 if control.release_turn(RESTORE_FAILED_RELEASE_REASON) else 2
     except (DriverError, SandboxError, SessionSupervisorError, WorktreeError) as exc:
         failure_detail = str(exc)
         _log_control_failure(stage, job.job_id, exc)
@@ -4212,7 +4233,8 @@ def run_forever(
 
         def downloaded() -> None:
             # Offered on the next beat, not an interval later, and not from a
-            # menu read before the download finished.
+            # menu read before the download finished; a version removed is
+            # withdrawn the same way.
             offered.invalidate()
             pool.wake()
 
@@ -4225,6 +4247,8 @@ def run_forever(
             registry=os.environ.get(ENV_RUNTIME_REGISTRY_URL, "").strip() or None,
             on_change=downloaded,
         )
+        # A menu too long to report keeps these first (``version_stamp``).
+        offered.targets = downloads.targets
 
     pool = HostHeartbeat(
         base_url=base_url,

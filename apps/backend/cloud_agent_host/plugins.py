@@ -34,6 +34,8 @@ def run_plugin_command(
         spec,
         argv,
         env=env,
+        # The installers' CLIs run in the shared workspace, so each installer
+        # is isolated Python (-I), which never imports the workspace's modules.
         workdir=CHAT_WORKDIR,
         user_uid=MEMBER_UID_BASE + slot_id,
         user_gid=manager.backend.gid,
@@ -169,7 +171,7 @@ def install_claude_plugins(
     run_plugin_command(
         manager,
         spec,
-        ["python3", "-c", _CLAUDE_INSTALL_SCRIPT, config_dir, json.dumps(plugins)],
+        ["python3", "-I", "-c", _CLAUDE_INSTALL_SCRIPT, config_dir, json.dumps(plugins)],
         env=install_env,
         slot_id=slot_id,
     )

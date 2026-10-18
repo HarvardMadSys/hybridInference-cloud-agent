@@ -19,6 +19,7 @@ const KNOWN_ERRORS = {
   invitation_closed: 'teams.error.invitationClosed',
   invitation_limit_reached: 'teams.error.invitationLimit',
   invitation_unavailable: 'teams.error.invitationUnavailable',
+  no_longer_member: 'teams.error.noLongerMember',
   not_found: 'teams.error.notFound',
   owner_cannot_leave: 'teams.error.ownerCannotLeave',
   owner_not_admitted: 'teams.error.ownerNotAdmitted',

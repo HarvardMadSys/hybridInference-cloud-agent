@@ -972,6 +972,138 @@ async def test_a_crlf_event_stream_is_filtered_event_by_event(monkeypatch, store
     ] == [["get_issue"], []]
 
 
+def _server_event(seq: int) -> bytes:
+    """One message a server sends on its own, unasked, down the open stream."""
+    message = {"jsonrpc": "2.0", "method": "notifications/message", "params": {"seq": seq}}
+    return b"event: message\ndata: " + json.dumps(message).encode() + b"\n\n"
+
+
+class _ServerStream(httpx.AsyncByteStream):
+    """A server-to-client stream that stays open for as long as the server likes.
+
+    It sends one event, lets the test change something about the session that
+    opened it, and then either sends one more event a while later or, as a
+    server with nothing to say does, holds its socket open with nothing on it.
+    """
+
+    def __init__(self, meanwhile: Any, *, later: bytes | None = None) -> None:
+        self._meanwhile = meanwhile
+        self._later = later
+        self.closed = asyncio.Event()
+
+    async def __aiter__(self) -> Any:
+        yield _server_event(1)
+        self._meanwhile()
+        if self._later is None:
+            await asyncio.Event().wait()
+        # Long enough for the relay to look at the session again several times.
+        await asyncio.sleep(0.5)
+        yield self._later
+
+    async def aclose(self) -> None:
+        """Record that the relay let go of the upstream socket."""
+        self.closed.set()
+
+
+def _stream_from(body: _ServerStream) -> Upstream:
+    """An upstream that answers the stream's GET with ``body``."""
+    upstream = Upstream()
+    upstream.handler = lambda request: httpx.Response(  # type: ignore[method-assign]
+        200, headers={"content-type": "text/event-stream"}, stream=body
+    )
+    return upstream
+
+
+def _revoke(store: FakeJobStore, how: str) -> None:
+    """End, as its owner or the platform can, the authority a stream was opened under."""
+    if how == "turn_ended":
+        store.live = False
+    elif how == "disconnected":
+        store.connection = _connection(deleted_at="2026-10-16T00:00:00Z", status="disabled")
+    elif how == "binding_off":
+        store.bindings = [_binding(enabled=False)]
+    elif how == "retargeted":
+        store.connection = _connection(config_revision=2, authorization_epoch=2)
+    else:  # pragma: no cover - parametrization typo
+        raise AssertionError(how)
+
+
+@pytest.mark.parametrize("how", ["turn_ended", "disconnected", "binding_off", "retargeted"])
+async def test_a_server_stream_relays_nothing_once_its_session_loses_authority(
+    monkeypatch, store, how
+):
+    """The GET stream is authorized while it runs, not only when it opens.
+
+    Every request is fenced when it arrives, and a stream is one request that
+    lasts as long as the server keeps writing. Relayed unchecked, it kept
+    carrying the owner's server to the sandbox, under the owner's credential,
+    after the turn ended, the connection was disconnected or retargeted, or
+    the session's binding was turned off.
+    """
+    monkeypatch.setattr(agent_mcp_router, "_STREAM_RECHECK_S", 0.05)
+    body = _ServerStream(lambda: _revoke(store, how), later=_server_event(2))
+    async with _relay(monkeypatch, store, _stream_from(body)) as api:
+        response = await asyncio.wait_for(
+            api.get(f"/v1/agent/mcp/{_ALIAS}", headers=_auth()), timeout=10
+        )
+
+    assert response.status_code == 200
+    assert response.content == _server_event(1)
+    assert body.closed.is_set()
+
+
+async def test_a_quiet_server_stream_is_closed_once_its_turn_ends(monkeypatch, store):
+    """A server that sends nothing more no longer keeps the owner's socket, and the request, open."""
+    monkeypatch.setattr(agent_mcp_router, "_STREAM_RECHECK_S", 0.05)
+    body = _ServerStream(lambda: _revoke(store, "turn_ended"))
+    async with _relay(monkeypatch, store, _stream_from(body)) as api:
+        response = await asyncio.wait_for(
+            api.get(f"/v1/agent/mcp/{_ALIAS}", headers=_auth()), timeout=10
+        )
+
+    assert response.content == _server_event(1)
+    assert body.closed.is_set()
+
+
+async def test_a_legacy_server_stream_is_not_relayed_to_the_sandbox(monkeypatch, store):
+    """A 2024-11-05 server's stream opens by naming where its messages go.
+
+    That announcement carries the upstream session, which many such servers
+    accept messages on without the credential it was opened with. Relayed,
+    it let the sandbox post straight to the owner's server, past this relay's
+    decisions and its fence, and it named the upstream address the relay
+    otherwise keeps to itself. This route cannot carry the session anyway: it
+    posts to the stream's own address.
+    """
+    announcement = (
+        b"event: endpoint\ndata: http://" + _UPSTREAM_HOST.encode() + b"/messages"
+        b"?sessionId=upstream-session-7\n\n"
+    )
+    upstream = Upstream(body=announcement, content_type="text/event-stream")
+    store.connection = _connection(transport="http-sse")
+    store.bindings = [_binding(transport="http-sse")]
+    async with _relay(monkeypatch, store, upstream) as api:
+        response = await api.get(f"/v1/agent/mcp/{_ALIAS}", headers=_auth())
+
+    assert b"upstream-session-7" not in response.content
+    assert _UPSTREAM_HOST not in response.text
+    assert response.status_code == 405
+    assert "merged" in response.json()["error"]["message"]
+    assert upstream.requests == []
+
+
+async def test_a_server_stream_runs_on_while_its_session_stays_authorized(monkeypatch, store):
+    """Looking again is not ending: a live session's stream carries everything the server sends."""
+    monkeypatch.setattr(agent_mcp_router, "_STREAM_RECHECK_S", 0.05)
+    body = _ServerStream(lambda: None, later=_server_event(2))
+    async with _relay(monkeypatch, store, _stream_from(body)) as api:
+        response = await asyncio.wait_for(
+            api.get(f"/v1/agent/mcp/{_ALIAS}", headers=_auth()), timeout=10
+        )
+
+    assert response.content == _server_event(1) + _server_event(2)
+
+
 async def test_a_confirmed_tool_is_advertised_but_held_for_its_owner(monkeypatch, store, upstream):
     """A confirmation is a question, not a refusal, so the tool stays visible.
 

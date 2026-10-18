@@ -12,6 +12,10 @@
 /** A drive letter prefix (`C:/…`), which is not a relative path anywhere. */
 const DRIVE_PREFIX = /^[A-Za-z]:[\\/]/;
 
+/** Control characters, including the line breaks that would split one file
+ *  reference into several lines in the prompt listing. */
+const CONTROL_CHARACTER = /[\u0000-\u001f\u007f]/;
+
 export function isSafeUploadPath(path: string, maxLength: number): boolean {
   if (!path || path.length > maxLength) return false;
   if (path.startsWith('/') || DRIVE_PREFIX.test(path)) return false;
@@ -23,7 +27,7 @@ export function isSafeUploadPath(path: string, maxLength: number): boolean {
       part !== '..' &&
       part.toLowerCase() !== '.git' &&
       !part.includes('\\') &&
-      !part.includes('\0'),
+      !CONTROL_CHARACTER.test(part),
   );
 }
 

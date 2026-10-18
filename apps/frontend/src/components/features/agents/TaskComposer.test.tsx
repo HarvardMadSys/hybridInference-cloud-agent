@@ -2440,6 +2440,33 @@ describe('durable new-task drafts', () => {
     expect(await screen.findByRole('textbox')).toHaveValue('');
   });
 
+  it('clears New task opened again before its create answered, once the task exists', async () => {
+    // Leaving New task unmounts it, but the create it made still lands. The
+    // composer opened on coming back read the draft while that create was out;
+    // still showing it afterwards offers the same task a second time, under a
+    // new key, since the first one's was retired with its answer.
+    let finish!: (job: AgentJobApi) => void;
+    vi.mocked(createAgentJob).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const left = render(<TaskComposer />);
+    await chooseRepository();
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Create this once' } });
+    await runWhenReady();
+    await waitFor(() => expect(finish).toBeDefined());
+    left.unmount();
+    render(<TaskComposer />);
+    expect(await screen.findByRole('textbox')).toHaveValue('Create this once');
+    await untilRunnable();
+    await act(async () => finish({ id: 'created-once' } as AgentJobApi));
+    expect(navigation.push).not.toHaveBeenCalled();
+    expect(screen.getByRole('textbox')).toHaveValue('');
+    expect(screen.getByRole('button', { name: /^Run/ })).toBeDisabled();
+  });
+
   it('clears an accepted draft while retaining a draft edited during an in-flight request', async () => {
     let finish!: (job: AgentJobApi) => void;
     vi.mocked(createAgentJob).mockImplementation(

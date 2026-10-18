@@ -110,6 +110,9 @@ export default function AdminTeamPage() {
   const team = detail?.team;
   const active = detail?.members.filter((member) => member.state === 'active') ?? [];
   const departed = detail?.members.filter((member) => member.state !== 'active') ?? [];
+  // The list holds the oldest requests only; the team's count is all of them.
+  const requestsListed = detail?.join_requests.length ?? 0;
+  const requestsWaiting = team?.pending_request_count ?? 0;
 
   return (
     <div className="min-w-0 flex-1 overflow-y-auto">
@@ -196,6 +199,12 @@ export default function AdminTeamPage() {
                     ))}
                   </tbody>
                 </table>
+                {detail.departed_member_count > departed.length && (
+                  <p className="px-4 py-3 text-xs text-muted">
+                    Showing the latest {departed.length} of {detail.departed_member_count} people
+                    who left or were removed.
+                  </p>
+                )}
               </section>
 
               <section aria-labelledby="team-history" className={CARD}>
@@ -263,7 +272,7 @@ export default function AdminTeamPage() {
 
               <section aria-labelledby="team-requests" className={CARD}>
                 <h2 id="team-requests" className="px-4 pt-4 text-sm font-semibold text-foreground">
-                  Waiting to join ({detail.join_requests.length})
+                  Waiting to join ({requestsWaiting})
                 </h2>
                 {detail.join_requests.length ? (
                   <ul className="mt-2 divide-y divide-border">
@@ -279,6 +288,11 @@ export default function AdminTeamPage() {
                   </ul>
                 ) : (
                   <p className="px-4 py-3 text-sm text-muted">No open requests.</p>
+                )}
+                {requestsListed > 0 && requestsWaiting > requestsListed && (
+                  <p className="px-4 pb-4 text-xs text-muted">
+                    Showing the oldest {requestsListed} of {requestsWaiting}.
+                  </p>
                 )}
               </section>
             </div>

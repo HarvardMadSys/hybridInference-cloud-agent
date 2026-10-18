@@ -801,9 +801,10 @@ history back to `0046_admin_sandbox_trajectory`. CPU and memory history starts
 with migration `0077_sandbox_usage_days`: each accepted sample adds the time
 since the previous accepted sample of the same running container (at most
 120 seconds; after a start or a longer gap, only the sample's own CPU window),
-and its CPU cores and memory bytes over that time, to the container's row for
-the sample's UTC day. The page states how much of the running time the
-measurements cover. Disk usage is not measured.
+and its CPU cores and memory bytes over that time, to the container's rows for
+the UTC days that time falls on: time that spans 00:00 UTC is split there, so
+the part before midnight counts on the day before. The page states how much of
+the running time the measurements cover. Disk usage is not measured.
 
 Days are UTC days on purpose: the Gateway's daily limit resets at 00:00 UTC,
 so the page's "today" and the limit's "today" agree. The page says so and
@@ -864,10 +865,17 @@ administrators see every team under **Admin → Teams**, read-only:
   active members, admins besides the owner, and join requests waiting for a
   decision. `state` is `active` (default), `deleted` or `all`; `q` matches part
   of a team name, a team id, or the user id of anyone who has been a member.
-  It pages with `offset`; the response's `next_offset` is the next page.
+  It pages with `before`, the id of the last team the previous page showed;
+  the response's `next_before` is that id for the next page. A page starts
+  after that team rather than after a row count, so a team created or deleted
+  while an administrator reads is neither shown twice nor skipped.
 - A team's page (`GET /admin/agent/teams/{team_id}`) lists members in every
   state, including those who left or were removed and when, plus open join
   requests and how many invitation links are open, expired, claimed or revoked.
+  Departures are kept for good, so it lists every active member and the 50 who
+  left or were removed most recently; `departed_member_count` counts them all.
+  That bounds the Gateway email lookups one view makes. Open requests are the
+  50 oldest likewise, and the team's `pending_request_count` counts them all.
   `GET /admin/agent/teams/{team_id}/audit-events` pages the team's own audit
   history with `before`.
 
@@ -966,6 +974,14 @@ The relay enforces these rules:
 - **A connection is not a job.** Bindings are read fresh on every tool call
   rather than copied onto a job, so narrowing a session takes effect on its
   next call instead of at its next turn.
+- **A stream is checked while it runs.** The server-to-client stream that
+  `GET /v1/agent/mcp/<alias>` opens is one request lasting as long as the
+  server keeps it open. Every 5 seconds, whether or not the server is sending,
+  the relay checks it again as it checks a held call before dispatch: the
+  turn's fence, then the binding and connection, which must be the ones it was
+  opened under. The first check that fails ends the stream and closes the
+  upstream socket, so a stopped turn, a disconnected or retargeted connection,
+  or a binding turned off stops it within that interval.
 - **Two endpoints share one authorization function.**
   `/v1/agent/mcp/<alias>` passes one connection's protocol through to the CLI.
   `/v1/agent/mcp` is the merged host: it answers `initialize`, lists the job's
@@ -975,7 +991,10 @@ The relay enforces these rules:
   per connection would duplicate the merged catalogue. The per-connection route
   remains available to clients needing unmodified protocol passthrough. A legacy
   SSE server cannot initialize through a pipe, so the adapters use the merged
-  host instead.
+  host instead, and the per-connection route answers a `GET` for one with 405
+  rather than relaying its stream: that stream opens by announcing the upstream
+  session its messages go to, which many such servers accept without the
+  credential, so the sandbox could use it past the relay.
 
 Tools and prompts use `<alias>__<name>` on the merged surface. Routing looks up
 that name in the catalogue; it never splits on `__`, because aliases can contain
@@ -1229,7 +1248,11 @@ idle or lost stop while Docker keeps the container writable layer, and wake
 creates it again. Sandbox Manager reconciliation also removes labelled bridges left by an
 interrupted create after a five-minute grace period. The grace prevents status
 reconciliation from deleting a bridge between creation and sandbox attachment
-while still reclaiming bridge interfaces and IPAM.
+while still reclaiming bridge interfaces and IPAM. A bridge that an environment
+test or prebuild still runs on is that run's, and the run removes it when it
+ends. A bridge reconciliation cannot remove, such as one with an unknown
+container attached, is logged as `chat_network_prune_failed` and left for the
+next pass; it does not fail the host's sandbox listing.
 
 ### 1. Only enrolled sandbox hosts run jobs
 
@@ -1544,9 +1567,15 @@ GitHub repositories retain the complete Agent lifecycle: checkout, branch
 discovery, push, and draft PR publishing use short-lived GitHub App installation
 tokens. Draft PR titles summarize the captured user and assistant messages across
 the shared session through a bounded inference request under a separate,
-owner-scoped grant. Generic completion text is rejected and retried. If inference
-is unavailable, the publisher uses the first concrete line from each included
-turn's closing summary, skipping headings and generic completion preambles. It
+owner-scoped grant, which each try of a publication mints for itself and revokes
+when its title is written. A Fork's copies of earlier turns are read once, in the chat
+they were copied from. A session longer than one request is summarized in at
+most four fragments, all at once, and the title is written from their summaries
+within the same one-minute budget. A longer session is not sent to the model at
+all (fallback reason `conversation_too_long`). Generic completion text is
+rejected and retried. If inference is unavailable, the publisher uses the first
+concrete line from each included turn's closing summary, skipping headings and
+generic completion preambles. It
 falls back to the changed files when no usable summary exists. The
 `agent_pr_title_generation_failed` log records the snapshot ID and fallback
 reason as structured fields, plus the exception type and HTTP status when
@@ -2100,13 +2129,27 @@ checkpoint still covers it: the same container, generation and start fence,
 every member's last settled turn recorded, and a base image another host can
 pull by digest. Every other group stays bound to the removed host, as before,
 and continues only if that host is enrolled again; the admin sandbox page shows
-which is which.
+which is which. A checkpoint carried by a heartbeat still in flight when the
+credential was revoked is handed on by the reaper's next pass.
+
+Nothing starts a group on a removed host, since that host never reports the
+stop that would cover it again. A workspace request (Files, Terminal, Git or
+an environment retry) answers `workspace_unavailable` (409), a Fork is refused,
+and a publication's capture and base import wait until the group has moved. A
+checkpoint still in flight therefore covers its group when it lands, and a
+request or Fork that finds the group covered hands it on at once: the request
+answers `workspace_restoring`.
 
 Two other paths turn covered stopped groups `cold` without revoking the host:
 a provider that confirms the node terminated hands over all of them, and a
 host [moving out before its lease ends](operations-compute.md#moving-sandboxes-out-before-a-lease-ends)
 hands over each group as its final checkpoint arrives. The host row, its
 credential and any deployment drain fence are left to the removal flow.
+
+A `cold` group does not keep its old host from being forgotten, by **Forget**
+or by permanently removing the server: it no longer needs that machine. It
+keeps naming the host it last ran on until a claim moves it to the claiming
+host. Every other undeleted group still blocks forgetting.
 
 The next turn of any chat in a `cold` group is claimed by any host that
 advertises `sandbox-restore-v1` with archives enabled, except the host that
@@ -2128,11 +2171,41 @@ old host still holds is fenced out. The new host's Sandbox Manager:
    network, labelled with the checkpoint id, and resumes each native session as
    after any restart.
 
+The download and the checked archive are unnamed files in
+`AGENT_SANDBOX_ARCHIVE_STATE_DIR/checkpoint-spool`, and Docker reads the
+archive on standard input, so a restore or snapshot load cut short by a
+reboot, a forced stop or the OOM killer leaves nothing in that durable
+directory. Sandbox Managers that predate this named them `restore-*`; any such
+file is an interrupted restore's and can be deleted while no restore is
+running.
+
+The loaded image, `freeinference-checkpoint/<sandbox hash>:<checkpoint id>`,
+is that container's alone, and it goes with the container: when the group is
+deleted or discarded, and when a later move back onto the same host replaces
+the older container. A move back that restores the older container's own
+checkpoint uses its image and loads nothing again. A restore that fails before
+the group starts removes the container it created, with any anonymous volume,
+and the image it loaded: any host may claim the next try, so a retry on the
+same host downloads the checkpoint again. A failure to remove the image is
+logged as `sandbox_checkpoint_image_remove_failed` and one to remove the
+container as `sandbox_create_cleanup_failed`; `docker image rm` and
+`docker rm --volumes` clear what they leave.
+
 A restore that fails before the turn is admitted returns the group to `cold`
-and the turn to the queue without spending an attempt; the third failed claim
-marks the group lost and fails its queued turns. The checkpoint is never
-changed. Workspace requests to a `cold` or `restoring` group return
-`workspace_restoring` (409) until a turn has restored it. Restore reads with
+and the turn to the queue without spending an attempt. The group is not
+claimed again until 30 seconds after its first failure, 5 minutes after its
+second and 30 minutes after its third, so the attempts outlast a short
+registry or S3 outage; the fourth failed restore marks the group lost and fails
+its queued turns: the chat whose turn ran it out at once, and its Fork
+siblings' within one reaper pass. A claim that ends before its host reserved
+the group never reached the checkpoint, however it ends: handed back because
+the control plane could not mint the turn's credentials or the host could not
+launch the turn, failed because the hand-over refused the turn (its owner lost
+Agent access, or its model or repository is no longer allowed) or the host
+could not start it, or reaped because the host died right after claiming. It
+is not a failed restore and starts no wait. The checkpoint is never changed. Workspace
+requests to a `cold` or `restoring` group return `workspace_restoring` (409)
+until a turn has restored it. Restore reads with
 the archive credentials hosts already receive: `s3:GetObject` and
 `kms:Decrypt` on the archive prefix.
 
@@ -2169,7 +2242,10 @@ stored like a checkpoint. Design: [install snapshots](../agents/specs/2026-10-15
   the owner's one running test. After a failed build, tasks queue no new one
   for that installation for 6 hours; a passing test or an owner's rebuild
   still does. Deleting snapshots cancels their pending prebuilds, and a
-  receipt is accepted only while its run's lease is live.
+  receipt is accepted only while its run's lease is live. A prebuild no host
+  has started a day after it was queued is given up on: maintenance fails its
+  snapshot and then its run, which no claim would take any more, so it neither
+  waits for good nor counts as queued work for the autoscaler.
 - **Who uses.** A claim names a snapshot only for a new group on a host whose
   sandbox image is the snapshot's base image, and only when the binding's setup
   fingerprint (an HMAC of the install script and setup-time variables, keyed by
@@ -2177,16 +2253,24 @@ stored like a checkpoint. Design: [install snapshots](../agents/specs/2026-10-15
   checkout's lockfiles (Git object ids). Any mismatch or failure creates the
   group from the sandbox image and installs in full; the turn never fails
   because of a snapshot. Without the encryption key, bindings carry no
-  fingerprint and nothing is snapshotted.
+  fingerprint and nothing is snapshotted. The runner's report of what the new
+  group did with its snapshot, which keeps a used one alive, deletes one that
+  failed its checks and queues the builds above, is accepted only from the
+  attempt holding the task's live lease on a host still enrolled; any other
+  worker token gets `409 lease_lost` and changes nothing.
 - **Retention.** The newest snapshot of an installation supersedes older ones.
   Changing an installation — its install script, or a setup-time variable or
   Secret, a global one included — supersedes the snapshots of the earlier
   one, and a build that finishes after the change is superseded on receipt;
   a snapshot built for a task's own install script is checked against that
-  script. Superseded snapshots are no longer handed out and are deleted after
-  24 hours. A snapshot is not handed out after 25 days, and is deleted after
-  7 days unused, when its environment is archived or deleted by the owner,
-  and beyond 20 GiB of ready snapshots per owner (least recently used first).
+  script. Maintenance also compares each owner's ready snapshots with their
+  current configuration, 20 owners per 30-second pass, so a snapshot that
+  went stale without a publish to notice it (one already stale before these
+  checks, say) is superseded too. Superseded snapshots are no longer handed
+  out and are deleted after 24 hours. A snapshot is not handed out after 25
+  days, and is deleted after 7 days unused, when its environment is archived
+  or deleted by the owner, and beyond 20 GiB of ready snapshots per owner
+  (least recently used first).
 - **Deletion.** Hosts poll `/v1/agent/worker/environment-snapshots/deletions`
   every 10 minutes and delete the object versions it names, least recently
   tried first, so objects the bucket refuses to delete never hold back the
@@ -2244,7 +2328,11 @@ chat containers untouched.
 At sandbox manager startup, reconciliation stops running orphans before readmission.
 It never adopts resident processes on the strength of an unproven in-memory
 lease or infers an active turn from an empty lease table. Docker observations
-travel in the enrolled heartbeat. The control plane checks the durable attempt
+travel in the enrolled heartbeat. A group the host listing cannot reconcile,
+because its container was lost or relabelled or another call changed it while
+its archive marker was read, is logged as `shared_sandbox_reconcile_group_failed`
+and reported as it stands; it never costs the host's other groups their
+observations. The control plane checks the durable attempt
 fence and idle deadline before returning a generation-scoped stop command; the
 next heartbeat records Docker's STOPPED state.
 
@@ -2268,6 +2356,21 @@ same database transaction, and a new follow-up receives
 `sandbox_context_lost` instead of becoming a permanently unclaimable queued
 job. That conservative choice prevents duplicate prompt/tool execution.
 
+On the host, the reaper's close of that member's residency also ends the
+activation that ran on it, as an abandon would, so a Fork sibling's group can
+still go idle and its publication snapshot is not refused as an active
+mutation. A turn that was running when the runner died was already aborted
+when the runner's turn stream to the sandbox manager closed. A runner that
+hung instead still holds that stream: the close interrupts its turn, and the
+activation ends once the stream has closed the turn. A stream its runner no
+longer reads may never get that far, so the sandbox manager's sweep closes a
+turn still open 60 seconds after the loss. The reaper waits for the host's
+sandbox manager at most 5 seconds per member for its close of a residency,
+the members one pass reaps side by side, and revokes each member's grant
+either way: the host's next heartbeat is told the generation is lost and
+closes the process itself, so a host that no longer answers, usually the
+reason the lease expired, does not hold up the pass for every other host.
+
 #### Safety watchdogs
 
 These guards serve separate purposes; they do not create extra idle states or
@@ -2284,8 +2387,10 @@ deactivate a healthy group:
   noisy forever. It is a resource/security guard, not sandbox deactivation;
 - `AGENT_RESIDENCY_TTL_S` defaults to 1800 seconds and fences each member's
   live-process ownership plus renewable inference grant. Losing that lease
-  demotes/restarts the member; it does not itself stop a healthy chat group or
-  create another inactivity clock;
+  demotes/restarts the member, and ends with LOST context an unfinished
+  activation that had taken on its process, once any turn it was running has
+  closed; it does not itself stop a healthy chat group or create another
+  inactivity clock;
 - no TTL removes chat data. A retained sandbox is removed only by an
   administrator's deletion or once its owner permanently deletes every chat
   using it (see [sandbox inventory](#sandbox-inventory-resource-usage-and-controls));
@@ -2370,6 +2475,11 @@ base import that keeps failing (GitHub no longer serves the commit, access was
 withdrawn, or the workspace cannot take the bundle) fails after an hour and
 leaves its group `dirty`; the owner's next request captures, and imports,
 again.
+
+An import completes only for the generation and container it was sent to. If
+the group's host is removed and another host restores the group while an
+import is still out, the old host's late answer changes nothing, and the
+import is sent again to the restored container.
 
 Admission checks free space only through the
 [storage reserve](#how-full-is-the-sandbox-storage); disk-pressure alerting and
@@ -3498,7 +3608,12 @@ rules, not the host's.
 - **Watched while groups run.** While any group of this deployment is
   running, the sandbox manager reads the tables back on every five-second sweep, logs
   `network_guard_rules_changed` when they differ from what it installed, and
-  reinstalls whatever is missing. If that fails twice in a row, it logs
+  reinstalls whatever is missing. A reinstalled table holds no group's
+  exceptions, so the same pass gives each running group whose bridge lost
+  them its relays back, from what Docker reports, and its SSH targets as the
+  sandbox manager last wrote them for that same Docker network; a group that
+  cannot get them back logs `chat_group_exceptions_not_restored` and is synced
+  again by its next activation. If the check fails twice in a row, it logs
   `shared_chat_network_unguarded` and stops every running group — workspaces
   and native sessions kept — rather than let one go on without the boundary it
   was started behind. Waking a group reinstalls and verifies the rules first,
@@ -3556,8 +3671,8 @@ own and no one else's — with the helper above:
 `bridge`. Never delete or flush a table a running deployment uses: Docker
 routes and masquerades every group bridge, and the table is what limits it.
 Anything that flushes the host's whole ruleset removes these tables too; they
-are reinstalled at the next check, so do not run such a reload on a host with
-active groups.
+are reinstalled at the next check, with each running group's relay and SSH
+exceptions, but do not run such a reload on a host with active groups.
 
 #### Choosing the resolver
 
@@ -3594,8 +3709,9 @@ image's own parser before any runner is drained, and a refusal prints
 these:
 
 - `AGENT_EGRESS_CHAT_NETWORK_POOL must name this deployment's group address pool`
-  or `… must be RFC1918 space holding at least one /29` — unset, not private,
-  or smaller than a `/29`;
+  or `… must be RFC1918 space holding at least one /29` — unset, outside
+  `10.0.0.0/8`, `172.16.0.0/12` and `192.168.0.0/16` (link-local, loopback and
+  the other special-purpose blocks are refused too), or smaller than a `/29`;
 - `AGENT_EGRESS_DNS_SERVER='…' must be one IPv4 resolver address` or
   `… must be reachable from a group bridge` — unset, not IPv4, loopback,
   unspecified, or inside the pool;
@@ -3859,15 +3975,23 @@ and the owner SSH servers entry in [AGENTS.md](../../AGENTS.md) §7.
   whose chats ever selected a server costs nothing: no state is sent.
 - **Taking access away is immediate; granting it waits for the next turn.**
   Turning a server on or off for a chat, editing, checking, rekeying or
-  deleting a server pushes the new state to every running group it reaches. A
-  push only removes: deleting an element cuts a live SSH session on its next
+  deleting a server pushes the new state to every running group it reaches,
+  on the host the group is on. A push names the group by its origin chat,
+  which a restarted sandbox manager re-learns from the container; if the
+  manager does not know it, as after the origin chat was deleted and gave up
+  its slot, the push is retried through another chat of the group that holds
+  a slot. A push only removes: deleting an element cuts a live SSH session on its next
   packet, and a member's directory for a server it may no longer use, or whose
   key changed, is deleted. A server turned on, or a new key, arrives with the
   chat's next turn, whose runner masks the key. If a newest state fails after
   it was recorded, the manager clears the bridge's SSH elements and the call
-  fails, so the group stays closed until a state applies whole. A stopped
-  group, or a host the control plane cannot reach, gets the state before its
-  next turn runs anything.
+  fails, so the group stays closed until a state applies whole. A push looks
+  only for running groups, and a claim's state is read before its group is
+  reserved, so a change made while a new, stopped or cold group starts reaches
+  neither. When the runner marks the group running, the control plane pushes
+  the group's state once more; it is newer than the claim's, and the manager
+  keeps it whichever of the two arrives first. A host the control plane cannot
+  reach gets the state with its next turn's claim.
 - **Checks dial out from the control plane.** A check resolves the address,
   refuses it whole if any answer is private, reserved or protected, reads the
   host keys with `ssh-keyscan`, and after the owner confirms a fingerprint logs
@@ -3927,6 +4051,10 @@ An interrupted launch without a recoverable result is reported as `unknown` and
 is never automatically replayed. Inspect external effects before starting a new
 run with a different idempotency key. These receipts do not promise exactly-once
 side effects in external services.
+
+The output of a test, a preparation or an action is stored masked and bounded,
+with each NUL and unpaired surrogate replaced by U+FFFD: Postgres stores
+neither, and refusing the output would leave the test or command unfinished.
 
 Empty bindings still pin the original task's selection, but require neither
 `environment-v1` nor preparation. Each environment test reserves one local slot

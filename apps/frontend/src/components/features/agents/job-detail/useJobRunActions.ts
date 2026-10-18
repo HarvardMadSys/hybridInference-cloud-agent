@@ -73,7 +73,10 @@ export function useJobRunActions({
         event.key !== 'Escape' ||
         event.repeat ||
         event.defaultPrevented ||
-        target?.closest('input, textarea, select, [contenteditable="true"]')
+        target?.closest('input, textarea, select, [contenteditable="true"]') ||
+        // The open mobile task list hides the conversation, and Escape closes
+        // the list. It must not also stop a run the owner cannot see.
+        document.getElementById('agents-workspace')?.hidden
       ) {
         return;
       }

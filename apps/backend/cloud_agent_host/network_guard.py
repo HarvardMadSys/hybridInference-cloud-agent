@@ -30,6 +30,13 @@ seconds while groups run) confirms or forgets those remembered exceptions, so
 the memory is never trusted longer than the rules themselves are, and a stalled
 sweep sends the next update back to the kernel.
 
+**A reinstalled table holds no exceptions.** A table someone deleted (a
+firewall reload's ``flush ruleset``) is installed again with empty relay and
+SSH sets. Every read-back reports what each bridge still holds
+(:class:`HeldExceptions`), so the sweep can give a group that kept running its
+exceptions back: its relays from what Docker reports, and its SSH targets as
+this guard last wrote them for that same Docker network.
+
 **Neighbours.** Every deployment registers its address pool in its own table.
 The check runs after the install, so of two deployments starting together with
 overlapping pools at least the later one sees the other and refuses. The pool
@@ -167,6 +174,16 @@ json.dump(answer, sys.stdout)
 
 
 @dataclass(frozen=True)
+class HeldExceptions:
+    """What one read-back of this deployment's tables showed each bridge holding."""
+
+    #: Relay exceptions per bridge, held in every relay family.
+    relays: dict[str, frozenset[tuple[str, int]]]
+    #: SSH exceptions per bridge.
+    ssh_targets: dict[str, frozenset[tuple[str, int]]]
+
+
+@dataclass(frozen=True)
 class _HeldRelays:
     """Relay exceptions this guard last wrote or read back for one bridge."""
 
@@ -233,6 +250,48 @@ def _relay_elements(elements: list[Any]) -> set[tuple[str, str, int]]:
     return found
 
 
+def _set_elements_in(listing: list[Any], name: str) -> list[Any]:
+    """One set's elements in a ``list table`` listing; none if it holds none."""
+    for item in listing:
+        found = item.get("set") if isinstance(item, dict) else None
+        if isinstance(found, dict) and found.get("name") == name:
+            raw = found.get("elem") or []
+            return raw if isinstance(raw, list) else [raw]
+    return []
+
+
+def _held_in(
+    listings: dict[str, list[Any]], families: tuple[str, ...], name: str
+) -> dict[str, frozenset[tuple[str, int]]]:
+    """The ``address . port`` elements each bridge holds in set ``name`` of every family."""
+    per_family: list[dict[str, set[tuple[str, int]]]] = []
+    for family in families:
+        found: dict[str, set[tuple[str, int]]] = {}
+        for bridge, address, port in _relay_elements(_set_elements_in(listings[family], name)):
+            found.setdefault(bridge, set()).add((address, port))
+        per_family.append(found)
+    bridges = set.intersection(*(set(found) for found in per_family))
+    return {
+        bridge: frozenset(set.intersection(*(found[bridge] for found in per_family)))
+        for bridge in bridges
+    }
+
+
+def _read_exceptions(tables: list[list[Any]]) -> HeldExceptions | None:
+    """What ``list table`` listings of :data:`RELAY_FAMILIES`, in order, show each bridge holding.
+
+    ``None`` when an element cannot be read: nothing is concluded from it.
+    """
+    try:
+        listings = dict(zip(RELAY_FAMILIES, tables, strict=True))
+        return HeldExceptions(
+            relays=_held_in(listings, RELAY_FAMILIES, "relays"),
+            ssh_targets=_held_in(listings, SSH_TARGET_FAMILIES, SSH_TARGETS_SET),
+        )
+    except (NetworkGuardError, TypeError, ValueError, AttributeError, KeyError):
+        return None
+
+
 class HostNetworkGuard:
     """This deployment's rules on this host, through the trusted helper."""
 
@@ -251,15 +310,28 @@ class HostNetworkGuard:
         self._lock = threading.RLock()
         self._verified_at: float | None = None
         self._held: dict[str, _HeldRelays] = {}
+        #: The SSH exceptions this guard last wrote for each bridge, with the
+        #: Docker network they were written for. Unlike ``_held`` this is not
+        #: a shortcut but what a running group gets back when a reinstalled
+        #: table lost it, so a failed check does not forget it.
+        self._ssh_written: dict[str, tuple[str, frozenset[tuple[str, int]]]] = {}
+        #: The relay exceptions this guard last wrote for each bridge. Kept
+        #: for the same reason: it is what says that a read-back lost one,
+        #: whatever ports the relays share.
+        self._relays_written: dict[str, frozenset[tuple[str, int]]] = {}
 
     # ── public surface ──────────────────────────────────────────────────
 
-    def ensure(self, *, max_age_s: float = GUARD_RECHECK_S) -> None:
-        """Install (idempotently) and verify, at most once per ``max_age_s``."""
+    def ensure(self, *, max_age_s: float = GUARD_RECHECK_S) -> HeldExceptions | None:
+        """Install (idempotently) and verify, at most once per ``max_age_s``.
+
+        Returns what the read-back showed each bridge holding, or ``None``
+        when the last verification still stood and nothing was read.
+        """
         with self._lock:
             now = time.monotonic()
             if self._verified_at is not None and now - self._verified_at < max_age_s:
-                return
+                return None
             self._verified_at = None
             # Remembered exceptions survive only if the read-back after this
             # install shows them still held.
@@ -275,8 +347,9 @@ class HostNetworkGuard:
             self._held = held
             self._observe_relays(listings[: len(RELAY_FAMILIES)], read_at=read_at)
             self._verified_at = time.monotonic()
+            return _read_exceptions(listings[: len(RELAY_FAMILIES)])
 
-    def recheck(self) -> None:
+    def recheck(self) -> HeldExceptions | None:
         """Read this deployment's tables from the kernel now, and repair them if changed.
 
         :meth:`ensure` trusts a verification for a minute, which suits
@@ -291,6 +364,10 @@ class HostNetworkGuard:
         :data:`GUARD_RENEW_S` takes the full path regardless, so those checks
         keep their cadence and an activation never finds the verification
         lapsed.
+
+        Returns what the read-back showed each bridge holding, as
+        :meth:`ensure` does: a table reinstalled here, or by another process
+        since, holds none of the running groups' exceptions.
         """
         with self._lock:
             verified_at = self._verified_at
@@ -301,7 +378,7 @@ class HostNetworkGuard:
                 self._verify(render_ruleset(self.network), listings=listings)
                 with self._lock:
                     self._observe_relays(listings[: len(RELAY_FAMILIES)], read_at=read_at)
-                return
+                return _read_exceptions(listings[: len(RELAY_FAMILIES)])
             except NetworkGuardError as exc:
                 logger.warning(
                     "network_guard_rules_changed",
@@ -312,7 +389,7 @@ class HostNetworkGuard:
                     },
                 )
                 self.invalidate()
-        self.ensure(max_age_s=GUARD_RENEW_S)
+        return self.ensure(max_age_s=GUARD_RENEW_S)
 
     def invalidate(self) -> None:
         """Forget the last verification, so the next activation reads the kernel."""
@@ -339,6 +416,7 @@ class HostNetworkGuard:
         with self._lock:
             held = self._held.pop(bridge, None)
             now = time.monotonic()
+            self._relays_written.pop(bridge, None)
             if (
                 network_id
                 and held is not None
@@ -351,6 +429,7 @@ class HostNetworkGuard:
                 and now - held.confirmed_at < HELD_RELAYS_TRUST_S
             ):
                 self._held[bridge] = held
+                self._relays_written[bridge] = wanted
                 return
             written_at = time.monotonic()
             self._batch(
@@ -362,26 +441,71 @@ class HostNetworkGuard:
                     "wanted": sorted([address, port] for address, port in wanted),
                 },
             )
+            self._relays_written[bridge] = wanted
             if network_id:
                 self._held[bridge] = _HeldRelays(network_id, wanted, written_at)
 
-    def sync_ssh_targets(self, bridge: str, endpoints: set[tuple[str, int]]) -> None:
+    def sync_ssh_targets(
+        self,
+        bridge: str,
+        endpoints: set[tuple[str, int]],
+        *,
+        network_id: str | None = None,
+    ) -> None:
         """Make one bridge's SSH exceptions exactly ``endpoints``.
 
         Always read from the kernel and corrected in one helper. These change
         only when an owner's SSH selection does and are synced only for groups
         that have one, so there is no per-activation cost to save by
-        remembering them.
+        remembering them. With ``network_id``, the Docker network the bridge
+        belongs to, a successful write is kept for :meth:`restore_ssh_targets`.
         """
         self._require_own_bridge(bridge)
         with self._lock:
-            self._batch([], ssh_targets=self._target_update(bridge, endpoints))
+            self._ssh_written.pop(bridge, None)
+            update = self._target_update(bridge, endpoints)
+            self._batch([], ssh_targets=update)
+            if network_id:
+                self._ssh_written[bridge] = (
+                    network_id,
+                    frozenset((address, port) for address, port in update["wanted"]),
+                )
+
+    def written_relays(self, bridge: str) -> frozenset[tuple[str, int]] | None:
+        """The relay exceptions this guard last wrote for one bridge, if any."""
+        with self._lock:
+            return self._relays_written.get(bridge)
+
+    def written_ssh_targets(self, bridge: str) -> tuple[str, frozenset[tuple[str, int]]] | None:
+        """The SSH exceptions this guard last wrote for one bridge, and for which network."""
+        with self._lock:
+            return self._ssh_written.get(bridge)
+
+    def restore_ssh_targets(self, bridge: str, *, network_id: str) -> None:
+        """Write back the SSH exceptions this guard last wrote for this exact network.
+
+        Only for that network: a bridge removed and created again keeps its
+        name, and its successor gets its own SSH targets from its own turn.
+        The write is whatever is remembered when it runs, so an owner's change
+        synced meanwhile is never undone.
+        """
+        self._require_own_bridge(bridge)
+        with self._lock:
+            written = self._ssh_written.get(bridge)
+            if written is None:
+                return
+            if written[0] != network_id:
+                del self._ssh_written[bridge]
+                return
+            self._batch([], ssh_targets=self._target_update(bridge, set(written[1])))
 
     def release_bridge(self, bridge: str) -> None:
         """Drop every exception a removed bridge had, relays and SSH alike, in one helper."""
         self._require_own_bridge(bridge)
         with self._lock:
             self._held.pop(bridge, None)
+            self._ssh_written.pop(bridge, None)
+            self._relays_written.pop(bridge, None)
             self._batch(
                 [],
                 relays={
@@ -591,15 +715,9 @@ class HostNetworkGuard:
         kernel itself.
         """
         try:
-            per_family = []
-            for listing in tables:
-                elements: list[Any] = []
-                for item in listing:
-                    found = item.get("set") if isinstance(item, dict) else None
-                    if isinstance(found, dict) and found.get("name") == "relays":
-                        raw = found.get("elem") or []
-                        elements = raw if isinstance(raw, list) else [raw]
-                per_family.append(_relay_elements(elements))
+            per_family = [
+                _relay_elements(_set_elements_in(listing, "relays")) for listing in tables
+            ]
         except (NetworkGuardError, TypeError, ValueError, AttributeError):
             self._held = {}
             return
@@ -717,4 +835,4 @@ class HostNetworkGuard:
         return image
 
 
-__all__ = ["GUARD_RECHECK_S", "HostNetworkGuard", "NetworkGuardError"]
+__all__ = ["GUARD_RECHECK_S", "HeldExceptions", "HostNetworkGuard", "NetworkGuardError"]

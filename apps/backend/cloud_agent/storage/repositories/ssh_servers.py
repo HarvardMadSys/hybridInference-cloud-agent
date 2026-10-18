@@ -423,7 +423,15 @@ class PostgresSshServerRepository:
     async def running_groups_for_ssh_change(
         self, *, thread_ids: list[str] | None = None, server_id: str | None = None
     ) -> list[dict[str, Any]]:
-        """Running groups an SSH change reaches: one member chat and its latest job each."""
+        """Running groups an SSH change reaches: each group's host and the chats it is known by.
+
+        A push is for the whole group, so it goes to the host the group is on,
+        not to wherever one member's latest job ran. It names the group by its
+        origin chat, which a sandbox manager re-learns from the container after
+        a restart. ``resident_thread_id`` is another chat holding a slot, which
+        every manifest the manager is sent names: a deleted origin chat gives
+        its slot up, and the next manifest drops it.
+        """
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 """
@@ -436,18 +444,20 @@ class PostgresSshServerRepository:
                            WHERE server_id = $2::uuid
                        )
                 )
-                SELECT DISTINCT ON (s.id)
-                       s.id AS sandbox_id, m.thread_id, j.id AS job_id
+                SELECT s.id AS sandbox_id, s.origin_thread_id, s.host,
+                       (
+                           SELECT m.thread_id
+                           FROM agent_thread_sandbox_memberships m
+                           WHERE m.sandbox_id = s.id
+                             AND m.thread_id <> s.origin_thread_id
+                             AND m.resident_slot_id IS NOT NULL
+                             AND m.native_session_id IS NOT NULL
+                           ORDER BY m.resident_slot_id
+                           LIMIT 1
+                       ) AS resident_thread_id
                 FROM touched
                 JOIN agent_sandboxes s ON s.id = touched.sandbox_id AND s.state = 'running'
-                JOIN agent_thread_sandbox_memberships m ON m.sandbox_id = s.id
-                JOIN LATERAL (
-                    SELECT id FROM agent_jobs
-                    WHERE thread_id = m.thread_id
-                    ORDER BY created_at DESC, id DESC
-                    LIMIT 1
-                ) j ON TRUE
-                ORDER BY s.id, (m.resident_slot_id IS NOT NULL) DESC, m.thread_id
+                ORDER BY s.id
                 """,
                 list(thread_ids or []),
                 server_id,

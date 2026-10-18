@@ -90,7 +90,7 @@ Owner 或管理员创建邀请后，服务端用 `secrets.token_urlsafe(32)` 生
 3. Owner 或管理员查看申请人的显示资料（个人资料中的名字，否则是 Gateway 账户 email）和稳定账户标识，批准或拒绝。显示名只用于展示，权限永远绑定 `user_id`。
 4. 批准前向 Gateway 确认申请人当前的 `agent.use`；批准事务再检查操作者的 Owner 或管理员身份、团队状态、申请有效性和成员容量，然后激活 membership、消费邀请并写入审计。
 
-同一申请人的重复领取返回同一申请；另一账户不能抢占已领取的邀请。同一用户在一个 Team 只能有一个待处理申请（部分唯一索引保证）；随链接过期的旧申请在下一次领取时被标记为 `expired`，不再占用这个名额。重复批准返回已完成结果，不增加第二条 membership。撤销、拒绝或过期都不能再次使用原 token。
+同一申请人的重复领取（连点、刷新页面）返回同一申请，前提是申请仍待处理，或已批准且本人仍是活跃成员；已拒绝、取消或过期的申请照原样返回。已批准的申请人后来退出或被移除时，原链接不会让其重新加入：领取返回 409（`no_longer_member`），提示向 Owner 或管理员索取新的邀请链接。另一账户不能抢占已领取的邀请。同一用户在一个 Team 只能有一个待处理申请（部分唯一索引保证）；随链接过期的旧申请在下一次领取时被标记为 `expired`，不再占用这个名额。重复批准返回已完成结果，不增加第二条 membership。撤销、拒绝或过期都不能再次使用原 token。
 
 转让 Team 所有权时撤销尚未完成的邀请和申请，由新 Owner 重新发起。没有 `agent.use` 的用户可以理解拒绝原因，但不会获得资源访问权。邮箱邀请可在将来具备明确的已验证身份契约后加入。
 
@@ -244,7 +244,7 @@ Team 只有 `active → deleted`：Owner 按读取时的 revision 直接删除�
 
 非成员按 ID 访问团队环境一律 404，不区分“不存在”和“无权访问”。
 
-错误统一为 `{"error": {"type": …, "message": …}}`：非成员或跨 scope 的资源请求返回 404（`not_found`），已知 Team 内的角色不足返回 403（`forbidden`），失效 revision、Owner 直接退出、成员已满等冲突返回 409 并带稳定类型（如 `revision_conflict`、`owner_cannot_leave`、`team_full`、`request_pending`、`applicant_not_admitted`），失效的邀请链接返回 410（`invitation_unavailable`，不区分不存在、过期、撤销或已被他人领取）。Gateway 无法回答时返回 503，不使用过期肯定结果兜底。所有团队响应 `Cache-Control: no-store`；格式错误的请求返回通用 422，不回显请求内容，避免把输错的链接写进错误信息。
+错误统一为 `{"error": {"type": …, "message": …}}`：非成员或跨 scope 的资源请求返回 404（`not_found`），已知 Team 内的角色不足返回 403（`forbidden`），失效 revision、Owner 直接退出、成员已满、前成员再次领取旧链接等冲突返回 409 并带稳定类型（如 `revision_conflict`、`owner_cannot_leave`、`team_full`、`request_pending`、`applicant_not_admitted`、`no_longer_member`），失效的邀请链接返回 410（`invitation_unavailable`，不区分不存在、过期、撤销或已被他人领取）。Gateway 无法回答时返回 503，不使用过期肯定结果兜底。所有团队响应 `Cache-Control: no-store`；格式错误的请求返回通用 422，不回显请求内容，避免把输错的链接写进错误信息。
 
 ## 10 前端
 

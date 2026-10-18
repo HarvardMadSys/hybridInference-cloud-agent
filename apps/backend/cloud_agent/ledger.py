@@ -396,7 +396,11 @@ def summarize_conversation(rows: list[dict[str, Any]]) -> ConversationUsage:
         turn_count=len({row["job_id"] for row in rows}),
         incomplete=bool(
             summary.missing_attempts
-            or any(attempt.reason not in (None, "pending") for attempt in summary.attempts)
+            # An attempt that called no model has nothing missing.
+            or any(
+                attempt.reason not in (None, "pending", NO_MODEL_CALLS)
+                for attempt in summary.attempts
+            )
             or (
                 unknown
                 and any(getattr(unknown, name) for name in USAGE_METRICS if name != "reasoning")

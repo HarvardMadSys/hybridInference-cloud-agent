@@ -13,6 +13,7 @@ import {
 } from '@testing-library/react';
 import { useKeyboardShortcuts } from '@/components/features/settings/keyboardShortcutPreferences';
 import { DEFAULT_KEYBOARD_SHORTCUTS } from '@/lib/keyboardShortcuts';
+import { onPlatform } from '@/lib/platformTestSupport';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AgentConversationApi, AgentJobApi, AgentSessionListOptions } from '@/lib/api/agents';
 import { announceAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
@@ -117,7 +118,7 @@ it('uses the customized search shortcut and retains click access when disabled',
     }),
   );
   const search = screen.getByRole('button', { name: 'Search tasks' });
-  expect(search).toHaveAttribute('aria-keyshortcuts', 'Meta+Shift+G Control+Shift+G');
+  expect(search).toHaveAttribute('aria-keyshortcuts', 'Control+Shift+G');
   fireEvent.keyDown(document, { key: 'k', ctrlKey: true });
   expect(screen.queryByRole('textbox', { name: 'Search tasks' })).not.toBeInTheDocument();
   fireEvent.keyDown(document, { key: 'G', ctrlKey: true, shiftKey: true });
@@ -932,9 +933,13 @@ describe('sidebar navigation interactions', () => {
     expect(screen.queryByText('Current')).not.toBeInTheDocument();
   });
 
-  it.each([{ ctrlKey: true }, { metaKey: true }])(
-    'preserves a portaled modal focus cycle when search is requested with %j',
-    async (modifier) => {
+  it.each([
+    ['Win32', { ctrlKey: true }],
+    ['MacIntel', { metaKey: true }],
+  ])(
+    'preserves a portaled modal focus cycle when search is requested on %s with %j',
+    async (platform, modifier) => {
+      onPlatform(platform);
       function Workspace() {
         const [open, setOpen] = useState(true);
         return open ? (
@@ -997,6 +1002,35 @@ describe('sidebar navigation interactions', () => {
 
     screen.getByRole('dialog', { name: 'Task details' }).removeAttribute('open');
     fireEvent.keyDown(document, { key: 'k', ctrlKey: true });
+    await waitFor(() =>
+      expect(screen.getByRole('textbox', { name: 'Search tasks' })).toHaveFocus(),
+    );
+  });
+
+  it('leaves Control+K to a text field on a Mac and searches on Command+K', async () => {
+    onPlatform('MacIntel');
+    render(
+      <>
+        <AgentsSidebar />
+        <textarea aria-label="Message" />
+      </>,
+    );
+    await screen.findByText('Task a');
+    const composer = screen.getByRole('textbox', { name: 'Message' });
+    composer.focus();
+
+    // In a Mac text field, Control+K deletes to the end of the line.
+    expect(fireEvent.keyDown(composer, { key: 'k', ctrlKey: true })).toBe(true);
+    await act(async () => {
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    });
+    expect(composer).toHaveFocus();
+    expect(screen.queryByRole('textbox', { name: 'Search tasks' })).not.toBeInTheDocument();
+    const search = screen.getByRole('button', { name: 'Search tasks' });
+    expect(search).toHaveAttribute('aria-keyshortcuts', 'Meta+K');
+    expect(search).toHaveAttribute('title', 'Search tasks (⌘ + K)');
+
+    expect(fireEvent.keyDown(composer, { key: 'k', metaKey: true })).toBe(false);
     await waitFor(() =>
       expect(screen.getByRole('textbox', { name: 'Search tasks' })).toHaveFocus(),
     );

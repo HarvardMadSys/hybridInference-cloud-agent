@@ -19,7 +19,7 @@ from tests.support.db import reset_agent_tables
 from tests.support.migrations import apply_migrations
 from tests.unit.test_ledger_snapshots import report_payload
 
-from cloud_agent.ledger import summarize_conversation
+from cloud_agent.ledger import summarize_conversation, summarize_job_usage
 from cloud_agent.storage.assembly import Storage
 from cloud_agent.storage.repositories.ledger import PostgresLedgerRepository
 from cloud_agent.thread_stats import summarize_thread
@@ -218,6 +218,48 @@ async def test_conversation_usage_is_owner_scoped_and_does_not_include_other_thr
         await ledger.ledger_rows_for_conversation(job_id=first["id"], user_id="another-user") == []
     )
     assert await ledger.ledger_rows_for_conversation(job_id="missing", user_id="user-1") == []
+
+
+async def test_a_turn_that_never_called_a_model_leaves_no_gap_in_its_conversation(
+    db, store, ledger: PostgresLedgerRepository
+):
+    """The conversation total reads such a turn as the turn's own usage does.
+
+    A turn that ended before its agent could call a model has no reference and
+    spent nothing, and its job usage says so. The conversation read left out
+    whether that turn ever reported model usage, so its summary named it
+    unattributed, and a conversation holding one read as incomplete beside the
+    totals of every turn that did run.
+    """
+    first, _, _ = await _seed_attempt(
+        db, store, grant_id=None, finished_at=datetime.now(timezone.utc)
+    )
+    second = await store.conversation_commands.create_follow_up(
+        parent_job_id=first["id"], user_id="user-1", prompt="second turn"
+    )
+    assert second is not None and second.get("error") is None
+    _, _, second_ledger = await _seed_attempt(db, store, job=second)
+    async with db.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_attempt_ledger SET snapshot = $2::jsonb, queried_at = NOW() "
+            "WHERE id = $1",
+            second_ledger,
+            json.dumps(report_payload(grant_id="grant-one")),
+        )
+    first_usage = summarize_job_usage(
+        ledger_rows=await ledger.ledger_rows_for_job(job_id=first["id"]),
+        runtime_inputs={"job_ids": [first["id"]], "attempts": [], "events": []},
+        runtime="claude-code",
+        terminal=False,
+    )
+    assert first_usage.ledger.attempts[0].reason == "no_model_calls"
+
+    summary = summarize_conversation(
+        await ledger.ledger_rows_for_conversation(job_id=second["id"], user_id="user-1")
+    )
+    assert summary.turn_count == 2
+    assert summary.totals.calls == 1
+    assert summary.incomplete is False
 
 
 async def _complete(
@@ -1008,6 +1050,155 @@ async def test_job_runtime_usage_includes_retries_but_excludes_other_turns(db, s
     summary = summarize_thread(**inputs)
     assert summary.input_tokens == 30
     assert summary.output_tokens is None
+
+
+async def test_usage_reads_fetch_only_what_their_summaries_read(db, store):
+    """A turn's tool output stays in Postgres, and its usage adds up as before.
+
+    A job's usage read, which every open tab is pushed again as each model
+    call is counted, and a thread's stats both took every event's payload
+    but its text, input and content. A tool result also carries what the
+    tool returned, such as a whole edited file or a command's output, so a
+    long turn's read moved megabytes to add up a few token counts.
+    """
+    base = datetime.now(timezone.utc) - timedelta(minutes=10)
+    job, first, _ = await _seed_attempt(
+        db, store, grant_id=None, started_at=base, finished_at=base + timedelta(seconds=60)
+    )
+    _, retry, _ = await _seed_attempt(
+        db, store, job=job, attempt_no=2, grant_id=None, started_at=base + timedelta(seconds=90)
+    )
+    output = "x = 1\n" * 5000
+    # Usage in each place a runtime puts it, tool calls with large results,
+    # and a retry whose last event totals its own usage.
+    events = [
+        (
+            first,
+            "message",
+            {
+                "text": "Looking.",
+                "usage_id": "msg_1",
+                "usage": {"input_tokens": 100, "output_tokens": 0, "cache_read_input_tokens": 50},
+            },
+        ),
+        (
+            first,
+            "tool_use",
+            {
+                "name": "Edit",
+                "id": "call-1",
+                "input": {"file_path": "a.py"},
+                "usage_id": "msg_1",
+                "usage": {"input_tokens": 100, "output_tokens": 40, "cache_read_input_tokens": 50},
+            },
+        ),
+        (
+            first,
+            "tool_result",
+            {
+                "tool_use_id": "call-1",
+                "is_error": False,
+                "content": "Updated.",
+                "structured_output": {"filePath": "a.py", "originalFile": output},
+            },
+        ),
+        (first, "tool_use", {"name": "Bash", "id": "call-2", "input": {"command": "pytest"}}),
+        (
+            first,
+            "tool_result",
+            {
+                "tool_use_id": "call-2",
+                "is_error": True,
+                "content": "1 failed",
+                "structured_output": {"stdout": output},
+            },
+        ),
+        (first, "usage", {"input_tokens": 7, "output_tokens": 3, "cache_read_tokens": 1}),
+        (first, "thinking", {"text": "Nearly there.", "signature": output}),
+        (
+            first,
+            "message",
+            {
+                "text": "Done.",
+                "usage_id": "msg_2",
+                "usage": {"input_tokens": 5, "output_tokens": 9},
+            },
+        ),
+        (
+            retry,
+            "message",
+            {
+                "text": "Again.",
+                "usage_id": "msg_1",
+                "usage": {"input_tokens": 20, "output_tokens": 4},
+            },
+        ),
+        (retry, "tool_use", {"name": "Read", "id": 7}),
+        (
+            retry,
+            "tool_result",
+            {"tool_use_id": 7, "is_error": 1, "structured_output": {"file": output}},
+        ),
+        (
+            retry,
+            "lifecycle",
+            {
+                "phase": "result",
+                "usage_scope": "attempt",
+                "usage": {"input_tokens": 30, "output_tokens": 8},
+            },
+        ),
+    ]
+    async with db.acquire() as conn:
+        for n, (attempt_id, event_type, payload) in enumerate(events):
+            await conn.execute(
+                """
+                INSERT INTO agent_job_events
+                    (job_id, attempt_id, seq, event_type, payload, created_at)
+                VALUES ($1, $2, $3, $4, $5::jsonb, $6)
+                """,
+                job["id"],
+                attempt_id,
+                n + 1,
+                event_type,
+                json.dumps(payload),
+                base + timedelta(seconds=5 * n + 1),
+            )
+        full = [
+            {**dict(row), "payload": json.loads(row["payload"])}
+            for row in await conn.fetch(
+                "SELECT job_id, attempt_id, seq, event_type, created_at, payload "
+                "FROM agent_job_events WHERE job_id = $1 ORDER BY attempt_id, seq",
+                job["id"],
+            )
+        ]
+    reads = await store.ledger.job_usage_reads(job_id=job["id"], user_id=job["user_id"])
+    thread = await store.execution_queries.thread_stats_inputs(
+        job_id=job["id"], user_id=job["user_id"]
+    )
+    assert reads is not None and thread is not None
+
+    for inputs in (reads["inputs"], thread):
+        assert max(len(json.dumps(event["payload"])) for event in inputs["events"]) < 256
+        summary = summarize_thread(
+            job_ids=inputs["job_ids"], attempts=inputs["attempts"], events=inputs["events"]
+        )
+        assert summary == summarize_thread(
+            job_ids=inputs["job_ids"], attempts=inputs["attempts"], events=full
+        )
+    usage = summarize_job_usage(
+        ledger_rows=reads["ledger_rows"],
+        runtime_inputs=reads["inputs"],
+        runtime="claude-code",
+        terminal=False,
+    )
+    assert usage == summarize_job_usage(
+        ledger_rows=reads["ledger_rows"],
+        runtime_inputs={**reads["inputs"], "events": full},
+        runtime="claude-code",
+        terminal=False,
+    )
+    assert (usage.runtime.input_tokens, usage.runtime.output_tokens) == (142, 60)
 
 
 async def test_deleting_attempt_cascades_its_snapshot_but_not_other_attempts(

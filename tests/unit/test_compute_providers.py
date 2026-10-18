@@ -354,52 +354,33 @@ async def test_cloudlab_missing_profile_is_rejected_before_create():
 
 
 @pytest.mark.asyncio
-async def test_cloudlab_completed_server_error_without_an_experiment_is_a_rejection():
-    responses = {
-        ("GET", "/v1/profiles/"): httpx.Response(
-            200, json={"profiles": [{"name": "one-node", "project": "PortalProfiles"}]}
-        ),
-        ("POST", "/v1/experiments/"): httpx.Response(
-            500, json={"error": "Internal server error", "code": 500}
-        ),
-        ("GET", "/v1/experiments/"): httpx.Response(200, json={"experiments": []}),
-    }
-    with pytest.raises(ProviderError, match="did not create the experiment") as caught:
-        await provider(_routes(responses)).acquire(
-            AcquireRequest(mode="provision", config=_provision("probe-exp")), intent()
-        )
-    assert caught.value.code == "request_rejected"
+@pytest.mark.parametrize("matching_experiment", [False, True])
+async def test_cloudlab_server_error_is_unknown_without_name_based_adoption(matching_experiment):
+    requests = []
 
+    def respond(request):
+        requests.append((request.method, request.url.path))
+        if request.url.path.endswith("/profiles/"):
+            return httpx.Response(
+                200, json={"profiles": [{"name": "one-node", "project": "PortalProfiles"}]}
+            )
+        if request.method == "POST":
+            return httpx.Response(500, json={"error": "Internal server error", "code": 500})
+        if matching_experiment:
+            return httpx.Response(
+                200,
+                json={
+                    "experiments": [{"id": EXPERIMENT, "name": "probe-exp", "project": "research"}]
+                },
+            )
+        return httpx.Response(200, json={"experiments": []})
 
-@pytest.mark.asyncio
-async def test_cloudlab_server_error_adopts_the_named_experiment_when_it_exists():
-    responses = {
-        ("GET", "/v1/profiles/"): httpx.Response(
-            200, json={"profiles": [{"name": "one-node", "project": "PortalProfiles"}]}
-        ),
-        ("POST", "/v1/experiments/"): httpx.Response(
-            500, json={"error": "Internal server error", "code": 500}
-        ),
-        ("GET", "/v1/experiments/"): httpx.Response(
-            200,
-            json={
-                "experiments": [
-                    {"id": EXPERIMENT, "name": "probe-exp", "project": "research"},
-                    {
-                        "id": "11111111-1111-1111-1111-111111111111",
-                        "name": "other",
-                        "project": "research",
-                    },
-                ]
-            },
-        ),
-    }
-    receipt = await provider(_routes(responses)).acquire(
+    receipt = await provider(respond).acquire(
         AcquireRequest(mode="provision", config=_provision("probe-exp")), intent()
     )
-    assert receipt.outcome == "pending"
-    assert receipt.resource is not None
-    assert receipt.resource.external_id == EXPERIMENT
+
+    assert receipt.outcome == "unknown"
+    assert requests == [("GET", "/v1/profiles/"), ("POST", "/v1/experiments/")]
 
 
 @pytest.mark.asyncio
@@ -596,35 +577,32 @@ async def test_cloudlab_empty_preferences_preserve_the_profiles_hardware_choice(
         "Resource capacity is exhausted",
     ],
 )
-async def test_cloudlab_falls_back_after_a_confirmed_server_capacity_rejection(diagnostic):
+async def test_cloudlab_server_capacity_error_does_not_blindly_try_another_node_type(diagnostic):
     attempted = []
+    requests = []
 
     def respond(request):
+        requests.append((request.method, request.url.path))
         if request.url.path.endswith("/profiles/"):
             return _profile_list()
-        if request.method == "GET":
-            assert request.url.params["project"] == "research"
-            return httpx.Response(200, json={"experiments": []})
         attempted.append(json.loads(request.content)["bindings"]["phystype"])
-        return (
-            httpx.Response(500, json={"error": diagnostic})
-            if len(attempted) == 1
-            else httpx.Response(201, json={"id": EXPERIMENT})
-        )
+        return httpx.Response(500, json={"error": diagnostic})
 
     receipt = await provider(respond).acquire(
         AcquireRequest(mode="provision", config={**_provision(), "node_types": ["r6615", "c6620"]}),
         intent(),
     )
-    assert attempted == ["r6615", "c6620"]
-    assert receipt.resource.config["bindings"]["phystype"] == "c6620"
+    assert receipt.outcome == "unknown"
+    assert attempted == ["r6615"]
+    assert requests == [("GET", "/v1/profiles/"), ("POST", "/v1/experiments/")]
 
 
 @pytest.mark.asyncio
-async def test_cloudlab_capacity_diagnostic_does_not_replace_an_experiment_that_was_created():
-    attempted = []
+async def test_cloudlab_capacity_error_does_not_adopt_a_matching_name():
+    requests = []
 
     def respond(request):
+        requests.append((request.method, request.url.path))
         if request.url.path.endswith("/profiles/"):
             return _profile_list()
         if request.method == "GET":
@@ -634,7 +612,6 @@ async def test_cloudlab_capacity_diagnostic_does_not_replace_an_experiment_that_
                     "experiments": [{"id": EXPERIMENT, "name": "probe-exp", "project": "research"}]
                 },
             )
-        attempted.append(json.loads(request.content)["bindings"]["phystype"])
         return httpx.Response(500, json={"error": "Insufficient physical nodes"})
 
     receipt = await provider(respond).acquire(
@@ -643,10 +620,8 @@ async def test_cloudlab_capacity_diagnostic_does_not_replace_an_experiment_that_
         ),
         intent(),
     )
-    assert attempted == ["r6615"]
-    assert receipt.outcome == "pending"
-    assert receipt.resource.external_id == EXPERIMENT
-    assert receipt.resource.config["bindings"]["phystype"] == "r6615"
+    assert receipt.outcome == "unknown"
+    assert requests == [("GET", "/v1/profiles/"), ("POST", "/v1/experiments/")]
 
 
 @pytest.mark.asyncio
@@ -658,11 +633,8 @@ async def test_cloudlab_capacity_diagnostic_does_not_replace_an_experiment_that_
         (httpx.Response(400), "request_rejected"),
         (httpx.Response(429), "rate_limited"),
         (httpx.Response(429, json={"error": "Request rate limit reached"}), "rate_limited"),
-        (httpx.Response(500, json={"error": "Internal server error"}), "request_rejected"),
-        (
-            httpx.Response(500, json={"error": "Invalid parameter phystype"}),
-            "request_rejected",
-        ),
+        (httpx.Response(500, json={"error": "Internal server error"}), None),
+        (httpx.Response(500, json={"error": "Invalid parameter phystype"}), None),
         (httpx.ConnectTimeout("handshake timed out"), "temporarily_unavailable"),
         (httpx.ReadTimeout("create timed out"), None),
         (httpx.Response(201, json={"error": "missing experiment ID"}), None),
@@ -820,6 +792,7 @@ async def test_known_uuid_recovers_create_by_exact_identity():
     [
         (401, "credential_invalid"),
         (403, "permission_denied"),
+        (400, "request_rejected"),
         (503, "temporarily_unavailable"),
         (429, "rate_limited"),
         (302, "request_rejected"),
@@ -830,13 +803,352 @@ async def test_provider_error_diagnostics_never_expose_secrets_or_call_redirect(
 
     def respond(request):
         requests.append(request)
-        return httpx.Response(status, text=TOKEN, headers={"Location": "https://attacker.example/"})
+        return httpx.Response(
+            status,
+            text=TOKEN,
+            headers={
+                "Location": "https://attacker.example/",
+                "X-Request-ID": EXPERIMENT,
+            },
+        )
 
     with pytest.raises(ProviderError) as error:
         await provider(respond).inspect(ResourceRef(external_id=EXPERIMENT, config=CONFIG))
     assert error.value.code == code
     assert TOKEN not in str(error.value)
+    assert TOKEN not in repr(error.value.diagnostics)
+    assert error.value.diagnostics["http_status"] == status
+    assert error.value.diagnostics["provider_operation"] == "experiments.read"
+    assert error.value.diagnostics["external_id"] == EXPERIMENT
+    assert error.value.diagnostics["provider_request_id"] == EXPERIMENT
     assert len(requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_cloudlab_preserves_safe_actionable_http_400_diagnostics():
+    def respond(request):
+        if request.method == "GET" and request.url.path.endswith("/profiles/"):
+            return httpx.Response(
+                200,
+                json={"profiles": [{"name": "cloud-agent-node", "project": "FAST25-AE"}]},
+            )
+        return httpx.Response(
+            400,
+            json={"error": "Invalid parameter phystype"},
+            headers={"X-Request-ID": EXPERIMENT},
+        )
+
+    request = AcquireRequest(
+        mode="provision",
+        config={
+            "credential_ref": "account-1",
+            "project": "research",
+            "profile_name": "cloud-agent-node",
+            "profile_project": "FAST25-AE",
+            "bindings": {"cluster": "utah", "phystype": "r6615"},
+        },
+    )
+    operation = intent(request)
+    with pytest.raises(ProviderError) as error:
+        await provider(respond).acquire(request, operation)
+
+    assert error.value.code == "request_rejected"
+    assert error.value.retryable is False
+    assert error.value.diagnostics == {
+        "provider_operation": "experiments.create",
+        "http_status": 400,
+        "provider_reason_code": "invalid_profile_binding",
+        "provider_request_id": EXPERIMENT,
+        "operation_id": operation.operation_id,
+        "allocation_id": operation.allocation_id,
+        "requested_project": "research",
+        "requested_profile": "cloud-agent-node",
+        "requested_profile_project": "FAST25-AE",
+        "requested_site": "utah",
+        "requested_hardware": "r6615",
+    }
+    assert TOKEN not in str(error.value) + repr(error.value.diagnostics)
+
+
+@pytest.mark.asyncio
+async def test_cloudlab_classifies_detail_validation_errors_without_retaining_input():
+    adapter = provider(
+        lambda request: httpx.Response(
+            400,
+            json={"detail": "Not a HASH reference"},
+            headers={"X-Request-ID": EXPERIMENT},
+        )
+    )
+    request = AcquireRequest(
+        mode="provision",
+        config={
+            "credential_ref": "account-1",
+            "project": "research",
+            "profile_name": "cloud-agent-node",
+            "profile_project": "FAST25-AE",
+            "bindings": {"enabled": True},
+        },
+    )
+
+    with pytest.raises(ProviderError) as error:
+        await adapter.acquire(request, intent(request))
+
+    assert error.value.code == "request_rejected"
+    assert error.value.diagnostics["provider_reason_code"] == "invalid_profile_binding"
+    assert error.value.diagnostics["provider_request_id"] == EXPERIMENT
+    assert TOKEN not in repr(error.value.diagnostics)
+
+
+@pytest.mark.asyncio
+async def test_cloudlab_reads_bounded_422_detail_and_keeps_it_out_of_diagnostics():
+    adapter = provider(
+        lambda request: httpx.Response(
+            422,
+            json={
+                "detail": [{"loc": ["body", "bindings"], "msg": "invalid value", "input": TOKEN}]
+            },
+            headers={"X-Request-ID": EXPERIMENT},
+        )
+    )
+    request = AcquireRequest(
+        mode="provision",
+        config={
+            "credential_ref": "account-1",
+            "project": "research",
+            "profile_name": "one-node",
+            "profile_project": "PortalProfiles",
+        },
+    )
+
+    with pytest.raises(ProviderError) as error:
+        await adapter.acquire(request, intent(request))
+
+    assert error.value.code == "request_rejected"
+    assert error.value.diagnostics["http_status"] == 422
+    assert error.value.diagnostics["provider_reason_code"] == "invalid_parameter"
+    assert TOKEN not in str(error.value) + repr(error.value.diagnostics)
+
+
+@pytest.mark.asyncio
+async def test_cloudlab_successful_create_receipt_keeps_request_correlation():
+    def respond(request):
+        if request.method == "GET" and request.url.path.endswith("/profiles/"):
+            return _profile_list()
+        return httpx.Response(
+            201,
+            json={"id": EXPERIMENT},
+            headers={"X-Request-ID": EXPERIMENT},
+        )
+
+    adapter = provider(respond)
+    request = AcquireRequest(
+        mode="provision",
+        config={
+            "credential_ref": "account-1",
+            "project": "research",
+            "profile_name": "one-node",
+            "profile_project": "PortalProfiles",
+        },
+    )
+
+    operation = intent(request)
+    receipt = await adapter.acquire(request, operation)
+
+    assert receipt.outcome == "pending"
+    assert receipt.resource is not None and receipt.resource.external_id == EXPERIMENT
+    assert receipt.diagnostics == {
+        "provider_operation": "experiments.create",
+        "http_status": 201,
+        "provider_reason_code": "request_accepted",
+        "provider_request_id": EXPERIMENT,
+        "operation_id": operation.operation_id,
+        "allocation_id": operation.allocation_id,
+        "external_id": EXPERIMENT,
+        "requested_project": "research",
+        "requested_profile": "one-node",
+        "requested_profile_project": "PortalProfiles",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("matching_resources", [1, 2])
+async def test_cloudlab_ambiguous_create_never_adopts_matching_names(matching_resources):
+    requests = []
+    created = []
+
+    def respond(request):
+        requests.append((request.method, request.url.path))
+        if request.method == "GET" and request.url.path.endswith("/profiles/"):
+            return _profile_list()
+        if request.method == "POST":
+            created.extend(
+                {"id": str(uuid4()), "name": "same-name", "project": "research"}
+                for _ in range(matching_resources)
+            )
+            return httpx.Response(
+                500,
+                json={"error": "The experiment may have been created"},
+                headers={"X-Request-ID": EXPERIMENT},
+            )
+        return httpx.Response(200, json={"experiments": created})
+
+    request = AcquireRequest(
+        mode="provision",
+        config={**_provision("same-name"), "node_types": ["r6615", "c6620"]},
+    )
+    operation = intent(request)
+    receipt = await provider(respond).acquire(request, operation)
+
+    assert len(created) == matching_resources
+    assert requests == [("GET", "/v1/profiles/"), ("POST", "/v1/experiments/")]
+    assert receipt.outcome == "unknown"
+    assert receipt.resource is None
+    assert receipt.diagnostics["provider_request_id"] == EXPERIMENT
+    assert receipt.diagnostics["operation_id"] == operation.operation_id
+    assert receipt.diagnostics["allocation_id"] == operation.allocation_id
+    assert receipt.diagnostics["requested_project"] == "research"
+    assert receipt.diagnostics["requested_profile"] == "one-node"
+
+
+@pytest.mark.asyncio
+async def test_cloudlab_invalid_experiment_json_retains_safe_response_diagnostics():
+    adapter = provider(
+        lambda request: httpx.Response(
+            200,
+            text=TOKEN,
+            headers={"X-Request-ID": EXPERIMENT},
+        )
+    )
+
+    with pytest.raises(ProviderError) as error:
+        await adapter.inspect(ResourceRef(external_id=EXPERIMENT, config=CONFIG))
+
+    assert error.value.code == "invalid_response"
+    assert error.value.diagnostics == {
+        "provider_operation": "experiments.read",
+        "http_status": 200,
+        "provider_reason_code": "invalid_json_response",
+        "provider_request_id": EXPERIMENT,
+        "external_id": EXPERIMENT,
+        "requested_project": "research",
+    }
+    assert TOKEN not in str(error.value) + repr(error.value.diagnostics)
+
+
+@pytest.mark.asyncio
+async def test_cloudlab_rate_limit_diagnostic_keeps_existing_retry_classification():
+    adapter = provider(
+        lambda request: httpx.Response(429, json={"error": "Request rate limit reached"})
+    )
+    with pytest.raises(ProviderError) as error:
+        await adapter.inspect(ResourceRef(external_id=EXPERIMENT, config=CONFIG))
+
+    assert error.value.code == "rate_limited"
+    assert error.value.retryable is True
+    assert error.value.diagnostics["http_status"] == 429
+    assert error.value.diagnostics["provider_reason_code"] == "rate_limited"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body", [None, {}, {"message": TOKEN}])
+async def test_cloudlab_missing_or_incomplete_400_body_stays_safe(body):
+    adapter = provider(
+        lambda request: httpx.Response(400, json=body) if body is not None else httpx.Response(400)
+    )
+    with pytest.raises(ProviderError) as error:
+        await adapter.acquire(
+            AcquireRequest(
+                mode="provision",
+                config={
+                    "credential_ref": "account-1",
+                    "project": "research",
+                    "profile_name": "one-node",
+                    "profile_project": "PortalProfiles",
+                },
+            ),
+            intent(),
+        )
+
+    assert error.value.code == "request_rejected"
+    assert error.value.retryable is False
+    assert error.value.diagnostics["http_status"] == 400
+    assert error.value.diagnostics["provider_reason_code"] == "invalid_request"
+    assert TOKEN not in str(error.value) + repr(error.value.diagnostics)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure,code,retryable,reason",
+    [
+        (
+            httpx.ConnectTimeout("TLS handshake"),
+            "temporarily_unavailable",
+            True,
+            "connect_failed",
+        ),
+        (
+            httpx.ConnectError("certificate verify failed: certificate has expired"),
+            "temporarily_unavailable",
+            True,
+            "tls_verification_failed",
+        ),
+        (
+            httpx.ReadTimeout("create response"),
+            "result_unknown",
+            False,
+            "request_outcome_unknown",
+        ),
+        (
+            httpx.Response(503, json={"error": "server maintenance"}),
+            "result_unknown",
+            False,
+            "provider_server_error",
+        ),
+    ],
+)
+async def test_cloudlab_creation_diagnostics_preserve_existing_uncertain_outcome(
+    failure, code, retryable, reason
+):
+    def respond(request):
+        if request.method == "GET" and request.url.path.endswith("/profiles/"):
+            return _profile_list()
+        if request.method == "GET" and request.url.path.endswith("/experiments/"):
+            return httpx.Response(200, json={"experiments": []})
+        if isinstance(failure, httpx.RequestError):
+            raise failure
+        return failure
+
+    request = AcquireRequest(
+        mode="provision",
+        config={
+            "credential_ref": "account-1",
+            "project": "research",
+            "profile_name": "one-node",
+            "profile_project": "PortalProfiles",
+        },
+    )
+    adapter = provider(respond)
+    if code == "result_unknown":
+        receipt = await adapter.acquire(request, intent(request))
+        assert receipt.outcome == "unknown"
+        diagnostics = receipt.diagnostics
+        assert diagnostics["provider_operation"] == "experiments.create"
+        assert diagnostics["provider_reason_code"] == reason
+        if isinstance(failure, httpx.RequestError):
+            assert "http_status" not in diagnostics
+        else:
+            assert diagnostics["http_status"] == 503
+    else:
+        with pytest.raises(ProviderError) as error:
+            await adapter.acquire(request, intent(request))
+        assert error.value.code == code
+        assert error.value.retryable is retryable
+        assert error.value.diagnostics["provider_operation"] == "experiments.create"
+        assert error.value.diagnostics["provider_reason_code"] == reason
+        if isinstance(failure, httpx.Response):
+            assert error.value.diagnostics["http_status"] == failure.status_code
+        else:
+            assert "http_status" not in error.value.diagnostics
 
 
 @pytest.mark.asyncio

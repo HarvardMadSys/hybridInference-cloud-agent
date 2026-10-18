@@ -42,6 +42,7 @@ from cloud_agent_host.shared_protocol import (
     SHARED_SANDBOX_RUNTIME_PINS,
     shared_deployment_capability,
 )
+from cloud_agent_shared.runtime_downloads import MAX_TARGETS_PER_RUNTIME
 from cloud_agent_shared.sandbox_archive_settings import SANDBOX_ARCHIVE_S3_URI
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
@@ -3287,8 +3288,46 @@ async def test_until_an_update_switches_hosts_also_hold_the_version_in_use(
 
     await _offering(hosts, "runner-a", ["2.1.220", "2.1.235", "2.1.301"])
     assert await hosts.activate_ready_runtime_upgrades() == ["claude-code"]
-    # Switched: only the update is sent; hosts keep their copy for a rollback.
-    assert [t["version"] for t in await hosts.runtime_download_targets()] == ["2.1.301"]
+    # Switched: the update comes first now, and the version it replaced is
+    # still sent, as what Roll back returns to.
+    assert [t["version"] for t in await hosts.runtime_download_targets()] == ["2.1.301", "2.1.235"]
+
+
+async def test_after_the_switch_every_host_keeps_what_roll_back_returns_to(
+    db, store, hosts: PostgresHostPoolRepository
+):
+    """Roll back stays instant everywhere, on a host that joins later too.
+
+    The switch does not wait for that version, and Roll back holds only the
+    version it chose.
+    """
+    await _menu_host(store, "runner-a", menu=["2.1.220", "2.1.235"], hosts=hosts)
+    assert await hosts.set_runtime_version(runtime="claude-code", version="2.1.235")
+    await _age_record(db, "claude-code", "2026-01-01T00:00:00Z")
+    update = await hosts.request_runtime_upgrade(
+        runtime="claude-code", version="2.1.300", requested_by="admin@test"
+    )
+
+    # runner-a no longer holds 2.1.235, as after a new sandbox image: the
+    # switch waits only for the update's own version.
+    await _offering(hosts, "runner-a", ["2.1.220", "2.1.300"])
+    assert await hosts.activate_ready_runtime_upgrades() == ["claude-code"]
+    _, _, selected, _ = await hosts.runner_pool()
+    assert selected == {"claude-code": "2.1.300"}
+
+    # The version new chats use first, then the one Roll back returns to,
+    # with the cutoff it was first downloaded with.
+    targets = await hosts.runtime_download_targets()
+    assert [(t["version"], t["before"]) for t in targets] == [
+        ("2.1.300", update["before"]),
+        ("2.1.235", "2026-01-01T00:00:00Z"),
+    ]
+    assert len(targets) <= MAX_TARGETS_PER_RUNTIME
+
+    # Roll back: the version rolled back from is no longer held.
+    await _offering(hosts, "runner-a", ["2.1.220", "2.1.235", "2.1.300"])
+    assert await hosts.set_runtime_version(runtime="claude-code", version="2.1.235")
+    assert [t["version"] for t in await hosts.runtime_download_targets()] == ["2.1.235"]
 
 
 async def test_rolling_back_keeps_the_version_on_every_host(

@@ -53,6 +53,8 @@ export interface DelegationReply {
 export interface DelegationCall {
   tool: string;
   input: unknown;
+  /** The MCP server a Codex call went to; Claude names it in `tool` instead. */
+  mcpServer?: string;
   resultState?: 'received' | 'failed' | 'waiting' | 'not_recorded' | 'cancelled' | 'unknown';
   output?: string;
   isError?: boolean;
@@ -172,12 +174,27 @@ const DELEGATION_TITLES: Record<string, string> = {
   list_agents: 'List subagents',
 };
 
+/**
+ * Whether a call went to an MCP server rather than to the runtime itself.
+ * Claude Code names such a call `mcp__<server>__<tool>`. Codex keeps the
+ * tool's own name and records the server beside it, so its server's `task`
+ * reads like Codex's own by name alone. A server may name a tool anything, and
+ * none of its tools is the runtime's task list or delegation.
+ */
+function isMcpCall(toolName: string, mcpServer?: string): boolean {
+  return toolName.startsWith('mcp__') || Boolean(mcpServer);
+}
+
 /** Unknown tools remain ordinary tool calls; names never imply an outcome. */
-export function parseToolActivity(toolName: string, value: unknown): ToolActivity | null {
+export function parseToolActivity(
+  toolName: string,
+  value: unknown,
+  mcpServer?: string,
+): ToolActivity | null {
   const key = toolKey(toolName);
   const input = record(value);
   if (
-    toolName.startsWith('mcp__') &&
+    isMcpCall(toolName, mcpServer) &&
     (['tasks', 'plan'].includes(key) || Object.hasOwn(DELEGATION_TITLES, key))
   )
     return null;
@@ -278,7 +295,11 @@ function returnedText(
  * agent's answer as their own result; other delegation tools return none.
  */
 export function recordedDelegationReply(call: DelegationCall): DelegationReply | undefined {
-  if (!['agent', 'task'].includes(toolKey(call.tool)) || call.resultState === 'unknown') {
+  if (
+    !['agent', 'task'].includes(toolKey(call.tool)) ||
+    isMcpCall(call.tool, call.mcpServer) ||
+    call.resultState === 'unknown'
+  ) {
     return undefined;
   }
   if (call.resultState === 'waiting' || call.resultState === 'not_recorded') {

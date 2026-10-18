@@ -483,6 +483,41 @@ async def test_host_activity_guards_still_apply_after_provider_is_gone(db, store
     assert await hosts.get_host(host="removed") is not None
 
 
+async def test_a_cold_group_does_not_keep_a_released_servers_records(db, store, hosts):
+    """It waits in its checkpoint for whichever host claims it, not for this machine."""
+    allocation_id, _, _ = await terminal_allocation(store, hosts)
+    await seed(db, store, "cold-removed", state="stopped", host="removed")
+    async with db.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO agent_sandbox_checkpoints
+               (id, sandbox_id, generation, host, container_id, base_image, runtime_id,
+                object_key, sha256, size_bytes, new_layer_bytes, layer_count,
+                format_version, captured_at, start_seq)
+               VALUES ($1, 'cold-removed', 1, 'removed', 'container-cold-removed', $2,
+                       'claude-code', 'cloud-agent/sandbox/v2/cold.oci.tar', $3,
+                       4096, 2048, 3, 1, NOW(), 0)""",
+            "c" * 32,
+            "ghcr.io/example/cloud-agent-sandbox@sha256:" + "a" * 64,
+            "e" * 64,
+        )
+        await conn.execute(
+            "UPDATE agent_sandboxes SET state = 'cold', restore_checkpoint_id = $1 "
+            "WHERE id = 'cold-removed'",
+            "c" * 32,
+        )
+
+    await remove_current(store, allocation_id)
+
+    assert await store.compute_resources.get_allocation(allocation_id) is None
+    assert await hosts.get_host(host="removed") is None
+    async with db.acquire() as conn:
+        group = await conn.fetchrow(
+            "SELECT state, host, restore_checkpoint_id FROM agent_sandboxes "
+            "WHERE id = 'cold-removed'"
+        )
+    assert dict(group) == {"state": "cold", "host": "removed", "restore_checkpoint_id": "c" * 32}
+
+
 async def test_removal_requires_current_revision(store):
     allocation_id, _ = await pending_allocation(store)
     with pytest.raises(ValueError, match=r"^revision_conflict$"):

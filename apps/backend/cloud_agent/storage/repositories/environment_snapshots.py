@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 from cloud_agent.execution_profiles import default_execution_profile
 from cloud_agent.sandbox_archive_credentials import load_stored_archive_policy
+from cloud_agent.storage._sql.hosts import LIVE_ATTEMPT_HOST
 from cloud_agent.storage._sql.rows import load_json
 from cloud_agent.storage.repositories.environments import (
     lock_environment_snapshots,
@@ -77,6 +78,10 @@ _JOB_MAY_USE = (
 #: can still ask for one. A setup that fails would otherwise rerun in the
 #: background beside every task.
 FAILED_BUILD_BACKOFF_HOURS = 6
+#: Owners one maintenance pass checks for snapshots of an installation they
+#: have since changed. The next pass goes on with the owners after them, so a
+#: pass stays short however many owners there are, and each is checked in turn.
+OWNERS_CHECKED_PER_PASS = 20
 
 
 def _ref(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -101,6 +106,9 @@ class PostgresEnvironmentSnapshotRepository:
     def __init__(self, pool: asyncpg.Pool) -> None:
         """Reuse the assembled persistence pool."""
         self._pool = pool
+        # The last owner maintenance checked for changed installations; the
+        # next pass goes on after them.
+        self._checked_owner = ""
 
     @staticmethod
     async def _enabled(conn: Any) -> bool:
@@ -408,25 +416,53 @@ class PostgresEnvironmentSnapshotRepository:
             )
 
     async def record_use(
-        self, *, job_id: str, snapshot_id: str | None, outcome: str, base_sha: str | None
+        self,
+        *,
+        job_id: str,
+        attempt_id: int,
+        lease_generation: int,
+        snapshot_id: str | None,
+        outcome: str,
+        base_sha: str | None,
     ) -> bool:
         """Account for a new workspace's snapshot, and queue a build when it had none to use.
 
         ``base_sha`` is the commit the workspace checked out; a build is queued
         for it, so the next task on that commit finds a snapshot.
+
+        Only the attempt that holds the job's live lease, on a host still
+        enrolled, is heard: a worker token names its attempt's fence and
+        outlives both its turn and its host, and an invalid report deletes a
+        snapshot every workspace of the environment starts from. Any other
+        report changes nothing and returns ``False``.
         """
         if outcome not in SNAPSHOT_OUTCOMES:
             raise ValueError("unknown snapshot outcome")
         if (snapshot_id is None) != (outcome == "absent"):
             raise ValueError("only an absent snapshot has no id")
-        async with self._pool.acquire() as conn:
+        async with self._pool.acquire() as conn, conn.transaction():
+            # The attempt share-locked: a supersession or finish, which
+            # updates its row, waits for the write below or is seen here.
             job = await conn.fetchrow(
-                "SELECT t.user_id, t.environment_binding_id, t.repo FROM agent_jobs j "
-                "JOIN agent_threads t ON t.id = j.thread_id WHERE j.id = $1",
+                f"""
+                SELECT t.user_id, t.environment_binding_id, t.repo
+                FROM agent_attempts a
+                JOIN agent_jobs j ON j.id = a.job_id
+                JOIN agent_threads t ON t.id = j.thread_id
+                WHERE a.id = $2 AND a.lease_generation = $3 AND a.status = 'running'
+                  AND a.lease_expires_at > clock_timestamp()
+                  AND j.id = $1 AND j.current_attempt_id = a.id AND j.state = 'running'
+                  AND {LIVE_ATTEMPT_HOST}
+                FOR SHARE OF a
+                """,
                 job_id,
+                attempt_id,
+                lease_generation,
             )
-            if job is None or not job["environment_binding_id"]:
+            if job is None:
                 return False
+            if not job["environment_binding_id"]:
+                return True
             if outcome == "used":
                 await conn.execute(
                     "UPDATE agent_environment_snapshots SET last_used_at=NOW(), use_count=use_count+1 "
@@ -538,7 +574,14 @@ class PostgresEnvironmentSnapshotRepository:
         return len(rows)
 
     async def maintain(self) -> None:
-        """Expire, retire and abandon snapshots; hosts then delete their objects."""
+        """Expire, retire and abandon snapshots; hosts then delete their objects.
+
+        Snapshots already due for deletion go first, so a stale one that is
+        also expired or unused is deleted now rather than after the grace a
+        retired one gets. A queued prebuild whose snapshot is no longer pending
+        is failed with it: no claim takes it, so it would otherwise wait for
+        good, counted as queued work by the autoscaler.
+        """
         async with self._pool.acquire() as conn:
             await conn.execute(
                 f"""
@@ -573,6 +616,62 @@ class PostgresEnvironmentSnapshotRepository:
                                AND r.finished_at <= NOW() - INTERVAL '5 minutes'))
                 """
             )
+            # Its run goes with it. A claim skips a prebuild whose snapshot is
+            # no longer pending, and a snapshot never becomes pending again, so
+            # a run left queued here waits for good. Only the runs are locked,
+            # and only those no claim holds: nothing here waits for a lock.
+            await conn.execute(
+                """
+                WITH abandoned AS MATERIALIZED (
+                    SELECT r.id FROM agent_environment_runs r
+                    WHERE r.state='queued' AND r.purpose='prebuild' AND NOT EXISTS (
+                        SELECT 1 FROM agent_environment_snapshots s
+                        WHERE s.id = r.snapshot_id AND s.state IN ('queued','building'))
+                    FOR UPDATE OF r SKIP LOCKED
+                )
+                UPDATE agent_environment_runs r SET state='failed', cleanup_complete=TRUE,
+                    detail='The installation snapshot is no longer being built',
+                    finished_at=NOW(), updated_at=NOW()
+                FROM abandoned WHERE r.id = abandoned.id
+                """
+            )
+        await self._retire_changed_installations()
+
+    async def _retire_changed_installations(self) -> None:
+        """Check the next owners' ready snapshots against what they install now.
+
+        Publishing a configuration and recording a build retire the snapshots
+        of an installation that changed. A snapshot can go stale with neither
+        to notice it: one already stale before they retired anything, say. If
+        its environment was never published again, it stayed ready until it
+        expired, up to 25 days later, with a rotated or removed setup Secret
+        in it.
+
+        Each owner is checked in a transaction of its own, under their snapshot
+        lock: every publish takes it before it commits, so the configuration
+        read here cannot change until this commits, and a snapshot whose
+        fingerprint still matches it is never retired.
+        """
+        async with self._pool.acquire() as conn:
+            owners = [
+                row["user_id"]
+                for row in await conn.fetch(
+                    "SELECT DISTINCT user_id FROM agent_environment_snapshots "
+                    "WHERE state='ready' AND user_id > $1 ORDER BY user_id LIMIT $2",
+                    self._checked_owner,
+                    OWNERS_CHECKED_PER_PASS,
+                )
+            ]
+        # Fewer than a batch left: the pass after this one starts over.
+        last = len(owners) < OWNERS_CHECKED_PER_PASS
+        for owner in owners:
+            # Recorded before the check: an owner whose check fails waits for
+            # the next round instead of holding back the owners after them.
+            self._checked_owner = owner
+            async with self._pool.acquire() as conn, conn.transaction():
+                await retire_changed_snapshots(conn, owner)
+        if last:
+            self._checked_owner = ""
 
     async def deletions(self, limit: int = 20) -> builtins.list[dict[str, Any]]:
         """Stored objects a host should delete, those waiting longest first.

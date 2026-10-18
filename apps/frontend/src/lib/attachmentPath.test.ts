@@ -25,6 +25,9 @@ describe('isSafeUploadPath', () => {
     './relative.txt',
     'back\\slash.txt',
     '',
+    'a\nb.txt',
+    'a\rb.txt',
+    'tab\tname.txt',
   ])('refuses %s', (path) => {
     expect(isSafeUploadPath(path, MAX)).toBe(false);
   });

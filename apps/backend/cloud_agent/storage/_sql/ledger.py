@@ -10,15 +10,48 @@ from typing import TYPE_CHECKING, Any
 
 from cloud_agent.storage._sql.attempts import NEXT_ATTEMPT_START_SQL
 from cloud_agent.storage._sql.rows import load_json
+from cloud_agent.thread_stats import SUMMARY_PAYLOAD_KEYS
 
 if TYPE_CHECKING:
     import asyncpg
+
+_SUMMARY_PAYLOAD_KEYS_SQL = ", ".join(f"'{key}'" for key in SUMMARY_PAYLOAD_KEYS)
+
+#: The payload of event ``e`` as a usage read needs it: the keys the summaries
+#: read (``SUMMARY_PAYLOAD_KEYS``) and whether its text has anything to show. A
+#: tool result also carries what the tool returned, such as a whole edited
+#: file, and taking every key but a few moved all of it to add up token counts.
+USAGE_EVENT_PAYLOAD_SQL = f"""
+COALESCE((
+    SELECT jsonb_object_agg(field.key, field.value)
+    FROM jsonb_each(CASE WHEN jsonb_typeof(e.payload) = 'object'
+                         THEN e.payload ELSE '{{}}'::jsonb END) AS field
+    WHERE field.key IN ({_SUMMARY_PAYLOAD_KEYS_SQL})
+), '{{}}'::jsonb)
+|| jsonb_build_object('has_text', COALESCE(e.payload->>'text', '') ~ '[^[:space:]]')
+"""
 
 LEDGER_WINDOW_UNTIL_SQL = f"""
 LEAST(
     COALESCE(a.finished_at, NOW()),
     {NEXT_ATTEMPT_START_SQL}
 )
+"""
+
+#: The two columns :func:`cloud_agent.ledger.summarize_ledger` needs to tell
+#: what an attempt ``a`` with no ledger reference ``l`` is: still starting,
+#: ended before its agent called a model, or unattributed. A read that hands the
+#: reducer attempt rows without them makes every such attempt unattributed, so
+#: each one selects them from here. Only a finished attempt without a reference
+#: is asked whether it reported model usage, the way thread stats reads it.
+UNREFERENCED_ATTEMPT_SQL = """
+a.status AS attempt_status,
+CASE WHEN l.id IS NULL AND a.status <> 'running' THEN EXISTS (
+    SELECT 1 FROM agent_job_events e
+    WHERE e.attempt_id = a.id
+      AND (e.event_type = 'usage'
+           OR jsonb_typeof(e.payload->'usage') = 'object')
+) END AS model_usage_reported
 """
 
 
@@ -49,7 +82,7 @@ async def fetch_ledger_rows_for_job(conn: asyncpg.Connection, job_id: str) -> li
     rows = await conn.fetch(
         f"""
         SELECT a.id AS attempt_id, a.job_id, a.attempt_no,
-               a.status AS attempt_status, a.started_at, a.finished_at,
+               a.started_at, a.finished_at,
                l.id, l.grant_id, l.residency_generation, l.binding_id,
                l.window_since, {LEDGER_WINDOW_UNTIL_SQL} AS window_until,
                l.snapshot, l.queried_at, l.last_error_code, l.next_refresh_at,
@@ -61,14 +94,7 @@ async def fetch_ledger_rows_for_job(conn: asyncpg.Connection, job_id: str) -> li
                    OR (a.status <> 'running' AND l.terminal_refresh_count = 0
                        AND l.next_refresh_at IS NULL)
                )) IS TRUE AS refreshing,
-               -- Only for a finished attempt that never bound a grant:
-               -- did its agent report any model usage at all?
-               CASE WHEN l.id IS NULL AND a.status <> 'running' THEN EXISTS (
-                   SELECT 1 FROM agent_job_events e
-                   WHERE e.attempt_id = a.id
-                     AND (e.event_type = 'usage'
-                          OR jsonb_typeof(e.payload->'usage') = 'object')
-               ) END AS model_usage_reported
+               {UNREFERENCED_ATTEMPT_SQL}
         FROM agent_attempts a
         JOIN agent_jobs j ON j.id = a.job_id
         LEFT JOIN agent_attempt_ledger l ON l.attempt_id = a.id
@@ -85,9 +111,8 @@ async def fetch_ledger_rows_for_conversation(
 ) -> list[dict[str, Any]]:
     """The owner's conversation snapshots around a job, in the caller's transaction."""
     rows = await conn.fetch(
-        """
+        f"""
         SELECT j.id AS job_id, j.state AS job_state, a.id AS attempt_id, a.attempt_no,
-               a.status AS attempt_status,
                l.id, l.grant_id, l.snapshot, l.queried_at,
                l.last_error_code, l.next_refresh_at,
                (l.id IS NOT NULL AND (
@@ -95,7 +120,8 @@ async def fetch_ledger_rows_for_conversation(
                    OR l.next_refresh_at <= NOW()
                    OR (a.status <> 'running' AND l.terminal_refresh_count = 0
                        AND l.next_refresh_at IS NULL)
-               )) IS TRUE AS refreshing
+               )) IS TRUE AS refreshing,
+               {UNREFERENCED_ATTEMPT_SQL}
         FROM agent_jobs anchor
         JOIN agent_jobs j ON (j.thread_id = anchor.thread_id OR j.id = anchor.id)
             AND j.user_id = $2
@@ -121,15 +147,12 @@ async def fetch_job_usage_inputs(conn: asyncpg.Connection, job_id: str) -> dict[
         job_id,
     )
     events = await conn.fetch(
-        """
-        SELECT job_id, attempt_id, seq, event_type, created_at,
-               (payload - ARRAY['text', 'input', 'content'])
-               || jsonb_build_object(
-                   'has_text', COALESCE(payload->>'text', '') ~ '[^[:space:]]'
-               ) AS payload
-        FROM agent_job_events
-        WHERE job_id = $1
-        ORDER BY attempt_id, seq
+        f"""
+        SELECT e.job_id, e.attempt_id, e.seq, e.event_type, e.created_at,
+               {USAGE_EVENT_PAYLOAD_SQL} AS payload
+        FROM agent_job_events e
+        WHERE e.job_id = $1
+        ORDER BY e.attempt_id, e.seq
         """,
         job_id,
     )

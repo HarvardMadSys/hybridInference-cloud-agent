@@ -46,6 +46,8 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _GIT_TIMEOUT_S = 120.0
+#: How many error lines a failed local git command's message quotes.
+_ERROR_LINES_QUOTED = 3
 
 # A commit hash and nothing else. git treats a leading `-` as an option even
 # in positions that look like operands, so an unvalidated ref is an argument
@@ -72,6 +74,13 @@ _GIT_ENV = {
     "GIT_TERMINAL_PROMPT": "0",
     "GIT_ASKPASS": "/bin/true",
 }
+
+# No command starts git's automatic maintenance. Each repository here is thrown
+# away after one publication, so housekeeping buys nothing. Since git 2.54 the
+# maintenance a fetch leaves running repacks, which in a shallow repository
+# rewrites .git/shallow under the next fetch and fails it. Set on the command
+# line, where the credential's own GIT_CONFIG_COUNT entries cannot replace it.
+_NO_AUTO_MAINTENANCE = ("-c", "maintenance.auto=false")
 
 
 class PublishError(Exception):
@@ -137,7 +146,7 @@ def _run_git(
     timeout_s = number_setting("publish_git_timeout_s", _GIT_TIMEOUT_S)
     try:
         completed = subprocess.run(
-            ["git", *args],
+            ["git", *_NO_AUTO_MAINTENANCE, *args],
             cwd=str(cwd) if cwd else None,
             env=_git_env(env_extra),
             capture_output=True,
@@ -151,10 +160,28 @@ def _run_git(
         raise error(f"git {args[0]} timed out after {timeout_s:.0f}s") from exc
     if completed.returncode != 0:
         detail = (completed.stderr or completed.stdout or "").strip().splitlines()
-        tail = detail[-1] if detail else "no output"
+        # The publish worker tells a dropped connection from a refusal by a
+        # remote command's last line, so that one stays as it is.
+        tail = (None if remote else _error_lines(detail)) or (detail[-1] if detail else "no output")
         error = TransientPublishError if remote else PublishError
         raise error(f"git {args[0]} failed: {tail}")
     return completed.stdout
+
+
+def _error_lines(detail: list[str]) -> str | None:
+    """The first few distinct ``error:`` and ``fatal:`` lines of a failed command.
+
+    Git writes them where they happen and goes on writing progress after them:
+    ``git apply --3way`` ends a failed apply with "Falling back to direct
+    application..." or "Applied patch to 'b.txt' cleanly.", so its last line
+    does not say which file failed. ``None`` when there are none.
+    """
+    errors = list(dict.fromkeys(line for line in detail if line.startswith(("error:", "fatal:"))))
+    if not errors:
+        return None
+    quoted = "; ".join(errors[:_ERROR_LINES_QUOTED])
+    more = len(errors) - _ERROR_LINES_QUOTED
+    return f"{quoted}; and {more} more" if more > 0 else quoted
 
 
 @dataclass

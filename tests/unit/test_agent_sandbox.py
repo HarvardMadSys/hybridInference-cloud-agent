@@ -630,6 +630,110 @@ def test_version_stamp_offers_downloaded_versions_after_the_images_own(monkeypat
     assert backend.image_menu()["claude-code"] == ["1.2.3"]
 
 
+def _holding(monkeypatch, versions, *, in_use=(), menu_label=None):
+    """A host with the image's claude-code 1.2.3 that downloaded ``versions`` since.
+
+    ``in_use`` are the versions its chat containers run. Returns every
+    Docker call made.
+    """
+    calls = []
+    labels = {"org.freeinference.runtime.claude-code.version": "1.2.3"}
+    if menu_label is not None:
+        labels["org.freeinference.runtime.claude-code.versions"] = menu_label
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        if argv[1:3] == ["image", "ls"] and "--quiet" not in argv:
+            refs = (f"default-agent-runtime:claude-code_{v}_0123456789ab" for v in versions)
+            return SimpleNamespace(returncode=0, stdout="\n".join(refs), stderr="")
+        if argv[1] == "ps":
+            rows = (f"claude-code\t{version}" for version in in_use)
+            return SimpleNamespace(returncode=0, stdout="\n".join(rows), stderr="")
+        if argv[1:3] == ["image", "ls"]:
+            # No checkpoint images.
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return SimpleNamespace(
+            returncode=0, stdout=_inspect_json(Config={"Labels": labels}), stderr=""
+        )
+
+    monkeypatch.setattr("cloud_agent_host.sandbox.subprocess.run", fake_run)
+    return calls
+
+
+def test_a_menu_too_long_to_report_leaves_off_the_oldest_unneeded_downloads(monkeypatch, caplog):
+    """The control plane refuses a longer menu with the whole beat, or the claim.
+
+    The image's own menu stays, its head being the default. Of what was
+    downloaded, a version a target or a chat holds stays while anything else
+    can go, and the oldest go first.
+    """
+    from cloud_agent_shared.shared_protocol import HOST_VERSION_MENU_MAX_ITEMS
+
+    downloaded = [f"2.1.{n}" for n in range(70)]
+    calls = _holding(monkeypatch, downloaded, in_use=["2.1.3"])
+    backend = ContainerBackend(image="img:1")
+    backend.downloaded_versions.targets = lambda: {("claude-code", "2.1.1")}
+
+    with caplog.at_level(logging.WARNING):
+        menu = backend.version_stamp()["runtime_versions_available"]["claude-code"]
+        assert backend.version_stamp()["runtime_versions_available"]["claude-code"] == menu
+
+    assert len(menu) == HOST_VERSION_MENU_MAX_ITEMS
+    assert menu[0] == "1.2.3"
+    assert menu[1:3] == ["2.1.1", "2.1.3"]
+    left_off = ["2.1.0", "2.1.2", "2.1.4", "2.1.5", "2.1.6", "2.1.7", "2.1.8"]
+    assert menu[3:] == [v for v in downloaded if v not in {"2.1.1", "2.1.3", *left_off}]
+    # Said once, not on every beat and claim that asks.
+    (warned,) = [r for r in caplog.records if r.getMessage() == "agent_runtime_versions_left_off"]
+    assert warned.left_off == {"claude-code": left_off}
+    # What chats run is read only for a menu that is too long, and not per stamp.
+    assert len([argv for argv in calls if argv[1] == "ps"]) == 1
+
+
+def test_a_menu_that_still_needs_everything_keeps_the_newest_it_can(monkeypatch):
+    """Even a host where every version is held is never refused for its menu."""
+    from cloud_agent_shared.shared_protocol import HOST_VERSION_MENU_MAX_ITEMS
+
+    downloaded = [f"2.1.{n}" for n in range(70)]
+    _holding(monkeypatch, downloaded, in_use=downloaded)
+    backend = ContainerBackend(image="img:1")
+
+    menu = backend.version_stamp()["runtime_versions_available"]["claude-code"]
+
+    assert menu == ["1.2.3", *downloaded[7:]]
+    assert len(menu) == HOST_VERSION_MENU_MAX_ITEMS
+
+
+def test_an_image_version_nothing_needs_goes_before_a_download_a_chat_runs(monkeypatch):
+    """What a target or a chat holds goes only when nothing else is left to leave off."""
+    from cloud_agent_shared.shared_protocol import HOST_VERSION_MENU_MAX_ITEMS
+
+    downloaded = [f"2.1.{n}" for n in range(63)]
+    _holding(monkeypatch, downloaded, in_use=[*downloaded, "1.2.0"], menu_label="1.2.3,1.2.0,1.1.0")
+    backend = ContainerBackend(image="img:1")
+
+    menu = backend.version_stamp()["runtime_versions_available"]["claude-code"]
+
+    # Two over: the image's own 1.1.0, which nothing needs, and then the
+    # oldest download, though a chat runs it.
+    assert menu == ["1.2.3", "1.2.0", *downloaded[1:]]
+    assert len(menu) == HOST_VERSION_MENU_MAX_ITEMS
+
+
+def test_an_image_menu_too_long_to_report_keeps_its_default(monkeypatch):
+    from cloud_agent_shared.shared_protocol import HOST_VERSION_MENU_MAX_ITEMS
+
+    own = ["1.2.3", *(f"1.0.{n}" for n in range(70))]
+    _holding(monkeypatch, [], menu_label=",".join(own))
+    backend = ContainerBackend(image="img:1")
+
+    menu = backend.version_stamp()["runtime_versions_available"]["claude-code"]
+
+    assert menu == own[:HOST_VERSION_MENU_MAX_ITEMS]
+    # What the image holds is still told apart, whole, for the copy into a chat.
+    assert backend.image_menu()["claude-code"] == own
+
+
 def test_version_stamp_attests_runc_with_an_empty_string(monkeypatch):
     """No VM runtime is a positive statement, not a missing one."""
     monkeypatch.setattr(

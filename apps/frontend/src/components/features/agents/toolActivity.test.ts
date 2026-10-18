@@ -175,6 +175,35 @@ describe('delegation tool arguments', () => {
     ).toBeNull();
   });
 
+  it.each([
+    'task',
+    'agent',
+    'spawn_agent',
+    'send_message',
+    'send_input',
+    'wait',
+    'close_agent',
+    'resume_agent',
+    'followup_task',
+    'interrupt_agent',
+    'list_agents',
+    'tasks',
+    'plan',
+  ])('never treats a Codex MCP tool named %s as native activity', (name) => {
+    const input = {
+      id: 'worker_1',
+      target: 'worker_1',
+      receiver_thread_ids: ['worker_1'],
+      message: 'Review this change.',
+      tasks: [{ subject: 'Review' }],
+    };
+    // Codex records an MCP call under the tool's own name and names its server.
+    expect(parseToolActivity(name, input, 'session')).toBeNull();
+    expect(parseToolActivity(`review__${name}`, input, 'session')).toBeNull();
+    // A call stored before the server was recorded reads as it always did.
+    expect(parseToolActivity(`review__${name}`, input)).not.toBeNull();
+  });
+
   it('reads explicit native agent state maps and retains unfamiliar recorded statuses', () => {
     expect(
       recordedAgentStates({
@@ -297,6 +326,22 @@ describe('a delegated agent’s recorded reply', () => {
         outputTruncated: true,
       }),
     ).toMatchObject({ state: 'received', truncated: true });
+  });
+
+  it('reads no agent’s answer from an MCP tool that shares a delegation name', () => {
+    for (const call of [
+      { tool: 'review__task', mcpServer: 'session' },
+      { tool: 'mcp__session__review__task' },
+    ]) {
+      expect(
+        recordedDelegationReply({
+          ...call,
+          input: { prompt: 'Review.' },
+          resultState: 'received',
+          output: 'Looks good.',
+        }),
+      ).toBeUndefined();
+    }
   });
 
   it('claims nothing for calls whose result is not an answer, or whose records disagree', () => {

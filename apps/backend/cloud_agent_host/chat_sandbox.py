@@ -838,9 +838,9 @@ class ChatSandboxManager:
             defer_network_release=defer_network_release,
         )
 
-    def verify_host_rules(self) -> None:
+    def verify_host_rules(self, running: Sequence[ChatSandboxSpec] = ()) -> None:
         """Delegate to the group-network lifecycle owner."""
-        return self._network_lifecycle.verify_host_rules()
+        return self._network_lifecycle.verify_host_rules(running)
 
     def require_docker_data_root(self, expected: str) -> str:
         """Verify retained state is owned by the intended Docker data root.
@@ -1063,19 +1063,53 @@ class ChatSandboxManager:
             # attempt really paid to create was reported as a wake from
             # stopped. Two of the four measured paths became indistinguishable.
             facts.note("create")
-        inspected = self.inspect(spec.container_name)
-        if inspected is None:
-            raise SandboxError("Docker created the chat sandbox but it cannot be inspected")
-        self._verify_identity(inspected, spec)
+        try:
+            inspected = self.inspect(spec.container_name)
+            if inspected is None:
+                raise SandboxError("Docker created the chat sandbox but it cannot be inspected")
+            self._verify_identity(inspected, spec)
+        except BaseException:
+            # This call made it and nothing has run in it, but nothing will
+            # adopt it either: left, it would hold the group's name, and the
+            # anonymous volumes its image declares, on a host the group may
+            # never come back to. It goes by the id Docker printed, so only
+            # what this call made can go.
+            self._remove_created(spec, created.stdout.strip())
+            raise
         return inspected
 
-    def remove_superseded(self, spec: ChatSandboxSpec) -> bool:
+    def _remove_created(self, spec: ChatSandboxSpec, container_id: str) -> None:
+        """Remove a container :meth:`create` made that failed its checks; best effort."""
+        removed = None
+        if container_id:
+            with contextlib.suppress(SandboxError):
+                removed = self._run(
+                    [self.backend.docker_binary, "rm", "--force", "--volumes", container_id],
+                    timeout=120,
+                )
+        if removed is not None and "no such container" in removed.stderr.lower():
+            return
+        if removed is None or removed.returncode != 0:
+            logger.warning(
+                "chat sandbox that failed its checks could not be removed",
+                extra={
+                    "event": "sandbox_create_cleanup_failed",
+                    "sandbox_id": spec.sandbox_id,
+                },
+            )
+
+    def remove_superseded(
+        self, spec: ChatSandboxSpec, *, keep_checkpoint: str | None = None
+    ) -> bool:
         """Remove this group's container from an older generation, if one holds its name.
 
         A group moved here was rehomed under a new generation; whatever an
         earlier attempt left on this host under the old one is fenced out by
         the control plane and can never run again. Anything else holding the
         name is left alone. Returns whether a container was removed.
+
+        A container recreated from a checkpoint takes that checkpoint's image
+        with it, unless it is ``keep_checkpoint``, the one about to be loaded.
         """
         current = self.inspect(spec.container_name)
         if current is None:
@@ -1098,6 +1132,9 @@ class ChatSandboxManager:
             raise SandboxError(
                 "superseded chat sandbox could not be removed: " + removed.stderr.strip()[:300]
             )
+        checkpoint_id = labels.get(CHAT_CHECKPOINT_LABEL)
+        if checkpoint_id and checkpoint_id != keep_checkpoint:
+            self.remove_checkpoint_image(spec, checkpoint_id)
         return True
 
     def require_existing(
@@ -1290,6 +1327,35 @@ class ChatSandboxManager:
                 # The container is already absent. Normal orphan-network
                 # pruning can retry cleanup, fenced to that network's labels.
                 logger.warning("archived sandbox network cleanup needs reconciliation")
+        checkpoint_id = current.labels.get(CHAT_CHECKPOINT_LABEL)
+        if checkpoint_id:
+            self.remove_checkpoint_image(spec, checkpoint_id)
+
+    def remove_checkpoint_image(self, spec: ChatSandboxSpec, checkpoint_id: str) -> None:
+        """Drop this group's image of ``checkpoint_id``, unless a container still uses it.
+
+        The image is named for this group's checkpoint, and only the group's
+        container on this host ever runs it, so nothing else needs its layers.
+        Best effort: Docker keeps an image a container still uses, an image
+        already gone is what was asked for, and one left behind costs disk,
+        not correctness.
+        """
+        reference = checkpoint_image_reference(spec.sandbox_id, checkpoint_id)
+        try:
+            removed = self._run([self.backend.docker_binary, "image", "rm", reference], timeout=120)
+        except SandboxError:
+            removed = None
+        if removed is not None and "no such image" in removed.stderr.lower():
+            return
+        if removed is None or removed.returncode != 0:
+            logger.warning(
+                "restored checkpoint image could not be removed",
+                extra={
+                    "event": "sandbox_checkpoint_image_remove_failed",
+                    "sandbox_id": spec.sandbox_id,
+                    "checkpoint_id": checkpoint_id,
+                },
+            )
 
     def inspect(
         self, container: str, *, verify_mounts: bool = True

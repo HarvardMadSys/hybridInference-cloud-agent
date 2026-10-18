@@ -22,9 +22,12 @@ with tempfile.TemporaryDirectory(prefix='agent-secret-scan-') as temporary:
  paths=subprocess.check_output(['git','diff','--name-only','-z','--diff-filter=ACMRT',sys.argv[2]],cwd=root,env=env).split(b'\0')
 for raw in paths:
  if not raw: continue
- path=root / raw.decode('utf-8')
- data=os.readlink(path).encode() if path.is_symlink() else path.read_bytes()
- old=subprocess.run(['git','show',sys.argv[2]+':'+raw.decode('utf-8')],cwd=root,capture_output=True).stdout
+ # A name is the bytes Git keeps, which need not be UTF-8.
+ path=root / os.fsdecode(raw)
+ # A repository inside the workspace is one entry, a commit id: none of its files is in the patch.
+ if path.is_dir() and not path.is_symlink(): continue
+ data=os.fsencode(os.readlink(path)) if path.is_symlink() else path.read_bytes()
+ old=subprocess.run(['git','show',os.fsencode(sys.argv[2])+b':'+raw],cwd=root,capture_output=True).stdout
  if any(data.count(p)>old.count(p) for p in patterns): sys.exit(3)
 """
 
@@ -49,7 +52,8 @@ def check_snapshot_secrets(
         return
     check = backend.manager.exec_capture(
         backend.spec,
-        ["python3", "-c", SCAN_SCRIPT, workdir, base_sha],
+        # Isolated: the scan starts in the workspace and never imports from it.
+        ["python3", "-I", "-c", SCAN_SCRIPT, workdir, base_sha],
         env=patterns,
         workdir=workdir,
         timeout_s=60,

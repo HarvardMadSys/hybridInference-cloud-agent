@@ -103,6 +103,30 @@ describe('JoinTeamView', () => {
     expect(screen.queryByRole('button', { name: 'Ask to join' })).not.toBeInTheDocument();
   });
 
+  it.each([
+    [
+      'no_longer_member',
+      'You are no longer a member of this team. Ask an owner or admin for a new invitation link.',
+    ],
+    ['already_member', 'You are already a member of this team.'],
+  ])('answers %s once, in place of the link hint', async (code, sentence) => {
+    vi.mocked(claimInvitation).mockRejectedValue(new APIError(code, 'Refused.', 409));
+    view();
+    fireEvent.click(await screen.findByRole('button', { name: 'Ask to join' }));
+    expect(await screen.findByRole('status')).toHaveTextContent(sentence);
+    expect(screen.getAllByText(sentence)).toHaveLength(1);
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.queryByText(/needs an invitation link/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Welcome to the team' })).not.toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Join a team' })).toBeVisible();
+    expect(readInvitationToken()).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Ask to join' })).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Go to Teams' })).toHaveAttribute(
+      'href',
+      '/settings/teams',
+    );
+  });
+
   it('keeps the link for a retry when the failure is temporary', async () => {
     vi.mocked(claimInvitation).mockRejectedValue(new APIError('unavailable', 'Later.', 503));
     view();

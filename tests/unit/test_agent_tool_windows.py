@@ -430,6 +430,30 @@ def test_a_legacy_mark_outside_the_window_it_would_narrow_is_refused():
     assert report.outcomes[0].status == "outside_window"
 
 
+@pytest.mark.parametrize(
+    ("stamp", "status"),
+    [
+        (float("nan"), "outside_window"),
+        (float("inf"), "misordered"),
+        (float("-inf"), "outside_window"),
+        (1e306, "misordered"),
+    ],
+)
+def test_a_legacy_mark_no_window_can_be_measured_against_is_refused_not_raised(stamp, status):
+    """Its lag is too far out for a number, so the call stays message-timed."""
+    tracker = ToolWindowTracker()
+    tracker.observe("tool_use", {"id": "t1", "name": "Bash"}, mono=1.0)
+    tracker.observe("tool_result", {"tool_use_id": "t1"}, mono=9.0)
+
+    report = tracker.apply_marks([ToolMark(stamp, "pre", "t1"), ToolMark(8.0, "post", "t1")])
+
+    (window,) = tracker.windows()
+    (outcome,) = report.outcomes
+    assert report.upgraded == 0
+    assert window.source == "message"
+    assert (outcome.status, outcome.open_lag_ms, outcome.close_lag_ms) == (status, None, 1000)
+
+
 def test_guest_marks_are_taken_even_when_the_message_arrived_after_the_call_ran():
     """The pipe, not the clock: a 21 ms call can run and finish before the
     sandbox manager reads the line announcing it. Guest marks are fenced by the
@@ -676,6 +700,14 @@ def test_a_malformed_mark_is_skipped_not_raised(tmp_path):
         "1.0 pre t1;rm -rf /\n"
         "1.0 pre good\n"
     )
+    assert [mark.tool_use_id for mark in reader.read()] == ["good"]
+
+
+def test_a_mark_stamped_with_no_time_a_clock_could_read_is_skipped(tmp_path):
+    """``float`` reads these too, and a turn must not fail on what the file says."""
+    path = tmp_path / TOOL_MARK_FILE
+    reader = ToolMarkReader(str(tmp_path))
+    path.write_text("nan pre t1\ninf post t1\n-infinity pre t2\n1.0 pre good\n")
     assert [mark.tool_use_id for mark in reader.read()] == ["good"]
 
 

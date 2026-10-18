@@ -20,10 +20,16 @@ from cloud_agent.logging_utils import get_logger
 from cloud_agent.workers.agent_memory import maintain_agent_memories
 from cloud_agent.workers.attempts import reap_expired_attempts
 from cloud_agent.workers.background_wake import BackgroundWake
+from cloud_agent.workers.environment_maintenance import run_environment_maintenance
 from cloud_agent.workers.job_event_signal import JobEventSignal
 from cloud_agent.workers.mcp_decision_signal import McpDecisionSignal
 from cloud_agent.workers.notifications import listen
 from cloud_agent.workers.owner_change_signal import OwnerChangeSignal
+from cloud_agent.workers.recovery_maintenance import (
+    run_goal_scheduling_maintenance,
+    run_goal_wakeup_maintenance,
+    run_queued_follow_up_maintenance,
+)
 from cloud_agent.workers.sandbox_deletion import coordinate_sandbox_deletions
 from cloud_agent.workers.sandbox_move_out import coordinate_move_out
 from cloud_agent.workers.snapshots import coordinate_shared_snapshots
@@ -43,6 +49,19 @@ logger = get_logger("cloud_agent.app")
 
 
 ENV_DATABASE_URL = "AGENT_DATABASE_URL"
+
+
+#: What every database session the service opens sets for itself.
+#:
+#: No JIT compilation. It pays off for statements that process millions of
+#: rows, and the largest reads here, the admin usage selection among them, stop
+#: at tens of thousands. But the planner prices a correlated subquery once per
+#: outer row, so a statement reading a few hundred indexed rows can be
+#: estimated past ``jit_above_cost``, and then compiles itself on every call.
+#: At a thousand hosts the admin host list spent 1.9 s compiling a statement
+#: that ran in 85 ms, and each reaper pass spent 170 ms compiling a check that
+#: ran in under one.
+DATABASE_SESSION_SETTINGS = {"jit": "off"}
 
 
 ENV_PUBLISH_BASE_BRANCH = "AGENT_PUBLISH_BASE_BRANCH"
@@ -87,6 +106,10 @@ _SHUTDOWN_TASK_ATTRS: tuple[str, ...] = (
     "mcp_maintenance_task",
     "mcp_catalog_task",
     "reaper_task",
+    "environment_maintenance_task",
+    "queued_follow_up_maintenance_task",
+    "goal_wakeup_maintenance_task",
+    "goal_scheduling_maintenance_task",
     "snapshot_task",
     "sandbox_deletion_task",
     "sandbox_move_out_task",
@@ -368,7 +391,7 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
 
     # One region after the pool exists: any later failure still releases what
     # startup opened, and a cleanup error must not replace that failure.
-    pool = await asyncpg.create_pool(dsn)
+    pool = await asyncpg.create_pool(dsn, server_settings=DATABASE_SESSION_SETTINGS)
     http = None
     local_measurement_writer = None
     writer_installed = False
@@ -446,6 +469,22 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
                     gateway=app.state.gateway,
                 )
             )
+            environment_maintenance = asyncio.create_task(
+                run_environment_maintenance(storage.environments, storage.environment_snapshots)
+            )
+            queued_follow_up_maintenance = asyncio.create_task(
+                run_queued_follow_up_maintenance(storage)
+            )
+            goal_wakeup_maintenance = asyncio.create_task(
+                run_goal_wakeup_maintenance(
+                    storage,
+                    github_app=app.state.source_control.github,
+                    gateway=app.state.gateway,
+                )
+            )
+            goal_scheduling_maintenance = asyncio.create_task(
+                run_goal_scheduling_maintenance(storage)
+            )
             # The workers below wait on this as well as their clocks; the shared
             # listener started further down is what sets it.
             app.state.background_wake = BackgroundWake()
@@ -470,6 +509,10 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
             )
             agent_memories = asyncio.create_task(maintain_agent_memories(storage.agent_memory))
             _BACKGROUND_TASKS.add(reaper)
+            _BACKGROUND_TASKS.add(environment_maintenance)
+            _BACKGROUND_TASKS.add(queued_follow_up_maintenance)
+            _BACKGROUND_TASKS.add(goal_wakeup_maintenance)
+            _BACKGROUND_TASKS.add(goal_scheduling_maintenance)
             _BACKGROUND_TASKS.add(snapshot_coordinator)
             _BACKGROUND_TASKS.add(sandbox_deletions)
             _BACKGROUND_TASKS.add(sandbox_move_out)
@@ -477,6 +520,10 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
             _BACKGROUND_TASKS.add(capacity_history)
             _BACKGROUND_TASKS.add(agent_memories)
             reaper.add_done_callback(_forget_background_task)
+            environment_maintenance.add_done_callback(_forget_background_task)
+            queued_follow_up_maintenance.add_done_callback(_forget_background_task)
+            goal_wakeup_maintenance.add_done_callback(_forget_background_task)
+            goal_scheduling_maintenance.add_done_callback(_forget_background_task)
             snapshot_coordinator.add_done_callback(_forget_background_task)
             sandbox_deletions.add_done_callback(_forget_background_task)
             sandbox_move_out.add_done_callback(_forget_background_task)
@@ -484,6 +531,10 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
             capacity_history.add_done_callback(_forget_background_task)
             agent_memories.add_done_callback(_forget_background_task)
             app.state.reaper_task = reaper
+            app.state.environment_maintenance_task = environment_maintenance
+            app.state.queued_follow_up_maintenance_task = queued_follow_up_maintenance
+            app.state.goal_wakeup_maintenance_task = goal_wakeup_maintenance
+            app.state.goal_scheduling_maintenance_task = goal_scheduling_maintenance
             app.state.snapshot_task = snapshot_coordinator
             app.state.sandbox_deletion_task = sandbox_deletions
             app.state.sandbox_move_out_task = sandbox_move_out
@@ -544,6 +595,10 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
             app.state.profiling_policy_worker = None
             app.state.profiling_policy_task = None
             app.state.reaper_task = None
+            app.state.environment_maintenance_task = None
+            app.state.queued_follow_up_maintenance_task = None
+            app.state.goal_wakeup_maintenance_task = None
+            app.state.goal_scheduling_maintenance_task = None
             app.state.snapshot_task = None
             app.state.sandbox_deletion_task = None
             app.state.sandbox_move_out_task = None

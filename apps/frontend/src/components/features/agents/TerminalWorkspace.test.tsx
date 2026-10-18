@@ -614,6 +614,35 @@ describe('TerminalWorkspace', () => {
     expect(listAgentTerminals).toHaveBeenCalledTimes(2);
   });
 
+  it('offers a retry when the listing fails after a terminal was opened', async () => {
+    // A terminal opened while the listing was out keeps the panel off its
+    // empty state, which is where Retry lives; until the listing succeeds no
+    // other terminal may open, so without one the panel stays that way.
+    let failListing: (cause: Error) => void = () => undefined;
+    vi.mocked(listAgentTerminals)
+      .mockReturnValueOnce(
+        new Promise<AgentTerminalApi[]>((_resolve, reject) => {
+          failListing = reject;
+        }),
+      )
+      .mockResolvedValueOnce([terminal('term-existing')]);
+    vi.mocked(createAgentTerminal).mockResolvedValue(terminal('term-1'));
+
+    render(<TerminalWorkspace jobId="job-1" active />);
+    fireEvent.click(await screen.findByRole('button', { name: 'New terminal' }));
+    await screen.findByRole('application', { name: 'Terminal 1 terminal' });
+    failListing(new Error('Workspace is unavailable'));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Workspace is unavailable');
+    expect(screen.getByRole('button', { name: 'New terminal' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+
+    await waitFor(() => expect(screen.getByRole('button', { name: 'New terminal' })).toBeEnabled());
+    expect(listAgentTerminals).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'Terminal 2 · zsh' })).toBeInTheDocument();
+  });
+
   it('does not update UI when a kill finishes after the job changes', async () => {
     const oldTerminal = terminal('term-old');
     const newTerminal = terminal('term-new');

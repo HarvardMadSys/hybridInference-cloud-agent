@@ -1,4 +1,5 @@
 import type { KeyboardEvent } from 'react';
+import { hasPrimaryModifier } from '@/lib/keyboardShortcuts';
 
 /** What browsers report for a keypress an IME is still holding. */
 const IME_KEY_CODE = 229;
@@ -31,7 +32,8 @@ export function isComposerSubmit(event: KeyboardEvent<HTMLElement>): boolean {
 }
 
 /**
- * Cmd/Ctrl+Enter: send into the running turn now rather than after it.
+ * Cmd+Enter on Apple platforms, Ctrl+Enter elsewhere: send into the running
+ * turn now rather than after it.
  *
  * Only where a running turn can take a message does it mean anything more than
  * Enter; the caller decides that. An IME's Enter is never this chord either.
@@ -39,5 +41,5 @@ export function isComposerSubmit(event: KeyboardEvent<HTMLElement>): boolean {
 export function isSteerChord(event: KeyboardEvent<HTMLElement>): boolean {
   if (event.key !== 'Enter') return false;
   if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === IME_KEY_CODE) return false;
-  return (event.metaKey || event.ctrlKey) && !event.shiftKey && !event.altKey;
+  return hasPrimaryModifier(event) && !event.shiftKey && !event.altKey;
 }

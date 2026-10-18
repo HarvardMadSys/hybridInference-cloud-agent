@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 from cloud_agent.domain.execution import CANCELLED, SUCCEEDED, TERMINAL_STATES
 from cloud_agent.domain.ids import new_job_id, new_session_fork_id, new_thread_id
 from cloud_agent.storage._sql.compute_admission import host_compute_admission, lock_compute_entry
+from cloud_agent.storage._sql.hosts import refuse_start_on_revoked_host
 from cloud_agent.storage._sql.jobs import JOB_SELECT
 from cloud_agent.storage._sql.rows import job_row_to_dict, load_json, sandbox_row_to_dict
 from cloud_agent.storage._sql.sandbox import (
@@ -145,6 +146,17 @@ class PostgresSessionForkRepository:
             if row is None:
                 return {"error": "not_shared_live"}
             if row["deletion_state"] in {"pending", "archived", "deleted"}:
+                return {"error": "sandbox_not_ready"}
+            # ``native_fork_capable`` read the host before the group's lock was
+            # this fork's, and a revocation may have held that lock. Read again
+            # under it: a fork must not start a revoked host's group.
+            refused = await refuse_start_on_revoked_host(
+                conn, {"id": row["sandbox_id"], "state": row["sandbox_state"], "host": row["host"]}
+            )
+            if refused == "host_revoked":
+                return {"error": "host_removed"}
+            if refused is not None:
+                # A late checkpoint handed the group on; its next turn restores it.
                 return {"error": "sandbox_not_ready"}
             resource_new, _ = await host_compute_admission(conn, str(row["host"]))
             if not resource_new:

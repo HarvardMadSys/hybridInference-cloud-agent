@@ -606,7 +606,7 @@ class HostHeartbeat:
         sandbox_archive_settings_report: Callable[[], int | None] | None = None,
         on_sandbox_archive_settings: Callable[[dict[str, Any] | None], None] | None = None,
         runtime_downloads_report: Callable[[], list[dict[str, Any]]] | None = None,
-        on_runtime_downloads: Callable[[list[dict[str, Any]]], None] | None = None,
+        on_runtime_downloads: Callable[[list[dict[str, Any]] | None], None] | None = None,
         on_residencies_lost: Callable[[list[dict[str, Any]]], None] | None = None,
         on_retained_sandboxes_stop: Callable[[list[dict[str, Any]]], None] | None = None,
     ) -> None:
@@ -665,7 +665,8 @@ class HostHeartbeat:
         self._sandbox_archive_settings_report = sandbox_archive_settings_report
         self._on_sandbox_archive_settings = on_sandbox_archive_settings
         # Asked per beat for each download's progress, and told after each
-        # answered beat which versions the control plane wants.
+        # answered beat which versions the control plane wants, or ``None``
+        # when the answer does not say.
         self._runtime_downloads_report = runtime_downloads_report
         self._on_runtime_downloads = on_runtime_downloads
         self._on_residencies_lost = on_residencies_lost
@@ -853,12 +854,16 @@ class HostHeartbeat:
             )
 
     def _apply_runtime_downloads(self) -> None:
-        """Hand the answered download targets on, without stopping the beats."""
-        targets = self._identity.runtime_downloads
-        if self._on_runtime_downloads is None or targets is None:
+        """Hand the answered download targets on, without stopping the beats.
+
+        ``None`` is an answer without them: the downloader keeps what it holds
+        and removes nothing on that answer's word.
+        """
+        if self._on_runtime_downloads is None:
             return
+        targets = self._identity.runtime_downloads
         try:
-            self._on_runtime_downloads(list(targets))
+            self._on_runtime_downloads(None if targets is None else list(targets))
         except Exception:
             logger.exception(
                 "agent_runtime_downloads_apply_failed",

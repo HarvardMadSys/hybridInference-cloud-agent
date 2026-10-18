@@ -132,7 +132,10 @@ async def test_a_capture_whose_base_git_pruned_waits_for_it_to_be_imported_again
     assert pending_import["origin_base_sha"] == first_base
 
     assert await store.snapshot.complete_snapshot_base_import(
-        snapshot_id=second["snapshot_id"], commit_sha=_SECOND_COMMIT
+        snapshot_id=second["snapshot_id"],
+        commit_sha=_SECOND_COMMIT,
+        generation=pending_import["generation"],
+        container_id=pending_import["container_id"],
     )
     assert await _group_state(pool, sandbox["sandbox_id"]) == "pending"
     recaptured = await store.snapshot.claim_due_sandbox_snapshot()

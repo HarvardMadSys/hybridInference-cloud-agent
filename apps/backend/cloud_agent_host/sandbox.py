@@ -34,9 +34,10 @@ from cloud_agent_host.logging_utils import get_logger
 from cloud_agent_host.runtime_images import DownloadedVersions
 from cloud_agent_shared.egress import SandboxNetwork, network_from_env
 from cloud_agent_shared.errors import SandboxError
+from cloud_agent_shared.shared_protocol import HOST_VERSION_MENU_MAX_ITEMS
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Collection, Iterator
 
     from cloud_agent_host.network_guard import HostNetworkGuard
 
@@ -186,6 +187,25 @@ def _split_menu(menu: str | None, default: str) -> list[str]:
         # what a job with no selection runs, so it is always available.
         offered.insert(0, default)
     return offered
+
+
+def _bounded_menu(menu: list[str], own: int, needed: Collection[str]) -> list[str]:
+    """``menu`` cut to what a heartbeat or a claim may carry.
+
+    ``menu`` is the image's ``own`` versions, default first, then the ones
+    downloaded since, oldest first. What nothing needs is left off first:
+    downloaded versions, oldest first, then the image's own, from its tail.
+    A version that is ``needed`` (a target, or what a chat runs) goes only
+    when nothing else is left, in the same order. The default, at the head
+    of the image's own, always stays.
+    """
+    excess = len(menu) - HOST_VERSION_MENU_MAX_ITEMS
+    if excess <= 0:
+        return menu
+    order = [*range(own, len(menu)), *range(own - 1, 0, -1)]
+    order.sort(key=lambda at: menu[at] in needed)
+    left_off = set(order[:excess])
+    return [version for at, version in enumerate(menu) if at not in left_off]
 
 
 class TerminalNotSupportedError(SandboxError):
@@ -589,6 +609,8 @@ class ContainerBackend(SandboxBackend):
         # labels these change while the process runs, so they are read again
         # (briefly cached) rather than frozen into the stamp.
         self.downloaded_versions = DownloadedVersions(docker_binary, sandbox_namespace)
+        # What the last stamp too long to report left off, per runtime.
+        self._left_off: dict[str, list[str]] = {}
         # Filled by preflight from a real container under the exact runtime
         # passed to jobs. Kept separate so an early image stamp cannot freeze
         # out the later kernel observation.
@@ -623,25 +645,65 @@ class ContainerBackend(SandboxBackend):
 
         Digest and versions degrade to empty on inspect failure rather than
         failing the heartbeat: liveness reporting must not come to depend on
-        the local image store answering.
+        the local image store answering. For the same reason no runtime's menu
+        is ever longer than the control plane accepts (:meth:`_bounded`).
         """
         if self._version_stamp is None:
             self._version_stamp = self._collect_version_stamp()
         stamp = {**self._version_stamp, **self._kernel_probe}
-        downloaded = self.downloaded_versions.versions()
-        if downloaded:
+        own = stamp.get("runtime_versions_available") or {}
+        menus = {runtime: list(versions) for runtime, versions in own.items()}
+        for runtime, versions in self.downloaded_versions.versions().items():
             # After the image's own menu, whose head is the default: a
             # downloaded version is offered, never what a job with no
             # selection runs.
-            menus = {
-                runtime: list(versions)
-                for runtime, versions in (stamp.get("runtime_versions_available") or {}).items()
-            }
-            for runtime, versions in downloaded.items():
-                menu = menus.setdefault(runtime, [])
-                menu.extend(version for version in versions if version not in menu)
-            stamp["runtime_versions_available"] = menus
+            menu = menus.setdefault(runtime, [])
+            menu.extend(version for version in versions if version not in menu)
+        stamp["runtime_versions_available"] = self._bounded(menus, own)
         return stamp
+
+    def _bounded(
+        self, menus: dict[str, list[str]], own: dict[str, list[str]]
+    ) -> dict[str, list[str]]:
+        """Each runtime's menu, no longer than the control plane accepts.
+
+        It refuses a longer one with the whole beat or claim, which takes this
+        host out of the pool. Downloaded versions nothing needs are removed
+        (``runtime_downloads``), so a menu meets the cap only when chats still
+        run many versions, or when that cleanup cannot run.
+        """
+        if all(len(menu) <= HOST_VERSION_MENU_MAX_ITEMS for menu in menus.values()):
+            self._left_off = {}
+            return menus
+        needed = self.downloaded_versions.needed()
+        bounded = {
+            runtime: _bounded_menu(
+                menu,
+                len(own.get(runtime) or []),
+                {version for held, version in needed if held == runtime},
+            )
+            for runtime, menu in menus.items()
+        }
+        left_off = {
+            runtime: [version for version in menu if version not in bounded[runtime]]
+            for runtime, menu in menus.items()
+            if len(menu) != len(bounded[runtime])
+        }
+        if left_off != self._left_off:
+            # Once per change, not on every beat and claim that asks.
+            self._left_off = left_off
+            logger.warning(
+                "agent_runtime_versions_left_off",
+                extra={
+                    "event": "agent_runtime_versions_left_off",
+                    "left_off": left_off,
+                    "detail": (
+                        f"a runtime's version menu lists at most {HOST_VERSION_MENU_MAX_ITEMS} "
+                        "versions; this host does not offer the ones left off"
+                    ),
+                },
+            )
+        return bounded
 
     def image_menu(self) -> dict[str, list[str]]:
         """The versions the sandbox image itself holds, default first.

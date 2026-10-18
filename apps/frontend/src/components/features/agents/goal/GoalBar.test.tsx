@@ -5,6 +5,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { clearAgentGoal, pauseAgentGoal, resumeAgentGoal, setAgentGoal } from '@/lib/api/agents';
+import { onPlatform } from '@/lib/platformTestSupport';
 import { APIError } from '@/lib/utils/errors';
 
 import { GoalBar } from './GoalBar';
@@ -380,18 +381,26 @@ describe('GoalBar controls', () => {
     expect(setAgentGoal).not.toHaveBeenCalled();
   });
 
-  it('saves on Cmd/Ctrl+Enter, and leaves plain Enter to break the line', async () => {
-    render(<GoalBar threadId="thread_1" goal={goal()} state={idle} onChanged={() => {}} />);
-    fireEvent.click(screen.getByRole('button', { name: 'Goal options' }));
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Edit goal' }));
-    const field = screen.getByLabelText('Objective');
-    fireEvent.change(field, { target: { value: 'ship the release notes' } });
-    // Enter is a newline: an objective is prose and may run to several lines.
-    fireEvent.keyDown(field, { key: 'Enter' });
-    expect(setAgentGoal).not.toHaveBeenCalled();
-    fireEvent.keyDown(field, { key: 'Enter', metaKey: true });
-    await waitFor(() => expect(setAgentGoal).toHaveBeenCalledTimes(1));
-  });
+  it.each([
+    ['MacIntel', { metaKey: true }, { ctrlKey: true }],
+    ['Win32', { ctrlKey: true }, { metaKey: true }],
+  ])(
+    'saves on %s with %j+Enter, and leaves plain or %j+Enter alone',
+    async (platform, primary, other) => {
+      onPlatform(platform);
+      render(<GoalBar threadId="thread_1" goal={goal()} state={idle} onChanged={() => {}} />);
+      fireEvent.click(screen.getByRole('button', { name: 'Goal options' }));
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Edit goal' }));
+      const field = screen.getByLabelText('Objective');
+      fireEvent.change(field, { target: { value: 'ship the release notes' } });
+      // Enter is a newline: an objective is prose and may run to several lines.
+      fireEvent.keyDown(field, { key: 'Enter' });
+      fireEvent.keyDown(field, { key: 'Enter', ...other });
+      expect(setAgentGoal).not.toHaveBeenCalled();
+      fireEvent.keyDown(field, { key: 'Enter', ...primary });
+      await waitFor(() => expect(setAgentGoal).toHaveBeenCalledTimes(1));
+    },
+  );
 
   it('leaves a paused goal paused when its objective is edited', async () => {
     // Changing the words is not resuming it: the owner stopped this goal, and

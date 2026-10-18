@@ -7,6 +7,7 @@ import io
 import json
 import tarfile
 import threading
+import time
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, BinaryIO, cast
@@ -246,11 +247,28 @@ def _zero_clock() -> float:
     return 0.0
 
 
+class _ContendedSlot(threading.BoundedSemaphore):
+    """The one capture slot, saying when a capture has to wait for it."""
+
+    def __init__(self) -> None:
+        super().__init__(1)
+        self.contended = threading.Event()
+
+    def acquire(self, blocking: bool = True, timeout: float | None = None) -> bool:
+        if super().acquire(blocking=False):
+            return True
+        if not blocking:
+            return False
+        self.contended.set()
+        return super().acquire(blocking=True, timeout=timeout)
+
+
 def _service(
     manager: _Manager,
     uploader: _Uploader,
     *,
     capture_capacity: int = 1,
+    capture_slots: threading.BoundedSemaphore | None = None,
     spool_budget_bytes: int = 8 * 1024 * 1024 * 1024,
     max_upload_attempts: int = 3,
     retry_delay_s: float = 0,
@@ -264,6 +282,7 @@ def _service(
         uploader=cast("SandboxArchiveS3Uploader", uploader),
         config=uploader.config,
         capture_capacity=capture_capacity,
+        capture_slots=capture_slots,
         spool_budget_bytes=spool_budget_bytes,
         max_upload_attempts=max_upload_attempts,
         retry_delay_s=retry_delay_s,
@@ -927,7 +946,8 @@ def test_capture_capacity_blocks_before_copy_instead_of_dropping_a_clean_stop() 
     entered = threading.Event()
     release = threading.Event()
     uploader = _Uploader(_config(), entered=entered, release=release)
-    service = _service(manager, uploader, capture_capacity=1)
+    slot = _ContendedSlot()
+    service = _service(manager, uploader, capture_capacity=1, capture_slots=slot)
     service.start()
     failures: list[BaseException] = []
 
@@ -945,7 +965,7 @@ def test_capture_capacity_blocks_before_copy_instead_of_dropping_a_clean_stop() 
         second.start()
         # The second capture waits on the semaphore before inspect/export, so
         # only the first final's three roots can have reached Docker.
-        second.join(timeout=0.05)
+        assert slot.contended.wait(timeout=5), "the second final did not wait for the slot"
         assert second.is_alive()
         assert len(manager.export_calls) == 3
         assert service.status()["pending"] == 2
@@ -969,7 +989,8 @@ def test_close_is_bounded_and_prevents_a_waiter_from_starting_copy() -> None:
     entered = threading.Event()
     release = threading.Event()
     uploader = _Uploader(_config(), entered=entered, release=release)
-    service = _service(manager, uploader, capture_capacity=1)
+    slot = _ContendedSlot()
+    service = _service(manager, uploader, capture_capacity=1, capture_slots=slot)
     service.start()
     failures: list[BaseException] = []
 
@@ -992,9 +1013,13 @@ def test_close_is_bounded_and_prevents_a_waiter_from_starting_copy() -> None:
     try:
         assert entered.wait(timeout=5)
         waiter.start()
-        waiter.join(timeout=0.05)
+        assert slot.contended.wait(timeout=5), "the waiting final did not wait for the slot"
         assert waiter.is_alive()
         closer.start()
+        # Closing stops new work at once, then waits for the work it admitted.
+        deadline = time.monotonic() + 5
+        while service.status()["running"] and time.monotonic() < deadline:
+            time.sleep(0.01)
         closer.join(timeout=0.05)
         assert closer.is_alive()
         assert uploader.close_calls == 0

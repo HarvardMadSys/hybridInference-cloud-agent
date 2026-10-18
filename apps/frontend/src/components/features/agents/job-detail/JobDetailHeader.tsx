@@ -13,6 +13,7 @@ import {
 import type { AgentJob } from '../types';
 import type { JobDetailPanels } from './useJobDetailPanels';
 import { shortcutAriaLabel, shortcutLabel } from '@/lib/keyboardShortcuts';
+import { useApplePlatform } from '@/components/features/settings/keyboardShortcutPreferences';
 
 export function JobDetailHeader({
   panels,
@@ -48,6 +49,7 @@ export function JobDetailHeader({
   onStop: () => void;
 }) {
   const t = useT();
+  const apple = useApplePlatform();
   const isArchived = Boolean(job.archivedAt);
   const isActive = job.state === 'running' || job.state === 'queued';
   const { tab, setTab, openWorkspace, workspaceOpen, toggleWorkspace, workspaceShortcut } = panels;
@@ -174,8 +176,8 @@ export function JobDetailHeader({
               aria-label={workspaceOpen ? 'Close workspace' : 'Open workspace'}
               aria-expanded={workspaceOpen}
               aria-controls="job-workspace-pane"
-              aria-keyshortcuts={shortcutAriaLabel(workspaceShortcut)}
-              title={`${workspaceOpen ? 'Close workspace' : 'Open workspace'}${workspaceShortcut ? ` (${shortcutLabel(workspaceShortcut)})` : ''}`}
+              aria-keyshortcuts={shortcutAriaLabel(workspaceShortcut, apple)}
+              title={`${workspaceOpen ? 'Close workspace' : 'Open workspace'}${workspaceShortcut ? ` (${shortcutLabel(workspaceShortcut, apple)})` : ''}`}
               className={`ui-focus-ring inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border transition-colors [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11 ${
                 workspaceOpen
                   ? 'border-gray-900 dark:border-gray-100 bg-gray-900 dark:bg-gray-100 text-white dark:text-gray-900 hover:bg-gray-800 dark:hover:bg-white'

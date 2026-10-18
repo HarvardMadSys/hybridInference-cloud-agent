@@ -61,6 +61,13 @@ from cloud_agent_shared import operation_profiling
 from cloud_agent_shared.errors import SandboxArchiveBlocked
 from cloud_agent_shared.sandbox_archive_settings import SandboxArchivePolicy
 
+#: How long a call on another group may take while one group's Docker call or
+#: hook is held. Only a guard against a hang: a held call waits for the test
+#: longer than this (_HELD_S), so a call queued behind the supervisor-wide lock
+#: still runs out of time, however late the machine runs the calling thread.
+_UNBLOCKED_S = 5
+_HELD_S = 10
+
 
 class _Manager:
     def __init__(self) -> None:
@@ -77,6 +84,8 @@ class _Manager:
         # The host-rule check: how many of the next checks fail, and how many ran.
         self.host_rule_failures = 0
         self.host_rule_checks = 0
+        # The running groups each check was given, whose exceptions it restores.
+        self.host_rule_running: list[list[ChatSandboxSpec]] = []
         # Renewals of the host-rule verification the sweep makes while idle.
         self.host_rule_renewals = 0
         self.host_rule_renewal_failures = 0
@@ -235,8 +244,9 @@ class _Manager:
             self.host_rule_renewal_failures -= 1
             raise SandboxError("nft failed: Error: Could not process rule")
 
-    def verify_host_rules(self) -> None:
+    def verify_host_rules(self, running: Any = ()) -> None:
         self.host_rule_checks += 1
+        self.host_rule_running.append(list(running))
         if self.host_rule_failures:
             self.host_rule_failures -= 1
             raise SandboxError("inet cloud_agent_x is missing chain 'from_group'")
@@ -1129,6 +1139,188 @@ def test_explicit_stop_cleans_up_a_registered_never_started_container_without_ar
     assert manager.items[spec.container_name].networks == ()
 
 
+def test_orphan_stop_accepts_group_level_zero_activation_fence() -> None:
+    manager = _Manager()
+    spec = _spec()
+    supervisor = SharedChatSessionSupervisor(manager)
+    lease = supervisor.acquire(
+        spec,
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=False,
+        manifest=_members(),
+    )
+    issued_member_fence = {"athr_source": 1, "athr_peer": 0}
+
+    with pytest.raises(SessionLeaseLost, match="group-level stop"):
+        supervisor.stop_if_idle(
+            "athr_source",
+            generation=spec.generation,
+            activation_generation=0,
+            reason="idle",
+            member_activation_generations=issued_member_fence,
+        )
+    assert manager.stop_count == 0
+
+    stopped = supervisor.stop_if_idle(
+        "athr_source",
+        generation=spec.generation,
+        activation_generation=0,
+        reason="orphaned_attempt",
+        member_activation_generations=issued_member_fence,
+    )
+
+    assert stopped.running is False
+    assert manager.stop_count == 1
+    duplicate = supervisor.stop_if_idle(
+        "athr_source",
+        generation=spec.generation,
+        activation_generation=0,
+        reason="orphaned_attempt",
+        member_activation_generations=issued_member_fence,
+    )
+    assert duplicate.running is False
+    assert manager.stop_count == 1
+
+    replacement = supervisor.acquire(
+        spec,
+        thread_id="athr_source",
+        owner="attempt:2",
+        activation_generation=2,
+        has_settled_context=False,
+        manifest=_members(),
+        expected_container_id="container-shared",
+    )
+    assert replacement.token
+    with pytest.raises(SessionLeaseLost, match="member activation changed"):
+        supervisor.stop_if_idle(
+            "athr_source",
+            generation=spec.generation,
+            activation_generation=0,
+            reason="orphaned_attempt",
+            member_activation_generations=issued_member_fence,
+        )
+    assert manager.stop_count == 1
+    supervisor.abandon("athr_source", replacement.token, lost=False)
+    # The original broker lease was cleared as part of the orphan stop.
+    with pytest.raises(SessionLeaseLost):
+        supervisor.abandon("athr_source", lease.token, lost=False)
+
+
+def test_lost_archive_restart_replay_does_not_reopen_or_repeat_destructive_work() -> None:
+    class MarkedManager(_Manager):
+        def __init__(self) -> None:
+            super().__init__()
+            self.final_marker: bytes | None = None
+            self.docker_stop_calls = 0
+
+        def read_running_final_archive_marker(self, _spec, **_kwargs):
+            return self.final_marker
+
+        def read_stopped_final_archive_marker_optional(self, _spec, **_kwargs):
+            return self.final_marker
+
+        def stop(self, spec, **kwargs):
+            if self.items[spec.container_name].running:
+                self.docker_stop_calls += 1
+            return super().stop(spec, **kwargs)
+
+    manager = MarkedManager()
+    spec = _spec()
+    manager.items[spec.container_name] = manager._inspection(spec, running=True)
+    lost_member = SharedMemberManifest(
+        thread_id="athr_source",
+        native_session_id="native-source",
+        context_status="lost",
+        activation_generation=1,
+        process_generation=4,
+        residency_generation=2,
+        resident_state="lost",
+        resident_slot_id=0,
+        last_settled_job_id="ajob_source",
+    )
+    final_uploads: list[tuple[SharedMemberManifest, ...]] = []
+
+    def prepare(_spec, inspection):
+        assert inspection.running is True
+        manager.final_marker = b"pending-final-upload"
+
+    def archive(_spec, inspection, members):
+        assert inspection.running is False
+        if manager.final_marker == b"uploaded-final-receipt":
+            return
+        assert manager.final_marker == b"pending-final-upload"
+        final_uploads.append(members)
+        manager.final_marker = b"uploaded-final-receipt"
+
+    supervisor = SharedChatSessionSupervisor(
+        manager,
+        stopped_archive_prepare_hook=prepare,
+        stopped_archive_hook=archive,
+    )
+    supervisor.register_manifest(spec, [lost_member], expected_container_id="container-shared")
+    issued_stop = {
+        "thread_id": "athr_source",
+        "generation": spec.generation,
+        "activation_generation": 1,
+        "reason": "lost",
+        "member_activation_generations": {"athr_source": 1},
+    }
+
+    stopped = supervisor.stop_if_idle(
+        "athr_source",
+        generation=issued_stop["generation"],
+        activation_generation=issued_stop["activation_generation"],
+        reason=issued_stop["reason"],
+        member_activation_generations=issued_stop["member_activation_generations"],
+    )
+    assert stopped.running is False
+    assert manager.docker_stop_calls == 1
+    assert len(final_uploads) == 1
+    assert final_uploads[0][0].context_status == "lost"
+
+    # The broker died after Docker stop and final upload, before the control
+    # plane received its stopped observation. A replacement probes the durable
+    # upload marker and completes cleanup without another Docker stop/upload.
+    replacement = SharedChatSessionSupervisor(
+        manager,
+        stopped_archive_prepare_hook=prepare,
+        stopped_archive_hook=archive,
+    )
+    descriptors = replacement.reconcile()
+    assert len(descriptors) == 1 and descriptors[0].running is False
+    replacement.register_manifest(spec, [lost_member], expected_container_id="container-shared")
+    replacement.register_manifest(
+        spec,
+        [replace(lost_member, context_status="live", resident_state="live")],
+        expected_container_id="container-shared",
+    )
+    assert replacement.status("athr_source").context_status == "lost"
+    with pytest.raises(RetainedChatLost, match="context was lost"):
+        replacement.acquire(
+            spec,
+            thread_id="athr_source",
+            owner="attempt:2",
+            activation_generation=2,
+            has_settled_context=True,
+            manifest=[replace(lost_member, context_status="live", resident_state="live")],
+            expected_container_id="container-shared",
+        )
+
+    # A delayed copy of the original stop is harmless after restart too.
+    duplicate = replacement.stop_if_idle(
+        "athr_source",
+        generation=issued_stop["generation"],
+        activation_generation=issued_stop["activation_generation"],
+        reason=issued_stop["reason"],
+        member_activation_generations=issued_stop["member_activation_generations"],
+    )
+    assert duplicate.running is False
+    assert manager.docker_stop_calls == 1
+    assert len(final_uploads) == 1
+
+
 @pytest.mark.parametrize("released_networks", [(), ("none",)])
 def test_restart_reconcile_does_not_rearchive_an_already_released_stopped_group(
     released_networks,
@@ -1162,7 +1354,7 @@ def test_blocking_reconcile_archive_does_not_hold_global_lock_for_other_group_st
     def archive(spec, _inspection, _members):
         if spec.sandbox_id == other.sandbox_id:
             archived_entered.set()
-            assert allow_archive.wait(timeout=2)
+            assert allow_archive.wait(timeout=_HELD_S)
 
     supervisor = SharedChatSessionSupervisor(manager, stopped_archive_hook=archive)
     supervisor.register_manifest(_spec(), _members())
@@ -1194,7 +1386,7 @@ def test_blocking_reconcile_archive_does_not_hold_global_lock_for_other_group_st
 
     status_thread = threading.Thread(target=read_other_group)
     status_thread.start()
-    assert status_done.wait(timeout=0.5), "archive I/O held the supervisor-wide lock"
+    assert status_done.wait(timeout=_UNBLOCKED_S), "archive I/O held the supervisor-wide lock"
     allow_archive.set()
     reconcile_thread.join(timeout=2)
     status_thread.join(timeout=2)
@@ -1269,6 +1461,29 @@ def test_targeted_listing_refreshes_all_members_without_host_reconciliation(monk
         supervisor.list()
 
 
+def test_a_restarted_supervisor_knows_a_group_by_its_origin_until_a_manifest_names_the_rest():
+    """The chats a group-level request, such as an SSH push, can be addressed to.
+
+    After a restart the container's labels name only the origin chat. A
+    manifest then names the chats that hold slots, and drops an origin that
+    gave its slot up, as a deleted origin chat does.
+    """
+    manager = _Manager()
+    SharedChatSessionSupervisor(manager).register_manifest(_spec(), _members())
+    manager.items[_spec().container_name] = manager._inspection(_spec(), running=False)
+
+    restarted = SharedChatSessionSupervisor(manager)
+    restarted.reconcile()
+
+    assert restarted.owns("athr_source")
+    assert not restarted.owns("athr_peer")
+
+    restarted.register_manifest(_spec(), [_members()[1]])
+
+    assert restarted.owns("athr_peer")
+    assert not restarted.owns("athr_source")
+
+
 def test_targeted_listing_unknown_member_does_not_discover_or_inspect_containers(monkeypatch):
     manager = _Manager()
     supervisor = SharedChatSessionSupervisor(manager)
@@ -1339,7 +1554,7 @@ def test_targeted_listing_inspection_does_not_block_another_groups_status(monkey
     def inspect(container_name):
         if container_name == _spec().container_name:
             inspect_entered.set()
-            assert allow_inspect.wait(timeout=2)
+            assert allow_inspect.wait(timeout=_HELD_S)
         return manager.items[container_name]
 
     monkeypatch.setattr(manager, "inspect", inspect)
@@ -1364,7 +1579,7 @@ def test_targeted_listing_inspection_does_not_block_another_groups_status(monkey
     try:
         assert inspect_entered.wait(timeout=1)
         status_thread.start()
-        assert status_done.wait(timeout=0.5), "inspection held the supervisor-wide lock"
+        assert status_done.wait(timeout=_UNBLOCKED_S), "inspection held the supervisor-wide lock"
     finally:
         allow_inspect.set()
         listing_thread.join(timeout=2)
@@ -1470,7 +1685,7 @@ def _gated_inspect(manager, monkeypatch, container_name):
         observed = inspect(name)
         if name == container_name and not entered.is_set():
             entered.set()
-            assert release.wait(timeout=2)
+            assert release.wait(timeout=_HELD_S)
         return observed
 
     monkeypatch.setattr(manager, "inspect", gated)
@@ -1540,7 +1755,7 @@ def test_a_member_inspection_does_not_block_another_groups_status(monkeypatch, c
     try:
         assert entered.wait(timeout=1)
         status_thread, status_outcome = _in_thread(lambda: supervisor.status(other.thread_id))
-        status_thread.join(timeout=0.5)
+        status_thread.join(timeout=_UNBLOCKED_S)
         assert not status_thread.is_alive(), "an inspection held the supervisor-wide lock"
     finally:
         release.set()
@@ -1549,6 +1764,162 @@ def test_a_member_inspection_does_not_block_another_groups_status(monkeypatch, c
     assert not blocked_thread.is_alive()
     assert "error" not in blocked_outcome
     assert "error" not in status_outcome
+
+
+def test_retiring_a_cli_at_settlement_does_not_hold_the_supervisor_lock():
+    """A CLI that must retire after its turn is closed when its member settles.
+
+    The close waits for the CLI to flush its native history and, when it does
+    not exit in time, for a Docker exec to kill it: seconds, up to that exec's
+    timeout. Holding the supervisor-wide lock across it stalled every other
+    group's lifecycle calls, the host listing among them. The member's own next
+    process still waits for the close, so it never resumes unflushed history.
+    """
+    _manager, supervisor, lease = _question_activation()
+    factory = supervisor._transport_factory
+    other = replace(_spec(), thread_id="athr_other", sandbox_id="asbx_other")
+    supervisor.register_manifest(other, [replace(_members()[0], thread_id=other.thread_id)])
+    retiring = factory.transports[0]
+    retiring.retire_after_turn = True
+    entered = threading.Event()
+    release = threading.Event()
+
+    def flushing_close() -> None:
+        entered.set()
+        assert release.wait(timeout=_HELD_S)
+        retiring.alive = False
+
+    retiring.close = flushing_close
+    settle_thread, settle_outcome = _in_thread(
+        lambda: supervisor.settle(
+            "athr_source", lease.token, job_id="ajob_next", context_status="live"
+        )
+    )
+    resume_thread = None
+    try:
+        assert entered.wait(timeout=1)
+        status_thread, status_outcome = _in_thread(lambda: supervisor.status(other.thread_id))
+        status_thread.join(timeout=_UNBLOCKED_S)
+        assert not status_thread.is_alive(), "a retiring CLI's close held the supervisor lock"
+        assert "error" not in status_outcome
+        nxt = supervisor.acquire(
+            _spec(),
+            thread_id="athr_source",
+            owner="attempt:2",
+            activation_generation=2,
+            has_settled_context=True,
+            manifest=_members(),
+        )
+        resume = replace(
+            _launch("athr_source", native_session_id="native-source", slot=0),
+            credential="grant-2",
+            residency_generation=2,
+        )
+        resume_thread, resume_outcome = _in_thread(
+            lambda: supervisor.ensure_resident("athr_source", nxt.token, resume)
+        )
+        resume_thread.join(timeout=0.3)
+        assert resume_thread.is_alive(), "the next process started before the old one closed"
+        assert len(factory.opened) == 1
+    finally:
+        release.set()
+        settle_thread.join(timeout=2)
+        if resume_thread is not None:
+            resume_thread.join(timeout=2)
+
+    assert not settle_thread.is_alive()
+    settled = settle_outcome["value"]
+    assert settled.busy is False
+    assert settled.resident_state == "restarting"
+    assert settled.native_session_id == "native-source"
+    assert resume_thread is not None and not resume_thread.is_alive()
+    assert resume_outcome["value"].resident_action == "resume"
+    assert len(factory.opened) == 2
+
+
+def test_a_retiring_cli_that_fails_to_close_still_settles_its_member():
+    """The settlement's native locator is recorded before the CLI retires.
+
+    A close that cannot confirm the CLI's exit, such as a Docker exec kill
+    timing out, used to fail the settlement after recording it, with the lease
+    still held. The runner's retry then found no live transport to settle, so
+    a turn that had completed ended with its chat's context lost. The next
+    process of the member reaps its slot before it starts.
+    """
+    _manager, supervisor, lease = _question_activation()
+    retiring = supervisor._transport_factory.transports[0]
+    retiring.retire_after_turn = True
+
+    def failing_close() -> None:
+        retiring.alive = False
+        raise SandboxError("resident process cleanup failed: Docker exec timed out")
+
+    retiring.close = failing_close
+
+    settled = supervisor.settle(
+        "athr_source", lease.token, job_id="ajob_next", context_status="live"
+    )
+
+    assert settled.busy is False
+    assert settled.resident_state == "restarting"
+    assert settled.context_status == "live"
+    assert settled.native_session_id == "native-source"
+    assert settled.last_settled_job_id == "ajob_next"
+    replayed = supervisor.settle(
+        "athr_source", lease.token, job_id="ajob_next", context_status="live"
+    )
+    assert replayed == settled
+
+
+def test_environment_preparation_reads_docker_outside_the_supervisor_lock(monkeypatch):
+    """Preparation inspects the container and reads its receipt without the lock.
+
+    Every turn with an environment binding prepares first, and so does every
+    terminal that requires its environment. Holding the supervisor-wide lock
+    across those reads stalled every other group for as long as Docker took.
+    """
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager)
+    supervisor.register_manifest(_spec(), _members())
+    other = replace(_spec(), thread_id="athr_other", sandbox_id="asbx_other")
+    supervisor.register_manifest(other, [replace(_members()[0], thread_id=other.thread_id)])
+    inspect = manager.inspect
+    locked_inspections: list[str] = []
+
+    def observed_inspect(name):
+        if supervisor._lock._is_owned():
+            locked_inspections.append(name)
+        return inspect(name)
+
+    monkeypatch.setattr(manager, "inspect", observed_inspect)
+    entered = threading.Event()
+    release = threading.Event()
+
+    def receipt(backend, binding_id):
+        # EnvironmentPreparation.status inspects the container on a cache miss.
+        backend.manager.inspect(backend.spec.container_name)
+        entered.set()
+        assert release.wait(timeout=_HELD_S)
+        return {"binding_id": binding_id, "ready": True}
+
+    preparer = SimpleNamespace(status=receipt)
+    environment = SimpleNamespace(binding_id="binding-1")
+    preparing, outcome = _in_thread(
+        lambda: supervisor.prepare_environment("athr_source", environment, preparer)
+    )
+    try:
+        assert entered.wait(timeout=1)
+        status_thread, status_outcome = _in_thread(lambda: supervisor.status(other.thread_id))
+        status_thread.join(timeout=_UNBLOCKED_S)
+        assert not status_thread.is_alive(), "preparation held the supervisor-wide lock"
+    finally:
+        release.set()
+        preparing.join(timeout=2)
+
+    assert not preparing.is_alive()
+    assert outcome == {"value": {"binding_id": "binding-1", "ready": True}}
+    assert "error" not in status_outcome
+    assert locked_inspections == []
 
 
 @pytest.mark.parametrize("call", ["snapshot", "initial_archive"])
@@ -1621,7 +1992,7 @@ def test_creating_a_group_does_not_hold_the_supervisor_lock():
             inspection = super().create(spec, facts=facts, observer=observer)
             if spec.sandbox_id == _spec().sandbox_id:
                 creating.set()
-                assert proceed.wait(timeout=5)
+                assert proceed.wait(timeout=_HELD_S)
             return inspection
 
     manager = Manager()
@@ -1635,7 +2006,7 @@ def test_creating_a_group_does_not_hold_the_supervisor_lock():
         assert creating.wait(timeout=2)
         # Other groups are answered while this one is being created.
         status_thread, status_outcome = _in_thread(lambda: supervisor.status(other.thread_id))
-        status_thread.join(timeout=0.5)
+        status_thread.join(timeout=_UNBLOCKED_S)
         assert not status_thread.is_alive(), "Docker create held the supervisor-wide lock"
         assert "error" not in status_outcome
         # Host reconciliation sees the new container but leaves it to its
@@ -1747,14 +2118,119 @@ def test_reconcile_refuses_an_externally_stopped_replacement_without_archiving_i
         status=ChatSandboxStatus.STOPPED,
     )
 
-    with pytest.raises(RetainedChatLost, match="identity changed"):
-        supervisor.list()
+    descriptors = supervisor.list()
 
+    assert {(row.container_id, row.context_status) for row in descriptors} == {
+        ("container-shared", "lost")
+    }
     group = supervisor._members["athr_source"]
     assert group.inspection.container_id == "container-shared"
     assert group.container_lost is True
     assert manager.stop_count == 0
     assert archived == []
+    with pytest.raises(RetainedChatLost, match="identity was lost"):
+        supervisor.stop_if_idle("athr_source", generation=1)
+
+
+@pytest.mark.asyncio
+async def test_a_lost_group_does_not_fail_the_host_listing_of_the_others():
+    manager = _Manager()
+    other = replace(_spec(), thread_id="athr_other", sandbox_id="asbx_other")
+    supervisor = SharedChatSessionSupervisor(manager)
+    supervisor.register_manifest(_spec(), _members())
+    supervisor.register_manifest(other, [replace(_members()[0], thread_id=other.thread_id)])
+    original = manager.items[_spec().container_name]
+    manager.items[_spec().container_name] = replace(original, container_id="container-replacement")
+
+    # The first listing finds the replacement; later ones find a group already lost.
+    for _ in range(2):
+        rows = {row.thread_id: row for row in supervisor.list()}
+        assert {thread_id: row.context_status for thread_id, row in rows.items()} == {
+            "athr_source": "lost",
+            "athr_peer": "lost",
+            "athr_other": "live",
+        }
+        assert rows["athr_source"].container_id == "container-shared"
+    assert supervisor._members["athr_source"].container_lost is True
+    assert manager.pruned_specs == [_spec(), other]
+
+    app = create_app(
+        backend=ProcessBackend(acknowledged_unsafe=True),
+        token="sandbox-manager-secret",
+        shared_session_supervisor=supervisor,
+    )
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://sandbox_manager"
+    ) as client:
+        listed = await client.get(
+            "/sandboxes", headers={"X-Agent-Workspace-Token": "sandbox-manager-secret"}
+        )
+
+    assert listed.status_code == 200, listed.text
+    assert {row["sandbox_id"] for row in listed.json()["sandboxes"]} == {
+        "asbx_shared",
+        "asbx_other",
+    }
+    stopped = supervisor.stop_if_idle(other.thread_id, generation=other.generation)
+    assert stopped.running is False
+
+
+@pytest.mark.asyncio
+async def test_a_group_changed_while_it_is_reconciled_does_not_fail_the_host_listing():
+    """Reconciliation reads a group's archive marker outside the lock, under a check.
+
+    A container that stopped on its own keeps its bridge, so the next listing
+    reads its marker to classify that stop. Another call can change the group
+    meanwhile: here a targeted listing finds the container removed and marks
+    the group lost. The check then refused the marker's result, and the
+    refusal failed the whole host listing, so GET /sandboxes answered 409 and
+    the heartbeat carried no group's observation.
+    """
+    manager = _Manager()
+    other = replace(_spec(), thread_id="athr_other", sandbox_id="asbx_other")
+    supervisor = SharedChatSessionSupervisor(manager)
+    supervisor.register_manifest(_spec(), _members())
+    supervisor.register_manifest(other, [replace(_members()[0], thread_id=other.thread_id)])
+    name = _spec().container_name
+    manager.items[name] = replace(
+        manager.items[name], running=False, status=ChatSandboxStatus.STOPPED
+    )
+    read_marker = manager.read_stopped_final_archive_marker_optional
+    concurrent: list[BaseException] = []
+
+    def removed_while_read(spec, *, expected_container_id):
+        if spec.sandbox_id == _spec().sandbox_id and name in manager.items:
+            del manager.items[name]
+            try:
+                supervisor.list_for_thread("athr_source")
+            except RetainedChatLost as exc:
+                concurrent.append(exc)
+        return read_marker(spec, expected_container_id=expected_container_id)
+
+    manager.read_stopped_final_archive_marker_optional = removed_while_read
+    app = create_app(
+        backend=ProcessBackend(acknowledged_unsafe=True),
+        token="sandbox-manager-secret",
+        shared_session_supervisor=supervisor,
+    )
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://sandbox_manager"
+    ) as client:
+        listed = await client.get(
+            "/sandboxes", headers={"X-Agent-Workspace-Token": "sandbox-manager-secret"}
+        )
+
+    assert len(concurrent) == 1
+    assert listed.status_code == 200, listed.text
+    groups = {row["sandbox_id"]: row for row in listed.json()["sandboxes"]}
+    assert set(groups) == {"asbx_shared", "asbx_other"}
+    assert {member["context_status"] for member in groups["asbx_shared"]["members"]} == {"lost"}
+    assert groups["asbx_other"]["running"] is True
+    assert manager.pruned_specs == [_spec(), other]
+    assert supervisor._members["athr_source"].container_lost is True
+    rows = {row.thread_id: row.context_status for row in supervisor.list()}
+    assert rows == {"athr_source": "lost", "athr_peer": "lost", "athr_other": "live"}
+    assert supervisor.stop_if_idle(other.thread_id, generation=other.generation).running is False
 
 
 def test_status_blocks_an_externally_stopped_group_without_a_final_marker():
@@ -1990,6 +2466,21 @@ def test_guest_network_fail_stop_archives_once_and_does_not_duplicate_on_listing
     assert len(archived) == 1
 
 
+def test_the_sweep_names_its_running_groups_to_the_host_rule_check():
+    """A table the check reinstalls comes back without any group's relay or SSH exceptions.
+
+    A firewall reload flushes the host's ruleset; the check puts the table
+    back, but a group still running behind it stays cut off from its gateway
+    and MCP relays, and from its SSH servers, until something syncs its bridge
+    again. Only the sweep knows which groups are running, so it names them.
+    """
+    manager, supervisor = _running_group()
+
+    assert supervisor.guard_network() == []
+
+    assert manager.host_rule_running == [[_spec()]]
+
+
 def test_one_failed_check_is_retried_before_anything_is_stopped():
     manager, supervisor = _running_group()
     manager.host_rule_failures = 1
@@ -2093,6 +2584,49 @@ def test_invalid_terminal_close_keeps_reference_for_a_valid_retry():
     )
     assert closed.terminal_count == 0
     assert closed.idle_deadline_monotonic == 120.0
+
+
+@pytest.mark.parametrize("kind", ["terminal", "operation"])
+def test_a_token_still_closes_after_a_manifest_drops_its_opener(kind):
+    """A deleted Fork child's PTY or workspace request can outlive its membership.
+
+    A later Fork reclaims the deleted chat's resident slot, so every manifest
+    from then on omits the chat, and the host drops the member while its
+    token is still open. Closing the token must still release the group;
+    otherwise it never goes idle and every publication snapshot is refused.
+    """
+    now = [1000.0]
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(manager, idle_timeout_s=60, clock=lambda: now[0])
+    origin, child = _members()
+    supervisor.register_manifest(_spec(), [origin, child])
+    if kind == "terminal":
+        token, _ = supervisor.terminal_opened("athr_peer")
+
+        def close():
+            return supervisor.terminal_closed("athr_peer", token, last_activity_monotonic=now[0])
+    else:
+        token, _ = supervisor.operation_opened("athr_peer")
+
+        def close():
+            return supervisor.operation_closed("athr_peer", token)
+
+    supervisor.register_manifest(_spec(), [origin])
+    assert not supervisor.owns("athr_peer")
+
+    assert close() is None
+
+    [descriptor] = supervisor.list()
+    assert descriptor.group_busy is False
+    assert descriptor.idle_deadline_monotonic == 1060.0
+    with pytest.raises(SandboxError, match="no shared sandbox membership"):
+        close()
+    assert supervisor.capture_snapshot("athr_source", capture=lambda _backend: {"patch": ""}) == {
+        "patch": ""
+    }
+    now[0] += 60
+    assert [stopped.running for stopped in supervisor.sweep()] == [False]
+    assert manager.items[_spec().container_name].running is False
 
 
 def test_a_changed_idle_timeout_arms_the_next_quiet_moment_with_the_new_value():
@@ -3578,6 +4112,119 @@ def test_idle_stop_releases_networks_after_docker_already_stopped_the_container(
     assert manager.stop_count == 1
     assert stopped.running is False
     assert manager.items[spec.container_name].networks == ()
+
+
+def test_a_failed_stop_docker_cannot_inspect_leaves_the_group_unlost():
+    """Only Docker's "no such container" loses a group, not a daemon that cannot answer.
+
+    ``docker stop`` times out and so does the inspection that follows it. The
+    container never went anywhere: once Docker answers again the group keeps
+    its contexts, lists, and stops.
+    """
+
+    class DaemonDown(_Manager):
+        def __init__(self) -> None:
+            super().__init__()
+            self.down = False
+
+        def inspect(self, container_name):
+            if self.down:
+                raise SandboxError("Docker lifecycle command failed: timed out after 30 seconds")
+            return super().inspect(container_name)
+
+        def stop(self, spec, **kwargs):
+            if self.stop_count == 0:
+                self.stop_count += 1
+                self.down = True
+                raise SandboxError("Docker lifecycle command failed: timed out")
+            return super().stop(spec, **kwargs)
+
+    manager = DaemonDown()
+    supervisor = SharedChatSessionSupervisor(manager)
+    supervisor.register_manifest(_spec(), _members())
+
+    with pytest.raises(SandboxError, match="timed out"):
+        supervisor.stop_if_idle("athr_source", generation=1)
+    manager.down = False
+
+    group = supervisor._members["athr_source"]
+    assert group.container_lost is False
+    assert group.stopping is False
+    assert group.idle_deadline is not None
+    assert {row.context_status for row in supervisor.list()} == {"live"}
+    stopped = supervisor.stop_if_idle("athr_source", generation=1)
+    assert stopped.running is False
+    assert manager.stop_count == 2
+    assert manager.items[_spec().container_name].running is False
+
+
+def test_a_group_lost_in_a_failed_stop_is_never_armed_to_stop_again():
+    """A container that really went away during its stop leaves a lost group, not an idle one.
+
+    Its last observation still says running, but a lost group is never stopped
+    again. Armed, it was the sweep's candidate on every pass, and the loss it
+    raised ended each pass before the groups after it.
+    """
+    now = 100.0
+
+    class VanishOnStop(_Manager):
+        def stop(self, spec, **kwargs):
+            if spec.sandbox_id == _spec().sandbox_id:
+                # Docker now answers "no such container" for it.
+                self.items.pop(spec.container_name)
+                raise SandboxError("docker stop failed")
+            return super().stop(spec, **kwargs)
+
+    manager = VanishOnStop()
+    supervisor = SharedChatSessionSupervisor(manager, idle_timeout_s=30, clock=lambda: now)
+    other = replace(_spec(), thread_id="athr_other", sandbox_id="asbx_other")
+    supervisor.register_manifest(_spec(), _members())
+    supervisor.register_manifest(other, [replace(_members()[0], thread_id=other.thread_id)])
+    with pytest.raises(SandboxError, match="docker stop failed"):
+        supervisor.stop_if_idle("athr_source", generation=1)
+    lost = supervisor._members["athr_source"]
+    assert lost.container_lost is True
+    assert lost.idle_deadline is None
+    token, _ = supervisor.operation_opened(other.thread_id)
+    supervisor.operation_closed(other.thread_id, token)
+    now = 1000.0
+
+    assert [row.thread_id for row in supervisor.sweep()] == [other.thread_id]
+    assert manager.items[other.container_name].running is False
+
+
+def test_one_group_the_sweep_cannot_stop_does_not_hold_up_the_others(caplog):
+    now = 100.0
+    unsafe = "https://daemon.invalid/stop?token=sweep-secret"
+
+    class StopFails(_Manager):
+        def stop(self, spec, **kwargs):
+            if spec.sandbox_id == _spec().sandbox_id:
+                raise SandboxError(f"docker stop failed: {unsafe}")
+            return super().stop(spec, **kwargs)
+
+    manager = StopFails()
+    supervisor = SharedChatSessionSupervisor(manager, idle_timeout_s=30, clock=lambda: now)
+    other = replace(_spec(), thread_id="athr_other", sandbox_id="asbx_other")
+    supervisor.register_manifest(_spec(), _members())
+    supervisor.register_manifest(other, [replace(_members()[0], thread_id=other.thread_id)])
+    for thread_id in ("athr_source", other.thread_id):
+        token, _ = supervisor.operation_opened(thread_id)
+        supervisor.operation_closed(thread_id, token)
+    now = 1000.0
+
+    with caplog.at_level(logging.WARNING):
+        stopped = supervisor.sweep()
+
+    assert [row.thread_id for row in stopped] == [other.thread_id]
+    assert manager.items[_spec().container_name].running is True
+    assert manager.items[other.container_name].running is False
+    assert any(
+        getattr(record, "event", None) == "shared_chat_idle_stop_failed"
+        and getattr(record, "error_type", None) == "SandboxError"
+        for record in caplog.records
+    )
+    assert unsafe not in caplog.text
 
 
 def _archive_shutdown_group(
@@ -5697,6 +6344,41 @@ def test_turn_boundary_preserves_reviewed_resident_tree_and_reaps_new_processes(
     assert supervisor.status("athr_source").resident_state == "live"
 
 
+def test_successful_turn_boundary_retains_the_member_before_broker_settlement():
+    """The member remains resident and settled context survives local cleanup."""
+    manager = _Manager()
+    factory = _TransportFactory()
+    supervisor = SharedChatSessionSupervisor(manager, transport_factory=factory)
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+    supervisor.ensure_resident(
+        "athr_source",
+        lease.token,
+        _launch("athr_source", native_session_id="native-source", slot=0),
+    )
+    turn = supervisor.start_turn(
+        "athr_source",
+        lease.token,
+        prompt="work",
+        model="glm-5.1",
+        reasoning_effort=None,
+    )
+    supervisor.complete_turn("athr_source", lease.token, turn)
+
+    descriptor = supervisor.status("athr_source")
+
+    assert descriptor.resident_state == "live"
+    assert descriptor.last_settled_job_id == "ajob_source"
+    assert descriptor.context_status == "restored"
+    assert descriptor.native_session_id == "native-source"
+
+
 def test_kata_turn_observation_is_uid_scoped_and_closes_before_platform_cleanup():
     class Manager(_Manager):
         def finish_guest_observation(self, spec, cursor):
@@ -5839,6 +6521,268 @@ def test_lost_shared_residency_preserves_observation_until_turn_closes():
         ("reap-except", 0, ((41, 400),)),
         ("normalize", 0),
     ]
+
+
+@pytest.mark.parametrize("turn", ["never_started", "aborted"])
+def test_a_reaped_activation_ends_with_its_residency_so_its_group_can_idle(turn):
+    """A runner that dies mid-activation never settles or abandons its member.
+
+    The control plane reaps the attempt and closes the residency its process
+    ran on. The lease the dead activation holds ends with that process, as an
+    abandon would end it; otherwise a sibling's group never goes idle and its
+    publication snapshot is refused as an active mutation. A turn the dead
+    runner had started was already aborted when its stream dropped.
+    """
+    now = [1000.0]
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(
+        manager, transport_factory=_TransportFactory(), idle_timeout_s=60, clock=lambda: now[0]
+    )
+    dead = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+    supervisor.ensure_resident(
+        "athr_source", dead.token, _launch("athr_source", native_session_id="native-source", slot=0)
+    )
+    if turn == "aborted":
+        started = supervisor.start_turn(
+            "athr_source", dead.token, prompt="work", model="glm-5.1", reasoning_effort=None
+        )
+        supervisor.abort_turn("athr_source", dead.token, started)
+    peer = supervisor.acquire(
+        _spec(),
+        thread_id="athr_peer",
+        owner="attempt:7",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+    supervisor.ensure_resident(
+        "athr_peer", peer.token, _launch("athr_peer", native_session_id="native-peer", slot=1)
+    )
+    supervisor.settle("athr_peer", peer.token, job_id="ajob_peer", context_status="live")
+
+    ended = supervisor.residency_lost("athr_source", generation=1)
+
+    assert ended.busy is False
+    assert ended.group_busy is False
+    assert ended.context_status == ended.resident_state == "lost"
+    assert ended.residency_generation == 0
+    assert ended.idle_deadline_monotonic == 1060.0
+    with pytest.raises(SessionLeaseLost):
+        supervisor.settle("athr_source", dead.token, job_id="ajob_dead", context_status="live")
+    assert supervisor.capture_snapshot("athr_peer", capture=lambda _backend: {"patch": ""}) == {
+        "patch": ""
+    }
+    now[0] += 60
+    assert [stopped.running for stopped in supervisor.sweep()] == [False]
+    assert manager.items[_spec().container_name].running is False
+
+
+def test_a_loss_its_activation_rotated_past_meanwhile_leaves_the_new_process_running():
+    """A loss names the generation its beat sampled, which can be rotated past meanwhile.
+
+    The loss closes that generation's process and then ends the activation
+    that took it on. Before it does, the same activation can rotate to a newer
+    residency and start the replacement, as a Fork rotates its source's. Ending
+    the activation then tore the replacement down and marked its context lost.
+    """
+    manager = _Manager()
+    factory = _TransportFactory()
+    supervisor = SharedChatSessionSupervisor(manager, transport_factory=factory)
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+    first = _launch("athr_source", native_session_id="native-source", slot=0)
+    supervisor.ensure_resident("athr_source", lease.token, first)
+    old = factory.transports[0]
+    rotated = []
+
+    def rotate_as_the_old_process_closes() -> None:
+        # The loss closes the old process outside the supervisor's lock, and
+        # only then ends the activation; the rotation lands in between.
+        type(old).close(old)
+        rotated.append(
+            supervisor.ensure_resident(
+                "athr_source",
+                lease.token,
+                replace(first, credential="grant-2", residency_generation=2),
+            )
+        )
+
+    old.close = rotate_as_the_old_process_closes
+
+    lost = supervisor.residency_lost("athr_source", generation=1)
+
+    assert [replacement.residency_generation for replacement in rotated] == [2]
+    assert old.alive is False
+    assert factory.transports[1].alive is True
+    assert lost.residency_generation == 2
+    assert lost.context_status != "lost"
+    settled = supervisor.settle(
+        "athr_source", lease.token, job_id="ajob_next", context_status="restored"
+    )
+    assert settled.busy is False
+    assert settled.context_status == "restored"
+
+
+def test_a_residency_its_activation_is_replacing_leaves_that_activation_running():
+    """A host beat can name the generation a live activation is rotating away from.
+
+    The activation found the member's process unfit for its turn (here, a new
+    model) before taking it on, and asked the control plane for a new
+    residency, so the old generation is no longer current: a beat sampled just
+    before reports it lost. That closes the old process only. The activation
+    keeps its lease and starts the replacement under its new generation.
+    """
+    manager = _Manager()
+    factory = _TransportFactory()
+    supervisor = SharedChatSessionSupervisor(manager, transport_factory=factory)
+    first = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+    old_launch = _launch("athr_source", native_session_id="native-source", slot=0)
+    supervisor.ensure_resident("athr_source", first.token, old_launch)
+    supervisor.settle("athr_source", first.token, job_id="ajob_source", context_status="live")
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:2",
+        activation_generation=2,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+    probe = replace(old_launch, model="glm-5.2", credential=None)
+    with pytest.raises(SandboxError, match="requires a renewable credential"):
+        supervisor.ensure_resident("athr_source", lease.token, probe)
+
+    lost = supervisor.residency_lost("athr_source", generation=1)
+
+    assert lost.busy is True
+    assert lost.context_status == "live"
+    assert factory.transports[0].alive is False
+    replacement = supervisor.ensure_resident(
+        "athr_source", lease.token, replace(probe, credential="grant-2", residency_generation=2)
+    )
+    assert replacement.residency_generation == 2
+    assert replacement.resident_action == "resume"
+    settled = supervisor.settle(
+        "athr_source", lease.token, job_id="ajob_next", context_status="restored"
+    )
+    assert settled.busy is False
+    assert settled.context_status == "restored"
+
+
+def _hung_turn_with_a_live_sibling(now: list[float]):
+    """A member's turn is running for a runner that hangs; its Fork sibling has settled."""
+    manager = _Manager()
+    supervisor = SharedChatSessionSupervisor(
+        manager, transport_factory=_TransportFactory(), idle_timeout_s=60, clock=lambda: now[0]
+    )
+    hung = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+    supervisor.ensure_resident(
+        "athr_source", hung.token, _launch("athr_source", native_session_id="native-source", slot=0)
+    )
+    turn = supervisor.start_turn(
+        "athr_source", hung.token, prompt="work", model="glm-5.1", reasoning_effort=None
+    )
+    peer = supervisor.acquire(
+        _spec(),
+        thread_id="athr_peer",
+        owner="attempt:7",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+    supervisor.ensure_resident(
+        "athr_peer", peer.token, _launch("athr_peer", native_session_id="native-peer", slot=1)
+    )
+    supervisor.settle("athr_peer", peer.token, job_id="ajob_peer", context_status="live")
+    return manager, supervisor, hung, turn
+
+
+def test_a_loss_during_its_turn_ends_the_activation_once_its_stream_closes_the_turn():
+    """A hung runner still holds its turn stream when the reaper closes its residency.
+
+    The loss closes the process and leaves the running turn to that stream,
+    which still answers for what the turn did. Nothing else will release the
+    lease afterwards: the runner never settles or abandons, and the member's
+    residency generation is gone, so no host beat names it again. The
+    activation therefore ends with its turn, as an abandon would end it.
+    """
+    now = [1000.0]
+    _manager, supervisor, hung, turn = _hung_turn_with_a_live_sibling(now)
+
+    lost = supervisor.residency_lost("athr_source", generation=1)
+
+    assert lost.busy is True
+    assert turn.interrupted is True
+    # The stream ends the turn once the closed process has ended it.
+    supervisor.complete_turn("athr_source", hung.token, turn)
+
+    ended = supervisor.status("athr_source")
+    assert ended.busy is False
+    assert ended.group_busy is False
+    assert ended.context_status == ended.resident_state == "lost"
+    assert ended.idle_deadline_monotonic == 1060.0
+    with pytest.raises(SessionLeaseLost):
+        supervisor.settle("athr_source", hung.token, job_id="ajob_hung", context_status="live")
+    assert supervisor.capture_snapshot("athr_peer", capture=lambda _backend: {"patch": ""}) == {
+        "patch": ""
+    }
+
+
+def test_a_lost_turn_whose_stream_never_closes_it_is_closed_by_the_sweep():
+    """A stream to a runner that stopped reading never reaches its turn's end.
+
+    Its frames wait on a socket the runner no longer drains, so the turn the
+    loss interrupted stays open with its member lock and lease. Once the
+    stream has had ample time, the sweep closes that turn's boundary on its
+    behalf, which ends the activation; a stream that wakes later finds it gone.
+    """
+    now = [1000.0]
+    manager, supervisor, hung, turn = _hung_turn_with_a_live_sibling(now)
+    member = supervisor._members["athr_source"].members["athr_source"]
+    supervisor.residency_lost("athr_source", generation=1)
+
+    supervisor.sweep()
+    assert supervisor.status("athr_source").busy is True
+    now[0] += 60
+
+    assert supervisor.sweep() == []
+
+    ended = supervisor.status("athr_source")
+    assert ended.busy is False
+    assert ended.group_busy is False
+    assert ended.context_status == ended.resident_state == "lost"
+    assert member.turn_lock.locked() is False
+    assert manager.events[-2:] == [("reap-except", 0, ((41, 400),)), ("normalize", 0)]
+    with pytest.raises(SessionLeaseLost):
+        supervisor.complete_turn("athr_source", hung.token, turn)
+    now[0] += 60
+    assert [stopped.running for stopped in supervisor.sweep()] == [False]
 
 
 def test_supervisor_close_releases_an_active_turn_observation_and_member_lock():
@@ -6860,7 +7804,7 @@ def test_lifecycle_io_leaves_other_groups_available(monkeypatch, operation):
 
     def gate():
         entered.set()
-        assert release.wait(timeout=5)
+        assert release.wait(timeout=_HELD_S)
 
     if operation == "idle_stop":
         inspect = manager.inspect
@@ -6929,7 +7873,7 @@ def test_lifecycle_io_leaves_other_groups_available(monkeypatch, operation):
     try:
         assert entered.wait(timeout=2)
         other_worker, other_outcome = _in_thread(lambda: supervisor.status(other.thread_id))
-        other_worker.join(timeout=0.5)
+        other_worker.join(timeout=_UNBLOCKED_S)
         assert not other_worker.is_alive(), "lifecycle I/O held the supervisor-wide lock"
         assert "error" not in other_outcome
         if operation != "reconcile_marker":
@@ -6946,8 +7890,12 @@ def test_lifecycle_io_leaves_other_groups_available(monkeypatch, operation):
 
 @pytest.mark.parametrize("operation", ["idle_stop", "begin_archive", "reconcile_marker"])
 @pytest.mark.parametrize("fence", ["index", "lifecycle", "spec", "container"])
-def test_lifecycle_check_rejects_superseded_observations(monkeypatch, operation, fence):
-    """An observation cannot commit to a group whose authority changed."""
+def test_lifecycle_check_rejects_superseded_observations(monkeypatch, caplog, operation, fence):
+    """An observation cannot commit to a group whose authority changed.
+
+    Reconciliation rejects it for that group alone: it logs the refusal and
+    goes on with the host's other groups rather than failing their listing.
+    """
     manager = _Manager()
     supervisor = SharedChatSessionSupervisor(manager)
     spec = _spec()
@@ -6987,8 +7935,19 @@ def test_lifecycle_check_rejects_superseded_observations(monkeypatch, operation,
                 container_id=observed.container_id,
             )
 
-    with pytest.raises(SessionLeaseLost, match="lifecycle changed"):
-        call()
+    if operation == "reconcile_marker":
+        with caplog.at_level(logging.WARNING):
+            call()
+        refusals = [
+            str(getattr(record, "detail", ""))
+            for record in caplog.records
+            if getattr(record, "event", None) == "shared_sandbox_reconcile_group_failed"
+        ]
+        assert len(refusals) == 1
+        assert "lifecycle changed" in refusals[0]
+    else:
+        with pytest.raises(SessionLeaseLost, match="lifecycle changed"):
+            call()
     assert manager.stop_count == 0
     assert group.inspection.running is True
     assert group.archive_request_id is None

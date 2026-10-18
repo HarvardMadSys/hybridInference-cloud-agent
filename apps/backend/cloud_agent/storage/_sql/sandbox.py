@@ -10,7 +10,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from cloud_agent_shared.sandbox_restore import MAX_RESTORE_ATTEMPTS
+from cloud_agent.storage._sql.hosts import refuse_start_on_revoked_host
+from cloud_agent_shared.sandbox_restore import MAX_RESTORE_ATTEMPTS, RESTORE_RETRY_DELAYS_S
 from cloud_agent_shared.shared_protocol import (
     FORK_HELPER,
     MID_TURN_INPUT_CAPABILITY_PREFIX,
@@ -188,6 +189,23 @@ THREAD_SANDBOX_SOURCE = f"""
 ) AS s
 """
 
+# The columns of ``THREAD_SANDBOX_SOURCE`` a claim chooses its turn by, under
+# the same names, and none of the projections. A claim walks every queued turn
+# until one is runnable on the claiming host; joined to the full source, each
+# turn it passed paid for its group's publication state, members and host
+# capabilities, which only the turn handed out returns.
+THREAD_SANDBOX_CLAIM_SOURCE = """
+(
+    SELECT
+        m.thread_id, g.id AS sandbox_id, g.host, g.container_id, g.state,
+        m.fork_operation_id, m.context_status, m.native_state,
+        TRUE AS shared_live, g.restore_attempts,
+        g.last_activity_at AS group_last_activity_at
+    FROM agent_thread_sandbox_memberships m
+    JOIN agent_sandboxes g ON g.id = m.sandbox_id
+) AS s
+"""
+
 # SET-clause fragment for ``agent_sandboxes``: count one more start the
 # control plane let through and drop the restore point a start would make
 # stale. A checkpoint receipt covers the group only while the sequence it
@@ -206,8 +224,19 @@ async def fence_sandbox_start(conn: Any, sandbox_id: str) -> str | None:
 
     For callers that are about to ask a sandbox manager for something that may
     start a stopped container: a workspace request, a fork, a snapshot. The
-    returned state lets them refuse a group that only a checkpoint holds.
+    returned state lets them refuse a group that only a checkpoint holds. A
+    group bound to a revoked host is not fenced: it reads ``host_revoked``, or
+    ``cold`` once a late checkpoint has handed it on
+    (:func:`refuse_start_on_revoked_host`).
     """
+    group = await conn.fetchrow(
+        "SELECT id, state, host FROM agent_sandboxes WHERE id = $1 FOR UPDATE", sandbox_id
+    )
+    if group is None:
+        return None
+    refused = await refuse_start_on_revoked_host(conn, group)
+    if refused is not None:
+        return refused
     return await conn.fetchval(
         f"""
         UPDATE agent_sandboxes
@@ -219,6 +248,43 @@ async def fence_sandbox_start(conn: Any, sandbox_id: str) -> str | None:
     )
 
 
+def restore_claim_due(attempts: str, failed_at: str) -> str:
+    """SQL: whether a cold group may be claimed for another restore now.
+
+    ``attempts`` names the group's ``restore_attempts`` and ``failed_at`` the
+    time its last restore failed, which is its ``last_activity_at``: every
+    path that hands a failed restore back to the checkpoint stamps it. A
+    group no restore has failed for is due at once. After the n-th failure it
+    waits the n-th of ``RESTORE_RETRY_DELAYS_S``, so the attempts outlast a
+    short registry or S3 outage instead of all failing inside it.
+    """
+    delays = ", ".join(repr(float(delay)) for delay in RESTORE_RETRY_DELAYS_S)
+    return (
+        f"({attempts} = 0 OR {failed_at} <= clock_timestamp() - make_interval(secs => "
+        f"(ARRAY[{delays}]::double precision[])"
+        f"[LEAST({attempts}, {len(RESTORE_RETRY_DELAYS_S)})]))"
+    )
+
+
+async def release_restore(
+    conn: Any, attempt_id: int, detail: str, *, reported_failed: bool = False
+) -> str | None:
+    """Return a group this attempt was restoring to its checkpoint, however it ended.
+
+    A restore counts as failed only once it may have begun: its host reserved
+    the group, or reports the restore failed (``reported_failed``). An attempt
+    that ends before its host reserved the group -- handed back, failed by the
+    hand-over or by its host before the reservation, or reaped when its lease
+    lapsed -- never reached the checkpoint and gives the group its attempt back
+    (:func:`release_unstarted_restore`); every other end is a failed restore
+    (:func:`release_failed_restore`). Returns the group's new state, or
+    ``None`` when the attempt restored nothing.
+    """
+    if not reported_failed and await release_unstarted_restore(conn, attempt_id):
+        return "cold"
+    return await release_failed_restore(conn, attempt_id, detail)
+
+
 async def release_failed_restore(conn: Any, attempt_id: int, detail: str) -> str | None:
     """Return a group this attempt was recreating to its checkpoint.
 
@@ -228,8 +294,11 @@ async def release_failed_restore(conn: Any, attempt_id: int, detail: str) -> str
     checkpoint is untouched, so the group goes back to ``cold`` for another
     claim; a container the attempt may have left is fenced by the generation
     the next claim advances. Once the attempts run out it is ``lost`` instead.
-    Returns the group's new state, or ``None`` when the attempt restored
-    nothing.
+    The failure's time is the group's last activity, which the next claim
+    waits from (:func:`restore_claim_due`). Returns the group's new state, or
+    ``None`` when the attempt restored nothing. Callers go through
+    :func:`release_restore`, which first gives back an attempt whose restore
+    never began.
     """
     # Memberships before their group, the order every writer keeps. The
     # restoring member may already hold the attempt from its reservation.
@@ -252,10 +321,42 @@ async def release_failed_restore(conn: Any, attempt_id: int, detail: str) -> str
                 WHEN restore_attempts >= {MAX_RESTORE_ATTEMPTS} THEN 'lost' ELSE 'cold'
             END,
             container_id = NULL, restore_attempt_id = NULL,
-            last_error = $2, updated_at = NOW()
+            last_error = $2, last_activity_at = NOW(), updated_at = NOW()
         WHERE restore_attempt_id = $1 AND state = 'restoring'
         RETURNING state
         """,
         attempt_id,
         detail,
+    )
+
+
+async def release_unstarted_restore(conn: Any, attempt_id: int) -> bool:
+    """Return a group this attempt never began to restore, uncounted.
+
+    The claim that rehomes a cold group counts one restore attempt. Ended
+    before its host reserved the group -- the hand-over could not mint the
+    turn's credentials or refused the turn, the host could not launch or
+    start it, or the host died and the lease lapsed -- the claim never reached
+    the checkpoint. The group goes back to ``cold`` with that attempt given
+    back and its last failure's time unchanged, so the next claim waits only
+    as long as a real failure asks (:func:`restore_claim_due`). Returns
+    whether the attempt held such a group; one its host reserved is left to
+    :func:`release_failed_restore`.
+    """
+    return (
+        await conn.fetchval(
+            """
+            UPDATE agent_sandboxes g
+            SET state = 'cold', restore_attempt_id = NULL,
+                restore_attempts = g.restore_attempts - 1, updated_at = NOW()
+            WHERE g.restore_attempt_id = $1 AND g.state = 'restoring'
+              AND NOT EXISTS (
+                  SELECT 1 FROM agent_thread_sandbox_memberships m
+                  WHERE m.sandbox_id = g.id AND m.active_attempt_id = $1
+              )
+            RETURNING g.id
+            """,
+            attempt_id,
+        )
+        is not None
     )

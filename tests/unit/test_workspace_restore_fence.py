@@ -52,3 +52,14 @@ async def test_a_job_without_a_conversation_fences_nothing():
     await fence_workspace_start(store, {"thread_id": None})
 
     assert store.sandbox.fenced == []
+
+
+@pytest.mark.asyncio
+async def test_a_group_on_a_removed_host_is_refused():
+    with pytest.raises(HTTPException) as refused:
+        await fence_workspace_start(_store("host_revoked"), {"thread_id": "athr_one"})
+
+    assert refused.value.status_code == 409
+    error = refused.value.detail["error"]
+    assert error["type"] == "workspace_unavailable"
+    assert "server that has been removed" in error["message"]

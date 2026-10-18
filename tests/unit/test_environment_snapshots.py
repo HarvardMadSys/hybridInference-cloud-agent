@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import sys
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
@@ -325,6 +327,33 @@ def test_lockfiles_are_fingerprinted_by_git_object(tmp_path):
     # Untracked manifests do not count: the checkout is what the task uses.
     assert set(found or {}) == {"web/package-lock.json", "uv.lock"}
     assert found["uv.lock"] == blob
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="other filesystems refuse non-UTF-8 names")
+def test_lockfiles_are_found_beside_names_that_are_not_utf8(tmp_path):
+    from cloud_agent_host.runner import tracked_lockfiles
+
+    git = ["git", "-C", str(tmp_path), "-c", "user.email=a@b", "-c", "user.name=t"]
+    subprocess.run([*git, "init", "-q"], check=True)
+    (tmp_path / "uv.lock").write_text("version = 1\n")
+    # Git keeps a name as the bytes it was committed with, here Latin-1.
+    root = os.fsencode(tmp_path)
+    with open(os.path.join(root, b"r\xe9sum\xe9.txt"), "wb") as handle:
+        handle.write(b"cv\n")
+    subprocess.run([*git, "add", "-A"], check=True)
+    blob = subprocess.run(
+        [*git, "hash-object", "uv.lock"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+    assert tracked_lockfiles(str(tmp_path)) == {"uv.lock": blob}
+
+    # A manifest in a directory so named cannot be recorded: never matched.
+    os.mkdir(os.path.join(root, b"caf\xe9"))
+    with open(os.path.join(root, b"caf\xe9", b"package-lock.json"), "wb") as handle:
+        handle.write(b"{}\n")
+    subprocess.run([*git, "add", "-A"], check=True)
+
+    assert tracked_lockfiles(str(tmp_path)) is None
 
 
 # -- saving a snapshot from an environment run ------------------------------------

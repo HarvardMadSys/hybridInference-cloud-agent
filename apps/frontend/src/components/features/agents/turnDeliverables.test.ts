@@ -114,11 +114,32 @@ describe('recorded turn outputs', () => {
     expect(recordedTurnOutputs(JOB, [event(patch().replace('+new\n', ''))])).toBeNull();
   });
 
-  it('rejects quoted paths and bare change markers that cannot form an accurate action', () => {
+  it('rejects bare change markers that cannot form an accurate action', () => {
     expect(
       recordedTurnOutputs(JOB, [event('diff --git "a/spaced file.ts" "b/spaced file.ts"')]),
     ).toBeNull();
     expect(recordedTurnOutputs(JOB, [event('diff --git a/file.ts b/file.ts')])).toBeNull();
+  });
+
+  it('names a file Git quoted by its decoded path, wherever it is listed', () => {
+    const quoted = [
+      'diff --git "a/\\346\\226\\207\\346\\241\\243.md" "b/\\346\\226\\207\\346\\241\\243.md"',
+      'index ce01362..3b18e51 100644',
+      '--- "a/\\346\\226\\207\\346\\241\\243.md"',
+      '+++ "b/\\346\\226\\207\\346\\241\\243.md"',
+      '@@ -1 +1 @@',
+      '-hello',
+      '+hello world',
+      '',
+    ].join('\n');
+    expect(recordedTurnOutputs(JOB, [event(`${patch()}${quoted}`)])?.files).toEqual([
+      expect.objectContaining({ path: 'src/app.tsx', add: 1, del: 1 }),
+      expect.objectContaining({ path: '文档.md', add: 1, del: 1 }),
+    ]);
+    expect(recordedTurnOutputs(JOB, [event(`${quoted}${patch()}`)])?.files).toEqual([
+      expect.objectContaining({ path: '文档.md', add: 1, del: 1 }),
+      expect.objectContaining({ path: 'src/app.tsx', add: 1, del: 1 }),
+    ]);
   });
 
   it('rejects ambiguous paths and repeated file snapshots rather than opening the wrong file', () => {

@@ -448,8 +448,9 @@ class HostPoolRepository(Protocol):
     async def runtime_download_targets(self) -> list[dict[str, str]]:
         """The agent versions every heartbeat answer tells hosts to hold.
 
-        At most two per runtime: the update's version and, until it switches
-        new chats, the downloaded version they use now.
+        At most two per runtime: the record's version, and the downloaded
+        version an update replaced, which new chats use until it switches them
+        and Roll back returns to after.
         """
         ...
 
@@ -533,10 +534,13 @@ class HostPoolRepository(Protocol):
         ``"retained_groups_present"``, ``"resource_bound"``,
         ``"active_attempts_present"`` and ``"pending_compute_operations"``.
         A sandbox whose deletion has completed is an audit row: it keeps the
-        host name and does not block forgetting. A live group, or one whose
-        deletion failed or is still in progress, does. A disabled attached
-        machine without external release capability may be deregistered after
-        dependency checks; this never shuts it down.
+        host name and does not block forgetting. Nor does a ``cold`` group,
+        which any restore-capable host may claim; it keeps naming this host
+        as the last it ran on until a claim moves it. A live or stopped
+        group, or one whose deletion failed or is still in progress, does
+        block. A disabled attached machine without external release
+        capability may be deregistered after dependency checks; this never
+        shuts it down.
 
         The active-host refusal lives here rather than in the caller because
         checking there is a read the switch can outrun: the endpoint sees the

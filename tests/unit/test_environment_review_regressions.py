@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import os
 import subprocess
 import sys
@@ -10,7 +11,12 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
-from tests.unit.test_agent_sandbox_manager import _Spawner, _TerminalProcess, _wait_for
+from tests.unit.test_agent_sandbox_manager import (
+    _SlowSpawner,
+    _Spawner,
+    _TerminalProcess,
+    _wait_for,
+)
 
 from cloud_agent.sandbox_manager_client import SandboxManagerClient, SandboxManagerError
 from cloud_agent_host import environment_tests
@@ -139,6 +145,66 @@ def test_snapshot_allows_ordinary_flags_ignored_files_and_secret_removal(git_wor
     check_snapshot_secrets(backend, base, bound, workdir=str(root))
 
 
+def test_snapshot_scan_never_imports_from_the_workspace(git_workspace):
+    root, _, base, _ = git_workspace
+    # The change adds the project's own module, named like the standard library's.
+    (root / "types.py").write_text("UserId = int\n")
+
+    def capture(_spec, argv, *, env, workdir, timeout_s):
+        # The scan exactly as the sandbox runs it, with the system interpreter.
+        return subprocess.run(
+            argv,
+            cwd=workdir,
+            env={"PATH": "/usr/bin:/bin", **env},
+            capture_output=True,
+            timeout=timeout_s,
+        )
+
+    backend = SimpleNamespace(spec=object(), manager=SimpleNamespace(exec_capture=capture))
+    bound = BoundEnvironment(
+        binding_id="b",
+        variables=[EnvironmentVariable(name="TOKEN", value="example-private-credential")],
+    )
+    check_snapshot_secrets(backend, base, bound, workdir=str(root))
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="other filesystems refuse non-UTF-8 names")
+@pytest.mark.parametrize("holds_secret", [False, True])
+def test_snapshot_scans_a_file_whose_name_is_not_utf8(git_workspace, holds_secret):
+    root, _, base, backend = git_workspace
+    value = "example-private-credential"
+    # Git keeps a name as the bytes it was written with, here Latin-1.
+    with open(os.path.join(os.fsencode(root), b"r\xe9sum\xe9.txt"), "wb") as handle:
+        handle.write(b"TOKEN=" + value.encode() if holds_secret else b"cv\n")
+    bound = BoundEnvironment(
+        binding_id="b", variables=[EnvironmentVariable(name="TOKEN", value=value)]
+    )
+    if holds_secret:
+        with pytest.raises(SandboxError, match="Secret value"):
+            check_snapshot_secrets(backend, base, bound, workdir=str(root))
+    else:
+        check_snapshot_secrets(backend, base, bound, workdir=str(root))
+
+
+def test_snapshot_scan_passes_a_repository_cloned_into_the_workspace(git_workspace):
+    root, _, base, backend = git_workspace
+    nested = root / "dependency"
+    nested.mkdir()
+    (nested / "README").write_text("another project\n")
+    for args in (
+        ["init", "-q"],
+        ["add", "README"],
+        ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "x"],
+    ):
+        subprocess.check_output(["git", *args], cwd=nested, stderr=subprocess.STDOUT)
+    bound = BoundEnvironment(
+        binding_id="b",
+        variables=[EnvironmentVariable(name="TOKEN", value="example-private-credential")],
+    )
+    # Its entry is a commit id, which carries no file content into the patch.
+    check_snapshot_secrets(backend, base, bound, workdir=str(root))
+
+
 def test_completed_action_is_not_reexecuted_after_reaping_or_broker_restart(tmp_path):
     receipts = ActionReceipts(tmp_path)
     manager = _TerminalManager(
@@ -225,6 +291,73 @@ def test_stop_before_delayed_action_launch_persists_a_tombstone(tmp_path):
     assert ActionReceipts(tmp_path).reserve("w", "term_run", "bound", "deploy")["state"] == "closed"
 
 
+class _RecordingSlowSpawner(_SlowSpawner):
+    def __init__(self) -> None:
+        super().__init__()
+        self.processes: list = []
+
+    def spawn_terminal(self, spec, *, rows: int, cols: int):
+        process = super().spawn_terminal(spec, rows=rows, cols=cols)
+        self.processes.append(process)
+        return process
+
+
+def test_stopping_an_action_while_its_terminal_spawns_stops_it(tmp_path):
+    """A Stop that lands while an action's terminal spawns closes that terminal.
+
+    Creating an action's terminal reserves its receipt and then spawns the PTY
+    under the workspace's own lock only. A delete in between found no
+    terminal, and its tombstone leaves a reserved receipt alone, so the
+    command the owner had stopped started once its terminal was listed.
+    """
+    receipts = ActionReceipts(tmp_path)
+    manager = _TerminalManager(
+        idle_ttl_s=30, hard_ttl_s=60, max_sessions=4, action_receipts=receipts
+    )
+    bound = BoundEnvironment(
+        binding_id="b", actions=[EnvironmentAction(id="deploy", name="Deploy", command="deploy")]
+    )
+    run_id = "8f2c2a54-0b8e-4e1c-9a51-3f5d2c7b9e10"
+    spawner = _RecordingSlowSpawner()
+    creation = threading.Thread(
+        target=functools.partial(
+            manager.create,
+            "workspace",
+            "/workspace",
+            rows=24,
+            cols=80,
+            backend=spawner,
+            environment=bound,
+            action_id="deploy",
+            run_id=run_id,
+        ),
+        daemon=True,
+    )
+    creation.start()
+    assert spawner.spawning.wait(2)
+    stopped: list[dict] = []
+    stop = threading.Thread(
+        target=lambda: stopped.append(manager.delete("workspace", "term_" + run_id)),
+        daemon=True,
+    )
+    try:
+        stop.start()
+        stop.join(0.3)
+        stopped_mid_spawn = not stop.is_alive()
+    finally:
+        spawner.release.set()
+        creation.join(5)
+        stop.join(5)
+
+    assert not stopped_mid_spawn, "the Stop waits for the terminal it stops"
+    assert [descriptor["state"] for descriptor in stopped] == ["closed"]
+    [process] = spawner.processes
+    assert process.killed
+    assert manager.list("workspace") == []
+    assert receipts.read("workspace", "term_" + run_id)["state"] == "closed"
+    manager.close()
+
+
 def test_environment_test_poll_does_not_block_and_can_be_cancelled(monkeypatch):
     entered = threading.Event()
     exited = threading.Event()
@@ -265,6 +398,130 @@ def test_environment_orphan_poll_is_throttled(monkeypatch):
         worker._thread.join(1)
     worker.close()
     assert [call["cleanup_orphans"] for call in calls] == [True, False, False, True]
+
+
+def _environment_worker(monkeypatch, tmp_path, prepare, status):
+    """A worker whose first claim runs one test run against stand-ins.
+
+    The run is handed the stop event the worker gives its claim, as the real
+    claim does; ``prepare`` stands in for installation and ``status`` answers
+    every report. Returns the worker, its claims and the run's reports.
+    """
+    claims = []
+    reports = []
+
+    class _RunManager:
+        def __init__(self, backend):
+            self.backend = backend
+
+        def create(self, spec):
+            pass
+
+        def start(self, spec):
+            return SimpleNamespace(container_id="container-1")
+
+        def prepare_shared_workspace(self, spec):
+            pass
+
+        def inspect(self, name):
+            return None
+
+        def remove_environment_test(self, spec, *, container_id):
+            pass
+
+    class _Source:
+        def __init__(self, job, **kwargs):
+            pass
+
+        def import_into(self, manager, spec):
+            return "c" * 40
+
+        def discard(self):
+            pass
+
+    class _Preparation:
+        root = tmp_path
+
+        def prepare(self, backend, environment, *, callback, cancel):
+            prepare(callback, cancel)
+
+    def post(path, json):
+        reports.append(json)
+        return httpx.Response(status, request=httpx.Request("POST", f"http://control{path}"))
+
+    backend = SimpleNamespace(
+        uid=1000, gid=1000, version_stamp=lambda: {"sandbox_image_digest": "sha256:" + "a" * 64}
+    )
+    environment = BoundEnvironment(binding_id="b", setup_script="make").model_dump(mode="json")
+
+    def claim_and_execute(**kwargs):
+        claims.append(kwargs)
+        if len(claims) == 1:
+            environment_tests.execute_test(
+                client=SimpleNamespace(post=post),
+                run={
+                    "id": "run-1",
+                    "lease_generation": 1,
+                    "repo": "org/repo",
+                    "base_sha": "c" * 40,
+                    "environment": environment,
+                    "purpose": "test",
+                },
+                backend=backend,
+                stop=kwargs["stop"],
+            )
+        return True
+
+    monkeypatch.setattr(environment_tests, "ChatSandboxManager", _RunManager)
+    monkeypatch.setattr(environment_tests, "RetainedChatBackend", lambda manager, spec: None)
+    monkeypatch.setattr(environment_tests, "EnvironmentPreparation", _Preparation)
+    monkeypatch.setattr(environment_tests, "claim_and_execute", claim_and_execute)
+    monkeypatch.setattr("cloud_agent_host.runner._SourcePrefetch", _Source)
+    return environment_tests.EnvironmentTestWorker("http://control", backend), claims, reports
+
+
+@pytest.mark.parametrize("refused", ["report", "heartbeat"])
+def test_a_cancelled_environment_run_leaves_the_worker_polling(monkeypatch, tmp_path, refused):
+    """A refused report or a failed heartbeat ends that run, never the host's worker."""
+    now = [100.0]
+    monkeypatch.setattr(environment_tests.time, "monotonic", lambda: now[0])
+
+    def prepare(callback, cancel):
+        if refused == "report":
+            # The owner cancelled the run, so its next report is refused.
+            callback({"phase": "setup", "state": "running", "output": "installing"})
+        else:
+            # A heartbeat falls due and the control plane cannot be reached.
+            now[0] += 11
+            assert cancel.wait(15)
+
+    worker, claims, reports = _environment_worker(
+        monkeypatch, tmp_path, prepare, 409 if refused == "report" else 503
+    )
+    worker.poll("credential")
+    worker._thread.join(20)
+    assert reports[-1]["state"] == "cancelled"
+    assert not worker._stop.is_set()
+    now[0] += 6
+    worker.poll("credential")
+    worker._thread.join(1)
+    worker.close()
+    assert len(claims) == 2
+
+
+def test_closing_the_environment_worker_still_cancels_its_run(monkeypatch, tmp_path):
+    started = threading.Event()
+
+    def prepare(callback, cancel):
+        started.set()
+        assert cancel.wait(5)
+
+    worker, _, reports = _environment_worker(monkeypatch, tmp_path, prepare, 200)
+    worker.poll("credential")
+    assert started.wait(5)
+    worker.close()
+    assert not worker.busy
+    assert reports[-1]["state"] == "cancelled"
 
 
 @pytest.mark.asyncio

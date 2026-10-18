@@ -45,7 +45,10 @@ from cloud_agent.storage._sql.hosts import (
     COVERED_GROUP_SQL,
     HOST_CAPACITY_COLUMNS,
     HOST_COLUMNS,
+    HOST_RETAINED_GROUP,
     QUALIFIED_HOST_COLUMNS,
+    lock_revocation_rows,
+    release_late_covered_sandboxes,
     revoke_host_credentials,
 )
 from cloud_agent.storage._sql.move_out import (
@@ -69,6 +72,7 @@ from cloud_agent_shared.sandbox_archive_settings import (
     SandboxArchivePolicy,
     SandboxArchivePolicyError,
 )
+from cloud_agent_shared.sandbox_restore import SANDBOX_RESTORE_CAPABILITY
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -888,7 +892,10 @@ class PostgresHostPoolRepository:
         claims nothing, its idle groups stop into checkpoints and are handed
         over one at a time, and :meth:`finish_host_removals` revokes it once
         none is left and its last running turn has ended. Nothing running is
-        interrupted.
+        interrupted. A host still running turns moves out whenever it can,
+        even with no group to stop yet: a turn restoring a group, or one that
+        claimed a covered group before the removal, leaves that group running
+        here once it ends.
 
         A removal that would leave groups bound to the host needs
         ``allow_unmoved``: ``"no_move_target"`` when groups could move but no
@@ -929,6 +936,9 @@ class PostgresHostPoolRepository:
                 "ORDER BY id FOR UPDATE",
                 host,
             )
+            # Then its groups, which the counts below read and the revocation
+            # hands over: a start fenced in between would slip out of both.
+            await lock_revocation_rows(conn, [host])
             row = await conn.fetchrow(
                 "SELECT status, slots_used, drain_fence_active, removal_requested_at, "
                 "removal_moves_out, removal_leaves_unmoved "
@@ -966,7 +976,12 @@ class PostgresHostPoolRepository:
                     leaves_unmoved,
                 )
                 return "moving_out"
-            moving = bool(groups["to_stop"]) and await move_out_possible(
+            # A running turn may leave a group running here that this count
+            # did not see: one it is restoring, or a covered one it claimed
+            # before the removal and starts after it. The revocation, which
+            # waits for the turn, would leave that group behind, so a host
+            # still running turns moves out whenever it can.
+            moving = bool(groups["to_stop"] or row["slots_used"]) and await move_out_possible(
                 conn, [host], need_target=True
             )
             if not allow_unmoved:
@@ -1002,6 +1017,10 @@ class PostgresHostPoolRepository:
         lock: an attempt the reaper is ending at this moment must either be
         finished first or keep the host for the next pass.
 
+        Each pass then hands on any group of an already revoked host whose
+        checkpoint arrived with a beat still in flight at the revocation
+        (``release_late_covered_sandboxes``).
+
         Returns the hosts it revoked.
         """
         removed: list[str] = []
@@ -1019,6 +1038,7 @@ class PostgresHostPoolRepository:
                         "ORDER BY id FOR UPDATE",
                         host,
                     )
+                    await lock_revocation_rows(conn, [host])
                     row = await conn.fetchrow(
                         "SELECT h.slots_used, h.removal_requested_at, "
                         "(" + _REMOVAL_WAITS_SQL + ") AS moving "
@@ -1034,6 +1054,16 @@ class PostgresHostPoolRepository:
                         continue
                     await revoke_host_credentials(conn, [host])
                 removed.append(host)
+            async with conn.transaction():
+                released = await release_late_covered_sandboxes(conn)
+        if released:
+            logger.info(
+                "agent_sandboxes_released_after_revocation",
+                extra={
+                    "event": "agent_sandboxes_released_after_revocation",
+                    "sandbox_ids": released,
+                },
+            )
         return removed
 
     async def reap_offline_hosts(
@@ -1462,6 +1492,9 @@ class PostgresHostPoolRepository:
         Occupied slots are ordinary backpressure. Missing/stale/disabled hosts,
         lost deployment markers and a wrong placement pin are not. Retained
         members use their owner, independent of the pin for new conversations.
+        A ``cold`` group lives in its checkpoint instead: any host that
+        restores may take it, except the one it left while that one still
+        names its container, as the claim's cold branch reads it.
         No user content, job identifiers or credentials leave this projection.
         """
         async with self._pool.acquire() as conn, conn.transaction():
@@ -1491,6 +1524,8 @@ class PostgresHostPoolRepository:
                 """
                 WITH waiting AS (
                     SELECT g.host AS owner, t.execution_profile,
+                           COALESCE(g.state = 'cold', FALSE) AS cold,
+                           g.container_id IS NULL AS uncontained,
                            COALESCE(j.metadata->'requires', '[]'::jsonb) AS requires
                     FROM agent_jobs j
                     JOIN agent_threads t ON t.id = j.thread_id
@@ -1527,7 +1562,11 @@ class PostgresHostPoolRepository:
                            WHERE waiting.requires <@ h.capabilities
                              AND (waiting.execution_profile = 'trusted-v1' OR h.sandbox_runtime = $2)
                              AND (
-                                 (waiting.owner IS NOT NULL AND h.host = waiting.owner)
+                                 (waiting.owner IS NOT NULL AND NOT waiting.cold
+                                  AND h.host = waiting.owner)
+                                 OR (waiting.cold AND $4::boolean
+                                     AND h.capabilities @> $7::jsonb
+                                     AND (waiting.uncontained OR h.host <> waiting.owner))
                                  OR (waiting.owner IS NULL
                                      AND h.capabilities @> '["native-fork-at-anchor-v1"]'::jsonb
                                      AND ($1 = '' OR h.capabilities ? ('shared-sandbox-deployment:' || $1))
@@ -1544,6 +1583,7 @@ class PostgresHostPoolRepository:
                 archive_required,
                 archive_revision,
                 json.dumps([SANDBOX_ARCHIVE_CAPABILITY]),
+                json.dumps([SANDBOX_RESTORE_CAPABILITY]),
                 timeout=10,
             )
         return {key: int(row[key]) for key in ("queued", "unavailable", "running")}
@@ -1623,11 +1663,18 @@ class PostgresHostPoolRepository:
     async def runtime_download_targets(self) -> list[dict[str, str]]:
         """What every heartbeat answer tells hosts to hold, per runtime.
 
-        The record's version, and until an update switches new chats, also the
-        downloaded version they use now: a host that joins while the update is
-        downloading, or after it failed, must still run what every other host
-        runs. Done targets stay, so a host that joins later, or restarts on a
-        new sandbox image, downloads and checks the version again.
+        The record's version, and the downloaded version an update replaced.
+        Until the update switches new chats, they still use that one: a host
+        that joins while the update is downloading, or after it failed, must
+        run what every other host runs. After the switch it is what Roll back
+        returns to, so rolling back is instant on every host, one that joins
+        later included. The switch waits only for the record's own version.
+        The version new chats use comes first. Done targets stay, so a host
+        that joins later, or restarts on a new sandbox image, downloads and
+        checks the version again.
+
+        A selection record, Roll back's included, replaced nothing to hold:
+        the version rolled back from stays only where chats still run it.
         """
         async with self._pool.acquire() as conn:
             policy = await conn.fetchrow(
@@ -1639,15 +1686,18 @@ class PostgresHostPoolRepository:
         for runtime, record in sorted(upgrades.items()):
             if not isinstance(record, dict):
                 continue
+            own = {"runtime": runtime, **_download_of(record)}
             held = record.get("previous_download")
-            if (
-                not record.get("activated_at")
-                and isinstance(held, dict)
-                and held.get("version") == selection.get(runtime)
-                and held.get("version") != record.get("version")
-            ):
-                targets.append({"runtime": runtime, **_download_of(held)})
-            targets.append({"runtime": runtime, **_download_of(record)})
+            if not isinstance(held, dict) or held.get("version") == record.get("version"):
+                targets.append(own)
+            elif not record.get("activated_at"):
+                if held.get("version") == selection.get(runtime):
+                    targets.append({"runtime": runtime, **_download_of(held)})
+                targets.append(own)
+            else:
+                targets.append(own)
+                if held.get("version") == record.get("previous_version"):
+                    targets.append({"runtime": runtime, **_download_of(held)})
         return targets
 
     async def request_runtime_upgrade(
@@ -1979,10 +2029,13 @@ class PostgresHostPoolRepository:
         ``"retained_groups_present"``, ``"resource_bound"``,
         ``"active_attempts_present"`` and ``"pending_compute_operations"``.
         A sandbox whose deletion has completed is an audit row: it keeps the
-        host name and does not block forgetting. A live group, or one whose
-        deletion failed or is still in progress, does. A disabled attached
-        machine without external release capability may be deregistered after
-        dependency checks; this never shuts it down.
+        host name and does not block forgetting. Nor does a ``cold`` group,
+        which any restore-capable host may claim; it keeps naming this host as
+        the last it ran on until a claim moves it (``HOST_RETAINED_GROUP``).
+        A live or stopped group, or one whose deletion failed or is still in
+        progress, does block. A disabled attached machine without external
+        release capability may be deregistered after dependency checks; this
+        never shuts it down.
 
         The active-host refusal lives here rather than in the caller because
         checking there is a read the switch can outrun: the endpoint sees the
@@ -1998,7 +2051,7 @@ class PostgresHostPoolRepository:
             if active == host:
                 return "active"
             retained = await conn.fetchval(
-                "SELECT 1 FROM agent_sandboxes WHERE host=$1 AND deletion_state<>'deleted' LIMIT 1",
+                f"SELECT 1 FROM agent_sandboxes g WHERE g.host=$1 AND {HOST_RETAINED_GROUP} LIMIT 1",
                 host,
             )
             if retained:

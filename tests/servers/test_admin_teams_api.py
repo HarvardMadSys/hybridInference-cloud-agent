@@ -96,8 +96,10 @@ class FakeTeams:
 class FakeGateway:
     def __init__(self) -> None:
         self.unreadable: set[str] = set()
+        self.asked: list[str] = []
 
     async def user_email(self, user_id: str) -> str:
+        self.asked.append(user_id)
         if user_id in self.unreadable:
             raise GatewayError("unavailable")
         return f"{user_id}@example.com"
@@ -129,14 +131,17 @@ async def test_the_list_names_owners_and_offers_the_next_page(api) -> None:
     teams.more = True
 
     response = await client.get(
-        "/admin/agent/teams?q=%20plat%20&state=all&limit=1&offset=4", headers=ADMIN
+        "/admin/agent/teams?q=%20plat%20&state=all&limit=1&before=ateam_9", headers=ADMIN
     )
 
     assert response.status_code == 200
     assert response.headers["cache-control"] == "no-store"
-    assert teams.calls == [("list", {"query": "plat", "state": "all", "limit": 1, "offset": 4})]
+    assert teams.calls == [
+        ("list", {"query": "plat", "state": "all", "limit": 1, "before": "ateam_9"})
+    ]
     body = response.json()
-    assert body["next_offset"] == 5
+    # The next page starts after the last team this one showed.
+    assert body["next_before"] == "ateam_1"
     (summary,) = body["teams"]
     assert summary["owner"] == {
         "user_id": "alice",
@@ -156,8 +161,10 @@ async def test_a_blank_search_lists_everything_and_a_bad_state_is_refused(api) -
     assert (await client.get("/admin/agent/teams?q=%20%20", headers=ADMIN)).status_code == 200
     assert teams.calls[-1][1]["query"] is None
     assert teams.calls[-1][1]["state"] == "active"
+    assert teams.calls[-1][1]["before"] is None
     assert (await client.get("/admin/agent/teams?state=gone", headers=ADMIN)).status_code == 422
     assert (await client.get("/admin/agent/teams?limit=101", headers=ADMIN)).status_code == 422
+    assert (await client.get("/admin/agent/teams?before=", headers=ADMIN)).status_code == 422
 
 
 async def test_a_team_lists_everyone_and_survives_an_unreadable_email(api) -> None:
@@ -172,6 +179,7 @@ async def test_a_team_lists_everyone_and_survives_an_unreadable_email(api) -> No
         ],
         join_requests=[ApplicantRecord("atjr_1", "dave", "Dave", "", "pending", NOW, NOW)],
         invitations={"open": 1, "expired": 2, "claimed": 3, "revoked": 0},
+        departed_count=1,
     )
 
     response = await client.get("/admin/agent/teams/ateam_1", headers=ADMIN)
@@ -189,6 +197,32 @@ async def test_a_team_lists_everyone_and_survives_an_unreadable_email(api) -> No
     assert body["members"][2]["departed_at"] is not None
     assert [(r["id"], r["display_name"]) for r in body["join_requests"]] == [("atjr_1", "Dave")]
     assert body["invitations"] == {"open": 1, "expired": 2, "claimed": 3, "revoked": 0}
+    assert body["departed_member_count"] == 1
+
+
+async def test_a_team_counts_departures_it_does_not_list_and_looks_up_only_those_listed(
+    api,
+) -> None:
+    client, teams, gateway = api
+    teams.detail = AdminTeamDetail(
+        team=team(),
+        members=[
+            AdminMemberRecord("alice", "Alice", "", "owner", "active", NOW, None),
+            AdminMemberRecord("carol", "", "", "member", "left", NOW, NOW),
+        ],
+        join_requests=[],
+        invitations={"open": 0, "expired": 0, "claimed": 0, "revoked": 0},
+        departed_count=120,
+    )
+
+    response = await client.get("/admin/agent/teams/ateam_1", headers=ADMIN)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [m["user_id"] for m in body["members"]] == ["alice", "carol"]
+    assert body["departed_member_count"] == 120
+    # One Gateway lookup per person named, none for the departures only counted.
+    assert sorted(gateway.asked) == ["alice", "carol"]
 
 
 async def test_an_unknown_team_is_not_found(api) -> None:
@@ -201,7 +235,9 @@ async def test_an_unknown_team_is_not_found(api) -> None:
 
 async def test_audit_events_name_people_and_page_backwards(api) -> None:
     client, teams, _ = api
-    teams.detail = AdminTeamDetail(team=team(), members=[], join_requests=[], invitations={})
+    teams.detail = AdminTeamDetail(
+        team=team(), members=[], join_requests=[], invitations={}, departed_count=0
+    )
     teams.events = [audit(9), audit(8, action="team_created", target_user_id=None), audit(7)]
 
     response = await client.get("/admin/agent/teams/ateam_1/audit-events?limit=2", headers=ADMIN)

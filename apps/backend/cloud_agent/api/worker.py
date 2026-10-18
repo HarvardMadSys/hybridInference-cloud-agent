@@ -52,6 +52,7 @@ from cloud_agent.application.residency import _mint_residency_grant, residency_t
 from cloud_agent.application.ssh_servers import (
     build_ssh_access,
     prompt_with_ssh_servers,
+    push_ssh_access,
     servers_for_thread,
     ssh_key_cipher,
 )
@@ -1636,20 +1637,26 @@ async def worker_report_environment_snapshot(
     """Record what a new workspace did with its installation snapshot.
 
     Usage keeps a snapshot from expiring; a workspace that had none, or whose
-    lockfiles or image differed, queues a build for its commit.
+    lockfiles or image differed, queues a build for its commit. Fenced like
+    every other worker write: only the attempt holding the job's live lease,
+    on a host still enrolled, is heard.
     """
     job_store = _require_store(store)
     claims = _worker_claims(authorization)
     _match_job(claims, job_id)
     try:
-        await job_store.environment_snapshots.record_use(
+        recorded = await job_store.environment_snapshots.record_use(
             job_id=job_id,
+            attempt_id=claims["attempt_id"],
+            lease_generation=claims["lease_generation"],
             snapshot_id=body.snapshot_id,
             outcome=body.outcome,
             base_sha=body.base_sha,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if not recorded:
+        raise _lease_lost()
     return Response(status_code=204)
 
 
@@ -1660,6 +1667,7 @@ async def worker_report_environment_snapshot(
 async def worker_mark_thread_sandbox_running(
     job_id: str,
     body: WorkerSandboxRunningRequest,
+    background: BackgroundTasks,
     authorization: str | None = Header(None),
     store: _WorkerStorage | None = Depends(get_storage),
 ) -> WorkerThreadSandbox:
@@ -1679,6 +1687,12 @@ async def worker_mark_thread_sandbox_running(
     )
     if row is None:
         raise _lease_lost()
+    # The claim's SSH state was read before the group was reserved, and an
+    # owner's change made since found no running group to push to. This push
+    # is read after the group became running, so it holds every such change
+    # and is newer than the claim's: the sandbox manager keeps it whichever of
+    # the two arrives first. Every later change finds the group running.
+    background.add_task(push_ssh_access, job_store, thread_ids=[thread_id])
     return WorkerThreadSandbox(**row)
 
 

@@ -705,6 +705,20 @@ describe('TrajectoryView overview', () => {
     expect(container.querySelector('[data-timeline-focus="outside"]')).toBeNull();
   });
 
+  it.each([
+    ['a drag', 0],
+    ['a pan', 2],
+  ])('claims the Escape that cancels %s, so it cannot also stop the run', (_gesture, button) => {
+    render(<Harness events={MANY} />);
+    withTrackWidth();
+
+    // Nothing is selected or zoomed yet: cancelling the gesture is all Escape does.
+    pointer('pointerdown', { button, pointerId: 1, clientX: 100, clientY: 10 });
+    pointer('pointermove', { pointerId: 1, clientX: 250, clientY: 10 });
+
+    expect(fireEvent.keyDown(track(), { key: 'Escape' })).toBe(false);
+  });
+
   it('walks into steps appended while the pointer is held at an edge', () => {
     vi.useFakeTimers();
     const { rerender } = render(<Harness events={MANY} />);

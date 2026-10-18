@@ -221,6 +221,26 @@ async def _expire_attempt(pool, store: Storage, attempt_id: int) -> None:
         )
 
 
+async def _waiting_on(pool, pid: int) -> int:
+    """The backend that waits on a lock ``pid`` holds, once one does.
+
+    test_lock_order has the same probe; it imports this module, so this one
+    cannot import it. Postgres queues a row's lockers: the first one holds the
+    row's tuple lock while it waits for the owner, and the next waits behind
+    that first one rather than behind the owner.
+    """
+    async with asyncio.timeout(10), pool.acquire() as observer:
+        while True:
+            waiter = await observer.fetchval(
+                "SELECT pid FROM pg_locks "
+                "WHERE NOT granted AND $1 = ANY(pg_blocking_pids(pid)) LIMIT 1",
+                pid,
+            )
+            if waiter is not None:
+                return waiter
+            await asyncio.sleep(0.01)
+
+
 def _shared_claim_attestation() -> dict[str, object]:
     """Return the exact process-local fence required for shared work."""
     return {
@@ -743,6 +763,8 @@ async def test_shared_workspace_snapshot_publishes_without_rewriting_turn_state(
     assert await store.snapshot.complete_snapshot_base_import(
         snapshot_id=capture["snapshot_id"],
         commit_sha=commit_sha,
+        generation=pending_import["generation"],
+        container_id=pending_import["container_id"],
     )
     final_sandbox = await store.sandbox.thread_sandbox(thread_id=job["thread_id"])
     assert final_sandbox is not None
@@ -847,6 +869,8 @@ async def test_snapshot_publication_uses_latest_current_attempt_replies_from_inc
         assert await store.snapshot.complete_snapshot_base_import(
             snapshot_id=prior_capture["snapshot_id"],
             commit_sha="b" * 40,
+            generation=prior_publication["generation"],
+            container_id=prior_publication["container_id"],
         )
     child = await store.conversation_commands.create_follow_up(
         parent_job_id=parent["id"], user_id=parent["user_id"], prompt="also update the docs"
@@ -1815,13 +1839,17 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
     # operation lock. A retry that takes thread -> operation would deadlock
     # against finalization's operation -> thread once this lock is released.
     async with pool.acquire() as conn, conn.transaction():
+        holder = await conn.fetchval("SELECT pg_backend_pid()")
         await conn.fetchrow(
             "SELECT id FROM agent_session_forks WHERE id = $1 FOR UPDATE", operation["id"]
         )
         finalization = asyncio.create_task(
             store.session_fork.finalize_session_fork(operation_id=operation["id"])
         )
-        await asyncio.sleep(0.03)
+        # Start the retry only once finalization waits on this row. Finalization
+        # then holds the row's tuple lock, so the retry queues behind it: the
+        # second wait looks for what finalization blocks, not this holder.
+        finalizer = await _waiting_on(pool, holder)
         retry = asyncio.create_task(
             store.session_fork.prepare_session_fork(
                 source_job_id=job["id"],
@@ -1829,7 +1857,7 @@ async def test_native_fork_finalizes_two_concurrent_members_in_one_sandbox(
                 idempotency_key="native-fork-one",
             )
         )
-        await asyncio.sleep(0.03)
+        await _waiting_on(pool, finalizer)
         assert not finalization.done() and not retry.done()
     child, replayed = await asyncio.wait_for(asyncio.gather(finalization, retry), timeout=3)
     assert replayed is not None and replayed["state"] == "ready"
@@ -4696,6 +4724,73 @@ async def test_failed_preadmission_late_container_observation_is_stopped(
     assert due is not None
     assert due["reason"] == "orphaned_attempt"
     assert due["activation_generation"] == 0
+    assert due["member_activation_generations"] == {
+        job["thread_id"]: sandbox["activation_generation"]
+    }
+
+
+async def test_orphan_stop_fence_snapshots_every_shared_member_activation(
+    pool,
+    store: Storage,
+):
+    job, claim, sandbox = await _reserve_shared_chat(store)
+    sibling = await _create_job(store, task_prompt="shared sibling")
+    fence = {
+        "thread_id": job["thread_id"],
+        "attempt_id": claim["attempt_id"],
+        "lease_generation": claim["lease_generation"],
+        "sandbox_generation": sandbox["generation"],
+        "activation_generation": sandbox["activation_generation"],
+    }
+    running = await store.sandbox.mark_thread_sandbox_running(
+        **fence,
+        container_id="container-orphan-fence",
+        context_status="live",
+    )
+    assert running is not None
+
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO agent_thread_sandbox_memberships (
+                thread_id, user_id, sandbox_id, native_session_id, native_state,
+                context_status, activation_generation, process_generation,
+                resident_state, resident_slot_id
+            ) VALUES (
+                $1, (SELECT user_id FROM agent_threads WHERE id = $1), $2,
+                'native-sibling', 'ready', 'live', 7, 2, 'live', 1
+            )
+            """,
+            sibling["thread_id"],
+            sandbox["sandbox_id"],
+        )
+        await conn.execute(
+            "UPDATE agent_thread_sandbox_memberships SET active_attempt_id=NULL WHERE sandbox_id=$1",
+            sandbox["sandbox_id"],
+        )
+        await conn.execute(
+            """
+            UPDATE agent_sandboxes
+            SET state='stopping', idle_deadline=NULL, stop_requested_at=NULL
+            WHERE id=$1
+            """,
+            sandbox["sandbox_id"],
+        )
+
+    due = await store.sandbox.due_thread_sandbox_stop(
+        thread_id=job["thread_id"],
+        host="shared-runner",
+        sandbox_id=sandbox["sandbox_id"],
+        container_id="container-orphan-fence",
+        sandbox_generation=sandbox["generation"],
+    )
+    assert due is not None
+    assert due["reason"] == "orphaned_attempt"
+    assert due["activation_generation"] == 0
+    assert due["member_activation_generations"] == {
+        job["thread_id"]: sandbox["activation_generation"],
+        sibling["thread_id"]: 7,
+    }
 
 
 async def test_stopped_observation_normalizes_a_reported_restarting_member(
@@ -5071,6 +5166,115 @@ async def test_expired_retained_admission_fails_closed_instead_of_replaying(
     failed_child = await store.conversation_queries.get_job(child["id"])
     assert failed_child["state"] == "failed"
     assert "lost the retained sandbox context" in failed_child["detail"]
+
+    observed = await store.sandbox.reconcile_thread_sandbox_observation(
+        thread_id=job["thread_id"],
+        host="runner-a",
+        sandbox_id=sandbox["sandbox_id"],
+        container_id="container-retained-one",
+        sandbox_generation=sandbox["generation"],
+        running=True,
+        activity_active=True,
+        members=[
+            {
+                "thread_id": job["thread_id"],
+                "activation_generation": sandbox["activation_generation"],
+                "process_generation": 0,
+                "residency_generation": 0,
+                "resident_state": "restarting",
+            }
+        ],
+        terminal_count=0,
+    )
+    assert observed == "stopping"
+    durable_after_observation = await store.sandbox.thread_sandbox(thread_id=job["thread_id"])
+    assert durable_after_observation is not None
+    assert durable_after_observation["state"] == "stopping"
+    assert durable_after_observation["context_status"] == "lost"
+    assert durable_after_observation["idle_deadline"] is None
+    due = await store.sandbox.due_thread_sandbox_stop(
+        thread_id=job["thread_id"],
+        host="runner-a",
+        sandbox_id=sandbox["sandbox_id"],
+        container_id="container-retained-one",
+        sandbox_generation=sandbox["generation"],
+    )
+    assert due is not None
+    assert due["reason"] == "lost"
+    assert due["activation_generation"] == 0
+    assert due["member_activation_generations"] == {
+        job["thread_id"]: sandbox["activation_generation"]
+    }
+
+    stopped = await store.sandbox.reconcile_thread_sandbox_observation(
+        thread_id=job["thread_id"],
+        host="runner-a",
+        sandbox_id=sandbox["sandbox_id"],
+        container_id="container-retained-one",
+        sandbox_generation=sandbox["generation"],
+        running=False,
+        activity_active=False,
+        members=[
+            {
+                "thread_id": job["thread_id"],
+                "activation_generation": sandbox["activation_generation"],
+                "process_generation": 0,
+                "residency_generation": 0,
+                "resident_state": "stopped",
+            }
+        ],
+        terminal_count=0,
+    )
+    assert stopped == "stopped"
+    durable_stopped = await store.sandbox.thread_sandbox(thread_id=job["thread_id"])
+    assert durable_stopped is not None
+    assert durable_stopped["state"] == "stopped"
+    assert durable_stopped["context_status"] == "lost"
+    assert durable_stopped["active_attempt_id"] is None
+    assert durable_stopped["idle_deadline"] is None
+    async with pool.acquire() as conn:
+        assert (
+            await conn.fetchval(
+                "SELECT active_operation_count FROM agent_sandboxes WHERE id=$1",
+                sandbox["sandbox_id"],
+            )
+            == 0
+        )
+
+    replayed = await store.sandbox.reconcile_thread_sandbox_observation(
+        thread_id=job["thread_id"],
+        host="runner-a",
+        sandbox_id=sandbox["sandbox_id"],
+        container_id="container-retained-one",
+        sandbox_generation=sandbox["generation"],
+        running=False,
+        activity_active=False,
+        members=[
+            {
+                "thread_id": job["thread_id"],
+                "activation_generation": sandbox["activation_generation"],
+                "process_generation": 0,
+                "residency_generation": 0,
+                "resident_state": "stopped",
+            }
+        ],
+        terminal_count=0,
+    )
+    assert replayed is None
+    durable_replayed = await store.sandbox.thread_sandbox(thread_id=job["thread_id"])
+    assert durable_replayed is not None
+    assert durable_replayed["state"] == "stopped"
+    assert durable_replayed["context_status"] == "lost"
+    assert (
+        await store.sandbox.due_thread_sandbox_stop(
+            thread_id=job["thread_id"],
+            host="runner-a",
+            sandbox_id=sandbox["sandbox_id"],
+            container_id="container-retained-one",
+            sandbox_generation=sandbox["generation"],
+        )
+        is None
+    )
 
 
 async def test_reap_fails_job_after_max_attempts(pool, store: Storage):
@@ -5519,6 +5723,50 @@ async def test_a_turn_reserved_but_not_admitted_can_still_be_handed_back(store: 
 
     assert released is True
     assert (await store.conversation_queries.get_job(job["id"]))["state"] == "queued"
+
+
+async def test_a_turn_handed_back_after_its_reservation_can_be_reserved_again(store: Storage):
+    """The aborted attempt takes its activation of the chat's member with it.
+
+    Grant renewal hands back an attempt whose grant the Gateway will not
+    renew, and that attempt may already have reserved its chat. The member
+    went on naming the aborted attempt as its active one, which nothing
+    clears once the attempt is no longer running: every later reservation
+    of the chat was refused, and its group never counted as idle.
+    """
+    job, claim, sandbox = await _reserve_shared_chat(store)
+
+    assert await store.attempt_commands.release_claim(
+        job_id=job["id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+    )
+
+    member = await store.sandbox.thread_sandbox(thread_id=job["thread_id"])
+    assert member is not None
+    assert (member["active_attempt_id"], member["resident_state"]) == (None, "stopped")
+    retry = await _claim(
+        store,
+        worker_id="shared-worker",
+        lease_ttl_seconds=60,
+        host="shared-runner",
+        host_credential_hash="test-credential-hash",
+    )
+    assert retry is not None and retry["id"] == job["id"]
+    reserved = await store.sandbox.reserve_thread_sandbox(
+        thread_id=job["thread_id"],
+        attempt_id=retry["attempt_id"],
+        lease_generation=retry["lease_generation"],
+        host="shared-runner",
+        sandbox_id=sandbox["sandbox_id"],
+        container_name=sandbox["container_name"],
+        runtime_id=sandbox["runtime_id"],
+        runtime_version=sandbox["runtime_version"],
+        sandbox_image_digest=sandbox["sandbox_image_digest"],
+        execution_profile=sandbox["execution_profile"],
+    )
+    assert reserved is not None
+    assert reserved["active_attempt_id"] == retry["attempt_id"]
 
 
 async def test_a_release_records_the_reason_it_was_given(store: Storage):

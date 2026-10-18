@@ -170,7 +170,10 @@ async def _publish(store, publication: dict, *, commit_sha: str) -> None:
         commit_sha=commit_sha,
     )
     assert await store.snapshot.complete_snapshot_base_import(
-        snapshot_id=publication["snapshot_id"], commit_sha=commit_sha
+        snapshot_id=publication["snapshot_id"],
+        commit_sha=commit_sha,
+        generation=publication["generation"],
+        container_id=publication["container_id"],
     )
 
 

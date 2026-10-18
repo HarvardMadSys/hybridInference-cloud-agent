@@ -19,7 +19,8 @@ from unittest.mock import AsyncMock
 import pytest
 from tests.support.storage import OneFake
 
-from cloud_agent.workers.attempts import reap_expired_attempts
+from cloud_agent.workers import attempts as attempts_module
+from cloud_agent.workers.attempts import _cleanup_failed_session_fork, reap_expired_attempts
 
 pytestmark = pytest.mark.asyncio
 
@@ -79,3 +80,32 @@ async def test_one_failing_fork_cleanup_does_not_strand_the_ones_after_it(monkey
     # The fork whose sandbox manager could not be found still loses its credential.
     assert sorted(call.args[0] for call in grants.revoke.await_args_list) == ["agr_2", "agr_3"]
     sandbox_manager.shared_residency_lost.assert_awaited_once_with("athr_3", generation=3)
+
+
+async def test_a_fork_whose_host_never_answers_still_loses_its_grants_promptly(
+    monkeypatch,
+) -> None:
+    """Each member's process cleanup waits for its host a bounded time, then the revocation runs."""
+    monkeypatch.setattr(attempts_module, "RESIDENCY_CLEANUP_TIMEOUT_S", 0.05)
+    gone = asyncio.Event()
+
+    async def never_answers(_thread_id: str, *, generation: int) -> None:
+        await gone.wait()
+
+    sandbox_manager = SimpleNamespace(shared_residency_lost=never_answers)
+
+    async def sandbox_manager_for_job(_store: Any, _job_id: str | None) -> Any:
+        return sandbox_manager
+
+    monkeypatch.setattr(
+        "cloud_agent.sandbox_manager_routing.sandbox_manager_for_job", sandbox_manager_for_job
+    )
+    operation = _failed_fork(4)
+    operation["cleanup_residencies"].append(
+        {"thread_id": "athr_5", "generation": 5, "grant_id": "agr_5"}
+    )
+    grants = SimpleNamespace(revoke=AsyncMock(return_value=True))
+
+    await asyncio.wait_for(_cleanup_failed_session_fork(object(), operation, grants), 2)
+
+    assert sorted(call.args[0] for call in grants.revoke.await_args_list) == ["agr_4", "agr_5"]

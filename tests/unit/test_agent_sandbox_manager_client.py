@@ -451,6 +451,36 @@ async def test_an_oversized_error_reply_keeps_its_status_and_drops_its_detail(mo
 
 
 @pytest.mark.asyncio
+async def test_an_oversized_capability_answer_is_refused_before_it_is_buffered(monkeypatch):
+    """The capability probe reads the host's /health answer under the same ceiling."""
+    monkeypatch.setattr(sandbox_manager_client, "MAX_SANDBOX_MANAGER_CONTROL_BYTES", 1024 * 1024)
+    body, pulled = _counting_body(64)
+    broker = _broker(lambda request: httpx.Response(200, content=body()))
+
+    with pytest.raises(SandboxManagerError) as refused:
+        await broker.require_environment_capability()
+    assert refused.value.status_code == 503
+    assert pulled[0] == 17
+
+
+@pytest.mark.asyncio
+async def test_a_capability_answer_is_still_read_and_checked():
+    def respond(request):
+        assert request.url.path == "/health"
+        assert request.headers["X-Agent-Workspace-Token"] == "secret"
+        return httpx.Response(200, json={"capabilities": ["environment-v1", "ssh-access-v1"]})
+
+    assert await _broker(respond).require_environment_capability() == [
+        "environment-v1",
+        "ssh-access-v1",
+    ]
+    with pytest.raises(SandboxManagerError, match="must be upgraded"):
+        await _broker(
+            lambda request: httpx.Response(200, json={"capabilities": ["ssh-access-v1"]})
+        ).require_environment_capability()
+
+
+@pytest.mark.asyncio
 async def test_a_health_probe_never_reads_a_success_body():
     body, pulled = _counting_body(64)
     broker = _broker(lambda request: httpx.Response(200, content=body()))

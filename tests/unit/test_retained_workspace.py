@@ -9,13 +9,16 @@ import resource
 import stat
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 
+from cloud_agent_host.chat_sandbox import CHAT_WORKDIR
 from cloud_agent_host.retained_workspace import (
     _READ_PROGRAM,
     _WRITE_PROGRAM,
     _error_from_result,
+    read_retained_file,
 )
 
 
@@ -131,6 +134,61 @@ def test_retained_reader_never_returns_download_bytes_for_symlinks(tmp_path):
     assert result.returncode == 0
     assert payload["kind"] == "symlink"
     assert payload.get("content_base64") is None
+
+
+def _backend(root, *, lang: str | None = None):
+    """A retained backend whose exec runs the fixed argv against ``root``.
+
+    The program sees the container's environment, which names no locale.
+    """
+
+    def exec_capture(_spec, argv, *, workdir, timeout_s, observer=None):
+        command = [sys.executable, *argv[1:]]
+        command[command.index(CHAT_WORKDIR)] = str(root)
+        return subprocess.run(
+            command,
+            cwd=workdir,
+            env={"PATH": "/usr/bin:/bin", **({"LANG": lang} if lang else {})},
+            capture_output=True,
+            timeout=timeout_s,
+            check=False,
+        )
+
+    return SimpleNamespace(spec=None, manager=SimpleNamespace(exec_capture=exec_capture))
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="other filesystems refuse non-UTF-8 names")
+@pytest.mark.parametrize("lang", [None, "C.UTF-8"])
+def test_a_name_that_is_not_utf8_leaves_the_rest_of_its_directory_listed(tmp_path, lang):
+    (tmp_path / "README.md").write_text("hello\n")
+    (tmp_path / "café.txt").write_text("x")
+    # Latin-1: a reply cannot name it, so no request could name it back.
+    with open(os.path.join(os.fsencode(tmp_path), b"caf\xe9.dat"), "wb") as handle:
+        handle.write(b"x")
+
+    listing = read_retained_file(
+        _backend(tmp_path, lang=lang), "", max_preview_bytes=1024, max_directory_entries=100
+    )
+
+    assert [entry["name"] for entry in listing["entries"]] == ["café.txt", "README.md"]
+    assert listing["truncated"] is True
+
+
+def test_a_directory_listed_up_to_its_entry_limit_says_so(tmp_path):
+    for name in ("a.txt", "b.txt", "c.txt"):
+        (tmp_path / name).write_text(name)
+
+    capped = read_retained_file(
+        _backend(tmp_path), "", max_preview_bytes=1024, max_directory_entries=2
+    )
+    whole = read_retained_file(
+        _backend(tmp_path), "", max_preview_bytes=1024, max_directory_entries=3
+    )
+
+    assert [entry["name"] for entry in capped["entries"]] == ["a.txt", "b.txt"]
+    assert capped["truncated"] is True
+    assert len(whole["entries"]) == 3
+    assert whole["truncated"] is False
 
 
 @pytest.mark.parametrize("path", ["../image.png", "./image.png", "nested/../image.png"])

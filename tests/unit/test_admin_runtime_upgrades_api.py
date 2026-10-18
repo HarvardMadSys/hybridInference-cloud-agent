@@ -268,6 +268,35 @@ async def test_a_finished_update_shows_as_updated_with_its_rollback(api):
     assert item["upgrade"]["previous_version"] is None
 
 
+async def test_holding_what_roll_back_returns_to_is_not_the_updates_progress(api):
+    """Hosts keep that version after the switch; the page follows only the update."""
+    client, store, _audited, _registry = api
+    held = {"version": "2.1.235", "before": "2026-01-01T00:00:00Z", "nonce": "a" * 32}
+    store.host_pool.selection = {"claude-code": "2.1.300"}
+    store.host_pool.upgrades["claude-code"] = {
+        "kind": "update",
+        "version": "2.1.300",
+        "before": "2026-10-15T00:00:00Z",
+        "nonce": "0123456789abcdef0123456789abcdef",
+        "previous_version": "2.1.235",
+        "previous_download": held,
+        "requested_at": "2026-10-15T00:00:00+00:00",
+        "activated_at": "2026-10-15T00:04:00+00:00",
+    }
+    host = store.host_pool.hosts[0]
+    host["runtime_versions_available"] = {"claude-code": ["2.1.220", "2.1.300"]}
+    # This host lost its copy and could not download it again.
+    host["runtime_downloads"] = [
+        {**held, "runtime": "claude-code", "state": "failed", "progress": 0, "error": "npm"}
+    ]
+
+    item = _by_runtime((await client.get("/admin/agent/runtime-upgrades")).json())["claude-code"]
+
+    upgrade = item["upgrade"]
+    assert (upgrade["state"], upgrade["progress"], upgrade["error"]) == ("updated", 100, None)
+    assert upgrade["previous_version"] == "2.1.235"
+
+
 async def test_the_version_menu_lists_every_stable_release_from_npm(api):
     client, _store, _audited, _registry = api
 

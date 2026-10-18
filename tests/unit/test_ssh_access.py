@@ -496,6 +496,27 @@ def test_an_older_state_is_applied_only_as_far_as_the_newest_allows(tmp_path: Pa
     assert manager.targets == opened, "an older state leaves the bridge to the newest"
 
 
+@pytest.mark.parametrize("push_first", [True, False])
+def test_a_starting_turn_ends_with_the_push_sent_when_its_group_ran(
+    tmp_path: Path, push_first: bool
+) -> None:
+    """The claim read gpu on (8); the owner turned it off while the group started (9).
+
+    The control plane pushes 9 once the turn marks its group running, and the
+    runner applies the claim's 8 before the agent starts. Whichever lands
+    first, the turn ends with 9: no key for gpu and no exception for it.
+    """
+    manager = FakeManager(tmp_path)
+    claim, pushed = _access(8, ("a", 0, [_GPU])), _access(9)
+    order = [(pushed, None), (claim, "a")] if push_first else [(claim, "a"), (pushed, None)]
+
+    for access, starting in order:
+        _apply(manager, access, starting)
+
+    assert manager.held(0) == []
+    assert manager.targets[-1] == set()
+
+
 def test_a_newest_state_that_fails_closes_the_bridge(tmp_path: Path) -> None:
     manager = FakeManager(tmp_path, fail_slot=1)
     with pytest.raises(SandboxError, match="slot 1"):

@@ -3,7 +3,10 @@ import Link from 'next/link';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useAuth, useT } from '@/components/providers';
-import { useKeyboardShortcuts } from '@/components/features/settings/keyboardShortcutPreferences';
+import {
+  useApplePlatform,
+  useKeyboardShortcuts,
+} from '@/components/features/settings/keyboardShortcutPreferences';
 import { matchesShortcut, shortcutAriaLabel, shortcutLabel } from '@/lib/keyboardShortcuts';
 import { SettingsSidebar } from '@/components/features/settings/SettingsSidebar';
 import { useSidebarScroll } from './useSidebarScroll';
@@ -62,6 +65,7 @@ export function AgentsSidebar({
   const { state } = useAuth();
   const userId = state.user?.id;
   const [shortcuts] = useKeyboardShortcuts(userId);
+  const apple = useApplePlatform();
   const scrollRef = useSidebarScroll(active && !collapsed, userId);
   const reads = useAgentReads();
   const [preferences, updatePreferences] = useSidebarPreferences(userId);
@@ -757,8 +761,8 @@ export function AgentsSidebar({
                 ref={searchButton}
                 type="button"
                 aria-label={t('sidebar.search')}
-                title={`${t('sidebar.search')}${shortcuts.search ? ` (${shortcutLabel(shortcuts.search)})` : ''}`}
-                aria-keyshortcuts={shortcutAriaLabel(shortcuts.search)}
+                title={`${t('sidebar.search')}${shortcuts.search ? ` (${shortcutLabel(shortcuts.search, apple)})` : ''}`}
+                aria-keyshortcuts={shortcutAriaLabel(shortcuts.search, apple)}
                 aria-expanded={searchOpen}
                 className="ui-focus-ring flex h-8 w-8 items-center justify-center rounded-lg text-muted transition-colors hover:bg-surface-hover hover:text-foreground [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11"
                 onClick={() => {

@@ -6,10 +6,14 @@ import { useState } from 'react';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { cancelAgentJob } from '@/lib/api/agents';
 import { listMcpInvocations, type McpInvocationsApi } from '@/lib/api/mcp';
 import type { AgentAccessApi } from '@/lib/api/session';
+import { useJobRunActions } from '@/components/features/agents/job-detail/useJobRunActions';
 import { SkillDialog } from '@/components/features/agents/skills/SkillDialog';
+import type { AgentJob } from '@/components/features/agents/types';
 import { KeyboardShortcutsSettings } from '@/components/features/settings/KeyboardShortcutsSettings';
+import { onPlatform } from '@/lib/platformTestSupport';
 
 let access: AgentAccessApi | undefined;
 let role = 'internal';
@@ -25,12 +29,18 @@ beforeEach(() => {
   sessionStorage.clear();
   window.history.replaceState(null, '', '/');
   vi.mocked(listMcpInvocations).mockReset().mockResolvedValue({ invocations: [] });
+  vi.mocked(cancelAgentJob).mockReset();
   router.replace.mockReset();
   logout.mockReset();
 });
 
 let pathname = '/';
 let statusUrl = '/status';
+
+vi.mock('@/lib/api/agents', async (original) => ({
+  ...(await original<typeof import('@/lib/api/agents')>()),
+  cancelAgentJob: vi.fn(),
+}));
 
 vi.mock('@/lib/api/mcp', async (original) => ({
   ...(await original<typeof import('@/lib/api/mcp')>()),
@@ -160,7 +170,7 @@ describe('AgentsLayout sidebar collapse', () => {
     expect(toggle()).toHaveAccessibleName('Collapse task list');
     expect(toggle()).toHaveAttribute('aria-expanded', 'true');
     expect(toggle()).toHaveAttribute('aria-controls', 'agents-sidebar');
-    expect(toggle()).toHaveAttribute('aria-keyshortcuts', 'Meta+B Control+B');
+    expect(toggle()).toHaveAttribute('aria-keyshortcuts', 'Control+B');
     expect(screen.getByTestId('sidebar-stub')).toContainElement(toggle());
 
     fireEvent.click(toggle());
@@ -191,20 +201,50 @@ describe('AgentsLayout sidebar collapse', () => {
     expect(toggle()).toHaveAccessibleName('Expand task list');
   });
 
-  it('toggles and persists the task list with Command+B or Control+B', () => {
+  it.each([
+    ['MacIntel', { metaKey: true }, { ctrlKey: true }],
+    ['Win32', { ctrlKey: true }, { metaKey: true }],
+  ])(
+    'on %s, toggles and persists the task list with %j and leaves %j alone',
+    (platform, primary, other) => {
+      onPlatform(platform);
+      render(
+        <AgentsLayout>
+          <p>job</p>
+        </AgentsLayout>,
+      );
+
+      expect(fireEvent.keyDown(window, { key: 'b', ...other })).toBe(true);
+      expect(screen.getByTestId('sidebar-stub')).toBeInTheDocument();
+      expect(localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY)).toBeNull();
+
+      expect(fireEvent.keyDown(window, { key: 'b', ...primary })).toBe(false);
+      expect(screen.queryByTestId('sidebar-stub')).not.toBeInTheDocument();
+      expect(localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY)).toBe('1');
+
+      expect(fireEvent.keyDown(window, { key: 'b', ...primary })).toBe(false);
+      expect(screen.getByTestId('sidebar-stub')).toBeInTheDocument();
+      expect(localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY)).toBe('0');
+    },
+  );
+
+  it('leaves Control+B to a text field on a Mac and names Command in the hint', () => {
+    onPlatform('MacIntel');
     render(
       <AgentsLayout>
-        <p>job</p>
+        <textarea aria-label="Message" />
       </AgentsLayout>,
     );
+    const composer = screen.getByRole('textbox', { name: 'Message' });
 
-    expect(fireEvent.keyDown(window, { key: 'b', metaKey: true })).toBe(false);
-    expect(screen.queryByTestId('sidebar-stub')).not.toBeInTheDocument();
-    expect(localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY)).toBe('1');
-
-    expect(fireEvent.keyDown(window, { key: 'b', ctrlKey: true })).toBe(false);
+    // In a Mac text field, Control+B moves the caret back one character.
+    expect(fireEvent.keyDown(composer, { key: 'b', ctrlKey: true })).toBe(true);
     expect(screen.getByTestId('sidebar-stub')).toBeInTheDocument();
-    expect(localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY)).toBe('0');
+    expect(toggle()).toHaveAttribute('aria-keyshortcuts', 'Meta+B');
+    expect(toggle()).toHaveAttribute('title', 'Collapse task list (⌘ + B)');
+
+    expect(fireEvent.keyDown(composer, { key: 'b', metaKey: true })).toBe(false);
+    expect(screen.queryByTestId('sidebar-stub')).not.toBeInTheDocument();
   });
 
   it.each([
@@ -228,10 +268,10 @@ describe('AgentsLayout sidebar collapse', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Change shortcut for Toggle task list' }));
       const input = screen.getByRole('textbox', { name: 'New shortcut for Toggle task list' });
       fireEvent.keyDown(input, { key: 'B', ctrlKey: true, shiftKey: true });
-      expect(sidebarToggle()).toHaveAttribute('aria-keyshortcuts', 'Meta+Shift+B Control+Shift+B');
+      expect(sidebarToggle()).toHaveAttribute('aria-keyshortcuts', 'Control+Shift+B');
       expect(fireEvent.keyDown(window, { key: 'b', ctrlKey: true })).toBe(true);
       expect(screen.getByTestId(sidebar)).toBeInTheDocument();
-      fireEvent.keyDown(window, { key: 'B', metaKey: true, shiftKey: true });
+      fireEvent.keyDown(window, { key: 'B', ctrlKey: true, shiftKey: true });
       expect(screen.queryByTestId(sidebar)).not.toBeInTheDocument();
       fireEvent.click(
         screen.getByRole('button', { name: 'Disable shortcut for Toggle task list' }),
@@ -251,9 +291,10 @@ describe('AgentsLayout sidebar collapse', () => {
       </AgentsLayout>,
     );
 
-    expect(fireEvent.keyDown(window, { key: 'b', metaKey: true, repeat: true })).toBe(false);
-    expect(fireEvent.keyDown(window, { key: 'b', metaKey: true, shiftKey: true })).toBe(true);
+    expect(fireEvent.keyDown(window, { key: 'b', ctrlKey: true, repeat: true })).toBe(false);
+    expect(fireEvent.keyDown(window, { key: 'b', ctrlKey: true, shiftKey: true })).toBe(true);
     expect(fireEvent.keyDown(window, { key: 'b', ctrlKey: true, altKey: true })).toBe(true);
+    expect(fireEvent.keyDown(window, { key: 'b', ctrlKey: true, metaKey: true })).toBe(true);
     expect(fireEvent.keyDown(window, { key: 'b' })).toBe(true);
 
     expect(screen.getByTestId('sidebar-stub')).toBeInTheDocument();
@@ -390,6 +431,28 @@ describe('AgentsLayout mobile task list', () => {
     expect(toggle()).toHaveAttribute('aria-expanded', 'false');
   });
 
+  it('closes the task list with Escape without stopping the run it covers', () => {
+    // What JobDetail mounts for a running conversation: Escape stops its turn.
+    function RunningConversation() {
+      useJobRunActions({ job: { id: 'ajob_1', state: 'running' } as AgentJob, onError: () => {} });
+      return <p>Task composer</p>;
+    }
+    render(
+      <AgentsLayout>
+        <RunningConversation />
+      </AgentsLayout>,
+    );
+    fireEvent.click(toggle());
+    const newTask = screen.getByRole('link', { name: 'New task' });
+    expect(newTask).toHaveFocus();
+
+    fireEvent.keyDown(newTask, { key: 'Escape' });
+
+    expect(cancelAgentJob).not.toHaveBeenCalled();
+    expect(screen.queryByTestId('sidebar-stub')).not.toBeInTheDocument();
+    expect(toggle()).toHaveFocus();
+  });
+
   it('moves focus into the task list when opened with Control+B and back when closed', async () => {
     renderLayout();
     const workspace = screen.getByRole('main');
@@ -410,9 +473,13 @@ describe('AgentsLayout mobile task list', () => {
     expect(localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY)).toBeNull();
   });
 
-  it.each([{ ctrlKey: true }, { metaKey: true }])(
-    'keeps focus in a portaled Skills modal when the sidebar shortcut uses %j',
-    (modifier) => {
+  it.each([
+    ['Win32', { ctrlKey: true }],
+    ['MacIntel', { metaKey: true }],
+  ])(
+    'keeps focus in a portaled Skills modal when the sidebar shortcut on %s uses %j',
+    (platform, modifier) => {
+      onPlatform(platform);
       function Workspace() {
         const [open, setOpen] = useState(true);
         return (
@@ -675,7 +742,7 @@ describe('AgentsLayout product navigation', () => {
     expect(screen.getByRole('link', { name: 'Agents' })).not.toHaveAttribute('aria-current');
     fireEvent.click(screen.getByRole('button', { name: 'Collapse settings navigation' }));
     expect(screen.queryByTestId('settings-sidebar-stub')).not.toBeInTheDocument();
-    fireEvent.keyDown(window, { key: 'b', metaKey: true });
+    fireEvent.keyDown(window, { key: 'b', ctrlKey: true });
     expect(screen.getByTestId('settings-sidebar-stub')).toBeInTheDocument();
   });
 

@@ -85,3 +85,45 @@ def test_long_claude_answer_below_limit_remains_complete():
     )
     assert event.payload["text"] == text
     assert "truncated" not in event.payload
+
+
+#: ``cat /proc/self/cmdline`` and an emoji cut in half, as tool output carries
+#: them: Postgres stores neither a NUL nor a surrogate, and UTF-8 has no surrogate.
+_UNSTORABLE = "cat\x00/proc/self/cmdline\x00 \ud83d"
+_STORED = "cat\ufffd/proc/self/cmdline\ufffd \ufffd"
+
+
+@pytest.mark.parametrize("boundary", ["runtime", "api"])
+def test_text_postgres_cannot_store_is_replaced_rather_than_refused(boundary):
+    original = {
+        "tool_use_id": "toolu_1",
+        "content": _UNSTORABLE,
+        "input": {"file_path\x00": ["/workspace/\udcff.txt"]},
+    }
+    if boundary == "runtime":
+        payload = NormalizedEvent("tool_result", original).payload
+    else:
+        payload = WorkerEventRequest(event_type="tool_result", payload=original).payload
+    assert payload == {
+        "tool_use_id": "toolu_1",
+        "content": _STORED,
+        "input": {"file_path\ufffd": ["/workspace/\ufffd.txt"]},
+    }
+    assert _size(payload) > 0
+    assert original["content"] == _UNSTORABLE  # Do not alter the native record.
+
+
+def test_a_claude_tool_result_cut_inside_a_surrogate_pair_is_still_an_event():
+    line = json.dumps(
+        {
+            "type": "user",
+            "message": {
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_1", "content": _UNSTORABLE}
+                ]
+            },
+        }
+    )
+    event = ClaudeCodeRuntime().parse_event(line)
+    assert event is not None
+    assert event.payload["content"] == _STORED

@@ -22,14 +22,26 @@ new release downloads and checks its targets again.
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
+import json
 import re
 import subprocess
 import threading
 import time
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
+from cloud_agent_host.chat_sandbox_models import (
+    CHAT_NAMESPACE_LABEL,
+    CHAT_RUNTIME_LABEL,
+    CHAT_RUNTIME_VERSION_LABEL,
+)
 from cloud_agent_shared.runtime_catalog import downloadable_runtimes
 from cloud_agent_shared.runtime_downloads import is_exact_version
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Collection
 
 LABEL = "org.freeinference.runtime-download"
 #: Which deployment downloaded it. Staging and production share a Docker daemon
@@ -40,10 +52,18 @@ VERSION_LABEL = f"{LABEL}.version"
 #: Transient install and probe containers, so a runner restarted mid-download
 #: can remove what its predecessor left.
 WORK_LABEL = f"{LABEL}.work"
+#: The stopped container a chat copies a downloaded version out of
+#: (``runtime_install``). The copy removes it; one its process died before
+#: removing pins the version's image until the downloader removes it, once it
+#: is too old to belong to a copy still running.
+SOURCE_LABEL = f"{LABEL}.source"
 
 #: How long a discovered menu is reused. Short: a version that finished
 #: downloading should be offered on the next beat, not a minute later.
 _CACHE_S = 5.0
+#: How long what chats run is reused for a menu too long to report. Read only
+#: then, but a host can stay that way a while, and every beat and claim asks.
+_IN_USE_CACHE_S = 60.0
 
 
 @dataclass(frozen=True)
@@ -57,10 +77,32 @@ class RuntimeImage:
     ref: str
 
 
+def _readable(namespace: str) -> str:
+    """``namespace`` lowercased, every run of anything but ``a-z0-9`` folded to ``-``."""
+    return re.sub(r"[^a-z0-9]+", "-", namespace.lower()).strip("-") or "default"
+
+
 def repository(namespace: str) -> str:
-    """This deployment's repository name for downloaded versions."""
-    name = re.sub(r"[^a-z0-9]+", "-", namespace.lower()).strip("-") or "default"
-    return f"{name}-agent-runtime"
+    """This deployment's repository name for downloaded versions.
+
+    The namespace, readable, then the first 12 hex digits of its SHA-256.
+    Reading it loses case and punctuation: ``foo_bar`` and ``foo-bar`` read
+    the same, and two such deployments on one Docker daemon would share a
+    repository, each download moving the other's tag off its image. The
+    digest of the exact namespace keeps them apart, as it does their bridges
+    and tables (``egress``).
+    """
+    digest = hashlib.sha256(namespace.encode()).hexdigest()[:12]
+    return f"{_readable(namespace)}-agent-runtime-{digest}"
+
+
+def legacy_repository(namespace: str) -> str:
+    """Where earlier releases kept downloads, shared by every namespace that reads the same.
+
+    Hosts still hold versions there. They are offered, used and removed as
+    before; nothing new is kept there.
+    """
+    return f"{_readable(namespace)}-agent-runtime"
 
 
 def short_id(image_id: str) -> str:
@@ -79,7 +121,9 @@ def image_ref(namespace: str, runtime: str, version: str, base: str) -> str:
 
 def _parse(ref: str, namespace: str) -> RuntimeImage | None:
     repo, _, tag = ref.rpartition(":")
-    if repo != repository(namespace):
+    # The old name is shared, but the listing holds only images labelled with
+    # this exact namespace: under either name, they are this deployment's.
+    if repo not in (repository(namespace), legacy_repository(namespace)):
         return None
     parts = tag.split("_")
     if len(parts) != 3:
@@ -94,28 +138,92 @@ def _parse(ref: str, namespace: str) -> RuntimeImage | None:
 
 def discover(docker: str, namespace: str, *, timeout: float = 15) -> list[RuntimeImage]:
     """Every downloaded version this deployment holds; empty if Docker cannot say."""
+    return discover_or_none(docker, namespace, timeout=timeout) or []
+
+
+def discover_or_none(
+    docker: str, namespace: str, *, timeout: float = 15
+) -> list[RuntimeImage] | None:
+    """Every downloaded version this deployment holds; ``None`` if Docker cannot say.
+
+    For a caller that must not take a failed listing for holding nothing, such
+    as a cleanup deciding whether it is still owed.
+    """
+    listed = _read(
+        docker,
+        [
+            "image",
+            "ls",
+            "--filter",
+            f"label={NAMESPACE_LABEL}={namespace}",
+            "--format",
+            "{{.Repository}}:{{.Tag}}",
+        ],
+        timeout,
+    )
+    if listed is None:
+        return None
+    found = (_parse(line.strip(), namespace) for line in listed.splitlines())
+    return [image for image in found if image is not None]
+
+
+def _read(docker: str, args: list[str], timeout: float) -> str | None:
+    """What one Docker command prints, or None if it fails."""
     try:
-        listed = subprocess.run(
-            [
-                docker,
-                "image",
-                "ls",
-                "--filter",
-                f"label={NAMESPACE_LABEL}={namespace}",
-                "--format",
-                "{{.Repository}}:{{.Tag}}",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
+        done = subprocess.run(
+            [docker, *args], capture_output=True, text=True, timeout=timeout, check=False
         )
     except (OSError, subprocess.SubprocessError):
-        return []
-    if listed.returncode != 0:
-        return []
-    found = (_parse(line.strip(), namespace) for line in listed.stdout.splitlines())
-    return [image for image in found if image is not None]
+        return None
+    return done.stdout if done.returncode == 0 else None
+
+
+def chat_versions(
+    docker: str, namespace: str, *, timeout: float = 15
+) -> set[tuple[str, str]] | None:
+    """The (runtime, version) each chat container and checkpoint image of ``namespace`` runs.
+
+    Containers count in any state. So do checkpoint images: ``docker commit``
+    keeps a container's labels, so a checkpoint carries its chat's. ``None``
+    when Docker cannot say, which a caller removing images must read as every
+    version being in use.
+    """
+    owned = [
+        "--filter",
+        f"label={CHAT_NAMESPACE_LABEL}={namespace}",
+        "--filter",
+        f"label={CHAT_RUNTIME_VERSION_LABEL}",
+    ]
+    fields = "\t".join(
+        '{{.Label "' + label + '"}}' for label in (CHAT_RUNTIME_LABEL, CHAT_RUNTIME_VERSION_LABEL)
+    )
+    containers = _read(docker, ["ps", "--all", *owned, "--format", fields], timeout)
+    images = _read(docker, ["image", "ls", "--quiet", "--no-trunc", *owned], timeout)
+    if containers is None or images is None:
+        return None
+    found: set[tuple[str, str]] = set()
+    for line in containers.splitlines():
+        runtime, _, version = line.partition("\t")
+        found.add((runtime, version))
+    ids = sorted(set(images.split()))
+    if ids:
+        # ``image ls`` cannot print labels; one inspect reads them all.
+        inspected = _read(
+            docker, ["image", "inspect", "--format", "{{json .Config.Labels}}", *ids], timeout
+        )
+        if inspected is None:
+            return None
+        for line in inspected.splitlines():
+            with contextlib.suppress(ValueError):
+                labels = json.loads(line)
+                if isinstance(labels, dict):
+                    found.add(
+                        (
+                            str(labels.get(CHAT_RUNTIME_LABEL) or ""),
+                            str(labels.get(CHAT_RUNTIME_VERSION_LABEL) or ""),
+                        )
+                    )
+    return {pair for pair in found if all(pair)}
 
 
 def image_id(docker: str, ref: str, *, timeout: float = 30) -> str | None:
@@ -155,6 +263,11 @@ class DownloadedVersions:
         self._lock = threading.Lock()
         self._read_at = float("-inf")
         self._versions: dict[str, list[str]] = {}
+        #: The versions this host was told to hold. The runner wires in its
+        #: downloader's; a process with none has no targets.
+        self.targets: Callable[[], Collection[tuple[str, str]]] | None = None
+        self._in_use: set[tuple[str, str]] = set()
+        self._in_use_at = float("-inf")
 
     def versions(self) -> dict[str, list[str]]:
         """Downloaded versions per runtime, at most a few seconds old."""
@@ -163,6 +276,23 @@ class DownloadedVersions:
                 self._versions = by_runtime(discover(self._docker, self._namespace))
                 self._read_at = time.monotonic()
             return {runtime: list(found) for runtime, found in self._versions.items()}
+
+    def needed(self) -> set[tuple[str, str]]:
+        """What a menu too long to report keeps first: targets, and what chats run.
+
+        What chats run is at most a minute old; when Docker cannot say, the
+        last answer stands.
+        """
+        with self._lock:
+            if time.monotonic() - self._in_use_at >= _IN_USE_CACHE_S:
+                found = chat_versions(self._docker, self._namespace)
+                if found is not None:
+                    self._in_use = found
+                self._in_use_at = time.monotonic()
+            needed = set(self._in_use)
+        if self.targets is not None:
+            needed.update(self.targets())
+        return needed
 
     def invalidate(self) -> None:
         """Read Docker again next time: a download has just finished."""

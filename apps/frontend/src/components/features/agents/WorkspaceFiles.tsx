@@ -6,7 +6,7 @@ import { useT } from '@/components/providers';
 import type { AgentJobFileApi, AgentJobFileEntryApi } from '@/lib/api/agents';
 
 import { highlightCode, TOKEN_CLASS, type CodeToken } from '@/lib/codeHighlight';
-import type { AgentJob } from './types';
+import type { AgentDiffFile, AgentJob } from './types';
 import { useWorkspaceFiles, type WorkspaceDirectory } from './useAgentJobs';
 import { PANE_RESIZE_EVENT } from './useResizablePane';
 
@@ -31,6 +31,19 @@ function formatFileSize(size?: number | null): string {
   if (size < 1024) return `${size} B`;
   if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
   return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/** Whether the diff deletes this file: Git's `deleted file mode` header, before any hunk. */
+function deletedByDiff(file: AgentDiffFile): boolean {
+  // A change of file type deletes the path and then creates it, so the last
+  // of these says what is there now. A hunk's lines each start with a marker,
+  // so none of them can read as one.
+  let deleted = false;
+  for (const line of file.lines) {
+    if (line.text.startsWith('deleted file mode ')) deleted = true;
+    else if (line.text.startsWith('new file mode ')) deleted = false;
+  }
+  return deleted;
 }
 
 function basename(path: string): string {
@@ -275,11 +288,20 @@ function TreeLevel({
       </p>
     ) : null;
   }
+  // The host leaves out entries past its limit and names that are not UTF-8,
+  // and says so; without this a partial folder reads as the whole of it.
+  const incomplete = state.truncated ? (
+    <p style={indent} className="py-1 pr-2 text-[11px] text-gray-400 dark:text-gray-500">
+      {t('workspaceFiles.listingIncomplete')}
+    </p>
+  ) : null;
   if (state.entries.length === 0) {
     return (
-      <p style={indent} className="py-1 pr-2 text-[11px] text-gray-400 dark:text-gray-500">
-        Empty
-      </p>
+      incomplete ?? (
+        <p style={indent} className="py-1 pr-2 text-[11px] text-gray-400 dark:text-gray-500">
+          Empty
+        </p>
+      )
     );
   }
 
@@ -325,6 +347,7 @@ function TreeLevel({
           </div>
         );
       })}
+      {incomplete}
     </>
   );
 }
@@ -584,6 +607,7 @@ export function WorkspaceFiles({
     file,
     fileLoading,
     fileError,
+    fileMissing,
     source,
     toggleDirectory,
     retryDirectory,
@@ -593,6 +617,13 @@ export function WorkspaceFiles({
     closeFile,
     reload,
   } = useWorkspaceFiles(job.id, active, `${job.state}:${settledDiffCount}`);
+  // The live workspace has nothing at a path the run deleted, so its read
+  // finds nothing there. The diff says why, and no retry would find it.
+  const deletedPaths = useMemo(
+    () => new Set((job.diffFileDetails ?? []).filter(deletedByDiff).map((entry) => entry.path)),
+    [job.diffFileDetails],
+  );
+  const selectedDeleted = Boolean(fileMissing && selected && deletedPaths.has(selected));
   const assets = useFileAssets(file?.kind === 'file' ? file : null);
   const processedRequest = useRef<{
     jobId: string;
@@ -1003,6 +1034,8 @@ export function WorkspaceFiles({
         >
           {fileLoading ? (
             <PaneMessage>Loading file…</PaneMessage>
+          ) : fileError && selectedDeleted ? (
+            <PaneMessage>This file was deleted by the run.</PaneMessage>
           ) : fileError ? (
             <PaneMessage>
               <span className="flex flex-col items-center gap-3">

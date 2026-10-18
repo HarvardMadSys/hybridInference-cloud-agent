@@ -130,6 +130,9 @@ class _NoRuntimeDownloads:
     def report(self) -> list[dict[str, object]]:
         return []
 
+    def targets(self) -> frozenset[tuple[str, str]]:
+        return frozenset()
+
 
 def _no_wait_endpoint(**_kwargs: Any) -> str:
     raise runner_mod.WorkWaitUnsupported("404")
@@ -592,6 +595,25 @@ def test_the_host_proves_its_runtime_once_at_start(service, monkeypatch, qualifi
         == 0
     )
     assert events[:2] == (["refresh", "network"] if qualified else ["refresh", "full"])
+
+
+def test_a_menu_too_long_to_report_keeps_what_this_host_was_told_to_hold(service, monkeypatch):
+    """The version stamp leaves the least needed versions off; targets are needed."""
+    events: list[str] = []
+    backend = _qualified_backend(monkeypatch, events)
+    monkeypatch.setattr(
+        runner_mod, "HostQualification", lambda actual: FakeQualification(actual, [True], events)
+    )
+    monkeypatch.setattr(runner_mod, "claim_payload", lambda **_k: runner_mod._STOPPING.set())
+    held = frozenset({("claude-code", "2.1.300")})
+    monkeypatch.setattr(_NoRuntimeDownloads, "targets", lambda _self: held)
+
+    runner_mod.run_forever(
+        base_url="http://control", worker_id="runner-a", backend=backend, host="host-a"
+    )
+
+    assert backend.downloaded_versions.targets is not None
+    assert backend.downloaded_versions.targets() == held
 
 
 def test_runtime_qualification_failure_pauses_claims_until_recovered(service, monkeypatch):

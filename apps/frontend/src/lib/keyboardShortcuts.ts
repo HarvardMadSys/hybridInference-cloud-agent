@@ -1,7 +1,40 @@
 export const SHORTCUT_ACTIONS = ['search', 'sidebar', 'workspace'] as const;
 export type ShortcutAction = (typeof SHORTCUT_ACTIONS)[number];
 
-/** The primary modifier is Command on macOS or Control on Windows/Linux. */
+/**
+ * Whether the primary modifier is Command: on a Mac, iPhone or iPad. There,
+ * Control with a letter edits text (Ctrl+K deletes to the end of the line,
+ * Ctrl+B moves back a character), so app chords answer to Command alone.
+ * Everywhere else they answer to Control alone.
+ *
+ * Read when a key is pressed. A server render has no platform to read and
+ * says no; rendered hints come from `useApplePlatform`, which corrects that
+ * after hydration.
+ */
+export function isApplePlatform(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  const hint = (navigator as Navigator & { userAgentData?: { platform?: unknown } }).userAgentData;
+  const platform =
+    typeof hint?.platform === 'string' && hint.platform ? hint.platform : navigator.platform;
+  return /^(mac|ios|iphone|ipad|ipod)/i.test(platform ?? '');
+}
+
+/** Exactly the primary modifier is held: Command on Apple platforms, Control elsewhere. */
+export function hasPrimaryModifier(event: { metaKey: boolean; ctrlKey: boolean }): boolean {
+  return isApplePlatform() ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey;
+}
+
+/** A chord on the primary modifier as hints write it: "⌘ + Enter", "Ctrl + Shift + K". */
+export function chordLabel(key: string, apple: boolean, shift = false): string {
+  return `${apple ? '⌘' : 'Ctrl'} + ${shift ? 'Shift + ' : ''}${key}`;
+}
+
+/** The same chord for `aria-keyshortcuts`, which names the modifier key. */
+export function chordAriaLabel(key: string, apple: boolean, shift = false): string {
+  return `${apple ? 'Meta' : 'Control'}+${shift ? 'Shift+' : ''}${key}`;
+}
+
+/** A key with the primary modifier: Command on Apple platforms, Control elsewhere. */
 export interface ShortcutBinding {
   key: string;
   shift: boolean;
@@ -74,14 +107,15 @@ export function parseKeyboardShortcuts(value: string | null): KeyboardShortcuts 
   }
 }
 
-export function shortcutLabel(binding: ShortcutBinding): string {
-  return `⌘ / Ctrl + ${binding.shift ? 'Shift + ' : ''}${binding.key.toUpperCase()}`;
+export function shortcutLabel(binding: ShortcutBinding, apple: boolean): string {
+  return chordLabel(binding.key.toUpperCase(), apple, binding.shift);
 }
 
-export function shortcutAriaLabel(binding: ShortcutBinding | null): string | undefined {
-  if (!binding) return undefined;
-  const keys = `${binding.shift ? 'Shift+' : ''}${binding.key.toUpperCase()}`;
-  return `Meta+${keys} Control+${keys}`;
+export function shortcutAriaLabel(
+  binding: ShortcutBinding | null,
+  apple: boolean,
+): string | undefined {
+  return binding ? chordAriaLabel(binding.key.toUpperCase(), apple, binding.shift) : undefined;
 }
 
 /** All app handlers opt out while Settings is recording a replacement chord. */
@@ -92,7 +126,7 @@ export function matchesShortcut(event: KeyboardEvent, binding: ShortcutBinding |
     !event.isComposing &&
     event.keyCode !== 229 &&
     !(event.target instanceof Element && event.target.closest('[data-shortcut-recorder]')) &&
-    event.metaKey !== event.ctrlKey &&
+    hasPrimaryModifier(event) &&
     !event.altKey &&
     event.shiftKey === binding.shift &&
     event.key.toLowerCase() === binding.key,

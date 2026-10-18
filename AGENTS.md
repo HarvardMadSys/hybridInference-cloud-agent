@@ -51,7 +51,7 @@ database stamped with the chain that predates it.
 | `apps/backend/cloud_agent/schemas/` | Domain-organized wire models, explicitly exported by `cloud_agent.schemas` |
 | `apps/backend/cloud_agent/application/` | Flows that run without a request: job admission and creation, native Fork materialization, residency credentials |
 | `apps/backend/cloud_agent/bootstrap/` | Internal assembly: the resources the listeners are built from, and the lifespan that starts and stops them |
-| `apps/backend/cloud_agent/workers/` | The background loops — attempt reaping, grant renewal, shared-workspace snapshot capture |
+| `apps/backend/cloud_agent/workers/` | The background loops — attempt reaping, grant renewal, queue and goal recovery, shared-workspace snapshot capture |
 | `apps/backend/cloud_agent/ports/`, `apps/backend/cloud_agent/storage/` | Narrow capability contracts and Postgres repositories: claims, fences, residency, publication |
 | `apps/backend/cloud_agent/grants.py`, `ledger.py`, `grant_usage.py` | Gateway inference grants, and the usage snapshots read back from them |
 | `apps/backend/cloud_agent/gateway.py`, `agent_access.py`, `identity.py` | The three gateway contracts: lookups, admission, identity |

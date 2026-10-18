@@ -194,8 +194,20 @@ class SnapshotRepository(Protocol):
         """Return one published group commit whose object import is pending."""
         ...
 
-    async def complete_snapshot_base_import(self, *, snapshot_id: int, commit_sha: str) -> bool:
-        """Acknowledge that the exact published commit resolves in Docker."""
+    async def complete_snapshot_base_import(
+        self,
+        *,
+        snapshot_id: int,
+        commit_sha: str,
+        generation: int,
+        container_id: str | None,
+    ) -> bool:
+        """Acknowledge that the exact published commit resolves in Docker.
+
+        ``generation`` and ``container_id`` name the container the import was
+        sent to. An import answered after the group moved on to another
+        container changes nothing: that container still needs its own.
+        """
         ...
 
     async def record_snapshot_base_import_failure(

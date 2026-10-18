@@ -15,7 +15,9 @@ from unittest.mock import Mock
 
 import httpx
 import pytest
+from pydantic import ValidationError
 
+from cloud_agent.schemas import WorkerSandboxAbandonRequest
 from cloud_agent_host import control_plane_client, runner as runner_mod
 from cloud_agent_host.chat_sandbox import ChatSandboxSpec
 from cloud_agent_host.runner import ClaimedJob, LeaseLost
@@ -1513,6 +1515,38 @@ def _run_frames(frames):
     )
 
 
+def test_tool_output_cut_inside_a_surrogate_pair_does_not_end_the_turn():
+    """A sandbox manager forwards the half pair its CLI's JSON escaped.
+
+    UTF-8 has no surrogates, so the event could be neither measured nor sent:
+    the error escaped the stream, and the turn failed with its context lost.
+    """
+    control = _Control()
+
+    code, *_ = runner_mod._stream_shared_agent_turn(
+        supervisor=_Supervisor(
+            [
+                {
+                    "kind": "event",
+                    "event_type": "tool_result",
+                    "payload": {"tool_use_id": "toolu_1", "content": "build ok \ud83d"},
+                },
+                {"kind": "result", "status": "completed", "exit_code": 0},
+            ]
+        ),
+        job=_JOB,
+        control=control,
+        heart=SimpleNamespace(cancel_requested=False, lease_lost=False),
+        lease_token="lease",
+        timeout_s=30,
+    )
+
+    assert code == 0
+    assert ("tool_result", {"tool_use_id": "toolu_1", "content": "build ok \ufffd"}) in (
+        control.events
+    )
+
+
 def test_a_turn_reports_its_clis_last_error_as_the_reason():
     """A Codex turn refused with 403 printed a config warning last."""
     *_, reported = _run_frames(
@@ -1781,6 +1815,67 @@ def test_event_upload_gives_up_inside_its_budget(monkeypatch):
     assert len(tries) > 2
     assert max(clock.sleeps) == control_plane_client._EVENT_RETRY_MAX_DELAY_S
     assert clock.now <= control_plane_client._EVENT_RETRY_BUDGET_S < runner_mod.DEFAULT_LEASE_TTL_S
+
+
+def test_a_turn_can_end_with_a_reason_its_sandbox_printed():
+    """The reason quotes the CLI: a NUL, or half the surrogate pair it cut.
+
+    httpx writes JSON as UTF-8, which has no surrogates, so that finish never
+    left the host, and the control plane stores no NUL.
+    """
+    sent: list[dict[str, Any]] = []
+
+    def endpoint(request):
+        sent.append(json.loads(request.content))
+        return httpx.Response(200, json={"ok": True, "state": "failed"})
+
+    control = _event_control(endpoint)
+    try:
+        control.finish("failed", "agent reported an error: cat\x00/proc/self/cmdline \ud83d")
+    finally:
+        control.close()
+
+    assert sent == [
+        {
+            "state": "failed",
+            "detail": "agent reported an error: cat\ufffd/proc/self/cmdline \ufffd",
+            "base_sha": None,
+        }
+    ]
+
+
+def test_a_long_reason_still_releases_the_activation():
+    """The control plane holds an abandon's reason to 1000 characters.
+
+    The runner sent its failure as it was, so an unexpected error with a long
+    message had its release refused, and with it the immediate end of the
+    member's residency and grant.
+    """
+    released: list[dict[str, Any]] = []
+
+    def endpoint(request):
+        body = json.loads(request.content)
+        try:
+            WorkerSandboxAbandonRequest.model_validate(body)
+        except ValidationError:
+            return httpx.Response(422, json={"detail": "refused"})
+        released.append(body)
+        return httpx.Response(200, json={})
+
+    reason = "shared live chat failed unexpectedly: " + "docker: no space left on device. " * 40
+    control = _event_control(endpoint)
+    try:
+        control.abandon_chat_sandbox(
+            sandbox_generation=1,
+            activation_generation=3,
+            lost=True,
+            detail=reason,
+            idle_timeout_seconds=1800,
+        )
+    finally:
+        control.close()
+
+    assert [body["detail"] for body in released] == [reason[:1000]]
 
 
 def test_run_forever_refuses_to_enroll_a_host_that_cannot_attest(monkeypatch):

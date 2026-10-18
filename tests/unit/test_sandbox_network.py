@@ -100,6 +100,34 @@ def test_an_unsafe_or_incomplete_setting_is_refused(var: str, value: str) -> Non
         _network(**{var: value})
 
 
+@pytest.mark.parametrize(
+    "pool",
+    [
+        "169.254.169.0/24",  # link-local: the cloud metadata service's block
+        "127.0.0.0/16",
+        "0.0.0.0/16",
+        "192.0.0.0/24",
+        "192.0.2.0/24",
+        "198.18.0.0/16",
+        "240.0.0.0/16",
+    ],
+)
+def test_a_pool_outside_rfc1918_is_refused_even_where_python_calls_it_private(pool: str) -> None:
+    """Group bridges are carved from RFC1918 space, and only from it.
+
+    Python's ``is_private`` also says yes to loopback, link-local and the
+    special-purpose blocks. A bridge carved from 169.254.169.0/24 would route
+    the host's own traffic for the metadata service into a sandbox's bridge.
+    """
+    with pytest.raises(SandboxNetworkError, match="RFC1918"):
+        _network(AGENT_EGRESS_CHAT_NETWORK_POOL=pool)
+
+
+@pytest.mark.parametrize("pool", ["10.240.0.0/16", "172.20.0.0/16", "192.168.100.0/24"])
+def test_each_rfc1918_block_can_hold_the_pool(pool: str) -> None:
+    assert _network(AGENT_EGRESS_CHAT_NETWORK_POOL=pool).pool == ipaddress.IPv4Network(pool)
+
+
 def test_there_is_no_mode_to_select() -> None:
     """The retired tier variables change nothing, rather than being honoured."""
     retired = {

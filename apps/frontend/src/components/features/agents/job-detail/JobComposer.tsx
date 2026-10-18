@@ -1,7 +1,9 @@
 'use client';
 
 import { useT } from '@/components/providers';
+import { useApplePlatform } from '@/components/features/settings/keyboardShortcutPreferences';
 import type { SelectedSkillApi } from '@/lib/api/skills';
+import { chordLabel } from '@/lib/keyboardShortcuts';
 import { filesFromDataTransfer } from '@/lib/dataTransferFiles';
 import { Suspense, useState, type FormEvent, type RefObject } from 'react';
 import { ComposerCommandMenu } from '../ComposerCommandMenu';
@@ -96,6 +98,7 @@ export function JobComposer({
   hidden?: boolean;
 }) {
   const t = useT();
+  const apple = useApplePlatform();
   const threadId = job.threadId ?? job.id;
   const isArchived = Boolean(job.archivedAt);
   const isActive = job.state === 'running' || job.state === 'queued';
@@ -345,7 +348,7 @@ export function JobComposer({
                   label={t(isActive ? 'composer.queue' : 'composer.send')}
                   title={t(isActive ? 'composer.queueHint' : 'composer.sendHint')}
                   steerLabel={t('composer.steer')}
-                  steerTitle={t('composer.steerHint')}
+                  steerTitle={t('composer.steerHint', { keys: chordLabel('Enter', apple) })}
                   onSteer={
                     queue.canSendNow && attachments.entries.length === 0
                       ? () => void steerNow()
@@ -373,7 +376,9 @@ export function JobComposer({
                     : `Inherits ${job.runtime}`}
                 {modelOptions.length === 0 ? ` · ${inherited.model}` : ''}
                 {isActive ? ` · ${t('queue.afterThisTurn')}` : ''}
-                {queue.canSendNow ? ` · ${t('queue.steerHint')}` : ''}
+                {queue.canSendNow
+                  ? ` · ${t('queue.steerHint', { keys: chordLabel('↵', apple) })}`
+                  : ''}
               </p>
             </form>
           )}

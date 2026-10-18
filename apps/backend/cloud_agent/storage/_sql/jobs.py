@@ -198,36 +198,46 @@ async def fail_discontinuous_follow_ups(
 ) -> None:
     """Fail queued descendants that cannot preserve native continuity.
 
-    A successful parent requires a usable shared membership. The whole
-    pending tail fails if that membership is missing or lost. Terminal
+    A chat whose sandbox is lost -- its own context, or the group it shares,
+    as when the group's restores run out -- is never claimed again, whatever
+    the turn before it did. A successful parent also requires a shared
+    membership: the whole pending tail fails if it has none. Terminal
     writers scope this cleanup to the parent they just changed; the
-    periodic sweep handles legacy rows. Scheduling itself only checks
-    eligibility and never needs to promote a queued turn.
+    periodic sweep handles the rest, such as the turns a Fork sibling had
+    queued when a writer for another chat lost their group. Scheduling
+    itself only checks eligibility and never needs to promote a queued turn.
     """
     invalid = await conn.fetch(
         """
             WITH invalid_threads AS (
-                SELECT DISTINCT child.thread_id
+                SELECT DISTINCT child.thread_id,
+                       COALESCE(
+                           m.context_status = 'lost' OR m.native_state = 'lost'
+                           OR g.state IN ('stopped_dirty', 'lost'),
+                           FALSE
+                       ) AS sandbox_lost
                 FROM agent_jobs child
                 JOIN agent_jobs parent ON parent.id = child.parent_job_id
+                LEFT JOIN agent_thread_sandbox_memberships m ON m.thread_id = child.thread_id
+                LEFT JOIN agent_sandboxes g ON g.id = m.sandbox_id
                 WHERE child.state = 'queued'
-                  AND parent.state = 'succeeded'
                   AND ($1::text IS NULL OR parent.id = $1)
-                  AND NOT EXISTS (
-                        SELECT 1
-                        FROM agent_thread_sandbox_memberships m
-                        JOIN agent_sandboxes g ON g.id = m.sandbox_id
-                        WHERE m.thread_id = child.thread_id
-                          AND m.context_status <> 'lost'
-                          AND m.native_state <> 'lost'
-                          AND g.state NOT IN ('stopped_dirty', 'lost')
+                  AND (
+                        m.context_status = 'lost' OR m.native_state = 'lost'
+                        OR g.state IN ('stopped_dirty', 'lost')
+                        OR (parent.state = 'succeeded' AND m.thread_id IS NULL)
                   )
             )
             UPDATE agent_jobs pending
             SET state = 'failed',
-                detail = 'not run because its parent predates retained-session continuity',
+                detail = CASE
+                    WHEN invalid.sandbox_lost
+                        THEN 'not run because the chat''s sandbox was lost'
+                    ELSE 'not run because its parent predates retained-session continuity'
+                END,
                 updated_at = NOW()
-            WHERE pending.thread_id IN (SELECT thread_id FROM invalid_threads)
+            FROM invalid_threads invalid
+            WHERE pending.thread_id = invalid.thread_id
               AND pending.state = 'queued'
             RETURNING pending.thread_id
             """,

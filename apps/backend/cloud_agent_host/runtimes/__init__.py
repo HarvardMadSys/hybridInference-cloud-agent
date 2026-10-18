@@ -21,6 +21,7 @@ from .base import (
     RuntimeEffortUnsupportedError,
     RuntimeMCPConfig,
     RuntimeMCPUnavailableError,
+    merged_mcp_server,
 )
 from .claude import ClaudeCodeRuntime
 from .codex import CodexRuntime
@@ -80,6 +81,7 @@ __all__ = [
     "RuntimeMCPConfig",
     "RuntimeMCPUnavailableError",
     "get_runtime",
+    "merged_mcp_server",
     "registered_runtimes",
     "runtime_reasoning_efforts",
     "runtimes_supporting_mcp",

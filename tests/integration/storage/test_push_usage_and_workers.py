@@ -597,9 +597,13 @@ async def test_a_failed_base_import_waits_out_its_retry(store, pool):
     assert 595 < (due - await pool.fetchval("SELECT clock_timestamp()")).total_seconds() <= 600
 
     await _retry_now(pool, capture["snapshot_id"])
-    assert await store.snapshot.pending_snapshot_base_import() is not None
+    pending = await store.snapshot.pending_snapshot_base_import()
+    assert pending is not None
     assert await store.snapshot.complete_snapshot_base_import(
-        snapshot_id=capture["snapshot_id"], commit_sha=commit_sha
+        snapshot_id=capture["snapshot_id"],
+        commit_sha=commit_sha,
+        generation=pending["generation"],
+        container_id=pending["container_id"],
     )
     async with pool.acquire() as conn:
         retry_at = await conn.fetchval(

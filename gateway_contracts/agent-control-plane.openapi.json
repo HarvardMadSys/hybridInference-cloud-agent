@@ -3280,6 +3280,11 @@
       "AdminTeamDetailResponse": {
         "description": "One team as the administrator sees it.",
         "properties": {
+          "departed_member_count": {
+            "description": "Everyone who left or was removed, including those not listed.",
+            "title": "Departed Member Count",
+            "type": "integer"
+          },
           "invitations": {
             "$ref": "#/components/schemas/AdminTeamInvitationCounts"
           },
@@ -3291,6 +3296,7 @@
             "type": "array"
           },
           "members": {
+            "description": "Every active member, and the 50 who left or were removed most recently.",
             "items": {
               "$ref": "#/components/schemas/AdminTeamMember"
             },
@@ -3305,7 +3311,8 @@
           "team",
           "members",
           "join_requests",
-          "invitations"
+          "invitations",
+          "departed_member_count"
         ],
         "title": "AdminTeamDetailResponse",
         "type": "object"
@@ -3340,18 +3347,19 @@
         "type": "object"
       },
       "AdminTeamListResponse": {
-        "description": "A page of teams, newest first; pass ``next_offset`` for the next.",
+        "description": "A page of teams, newest first; pass ``next_before`` as ``before`` for the next.",
         "properties": {
-          "next_offset": {
+          "next_before": {
             "anyOf": [
               {
-                "type": "integer"
+                "type": "string"
               },
               {
                 "type": "null"
               }
             ],
-            "title": "Next Offset"
+            "description": "The last team on this page, or null when no more follow.",
+            "title": "Next Before"
           },
           "teams": {
             "items": {
@@ -3363,7 +3371,7 @@
         },
         "required": [
           "teams",
-          "next_offset"
+          "next_before"
         ],
         "title": "AdminTeamListResponse",
         "type": "object"
@@ -27267,7 +27275,7 @@
     },
     "/admin/agent/teams": {
       "get": {
-        "description": "Teams newest first.\n\n``q`` matches part of a team's name, a team id, or the user id of anyone\nwho has been a member.",
+        "description": "Teams newest first.\n\n``q`` matches part of a team's name, a team id, or the user id of anyone\nwho has been a member. A page continues after the team ``before`` names,\nso teams created or deleted meanwhile neither repeat nor drop out of view.",
         "operationId": "list_teams_admin_agent_teams_get",
         "parameters": [
           {
@@ -27315,14 +27323,23 @@
             }
           },
           {
+            "description": "The id of the last team the previous page showed.",
             "in": "query",
-            "name": "offset",
+            "name": "before",
             "required": false,
             "schema": {
-              "default": 0,
-              "minimum": 0,
-              "title": "Offset",
-              "type": "integer"
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The id of the last team the previous page showed.",
+              "title": "Before"
             }
           },
           {
@@ -39579,7 +39596,7 @@
     },
     "/v1/agent/worker/jobs/{job_id}/environment-snapshot": {
       "post": {
-        "description": "Record what a new workspace did with its installation snapshot.\n\nUsage keeps a snapshot from expiring; a workspace that had none, or whose\nlockfiles or image differed, queues a build for its commit.",
+        "description": "Record what a new workspace did with its installation snapshot.\n\nUsage keeps a snapshot from expiring; a workspace that had none, or whose\nlockfiles or image differed, queues a build for its commit. Fenced like\nevery other worker write: only the attempt holding the job's live lease,\non a host still enrolled, is heard.",
         "operationId": "worker_report_environment_snapshot_v1_agent_worker_jobs__job_id__environment_snapshot_post",
         "parameters": [
           {

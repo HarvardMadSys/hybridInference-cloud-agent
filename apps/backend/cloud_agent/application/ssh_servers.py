@@ -9,7 +9,8 @@ command on one. What the platform does is here:
   platform's key;
 * build a sandbox group's whole SSH state for the claim, and push it to a
   running group's host when the owner changes something, so a removal takes
-  effect at once instead of at the next turn.
+  effect at once instead of at the next turn, and again when a turn marks its
+  group running, so a change made while the group started reaches that turn.
 
 See ``docs/agents/specs/2026-10-15-user-ssh-servers-design.zh-CN.md``.
 """
@@ -33,7 +34,7 @@ from cryptography.hazmat.primitives.asymmetric import ed25519
 
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.sandbox_manager_client import SandboxManagerError
-from cloud_agent.sandbox_manager_routing import sandbox_manager_for_job
+from cloud_agent.sandbox_manager_routing import sandbox_manager_for_host
 from cloud_agent.source_control import SourceControlCipher, SourceControlError
 from cloud_agent_shared.ssh_access import (
     HOST_KEY_ALGORITHMS,
@@ -435,10 +436,13 @@ async def push_ssh_access(
 
     A push only takes access away from a running member: a server turned off,
     deleted or given a new key stops working at once, while one turned on
-    arrives with the member's next turn, whose runner masks its key. Best
-    effort by design: a group that is not running, or whose host cannot be
-    reached, gets the state before its next turn runs anything, because every
-    claim carries it.
+    arrives with the member's next turn, whose runner masks its key. Each
+    group's state goes to the host the group is on, addressed to a chat of
+    that group its sandbox manager knows. Best effort by design. A group that
+    is not running is sent its state when a turn marks it running
+    (``worker_mark_thread_sandbox_running``), because the claim's own state is
+    read before then and can miss a change made in between. A host that
+    cannot be reached gets the state with its next turn.
     """
     try:
         groups = await store.ssh_servers.running_groups_for_ssh_change(
@@ -450,14 +454,31 @@ async def push_ssh_access(
         return
     for group in groups:
         try:
-            state = await store.ssh_servers.ssh_group_state(thread_id=str(group["thread_id"]))
-            access = build_ssh_access(state, cipher)
-            if access is None:
+            origin = str(group["origin_thread_id"])
+            state = await store.ssh_servers.ssh_group_state(thread_id=origin)
+            # Only the group's own state goes to it.
+            if state is None or state["sandbox_id"] != group["sandbox_id"]:
                 continue
-            client = await sandbox_manager_for_job(store.host_pool, str(group["job_id"]))
+            access = build_ssh_access(state, cipher)
+            host = await store.host_pool.get_host(host=str(group["host"]))
+            client = None if host is None else sandbox_manager_for_host(host)
             if client is None:
                 continue
-            await client.sync_ssh_access(str(group["thread_id"]), access)
+            chats = [origin]
+            if group.get("resident_thread_id"):
+                chats.append(str(group["resident_thread_id"]))
+            for chat in chats:
+                try:
+                    await client.sync_ssh_access(chat, access)
+                    break
+                except SandboxManagerError as exc:
+                    # A manager knows a group by the chats it was told of:
+                    # after a restart only the origin, from the container's
+                    # labels; then the chats holding slots, from each
+                    # manifest. An unknown chat is tried again through the
+                    # group's other chat. Any other answer stands.
+                    if exc.status_code != 404 or chat == chats[-1]:
+                        raise
         except (SandboxManagerError, SourceControlError, httpx.HTTPError, ValueError) as exc:
             logger.warning(
                 "agent_ssh_push_failed",

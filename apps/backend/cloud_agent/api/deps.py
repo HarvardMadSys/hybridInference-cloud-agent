@@ -537,12 +537,13 @@ def session_token(request: Request, authorization: str | None = None) -> str | N
     """Find this service's session credential on a request.
 
     The cookie is preferred: it is what the web app sends, it is ``HttpOnly``,
-    and it is the only credential the browser holds. Either of its names is
-    read, the ``__Host-`` one first (:func:`identity.session_from_cookies`). A
-    bearer is accepted too, for the programmatic caller that has one and for
-    the router's existing credential dispatch — a session token is this
-    service's own credential whichever way it travels, and reading it from a
-    header weakens nothing that reading it from a cookie does not.
+    and it is the only credential the browser holds. It is read under the name
+    it is set with, only the ``__Host-`` one where it carries ``Secure``
+    (:func:`identity.session_from_cookies`). A bearer is accepted too, for the
+    programmatic caller that has one and for the router's existing credential
+    dispatch — a session token is this service's own credential whichever way
+    it travels, and reading it from a header weakens nothing that reading it
+    from a cookie does not.
     """
     cookie = identity.session_from_cookies(request.cookies)
     if cookie:

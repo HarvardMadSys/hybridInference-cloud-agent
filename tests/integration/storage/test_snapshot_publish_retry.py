@@ -180,7 +180,10 @@ def _push(**kwargs):
 
 async def _import_base(store, *, snapshot, commit_sha, bundle):
     return await store.snapshot.complete_snapshot_base_import(
-        snapshot_id=snapshot["snapshot_id"], commit_sha=commit_sha
+        snapshot_id=snapshot["snapshot_id"],
+        commit_sha=commit_sha,
+        generation=snapshot["generation"],
+        container_id=snapshot["container_id"],
     )
 
 
@@ -218,7 +221,10 @@ async def test_entitlement_outage_preserves_snapshot_and_later_work_then_retries
 
     async def import_base(store, *, snapshot, commit_sha, bundle):
         return await store.snapshot.complete_snapshot_base_import(
-            snapshot_id=snapshot["snapshot_id"], commit_sha=commit_sha
+            snapshot_id=snapshot["snapshot_id"],
+            commit_sha=commit_sha,
+            generation=snapshot["generation"],
+            container_id=snapshot["container_id"],
         )
 
     monkeypatch.setattr(publish_worker, "require_entitled_repo", entitlement)

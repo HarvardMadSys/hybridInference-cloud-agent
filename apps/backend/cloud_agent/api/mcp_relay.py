@@ -77,7 +77,7 @@ from cloud_agent.mcp.jsonrpc import (
     MAX_MESSAGE_BYTES,
     PARSE_ERROR,
 )
-from cloud_agent.mcp.models import CapabilityKind, McpServer
+from cloud_agent.mcp.models import CapabilityKind, McpServer, Transport
 from cloud_agent.mcp.net_policy import EndpointRejected, credential_headers, policy_from_environment
 from cloud_agent.mcp.refresh import RefreshRefused, ensure_fresh
 from cloud_agent.mcp.registry import (
@@ -116,7 +116,7 @@ from cloud_agent.tokens import (
 from cloud_agent_shared.shared_protocol import is_residency_mcp_credential
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterable, AsyncIterator
 
     from cloud_agent.ports import (
         AgentMemoryRepository,
@@ -159,6 +159,11 @@ _HOST_KEEPALIVE_S = 15.0
 #: How often it looks where nothing would wake it: no listener in this process,
 #: or the listening connection lost.
 _APPROVAL_POLL_S = 1.0
+#: How long a relayed server-to-client stream runs between checks that the
+#: session which opened it may still use it. The stream is one request that
+#: lasts as long as the server keeps writing, so the fence every other request
+#: meets on arrival is met again on this clock, whether or not the server sends.
+_STREAM_RECHECK_S = 5.0
 
 # Forwarded from the agent to the upstream. Everything else -- Authorization
 # above all, but equally Cookie, X-Forwarded-*, and whatever else the CLI or an
@@ -1322,6 +1327,93 @@ async def _stream_sse(
         await client.aclose()
 
 
+async def _stream_still_authorized(authorized: Authorized, store: _McpRelayStorage) -> bool:
+    """Whether the session that opened a stream may still be sent what it carries.
+
+    The checks a held call makes before it is dispatched, without a credential
+    refresh: the turn's fence, then the binding and connection as they are now,
+    which must still be the ones the stream was opened under. A store that
+    cannot answer fails closed, like the fence: the caller can open the stream
+    again and be asked afresh.
+    """
+    try:
+        identity = await _recheck_fence(
+            {
+                "job_id": authorized.job_id,
+                "attempt_id": authorized.attempt_id,
+                "lease_generation": authorized.lease_generation,
+                "residency_generation": authorized.residency_generation,
+            },
+            store,
+        )
+        current = await _resolve_binding(
+            identity, authorized.alias, store, refresh_credentials=False
+        )
+    except Exception:
+        return False
+    return (
+        current.connection_id == authorized.connection_id
+        and current.binding == authorized.binding
+        and current.connection.config_revision == authorized.connection.config_revision
+        and current.connection.authorization_epoch == authorized.connection.authorization_epoch
+        and current.connection.capability_revision == authorized.connection.capability_revision
+    )
+
+
+async def _while_authorized(
+    stream: AsyncIterable[Any], authorized: Authorized, store: _McpRelayStorage
+) -> AsyncIterator[Any]:
+    """Relay a long-lived stream only while the session that opened it may use it.
+
+    Checked every :data:`_STREAM_RECHECK_S` whether or not the server is
+    writing: a quiet server's socket still carries the owner's credential, and
+    the request still holds a relay connection open. The read in flight is left
+    running across a check rather than cancelled and restarted, which would end
+    the stream it reads; it is cancelled only when the stream ends, which closes
+    the upstream response.
+    """
+    chunks = aiter(stream)
+
+    async def next_chunk() -> Any:
+        return await anext(chunks)
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _STREAM_RECHECK_S
+    pending: asyncio.Task[Any] | None = None
+    try:
+        while True:
+            if pending is None:
+                pending = asyncio.create_task(next_chunk())
+            await asyncio.wait({pending}, timeout=max(0.0, deadline - loop.time()))
+            if loop.time() >= deadline:
+                if not await _stream_still_authorized(authorized, store):
+                    logger.info(
+                        "agent_mcp_stream_closed_unauthorized",
+                        extra={
+                            "event": "agent_mcp_stream_closed_unauthorized",
+                            "job_id": authorized.job_id,
+                            "alias": authorized.alias,
+                        },
+                    )
+                    return
+                deadline = loop.time() + _STREAM_RECHECK_S
+            if not pending.done():
+                continue
+            done, pending = pending, None
+            try:
+                chunk = done.result()
+            except StopAsyncIteration:
+                return
+            yield chunk
+    finally:
+        if pending is not None and not pending.done():
+            pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
+        closing = getattr(chunks, "aclose", None)
+        if closing is not None:
+            await closing()
+
+
 # --------------------------------------------------------------------------
 # The merged host endpoint
 # --------------------------------------------------------------------------
@@ -2333,10 +2425,34 @@ async def mcp_get(
     authorization: str | None = Header(None),
     store: _McpRelayStorage | None = Depends(get_storage),
 ) -> Any:
-    """Open the server-to-client stream for an established session."""
+    """Open the server-to-client stream for an established session.
+
+    The stream lasts as long as the server keeps it open, so it is relayed
+    only while the session that opened it is still authorized: the turn's
+    fence holds, and its binding and connection are the ones it was opened
+    under. The first check that fails ends it and closes the upstream.
+    """
     authorized = await _authorize(server_name, authorization, store)
     assert store is not None
-    return await _proxy(request, authorized=authorized, store=store, method="GET")
+    if authorized.connection.config.transport is Transport.HTTP_SSE:
+        # A 2024-11-05 server's stream opens by announcing where its messages
+        # go, session included, and many such servers take messages on that
+        # session without the credential that opened it. Relayed, it would be
+        # the sandbox's way to the owner's server past every decision and fence
+        # here. This route cannot carry the session anyway, since it posts to
+        # the stream's own address; the merged endpoint speaks it itself.
+        return JSONResponse(
+            _error_reply(
+                None,
+                f"The {authorized.alias!r} MCP connection is a legacy SSE server, whose "
+                "stream this route cannot relay. Use the merged endpoint, /v1/agent/mcp.",
+            ),
+            status_code=405,
+        )
+    response = await _proxy(request, authorized=authorized, store=store, method="GET")
+    if isinstance(response, StreamingResponse):
+        response.body_iterator = _while_authorized(response.body_iterator, authorized, store)
+    return response
 
 
 @router.delete("/{server_name}")

@@ -45,6 +45,11 @@ ENV_JWKS_URL = "GATEWAY_JWKS_URL"
 ENV_ISSUER = "GATEWAY_ISSUER"
 ENV_SESSION_SECRET = "AGENT_SESSION_SECRET"
 
+#: Whether this deployment's cookies carry ``Secure``, and so their ``__Host-``
+#: names. Read here, beside the names, because a cookie has to be read under
+#: the name it was set under; ``api.session`` sets them from the same answer.
+ENV_SESSION_COOKIE_SECURE = "AGENT_SESSION_COOKIE_SECURE"
+
 #: Must match what the gateway mints. A token for a different audience is a
 #: token for a different service, and accepting it would let one consumer's
 #: credential act as another's.
@@ -92,11 +97,18 @@ SESSION_TTL_S = 30 * 24 * 60 * 60
 SESSION_COOKIE = "__Host-cloud_agent_session"
 
 #: The name the cookie had before the prefix, and still has without ``Secure``
-#: (plain ``http://localhost``, where browsers refuse the prefix). Still read,
-#: for sessions issued under it before the rename — at most
-#: :data:`SESSION_TTL_S` after it — and expired by every sign-in and sign-out
-#: so that a browser converges on the prefixed name.
+#: (plain ``http://localhost``, where browsers refuse the prefix). With
+#: ``Secure`` it is never read: read whenever no prefixed cookie was present,
+#: it let a session another host planted sign in a browser that held none.
+#: Every sign-in and sign-out there still expires it, so a browser drops a
+#: copy left from before the rename.
 LEGACY_SESSION_COOKIE = "cloud_agent_session"
+
+
+def session_cookie_is_secure() -> bool:
+    """Whether the session and sign-in cookies carry ``Secure``, as by default."""
+    raw = (setting_env(ENV_SESSION_COOKIE_SECURE) or "").strip().lower()
+    return raw not in ("0", "false", "no")
 
 
 def session_cookie_name(*, secure: bool) -> str:
@@ -105,14 +117,18 @@ def session_cookie_name(*, secure: bool) -> str:
 
 
 def session_from_cookies(cookies: Mapping[str, str]) -> str | None:
-    """Return the session a request's cookies carry, preferring the prefixed name.
+    """Return the session a request's cookies carry, under the name it is set with.
 
-    While a prefixed cookie is present the plain one is not read at all, even
-    if the prefixed one turns out not to verify: a plain-named cookie is the
-    one a sibling host can plant, so it never stands in for this host's own.
+    With ``Secure`` only the prefixed name is read: a plain-named cookie is the
+    one a sibling host can plant, so it neither stands in for this host's own
+    nor signs in a browser that has none. Without ``Secure`` the plain name is
+    the session's, read only while no prefixed cookie is present, even one
+    that turns out not to verify.
     """
     if SESSION_COOKIE in cookies:
         return cookies[SESSION_COOKIE] or None
+    if session_cookie_is_secure():
+        return None
     return cookies.get(LEGACY_SESSION_COOKIE) or None
 
 
@@ -126,7 +142,22 @@ def session_from_cookies(cookies: Mapping[str, str]) -> str | None:
 #: ``localStorage``** because that is the whole point: page JavaScript cannot
 #: read it, so an XSS cannot walk off with a verifier and complete somebody
 #: else's login.
-LOGIN_FLOW_COOKIE = "cloud_agent_login"
+#:
+#: **``__Host-`` wherever it carries ``Secure``**, like the session cookie. A
+#: sibling host that could plant a parked sign-in of its own, with the
+#: ``state`` and code it holds, would finish its sign-in in this browser and
+#: replace whoever was signed in here.
+LOGIN_FLOW_COOKIE = "__Host-cloud_agent_login"
+
+#: The parked sign-in's name without ``Secure``, where browsers refuse the
+#: prefix. With ``Secure`` it is neither set nor read.
+LEGACY_LOGIN_FLOW_COOKIE = "cloud_agent_login"
+
+
+def login_flow_cookie_name(*, secure: bool) -> str:
+    """Return the name a sign-in is parked, read back and cleared under."""
+    return LOGIN_FLOW_COOKIE if secure else LEGACY_LOGIN_FLOW_COOKIE
+
 
 #: How long a parked sign-in stays valid. Long enough to read a consent screen,
 #: short enough that an abandoned flow is not a credential lying around.

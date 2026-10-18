@@ -298,6 +298,7 @@ function SideChatContent({
     submission.current = true;
     setSubmitting(true);
     setActionError(null);
+    const sentDraft = draft;
     try {
       const result = await sendingAttachments(
         requestId
@@ -306,7 +307,8 @@ function SideChatContent({
       );
       if (!mounted.current) return;
       if (clearDraft) {
-        setDraft('');
+        // Typed while this message was on its way, the box holds the next one.
+        setDraft((value) => (value === sentDraft ? '' : value));
         resetAttachments();
       }
       queue.apply(result);

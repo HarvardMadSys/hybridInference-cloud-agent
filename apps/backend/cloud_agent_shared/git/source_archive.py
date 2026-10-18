@@ -16,12 +16,12 @@ import stat
 import subprocess
 import tarfile
 import tempfile
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 from cloud_agent_shared.errors import SandboxError
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterable, Iterator
     from typing import BinaryIO
 
 
@@ -29,11 +29,14 @@ if TYPE_CHECKING:
 #: largest checkout that fits is well under this. A host may raise it.
 DEFAULT_MAX_SOURCE_ARCHIVE_BYTES = 1024 * 1024 * 1024
 DEFAULT_MAX_BASE_BUNDLE_BYTES = 1024 * 1024 * 1024
-#: Uploads are bounded far below the checkout: the control plane caps what one
-#: conversation's uploads may total below this (``MAX_THREAD_ATTACHMENT_BYTES``),
-#: because every turn's files are imported together, and this is the host's own
-#: refusal if that ever stops holding.
+#: Uploads are bounded far below the checkout. Every turn's files are imported
+#: together, so the control plane admits a conversation's uploads only while the
+#: archive built from them, headers and all (:func:`upload_archive_size`), fits
+#: this; the host refuses a larger one in case that ever stops holding.
 DEFAULT_MAX_UPLOAD_ARCHIVE_BYTES = 64 * 1024 * 1024
+#: How the upload archive is written. Its exact length depends on both.
+_UPLOAD_FORMAT: Final = tarfile.PAX_FORMAT
+_UPLOAD_ENCODING: Final = "utf-8"
 _FULL_OBJECT_ID = re.compile(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})")
 _GIT_ENV = {
     "GIT_CONFIG_GLOBAL": "/dev/null",
@@ -244,7 +247,9 @@ def build_upload_archive(
     directories: set[str] = set()
     total = 0
     try:
-        with tarfile.open(fileobj=buffer, mode="w") as archive:
+        with tarfile.open(
+            fileobj=buffer, mode="w", format=_UPLOAD_FORMAT, encoding=_UPLOAD_ENCODING
+        ) as archive:
             for path, content in files:
                 name = pathlib.PurePosixPath(path)
                 if name.is_absolute() or ".." in name.parts or not name.parts:
@@ -260,14 +265,8 @@ def build_upload_archive(
                     if parent in directories:
                         continue
                     directories.add(parent)
-                    entry = tarfile.TarInfo(parent)
-                    entry.type = tarfile.DIRTYPE
-                    entry.mode = 0o555
-                    archive.addfile(entry)
-                member = tarfile.TarInfo(str(name))
-                member.size = len(content)
-                member.mode = 0o444
-                archive.addfile(member, io.BytesIO(content))
+                    archive.addfile(_upload_member(parent))
+                archive.addfile(_upload_member(str(name), size=len(content)), io.BytesIO(content))
                 if buffer.tell() > max_bytes:
                     raise SandboxError("attached files exceed the upload import size limit")
     except tarfile.TarError as exc:
@@ -278,6 +277,51 @@ def build_upload_archive(
     return payload
 
 
+def _upload_member(name: str, *, size: int | None = None) -> tarfile.TarInfo:
+    """One ``/uploads`` entry, root-owned and read-only: a folder when ``size`` is ``None``."""
+    member = tarfile.TarInfo(name)
+    if size is None:
+        member.type = tarfile.DIRTYPE
+        member.mode = 0o555
+    else:
+        member.size = size
+        member.mode = 0o444
+    return member
+
+
+def upload_archive_size(files: Iterable[tuple[str, int]]) -> int:
+    """The exact length of what :func:`build_upload_archive` writes for these paths and sizes.
+
+    Every folder level is an entry with a header of its own, and a name past
+    100 characters, or one that is not ASCII, adds a pax header to it. So
+    almost no content can make an archive over its limit, and the control
+    plane, which holds paths and sizes, admits a conversation's uploads by
+    this. A folder header's length depends only on its name's shape, so each
+    shape is measured once: the deepest set it admits has 51,000 folders.
+    """
+    headers: dict[tuple[bool, int, int], int] = {}
+    directories: set[str] = set()
+    total = 0
+    for path, length in files:
+        name = pathlib.PurePosixPath(path)
+        parent = ""
+        for part in name.parts[:-1]:
+            parent = f"{parent}/{part}" if parent else part
+            if parent in directories:
+                continue
+            directories.add(parent)
+            shape = (parent.isascii(), len(parent), len(parent.encode(_UPLOAD_ENCODING)))
+            if shape not in headers:
+                headers[shape] = len(_upload_member(parent).tobuf(_UPLOAD_FORMAT, _UPLOAD_ENCODING))
+            total += headers[shape]
+        member = _upload_member(str(name), size=length)
+        total += len(member.tobuf(_UPLOAD_FORMAT, _UPLOAD_ENCODING))
+        total += -(-length // tarfile.BLOCKSIZE) * tarfile.BLOCKSIZE
+    # Closing writes two zero blocks, then pads the archive to a whole record.
+    total += 2 * tarfile.BLOCKSIZE
+    return -(-total // tarfile.RECORDSIZE) * tarfile.RECORDSIZE
+
+
 __all__ = [
     "DEFAULT_MAX_BASE_BUNDLE_BYTES",
     "DEFAULT_MAX_SOURCE_ARCHIVE_BYTES",
@@ -285,4 +329,5 @@ __all__ = [
     "build_base_bundle",
     "build_source_archive",
     "build_upload_archive",
+    "upload_archive_size",
 ]

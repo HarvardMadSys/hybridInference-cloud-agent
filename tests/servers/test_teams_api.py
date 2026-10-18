@@ -200,6 +200,25 @@ async def test_claiming_sends_the_hash_and_shows_only_team_name_and_inviter(app)
     app.state.gateway.user_email.assert_not_called()
 
 
+async def test_an_old_link_tells_a_former_member_to_ask_for_a_new_one(app):
+    message = (
+        "You are no longer a member of this team. Ask an owner or admin for a new invitation link."
+    )
+    app.state.repository.claim_invitation.side_effect = TeamConflict(
+        message, code="no_longer_member"
+    )
+    response = await call(
+        app, "POST", "/v1/agent/team-invitations/claim", user="bob", json={"token": TOKEN}
+    )
+    # 409, like the other answers about the caller's membership, so the join
+    # page treats it as final and forgets the link.
+    assert response.status_code == 409
+    assert response.json() == {"error": {"type": "no_longer_member", "message": message}}
+    assert response.headers["Cache-Control"] == "no-store"
+    assert TOKEN not in response.text
+    app.state.gateway.user_email.assert_not_called()
+
+
 async def test_approval_requires_the_applicants_current_admission(app):
     repository = app.state.repository
     repository.get_join_request.return_value = APPLICANT

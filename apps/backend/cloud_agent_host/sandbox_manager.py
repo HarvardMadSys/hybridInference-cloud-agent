@@ -34,8 +34,9 @@ from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 import uvicorn
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi.concurrency import iterate_in_threadpool
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from cloud_agent_host import sandbox_manager_profiling_policy
 from cloud_agent_host.bounded_output import OutputPump
@@ -130,7 +131,9 @@ from cloud_agent_shared.workspace_browser import (
 logger = get_logger(__name__)
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Iterator
+    from collections.abc import AsyncIterator, Awaitable, Callable, Generator, Iterator
+
+    from starlette.types import Receive, Scope, Send
 
     from cloud_agent_host.sandbox_archives import SandboxArchiveService
 
@@ -268,6 +271,33 @@ class _EndpointLifecycleCalls:
             )
         async with self._lock:
             self._calls.difference_update(calls)
+
+
+class _EndingStreamingResponse(StreamingResponse):
+    """A streaming response that runs ``on_end`` however the response ends.
+
+    Starlette stops pulling a body when its client goes away, a send fails or
+    its task is cancelled, but never closes it. A generator left suspended
+    runs its own cleanup only when a garbage collector reaches it, which a
+    reference cycle can put off indefinitely.
+    """
+
+    def __init__(
+        self,
+        content: AsyncIterator[str],
+        *,
+        on_end: Callable[[], Awaitable[None]],
+        media_type: str,
+        headers: dict[str, str],
+    ) -> None:
+        super().__init__(content, media_type=media_type, headers=headers)
+        self._on_end = on_end
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            await self._on_end()
 
 
 class _CommandSlots:
@@ -463,6 +493,15 @@ class SharedIdleStopRequest(BaseModel):
         dict[Annotated[str, Field(min_length=1, max_length=256)], Annotated[int, Field(ge=0)]]
         | None
     ) = Field(None, max_length=128)
+
+    @model_validator(mode="after")
+    def zero_activation_requires_group_stop_scope(self) -> SharedIdleStopRequest:
+        if self.activation_generation == 0 and (
+            self.reason not in {"orphaned_attempt", "lost"}
+            or self.member_activation_generations is None
+        ):
+            raise ValueError("generation zero requires a fenced group-level orphan/lost stop")
+        return self
 
 
 class SandboxArchivePrepareRequest(BaseModel):
@@ -1234,10 +1273,12 @@ class _TerminalManager:
         self._lock = threading.RLock()
         # One workspace's suspensions, resumptions and creations still run one
         # at a time, but under a lock of that workspace's own, kept only while
-        # a caller holds or waits for it: suspension and resumption wait on
-        # Docker, and ``_lock`` is taken by every terminal request on the
-        # sandbox manager.
+        # a caller holds or waits for it: all three wait on Docker, and
+        # ``_lock`` is taken by every terminal request on the sandbox manager.
         self._workspace_locks: dict[str, tuple[threading.Lock, int]] = {}
+        # Terminals admitted but not listed yet: each counts against the
+        # global cap while its spawn runs without ``_lock``.
+        self._spawning = 0
         self._stop = threading.Event()
         self._reaper: threading.Thread | None = None
 
@@ -1315,10 +1356,12 @@ class _TerminalManager:
     def _serialized(self, workspace_id: str) -> Iterator[None]:
         """Run one suspension, resumption or creation of a workspace at a time.
 
-        Suspension and resumption signal every terminal through Docker, which
-        can take seconds each, so they hold this workspace's own lock across
-        those calls and ``_lock`` only for bookkeeping: no other workspace's
-        terminal request waits behind them.
+        Suspension and resumption signal every terminal through Docker, and
+        creation spawns one, which can take seconds each, so they hold this
+        workspace's own lock across those calls and ``_lock`` only for
+        bookkeeping: no other workspace's terminal request waits behind them.
+        A delete that finds no terminal waits here too, for a creation that
+        may be spawning it.
         """
         with self._lock:
             lock, holders = self._workspace_locks.get(workspace_id) or (threading.Lock(), 0)
@@ -1346,7 +1389,15 @@ class _TerminalManager:
         action_id: str | None = None,
         run_id: str | None = None,
     ) -> dict[str, Any]:
-        """Create one PTY while atomically enforcing the per-workspace cap."""
+        """Create one PTY while atomically enforcing the per-workspace cap.
+
+        Resolving an action's directory and spawning the PTY are Docker calls
+        that can take seconds, so they hold only this workspace's own lock,
+        which keeps its creations one at a time. ``_lock``, which every
+        terminal request on the sandbox manager takes, covers only the
+        admission, which reserves the new terminal's place under the global
+        cap, and the listing once it is spawned.
+        """
         self.reap()
         terminal_id = "term_" + (run_id or secrets.token_urlsafe(18))
         now = time.monotonic()
@@ -1354,129 +1405,146 @@ class _TerminalManager:
         try:
             # After a suspension or resumption of this workspace in progress,
             # as when one lock covered both, rather than in its middle.
-            with self._serialized(workspace_id), self._lock:
-                if workspace_id in self._suspended_workspaces:
-                    raise HTTPException(status_code=409, detail="terminal workspace is not ready")
-                group = self._sessions.setdefault(workspace_id, {})
-                if terminal_id in group:
-                    if on_closed is not None:
-                        on_closed(now)
-                    return group[terminal_id].descriptor()
-                global_active = sum(
-                    session.holds_process
-                    for sessions in self._sessions.values()
-                    for session in sessions.values()
-                )
-                if global_active >= self._max_sessions:
-                    if not group:
-                        self._sessions.pop(workspace_id, None)
-                    raise HTTPException(
-                        status_code=503, detail="sandbox manager terminal limit reached"
-                    )
-                active = sum(session.holds_process for session in group.values())
-                if active >= self._max_sessions_per_workspace:
-                    raise HTTPException(status_code=409, detail="workspace terminal limit reached")
-                action = (
-                    next((a for a in environment.actions if a.id == action_id), None)
-                    if environment and action_id
-                    else None
-                )
-                if action_id and action is None:
-                    raise HTTPException(404, "Action not found in workspace binding")
-                if action is not None:
-                    workdir = "/workspace/" + action.cwd
-                    if isinstance(backend, RetainedChatBackend):
-                        resolved = backend.manager.exec_capture(
-                            backend.spec,
-                            ["realpath", "-e", "--", str(workdir)],
-                            workdir="/workspace",
-                            timeout_s=10,
+            with self._serialized(workspace_id):
+                with self._lock:
+                    if workspace_id in self._suspended_workspaces:
+                        raise HTTPException(
+                            status_code=409, detail="terminal workspace is not ready"
                         )
-                        normalized = resolved.stdout.decode().strip()
-                        if resolved.returncode or not (
-                            normalized == "/workspace" or normalized.startswith("/workspace/")
-                        ):
-                            raise HTTPException(422, "Action directory escapes workspace")
-                        workdir = normalized
-                spec = SandboxSpec(
-                    argv=["/bin/sh", "-lc", action.command] if action else ["/bin/sh"],
-                    workdir=str(workdir),
-                    env={
-                        **backend.base_env(),
-                        "GIT_CONFIG_NOSYSTEM": "1",
-                        "TERM": "xterm-256color",
-                        **(tool_environment() if environment else {}),
-                        **(environment.values("runtime") if environment else {}),
-                        **(
-                            {
-                                "AGENT_ACTION_UID": str(
-                                    31000
-                                    + next(
-                                        i
-                                        for i in range(64)
-                                        if 31000 + i
-                                        not in {
-                                            getattr(s, "operation_uid", None)
-                                            for s in group.values()
-                                        }
-                                    )
-                                )
-                            }
-                            if action
-                            else {}
-                        ),
-                    },
-                )
-                if action is not None and environment is not None:
-                    previous = self._action_receipts.reserve(
-                        workspace_id, terminal_id, environment.binding_id, action.id
-                    )
-                    if previous is not None:
+                    group = self._sessions.setdefault(workspace_id, {})
+                    if terminal_id in group:
                         if on_closed is not None:
                             on_closed(now)
-                        return previous
-                try:
-                    process = backend.spawn_terminal(spec, rows=rows, cols=cols)
-                except TerminalNotSupportedError as exc:
-                    raise HTTPException(
-                        status_code=409,
-                        detail=(
-                            "Interactive terminals require the container or kata sandbox backend."
-                        ),
-                    ) from exc
-                except (OSError, SandboxError) as exc:
-                    raise HTTPException(
-                        status_code=502, detail="terminal could not be started"
-                    ) from exc
-                session = _TerminalSession(
-                    terminal_id=terminal_id,
-                    process=process,
-                    workdir=workdir if isinstance(workdir, Path) else None,
-                    rows=rows,
-                    cols=cols,
-                    now=now,
-                    idle_ttl_s=idle_ttl_s,
-                    on_closed=on_closed,
-                    secrets=environment.secrets() if environment else {},
-                    limits=self._limits,
-                    on_result=(
-                        lambda result: self._action_receipts.finish(
-                            workspace_id, terminal_id, result
-                        )
+                        return group[terminal_id].descriptor()
+                    global_active = self._spawning + sum(
+                        session.holds_process
+                        for sessions in self._sessions.values()
+                        for session in sessions.values()
                     )
-                    if action
-                    else None,
-                )
-                evicted.extend(self._unlist_exited_locked(workspace_id))
-                session.operation_uid = int(spec.env["AGENT_ACTION_UID"]) if action else None
-                group[terminal_id] = session
+                    if global_active >= self._max_sessions:
+                        if not group:
+                            self._sessions.pop(workspace_id, None)
+                        raise HTTPException(
+                            status_code=503, detail="sandbox manager terminal limit reached"
+                        )
+                    active = sum(session.holds_process for session in group.values())
+                    if active >= self._max_sessions_per_workspace:
+                        raise HTTPException(
+                            status_code=409, detail="workspace terminal limit reached"
+                        )
+                    action = (
+                        next((a for a in environment.actions if a.id == action_id), None)
+                        if environment and action_id
+                        else None
+                    )
+                    if action_id and action is None:
+                        raise HTTPException(404, "Action not found in workspace binding")
+                    operation_uids = {getattr(s, "operation_uid", None) for s in group.values()}
+                    self._spawning += 1
+                spawning = True
+                try:
+                    if action is not None:
+                        workdir = "/workspace/" + action.cwd
+                        if isinstance(backend, RetainedChatBackend):
+                            resolved = backend.manager.exec_capture(
+                                backend.spec,
+                                ["realpath", "-e", "--", str(workdir)],
+                                workdir="/workspace",
+                                timeout_s=10,
+                            )
+                            normalized = resolved.stdout.decode().strip()
+                            if resolved.returncode or not (
+                                normalized == "/workspace" or normalized.startswith("/workspace/")
+                            ):
+                                raise HTTPException(422, "Action directory escapes workspace")
+                            workdir = normalized
+                    spec = SandboxSpec(
+                        argv=["/bin/sh", "-lc", action.command] if action else ["/bin/sh"],
+                        workdir=str(workdir),
+                        env={
+                            **backend.base_env(),
+                            "GIT_CONFIG_NOSYSTEM": "1",
+                            "TERM": "xterm-256color",
+                            **(tool_environment() if environment else {}),
+                            **(environment.values("runtime") if environment else {}),
+                            **(
+                                {
+                                    "AGENT_ACTION_UID": str(
+                                        31000
+                                        + next(
+                                            i for i in range(64) if 31000 + i not in operation_uids
+                                        )
+                                    )
+                                }
+                                if action
+                                else {}
+                            ),
+                        },
+                    )
+                    if action is not None and environment is not None:
+                        previous = self._action_receipts.reserve(
+                            workspace_id, terminal_id, environment.binding_id, action.id
+                        )
+                        if previous is not None:
+                            if on_closed is not None:
+                                on_closed(now)
+                            return previous
+                    try:
+                        process = backend.spawn_terminal(spec, rows=rows, cols=cols)
+                    except TerminalNotSupportedError as exc:
+                        raise HTTPException(
+                            status_code=409,
+                            detail=(
+                                "Interactive terminals require the container or kata "
+                                "sandbox backend."
+                            ),
+                        ) from exc
+                    except (OSError, SandboxError) as exc:
+                        raise HTTPException(
+                            status_code=502, detail="terminal could not be started"
+                        ) from exc
+                    session = _TerminalSession(
+                        terminal_id=terminal_id,
+                        process=process,
+                        workdir=workdir if isinstance(workdir, Path) else None,
+                        rows=rows,
+                        cols=cols,
+                        now=now,
+                        idle_ttl_s=idle_ttl_s,
+                        on_closed=on_closed,
+                        secrets=environment.secrets() if environment else {},
+                        limits=self._limits,
+                        on_result=(
+                            lambda result: self._action_receipts.finish(
+                                workspace_id, terminal_id, result
+                            )
+                        )
+                        if action
+                        else None,
+                    )
+                    session.operation_uid = int(spec.env["AGENT_ACTION_UID"]) if action else None
+                    # Draining before it is listed: whoever finds it listed, a
+                    # delete waiting on this workspace among them, may close
+                    # it, and closing joins the pump.
+                    session.start()
+                    with self._lock:
+                        self._spawning -= 1
+                        spawning = False
+                        # A reap or a delete may have unlisted this workspace
+                        # while it had no terminal.
+                        group = self._sessions.setdefault(workspace_id, {})
+                        evicted.extend(self._unlist_exited_locked(workspace_id))
+                        group[terminal_id] = session
+                finally:
+                    if spawning:
+                        with self._lock:
+                            self._spawning -= 1
         finally:
             for stale in evicted:
                 try:
                     stale.close(mark_activity=False)
                 except (SandboxError, OSError):
                     logger.exception("workspace_terminal_eviction_cleanup_failed")
-        session.start()
         return session.descriptor()
 
     def _unlist_exited_locked(self, workspace_id: str) -> list[_TerminalSession]:
@@ -1696,23 +1764,32 @@ class _TerminalManager:
     def delete(self, workspace_id: str, terminal_id: str) -> dict[str, Any]:
         """Close a terminal, retaining it when cleanup needs to be retried."""
         with self._lock:
-            group = self._sessions.get(workspace_id, {})
-            session = group.get(terminal_id)
+            session = self._sessions.get(workspace_id, {}).get(terminal_id)
         if session is None:
-            # Action run ids are UUIDs; ephemeral interactive terminal ids are not.
-            if re.fullmatch(
-                r"term_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", terminal_id
-            ):
-                self._action_receipts.stop(workspace_id, terminal_id)
-            return {
-                "id": terminal_id,
-                "shell": "sh",
-                "state": "closed",
-                "cwd": "/workspace",
-                "rows": 24,
-                "cols": 80,
-                "last_seq": 0,
-            }
+            # A creation in this workspace may have reserved this action's
+            # receipt and still be spawning its terminal, holding the
+            # workspace's own lock. The tombstone below leaves a reserved
+            # receipt alone, so the stopped command would start once that
+            # terminal is listed: wait for the creation, then look again.
+            with self._serialized(workspace_id):
+                with self._lock:
+                    session = self._sessions.get(workspace_id, {}).get(terminal_id)
+                if session is None:
+                    # Action run ids are UUIDs; ephemeral interactive terminal ids are not.
+                    if re.fullmatch(
+                        r"term_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+                        terminal_id,
+                    ):
+                        self._action_receipts.stop(workspace_id, terminal_id)
+                    return {
+                        "id": terminal_id,
+                        "shell": "sh",
+                        "state": "closed",
+                        "cwd": "/workspace",
+                        "rows": 24,
+                        "cols": 80,
+                        "last_seq": 0,
+                    }
         try:
             descriptor = session.close()
         except (SandboxError, OSError) as exc:
@@ -1986,6 +2063,14 @@ def _run_git(
     # target's commit. The patch loses only the ``-dirty`` mark, which
     # ``git apply`` cannot use. ``--submodule=short`` keeps that one form
     # whatever ``diff.submodule`` says, and starts no Git in a submodule.
+    # The browser reads each file's name from its ``a/`` and ``b/`` header,
+    # and the publisher applies a snapshot at ``-p1``, so the prefixes are
+    # named too: ``diff.noPrefix`` would leave a name with nothing to strip,
+    # and ``diff.mnemonicPrefix`` writes ``c/`` and ``w/``. Options on the
+    # command line outrank either, on every Git version. ``--no-color`` keeps
+    # the escape codes ``color.ui=always`` would write out of the same text,
+    # and ``--unified=3`` the context ``git apply`` will not apply without,
+    # which ``diff.context=0`` would leave out.
     script = _NEUTRALIZE_GIT_FILTERS + (
         "git --no-pager status --porcelain=v1 --branch --ignore-submodules=dirty; "
         "status_status=$?; "
@@ -1998,6 +2083,7 @@ def _run_git(
         'GIT_INDEX_FILE="$index_path" git add -A -N --pathspec-from-file=- '
         "--pathspec-file-nul >/dev/null 2>&1 && "
         f'GIT_INDEX_FILE="$index_path" git --no-pager diff --no-ext-diff --no-textconv '
+        "--no-color --src-prefix=a/ --dst-prefix=b/ --unified=3 "
         f"--ignore-submodules=dirty --submodule=short --binary {target}; diff_status=$?; "
         f"printf '\n{commits_tag}\n'; "
         "git --no-pager log -20 --pretty=format:'%H%x09%h%x09%s%x09%an%x09%aI'; "
@@ -3044,8 +3130,10 @@ def create_app(
             except Exception:
                 return None
 
-        def frames() -> Iterator[str]:
-            turn_boundary_closed = False
+        turn_boundary_closed = False
+
+        def frames() -> Generator[str, None, None]:
+            nonlocal turn_boundary_closed
             tool_windows = ToolWindowTracker()
             resources: dict[str, Any] | None = None
 
@@ -3082,6 +3170,10 @@ def create_app(
                     try:
                         event = events.get(timeout=0.25)
                     except queue.Empty:
+                        # Hand the pulling thread back while the CLI is quiet:
+                        # a response whose reader has gone can end only once
+                        # the pull it is waiting on returns.
+                        yield ""
                         continue
                     if event is None:
                         break
@@ -3154,9 +3246,34 @@ def create_app(
                 with contextlib.suppress(Exception):
                     if not turn_boundary_closed:
                         owner.abort_turn(thread_id, body.token, turn)
+                        turn_boundary_closed = True
 
-        return StreamingResponse(
-            frames(),
+        lines = frames()
+
+        async def stream() -> AsyncIterator[str]:
+            async for line in iterate_in_threadpool(lines):
+                if line:
+                    yield line
+
+        def end_stream() -> None:
+            # Closing the frames aborts a turn they started and did not
+            # close; a reader gone before they started leaves it to this.
+            lines.close()
+            if not turn_boundary_closed:
+                with contextlib.suppress(Exception):
+                    owner.abort_turn(thread_id, body.token, turn)
+
+        async def ended() -> None:
+            # However the response ended -- the runner's process may have
+            # died -- the member's turn, lease and lock must not wait for a
+            # collector. Shutdown owns the call, as it owns every lifecycle
+            # call, and once sealed it closes the supervisor itself.
+            with contextlib.suppress(HTTPException):
+                await endpoint_calls.run(end_stream)
+
+        return _EndingStreamingResponse(
+            stream(),
+            on_end=ended,
             media_type="application/x-ndjson",
             headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
         )

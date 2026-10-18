@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent.host_pool import hash_secret, new_enroll_token
+from cloud_agent_shared.runtime_catalog import downloadable_runtimes
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -71,12 +72,17 @@ class HostCommands:
         """Select only an installed runtime and return previous selections for audit."""
         _, _, previous, _ = await self.repository.runner_pool()
         if not await self.repository.set_runtime_version(runtime=runtime, version=version):
-            raise HostCommandError(
-                404,
-                f"No host in the pool offers {runtime} {version!r}. "
-                "A version has to be built into the sandbox image before it can be "
-                "selected — add it to that host's *_EXTRA_VERSIONS and redeploy.",
-            )
+            if runtime in downloadable_runtimes():
+                how = (
+                    "Update to it from Settings → Agent versions: every host downloads "
+                    "and checks it, then new chats switch to it."
+                )
+            else:
+                how = (
+                    "A version has to be built into the sandbox image before it can be "
+                    "selected — add it to that host's *_EXTRA_VERSIONS and redeploy."
+                )
+            raise HostCommandError(404, f"No host in the pool offers {runtime} {version!r}. {how}")
         return previous
 
     async def forget(self, host: str) -> None:

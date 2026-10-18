@@ -35,7 +35,13 @@ from tests.integration.storage.test_environment_snapshot_store import (
     _ready_snapshot,
     _receipt,
 )
+from tests.integration.storage.test_environment_store import _save as _save_environment
+from tests.integration.storage.test_sandbox_restore_store import (
+    _covered,
+    _state as _restore_state,
+)
 
+from cloud_agent.storage._sql.sandbox import fence_sandbox_start
 from cloud_agent.storage.repositories import (
     attempt_commands as attempt_module,
     snapshot as snapshot_module,
@@ -908,6 +914,153 @@ async def test_losing_an_activation_waits_for_a_deletion_that_holds_its_queued_t
         finally:
             await _settle(abandon)
     assert abandoned is not None and abandoned["context_status"] == "lost"
+
+
+async def test_a_claim_takes_its_turns_group_before_the_host_row(pool, store: Storage):
+    """A claim waiting for a group holds no host row that a finishing member needs.
+
+    Finishing a turn writes its group and then gives its slot back, and a Fork
+    sibling's next turn is claimed on the same host. The claim locked the host
+    row before it chose the turn, then waited for the turn's group: a finish
+    in between deadlocked with it, and when Postgres picked the finish, a turn
+    that had settled was failed once its lease ran out.
+    """
+    job, claim, sandbox = await _reserve_shared_chat(store)
+    await _run_turn(store, job, claim, sandbox)
+    follow = await store.conversation_commands.create_follow_up(
+        parent_job_id=job["id"], user_id=job["user_id"], prompt="and update the docs"
+    )
+    assert follow is not None and follow.get("error") is None
+    claiming = None
+    async with pool.acquire() as member:
+        try:
+            async with member.transaction():
+                # A member's finish, up to its slot: it has written the group.
+                await member.execute(
+                    "UPDATE agent_sandboxes SET last_activity_at = NOW() WHERE id = $1",
+                    sandbox["sandbox_id"],
+                )
+                claiming = asyncio.create_task(
+                    _claim(
+                        store,
+                        worker_id="next-turn",
+                        lease_ttl_seconds=60,
+                        host=_HOST,
+                        host_credential_hash=_HOST_CREDENTIAL,
+                    )
+                )
+                await _blocked_by(pool, await member.fetchval("SELECT pg_backend_pid()"))
+                # The finish's slot next, which the waiting claim must not hold.
+                await member.execute(
+                    "SELECT host FROM agent_runner_hosts WHERE host = $1 FOR UPDATE NOWAIT",
+                    _HOST,
+                )
+            claimed = await asyncio.wait_for(claiming, timeout=10)
+        finally:
+            await _settle(claiming)
+    assert claimed is not None and claimed["id"] == follow["id"]
+
+
+async def test_a_claim_counts_an_environment_run_started_while_it_waited(
+    pool, store: Storage, monkeypatch
+):
+    """Taken after the group, the host row is still locked before the slots are counted.
+
+    An environment run takes a slot of its host without writing the host row:
+    its claim locks the row, counts the slots in use and starts the run. A
+    turn's claim counts those runs in its slot UPDATE as they were when that
+    statement began, so it locks the row first, in a statement of its own.
+    """
+    monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "environment-test-key")
+    job, claim, sandbox = await _reserve_shared_chat(store)
+    await _run_turn(store, job, claim, sandbox)
+    follow = await store.conversation_commands.create_follow_up(
+        parent_job_id=job["id"], user_id=job["user_id"], prompt="and update the docs"
+    )
+    assert follow is not None and follow.get("error") is None
+    environment = await _save_environment(store)
+    run = await store.environments.create_environment_run(
+        "alice",
+        repo="org/repo",
+        base_sha="a" * 40,
+        selection={"environment_id": environment["id"], "environment_id_provided": True},
+        key="test",
+    )
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE agent_runner_hosts SET slots_total = 1 WHERE host = $1", _HOST)
+    claiming = None
+    async with pool.acquire() as environment_claim:
+        try:
+            async with environment_claim.transaction():
+                # ``claim_environment_run`` up to its commit: the host row, then the run.
+                await environment_claim.execute(
+                    "SELECT host FROM agent_runner_hosts WHERE host = $1 FOR UPDATE", _HOST
+                )
+                await environment_claim.execute(
+                    "UPDATE agent_environment_runs SET state = 'running', host = $2, "
+                    "lease_generation = lease_generation + 1, "
+                    "lease_expires_at = NOW() + INTERVAL '120 seconds', started_at = NOW() "
+                    "WHERE id = $1",
+                    run["id"],
+                    _HOST,
+                )
+                claiming = asyncio.create_task(
+                    _claim(
+                        store,
+                        worker_id="next-turn",
+                        lease_ttl_seconds=60,
+                        host=_HOST,
+                        host_credential_hash=_HOST_CREDENTIAL,
+                    )
+                )
+                await _blocked_by(pool, await environment_claim.fetchval("SELECT pg_backend_pid()"))
+            # The run holds the host's only slot.
+            assert await asyncio.wait_for(claiming, timeout=10) is None
+        finally:
+            await _settle(claiming)
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_environment_runs SET cleanup_complete = TRUE WHERE id = $1", run["id"]
+        )
+    claimed = await _claim(
+        store,
+        worker_id="next-turn",
+        lease_ttl_seconds=60,
+        host=_HOST,
+        host_credential_hash=_HOST_CREDENTIAL,
+    )
+    assert claimed is not None and claimed["id"] == follow["id"]
+
+
+async def test_a_removal_counts_a_hosts_groups_under_their_locks(pool, store: Storage):
+    """A workspace start fenced while a removal decides cannot strand its group.
+
+    Revoking an idle host hands each stopped group its checkpoint covers to
+    another host. A workspace request fences the group before it is
+    forwarded, which ends that cover: the container may start. The removal
+    counted the groups without locks, so a fence landing between the count
+    and the hand-over took the group out of the hand-over, and the host was
+    revoked with the group left on it, uncovered, its container about to
+    start where nothing could report it.
+    """
+    _job, group = await _covered(pool, store)
+    removing = None
+    async with pool.acquire() as request:
+        try:
+            async with request.transaction():
+                # The request's fence, held until it is forwarded to the host.
+                assert await fence_sandbox_start(request, group["sandbox_id"]) == "stopped"
+                removing = asyncio.create_task(store.host_pool.remove_host(host="runner-a"))
+                await _blocked_by(pool, await request.fetchval("SELECT pg_backend_pid()"))
+            removed = await asyncio.wait_for(removing, timeout=10)
+        finally:
+            await _settle(removing)
+    # The fence came first, so the group no longer moves: the administrator is
+    # asked, and the host is not revoked under it.
+    assert removed == "cannot_move"
+    assert (await _restore_state(pool, group["sandbox_id"]))["state"] == "stopped"
+    kept = await store.host_pool.get_host(host="runner-a")
+    assert kept is not None and kept["status"] == "online"
 
 
 @pytest.mark.parametrize("sibling", ["claim", "finish"])

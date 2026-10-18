@@ -848,10 +848,60 @@ async def test_a_runner_reports_what_its_new_workspace_did_with_a_snapshot(monke
             headers={"Authorization": f"Bearer {token}"},
         )
     assert response.status_code == 204, response.text
+    # Fenced by the store to the attempt the token names.
     store.environment_snapshots.record_use.assert_awaited_once_with(
-        job_id=_JOB, snapshot_id=None, outcome="absent", base_sha="b" * 40
+        job_id=_JOB,
+        attempt_id=_ATTEMPT,
+        lease_generation=_GENERATION,
+        snapshot_id=None,
+        outcome="absent",
+        base_sha="b" * 40,
     )
     assert refused.status_code == 422
+
+
+async def test_a_snapshot_report_from_a_token_that_lost_its_lease_is_refused():
+    """A worker token names its attempt's fence and never expires.
+
+    So the store asks whether that attempt still holds the job's lease: a
+    superseded attempt's token, or one from a finished turn or a removed host,
+    could otherwise delete a snapshot whole teams start from, or queue a build
+    at any commit, at any later time.
+    """
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from cloud_agent.tokens import SCOPE_FULL, mint_worker_token
+
+    async def record_use(**report: Any) -> bool:
+        return (report.get("attempt_id"), report.get("lease_generation")) == (
+            _ATTEMPT,
+            _GENERATION,
+        )
+
+    store, grants = _ClaimStore(), _Grants()
+    store.environment_snapshots = SimpleNamespace(record_use=AsyncMock(side_effect=record_use))
+    stale = mint_worker_token(
+        job_id=_JOB, attempt_id=_ATTEMPT + 1, lease_generation=_GENERATION + 1, scope=SCOPE_FULL
+    )
+    async with AsyncClient(
+        transport=ASGITransport(app=_app(store, grants)), base_url="http://test"
+    ) as client:
+        response = await client.post(
+            f"/v1/agent/worker/jobs/{_JOB}/environment-snapshot",
+            json={"snapshot_id": "a" * 32, "outcome": "invalid", "base_sha": None},
+            headers={"Authorization": f"Bearer {stale}"},
+        )
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["error"]["type"] == "lease_lost"
+    store.environment_snapshots.record_use.assert_awaited_once_with(
+        job_id=_JOB,
+        attempt_id=_ATTEMPT + 1,
+        lease_generation=_GENERATION + 1,
+        snapshot_id="a" * 32,
+        outcome="invalid",
+        base_sha=None,
+    )
 
 
 @pytest.mark.parametrize("inference_capable", [False, True])

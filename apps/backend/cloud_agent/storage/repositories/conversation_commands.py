@@ -497,10 +497,11 @@ class PostgresConversationCommands:
                 thread_ids,
                 user_id,
             )
-            # Claims do not read the thread tombstone, so a turn left queued
-            # would still run. Cancel it the way a cancelled goal round is
-            # cancelled; a running turn is asked to stop and reaches its
-            # terminal state through the worker's fenced transition.
+            # Claims read the thread tombstone only for an automatic round, so
+            # any other turn left queued would still run. Cancel it the way a
+            # cancelled goal round is cancelled; a running turn is asked to stop
+            # and reaches its terminal state through the worker's fenced
+            # transition.
             await conn.execute(
                 "UPDATE agent_jobs SET state = 'cancelled', cancel_requested = TRUE, "
                 "terminal_resume_pending = TRUE, updated_at = NOW() "

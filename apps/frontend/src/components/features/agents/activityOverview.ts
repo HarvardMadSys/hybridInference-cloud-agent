@@ -139,7 +139,7 @@ export function buildActivityOverview(events: AgentEvent[]): ActivityOverview {
 
   for (const [index, event] of events.entries()) {
     if (event.kind !== 'tool_use') continue;
-    const activity = parseToolActivity(event.tool, event.input);
+    const activity = parseToolActivity(event.tool, event.input, event.mcpServer);
     if (!activity) continue;
     if (!accepted(event)) {
       // A launch that failed or was interrupted is still delegated work. It

@@ -59,6 +59,9 @@ _JOB = {
     "task_prompt": "fix the flaky test",
     "session_summaries": ["Stabilize test retries"],
     "patch": "diff --git a/x b/x\n",
+    # The group's container as the publication claim read it.
+    "generation": 1,
+    "container_id": "container-1",
 }
 
 
@@ -78,6 +81,7 @@ class FakeStore(AllCapabilities):
         self.renew_ok = True
         self.import_failed: tuple[int, str] | None = None
         self.import_completed: tuple[int, str] | None = None
+        self.import_completed_for: tuple[int, str | None] | None = None
         self.pushes: list[tuple[int, int, str]] = []
         self.push_record: bool | Exception = True
         self.deferred_delay_s: float | None = None
@@ -153,8 +157,16 @@ class FakeStore(AllCapabilities):
         self.import_failed = (snapshot_id, detail)
         self.import_failed_delay_s = delay_s
 
-    async def complete_snapshot_base_import(self, *, snapshot_id: int, commit_sha: str) -> bool:
+    async def complete_snapshot_base_import(
+        self,
+        *,
+        snapshot_id: int,
+        commit_sha: str,
+        generation: int,
+        container_id: str | None,
+    ) -> bool:
         self.import_completed = (snapshot_id, commit_sha)
+        self.import_completed_for = (generation, container_id)
         return True
 
 
@@ -617,6 +629,8 @@ async def test_shared_snapshot_publishes_group_lineage_and_imports_the_new_base(
     assert store.snapshot_recorded == (9, url, "b" * 40)
     assert store.snapshot_failed is None and store.import_failed is None
     assert store.import_completed == (9, "b" * 40)
+    # Completed for the container the import was sent to, and no other.
+    assert store.import_completed_for == (1, "container-1")
     assert sandbox_manager.imported == (snapshot, "b" * 40, b"bundle")
     assert "group snapshot" in captured_pr["body"]
     assert "ajob_1" in captured_pr["body"] and "ajob_2" in captured_pr["body"]
@@ -662,6 +676,8 @@ async def test_a_retried_base_import_bundles_against_the_workspaces_first_base(m
         "published_commit_sha": "c" * 40,
         "base_sha": "b" * 40,
         "origin_base_sha": "a" * 40,
+        "generation": 2,
+        "container_id": "container-2",
     }
 
     assert await publish_worker._retry_base_import(
@@ -672,6 +688,7 @@ async def test_a_retried_base_import_bundles_against_the_workspaces_first_base(m
     assert fetched["base_sha"] == "a" * 40
     assert sandbox_manager.imported == ("c" * 40, b"bundle")
     assert store.import_completed == (9, "c" * 40)
+    assert store.import_completed_for == (2, "container-2")
     assert store.import_failed is None
 
 

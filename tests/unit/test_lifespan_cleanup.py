@@ -29,6 +29,10 @@ _EXPECTED_SHUTDOWN_TASKS = (
     "mcp_maintenance_task",
     "mcp_catalog_task",
     "reaper_task",
+    "environment_maintenance_task",
+    "queued_follow_up_maintenance_task",
+    "goal_wakeup_maintenance_task",
+    "goal_scheduling_maintenance_task",
     "snapshot_task",
     "sandbox_deletion_task",
     "sandbox_move_out_task",
@@ -126,6 +130,10 @@ _STAGES = [
         ("mcp_catalog", True, False),
         ("mcp_catalog_run", True, False),
         ("reaper", True, False),
+        ("environment_maintenance", True, False),
+        ("queued_follow_up_maintenance", True, False),
+        ("goal_wakeup_maintenance", True, False),
+        ("goal_scheduling_maintenance", True, False),
         ("background_wake", True, False),
         ("snapshots", True, False),
         ("sandbox_deletions", True, False),
@@ -329,6 +337,22 @@ def _prepare(
     for target, label in (
         ("cloud_agent.settings.synchronize_settings", "settings_task"),
         ("cloud_agent.bootstrap.lifespan.reap_expired_attempts", "reaper_task"),
+        (
+            "cloud_agent.bootstrap.lifespan.run_environment_maintenance",
+            "environment_maintenance_task",
+        ),
+        (
+            "cloud_agent.bootstrap.lifespan.run_queued_follow_up_maintenance",
+            "queued_follow_up_maintenance_task",
+        ),
+        (
+            "cloud_agent.bootstrap.lifespan.run_goal_wakeup_maintenance",
+            "goal_wakeup_maintenance_task",
+        ),
+        (
+            "cloud_agent.bootstrap.lifespan.run_goal_scheduling_maintenance",
+            "goal_scheduling_maintenance_task",
+        ),
         ("cloud_agent.bootstrap.lifespan.coordinate_shared_snapshots", "snapshot_task"),
         ("cloud_agent.bootstrap.lifespan.coordinate_sandbox_deletions", "sandbox_deletion_task"),
         ("cloud_agent.bootstrap.lifespan.coordinate_move_out", "sandbox_move_out_task"),
@@ -391,6 +415,22 @@ def _inject(monkeypatch: pytest.MonkeyPatch, stage: str | None) -> None:
         "mcp_catalog": ("cloud_agent.mcp.catalog.McpCatalog", _boom(stage)),
         "mcp_catalog_run": ("cloud_agent.mcp.catalog.McpCatalog.run", _boom(stage)),
         "reaper": ("cloud_agent.bootstrap.lifespan.reap_expired_attempts", _boom(stage)),
+        "environment_maintenance": (
+            "cloud_agent.bootstrap.lifespan.run_environment_maintenance",
+            _boom(stage),
+        ),
+        "queued_follow_up_maintenance": (
+            "cloud_agent.bootstrap.lifespan.run_queued_follow_up_maintenance",
+            _boom(stage),
+        ),
+        "goal_wakeup_maintenance": (
+            "cloud_agent.bootstrap.lifespan.run_goal_wakeup_maintenance",
+            _boom(stage),
+        ),
+        "goal_scheduling_maintenance": (
+            "cloud_agent.bootstrap.lifespan.run_goal_scheduling_maintenance",
+            _boom(stage),
+        ),
         "background_wake": ("cloud_agent.bootstrap.lifespan.BackgroundWake", _boom(stage)),
         "snapshots": ("cloud_agent.bootstrap.lifespan.coordinate_shared_snapshots", _boom(stage)),
         "sandbox_deletions": (

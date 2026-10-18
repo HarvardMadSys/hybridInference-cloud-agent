@@ -1,8 +1,9 @@
 """Download the agent CLI versions an admin updated to, and check each one.
 
 Every heartbeat answer carries the control plane's *targets*: exact versions,
-at most two per runtime — the one new chats use and the one an update moves
-them to (``cloud_agent_shared.runtime_downloads``). This runner keeps each one
+at most two per runtime — the one an update moves new chats to and the one it
+replaced, which Roll back returns to after the switch
+(``cloud_agent_shared.runtime_downloads``). This runner keeps each one
 installed as a local image (``runtime_images``) built on the sandbox image it
 runs, and reports how far it has got on the next beat. The control plane
 switches new chats to a version once every online host reports it ready.
@@ -27,6 +28,11 @@ capability dropped, and only the first has a network:
 
 The sandbox image's own ``docker build`` runs those install scripts as root
 with a network; this is the stricter of the two.
+
+A version is removed again once nothing here needs it: no heartbeat answer
+names it, and no chat container or checkpoint image of this deployment runs it.
+A chat runs its own copy of the files (``runtime_install``), so removing one
+never touches a chat, and the menu this host reports stays short.
 """
 
 from __future__ import annotations
@@ -35,17 +41,22 @@ import contextlib
 import logging
 import subprocess
 import threading
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from cloud_agent_host.runtime_images import (
     NAMESPACE_LABEL,
     RUNTIME_LABEL,
+    SOURCE_LABEL,
     VERSION_LABEL,
     WORK_LABEL,
+    chat_versions,
     discover,
+    discover_or_none,
     image_id,
     image_ref,
+    legacy_repository,
     repository,
     short_id,
 )
@@ -78,6 +89,19 @@ ENV_RUNTIME_REGISTRY_URL = "AGENT_RUNTIME_REGISTRY_URL"
 FETCH_TIMEOUT_S = 900.0
 SCRIPTS_TIMEOUT_S = 600.0
 _DOCKER_TIMEOUT_S = 120.0
+
+#: How long a version must go unneeded before it is removed. A new chat is
+#: given its version when it is claimed, but holds it (by its container's
+#: label) only once that container exists, which loading an environment
+#: snapshot can make a while. The version a switch has just replaced can be
+#: the one such a chat was given.
+UNNEEDED_GRACE_S = 600.0
+#: How long the worker waits for an answer to wake it before it looks again.
+_POLL_S = 60.0
+#: How old a chat's copy source must be before it counts as left behind, as
+#: Docker's ``until`` filter reads it (on the daemon's own clock). A copy
+#: streams for at most a few minutes (``runtime_install``).
+LEFT_BEHIND_SOURCE_AGE = "1h"
 
 #: Reported while each step runs. The admin page eases between them, so the
 #: bar keeps moving through a long fetch without this host inventing numbers.
@@ -121,8 +145,8 @@ class RuntimeDownloads:
 
     ``apply`` and ``report`` are called from the heartbeat thread; the work
     runs on a thread of its own, one version at a time, so a long fetch never
-    delays a beat. ``on_change`` is called when a report changes, so the
-    heartbeat can carry it now rather than an interval later.
+    delays a beat. ``on_change`` is called when a report changes, or a version
+    is removed, so the heartbeat can carry it now rather than an interval later.
     """
 
     def __init__(
@@ -136,6 +160,7 @@ class RuntimeDownloads:
         registry: str | None = None,
         probe: Callable[..., ProbeResult] = probe_runtime,
         on_change: Callable[[], None] | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._docker = docker
         self._image = image
@@ -145,6 +170,7 @@ class RuntimeDownloads:
         self._registry = registry
         self._probe = probe
         self._on_change = on_change
+        self._clock = clock
         self._lock = threading.Lock()
         self._wake = threading.Event()
         self._stop = threading.Event()
@@ -154,13 +180,35 @@ class RuntimeDownloads:
         #: (nonce, base) last attempted per target: a failure is not retried
         #: until the admin asks again or a new sandbox image arrives.
         self._attempted: dict[_Key, tuple[str, str]] = {}
+        #: Every version the latest answer named; ``None`` until an answer
+        #: carries the list, and after one without it. Nothing is removed
+        #: while it is ``None``.
+        self._named: frozenset[_Key] | None = None
+        #: Every version an answer named since a cleanup pass last looked,
+        #: though a later answer may have dropped it again. A chat claimed on
+        #: it meanwhile may not run it yet, so its grace period starts afresh.
+        self._named_meanwhile: set[_Key] = set()
+        #: Whether a cleanup is owed though there is nothing to download: the
+        #: list changed, a version is still waiting out its grace period, or a
+        #: chat still runs a version no answer names.
+        self._cleanup_due = False
+        #: When each held version was first seen unneeded; worker thread only.
+        self._unneeded_since: dict[_Key, float] = {}
         self._thread: threading.Thread | None = None
 
     # ── heartbeat side ──────────────────────────────────────────────────
 
     def apply(self, targets: object) -> None:
-        """Adopt the targets from one heartbeat answer."""
+        """Adopt the targets from one heartbeat answer.
+
+        ``None`` is an answer without them, from a control plane that does not
+        send them. The targets stay as they are, but nothing is removed until
+        an answer says again what to hold: any version may be what new chats
+        use there.
+        """
         if not isinstance(targets, list):
+            with self._lock:
+                self._named = None
             return
         adopted: dict[_Key, DownloadTarget] = {}
         per_runtime: dict[str, int] = {}
@@ -173,9 +221,23 @@ class RuntimeDownloads:
                     continue
                 per_runtime[target.runtime] = per_runtime.get(target.runtime, 0) + 1
             adopted[_key(target)] = target
+        # Read or not: a target this host cannot use may still name a version
+        # it holds, and that one is not for this host to remove.
+        named = frozenset(
+            (raw["runtime"], raw["version"])
+            for raw in targets
+            if isinstance(raw, dict)
+            and isinstance(raw.get("runtime"), str)
+            and isinstance(raw.get("version"), str)
+        )
         with self._lock:
             changed = adopted != self._targets
             self._targets = adopted
+            if named != self._named:
+                self._named = named
+                self._named_meanwhile |= named
+                self._cleanup_due = True
+                changed = True
             for key in list(self._reports):
                 current = adopted.get(key)
                 if current is None or current.nonce != self._reports[key].nonce:
@@ -187,6 +249,11 @@ class RuntimeDownloads:
         """Each target's state on this host, as the heartbeat carries it."""
         with self._lock:
             return [report.to_wire() for report in self._reports.values()]
+
+    def targets(self) -> frozenset[_Key]:
+        """Every version this host was told to hold, for its menu to keep first."""
+        with self._lock:
+            return frozenset(self._targets) | (self._named or frozenset())
 
     # ── lifecycle ───────────────────────────────────────────────────────
 
@@ -226,6 +293,9 @@ class RuntimeDownloads:
             if self._reports.get(_key(target)) == report:
                 return
             self._reports[_key(target)] = report
+        self._changed()
+
+    def _changed(self) -> None:
         if self._on_change is not None:
             with contextlib.suppress(Exception):
                 self._on_change()
@@ -260,11 +330,11 @@ class RuntimeDownloads:
         while not self._stop.is_set():
             self._wake.clear()
             with self._lock:
-                idle = not self._targets
+                idle = not self._targets and not self._cleanup_due
             if idle:
-                # Nothing to hold: no reason to ask Docker anything until an
-                # answer brings a target, which wakes this thread.
-                self._wake.wait(60.0)
+                # Nothing to hold or remove: no reason to ask Docker anything
+                # until an answer changes the list, which wakes this thread.
+                self._wake.wait(_POLL_S)
                 continue
             try:
                 base_id = image_id(self._docker, self._image)
@@ -281,12 +351,15 @@ class RuntimeDownloads:
                 if job is not None:
                     self._attempted[_key(job.target)] = (job.target.nonce, job.base_id)
                     self._download(job)
+                    self._clean_up()
                     continue
             except Exception:
                 logger.exception(
                     "runtime download loop failed", extra={"event": "runtime_download_loop_error"}
                 )
-            self._wake.wait(60.0)
+            # Nothing left to download.
+            self._clean_up()
+            self._wake.wait(_POLL_S)
 
     def _download(self, job: _Job) -> None:
         target = job.target
@@ -493,6 +566,15 @@ class RuntimeDownloads:
             labelled = self._docker_run(
                 [
                     "commit",
+                    # The container is install work, so a restarted runner
+                    # removes it; the version kept must not be. ``docker
+                    # commit`` keeps a container's labels, and every container
+                    # made from the image would inherit this one, among them
+                    # the one a chat copies the CLI from (``runtime_install``).
+                    # Docker cannot unset a label, but the leftover filter
+                    # names the namespace and does not match an empty value.
+                    "--change",
+                    f"LABEL {WORK_LABEL}=",
                     "--change",
                     f"LABEL {NAMESPACE_LABEL}={self._namespace}",
                     "--change",
@@ -521,6 +603,117 @@ class RuntimeDownloads:
             ) and image.base != short_id(base_id):
                 self._docker_run(["rmi", image.ref])
 
+    def _clean_up(self) -> None:
+        """Remove what nothing needs; a failure is logged, never raised."""
+        try:
+            self._remove_left_behind_sources()
+            self._remove_unneeded()
+        except Exception:
+            logger.exception(
+                "runtime download cleanup failed",
+                extra={"event": "runtime_download_cleanup_error"},
+            )
+
+    def _remove_left_behind_sources(self) -> None:
+        """Remove the copy sources chats' processes died before removing.
+
+        Each keeps its version's image from being removed. Only old ones go:
+        a young one may belong to a copy still running. ``container prune``
+        removes every container that is not running, and a source is never
+        started; ``until`` keeps the ones made in the last hour.
+        """
+        self._docker_run(
+            [
+                "container",
+                "prune",
+                "--force",
+                "--filter",
+                f"label={SOURCE_LABEL}={self._namespace}",
+                "--filter",
+                f"until={LEFT_BEHIND_SOURCE_AGE}",
+            ]
+        )
+
+    def _remove_unneeded(self) -> None:
+        """Remove the versions held here that nothing needs any more.
+
+        A version is needed while the latest answer names it, or a chat
+        container or checkpoint image of this deployment runs it, and for
+        :data:`UNNEEDED_GRACE_S` after. That time starts afresh whenever an
+        answer names the version again. Builds on older sandbox images go by
+        the same rule: the version a chat ran at a release stays on the old
+        image, and would be offered for good once that chat is gone.
+        """
+        with self._lock:
+            self._cleanup_due = False
+            named = self._named
+            named_meanwhile, self._named_meanwhile = self._named_meanwhile, set()
+        for key in named_meanwhile:
+            self._unneeded_since.pop(key, None)
+        if named is None:
+            # Time unneeded counts only while answers say what is needed.
+            self._unneeded_since.clear()
+            return
+        listed = discover_or_none(self._docker, self._namespace)
+        if listed is None:
+            # Docker could not say what this host holds, which is not holding
+            # nothing: look again, though there may be nothing to download.
+            with self._lock:
+                self._cleanup_due = True
+            return
+        held = [image for image in listed if (image.runtime, image.version) not in named]
+        if not held:
+            self._unneeded_since.clear()
+            return
+        in_use = chat_versions(self._docker, self._namespace)
+        if in_use is None:
+            # Docker could not say what chats run: any of these may be.
+            with self._lock:
+                self._cleanup_due = True
+            return
+        now = self._clock()
+        unneeded = {(image.runtime, image.version) for image in held} - in_use
+        self._unneeded_since = {key: self._unneeded_since.get(key, now) for key in unneeded}
+        waiting = removed = False
+        for image in held:
+            key = (image.runtime, image.version)
+            if key not in unneeded:
+                # A chat still runs it. Nothing tells this worker when that
+                # chat is deleted, so the check stays owed: a host with
+                # nothing to download would otherwise never look again.
+                waiting = True
+                continue
+            if now - self._unneeded_since[key] < UNNEEDED_GRACE_S:
+                waiting = True
+                continue
+            # An answer may have named it since this pass read the list: an
+            # admin can select a version this host still offers, and the
+            # control plane takes it on that word. Even if a later answer
+            # dropped it again, the next pass gives it a fresh grace period.
+            with self._lock:
+                if self._named is None or key in self._named or key in self._named_meanwhile:
+                    continue
+            # Never forced: Docker refuses an image a container still uses,
+            # such as the source a chat is copying this version from, and the
+            # next cleanup tries again.
+            if self._docker_run(["rmi", image.ref]).returncode != 0:
+                waiting = True
+                continue
+            removed = True
+            logger.info(
+                "runtime download removed",
+                extra={
+                    "event": "runtime_download_removed",
+                    "runtime": image.runtime,
+                    "version": image.version,
+                },
+            )
+        if waiting:
+            with self._lock:
+                self._cleanup_due = True
+        if removed:
+            self._changed()
+
     def _remove_leftovers(self) -> None:
         """Remove work a runner stopped mid-download left behind."""
         listed = self._docker_run(
@@ -528,14 +721,20 @@ class RuntimeDownloads:
         )
         for container in listed.stdout.split():
             self._docker_run(["rm", "-f", container])
-        candidates = self._docker_run(
-            [
-                "image",
-                "ls",
-                f"{repository(self._namespace)}-candidate",
-                "--format",
-                "{{.Repository}}:{{.Tag}}",
-            ]
-        )
-        for ref in candidates.stdout.split():
-            self._docker_run(["rmi", ref])
+        # Earlier releases' too, under the name every namespace that reads the
+        # same shares. Only this deployment's, by their label: another's may
+        # still be under its check.
+        for name in (repository(self._namespace), legacy_repository(self._namespace)):
+            candidates = self._docker_run(
+                [
+                    "image",
+                    "ls",
+                    f"{name}-candidate",
+                    "--filter",
+                    f"label={NAMESPACE_LABEL}={self._namespace}",
+                    "--format",
+                    "{{.Repository}}:{{.Tag}}",
+                ]
+            )
+            for ref in candidates.stdout.split():
+                self._docker_run(["rmi", ref])

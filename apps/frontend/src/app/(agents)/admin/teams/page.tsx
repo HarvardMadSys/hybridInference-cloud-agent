@@ -35,40 +35,47 @@ const STATES: { key: AdminTeamStateFilter; label: string }[] = [
   { key: 'all', label: 'All' },
 ];
 
+/** What an empty list says. Under Active or Deleted, the other state may still hold teams. */
+function nothingFound(state: AdminTeamStateFilter, query: string): string {
+  const kind = state === 'all' ? '' : `${state} `;
+  if (query) return `No ${kind}team matches “${query}”.`;
+  return state === 'all' ? 'No teams yet.' : `No ${kind}teams.`;
+}
+
 export default function AdminTeamsPage() {
   const [draft, setDraft] = useState('');
   const [query, setQuery] = useState('');
   const [state, setState] = useState<AdminTeamStateFilter>('active');
   const [teams, setTeams] = useState<AdminTeamSummary[] | null>(null);
-  const [nextOffset, setNextOffset] = useState<number | null>(null);
+  const [nextBefore, setNextBefore] = useState<string | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [denied, setDenied] = useState(false);
   const request = useRef<AbortController | null>(null);
 
   const load = useCallback(
-    async (offset: number) => {
+    async (before: string | null) => {
       request.current?.abort();
       const controller = new AbortController();
       request.current = controller;
       setError(null);
-      if (offset === 0) {
-        // An offset belongs to the list it came from; a new first page drops it.
+      if (before === null) {
+        // A cursor belongs to the list it came from; a new first page drops it.
         setTeams(null);
-        setNextOffset(null);
+        setNextBefore(null);
       } else {
         setLoadingMore(true);
       }
       try {
-        const page = await listAdminTeams({ q: query, state, offset }, controller.signal);
+        const page = await listAdminTeams({ q: query, state, before }, controller.signal);
         if (controller.signal.aborted) return;
-        setTeams((current) => (offset === 0 ? page.teams : [...(current ?? []), ...page.teams]));
-        setNextOffset(page.next_offset);
+        setTeams((current) => (before === null ? page.teams : [...(current ?? []), ...page.teams]));
+        setNextBefore(page.next_before);
       } catch (cause) {
         if (controller.signal.aborted) return;
         if (accessDenied(cause)) setDenied(true);
         else setError(getErrorMessage(cause));
-        if (offset === 0) setTeams([]);
+        if (before === null) setTeams([]);
       } finally {
         if (!controller.signal.aborted) setLoadingMore(false);
       }
@@ -77,7 +84,7 @@ export default function AdminTeamsPage() {
   );
 
   useEffect(() => {
-    void load(0);
+    void load(null);
     return () => request.current?.abort();
   }, [load]);
 
@@ -144,7 +151,11 @@ export default function AdminTeamsPage() {
           <div className="mt-6">
             <ErrorNotice>
               {error}{' '}
-              <button type="button" className="font-medium underline" onClick={() => void load(0)}>
+              <button
+                type="button"
+                className="font-medium underline"
+                onClick={() => void load(null)}
+              >
                 Retry
               </button>
             </ErrorNotice>
@@ -156,11 +167,7 @@ export default function AdminTeamsPage() {
             Loading…
           </p>
         ) : teams.length === 0 ? (
-          !error && (
-            <p className="mt-8 text-sm text-muted">
-              {query ? `No team matches “${query}”.` : 'No teams yet.'}
-            </p>
-          )
+          !error && <p className="mt-8 text-sm text-muted">{nothingFound(state, query)}</p>
         ) : (
           <div className={`${CARD} mt-6 overflow-x-auto`}>
             <table className="w-full min-w-[720px] text-left text-sm">
@@ -222,11 +229,11 @@ export default function AdminTeamsPage() {
           </div>
         )}
 
-        {teams !== null && nextOffset !== null && (
+        {teams !== null && nextBefore !== null && (
           <button
             type="button"
             disabled={loadingMore}
-            onClick={() => void load(nextOffset)}
+            onClick={() => void load(nextBefore)}
             className={`${BUTTON} mt-4`}
           >
             {loadingMore ? 'Loading…' : 'Show more'}

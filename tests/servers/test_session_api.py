@@ -898,17 +898,81 @@ async def test_a_secure_sign_in_uses_the_host_prefix_and_expires_the_plain_name(
     assert not client.cookies.get(identity.LEGACY_SESSION_COOKIE)
 
 
-async def test_a_session_under_the_plain_name_still_works_during_the_rename(
-    client_and_gateway,
-):
-    """A browser signed in before the rename is not signed out by it."""
-    client, _ = client_and_gateway
-    client.cookies.set(identity.LEGACY_SESSION_COOKIE, identity.mint_session(user_id=_USER))
+async def test_a_plain_named_session_signs_in_no_one(client_and_gateway):
+    """Where the cookie is ``Secure`` the plain name is never read, not even alone.
+
+    A sibling host can set it, so reading it whenever the prefixed one was
+    absent let a session somebody else chose sign in a browser that held none.
+    A browser still holding only its pre-rename cookie signs in again.
+    """
+    client, gateway = client_and_gateway
+    client.cookies.set(identity.LEGACY_SESSION_COOKIE, identity.mint_session(user_id="intruder"))
 
     response = await client.get("/v1/session/me")
 
-    assert response.status_code == 200
-    assert response.json()["id"] == _USER
+    assert response.status_code == 401
+    assert gateway.access_asked == []
+
+
+async def test_a_secure_sign_in_parks_its_flow_under_the_host_prefix(client_and_gateway):
+    """Named like the session cookie, and for the same reason: no sibling can plant it."""
+    client, _ = client_and_gateway
+
+    started = await _begin(client)
+    done = await client.get(
+        "/v1/session/callback", params={"code": "the-code", "state": _state_from(started)}
+    )
+
+    assert identity.LOGIN_FLOW_COOKIE == "__Host-cloud_agent_login"
+    parked = started.headers["set-cookie"]
+    assert parked.startswith(f"{identity.LOGIN_FLOW_COOKIE}=")
+    lowered = parked.lower()
+    assert "secure" in lowered and "path=/" in lowered and "domain=" not in lowered
+    assert done.status_code == 303
+    # Cleared under the same name and attributes, or the browser keeps it.
+    cleared = next(
+        c
+        for c in done.headers.get_list("set-cookie")
+        if c.startswith(f"{identity.LOGIN_FLOW_COOKIE}=")
+    )
+    assert "max-age=0" in cleared.lower() and "secure" in cleared.lower()
+
+
+async def test_a_sign_in_parked_under_the_plain_name_finishes_nothing(key):
+    """Login CSRF by cookie tossing.
+
+    An attacker starts a sign-in of their own, keeps its parked flow and
+    ``state``, consents at the gateway as themselves and keeps the code. A
+    sibling host can plant a plain-named cookie in the victim's browser and
+    send it to the callback; were that cookie read, the attacker's sign-in
+    would finish there and replace the victim's session with the attacker's.
+    """
+    gateway = _FakeGateway(identity_token=_identity_token(key))
+    app = _app(gateway)
+    async with (
+        AsyncClient(
+            transport=ASGITransport(app=app), base_url="https://test", follow_redirects=False
+        ) as victim,
+        AsyncClient(
+            transport=ASGITransport(app=app), base_url="https://test", follow_redirects=False
+        ) as attacker,
+    ):
+        assert (await _sign_in(victim)).status_code == 303
+        started = await _begin(attacker)
+        parked = attacker.cookies[identity.LOGIN_FLOW_COOKIE]
+        gateway.identity_token = _identity_token(key, sub="attacker")
+        victim.cookies.set("cloud_agent_login", parked)
+
+        response = await victim.get(
+            "/v1/session/callback",
+            params={"code": "attacker-code", "state": _state_from(started)},
+        )
+        me = await victim.get("/v1/session/me")
+
+    assert response.status_code == 303
+    assert "sign_in_error=expired" in response.headers["location"]
+    assert [exchange["code"] for exchange in gateway.exchanged] == ["the-code"]
+    assert me.json()["id"] == _USER
 
 
 async def test_a_plain_named_cookie_never_stands_in_for_the_prefixed_one(client_and_gateway):
@@ -980,6 +1044,26 @@ async def test_secure_can_be_turned_off_only_deliberately(monkeypatch, key):
     assert "secure" not in response.headers["set-cookie"].lower()
     assert "__host-" not in response.headers["set-cookie"].lower()
     assert "__host-" not in logout.headers["set-cookie"].lower()
+
+
+async def test_without_secure_both_cookies_keep_their_plain_names(monkeypatch, key):
+    """Plain ``http://localhost`` still signs in, since browsers refuse the prefix there."""
+    monkeypatch.setenv(session_router.ENV_COOKIE_SECURE, "false")
+    gateway = _FakeGateway(identity_token=_identity_token(key))
+    async with AsyncClient(
+        transport=ASGITransport(app=_app(gateway)), base_url="http://test", follow_redirects=False
+    ) as client:
+        started = await _begin(client)
+        done = await client.get(
+            "/v1/session/callback", params={"code": "the-code", "state": _state_from(started)}
+        )
+        me = await client.get("/v1/session/me")
+
+    assert started.headers["set-cookie"].startswith("cloud_agent_login=")
+    assert done.status_code == 303
+    assert client.cookies.get(identity.LEGACY_SESSION_COOKIE)
+    assert me.status_code == 200
+    assert me.json()["id"] == _USER
 
 
 @pytest.mark.parametrize("role", ["free", "admin"])

@@ -1012,6 +1012,30 @@ describe('buildTrajectorySteps', () => {
     expect(new Set(steps.map((step) => step.key)).size).toBe(2);
   });
 
+  it('keeps the MCP server a Codex call went to on its step', () => {
+    const [mcp, command] = buildTrajectorySteps(
+      [
+        event({
+          id: 1,
+          job_id: 'a',
+          turn_no: 1,
+          event_type: 'tool_use',
+          payload: { id: 'm', name: 'review__task', input: {}, mcp_server: 'session' },
+        }),
+        event({
+          id: 2,
+          job_id: 'a',
+          turn_no: 1,
+          event_type: 'tool_use',
+          payload: { id: 'c', name: 'Bash', input: 'ls' },
+        }),
+      ],
+      idle,
+    );
+    expect(mcp).toMatchObject({ toolName: 'review__task', mcpServer: 'session' });
+    expect(command).not.toHaveProperty('mcpServer');
+  });
+
   it('claims no status or duration when one call was answered twice', () => {
     const steps = buildTrajectorySteps(
       [

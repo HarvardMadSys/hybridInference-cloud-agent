@@ -15,8 +15,10 @@ honest about *this* surface while saying nothing about the gate.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
@@ -1108,6 +1110,57 @@ async def test_a_heartbeat_carries_the_version_stamp_to_the_admin_page(client):
     assert shown["sandbox_runtime"] == ""
     assert shown["sandbox_image_digest"] == "sha256:abc123"
     assert shown["runtime_versions"] == {"claude-code": "1.2.3"}
+
+
+async def test_a_host_holding_more_versions_than_a_menu_may_list_is_still_heard(
+    client, monkeypatch
+):
+    """The host cuts its menu to the cap: a refused beat takes it out of the pool.
+
+    That a longer menu is refused is the schema's own test
+    (``test_host_report_bounds.py``).
+    """
+    from cloud_agent.schemas import HOST_VERSION_MENU_MAX_ITEMS, WorkerClaimAttestation
+    from cloud_agent_host.sandbox import ContainerBackend
+
+    async_client, store = client
+    credential = await _enroll(async_client, store)
+    downloaded = "\n".join(
+        f"default-agent-runtime:claude-code_2.1.{n}_0123456789ab" for n in range(70)
+    )
+    inspected = json.dumps(
+        {
+            "Id": "sha256:local",
+            "Config": {"Labels": {"org.freeinference.runtime.claude-code.version": "2.1.220"}},
+        }
+    )
+
+    def docker(argv, **_kwargs):
+        if argv[1:3] == ["image", "ls"] and "--quiet" not in argv:
+            return SimpleNamespace(returncode=0, stdout=downloaded, stderr="")
+        if argv[1:3] == ["image", "inspect"]:
+            return SimpleNamespace(returncode=0, stdout=inspected, stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    with monkeypatch.context() as patched:
+        patched.setattr("cloud_agent_host.sandbox.subprocess.run", docker)
+        stamp = ContainerBackend(image="img:1").version_stamp()
+
+    response = await async_client.post(
+        "/v1/agent/host/heartbeat",
+        json={
+            "runtime_versions": stamp["runtime_versions"],
+            "runtime_versions_available": stamp["runtime_versions_available"],
+        },
+        headers={"Authorization": f"Bearer {credential}"},
+    )
+
+    assert response.status_code == 200, response.text
+    offered = store.rows["runner-a"]["runtime_versions_available"]["claude-code"]
+    assert len(offered) == HOST_VERSION_MENU_MAX_ITEMS
+    assert offered[0] == "2.1.220"
+    # A claim attests the same menu.
+    WorkerClaimAttestation(runtime_versions_available=stamp["runtime_versions_available"])
 
 
 _TARGET = {
@@ -2858,15 +2911,16 @@ async def test_host_heartbeat_returns_only_durable_due_idle_stop_fences(
     ]
 
 
-async def test_host_heartbeat_accepts_a_generation_zero_fork_target_idle_stop(residency_client):
-    """A sandbox-manager-reconstructed pre-turn fork target has no activation yet."""
+async def test_host_heartbeat_accepts_a_fenced_generation_zero_group_stop(residency_client):
+    """A generation-zero target stops only through its explicit group fence."""
     client, store, _grants = residency_client
     credential = await _enroll(client, store)
     store.sandbox_stop_due = {
         "thread_id": "athr_fork",
         "generation": 1,
         "activation_generation": 0,
-        "reason": "idle",
+        "reason": "orphaned_attempt",
+        "member_activation_generations": {"athr_fork": 0},
     }
 
     response = await client.post(
@@ -2885,10 +2939,9 @@ async def test_host_heartbeat_accepts_a_generation_zero_fork_target_idle_stop(re
         },
         headers={"Authorization": f"Bearer {credential}"},
     )
-
     assert response.status_code == 200, response.text
     assert response.json()["retained_sandboxes_stop"] == [
-        {**store.sandbox_stop_due, "shared_live": True, "member_activation_generations": None}
+        {**store.sandbox_stop_due, "shared_live": True}
     ]
 
 

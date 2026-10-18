@@ -10,6 +10,7 @@ import { writeGoal } from './goalApi';
 import { useGoalWrite } from './useGoalWrite';
 import { GoalActionsMenu } from './GoalActionsMenu';
 import { DEFAULT_GOAL_LIMITS, type GoalLimits } from '@/lib/goalLimits';
+import { hasPrimaryModifier } from '@/lib/keyboardShortcuts';
 
 /** What the band needs that the goal row does not carry. */
 export interface GoalBandState {
@@ -272,8 +273,8 @@ function GoalEditor({
           // The composers' own guard reads the same two fields for Enter.
           if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
           // The objective is prose and may run to several lines, so Enter is a
-          // newline here. Cmd/Ctrl+Enter is the chord that saves.
-          if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+          // newline here. Cmd+Enter (Ctrl+Enter off Apple platforms) saves.
+          if (event.key === 'Enter' && hasPrimaryModifier(event)) {
             event.preventDefault();
             if (canSave) onSave(trimmed);
           }

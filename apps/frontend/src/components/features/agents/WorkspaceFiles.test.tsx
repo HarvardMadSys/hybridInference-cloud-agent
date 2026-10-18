@@ -7,6 +7,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getAgentJobFiles, type AgentJobFileApi, type AgentJobFilesApi } from '@/lib/api/agents';
 import { LocaleProvider } from '@/components/providers/LocaleProvider';
 import { LOCALE_STORAGE_KEY } from '@/lib/i18n/locales';
+import { APIError } from '@/lib/utils/errors';
+import { toDiffFileDetails, toDiffFiles } from './adapt';
 import type { AgentJob } from './types';
 import { WorkspaceFiles } from './WorkspaceFiles';
 
@@ -325,6 +327,88 @@ describe('workspace navigation and copying', () => {
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
+  it('says a changed file the run deleted was deleted, rather than failing to read it', async () => {
+    vi.mocked(getAgentJobFiles).mockImplementation(async (_jobId, path = '') => {
+      if (!path) return { path: '', kind: 'directory', entries: [] };
+      // What the live workspace answers for a path that is no longer there.
+      throw new APIError('NOT_FOUND', 'workspace path does not exist', 404);
+    });
+    const patch = [
+      'diff --git a/kept.ts b/kept.ts',
+      'index 1111111..2222222 100644',
+      '--- a/kept.ts',
+      '+++ b/kept.ts',
+      '@@ -1 +1 @@',
+      '-old',
+      '+new',
+      'diff --git a/old.ts b/old.ts',
+      'deleted file mode 100644',
+      'index 3333333..0000000',
+      '--- a/old.ts',
+      '+++ /dev/null',
+      '@@ -1 +0,0 @@',
+      '-gone',
+      '',
+    ].join('\n');
+    const job = {
+      ...JOB,
+      diffFiles: toDiffFiles(patch),
+      diffFileDetails: toDiffFileDetails(patch),
+    };
+    render(<WorkspaceFiles job={job} active />);
+    fireEvent.click(screen.getByRole('tab', { name: /^Changes/ }));
+
+    fireEvent.click(await screen.findByRole('button', { name: 'old.ts' }));
+    expect(await screen.findByText('This file was deleted by the run.')).toBeVisible();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Retry loading file' })).not.toBeInTheDocument();
+
+    // A file the diff does not delete still reports that it could not be read.
+    fireEvent.click(screen.getByRole('button', { name: 'kept.ts' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('workspace path does not exist');
+    expect(screen.getByRole('button', { name: 'Retry loading file' })).toBeVisible();
+  });
+
+  it('does not call a file that became a symlink deleted', async () => {
+    vi.mocked(getAgentJobFiles).mockImplementation(async (_jobId, path = '') => {
+      if (!path) return { path: '', kind: 'directory', entries: [] };
+      // A link whose target is not there reads as nothing at its path.
+      throw new APIError('NOT_FOUND', 'workspace path does not exist', 404);
+    });
+    // A change of file type deletes the path and creates it again.
+    const patch = [
+      'diff --git a/config.yml b/config.yml',
+      'deleted file mode 100644',
+      'index a52e282..0000000',
+      '--- a/config.yml',
+      '+++ /dev/null',
+      '@@ -1 +0,0 @@',
+      '-plain text',
+      'diff --git a/config.yml b/config.yml',
+      'new file mode 120000',
+      'index 0000000..0190743',
+      '--- /dev/null',
+      '+++ b/config.yml',
+      '@@ -0,0 +1 @@',
+      '+shared/config.yml',
+      '\\ No newline at end of file',
+      '',
+    ].join('\n');
+    const job = {
+      ...JOB,
+      diffFiles: toDiffFiles(patch),
+      diffFileDetails: toDiffFileDetails(patch),
+    };
+    render(<WorkspaceFiles job={job} active />);
+    fireEvent.click(screen.getByRole('tab', { name: /^Changes/ }));
+
+    const changed = await screen.findByRole('button', { name: 'config.yml' });
+    expect(changed).toHaveTextContent('+1 −1');
+    fireEvent.click(changed);
+    expect(await screen.findByRole('alert')).toHaveTextContent('workspace path does not exist');
+    expect(screen.queryByText('This file was deleted by the run.')).not.toBeInTheDocument();
+  });
+
   it('retries a failed folder beside its error without refreshing the rest of the tree', async () => {
     let folderReads = 0;
     vi.mocked(getAgentJobFiles).mockImplementation(async (_jobId, path = '') => {
@@ -349,6 +433,58 @@ describe('workspace navigation and copying', () => {
 
     expect(await screen.findByRole('button', { name: 'src/notes.txt' })).toBeVisible();
     expect(getAgentJobFiles).toHaveBeenCalledExactlyOnceWith(JOB.id, 'src');
+  });
+
+  it('says which folders list only some of their entries', async () => {
+    vi.mocked(getAgentJobFiles).mockImplementation(async (_jobId, path = '') => {
+      if (!path)
+        return {
+          path: '',
+          kind: 'directory',
+          entries: [
+            { path: 'src', name: 'src', kind: 'directory' },
+            { path: 'docs', name: 'docs', kind: 'directory' },
+          ],
+          truncated: false,
+        };
+      return {
+        path,
+        kind: 'directory',
+        entries: [{ path: `${path}/kept.txt`, name: 'kept.txt', kind: 'file' }],
+        // The host leaves out names past its entry limit, and names that are
+        // not UTF-8, and says so.
+        truncated: path === 'src',
+      };
+    });
+    render(<WorkspaceFiles job={JOB} active />);
+    fireEvent.click(await screen.findByRole('button', { name: 'docs' }));
+    await screen.findByRole('button', { name: 'docs/kept.txt' });
+    expect(screen.queryByText('Some entries in this folder are not listed.')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'src' }));
+    await screen.findByRole('button', { name: 'src/kept.txt' });
+    expect(screen.getAllByText('Some entries in this folder are not listed.')).toHaveLength(1);
+
+    // A folder opened by its path reads the same flag.
+    openPath('lib');
+    await screen.findByRole('button', { name: 'lib/kept.txt' });
+    expect(screen.queryByText('Some entries in this folder are not listed.')).toBeNull();
+    openPath('src');
+    await screen.findByRole('button', { name: 'src/kept.txt' });
+    expect(screen.getByText('Some entries in this folder are not listed.')).toBeVisible();
+  });
+
+  it('does not call a folder empty when every entry was left out of its listing', async () => {
+    vi.mocked(getAgentJobFiles).mockResolvedValue({
+      path: '',
+      kind: 'directory',
+      entries: [],
+      truncated: true,
+    });
+    render(<WorkspaceFiles job={JOB} active />);
+
+    expect(await screen.findByText('Some entries in this folder are not listed.')).toBeVisible();
+    expect(screen.queryByText('Empty')).not.toBeInTheDocument();
   });
 
   it.each(['', Array.from({ length: 4002 }, (_, index) => `line ${index + 1}`).join('\n')])(

@@ -404,9 +404,19 @@ async def test_a_version_no_image_holds_is_refused_rather_than_stored(admin_clie
     )
 
     assert response.status_code == 404
-    # The refusal has to say how to make it true, or it is a dead end: the
-    # version has to be built into the image before it can be picked.
-    assert "EXTRA_VERSIONS" in response.json()["detail"]
+    # The refusal has to say how to make it true, or it is a dead end. An
+    # agent Settings can update is downloaded by updating to the version…
+    detail = response.json()["detail"]
+    assert "Update to it from Settings" in detail
+    assert "EXTRA_VERSIONS" not in detail
+    # …and only one it cannot, Kilo, has to be built into the image.
+    kilo = await client.put(
+        "/admin/agent/runtime-versions",
+        json={"runtime": "kilo", "version": "9.9.9"},
+        headers=ADMIN,
+    )
+    assert kilo.status_code == 404
+    assert "EXTRA_VERSIONS" in kilo.json()["detail"]
     assert store.runtime_versions == {}
 
 

@@ -23,6 +23,7 @@ import { createDisplayJobAdapter } from './adapt';
 import { useAgentReads } from './AgentReadProvider';
 import { announceAgentSessionsChanged, onAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
 import { projectKey } from '@/lib/temporaryWorkspace';
+import { APIError } from '@/lib/utils/errors';
 import type { AgentJob } from './types';
 import { isActiveJobState, isActiveConversationState } from './conversationJob';
 import { hasActiveGoal } from './goal/liveWork';
@@ -748,9 +749,15 @@ export function useAgentJob(
 /** One directory of the workspace tree, as far as it has been loaded. */
 export interface WorkspaceDirectory {
   entries: AgentJobFileEntryApi[] | null;
+  /** Set when the listing leaves entries out, so `entries` is not the whole folder. */
+  truncated?: true;
   loading: boolean;
   error: string | null;
 }
+
+/** A listing's incompleteness, carried only when it is set. */
+const partialListing = (truncated: boolean | undefined) =>
+  truncated ? { truncated: true as const } : {};
 
 export interface WorkspaceFilesState {
   /** Loaded directories keyed by path; the workspace root is the empty string. */
@@ -762,6 +769,8 @@ export interface WorkspaceFilesState {
   file: AgentJobFileApi | AgentJobSymlinkApi | null;
   fileLoading: boolean;
   fileError: string | null;
+  /** The failed read found nothing at the selected path (404), rather than failing. */
+  fileMissing: boolean;
   source: 'workspace' | null;
   toggleDirectory: (path: string) => void;
   retryDirectory: (path: string) => void;
@@ -795,6 +804,7 @@ export function useWorkspaceFiles(
   const [file, setFile] = useState<AgentJobFileApi | AgentJobSymlinkApi | null>(null);
   const [fileLoading, setFileLoading] = useState(false);
   const [fileError, setFileError] = useState<string | null>(null);
+  const [fileMissing, setFileMissing] = useState(false);
   const [source, setSource] = useState<'workspace' | null>(null);
   const [tick, setTick] = useState(0);
   const reload = useCallback(() => setTick((value) => value + 1), []);
@@ -834,7 +844,12 @@ export function useWorkspaceFiles(
         directoryRequests.current.get(path)?.request === request;
       setDirectories((current) => ({
         ...current,
-        [path]: { entries: current[path]?.entries ?? null, loading: true, error: null },
+        [path]: {
+          entries: current[path]?.entries ?? null,
+          ...partialListing(current[path]?.truncated),
+          loading: true,
+          error: null,
+        },
       }));
       try {
         const node = await getAgentJobFiles(jobId, path);
@@ -844,6 +859,7 @@ export function useWorkspaceFiles(
           ...current,
           [path]: {
             entries: node.kind === 'directory' ? (node.entries ?? []) : [],
+            ...partialListing(node.kind === 'directory' && node.truncated),
             loading: false,
             error: null,
           },
@@ -871,6 +887,7 @@ export function useWorkspaceFiles(
         alive.current && mine === generation.current && request === fileRequest.current;
       setFileLoading(true);
       setFileError(null);
+      setFileMissing(false);
       try {
         const node = await getAgentJobFiles(jobId, path);
         if (!isCurrent()) return;
@@ -883,7 +900,12 @@ export function useWorkspaceFiles(
           directoryGenerations.current.set(node.path, mine);
           setDirectories((current) => ({
             ...current,
-            [node.path]: { entries: node.entries ?? [], loading: false, error: null },
+            [node.path]: {
+              entries: node.entries ?? [],
+              ...partialListing(node.truncated),
+              loading: false,
+              error: null,
+            },
           }));
           setExpanded((current) => ({
             ...current,
@@ -904,6 +926,7 @@ export function useWorkspaceFiles(
         if (!isCurrent()) return;
         setFile(null);
         setFileError(filesError(cause));
+        setFileMissing(cause instanceof APIError && cause.statusCode === 404);
       } finally {
         if (isCurrent()) setFileLoading(false);
       }
@@ -959,6 +982,7 @@ export function useWorkspaceFiles(
     setFile(null);
     setFileLoading(false);
     setFileError(null);
+    setFileMissing(false);
   }, []);
 
   const retryDirectory = useCallback((path: string) => void loadDirectory(path), [loadDirectory]);
@@ -976,6 +1000,7 @@ export function useWorkspaceFiles(
       selectedRef.current = null;
       setSelected(null);
       setFileError(null);
+      setFileMissing(false);
     }
   }, [file]);
 
@@ -987,6 +1012,7 @@ export function useWorkspaceFiles(
     file,
     fileLoading,
     fileError,
+    fileMissing,
     source,
     toggleDirectory,
     retryDirectory,

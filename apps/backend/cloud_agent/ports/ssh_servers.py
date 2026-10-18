@@ -85,5 +85,5 @@ class SshServerRepository(Protocol):
     async def running_groups_for_ssh_change(
         self, *, thread_ids: list[str] | None = None, server_id: str | None = None
     ) -> list[dict[str, Any]]:
-        """Running groups an SSH change reaches: one member chat and its latest job each."""
+        """Running groups an SSH change reaches: each group's host and the chats it is known by."""
         ...

@@ -70,7 +70,8 @@ it to an account.
 
 ## Search
 
-Use the search icon or **Command+K / Ctrl+K** while the sidebar is expanded.
+Use the search icon, or **Command+K** on a Mac and **Ctrl+K** elsewhere, while
+the sidebar is expanded. On a Mac, Control+K stays the text field's own key.
 Search matches conversation titles and full repository names across history.
 The filter buttons restrict results to the current project or include archived
 conversations. The inline close button clears search and its filters.

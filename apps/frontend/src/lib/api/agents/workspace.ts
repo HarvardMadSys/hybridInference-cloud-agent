@@ -20,6 +20,11 @@ export interface AgentJobDirectoryApi {
   path: string;
   kind: 'directory';
   entries: AgentJobFileEntryApi[] | null;
+  /**
+   * Some entries are not listed: the directory is over the host's entry limit,
+   * or holds a name that is not UTF-8.
+   */
+  truncated?: boolean;
   writable?: boolean;
   source?: 'workspace';
 }

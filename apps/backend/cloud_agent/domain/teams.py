@@ -221,7 +221,10 @@ class AdminTeamDetail:
     """Everything the administrator's team page shows, read in one snapshot."""
 
     team: AdminTeamRecord
+    #: Every active member, and the :data:`LISTING_LIMIT` latest departures.
     members: list[AdminMemberRecord]
     join_requests: list[ApplicantRecord]
     #: Invitations by status: open, expired, claimed and revoked.
     invitations: dict[str, int]
+    #: Every membership that ended, listed in ``members`` or not.
+    departed_count: int

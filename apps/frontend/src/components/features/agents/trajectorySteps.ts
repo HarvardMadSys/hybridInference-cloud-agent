@@ -154,6 +154,8 @@ export interface TrajectoryStep {
   /** Tool steps: the call identity and the message that issued it. */
   callId?: string;
   toolName?: string;
+  /** Tool steps: the MCP server a Codex call went to; Claude names it in `toolName`. */
+  mcpServer?: string;
   parentKey?: string;
   /** The tool that delegated this agent, separate from model-message ownership. */
   delegationParentKey?: string;
@@ -611,6 +613,9 @@ export function buildTrajectorySteps(
       timing,
       callId,
       toolName: asText(payload.name || payload.tool) || 'tool',
+      ...(typeof payload.mcp_server === 'string' && payload.mcp_server
+        ? { mcpServer: payload.mcp_server }
+        : {}),
       ...(hasInput ? { payloadValue: payload.input } : {}),
       ...(!hasInput && payload.detail !== undefined
         ? { payloadPreview: preview(payload.detail, 200) }

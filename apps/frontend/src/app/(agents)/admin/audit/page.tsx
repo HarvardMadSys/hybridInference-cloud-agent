@@ -22,6 +22,7 @@ import { APIError, getErrorMessage } from '@/lib/utils/errors';
 
 import { AdminNavigation } from '../AdminNavigation';
 import { ADMIN_PAGE, AdminPageHeader } from '../AdminPageHeader';
+import { dateTime } from '../runs/shared';
 import { auditOutcome, describeActor, describeAuditEntry, describeWhen } from './describe';
 
 const FILTERS: { key: AdminAuditCategory | null; label: string }[] = [
@@ -228,7 +229,7 @@ function AuditRow({
 }) {
   const actor = describeActor(entry.actor_id, userId);
   const outcome = auditOutcome(entry);
-  const exact = new Date(entry.created_at).toLocaleString();
+  const exact = dateTime(entry.created_at);
   return (
     <li className="first:rounded-t-2xl last:rounded-b-2xl">
       <button

@@ -111,7 +111,7 @@ def install_codex_plugins(
     run_plugin_command(
         manager,
         spec,
-        ["python3", "-c", _CODEX_INSTALL_SCRIPT, state_dir, json.dumps(plugins)],
+        ["python3", "-I", "-c", _CODEX_INSTALL_SCRIPT, state_dir, json.dumps(plugins)],
         env={**env, "CODEX_HOME": state_dir, "CI": "1"},
         slot_id=slot_id,
     )

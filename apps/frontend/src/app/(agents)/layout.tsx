@@ -18,7 +18,10 @@ import { DeploymentFooter } from '@/components/DeploymentFooter';
 import { McpApprovalsProvider } from '@/components/features/agents/mcp/McpApprovalsProvider';
 import { McpApprovalsLink } from '@/components/features/agents/mcp/McpApprovalsView';
 import { AccountMenu } from '@/components/features/agents/AccountMenu';
-import { useKeyboardShortcuts } from '@/components/features/settings/keyboardShortcutPreferences';
+import {
+  useApplePlatform,
+  useKeyboardShortcuts,
+} from '@/components/features/settings/keyboardShortcutPreferences';
 import { isChatPath, isSettingsPath } from '@/components/features/settings/navigation';
 import {
   matchesShortcut,
@@ -172,6 +175,7 @@ function SidebarToggleButton({
   settings?: boolean;
 }) {
   const t = useT();
+  const apple = useApplePlatform();
   const label = settings
     ? sidebarCollapsed
       ? t('settings.expandNavigation')
@@ -187,8 +191,8 @@ function SidebarToggleButton({
       aria-label={label}
       aria-expanded={!sidebarCollapsed}
       aria-controls="agents-sidebar"
-      aria-keyshortcuts={shortcutAriaLabel(shortcut)}
-      title={`${label}${shortcut ? ` (${shortcutLabel(shortcut)})` : ''}`}
+      aria-keyshortcuts={shortcutAriaLabel(shortcut, apple)}
+      title={`${label}${shortcut ? ` (${shortcutLabel(shortcut, apple)})` : ''}`}
       className="ui-focus-ring inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted transition-colors hover:bg-surface-hover hover:text-foreground [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11"
     >
       <svg

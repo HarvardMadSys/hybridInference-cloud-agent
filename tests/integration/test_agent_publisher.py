@@ -8,6 +8,7 @@ remote untouched.
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -76,6 +77,14 @@ def _branches(bare_url: str) -> list[str]:
         check=True,
     ).stdout
     return [line.strip() for line in out.splitlines() if line.strip()]
+
+
+def _subcommand(argv: list[str]) -> str:
+    """The git subcommand one publisher call runs, after its ``-c`` options."""
+    rest = argv[1:]
+    while rest[:1] == ["-c"]:
+        rest = rest[2:]
+    return rest[0]
 
 
 def _blob_patch(
@@ -537,7 +546,11 @@ def test_the_push_credential_stays_out_of_argv_and_git_config(origin, monkeypatc
 
     assert commands and all(secret not in " ".join(args) for args, _ in commands)
     assert len(configs) == 1 and secret not in configs[0]
-    assert {args[1] for args, carried in commands if carried} == {"ls-remote", "fetch", "push"}
+    assert {_subcommand(args) for args, carried in commands if carried} == {
+        "ls-remote",
+        "fetch",
+        "push",
+    }
     assert _branches(clone_url) == ["agent/ajob_credential", "main"]
 
 
@@ -578,11 +591,13 @@ def test_a_retry_that_adopts_its_pushed_commit_still_authenticates_by_environmen
 
     assert published[1].commit_sha == published[0].commit_sha
     remote = [
-        (args, carried) for args, carried in commands if "origin" in args and args[1] != "remote"
+        (args, carried)
+        for args, carried in commands
+        if "origin" in args and _subcommand(args) != "remote"
     ]
     assert remote and all(carried for _, carried in remote)
     assert all(secret not in " ".join(args) for args, _ in commands)
-    reconciled = {args[1] for args, _ in remote if any("refs/heads/" in a for a in args)}
+    reconciled = {_subcommand(args) for args, _ in remote if any("refs/heads/" in a for a in args)}
     assert reconciled == {"ls-remote", "fetch", "push"}
 
 
@@ -678,6 +693,39 @@ def test_unapplyable_patch_fails_without_publishing(origin):
             base_sha=base_sha,
             commit_message="agent: broken patch",
         )
+    assert _branches(clone_url) == ["main"]
+
+
+def test_an_apply_failure_says_which_file_did_not_apply(origin):
+    """Git goes on writing progress after the file that failed; the error names that file."""
+    clone_url, base_sha = origin
+    patch = (
+        "diff --git a/app.py b/app.py\n"
+        "--- a/app.py\n"
+        "+++ b/app.py\n"
+        "@@ -1,2 +1,2 @@\n"
+        " context that does not exist\n"
+        "-    return 0\n"
+        "+    return 1\n"
+        "diff --git a/README.md b/README.md\n"
+        "--- a/README.md\n"
+        "+++ b/README.md\n"
+        "@@ -1 +1 @@\n"
+        "-# demo\n"
+        "+# demo, edited\n"
+    )
+
+    with pytest.raises(PublishError) as failed:
+        publish_patch(
+            job_id="ajob_half",
+            patch=patch,
+            clone_url=clone_url,
+            base_sha=base_sha,
+            commit_message="agent: one file does not apply",
+        )
+    assert str(failed.value).startswith("git apply failed: ")
+    assert "error: app.py: patch does not apply" in str(failed.value)
+    assert "Falling back" not in str(failed.value)
     assert _branches(clone_url) == ["main"]
 
 
@@ -1481,6 +1529,49 @@ def test_an_import_retry_reaches_the_base_under_any_number_of_own_pushes(origin,
     _git(["cat-file", "-e", f"{published}^{{commit}}"], cwd=workspace)
     with pytest.raises(PublishError, match="is not built on"):
         fetch_base_bundle(clone_url=f"file://{clone_url}", commit_sha=published, base_sha="f" * 40)
+
+
+def test_an_import_starts_no_background_git_maintenance(origin, tmp_path):
+    """Maintenance a fetch leaves running races the next fetch into the same repository.
+
+    Since git 2.54 it repacks, which in a shallow repository rewrites
+    .git/shallow while the import still deepens the history, and that fetch
+    fails. The import fetches with the credential's environment, whose own
+    config entries must not undo the setting.
+    """
+    clone_url, base_sha = origin
+    chain = tmp_path / "chain"
+    _git(["clone", "--quiet", clone_url, str(chain)], cwd=tmp_path)
+    for turn in range(5):
+        (chain / "turns.md").write_text(f"turn {turn}\n", encoding="utf-8")
+        _git(["add", "turns.md"], cwd=chain)
+        _git(["commit", "--quiet", "-m", f"agent: turn {turn}"], cwd=chain)
+    _git(["push", "--quiet", "origin", "HEAD:refs/heads/agent/athr_chain"], cwd=chain)
+    published = _git(["rev-parse", "HEAD"], cwd=chain).strip()
+    trace = tmp_path / "trace2.json"
+
+    fetch_base_bundle(
+        clone_url=f"file://{clone_url}",
+        commit_sha=published,
+        base_sha=base_sha,
+        auth_env={
+            # Shaped like a real credential: one config entry for the Git host.
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "http.https://github.invalid/.extraHeader",
+            "GIT_CONFIG_VALUE_0": "X-Test: yes",
+            # Every child process the fetches start.
+            "GIT_TRACE2_EVENT": str(trace),
+        },
+    )
+
+    started = [
+        event["argv"]
+        for event in map(json.loads, trace.read_text(encoding="utf-8").splitlines())
+        if event.get("event") == "child_start"
+    ]
+    # The deepening fetches ran, each starting its transport.
+    assert len(started) >= 3
+    assert [argv for argv in started if "maintenance" in argv] == []
 
 
 def test_republishing_the_same_patch_reuses_the_commit_already_pushed(origin):

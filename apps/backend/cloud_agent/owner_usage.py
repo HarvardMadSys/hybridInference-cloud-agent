@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import math
 import re
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -143,6 +143,28 @@ def measured_interval(
     if cpu_window_seconds is None or not cpu_window_seconds > 0:
         return 0.0
     return min(cpu_window_seconds, MAX_SAMPLE_GAP_SECONDS)
+
+
+def utc_day_shares(*, ended_at: datetime, seconds: float) -> list[tuple[date, float]]:
+    """How much of ``seconds`` of use ending at ``ended_at`` falls on each UTC day.
+
+    A sample stands for the time before it, which can begin on the day before:
+    one taken ten seconds after midnight, standing for thirty, used twenty of
+    them the day before. One taken exactly at midnight stands wholly for the
+    day before. Earliest day first.
+    """
+    shares: list[tuple[date, float]] = []
+    end = ended_at.astimezone(UTC)
+    left = seconds
+    while left > 0:
+        start = end.replace(hour=0, minute=0, second=0, microsecond=0)
+        if start == end:
+            start -= timedelta(days=1)
+        share = min(left, (end - start).total_seconds())
+        shares.append((start.date(), share))
+        left -= share
+        end = start
+    return shares[::-1]
 
 
 def history_window(days: int, *, now: datetime | None = None) -> tuple[datetime, datetime]:

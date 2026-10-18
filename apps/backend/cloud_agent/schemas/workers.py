@@ -13,6 +13,7 @@ from cloud_agent.attachments.models import (
 from cloud_agent.execution_profiles import ExecutionProfile
 from cloud_agent.schemas._host_reports import (
     WORKER_ID_MAX_CHARS,
+    ReportedText,
     _HostCapability,
     _HostReportKey,
     _HostReportVersion,
@@ -21,6 +22,7 @@ from cloud_agent.schemas._host_reports import (
 from cloud_agent_shared.plugins import (
     SandboxPlugin,  # noqa: TC001 — Pydantic resolves annotations at runtime.
 )
+from cloud_agent_shared.shared_protocol import ABANDON_DETAIL_MAX_CHARS
 from cloud_agent_shared.ssh_access import (
     SshAccess,  # noqa: TC001 — Pydantic resolves annotations at runtime.
 )
@@ -473,7 +475,7 @@ class WorkerSandboxAbandonRequest(BaseModel):
     sandbox_generation: int = Field(..., ge=1)
     activation_generation: int = Field(..., ge=1)
     lost: bool
-    detail: str | None = Field(None, max_length=1000)
+    detail: ReportedText | None = Field(None, max_length=ABANDON_DETAIL_MAX_CHARS)
     idle_timeout_seconds: float = Field(1800.0, gt=0, le=7 * 24 * 60 * 60)
 
 
@@ -499,7 +501,7 @@ class WorkerFinishRequest(BaseModel):
     """Terminal transition reported by a worker."""
 
     state: str = Field(..., description="succeeded|failed|cancelled")
-    detail: str | None = Field(
+    detail: ReportedText | None = Field(
         None,
         description=(
             "Why the turn ended as it did. Kept to the first "

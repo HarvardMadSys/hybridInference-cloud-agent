@@ -552,7 +552,12 @@ async def _import_snapshot_base(
     commit_sha: str,
     bundle: bytes | None,
 ) -> bool:
-    """Import a published commit into Docker without changing HEAD or files."""
+    """Import a published commit into Docker without changing HEAD or files.
+
+    The import goes to the group's generation and container as ``snapshot``
+    read them, and only an import into that container completes. A restore
+    may have moved the group to another one while the request was out.
+    """
     snapshot_id = int(snapshot["snapshot_id"])
     if not bundle:
         await store.snapshot.record_snapshot_base_import_failure(
@@ -580,6 +585,8 @@ async def _import_snapshot_base(
     return await store.snapshot.complete_snapshot_base_import(
         snapshot_id=snapshot_id,
         commit_sha=commit_sha,
+        generation=int(snapshot["generation"]),
+        container_id=snapshot.get("container_id"),
     )
 
 

@@ -290,7 +290,11 @@ async def admin_team_summaries(
 
 
 async def admin_team_detail(gateway: Any, detail: AdminTeamDetail) -> AdminTeamDetailResponse:
-    """The roster in every membership state, open requests and link counts."""
+    """The roster in every membership state, open requests and link counts.
+
+    Asks the Gateway about the people listed only, which the store bounds:
+    departures past the latest few are counted, not named.
+    """
     emails = await _emails(
         gateway,
         [
@@ -324,6 +328,7 @@ async def admin_team_detail(gateway: Any, detail: AdminTeamDetail) -> AdminTeamD
             for request in detail.join_requests
         ],
         invitations=AdminTeamInvitationCounts(**detail.invitations),
+        departed_member_count=detail.departed_count,
     )
 
 

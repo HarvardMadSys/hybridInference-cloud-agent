@@ -17,7 +17,7 @@ from tests.integration.storage.test_team_store import (
     token_hash,
 )
 
-from cloud_agent.domain.teams import TeamNotFound
+from cloud_agent.domain.teams import LISTING_LIMIT, TeamNotFound
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
@@ -46,7 +46,7 @@ async def test_the_list_shows_every_team_newest_first_with_its_counts(store, poo
     research = await new_team(store, owner="erin", name="Research", key="create-2")
 
     rows, more = await store.team_admin.list_teams_for_admin(
-        query=None, state="active", limit=50, offset=0
+        query=None, state="active", limit=50, before=None
     )
 
     assert more is False
@@ -69,7 +69,7 @@ async def test_the_list_filters_by_state_and_finds_a_name_an_id_or_a_member(stor
 
     async def ids(**kwargs) -> list[str]:
         rows, _ = await store.team_admin.list_teams_for_admin(
-            **{"query": None, "state": "active", "limit": 50, "offset": 0, **kwargs}
+            **{"query": None, "state": "active", "limit": 50, "before": None, **kwargs}
         )
         return [row.id for row in rows]
 
@@ -85,24 +85,53 @@ async def test_the_list_filters_by_state_and_finds_a_name_an_id_or_a_member(stor
     assert await ids(query="bob") == [kept.id]
     assert await ids(query="nobody") == []
     deleted = (
-        await store.team_admin.list_teams_for_admin(query=None, state="deleted", limit=1, offset=0)
+        await store.team_admin.list_teams_for_admin(
+            query=None, state="deleted", limit=1, before=None
+        )
     )[0]
     assert deleted[0].state == "deleted" and deleted[0].deleted_at is not None
 
 
-async def test_the_list_pages_by_offset(store):
+async def test_the_list_pages_after_the_last_team_shown(store):
     for number in range(3):
         await new_team(store, name=f"Team {number}", key=f"create-{number}")
 
     first, more = await store.team_admin.list_teams_for_admin(
-        query=None, state="all", limit=2, offset=0
+        query=None, state="all", limit=2, before=None
     )
     rest, done = await store.team_admin.list_teams_for_admin(
-        query=None, state="all", limit=2, offset=2
+        query=None, state="all", limit=2, before=first[-1].id
     )
 
     assert more is True and done is False
     assert [row.name for row in [*first, *rest]] == ["Team 2", "Team 1", "Team 0"]
+
+
+async def test_the_next_page_starts_after_the_last_team_shown_whatever_changed_meanwhile(store):
+    teams = [
+        await new_team(store, name=f"Team {number}", key=f"create-{number}") for number in range(4)
+    ]
+
+    async def page(before=None) -> tuple[list[str], bool]:
+        rows, more = await store.team_admin.list_teams_for_admin(
+            query=None, state="active", limit=2, before=before
+        )
+        return [row.name for row in rows], more
+
+    assert await page() == (["Team 3", "Team 2"], True)
+    # A team created while the first page is on screen comes first in the list,
+    # so counting rows from the top would show Team 2 a second time.
+    await new_team(store, owner="erin", name="Team new", key="create-new")
+    assert await page(before=teams[2].id) == (["Team 1", "Team 0"], False)
+
+    assert await page() == (["Team new", "Team 3"], True)
+    # A team deleted from under the Active filter leaves it, so counting rows
+    # would skip Team 2. The cursor still places the deleted team it names.
+    await store.teams.delete_team("alice", teams[3].id, expected_revision=teams[3].revision)
+    assert await page(before=teams[3].id) == (["Team 2", "Team 1"], True)
+    assert await page(before=teams[1].id) == (["Team 0"], False)
+    # A cursor that names no team names no place in the list.
+    assert await page(before="ateam_missing") == ([], False)
 
 
 async def test_a_team_shows_departed_members_requests_and_link_counts(store, pool):
@@ -138,6 +167,34 @@ async def test_a_team_shows_departed_members_requests_and_link_counts(store, poo
     expired = await store.team_admin.get_team_for_admin(team.id)
     assert expired.join_requests == []
     assert expired.invitations["expired"] == 1 and expired.invitations["open"] == 0
+
+
+async def test_a_team_lists_its_latest_departures_and_counts_the_rest(store, pool):
+    team = await new_team(store)
+    await join(store, team.id, "bob")
+    # Departures are kept for good, so a long-lived team piles them up; every
+    # one listed is also one Gateway lookup when the page names it.
+    async with pool.acquire() as conn:
+        await conn.executemany(
+            "INSERT INTO agent_team_members (team_id, user_id, state, joined_at, departed_at) "
+            "VALUES ($1, $2, $3, NOW() - INTERVAL '1 year', "
+            "NOW() - make_interval(days => $4::int))",
+            [
+                (team.id, f"former-{n:02}", "left" if n % 2 else "removed", 100 - n)
+                for n in range(LISTING_LIMIT + 5)
+            ],
+        )
+
+    detail = await store.team_admin.get_team_for_admin(team.id)
+
+    active = [m.user_id for m in detail.members if m.state == "active"]
+    departed = [m.user_id for m in detail.members if m.state != "active"]
+    assert active == ["alice", "bob"]
+    # The most recent departures are listed; the five oldest are only counted.
+    assert len(departed) == LISTING_LIMIT
+    assert set(departed) == {f"former-{n:02}" for n in range(5, LISTING_LIMIT + 5)}
+    assert detail.departed_count == LISTING_LIMIT + 5
+    assert detail.team.member_count == 2
 
 
 async def test_a_deleted_team_stays_readable_and_an_unknown_one_is_not_found(store):

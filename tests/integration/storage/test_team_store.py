@@ -255,6 +255,37 @@ async def test_an_account_has_one_pending_request_per_team(store):
     assert other.state == "pending"
 
 
+@pytest.mark.parametrize("departure", ["leave", "remove"])
+async def test_a_former_members_old_link_says_the_membership_ended(store, departure):
+    team = await new_team(store)
+    approved = await join(store, team.id, "bob")
+    # Claiming again while still a member is a reload: the same approved request.
+    again = await store.teams.claim_invitation("bob", token_hash=token_hash("link-bob"))
+    assert (again.id, again.state) == (approved.id, "approved")
+    # A decided request that made no member is returned as it stands.
+    await invite(store, team.id, label="declined")
+    request = await store.teams.claim_invitation("carol", token_hash=token_hash("declined"))
+    await store.teams.decide_join_request("alice", team.id, request.id, approve=False)
+    declined = await store.teams.claim_invitation("carol", token_hash=token_hash("declined"))
+    assert (declined.id, declined.state) == (request.id, "declined")
+
+    if departure == "leave":
+        await store.teams.leave_team("bob", team.id)
+    else:
+        await store.teams.remove_member("alice", team.id, "bob")
+    with pytest.raises(TeamConflict) as ended:
+        await store.teams.claim_invitation("bob", token_hash=token_hash("link-bob"))
+    assert ended.value.code == "no_longer_member"
+    assert ended.value.message == (
+        "You are no longer a member of this team. Ask an owner or admin for a new invitation link."
+    )
+    with pytest.raises(TeamNotFound):
+        await store.teams.get_team("bob", team.id)
+    # The spent link is still Bob's alone.
+    with pytest.raises(InvitationUnavailable):
+        await store.teams.claim_invitation("carol", token_hash=token_hash("link-bob"))
+
+
 async def test_concurrent_claims_of_one_link_leave_exactly_one_request(store):
     team = await new_team(store)
     await invite(store, team.id, label="race")

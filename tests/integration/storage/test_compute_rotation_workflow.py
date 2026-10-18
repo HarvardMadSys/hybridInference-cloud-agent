@@ -493,6 +493,52 @@ async def test_failed_node_type_is_released_and_the_next_type_takes_over(
     assert [h["host"] for h in target["hosts"]] == [host]
 
 
+async def test_a_replacement_known_only_to_its_acquisition_is_still_released(
+    db, store, hosts, monkeypatch
+):
+    """The provider answered its create, then could not show the experiment.
+
+    The move gives that node up for the next type. Releasing it deletes the
+    experiment its acquisition was given, though no observation recorded it.
+    """
+    r = await rig(store, hosts, monkeypatch)
+    source, host = await ready_slot(r, db)
+    acquire, inspect = r.cloud.acquire, r.cloud.inspect
+    unobserved: list[str] = []
+    missed: list[str] = []
+
+    async def acquire_without_observation(request, intent):
+        receipt = await acquire(request, intent)
+        if request.config["bindings"]["phystype"] != "t1":
+            return receipt
+        unobserved.append(receipt.resource.external_id)
+        return ProviderReceipt(outcome="pending", resource=receipt.resource)
+
+    async def inspect_after_one_miss(ref):
+        if ref.external_id in unobserved and ref.external_id not in missed:
+            missed.append(ref.external_id)
+            raise ProviderError("resource_visibility_unknown", "not visible yet")
+        return await inspect(ref)
+
+    monkeypatch.setattr(r.cloud, "acquire", acquire_without_observation)
+    monkeypatch.setattr(r.cloud, "inspect", inspect_after_one_miss)
+    await r.commands.rotate(
+        r.allocation_id,
+        RotateComputeRequest(request_id="move-now", expected_revision=source["revision"]),
+        actor="admin",
+    )
+    await run_all(r, db)
+
+    rotation = await rotation_of(r, r.allocation_id)
+    assert rotation["state"] == "succeeded", rotation
+    assert r.cloud.created == ["first", "t1", "t2"]
+    assert unobserved[0] in r.cloud.released
+    abandoned, replacement = await successor_of(db, r.allocation_id)
+    assert (abandoned["external_id"], abandoned["observed_state"]) == (unobserved[0], "terminated")
+    target = await r.repo.get_allocation(replacement["id"])
+    assert [h["host"] for h in target["hosts"]] == [host]
+
+
 async def test_a_failed_switch_rolls_back_to_the_original_node_first(db, store, hosts, monkeypatch):
     r = await rig(store, hosts, monkeypatch)
     source, host = await ready_slot(r, db)

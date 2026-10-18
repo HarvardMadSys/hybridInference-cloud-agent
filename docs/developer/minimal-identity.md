@@ -20,6 +20,14 @@ authority; Agent signs the session itself. Sessions last 30 days. Legacy cookies
 missing the issuer or containing profile claims, and cookies from another issuer,
 are rejected. Users must sign in again after upgrading from those formats.
 
+Where cookies carry `Secure` (the default), the session is read only from
+`__Host-cloud_agent_session` and a sign-in in progress only from
+`__Host-cloud_agent_login`. Another host on the same site can set a cookie of
+the plain name, so a `cloud_agent_session` cookie left from before the prefix
+signs nobody in; a browser that holds only that one signs in again. Plain-HTTP
+local stacks, where browsers refuse the prefix, keep the plain names; see
+`AGENT_SESSION_COOKIE_SECURE` in [ENVIRONMENT.md](../../ENVIRONMENT.md).
+
 An active account without Agent permission may establish a minimal session for
 the access-required page. A missing/inactive account is refused through the
 access contract's typed `subject_unavailable` error. Unreadable responses and

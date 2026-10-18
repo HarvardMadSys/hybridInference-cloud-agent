@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { isTemporaryWorkspace } from '@/lib/temporaryWorkspace';
 import { useEffect, useRef, useState } from 'react';
 import { useT } from '@/components/providers';
@@ -324,12 +325,12 @@ export function WorkspaceEnvironment({
           <p className="text-foreground">
             {t('environment.newVersionAvailable', { revision: bound.revision ?? 0 })}
           </p>
-          <a
+          <Link
             href={`/?repo=${encodeURIComponent(repo)}`}
             className="inline-block font-medium text-accent hover:underline"
           >
             {t('environment.newWorkspace')}
-          </a>
+          </Link>
         </div>
       ) : null}
 

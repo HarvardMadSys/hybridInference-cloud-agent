@@ -16,6 +16,7 @@ import asyncpg
 
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.storage._sql.events import insert_event
+from cloud_agent.storage._sql.hosts import REVOKED_HOST_SQL, refuse_start_on_revoked_host
 from cloud_agent.storage._sql.rows import load_json
 from cloud_agent.storage._sql.sandbox import FENCE_START_SQL
 
@@ -338,10 +339,15 @@ class PostgresSnapshotRepository:
         it left on the group: a capture is the whole diff from the group's
         published base, which a failure never advances, so this later one
         carries the failed one's changes, or their reversal, and supersedes it.
+
+        A group still on a host that has left the pool waits: capturing starts
+        its container, which nothing may do there any more
+        (:func:`refuse_start_on_revoked_host`). Once the group moves, its new
+        host captures it.
         """
         async with self._pool.acquire() as conn, conn.transaction():
             row = await conn.fetchrow(
-                """
+                f"""
                 SELECT s.id AS snapshot_id, s.sandbox_id, s.workspace_epoch,
                        s.anchor_job_id, s.base_sha, g.generation,
                        g.origin_thread_id, g.container_id, g.container_name,
@@ -373,6 +379,7 @@ class PostgresSnapshotRepository:
                   AND g.state IN ('running', 'stopped')
                   AND g.stop_requested_at IS NULL
                   AND g.deletion_state NOT IN ('pending', 'archived', 'deleted')
+                  AND NOT {REVOKED_HOST_SQL.format(host="g.host")}
                   -- A group's one pending snapshot is its newest epoch, so in a
                   -- dirty group it is the later capture that supersedes the
                   -- failure that dirtied it.
@@ -402,6 +409,13 @@ class PostgresSnapshotRepository:
                 """
             )
             if row is None:
+                return None
+            # The host was read before the group's lock was this claim's; a
+            # revocation that committed meanwhile shows only from here.
+            group = await conn.fetchrow(
+                "SELECT id, state, host FROM agent_sandboxes WHERE id = $1", row["sandbox_id"]
+            )
+            if await refuse_start_on_revoked_host(conn, group) is not None:
                 return None
             captured = await conn.fetchval(
                 """
@@ -917,8 +931,11 @@ class PostgresSnapshotRepository:
                                  AND captured.workspace_epoch <= s.workspace_epoch
                                GROUP BY included_job.thread_id
                            ) boundary
+                           -- A Fork's copies of its source's turns are read
+                           -- once, in the chat they were copied from.
                            JOIN agent_jobs history ON history.thread_id = boundary.thread_id
                                AND history.turn_no <= boundary.turn_no
+                               AND history.fork_source_job_id IS NULL
                            JOIN agent_thread_messages message ON message.job_id = history.id
                                AND message.thread_id = history.thread_id
                            LEFT JOIN agent_job_events event ON event.id = message.source_event_id
@@ -1278,12 +1295,21 @@ class PostgresSnapshotRepository:
                 """,
                 snapshot_id,
             )
-            # Importing the published base starts the container if stopped.
+            # Importing the published base starts the container if stopped, but
+            # not on a revoked host: there the group waits to move, and its
+            # next host imports the base.
+            group = await conn.fetchrow(
+                "SELECT id, state, host FROM agent_sandboxes WHERE id = $1 FOR UPDATE",
+                row["sandbox_id"],
+            )
+            fence = (
+                "" if await refuse_start_on_revoked_host(conn, group) else f"{FENCE_START_SQL}, "
+            )
             await conn.execute(
                 f"""
                 UPDATE agent_sandboxes
                 SET published_base_sha = $2, snapshot_state = 'importing',
-                    idle_deadline = NULL, {FENCE_START_SQL}, updated_at = NOW()
+                    idle_deadline = NULL, {fence}updated_at = NOW()
                 WHERE id = $1
                 """,
                 row["sandbox_id"],
@@ -1401,10 +1427,13 @@ class PostgresSnapshotRepository:
         it. The published ones are kept by nothing, so Git prunes them
         together, and a bundle that needs only the previous one in the
         workspace cannot import their successor again.
+
+        A group still on a revoked host waits, as a ``cold`` one does: an
+        import starts the container, which nothing may do there any more.
         """
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
-                """
+                f"""
                 SELECT latest.id AS snapshot_id, latest.sandbox_id,
                        latest.anchor_job_id, latest.published_commit_sha, latest.base_sha,
                        COALESCE((
@@ -1451,6 +1480,7 @@ class PostgresSnapshotRepository:
                   -- A group only its checkpoint holds has no container to
                   -- import into; it waits until a restore recreates one.
                   AND g.state NOT IN ('cold', 'restoring')
+                  AND NOT {REVOKED_HOST_SQL.format(host="g.host")}
                   AND g.stop_requested_at IS NULL
                   AND g.deletion_state NOT IN ('pending', 'archived', 'deleted')
                   AND (latest.retry_at IS NULL OR latest.retry_at <= NOW())
@@ -1464,8 +1494,22 @@ class PostgresSnapshotRepository:
         result["members"] = load_json(result.get("members")) or []
         return result
 
-    async def complete_snapshot_base_import(self, *, snapshot_id: int, commit_sha: str) -> bool:
-        """Acknowledge that the exact published commit resolves in Docker."""
+    async def complete_snapshot_base_import(
+        self,
+        *,
+        snapshot_id: int,
+        commit_sha: str,
+        generation: int,
+        container_id: str | None,
+    ) -> bool:
+        """Acknowledge that the exact published commit resolves in Docker.
+
+        Fenced to the generation and container the import was sent to, which
+        the import request named and its host checked. A restore moves a group
+        to a new generation and container while an import sent to the old one
+        may still be on its way back. Without the fence that late answer
+        marked the restored container imported, though its base never was.
+        """
         async with self._pool.acquire() as conn, conn.transaction():
             sandbox_id = await conn.fetchval(
                 """
@@ -1503,12 +1547,18 @@ class PostgresSnapshotRepository:
                   AND g.published_base_sha = $2
                   -- An import answered by a host that no longer holds the
                   -- group did not land in it; the restored container imports
-                  -- again. Marking the group running here would strand it.
+                  -- again. Marking the group running here would strand it,
+                  -- and once the restore is confirmed, mark the new container
+                  -- as holding a base it never received.
                   AND g.state NOT IN ('cold', 'restoring')
+                  AND g.generation = $3
+                  AND g.container_id IS NOT DISTINCT FROM $4
                 RETURNING g.id
                 """,
                 sandbox_id,
                 commit_sha,
+                generation,
+                container_id,
             )
             if updated is not None:
                 await conn.execute(

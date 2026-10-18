@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { getAgentConfig } from '@/lib/api/agents';
 import {
@@ -30,15 +30,21 @@ vi.mock('./EnvironmentDialog', async (actual) => ({
   EnvironmentDialog: ({
     initial,
     teams,
+    onClose,
   }: {
     initial: { name: string; repo: string | null };
     teams?: { name: string }[];
+    onClose: () => void;
   }) => (
     <div
       role="dialog"
       aria-label={`editing ${initial.repo === null ? 'globals' : initial.name}`}
       data-teams={(teams ?? []).map((team) => team.name).join(',')}
-    />
+    >
+      <button type="button" onClick={onClose}>
+        close editor
+      </button>
+    </div>
   ),
 }));
 
@@ -93,6 +99,52 @@ it('opens the shared editor for global variables, an environment, or a new one',
   await screen.findByText('org/web');
   fireEvent.click(screen.getAllByRole('button', { name: 'environment.edit' })[0]);
   expect(screen.getByRole('dialog', { name: 'editing globals' })).toBeInTheDocument();
+});
+
+it('reads the list again when the editor closes, so a test run there shows', async () => {
+  const globals = environment({ id: 'global', repo: null, name: 'Global', revision: 2 });
+  vi.mocked(listEnvironments)
+    .mockResolvedValue({
+      globals,
+      environments: [
+        environment({
+          latest_test: { id: 'run', state: 'succeeded', revision: 3, global_revision: 2 },
+        }),
+      ],
+    })
+    .mockResolvedValueOnce({ globals, environments: [environment({})] });
+  render(<EnvironmentManager />);
+  const web = (await screen.findByText('org/web')).parentElement!;
+  expect(within(web).getByText('environment.test.never')).toBeInTheDocument();
+  // A test of the saved version saves nothing, so only closing tells the list.
+  fireEvent.click(screen.getByRole('button', { name: 'environment.editItem' }));
+  fireEvent.click(screen.getByRole('button', { name: 'close editor' }));
+  expect(await within(web).findByText('environment.test.passed')).toBeInTheDocument();
+});
+
+it('follows a test the editor left running until it ends', async () => {
+  const globals = environment({ id: 'global', repo: null, name: 'Global', revision: 2 });
+  const tested = (state: string) => ({
+    globals,
+    environments: [
+      environment({ latest_test: { id: 'run', state, revision: 3, global_revision: 2 } }),
+    ],
+  });
+  vi.mocked(listEnvironments)
+    .mockResolvedValue(tested('succeeded'))
+    .mockResolvedValueOnce(tested('running'));
+  vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+  try {
+    render(<EnvironmentManager />);
+    const web = (await screen.findByText('org/web')).parentElement!;
+    expect(within(web).getByText('environment.test.running')).toBeInTheDocument();
+    await act(async () => {
+      vi.advanceTimersByTime(10_000);
+    });
+    expect(await within(web).findByText('environment.test.passed')).toBeInTheDocument();
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 it('asks before removing an environment', async () => {
@@ -164,6 +216,45 @@ it('shows which environments skip installation and lets the owner rebuild or del
   expect(screen.queryByRole('menuitem', { name: 'environment.snapshot.delete' })).toBeNull();
   fireEvent.click(screen.getByRole('menuitem', { name: 'environment.snapshot.rebuild' }));
   await waitFor(() => expect(rebuildEnvironmentSnapshot).toHaveBeenCalledWith('ci'));
+});
+
+it('keeps a removed environment off the list when an earlier poll answers late', async () => {
+  const globals = environment({ id: 'global', repo: null, name: 'Global', revision: 2 });
+  const building = environment({
+    setup_script: 'npm ci',
+    snapshot: { id: 's', state: 'building', created_at: '2026-10-15T00:00:00Z' },
+  });
+  const before = {
+    globals,
+    snapshots_enabled: true,
+    environments: [building, environment({ id: 'ci', name: 'Integration', revision: 1 })],
+  };
+  let answerPoll: (value: typeof before) => void = () => {};
+  vi.mocked(listEnvironments)
+    .mockResolvedValueOnce(before)
+    .mockImplementationOnce(() => new Promise((resolve) => (answerPoll = resolve)))
+    .mockResolvedValueOnce({ ...before, environments: [building] });
+  vi.mocked(deleteEnvironment).mockResolvedValue(undefined);
+  vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+  try {
+    render(<EnvironmentManager />);
+    await screen.findByText('Integration');
+    // The snapshot is building, so the list is read again every ten seconds;
+    // this read is still unanswered when the removal is confirmed.
+    await act(async () => {
+      vi.advanceTimersByTime(10_000);
+    });
+    expect(listEnvironments).toHaveBeenCalledTimes(2);
+    fireEvent.click(screen.getAllByRole('button', { name: 'environment.manageItem' })[1]);
+    fireEvent.click(screen.getByRole('menuitem', { name: 'environment.remove' }));
+    fireEvent.click(screen.getByRole('button', { name: 'environment.remove' }));
+    await waitFor(() => expect(screen.queryByText('Integration')).toBeNull());
+    expect(listEnvironments).toHaveBeenCalledTimes(3);
+    await act(async () => answerPoll(before));
+    expect(screen.queryByText('Integration')).toBeNull();
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 it('says nothing about snapshots where the deployment keeps none', async () => {

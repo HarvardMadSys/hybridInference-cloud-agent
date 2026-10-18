@@ -978,7 +978,7 @@ def test_each_beat_reports_downloads_and_hands_on_the_targets(monkeypatch) -> No
         {"claude-code": {"version": "2.1.300", "state": "ready", "progress": 100}},
     ]
     target = {"runtime": "claude-code", "version": "2.1.300", "before": "x", "nonce": "n"}
-    handed: list[list[dict]] = []
+    handed: list[list[dict] | None] = []
     bodies: list[dict] = []
     beat = enrollment.HostHeartbeat(
         base_url="http://cp",
@@ -1006,5 +1006,6 @@ def test_each_beat_reports_downloads_and_hands_on_the_targets(monkeypatch) -> No
 
     assert [body["runtime_versions_available"] for body in bodies] == menus
     assert [body["runtime_downloads"] for body in bodies] == reports
-    # Only the first answer had targets; the second leaves downloads as they are.
-    assert handed == [[target]]
+    # Only the first answer had targets. The second is handed on as ``None``:
+    # downloads stay as they are, and nothing is removed on its word.
+    assert handed == [[target], None]

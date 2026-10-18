@@ -262,7 +262,7 @@ function RichToolActivity({
     `call:${blockKey ?? disclosureId}`,
     presentation,
   );
-  const activity = parseToolActivity(event.tool, event.input);
+  const activity = parseToolActivity(event.tool, event.input, event.mcpServer);
   const resultLabel = toolResultLabel(event, t);
   if (activity && presentation !== 'compact') {
     return (
@@ -524,7 +524,8 @@ export function EventList({
     presentation === 'detailed' || (presentation !== 'compact' && showActivityDetails);
   const isCompactActivity = (event: AgentEvent): boolean =>
     event.kind === 'thinking' ||
-    (event.kind === 'tool_use' && (!richActivity || !parseToolActivity(event.tool, event.input)));
+    (event.kind === 'tool_use' &&
+      (!richActivity || !parseToolActivity(event.tool, event.input, event.mcpServer)));
 
   for (let index = 0; index < events.length; index += 1) {
     const event = events[index];
@@ -654,7 +655,7 @@ export function EventList({
 function processMayFold(event: AgentEvent): boolean {
   if (event.kind === 'tool_use') {
     if (toolNeedsAttention(event)) return false;
-    const activity = parseToolActivity(event.tool, event.input);
+    const activity = parseToolActivity(event.tool, event.input, event.mcpServer);
     if (activity) {
       const output = event.output?.join('\n');
       const states =

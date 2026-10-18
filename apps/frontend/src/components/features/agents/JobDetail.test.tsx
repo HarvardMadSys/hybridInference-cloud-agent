@@ -66,12 +66,14 @@ import {
   sendPendingMessageNow,
   submitThreadMessage,
   type PendingMessageApi,
+  type ThreadMessageResultApi,
 } from '@/lib/api/pendingMessages';
 
 import { APIError } from '@/lib/utils/errors';
 import { TEMPORARY_WORKSPACE } from '@/lib/temporaryWorkspace';
 import { useKeyboardShortcuts } from '@/components/features/settings/keyboardShortcutPreferences';
 import { DEFAULT_KEYBOARD_SHORTCUTS } from '@/lib/keyboardShortcuts';
+import { onPlatform } from '@/lib/platformTestSupport';
 import { listThreadQuestions } from '@/lib/api/questions';
 import { rewritePrompt } from '@/lib/api/promptRewrite';
 
@@ -2852,6 +2854,7 @@ describe('JobDetail', () => {
   });
 
   it('adds the draft, and only the draft, to a live turn that can take it, on Cmd+Enter', async () => {
+    onPlatform('MacIntel');
     const older = {
       id: 'apmsg_old',
       thread_id: 'ajob_1',
@@ -2884,7 +2887,7 @@ describe('JobDetail', () => {
     render(<JobDetail job={makeJob()} />);
 
     // Once the live turn can take one, the composer says what the chord does.
-    expect(await screen.findByText(/⌘\/Ctrl\+↵ to add to this turn/)).toBeInTheDocument();
+    expect(await screen.findByText(/⌘ \+ ↵ to add to this turn/)).toBeInTheDocument();
     const box = screen.getByLabelText('Add a follow-up');
     fireEvent.change(box, { target: { value: 'then run the linter' } });
     fireEvent.keyDown(box, { key: 'Enter', metaKey: true });
@@ -4268,7 +4271,7 @@ describe('JobDetail', () => {
     expect(workspaceButton).toHaveTextContent('');
     expect(workspaceButton).toHaveClass('h-9', 'w-9', 'justify-center');
     expect(workspaceButton).toHaveAttribute('aria-expanded', 'false');
-    expect(workspaceButton).toHaveAttribute('aria-keyshortcuts', 'Meta+J Control+J');
+    expect(workspaceButton).toHaveAttribute('aria-keyshortcuts', 'Control+J');
     expect(workspacePane).toHaveClass('hidden');
     expect(workspacePane).not.toHaveClass('flex');
     expect(screen.queryByRole('region', { name: 'Job workspace' })).not.toBeInTheDocument();
@@ -4686,12 +4689,12 @@ describe('JobDetail', () => {
       }),
     );
     const toggle = screen.getByRole('button', { name: 'Open workspace' });
-    expect(toggle).toHaveAttribute('aria-keyshortcuts', 'Meta+Shift+E Control+Shift+E');
-    expect(toggle).toHaveAttribute('title', 'Open workspace (⌘ / Ctrl + Shift + E)');
+    expect(toggle).toHaveAttribute('aria-keyshortcuts', 'Control+Shift+E');
+    expect(toggle).toHaveAttribute('title', 'Open workspace (Ctrl + Shift + E)');
     expect(fireEvent.keyDown(window, { key: 'j', ctrlKey: true })).toBe(true);
     fireEvent.keyDown(window, { key: 'E', ctrlKey: true, shiftKey: true });
     expect(screen.getByRole('region', { name: 'Job workspace' })).toBeInTheDocument();
-    fireEvent.keyDown(window, { key: 'E', metaKey: true, shiftKey: true });
+    fireEvent.keyDown(window, { key: 'E', ctrlKey: true, shiftKey: true });
     act(() => settings.result.current[1]({ ...DEFAULT_KEYBOARD_SHORTCUTS, workspace: null }));
     expect(toggle).not.toHaveAttribute('aria-keyshortcuts');
     expect(fireEvent.keyDown(window, { key: 'E', ctrlKey: true, shiftKey: true })).toBe(true);
@@ -4701,11 +4704,12 @@ describe('JobDetail', () => {
   });
 
   it.each([
-    { key: 'j', metaKey: true },
-    { key: 'J', metaKey: true },
-    { key: 'j', ctrlKey: true },
-    { key: 'J', ctrlKey: true },
-  ])('toggles the workspace and ignores repeats: %j', (chord) => {
+    ['MacIntel', { key: 'j', metaKey: true }],
+    ['MacIntel', { key: 'J', metaKey: true }],
+    ['Win32', { key: 'j', ctrlKey: true }],
+    ['Win32', { key: 'J', ctrlKey: true }],
+  ])('toggles the workspace and ignores repeats on %s: %j', (platform, chord) => {
+    onPlatform(platform);
     render(<JobDetail job={makeJob()} />);
 
     expect(fireEvent.keyDown(window, chord)).toBe(false);
@@ -4737,7 +4741,7 @@ describe('JobDetail', () => {
       const workspaceTabs = within(screen.getByRole('tablist', { name: 'Workspace views' }));
       fireEvent.click(workspaceTabs.getByRole('tab', { name: new RegExp(`^${tab}`) }));
 
-      fireEvent.keyDown(window, { key: 'j', metaKey: true });
+      fireEvent.keyDown(window, { key: 'j', ctrlKey: true });
       expect(screen.queryByRole('region', { name: 'Job workspace' })).not.toBeInTheDocument();
       fireEvent.keyDown(window, { key: 'j', ctrlKey: true });
       expect(workspaceTabs.getByRole('tab', { name: new RegExp(`^${tab}`) })).toHaveAttribute(
@@ -4746,7 +4750,7 @@ describe('JobDetail', () => {
       );
 
       fireEvent.click(screen.getByRole('button', { name: 'Close workspace' }));
-      fireEvent.keyDown(window, { key: 'j', metaKey: true });
+      fireEvent.keyDown(window, { key: 'j', ctrlKey: true });
       expect(workspaceTabs.getByRole('tab', { name: new RegExp(`^${tab}`) })).toHaveAttribute(
         'aria-selected',
         'true',
@@ -4756,6 +4760,7 @@ describe('JobDetail', () => {
 
   it.each([
     { key: 'j' },
+    { key: 'j', metaKey: true },
     { key: 'j', metaKey: true, ctrlKey: true },
     { key: 'j', metaKey: true, altKey: true },
     { key: 'j', ctrlKey: true, altKey: true },
@@ -4770,9 +4775,13 @@ describe('JobDetail', () => {
     expect(screen.queryByRole('region', { name: 'Job workspace' })).not.toBeInTheDocument();
   });
 
-  it.each([{ metaKey: true }, { ctrlKey: true }])(
-    'captures the workspace shortcut before a focused editor consumes it: %j',
-    (modifier) => {
+  it.each([
+    ['MacIntel', { metaKey: true }],
+    ['Win32', { ctrlKey: true }],
+  ])(
+    'captures the workspace shortcut before a focused editor consumes it on %s: %j',
+    (platform, modifier) => {
+      onPlatform(platform);
       render(<JobDetail job={makeJob()} />);
       const composer = screen.getByLabelText('Add a follow-up');
       // Terminal/editor handlers may stop bubbling or forward Ctrl+J as a newline.
@@ -4858,6 +4867,46 @@ describe('JobDetail', () => {
     fireEvent.click(screen.getByRole('tab', { name: 'diff' }));
     expect(screen.getByText('+fixed')).toBeInTheDocument();
     await waitFor(() => expect(getAgentJobGit).toHaveBeenCalledWith('ajob_1'));
+  });
+
+  it('lists a file that became a symlink once, with both halves of its change', async () => {
+    // Git writes a change of file type as a deletion and a creation under one
+    // name. Read as two files they shared one key, and selecting by name
+    // could never show the second: what the path holds now.
+    vi.mocked(getAgentJobGit).mockResolvedValue({
+      available: true,
+      branch: 'agent/ajob_1',
+      changes: [],
+      patch: [
+        'diff --git a/config.yml b/config.yml',
+        'deleted file mode 100644',
+        'index a52e282..0000000',
+        '--- a/config.yml',
+        '+++ /dev/null',
+        '@@ -1 +0,0 @@',
+        '-plain text',
+        'diff --git a/config.yml b/config.yml',
+        'new file mode 120000',
+        'index 0000000..0190743',
+        '--- /dev/null',
+        '+++ b/config.yml',
+        '@@ -0,0 +1 @@',
+        '+shared/config.yml',
+        '\\ No newline at end of file',
+      ].join('\n'),
+      commits: [],
+    });
+    render(<JobDetail job={makeJob({ state: 'done' })} />);
+    openWorkspace();
+
+    const git = screen.getByLabelText('Git workspace');
+    await waitFor(() => expect(within(git).getByText('-plain text')).toBeInTheDocument());
+    expect(
+      within(git)
+        .getAllByRole('option')
+        .map((option) => option.textContent),
+    ).toEqual(['config.yml (+1 −1)']);
+    expect(within(git).getByText('+shared/config.yml')).toBeInTheDocument();
   });
 
   it('navigates Git views from the keyboard and associates the selected panel', async () => {
@@ -6413,6 +6462,37 @@ describe('sending a follow-up', () => {
     await waitFor(() => expect(submitThreadMessage).toHaveBeenCalled());
     await waitFor(() => expect((box as HTMLTextAreaElement).value).toBe(''));
     expect(box).not.toBeDisabled();
+  });
+
+  it('clears the composer of a chat opened again before its send answered', async () => {
+    // Leaving a chat unmounts its composer, but the send it made still lands.
+    // The composer opened on coming back read the draft while that send was
+    // out; still showing it afterwards offers the same message a second time,
+    // under a new key, since the first one's was retired with its answer.
+    localStorage.clear();
+    let answer!: (result: ThreadMessageResultApi) => void;
+    vi.mocked(submitThreadMessage)
+      .mockClear()
+      .mockReturnValueOnce(
+        new Promise((resolve) => {
+          answer = resolve;
+        }),
+      );
+    const job = makeJob({ state: 'done' });
+    const left = render(<JobDetail job={job} userId="alice" />);
+    fireEvent.change(screen.getByLabelText('Add a follow-up'), {
+      target: { value: 'and now the docs' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /^(Send|Queue)$/ }));
+    await waitFor(() => expect(submitThreadMessage).toHaveBeenCalledTimes(1));
+    left.unmount();
+
+    render(<JobDetail job={job} userId="alice" />);
+    const box = screen.getByLabelText('Add a follow-up');
+    expect(box).toHaveValue('and now the docs');
+    await act(async () => answer({ pending: null, job: { id: 'ajob_next' } } as never));
+
+    expect(box).toHaveValue('');
   });
 });
 

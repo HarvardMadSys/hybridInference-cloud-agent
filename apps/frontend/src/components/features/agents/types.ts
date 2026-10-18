@@ -60,6 +60,8 @@ export type AgentEvent =
   | {
       kind: 'tool_use';
       tool: string;
+      /** The MCP server a Codex call went to; Claude names it in `tool` instead. */
+      mcpServer?: string;
       detail: string;
       /** Complete recorded arguments, retained separately from the compact preview. */
       input?: unknown;
