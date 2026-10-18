@@ -89,7 +89,9 @@ selection. Profiles with a different hardware parameter can use
 
 When adding or creating a server, enter **Sandbox storage path**, for example
 `/mydata`. This must be an existing writable mounted data disk on the remote
-server.
+server. A new CloudLab server starts with `/mydata`, where the `small-lan`
+profile and the Cloud Agent profile mount their data disk by default; change it
+when the server template mounts its disk elsewhere.
 Bootstrap stores sandbox workspaces and native session data in `<path>/docker`
 and `<path>/containerd`, binding these directories to the daemons' standard
 `/var/lib/docker` and `/var/lib/containerd` paths. The server overview shows the
