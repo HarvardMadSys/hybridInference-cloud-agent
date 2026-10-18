@@ -94,6 +94,38 @@ def test_a_backslash_is_normalized_to_a_separator_then_checked() -> None:
         safe_attachment_path("specs\\..\\..\\escape.md")
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        "a\nb.txt",
+        "a\rb.txt",
+        "line\nbreak.md",
+        "tab\tname.txt",
+        "nul\x00name.txt",
+        "delete\x7fname.txt",
+        "a/b\nc.txt",
+    ],
+)
+def test_a_name_cannot_carry_a_control_character(path: str) -> None:
+    """A control character would break a file reference out of its line.
+
+    ``prompt_with_attachments`` lists files one per line, so a name carrying a
+    newline reads as a second file that does not exist.
+    """
+    with pytest.raises(AttachmentError):
+        safe_attachment_path(path)
+
+
+def test_the_listing_has_exactly_one_line_per_file() -> None:
+    """The listing's line count is the file count, so no name can add a line."""
+    prompt = prompt_with_attachments("go", [{"path": "a.txt"}, {"path": "specs/api.md"}])
+    listed = [line for line in prompt.splitlines() if line.startswith("- ")]
+    assert listed == [
+        f"- {SANDBOX_UPLOAD_DIR}/a.txt",
+        f"- {SANDBOX_UPLOAD_DIR}/specs/api.md",
+    ]
+
+
 async def test_resolution_preserves_the_order_the_caller_asked_for() -> None:
     """The prompt lists files in the order the user attached them."""
     store = _Store([_row(1, "a.txt"), _row(2, "b.txt"), _row(3, "c.txt")])

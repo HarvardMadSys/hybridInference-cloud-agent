@@ -127,8 +127,9 @@ async def run_goal_wakeups(
     """Consume what is due, and return how many wakeups were handled.
 
     One pass is bounded, because it runs both inside the finish request and on
-    the reaper's loop: a deployment with hundreds of pending obligations must
-    not hold a request open, and the next tick takes the rest. ``thread_id``
+    the dedicated recovery loop: a deployment with hundreds of pending
+    obligations must not hold a request open, and the next tick takes the rest.
+    ``thread_id``
     confines the pass to one conversation, which is how the finish request
     runs it; the reaper's pass, without one, takes every conversation's.
 

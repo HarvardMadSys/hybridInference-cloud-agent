@@ -2117,7 +2117,11 @@ class SharedChatSessionSupervisor:
                     raise SandboxError("member resident slot changed in place")
                 if member.lease_token is None and member.current_turn is None:
                     member.native_session_id = manifest.native_session_id
-                    member.context_status = manifest.context_status
+                    member.context_status = (
+                        "lost"
+                        if member.context_status == "lost" or manifest.context_status == "lost"
+                        else manifest.context_status
+                    )
                     member.activation_generation = max(
                         member.activation_generation,
                         manifest.activation_generation,
@@ -2139,7 +2143,9 @@ class SharedChatSessionSupervisor:
                         )
                     member.last_settled_job_id = manifest.last_settled_job_id
                     if member.transport is None:
-                        member.resident_state = manifest.resident_state
+                        member.resident_state = (
+                            "lost" if member.context_status == "lost" else manifest.resident_state
+                        )
                         if member.resident_state == "live":
                             member.resident_state = (
                                 "restarting" if member.native_session_id else "stopped"
@@ -2244,6 +2250,8 @@ class SharedChatSessionSupervisor:
                 raise SessionBusy("shared workspace final archive retry is pending")
             if group.orphan_finalization_pending:
                 raise SessionBusy("shared workspace orphan finalization is pending")
+            if member.context_status == "lost":
+                raise RetainedChatLost("shared member context was lost")
             if member.lease_token is not None:
                 if member.lease_owner == owner:
                     return self._lease(
@@ -4493,9 +4501,12 @@ class SharedChatSessionSupervisor:
                 raise RetainedChatLost("shared sandbox container identity was lost")
             if group.spec.generation != generation:
                 raise SessionLeaseLost("shared sandbox generation is stale")
-            if (
-                activation_generation is not None
-                and requested.activation_generation != activation_generation
+            if activation_generation == 0 and (
+                reason not in {"orphaned_attempt", "lost"} or member_activation_generations is None
+            ):
+                raise SessionLeaseLost("group-level stop is missing its durable member fence")
+            if activation_generation not in (None, 0) and (
+                requested.activation_generation != activation_generation
             ):
                 raise SessionLeaseLost("shared member activation generation is stale")
             if member_activation_generations is not None and any(

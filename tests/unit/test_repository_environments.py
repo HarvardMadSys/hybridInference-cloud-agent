@@ -540,6 +540,43 @@ async def test_environment_gc_is_hourly_but_lease_reaping_runs_every_tick():
 
 
 @pytest.mark.asyncio
+async def test_failed_environment_gc_remains_due_for_the_next_pass():
+    from contextlib import asynccontextmanager
+    from unittest.mock import AsyncMock
+
+    from cloud_agent.storage.repositories.environments import PostgresEnvironmentRepository
+
+    calls = 0
+
+    async def execute(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 4:
+            raise RuntimeError("owner cleanup failed")
+
+    @asynccontextmanager
+    async def transaction():
+        yield
+
+    connection = SimpleNamespace(
+        execute=AsyncMock(side_effect=execute),
+        fetch=AsyncMock(return_value=[{"user_id": "owner"}]),
+        transaction=transaction,
+    )
+
+    @asynccontextmanager
+    async def acquire():
+        yield connection
+
+    repository = PostgresEnvironmentRepository(SimpleNamespace(acquire=acquire))
+    with pytest.raises(RuntimeError, match="owner cleanup failed"):
+        await repository.maintain_environments()
+    await repository.maintain_environments()
+
+    assert connection.fetch.await_count == 2
+
+
+@pytest.mark.asyncio
 async def test_repository_metadata_uses_configured_github_api(monkeypatch):
     from unittest.mock import AsyncMock
 

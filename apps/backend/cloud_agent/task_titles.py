@@ -63,6 +63,17 @@ def is_warmup_title(value: Any) -> bool:
     )
 
 
+def is_incomplete_completion(choice: Any) -> bool:
+    """True when a completion stopped for a reason other than a clean finish.
+
+    An explicit non-completion reason (``length``, ``content_filter``, …) means
+    the returned text is partial, so it must never be used as a title or a
+    summary. Providers that omit ``finish_reason`` stay supported. This is the
+    same contract ``prompt_rewrite`` already enforces.
+    """
+    return choice.get("finish_reason") not in (None, "stop")
+
+
 def thread_title_needs_generation(source: str | None, title: str | None) -> bool:
     """Recover fallback and contaminated automatic titles, never owner edits."""
     return source == "fallback" or (source in {"generated", "inherited"} and is_warmup_title(title))
@@ -164,7 +175,13 @@ async def generate_thread_title(
                         continue
                     raise
                 payload = response.json()
-                content = payload["choices"][0]["message"]["content"]
+                choice = payload["choices"][0]
+                # A truncated or filtered completion is not a title, even when
+                # its partial text looks plausible. Retrying would not make the
+                # same generation complete, so leave the fallback in place.
+                if is_incomplete_completion(choice):
+                    return
+                content = choice["message"]["content"]
                 # The gateway may buffer an upstream SSE warmup banner into a
                 # 200 JSON completion with finish_reason=stop. It is not a title.
                 if is_warmup_title(content):

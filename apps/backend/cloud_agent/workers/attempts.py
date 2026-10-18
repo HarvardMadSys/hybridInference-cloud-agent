@@ -1,12 +1,4 @@
-"""Attempt maintenance, grant renewal, and the recovery they keep moving.
-
-The maintenance pass closes attempts whose lease expired, reaps offline hosts
-and lapsed residencies, cleans up the residencies a stranded fork left behind,
-reconciles the forks and snapshot publishes an expiry stranded, and purges
-abandoned staged uploads. A sibling task renews live grants and handles
-definitive renewal refusals, so a slow maintenance operation cannot hold up
-their authorization. Both tasks are started and stopped by the same lifespan.
-"""
+"""Attempt lease recovery and the independent grant-renewal loop."""
 
 from __future__ import annotations
 
@@ -17,7 +9,6 @@ from typing import TYPE_CHECKING, Any, Protocol
 from cloud_agent.application.pending_messages import settle_waiting_queues
 from cloud_agent.application.send_now import recover_handoffs
 from cloud_agent.gateway import GatewayError
-from cloud_agent.goals.controller import run_goal_wakeups
 from cloud_agent.grants import GRANT_TTL_S, RENEWAL_INTERVAL_S
 from cloud_agent.host_pool import HEARTBEAT_INTERVAL_S, MISSED_HEARTBEATS_BEFORE_OFFLINE
 from cloud_agent.logging_utils import get_logger
@@ -29,8 +20,6 @@ if TYPE_CHECKING:
         AttemptCommands,
         ConversationCommands,
         ConversationQueries,
-        GoalRepository,
-        GoalWakeupRepository,
         GrantRepository,
         HostPoolRepository,
         PendingMessageRepository,
@@ -65,21 +54,12 @@ class _GrantRenewal(Protocol):
 
 
 class _Reaping(Protocol):
-    """What one reaper pass reaches for, named rather than inherited.
-
-    The pass is deliberately broad -- hosts, then residencies, then queued
-    follow-ups, then attempts, then the owner's waiting messages, then the
-    forks and snapshots an expiry strands -- so this list is long. It is still
-    a list: adding an eighth capability is an edit here, not a call that
-    happens to type-check.
-    """
+    """Capabilities used by one attempt-recovery pass."""
 
     attachments: AttachmentRepository
     attempt_commands: AttemptCommands
     conversation_commands: ConversationCommands
     conversation_queries: ConversationQueries
-    goal_wakeups: GoalWakeupRepository
-    goals: GoalRepository
     grants: GrantRepository
     source_control: SourceControlRepository
     host_pool: HostPoolRepository
@@ -667,7 +647,7 @@ async def _run_attempt_reaper(
     github_app: GitHubAppSource | None = None,
     gateway: Any | None = None,
 ) -> None:
-    """Periodically close attempts whose lease expired.
+    """Recover attempts and related resources whose leases or work stalled.
 
     Args:
         store: The agent store.
@@ -676,14 +656,10 @@ async def _run_attempt_reaper(
         grants: The grant client used for revocation after maintenance. ``None``
             skips inline revocation; the public loop also omits the independent
             renewal task, so capabilities expire at their own TTL.
-        github_app: Where to ask for the GitHub App's credentials, once per
-            pass. A goal decision checks the repository's entitlement before it
-            schedules, and with no minter that check can only see the
-            deployment's allowlist — so a repository the owner installed the App
-            on would be reported as access denied. Asked rather than held: the
-            credentials this process has at startup are not necessarily the
-            ones it has now (issue #47). Sending an owner's waiting message
-            checks the same entitlement, and waits for the App the same way.
+        github_app: Where to ask for the GitHub App's credentials when settling
+            an owner's waiting message. Asked rather than held: the credentials
+            this process has at startup are not necessarily the ones it has now
+            (issue #47).
         gateway: The gateway client. Sending an owner's waiting message checks
             the model and effort it names, exactly as sending it by hand does;
             without one, a message naming either waits for a settlement that
@@ -712,49 +688,6 @@ async def _run_attempt_reaper(
             await _reap_lapsed_residencies(store.residency, grants)
         except Exception:
             logger.warning("Residency reaper pass failed", exc_info=True)
-        # Queued follow-ups after residencies, before the attempt pass: give
-        # legacy turns a terminal answer if their native context is missing.
-        # Normal ordering is enforced at claim time; this cleanup uses the
-        # partial queued indexes instead of running on every runner poll.
-        try:
-            await store.attempt_commands.sweep_queued_follow_ups()
-        except Exception:
-            logger.warning("Queued follow-up sweep failed", exc_info=True)
-        # Goal wakeups before the attempt pass, every conversation's. A finish
-        # writes its obligation in the same transaction as the terminal
-        # transition and drains its own conversation's synchronously; this pass
-        # takes what an owner's write armed, and what a process that died
-        # between a finish and its drain left behind. The sweep after it is the
-        # backstop for a *missing* obligation, and the only thing that pauses a
-        # goal: every ordinary way an active goal stops being able to continue
-        # says so where and when it happens.
-        try:
-            await run_goal_wakeups(store=store, github_app=github_app, gateway=gateway)
-        except Exception:
-            logger.warning("Goal wakeup consumer pass failed", exc_info=True)
-        try:
-            swept = await store.goals.sweep_goal_scheduling()
-            if swept["rearmed"] or swept["stalled"]:
-                logger.warning(
-                    "agent_goals_recovered",
-                    extra={
-                        "event": "agent_goals_recovered",
-                        "rearmed": len(swept["rearmed"]),
-                        "stalled": len(swept["stalled"]),
-                        "stalled_thread_ids": swept["stalled"],
-                    },
-                )
-        except Exception:
-            logger.warning("Goal scheduling sweep failed", exc_info=True)
-        try:
-            environments = getattr(store, "environments", None)
-            if environments is not None:
-                await environments.maintain_environments()
-            snapshots = getattr(store, "environment_snapshots", None)
-            if snapshots is not None:
-                await snapshots.maintain()
-        except Exception:
-            logger.warning("Environment maintenance sweep failed", exc_info=True)
         try:
             actions = await store.attempt_commands.reap_expired(
                 max_attempts=(
@@ -887,8 +820,8 @@ async def _replay_settled_terminals(store: _SettledTerminals, *, interval_second
     and a marker stays set until that sandbox manager confirms. A host that stopped
     answering therefore costs each of its markers a full request timeout on
     every pass, and the turns the reaper ends because their host died are
-    among the ones that leave markers behind. Inside the reaper's pass that
-    wait held up lease reaping, goal scheduling, queue settlement and grant
+    among the ones that leave markers behind. Keeping this replay in its own
+    task prevents it from holding up lease reaping, queue settlement and grant
     renewal for the whole pool.
     """
     while True:

@@ -1139,6 +1139,188 @@ def test_explicit_stop_cleans_up_a_registered_never_started_container_without_ar
     assert manager.items[spec.container_name].networks == ()
 
 
+def test_orphan_stop_accepts_group_level_zero_activation_fence() -> None:
+    manager = _Manager()
+    spec = _spec()
+    supervisor = SharedChatSessionSupervisor(manager)
+    lease = supervisor.acquire(
+        spec,
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=False,
+        manifest=_members(),
+    )
+    issued_member_fence = {"athr_source": 1, "athr_peer": 0}
+
+    with pytest.raises(SessionLeaseLost, match="group-level stop"):
+        supervisor.stop_if_idle(
+            "athr_source",
+            generation=spec.generation,
+            activation_generation=0,
+            reason="idle",
+            member_activation_generations=issued_member_fence,
+        )
+    assert manager.stop_count == 0
+
+    stopped = supervisor.stop_if_idle(
+        "athr_source",
+        generation=spec.generation,
+        activation_generation=0,
+        reason="orphaned_attempt",
+        member_activation_generations=issued_member_fence,
+    )
+
+    assert stopped.running is False
+    assert manager.stop_count == 1
+    duplicate = supervisor.stop_if_idle(
+        "athr_source",
+        generation=spec.generation,
+        activation_generation=0,
+        reason="orphaned_attempt",
+        member_activation_generations=issued_member_fence,
+    )
+    assert duplicate.running is False
+    assert manager.stop_count == 1
+
+    replacement = supervisor.acquire(
+        spec,
+        thread_id="athr_source",
+        owner="attempt:2",
+        activation_generation=2,
+        has_settled_context=False,
+        manifest=_members(),
+        expected_container_id="container-shared",
+    )
+    assert replacement.token
+    with pytest.raises(SessionLeaseLost, match="member activation changed"):
+        supervisor.stop_if_idle(
+            "athr_source",
+            generation=spec.generation,
+            activation_generation=0,
+            reason="orphaned_attempt",
+            member_activation_generations=issued_member_fence,
+        )
+    assert manager.stop_count == 1
+    supervisor.abandon("athr_source", replacement.token, lost=False)
+    # The original broker lease was cleared as part of the orphan stop.
+    with pytest.raises(SessionLeaseLost):
+        supervisor.abandon("athr_source", lease.token, lost=False)
+
+
+def test_lost_archive_restart_replay_does_not_reopen_or_repeat_destructive_work() -> None:
+    class MarkedManager(_Manager):
+        def __init__(self) -> None:
+            super().__init__()
+            self.final_marker: bytes | None = None
+            self.docker_stop_calls = 0
+
+        def read_running_final_archive_marker(self, _spec, **_kwargs):
+            return self.final_marker
+
+        def read_stopped_final_archive_marker_optional(self, _spec, **_kwargs):
+            return self.final_marker
+
+        def stop(self, spec, **kwargs):
+            if self.items[spec.container_name].running:
+                self.docker_stop_calls += 1
+            return super().stop(spec, **kwargs)
+
+    manager = MarkedManager()
+    spec = _spec()
+    manager.items[spec.container_name] = manager._inspection(spec, running=True)
+    lost_member = SharedMemberManifest(
+        thread_id="athr_source",
+        native_session_id="native-source",
+        context_status="lost",
+        activation_generation=1,
+        process_generation=4,
+        residency_generation=2,
+        resident_state="lost",
+        resident_slot_id=0,
+        last_settled_job_id="ajob_source",
+    )
+    final_uploads: list[tuple[SharedMemberManifest, ...]] = []
+
+    def prepare(_spec, inspection):
+        assert inspection.running is True
+        manager.final_marker = b"pending-final-upload"
+
+    def archive(_spec, inspection, members):
+        assert inspection.running is False
+        if manager.final_marker == b"uploaded-final-receipt":
+            return
+        assert manager.final_marker == b"pending-final-upload"
+        final_uploads.append(members)
+        manager.final_marker = b"uploaded-final-receipt"
+
+    supervisor = SharedChatSessionSupervisor(
+        manager,
+        stopped_archive_prepare_hook=prepare,
+        stopped_archive_hook=archive,
+    )
+    supervisor.register_manifest(spec, [lost_member], expected_container_id="container-shared")
+    issued_stop = {
+        "thread_id": "athr_source",
+        "generation": spec.generation,
+        "activation_generation": 1,
+        "reason": "lost",
+        "member_activation_generations": {"athr_source": 1},
+    }
+
+    stopped = supervisor.stop_if_idle(
+        "athr_source",
+        generation=issued_stop["generation"],
+        activation_generation=issued_stop["activation_generation"],
+        reason=issued_stop["reason"],
+        member_activation_generations=issued_stop["member_activation_generations"],
+    )
+    assert stopped.running is False
+    assert manager.docker_stop_calls == 1
+    assert len(final_uploads) == 1
+    assert final_uploads[0][0].context_status == "lost"
+
+    # The broker died after Docker stop and final upload, before the control
+    # plane received its stopped observation. A replacement probes the durable
+    # upload marker and completes cleanup without another Docker stop/upload.
+    replacement = SharedChatSessionSupervisor(
+        manager,
+        stopped_archive_prepare_hook=prepare,
+        stopped_archive_hook=archive,
+    )
+    descriptors = replacement.reconcile()
+    assert len(descriptors) == 1 and descriptors[0].running is False
+    replacement.register_manifest(spec, [lost_member], expected_container_id="container-shared")
+    replacement.register_manifest(
+        spec,
+        [replace(lost_member, context_status="live", resident_state="live")],
+        expected_container_id="container-shared",
+    )
+    assert replacement.status("athr_source").context_status == "lost"
+    with pytest.raises(RetainedChatLost, match="context was lost"):
+        replacement.acquire(
+            spec,
+            thread_id="athr_source",
+            owner="attempt:2",
+            activation_generation=2,
+            has_settled_context=True,
+            manifest=[replace(lost_member, context_status="live", resident_state="live")],
+            expected_container_id="container-shared",
+        )
+
+    # A delayed copy of the original stop is harmless after restart too.
+    duplicate = replacement.stop_if_idle(
+        "athr_source",
+        generation=issued_stop["generation"],
+        activation_generation=issued_stop["activation_generation"],
+        reason=issued_stop["reason"],
+        member_activation_generations=issued_stop["member_activation_generations"],
+    )
+    assert duplicate.running is False
+    assert manager.docker_stop_calls == 1
+    assert len(final_uploads) == 1
+
+
 @pytest.mark.parametrize("released_networks", [(), ("none",)])
 def test_restart_reconcile_does_not_rearchive_an_already_released_stopped_group(
     released_networks,
@@ -6160,6 +6342,41 @@ def test_turn_boundary_preserves_reviewed_resident_tree_and_reaps_new_processes(
         ("normalize", 0),
     ]
     assert supervisor.status("athr_source").resident_state == "live"
+
+
+def test_successful_turn_boundary_retains_the_member_before_broker_settlement():
+    """The member remains resident and settled context survives local cleanup."""
+    manager = _Manager()
+    factory = _TransportFactory()
+    supervisor = SharedChatSessionSupervisor(manager, transport_factory=factory)
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+    supervisor.ensure_resident(
+        "athr_source",
+        lease.token,
+        _launch("athr_source", native_session_id="native-source", slot=0),
+    )
+    turn = supervisor.start_turn(
+        "athr_source",
+        lease.token,
+        prompt="work",
+        model="glm-5.1",
+        reasoning_effort=None,
+    )
+    supervisor.complete_turn("athr_source", lease.token, turn)
+
+    descriptor = supervisor.status("athr_source")
+
+    assert descriptor.resident_state == "live"
+    assert descriptor.last_settled_job_id == "ajob_source"
+    assert descriptor.context_status == "restored"
+    assert descriptor.native_session_id == "native-source"
 
 
 def test_kata_turn_observation_is_uid_scoped_and_closes_before_platform_cleanup():

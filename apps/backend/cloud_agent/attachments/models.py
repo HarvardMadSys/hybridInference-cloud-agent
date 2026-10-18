@@ -48,6 +48,10 @@ SANDBOX_UPLOAD_DIR = "/uploads"
 
 _DRIVE_PREFIX = re.compile(r"^[A-Za-z]:[\\/]")
 
+#: Control characters, including the line breaks that would split one file
+#: reference into several lines in the prompt listing.
+_CONTROL_CHARACTER = re.compile(r"[\x00-\x1f\x7f]")
+
 
 class AttachmentError(ValueError):
     """An upload the owner can correct."""
@@ -138,7 +142,12 @@ def safe_attachment_path(path: str) -> str:
     if cleaned.startswith("/") or _DRIVE_PREFIX.match(cleaned):
         raise AttachmentError("An upload path must be relative.")
     for part in cleaned.split("/"):
-        if not part or part in {".", ".."} or part.casefold() == ".git" or "\x00" in part:
+        if (
+            not part
+            or part in {".", ".."}
+            or part.casefold() == ".git"
+            or _CONTROL_CHARACTER.search(part)
+        ):
             raise AttachmentError(f"Unusable upload path: {path!r}")
     return cleaned
 

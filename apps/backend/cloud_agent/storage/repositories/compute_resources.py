@@ -2371,13 +2371,27 @@ class PostgresComputeResourceRepository:
             if generation is not None:
                 await self._fence(conn, operation_id, generation, worker_id)
             node = await conn.fetchrow(
-                """SELECT n.*,a.desired_state,a.release_committed_at
+                """SELECT n.*,a.desired_state,
+                          a.release_committed_at,a.observed_state,a.observation_error,
+                          a.scope_complete,a.observed_at,
+                          (a.observed_at >= NOW() - INTERVAL '5 minutes'
+                           AND a.observed_at <= NOW() + INTERVAL '30 seconds') AS observation_fresh,
+                          (SELECT COUNT(*) FROM agent_compute_nodes current_nodes
+                           WHERE current_nodes.allocation_id=a.id) AS allocation_node_count
                 FROM agent_compute_nodes n JOIN agent_compute_allocations a ON a.id=n.allocation_id
                 WHERE n.id=$1 FOR UPDATE OF a""",
                 node_id,
             )
             if node is None or node["desired_state"] != "present" or node["release_committed_at"]:
                 raise ValueError("resource_retiring")
+            if (
+                not node["scope_complete"]
+                or node["observed_state"] not in {"ready", "active", "running"}
+                or node["observation_error"] is not None
+                or not node["observation_fresh"]
+                or node["allocation_node_count"] != 1
+            ):
+                raise ValueError("resource_observation_not_ready")
             existing = await conn.fetchrow(
                 "SELECT * FROM agent_runner_hosts WHERE host=$1 FOR UPDATE", host
             )

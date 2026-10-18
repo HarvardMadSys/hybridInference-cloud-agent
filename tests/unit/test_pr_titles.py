@@ -374,6 +374,68 @@ async def test_generic_completion_responses_use_fallback_and_revoke_grant(caplog
     assert failures[0].reason == "invalid_title"
 
 
+@pytest.mark.parametrize("finish_reason", ["length", "content_filter"])
+async def test_incomplete_completion_uses_fallback_and_revokes_grant(finish_reason, caplog):
+    """A truncated title completion is never published, even with usable text."""
+    caplog.set_level(logging.INFO, logger="cloud_agent.pr_titles")
+    grants = _grants()
+
+    def handle(request):
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "finish_reason": finish_reason,
+                        "message": {"content": "Add retry backoff and regression tests"},
+                    }
+                ]
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        assert await generate_pr_title(_JOB, ["x"], grants=grants, client=client) is None
+
+    grants.revoke.assert_awaited_once_with("publication-grant")
+    failures = [
+        record
+        for record in caplog.records
+        if record.getMessage() == "agent_pr_title_generation_failed"
+    ]
+    assert [failure.reason for failure in failures] == ["invalid_title"]
+
+
+async def test_incomplete_fragment_summary_uses_fallback(caplog):
+    """A truncated fragment summary is not combined into the published title."""
+    caplog.set_level(logging.INFO, logger="cloud_agent.pr_titles")
+    grants = _grants()
+    job = {**_JOB, "session_messages": _session_of(2)}
+
+    def handle(request):
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "finish_reason": "length",
+                        "message": {"content": "Partial fragment summary"},
+                    }
+                ]
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        assert await generate_pr_title(job, ["x"], grants=grants, client=client) is None
+
+    grants.revoke.assert_awaited_once_with("publication-grant")
+    failures = [
+        record
+        for record in caplog.records
+        if record.getMessage() == "agent_pr_title_generation_failed"
+    ]
+    assert [failure.reason for failure in failures] == ["inference_failed"]
+
+
 async def test_missing_grants_logs_the_fallback_reason(caplog):
     caplog.set_level(logging.INFO, logger="cloud_agent.pr_titles")
 
@@ -446,6 +508,46 @@ async def test_a_fragment_that_fails_is_logged_as_that_call_failed(caplog):
         "HTTPStatusError",
         503,
     )
+
+
+async def test_a_failed_fragment_stops_and_joins_its_siblings(monkeypatch):
+    """A failing fragment must not leave sibling requests in flight.
+
+    The first failure aborts the title, but the requests it raced are still
+    talking to the gateway. They must be stopped *and awaited* before the title
+    path returns, so nothing outlives the publication grant's revocation.
+    """
+    grants = _grants()
+    job = {**_JOB, "session_messages": _session_of(3)}
+
+    created: list[asyncio.Task] = []
+    real_create_task = asyncio.create_task
+
+    def record(coro, **kwargs):
+        task = real_create_task(coro, **kwargs)
+        created.append(task)
+        return task
+
+    monkeypatch.setattr(asyncio, "create_task", record)
+
+    started = 0
+
+    async def handle(request):
+        nonlocal started
+        started += 1
+        if started == 1:
+            raise httpx.ConnectError("fragment gateway failure", request=request)
+        await asyncio.Event().wait()
+        return httpx.Response(200, json={"choices": [{"message": {"content": "summary"}}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        assert await generate_pr_title(job, ["x"], grants=grants, client=client) is None
+        # Nothing may still be in flight once the title path has returned.
+        unfinished = [task for task in created if not task.done()]
+
+    assert len(created) == 3
+    assert unfinished == []
+    grants.revoke.assert_awaited_once_with("publication-grant")
 
 
 async def test_timeout_cannot_block_publication(monkeypatch, caplog):

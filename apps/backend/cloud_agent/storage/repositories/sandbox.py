@@ -2077,22 +2077,40 @@ class PostgresSandboxRepository:
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
-                SELECT origin_thread_id AS thread_id, generation,
-                       0::bigint AS activation_generation,
+                SELECT g.origin_thread_id AS thread_id, g.generation,
                        CASE
-                           WHEN stop_requested_at IS NOT NULL THEN 'idle'
-                           WHEN state IN ('stopped_dirty', 'lost') THEN 'lost'
-                           WHEN state = 'stopping' THEN 'orphaned_attempt'
+                           WHEN (g.state = 'stopping' AND g.stop_requested_at IS NULL)
+                             OR origin.activation_generation = 0 THEN 0::bigint
+                           ELSE origin.activation_generation
+                       END AS activation_generation,
+                       CASE
+                           WHEN EXISTS (
+                               SELECT 1 FROM agent_thread_sandbox_memberships m
+                               WHERE m.sandbox_id = g.id
+                           ) AND NOT EXISTS (
+                               SELECT 1 FROM agent_thread_sandbox_memberships m
+                               WHERE m.sandbox_id = g.id
+                                 AND COALESCE(m.context_status, '') <> 'lost'
+                                 AND COALESCE(m.native_state, '') <> 'lost'
+                           ) THEN 'lost'
+                           WHEN g.state IN ('stopped_dirty', 'lost') THEN 'lost'
+                           WHEN origin.activation_generation = 0 THEN 'orphaned_attempt'
+                           WHEN g.state = 'stopping' AND g.stop_requested_at IS NULL
+                               THEN 'orphaned_attempt'
                            ELSE 'idle'
                        END AS reason,
                        TRUE AS shared_live,
-                       CASE WHEN stop_requested_at IS NOT NULL THEN (
-                           SELECT COALESCE(jsonb_object_agg(m.thread_id, m.activation_generation),
-                                           '{}'::jsonb)
+                       (
+                           SELECT COALESCE(
+                               jsonb_object_agg(m.thread_id, m.activation_generation),
+                               '{}'::jsonb
+                           )
                            FROM agent_thread_sandbox_memberships m
-                           WHERE m.sandbox_id = g.id AND m.resident_slot_id IS NOT NULL
-                       ) END AS member_activation_generations
+                           WHERE m.sandbox_id = g.id
+                       ) AS member_activation_generations
                 FROM agent_sandboxes g
+                JOIN agent_thread_sandbox_memberships origin
+                  ON origin.sandbox_id = g.id AND origin.thread_id = g.origin_thread_id
                 WHERE g.id = $1 AND g.origin_thread_id = $2 AND g.host = $3
                   AND g.container_id = $4 AND g.generation = $5
                   AND g.active_operation_count = 0
@@ -2667,6 +2685,27 @@ class PostgresSandboxRepository:
                 or int(group["active_operation_count"]) > 0
                 or (group["snapshot_state"] == "snapshotting")
             )
+            # A runner may have died after every durable member context became
+            # LOST while the sandbox manager still holds a stale local lease.
+            # That lease must not keep the shared container RUNNING forever.
+            lost_only_group = False
+            if not durable_activity and (
+                running or (group["state"] == "running" and group["idle_deadline"] is None)
+            ):
+                lost_only_group = await conn.fetchval(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1 FROM agent_thread_sandbox_memberships
+                        WHERE sandbox_id = $1
+                    ) AND NOT EXISTS (
+                        SELECT 1 FROM agent_thread_sandbox_memberships
+                        WHERE sandbox_id = $1
+                          AND COALESCE(context_status, '') <> 'lost'
+                          AND COALESCE(native_state, '') <> 'lost'
+                    )
+                    """,
+                    sandbox_id,
+                )
             # Docker creation can outlive the runner that requested it. An
             # explicit pre-admission abandon leaves the group PROVISIONING
             # with no active member; if Docker reports that exact labelled
@@ -2700,6 +2739,21 @@ class PostgresSandboxRepository:
                         sandbox_id,
                     )
                 return None if recovered is None else str(recovered)
+            if running and lost_only_group and not durable_activity:
+                row = await conn.fetchrow(
+                    """
+                    UPDATE agent_sandboxes
+                    SET state = CASE
+                            WHEN state IN ('lost', 'stopped_dirty') THEN state
+                            ELSE 'stopping'
+                        END,
+                        idle_deadline = NULL, updated_at = NOW()
+                    WHERE id = $1
+                    RETURNING state
+                    """,
+                    sandbox_id,
+                )
+                return None if row is None else str(row["state"])
             if running:
                 if group["stop_requested_at"] is not None:
                     # A heartbeat is an observation of a still-running
