@@ -592,6 +592,14 @@ class ComputeResourceRepository(Protocol):
         """
         ...
 
+    async def confirm_acquisition_absent(self, *, operation_id: str) -> dict[str, Any]:
+        """Close an acquisition an administrator confirmed created nothing.
+
+        Cancels the operation and makes its allocation absent, so the records
+        can be removed. Refused once anything recorded names a resource.
+        """
+        ...
+
     async def retry_operation(self, operation_id: str) -> dict[str, Any]:
         """Resume an operation from its durable step and original parameters."""
         ...

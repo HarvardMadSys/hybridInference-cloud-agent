@@ -544,6 +544,113 @@ async def test_registered_node_keys_prove_acquisition_has_provider_side_effects(
     assert registration is not None and registration["registered_at"] is not None
 
 
+@pytest.mark.parametrize(
+    ("state", "result"),
+    [
+        ("unknown", {"external_pending": True}),
+        ("failed", {"external_pending": False}),
+        ("blocked", {}),
+    ],
+)
+async def test_an_acquisition_confirmed_to_have_created_nothing_lets_its_server_go(
+    db, store, state, result
+):
+    repo = store.compute_resources
+    allocation_id, operation = await pending_allocation(store)
+    async with db.acquire() as conn:
+        await conn.execute(
+            """UPDATE agent_compute_operations
+               SET state=$2,step='acquiring',result=$3::jsonb WHERE id=$1""",
+            operation["id"],
+            state,
+            json.dumps(result),
+        )
+    with pytest.raises(ValueError, match=r"^external_operation_unresolved$"):
+        await remove_current(store, allocation_id)
+
+    closed = await repo.confirm_acquisition_absent(operation_id=operation["id"])
+
+    assert closed["state"] == "cancelled" and closed["result"]["confirmed_absent"] is True
+    allocation = await repo.get_allocation(allocation_id)
+    assert allocation is not None
+    assert (allocation["desired_state"], allocation["observed_state"]) == ("absent", "absent")
+    # Cancelled, it can never be retried into a fresh provider request.
+    with pytest.raises(ValueError, match=r"^operation_not_retryable$"):
+        await repo.retry_operation(operation["id"])
+    await remove_current(store, allocation_id)
+    assert await repo.get_allocation(allocation_id) is None
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        {"resource_ref": {"provider_id": "cloudlab", "external_id": "experiment"}},
+        {"external_id": "experiment"},
+        {"resolved_external_id": "experiment"},
+    ],
+)
+async def test_an_acquisition_that_named_a_resource_cannot_be_closed_as_never_created(
+    db, store, result
+):
+    repo = store.compute_resources
+    allocation_id, operation = await pending_allocation(store)
+    async with db.acquire() as conn:
+        await conn.execute(
+            """UPDATE agent_compute_operations
+               SET state='unknown',step='acquiring',result=$2::jsonb WHERE id=$1""",
+            operation["id"],
+            json.dumps(result),
+        )
+    before = await repo.get_allocation(allocation_id)
+    with pytest.raises(ValueError, match=r"^absence_not_confirmable$"):
+        await repo.confirm_acquisition_absent(operation_id=operation["id"])
+    assert await repo.get_allocation(allocation_id) == before
+    assert (await repo.get_operation(operation["id"]))["state"] == "unknown"
+
+
+async def test_a_running_acquisition_cannot_be_closed_as_never_created(store):
+    repo = store.compute_resources
+    allocation_id, operation = await pending_allocation(store)
+    claimed = await repo.claim_operation(worker_id="worker")
+    assert claimed["id"] == operation["id"] and claimed["state"] == "running"
+    with pytest.raises(ValueError, match=r"^absence_not_confirmable$"):
+        await repo.confirm_acquisition_absent(operation_id=operation["id"])
+    assert (await repo.get_allocation(allocation_id))["observed_state"] != "absent"
+
+
+async def test_a_registered_node_keeps_an_acquisition_from_closing_as_never_created(store):
+    repo = store.compute_resources
+    allocation_id, operation = await pending_allocation(store)
+    claimed = await repo.claim_operation(worker_id="registration-worker")
+    assert claimed["id"] == operation["id"]
+    await repo.create_node_registration(
+        allocation_id=allocation_id,
+        token_hash="node-of-a-lost-request",
+        ttl_seconds=3600,
+        operation_id=claimed["id"],
+        generation=claimed["generation"],
+        worker_id="registration-worker",
+    )
+    assert (
+        await repo.complete_node_registration(
+            token_hash="node-of-a-lost-request", host_keys=["ssh-ed25519 AAAAlost-request"]
+        )
+        == "registered"
+    )
+    assert await repo.finish_operation(
+        operation_id=claimed["id"],
+        generation=claimed["generation"],
+        worker_id="registration-worker",
+        state="unknown",
+        step="acquiring",
+        result={"external_pending": True},
+    )
+    with pytest.raises(ValueError, match=r"^provider_node_registered$"):
+        await repo.confirm_acquisition_absent(operation_id=operation["id"])
+    assert (await repo.get_operation(operation["id"]))["state"] == "unknown"
+    assert (await repo.get_allocation(allocation_id))["observed_state"] != "absent"
+
+
 @pytest.mark.parametrize("state", ["terminated", "absent"])
 async def test_confirmed_release_allows_historical_provider_receipts(db, store, hosts, state):
     allocation_id, _, operation = await terminal_allocation(store, hosts, state=state)

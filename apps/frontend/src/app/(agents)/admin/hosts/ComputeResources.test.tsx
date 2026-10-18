@@ -40,6 +40,7 @@ vi.mock('@/lib/api/compute', () => ({
   rotateComputeAllocation: vi.fn(),
   actOnComputeOperation: vi.fn(),
   resolveComputeOperation: vi.fn(),
+  confirmComputeOperationAbsent: vi.fn(),
 }));
 
 vi.mock('@/lib/api/admin', () => ({ forgetAgentRunnerHost: vi.fn() }));
@@ -1184,6 +1185,65 @@ describe('resource dashboard', () => {
       expect(api.resolveComputeOperation).toHaveBeenCalledWith('op-a', 'confirmed-experiment-id'),
     );
     expect(api.createComputeServer).not.toHaveBeenCalled();
+  });
+
+  it('closes an unknown acquisition as never created only once the portal was checked', async () => {
+    const lost = operation({
+      state: 'unknown',
+      allowed_actions: ['retry', 'resolve', 'confirm_absent'],
+    });
+    const closed = {
+      ...lost,
+      state: 'cancelled',
+      message: 'An administrator confirmed the provider created nothing for this request.',
+      allowed_actions: [],
+    };
+    vi.mocked(api.getComputeOperations).mockResolvedValue({ operations: [lost] });
+    vi.mocked(api.confirmComputeOperationAbsent).mockImplementation(async () => {
+      vi.mocked(api.getComputeOperations).mockResolvedValue({ operations: [closed] });
+      return { operation: closed };
+    });
+    render(<ComputeResources onHostsChanged={vi.fn()} />);
+    fireEvent.click(await screen.findByRole('button', { name: /Activity.*1 active/ }));
+    fireEvent.click(
+      await screen.findByRole('button', { name: /acquire · CloudLab experiment · unknown/ }),
+    );
+    const dialog = await screen.findByRole('dialog', { name: 'Resource operation' });
+    expect(
+      within(dialog).getByText(/If an experiment does exist, adopt it above instead/),
+    ).toBeInTheDocument();
+    const close = within(dialog).getByRole('button', { name: 'Nothing was created' });
+    expect(close).toBeDisabled();
+    fireEvent.click(close);
+    expect(api.confirmComputeOperationAbsent).not.toHaveBeenCalled();
+
+    fireEvent.click(
+      within(dialog).getByRole('checkbox', { name: /it has no experiment for this request/ }),
+    );
+    fireEvent.click(close);
+    await waitFor(() => expect(api.confirmComputeOperationAbsent).toHaveBeenCalledWith('op-a'));
+    expect(await within(dialog).findByText('acquire: cancelled')).toBeInTheDocument();
+    expect(
+      within(dialog).queryByRole('button', { name: 'Nothing was created' }),
+    ).not.toBeInTheDocument();
+    expect(api.resolveComputeOperation).not.toHaveBeenCalled();
+    expect(api.actOnComputeOperation).not.toHaveBeenCalled();
+  });
+
+  it('names a server whose acquisition created nothing as not created, not disconnected', async () => {
+    vi.mocked(api.getComputeServers).mockResolvedValue({
+      allocations: [
+        allocation({ name: 'Lost request', state: 'absent', external_id: null, nodes: [] }),
+      ],
+      hosts: [],
+      active_host: null,
+      observed_at: '2026-10-04T08:00:00Z',
+    });
+    render(<ComputeResources onHostsChanged={vi.fn()} />);
+    fireEvent.click(await screen.findByRole('button', { name: /Show released/ }));
+    const row = screen.getByRole('listitem', { name: 'Lost request' });
+    expect(within(row).getByText('Not created')).toBeInTheDocument();
+    expect(within(row).queryByText('Disconnected')).not.toBeInTheDocument();
   });
 
   it('keeps one resource row and its retained count when the global target changes', async () => {

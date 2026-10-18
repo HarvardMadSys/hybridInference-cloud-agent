@@ -20,6 +20,7 @@ import { APIError, getErrorMessage } from '@/lib/utils/errors';
 import AddComputeServer from './AddComputeServer';
 import CloudLabAutoscaling from './CloudLabAutoscaling';
 import ComputeSetup from './ComputeSetup';
+import ConfirmNothingCreated from './ConfirmNothingCreated';
 import RemoveComputeServer from './RemoveComputeServer';
 import ServerAccess from './ServerAccess';
 import ServerActions from './ServerActions';
@@ -732,6 +733,13 @@ export default function ComputeResources({
                 Adopt this experiment and continue
               </button>
             </form>
+          )}
+          {currentOperation.allowed_actions.includes('confirm_absent') && (
+            <ConfirmNothingCreated
+              key={currentOperation.id}
+              operation={currentOperation}
+              onConfirmed={(operation) => receiveOperation(operation)}
+            />
           )}
           <p className="mt-3 break-all text-xs text-gray-500 dark:text-gray-400">
             Request: {currentOperation.request_id}

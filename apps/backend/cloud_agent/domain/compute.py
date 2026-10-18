@@ -147,6 +147,33 @@ def provider_resource_absent(allocation: dict[str, Any] | None) -> bool:
     )
 
 
+def acquisition_absence_confirmable(
+    operation: dict[str, Any], allocation: dict[str, Any] | None
+) -> bool:
+    """Identify a manual acquisition an administrator may confirm created nothing.
+
+    Its provider call stopped without a result to trust, or failed or blocked
+    after it may have reached the provider, and nothing recorded names a
+    resource: no identity, node or Host. Only the provider's own portal can
+    settle that, so closing it is the administrator's statement, never an
+    observation of ours. Autoscaled acquisitions keep their own lifecycle.
+    """
+    internal = operation.get("result") or {}
+    return bool(
+        allocation
+        and not allocation.get("autoscaling_owned")
+        and allocation.get("mode") == "provision"
+        and operation.get("kind") == "acquire"
+        and operation.get("state") in {"unknown", "failed", "blocked"}
+        and not internal.get("resource_ref")
+        and not internal.get("external_id")
+        and not internal.get("resolved_external_id")
+        and provider_resource_absent(allocation)
+        and not allocation.get("release_committed_at")
+        and allocation.get("observed_state") not in {"terminated", "absent"}
+    )
+
+
 def autoscaling_acquire_is_terminal(
     operation: dict[str, Any], allocation: dict[str, Any] | None
 ) -> bool:

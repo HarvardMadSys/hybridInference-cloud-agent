@@ -447,7 +447,7 @@ there with its controls.
 | Result | Recovery |
 | --- | --- |
 | SSH key or identity refused | Verify the machine/key, update the selected connection and retry the same operation. Existing-SSH and registered CloudLab connections keep host-key checks enabled. |
-| Cloud create outcome unknown, no UUID saved | Identify the actual experiment in the exact account/project and resolve explicitly. The worker never repeats POST or adopts an experiment by name. |
+| Cloud create outcome unknown, no UUID saved | Identify the actual experiment in the exact account/project and resolve explicitly. The worker never repeats POST or adopts an experiment by name. If the portal has no experiment for the request, **Nothing was created** closes it: the operation is cancelled, never retried, and the server shows as not created and can be removed. That is the administrator's statement, made without asking the provider, so check the portal first. A node of the request that registered refuses it, and so does any saved UUID, node or Host. Autoscaled acquisitions keep their own cancellation. |
 | UUID saved, later observation failed | Repair access and resume the same resource. Releasing the server instead deletes that experiment by its saved UUID. |
 | Installation or readiness failed | Inspect deployment checks, repair prerequisites/profile and retry the same resource. Failure does not destroy it. |
 | Extension pending or unknown | Check actual expiry. Retries retain the fixed absolute target; shorter extensions are not successful. The provider may reject or limit extensions. An expiry that has not moved ten minutes after the request blocks as `extension_unconfirmed`, so the server's other operations and a replacement can proceed; retry sends the same target again. |
