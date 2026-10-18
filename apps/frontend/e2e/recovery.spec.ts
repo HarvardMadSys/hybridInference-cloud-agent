@@ -1,4 +1,5 @@
-import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
+import { type APIRequestContext, type Page } from '@playwright/test';
+import { expect, test } from './network-change';
 
 async function configure(request: APIRequestContext, settings: Record<string, boolean>) {
   expect((await request.post('/__fixture/config', { data: settings })).ok()).toBe(true);
@@ -24,6 +25,9 @@ async function openFork(page: Page) {
   await page.getByRole('menuitem', { name: /Fork/ }).click();
 }
 
+// Only an attempt that a host network change aborted is retried; see
+// network-change.ts.
+test.describe.configure({ retries: 1 });
 test.beforeEach(async ({ request, page }) => {
   expect((await request.post('/__fixture/reset')).ok()).toBe(true);
   page.on('dialog', (dialog) => dialog.accept());

@@ -313,6 +313,13 @@ fail the suite. This covers browser recovery and client/API interactions; it
 does not exercise the Python control plane, database, authentication provider,
 or sandbox hosts. Those still need their integration and staging checks.
 
+Chromium aborts requests still waiting for a connection with
+`net::ERR_NETWORK_CHANGED` whenever the host's network addresses change, which
+happens on shared CI runners when other jobs start or stop containers. A test
+whose failed attempt saw that error runs once more and is reported as flaky. The
+retry after any other failure fails at once, so that failure still fails the
+suite (`apps/frontend/e2e/network-change.ts`).
+
 Failures retain screenshots and Playwright traces in `apps/frontend/test-results/`
 and an HTML report in `apps/frontend/playwright-report/`; CI uploads both. To
 iterate on fixture/spec changes after a successful root build, use
