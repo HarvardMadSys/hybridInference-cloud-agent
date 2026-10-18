@@ -1,4 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  listAgentReadReceipts,
+  saveAgentReadReceipts,
+  type AgentReadReceiptApi,
+} from '@/lib/api/agents/readReceipts';
 import type { SidebarConversation } from './useConversationList';
 import { getConversationState } from './conversationState';
 
@@ -20,7 +25,7 @@ export const CONVERSATION_READ_EVENT = 'agent:conversation-read';
 export const conversationReadStorageKey = (userId: string) =>
   `agents.sidebar.read.${encodeURIComponent(userId)}`;
 const numberOrNull = (value: unknown): number | null =>
-  typeof value === 'number' && Number.isFinite(value) ? value : null;
+  typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : null;
 
 /** Attempt identity is consistent between list and detail, unlike execution telemetry. */
 function completionReceipt(row: SidebarConversation): Receipt | null {
@@ -38,11 +43,23 @@ function covers(read: Receipt | undefined, completion: Receipt): boolean {
   if (read.turnNo !== null && completion.turnNo !== null && read.turnNo > completion.turnNo)
     return true;
   if (read.jobId !== completion.jobId) return false;
-  if (read.attemptId === completion.attemptId) return true;
-  return (
-    read.attemptId !== null &&
-    completion.attemptId !== null &&
-    read.attemptId > completion.attemptId
+  // A cancellation before an attempt starts has no new execution result.
+  return (read.attemptId ?? 0) >= (completion.attemptId ?? 0);
+}
+/** A stale tab or a late network response can only advance progress. */
+function mergeReceipts(local: Receipts, incoming: Receipts): Receipts {
+  const merged = { ...local };
+  for (const [key, receipt] of Object.entries(incoming)) {
+    if (!covers(merged[key], receipt)) merged[key] = receipt;
+  }
+  return merged;
+}
+function fromApi(receipts: AgentReadReceiptApi[]): Receipts {
+  return Object.fromEntries(
+    receipts.map((receipt) => [
+      receipt.thread_id,
+      { jobId: receipt.job_id, attemptId: receipt.attempt_id, turnNo: receipt.turn_no },
+    ]),
   );
 }
 function parseReceipts(raw: string | null): Receipts {
@@ -61,7 +78,10 @@ function parseReceipts(raw: string | null): Receipts {
         !value ||
         typeof value !== 'object' ||
         !('jobId' in value) ||
-        typeof value.jobId !== 'string'
+        typeof value.jobId !== 'string' ||
+        !value.jobId ||
+        value.jobId.length > 128 ||
+        value.jobId.includes('\0')
       )
         continue;
       receipts[key] = {
@@ -91,7 +111,7 @@ function recordCompletion(
   const completion = completionReceipt(row);
   if (!completion) return local;
   const persisted = storedReceipts(userId);
-  const receipts = { ...local, ...persisted };
+  const receipts = mergeReceipts(local, persisted);
   if (!covers(receipts[row.key], completion)) receipts[row.key] = completion;
   if (userId && !covers(persisted[row.key], receipts[row.key])) {
     try {
@@ -118,29 +138,112 @@ export function markConversationRead(row: SidebarConversation, userId?: string):
 
 /** Remember only completions the user opened; listing history does not mark it read. */
 export function useConversationReadState(userId?: string): {
+  ready: boolean;
   isUnread: (row: SidebarConversation) => boolean;
   markRead: (row: SidebarConversation) => void;
 } {
   const [state, setState] = useState<ReadState>({ userId, receipts: {} });
+  const [readyOwner, setReadyOwner] = useState<string>();
   const current = useRef(state);
   const owner = useRef(userId);
   owner.current = userId;
 
   useEffect(() => {
-    const receipts = {
-      ...storedReceipts(userId),
+    const receipts = mergeReceipts(
+      storedReceipts(userId),
       // A child may mark an active completion before this mount effect runs.
-      ...(current.current.userId === userId ? current.current.receipts : {}),
-    };
+      current.current.userId === userId ? current.current.receipts : {},
+    );
     current.current = { userId, receipts };
     setState(current.current);
+    setReadyOwner(undefined);
+    let disposed = false;
+    let busy = false;
+    let request: AbortController | undefined;
+    let acknowledged: Receipts = {};
+    const active = () => !disposed && owner.current === userId;
+    const apply = (incoming: Receipts, persist = false) => {
+      const merged = mergeReceipts(current.current.receipts, incoming);
+      current.current = { userId, receipts: merged };
+      setState(current.current);
+      if (persist && userId) {
+        try {
+          const stored = storedReceipts(userId);
+          const next = mergeReceipts(stored, merged);
+          if (Object.entries(next).some(([key, receipt]) => !covers(stored[key], receipt))) {
+            localStorage.setItem(
+              conversationReadStorageKey(userId),
+              JSON.stringify({ version: 2, receipts: next }),
+            );
+          }
+        } catch {
+          // Memory and cloud synchronization still work with blocked storage.
+        }
+      }
+    };
+    const sync = async (refresh: boolean) => {
+      if (!userId || !active() || busy) return;
+      busy = true;
+      request = new AbortController();
+      const controller = request;
+      const withTimeout = async <T>(read: () => Promise<T>): Promise<T> => {
+        const timeout = window.setTimeout(() => controller.abort(), 15_000);
+        try {
+          return await read();
+        } finally {
+          window.clearTimeout(timeout);
+        }
+      };
+      try {
+        if (refresh) {
+          let cursor: string | undefined;
+          do {
+            const page = await withTimeout(() => listAgentReadReceipts(cursor, controller.signal));
+            if (!active() || page.user_id !== userId) return;
+            const cloud = fromApi(page.receipts);
+            acknowledged = mergeReceipts(acknowledged, cloud);
+            apply(cloud, true);
+            cursor = page.next_cursor ?? undefined;
+          } while (cursor);
+        }
+        // Import the old version-2 browser cache and retry offline reads in
+        // bounded batches. Reads arriving during an upload join the next batch.
+        while (active()) {
+          const pending = Object.entries(current.current.receipts)
+            .filter(([key, receipt]) => !covers(acknowledged[key], receipt))
+            .slice(0, 200);
+          if (!pending.length) break;
+          const response = await withTimeout(() =>
+            saveAgentReadReceipts(
+              pending.map(([, receipt]) => ({
+                job_id: receipt.jobId,
+                attempt_id: receipt.attemptId,
+              })),
+              controller.signal,
+            ),
+          );
+          if (!active() || response.user_id !== userId) return;
+          // The server also acknowledges obsolete/deleted local records by
+          // ignoring them; they must not stall the rest of the migration.
+          acknowledged = mergeReceipts(acknowledged, Object.fromEntries(pending));
+          const cloud = fromApi(response.receipts);
+          acknowledged = mergeReceipts(acknowledged, cloud);
+          apply(cloud, true);
+        }
+      } catch {
+        // Keep the local receipt; reconnect, focus and periodic refresh retry it.
+      } finally {
+        busy = false;
+        if (active()) setReadyOwner(userId);
+      }
+    };
     const onRead = (event: Event) => {
       const detail = (event as CustomEvent<ReadEventDetail>).detail;
       if (owner.current !== userId || detail?.userId !== userId || !detail.receipts) return;
       const receipt = detail.receipts[detail.key];
       if (!receipt || covers(current.current.receipts[detail.key], receipt)) return;
-      current.current = { userId, receipts: { ...current.current.receipts, ...detail.receipts } };
-      setState(current.current);
+      apply(detail.receipts);
+      void sync(false);
     };
     const onStorage = (event: StorageEvent) => {
       if (
@@ -154,14 +257,28 @@ export function useConversationReadState(userId?: string): {
       } catch {
         return;
       }
-      current.current = { userId, receipts: parseReceipts(event.newValue) };
-      setState(current.current);
+      apply(parseReceipts(event.newValue));
+      void sync(false);
+    };
+    const refresh = () => {
+      if (document.visibilityState !== 'hidden') void sync(true);
     };
     window.addEventListener(CONVERSATION_READ_EVENT, onRead);
     window.addEventListener('storage', onStorage);
+    window.addEventListener('focus', refresh);
+    window.addEventListener('online', refresh);
+    document.addEventListener('visibilitychange', refresh);
+    const timer = window.setInterval(refresh, 30_000);
+    void sync(true);
     return () => {
+      disposed = true;
+      request?.abort();
+      window.clearInterval(timer);
       window.removeEventListener(CONVERSATION_READ_EVENT, onRead);
       window.removeEventListener('storage', onStorage);
+      window.removeEventListener('focus', refresh);
+      window.removeEventListener('online', refresh);
+      document.removeEventListener('visibilitychange', refresh);
     };
   }, [userId]);
 
@@ -190,5 +307,5 @@ export function useConversationReadState(userId?: string): {
     [userId],
   );
 
-  return { isUnread, markRead };
+  return { isUnread, markRead, ready: !userId || readyOwner === userId };
 }

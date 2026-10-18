@@ -18,6 +18,12 @@ if TYPE_CHECKING:
 class ConversationQueries(Protocol):
     """Port: reading conversations, their jobs, and the project list."""
 
+    async def list_read_receipts(
+        self, *, user_id: str, after: str | None = None, limit: int = 200
+    ) -> dict[str, Any]:
+        """Page the owner's completion receipts, including archived but not deleted chats."""
+        ...
+
     async def get_thread_for_job(self, *, job_id: str, user_id: str) -> dict[str, Any] | None:
         """Return the conversation containing an owned job.
 

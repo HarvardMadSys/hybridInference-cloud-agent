@@ -32,6 +32,39 @@ test.afterEach(async ({ request }) => {
   expect((await state(request)).unknown).toEqual([]);
 });
 
+test('a fresh browser restores cloud read receipts without marking other chats read', async ({
+  page,
+  request,
+  browser,
+  baseURL,
+}) => {
+  await page.goto('/');
+  const source = page.getByRole('link', { name: 'Source conversation', exact: true });
+  await expect(source.getByLabel('Unread result', { exact: true })).toBeVisible();
+  await source.click();
+  await expect
+    .poll(async () => (await state(request)).readReceipts)
+    .toEqual([{ thread_id: 'thread-source', job_id: 'source', turn_no: 1, attempt_id: null }]);
+
+  const fresh = await browser.newContext({ baseURL });
+  try {
+    const newPage = await fresh.newPage();
+    await newPage.goto('/');
+    await expect(
+      newPage
+        .getByRole('link', { name: 'Other conversation', exact: true })
+        .getByLabel('Unread result', { exact: true }),
+    ).toBeVisible();
+    await expect(
+      newPage
+        .getByRole('link', { name: 'Source conversation', exact: true })
+        .getByLabel('Unread result', { exact: true }),
+    ).toHaveCount(0);
+  } finally {
+    await fresh.close();
+  }
+});
+
 test('leaving a conversation prevents a delayed Fork from stealing navigation', async ({
   page,
   request,

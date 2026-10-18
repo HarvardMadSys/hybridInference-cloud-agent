@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Protocol
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
 from cloud_agent.api._job_views import _iso, _job_response
 from cloud_agent.api._owner_auth import require_agent_owner
@@ -23,6 +23,9 @@ from cloud_agent.schemas import (
     AgentConversationListResponse,
     AgentProject,
     AgentProjectListResponse,
+    AgentReadReceipt,
+    AgentReadReceiptsRequest,
+    AgentReadReceiptsResponse,
     AgentSessionArchiveRequest,
     AgentSessionArchiveResponse,
     AgentSessionDeleteResponse,
@@ -170,6 +173,39 @@ async def delete_agent_sessions(
         job_store.host_pool, grants, result.get("released_residencies") or []
     )
     return AgentSessionDeleteResponse(thread_ids=result["thread_ids"])
+
+
+@router.get("/conversations/read-receipts", response_model=AgentReadReceiptsResponse)
+async def list_agent_read_receipts(
+    response: Response,
+    cursor: str | None = Query(None, min_length=1, max_length=128, pattern=r"^[^\x00]+$"),
+    limit: int = Query(200, ge=1, le=200),
+    user: dict[str, Any] = Depends(require_agent_owner),
+    store: _CatalogStorage | None = Depends(get_storage),
+) -> AgentReadReceiptsResponse:
+    """Restore account read progress, including chats outside the sidebar page."""
+    response.headers["Cache-Control"] = "no-store"
+    page = await _require_store(store).conversation_queries.list_read_receipts(
+        user_id=user["user_id"], after=cursor, limit=limit
+    )
+    return AgentReadReceiptsResponse(user_id=user["user_id"], **page)
+
+
+@router.post("/conversations/read-receipts", response_model=AgentReadReceiptsResponse)
+async def merge_agent_read_receipts(
+    body: AgentReadReceiptsRequest,
+    response: Response,
+    user: dict[str, Any] = Depends(require_agent_owner),
+    store: _CatalogStorage | None = Depends(get_storage),
+) -> AgentReadReceiptsResponse:
+    """Persist explicit completed attempts without ever marking later results read."""
+    response.headers["Cache-Control"] = "no-store"
+    receipts = await _require_store(store).conversation_commands.merge_read_receipts(
+        user_id=user["user_id"], receipts=[receipt.model_dump() for receipt in body.receipts]
+    )
+    return AgentReadReceiptsResponse(
+        user_id=user["user_id"], receipts=[AgentReadReceipt.model_validate(row) for row in receipts]
+    )
 
 
 @router.get("/conversations", response_model=AgentConversationListResponse)

@@ -93,6 +93,34 @@ class AgentConversationListResponse(BaseModel):
     next_cursor: str | None = None
 
 
+class AgentReadReceiptInput(BaseModel):
+    """The exact completion displayed by a client, never an implicit latest turn."""
+
+    job_id: str = Field(..., min_length=1, max_length=128, pattern=r"^[^\x00]+$")
+    attempt_id: int | None = Field(..., ge=1, le=9007199254740991)
+
+
+class AgentReadReceipt(AgentReadReceiptInput):
+    """Canonical owner-scoped conversation and turn identity for a receipt."""
+
+    thread_id: str
+    turn_no: int
+
+
+class AgentReadReceiptsRequest(BaseModel):
+    """A bounded batch, also used to import existing browser receipts."""
+
+    receipts: list[AgentReadReceiptInput] = Field(..., min_length=1, max_length=200)
+
+
+class AgentReadReceiptsResponse(BaseModel):
+    """Cloud progress and its owner, so a stale tab can detect account changes."""
+
+    user_id: str
+    receipts: list[AgentReadReceipt]
+    next_cursor: str | None = None
+
+
 class AgentProject(BaseModel):
     """One repo the caller has run tasks in, summarized for the task tree."""
 

@@ -73,6 +73,18 @@ vi.mock('@/lib/api/agents', async (importOriginal) => ({
   pinAgentJob: api.pin,
   unpinAgentJob: api.pin,
 }));
+vi.mock('@/lib/api/agents/readReceipts', () => ({
+  listAgentReadReceipts: vi.fn(async () => ({
+    user_id: api.user,
+    receipts: [],
+    next_cursor: null,
+  })),
+  saveAgentReadReceipts: vi.fn(async () => ({
+    user_id: api.user,
+    receipts: [],
+    next_cursor: null,
+  })),
+}));
 import { AgentsSidebar } from './AgentsSidebar';
 import { SkillDialog } from './skills/SkillDialog';
 import { AgentReadProvider } from './AgentReadProvider';

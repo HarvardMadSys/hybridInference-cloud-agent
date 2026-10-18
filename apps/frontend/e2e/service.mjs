@@ -67,6 +67,7 @@ export function createFixture() {
         ['other', job('other', 'Other conversation')],
       ]),
       receipts: new Map(),
+      readReceipts: new Map(),
       creates: [],
       forks: [],
       terminals: [],
@@ -115,6 +116,7 @@ export function createFixture() {
         forks: state.forks,
         pending: [...held.keys()],
         terminalStreams: state.terminalStreams,
+        readReceipts: [...state.readReceipts.values()],
         unknown: state.unknown,
       });
       return true;
@@ -181,7 +183,23 @@ export function createFixture() {
           },
         ],
       });
-    else if (api === '/v1/agent/conversations')
+    else if (api === '/v1/agent/conversations/read-receipts') {
+      const changed = [];
+      if (req.method === 'POST') {
+        for (const receipt of (await body(req)).receipts) {
+          const item = state.jobs.get(receipt.job_id);
+          if (!item || receipt.attempt_id !== item.current_attempt_id) continue;
+          const canonical = { ...receipt, thread_id: item.thread_id, turn_no: item.turn_no };
+          state.readReceipts.set(item.thread_id, canonical);
+          changed.push(canonical);
+        }
+      }
+      json(res, {
+        user_id: 'browser-owner',
+        receipts: req.method === 'POST' ? changed : [...state.readReceipts.values()],
+        next_cursor: null,
+      });
+    } else if (api === '/v1/agent/conversations')
       json(res, {
         conversations: [...state.jobs.values()].map((item) => ({
           job: item,

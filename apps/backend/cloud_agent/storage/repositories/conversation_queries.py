@@ -44,6 +44,31 @@ class PostgresConversationQueries:
         """Wrap the pool the control plane already owns."""
         self._pool = pool
 
+    async def list_read_receipts(
+        self, *, user_id: str, after: str | None = None, limit: int = 200
+    ) -> dict[str, Any]:
+        """Page receipts independently of the visible sidebar's history window."""
+        if not 1 <= limit <= 200:
+            raise ValueError("Read receipt page size must be between 1 and 200")
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT r.thread_id, r.job_id, r.turn_no, r.attempt_id
+                FROM agent_conversation_read_receipts r
+                JOIN agent_threads t ON t.id = r.thread_id AND t.user_id = r.user_id
+                WHERE r.user_id = $1 AND t.deleted_at IS NULL
+                  AND ($2::text IS NULL OR r.thread_id > $2)
+                ORDER BY r.thread_id LIMIT $3
+                """,
+                user_id,
+                after,
+                limit + 1,
+            )
+        return {
+            "receipts": [dict(row) for row in rows[:limit]],
+            "next_cursor": rows[limit - 1]["thread_id"] if len(rows) > limit else None,
+        }
+
     async def get_thread_for_job(self, *, job_id: str, user_id: str) -> dict[str, Any] | None:
         """Return the conversation containing an owned job.
 
