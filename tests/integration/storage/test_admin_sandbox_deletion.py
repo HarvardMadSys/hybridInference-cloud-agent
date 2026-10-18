@@ -922,31 +922,49 @@ async def test_automatic_retry_budget_exhaustion_preserves_receipt_and_resumes_s
     assert claim["deletion_archive_key"] == ARCHIVE_URI
 
 
-async def test_reclaimed_discard_recovers_after_automatic_retry_budget_exhaustion(db, store):
-    sandbox_id = "asbx_reclaimed_after_exhaustion"
+@pytest.mark.parametrize("retry_stop_mode", ["budget_exhausted", "operator_action"])
+async def test_reclaimed_discard_recovers_after_automatic_retries_stop(db, store, retry_stop_mode):
+    sandbox_id = f"asbx_reclaimed_after_{retry_stop_mode}"
     origin = await seed(db, store, sandbox_id, state="stopped")
     await member(db, sandbox_id, origin, 0)
     assert await request_delete(store, sandbox_id, discard=True) == "accepted"
 
-    for attempt_number in range(1, 9):
-        if attempt_number > 1:
-            async with db.acquire() as conn:
-                await conn.execute(
-                    "UPDATE agent_sandboxes SET deletion_retry_at=NOW() WHERE id=$1",
-                    sandbox_id,
-                )
+    if retry_stop_mode == "budget_exhausted":
+        for attempt_number in range(1, 9):
+            if attempt_number > 1:
+                async with db.acquire() as conn:
+                    await conn.execute(
+                        "UPDATE agent_sandboxes SET deletion_retry_at=NOW() WHERE id=$1",
+                        sandbox_id,
+                    )
+            claim = await store.sandbox.claim_due_admin_sandbox_deletion(ttl_seconds=3600)
+            assert claim is not None and claim["deletion_retry_count"] == attempt_number
+            decision = await store.sandbox.fail_admin_sandbox_deletion(
+                **worker_fence(claim),
+                error="The host timed out.",
+                retain_pending=True,
+                attempt_correlation_id=claim["deletion_attempt_correlation_id"],
+                failure_code="sandbox_manager_unavailable",
+                retry_class="transient",
+            )
+            assert decision.recorded is True
+            assert decision.retry_scheduled is (attempt_number < 8)
+        expected_retry_count = 8
+    else:
         claim = await store.sandbox.claim_due_admin_sandbox_deletion(ttl_seconds=3600)
-        assert claim is not None and claim["deletion_retry_count"] == attempt_number
+        assert claim is not None and claim["deletion_retry_count"] == 1
         decision = await store.sandbox.fail_admin_sandbox_deletion(
             **worker_fence(claim),
-            error="The host timed out.",
+            error="The sandbox manager is not configured.",
             retain_pending=True,
             attempt_correlation_id=claim["deletion_attempt_correlation_id"],
-            failure_code="sandbox_manager_unavailable",
-            retry_class="transient",
+            failure_code="sandbox_manager_resolution_rejected",
+            retry_class="operator_action",
         )
         assert decision.recorded is True
-        assert decision.retry_scheduled is (attempt_number < 8)
+        assert decision.retry_scheduled is False
+        assert decision.terminal_reason == "operator_action_required"
+        expected_retry_count = 1
 
     await _host(store, "runner-one", _RESTORE_HOST)
     allocation_id = f"{sandbox_id}_allocation"
@@ -969,7 +987,7 @@ async def test_reclaimed_discard_recovers_after_automatic_retry_budget_exhaustio
             allocation_id,
         )
 
-    # Exhaustion remains terminal while the provider still says the host is live.
+    # Stopped retries remain terminal while the provider still says the host is live.
     assert not await store.sandbox.recover_reclaimed_admin_sandbox_discard(
         reclaimed_quiet_seconds=600
     )
@@ -1009,11 +1027,11 @@ async def test_reclaimed_discard_recovers_after_automatic_retry_budget_exhaustio
     assert dict(row) == {
         "state": "lost",
         "deletion_state": "deleted",
-        "deletion_retry_count": 8,
+        "deletion_retry_count": expected_retry_count,
         "deletion_retry_exhausted_at": None,
         "deletion_error": None,
     }
-    assert dict(attempt_counts) == {"total": 8, "running": 0}
+    assert dict(attempt_counts) == {"total": expected_retry_count, "running": 0}
     assert event["host_reclaimed"] == "true"
     assert await store.sandbox.claim_due_admin_sandbox_deletion(ttl_seconds=3600) is None
 

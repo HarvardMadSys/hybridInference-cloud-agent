@@ -447,6 +447,8 @@ async def test_discard_reports_safe_sandbox_manager_configuration_errors(
     failure = store.sandbox.fail_admin_sandbox_deletion.call_args.kwargs
     assert reason in failure["error"]
     assert failure["retain_pending"] is True
+    assert failure["failure_code"] == "sandbox_manager_resolution_rejected"
+    assert failure["retry_class"] == "operator_action"
     record = caplog.records[-1]
     assert record.request_phase == "resolve_sandbox_manager"
     assert record.sandbox_manager_status is None

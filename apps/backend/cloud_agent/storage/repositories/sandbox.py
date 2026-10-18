@@ -1001,8 +1001,9 @@ class PostgresSandboxRepository:
         """Finish one provider-confirmed discard without spending another host attempt.
 
         The provider state and quiet-host interval are checked again under the
-        sandbox row lock. This recovery remains available after the bounded
-        external retry budget is exhausted.
+        sandbox row lock. This recovery remains available after automatic
+        retries stop, whether the bounded budget is exhausted or the failure
+        requires operator action.
         """
         async with self._pool.acquire() as conn, conn.transaction():
             candidate = await conn.fetchrow(

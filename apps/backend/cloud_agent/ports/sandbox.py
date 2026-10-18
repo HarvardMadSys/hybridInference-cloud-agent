@@ -144,8 +144,9 @@ class SandboxRepository(Protocol):
     ) -> bool:
         """Finalize one provider-confirmed discard without claiming another host attempt.
 
-        This recovery remains available after the external retry budget is
-        exhausted. Provider reclamation and the quiet-host interval fence the
+        This recovery remains available after automatic retries stop, whether
+        the bounded budget is exhausted or the failure requires operator
+        action. Provider reclamation and the quiet-host interval fence the
         state transition; no retry counter is consumed.
         """
         ...

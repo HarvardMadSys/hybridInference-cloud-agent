@@ -681,7 +681,8 @@ machine's other sandboxes lost. Its trajectory and audit record
 `host_reclaimed`. Chat history and the lifecycle audit remain. There is no S3
 object to restore from. An archive deletion that is already pending or verified
 is left unchanged; wait for it to finish or fail before choosing this action.
-If the automatic host-attempt budget has stopped a discard, the worker still
+If automatic retries have stopped for a discard, whether its host-attempt
+budget is exhausted or its failure requires operator action, the worker still
 checks for this provider-confirmed outcome. That recovery makes no host call and
 does not consume another retry; it requires the same provider termination and
 10-minute silence conditions.
