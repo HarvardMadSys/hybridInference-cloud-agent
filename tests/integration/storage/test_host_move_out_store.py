@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 from tests.integration.storage.test_agent_job_store import _create_job
 from tests.integration.storage.test_sandbox_restore_store import (
@@ -23,6 +26,8 @@ from tests.integration.storage.test_sandbox_restore_store import (
 )
 
 from cloud_agent.execution_profiles import KATA_RUNTIME
+from cloud_agent.sandbox_manager_client import SandboxManagerError
+from cloud_agent.workers import sandbox_deletion
 
 if TYPE_CHECKING:
     from cloud_agent.storage.assembly import Storage
@@ -808,6 +813,155 @@ async def test_a_reclaimed_machine_loses_a_group_whose_deletion_failed(pool, sto
     async with pool.acquire() as conn:
         queued = await conn.fetchval("SELECT state FROM agent_jobs WHERE id = $1", follow_up["id"])
     assert queued == "failed"
+
+
+async def _request_discard(store: Storage, sandbox_id: str = "asbx_restore") -> None:
+    """An administrator deletes the stopped group without an S3 archive."""
+    detail = await store.admin_sandboxes.detail(sandbox_id)
+    assert detail is not None
+    assert (
+        await store.sandbox.request_admin_delete(
+            sandbox_id=sandbox_id,
+            generation=detail.sandbox.generation,
+            container_id=detail.sandbox.container_id,
+            last_activity_at=detail.sandbox.last_activity_at,
+            actor_id="admin:operator",
+            admin_ip="127.0.0.1",
+            discard=True,
+        )
+        == "accepted"
+    )
+
+
+def _unreachable_sandbox_manager(monkeypatch) -> AsyncMock:
+    """Every call to the owning host's sandbox manager fails to connect."""
+    failure = SandboxManagerError(503, "The shared chat supervisor is temporarily unavailable.")
+    failure.__cause__ = httpx.ConnectError("connection refused")
+    discard = AsyncMock(side_effect=failure)
+    monkeypatch.setattr(
+        sandbox_deletion,
+        "sandbox_manager_for_host",
+        lambda _host: SimpleNamespace(discard_sandbox_deletion=discard),
+    )
+    return discard
+
+
+async def _deletion(pool, sandbox_id: str = "asbx_restore") -> dict:
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT state, deletion_state, deletion_error FROM agent_sandboxes WHERE id = $1",
+            sandbox_id,
+        )
+    assert row is not None
+    return dict(row)
+
+
+async def _due_again(pool, sandbox_id: str = "asbx_restore") -> None:
+    """The minute a failed deletion attempt waits before its retry has passed."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_sandboxes SET deletion_retry_at = NOW() WHERE id = $1", sandbox_id
+        )
+
+
+async def test_a_reclaimed_machine_finishes_a_pending_discard_without_its_host(
+    pool, store: Storage, monkeypatch
+):
+    """The container went with the machine; the host the discard waits for never answers."""
+    job, group = await _settled_stopped_group(pool, store)
+    follow_up = await store.conversation_commands.create_follow_up(
+        parent_job_id=job["id"], user_id="user-1", prompt="continue"
+    )
+    assert follow_up is not None
+    await _request_discard(store)
+    discard = _unreachable_sandbox_manager(monkeypatch)
+    await _on_machine(pool, "ended", observed_state="terminated")
+
+    # The Host beat moments ago and may still hold the container: wait for it.
+    assert await sandbox_deletion.delete_one_archived_sandbox(store)
+    assert (await _deletion(pool))["deletion_state"] == "pending"
+    discard.assert_awaited_once()
+
+    await _silent(pool)
+    await _due_again(pool)
+    assert await sandbox_deletion.delete_one_archived_sandbox(store)
+
+    deletion = await _deletion(pool)
+    assert (deletion["state"], deletion["deletion_state"]) == ("lost", "deleted")
+    assert deletion["deletion_error"] is None
+    discard.assert_awaited_once()
+    async with pool.acquire() as conn:
+        member = await conn.fetchrow(
+            "SELECT context_status, native_state FROM agent_thread_sandbox_memberships "
+            "WHERE thread_id = $1",
+            job["thread_id"],
+        )
+        queued = await conn.fetchval("SELECT state FROM agent_jobs WHERE id = $1", follow_up["id"])
+        event = await conn.fetchrow(
+            "SELECT from_state, to_state, details->>'host_reclaimed' AS reclaimed "
+            "FROM agent_sandbox_events WHERE sandbox_id = $1 AND event_type = 'deletion_completed'",
+            group["sandbox_id"],
+        )
+        audit = await conn.fetchrow(
+            "SELECT action, details->>'host_reclaimed' AS reclaimed "
+            "FROM agent_admin_audit_log ORDER BY id DESC LIMIT 1"
+        )
+    assert (member["context_status"], member["native_state"]) == ("lost", "lost")
+    assert queued == "failed"
+    assert dict(event) == {"from_state": "pending", "to_state": "deleted", "reclaimed": "true"}
+    assert dict(audit) == {"action": "agent.sandbox.delete.discarded", "reclaimed": "true"}
+    # Nothing is left for the reclaimed machine's own pass.
+    assert (
+        await store.compute_resources.lose_reclaimed_groups(
+            allocation_id="ended", quiet_seconds=600
+        )
+        == []
+    )
+
+
+async def test_a_discard_on_a_machine_its_provider_still_runs_keeps_waiting_for_its_host(
+    pool, store: Storage, monkeypatch
+):
+    """A silent Host on a live machine may still hold the container and return."""
+    await _settled_stopped_group(pool, store)
+    await _request_discard(store)
+    discard = _unreachable_sandbox_manager(monkeypatch)
+    await _on_machine(pool, "running")
+    await _silent(pool)
+
+    assert await sandbox_deletion.delete_one_archived_sandbox(store)
+
+    deletion = await _deletion(pool)
+    assert (deletion["state"], deletion["deletion_state"]) == ("stopped", "pending")
+    discard.assert_awaited_once()
+    # The page shows what the deletion is waiting for, and what ends the wait.
+    assert deletion["deletion_error"] == (
+        "Container removal without an archive could not be confirmed. "
+        "The owning host is offline, and only it can remove the container: "
+        "deletion finishes when the host reconnects, "
+        "or without it once its provider confirms the machine is gone. "
+        "Deletion will be retried."
+    )
+
+
+async def test_a_discard_on_a_removed_host_says_it_waits_for_that_host(
+    pool, store: Storage, monkeypatch
+):
+    """A removed Host keeps its machine; enrolled again, it removes the container."""
+    await _settled_stopped_group(pool, store)
+    await _request_discard(store)
+    _unreachable_sandbox_manager(monkeypatch)
+    assert await store.host_pool.remove_host(host="runner-a") == "ok"
+
+    assert await sandbox_deletion.delete_one_archived_sandbox(store)
+
+    deletion = await _deletion(pool)
+    assert (deletion["state"], deletion["deletion_state"]) == ("stopped", "pending")
+    assert deletion["deletion_error"] == (
+        "Container removal without an archive could not be confirmed. "
+        "The owning host was removed from the pool, and only it can remove the container: "
+        "deletion finishes if that host is enrolled again. Deletion will be retried."
+    )
 
 
 async def _waiting(pool, job_id: str) -> None:

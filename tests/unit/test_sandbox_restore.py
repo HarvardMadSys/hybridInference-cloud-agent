@@ -641,7 +641,7 @@ def test_a_moved_group_is_recreated_from_the_image_its_checkpoint_loads():
 
     supervisor = SharedChatSessionSupervisor(manager, checkpoint_restore_hook=restore)
 
-    supervisor.register_manifest(_moved_spec(), _members(), restore=_restore(), start_seq=7)
+    supervisor.register_manifest(_moved_spec(), _members(), restore=_restore())
 
     assert hooked == [("asbx_shared", _CHECKPOINT)]
     assert manager.created == [{"image": _REFERENCE, "checkpoint_id": _CHECKPOINT}]
@@ -729,9 +729,11 @@ def test_a_checkpoint_names_the_start_that_actually_ran():
     assert lease is not None
     assert supervisor.start_seq_for("asbx_shared") == 4
 
-    # A later request names its fence, but nothing has started for it yet:
-    # a checkpoint of a stop before then still belongs to the earlier run.
-    supervisor.register_manifest(
-        _spec(), _members(), expected_container_id="container-shared", start_seq=5
-    )
+    # A later request registers the group, but nothing of it has run yet: a
+    # checkpoint of a stop before then still belongs to the earlier run.
+    supervisor.register_manifest(_spec(), _members(), expected_container_id="container-shared")
     assert supervisor.start_seq_for("asbx_shared") == 4
+    # Admitted, it counts in the run it joins.
+    token, _ = supervisor.operation_opened("athr_source", start_seq=5)
+    assert supervisor.start_seq_for("asbx_shared") == 5
+    supervisor.operation_closed("athr_source", token)

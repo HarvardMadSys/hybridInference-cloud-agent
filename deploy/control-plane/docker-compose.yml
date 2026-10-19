@@ -204,10 +204,6 @@ services:
       AGENT_GIT_AUTHOR_NAME: ${AGENT_GIT_AUTHOR_NAME:-}
       AGENT_GIT_AUTHOR_EMAIL: ${AGENT_GIT_AUTHOR_EMAIL:-}
       AGENT_REPO_ALLOWLIST: ${AGENT_REPO_ALLOWLIST:-}
-      # Archiving a session once its published PR merged. Imported once into
-      # Admin Settings; blank keeps the defaults (on, every 30 seconds).
-      AGENT_PR_ARCHIVE_ENABLED: ${AGENT_PR_ARCHIVE_ENABLED:-}
-      AGENT_PR_ARCHIVE_POLL_S: ${AGENT_PR_ARCHIVE_POLL_S:-}
       # The GitHub App and GitLab OAuth behind Integrations. Optional as a
       # group: a deployment that configures neither simply offers no
       # connections.

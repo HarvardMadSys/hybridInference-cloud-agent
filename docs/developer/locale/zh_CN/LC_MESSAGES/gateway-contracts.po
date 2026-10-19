@@ -1,0 +1,309 @@
+# Simplified Chinese translation of the Cloud Agent developer documentation.
+# See docs/developer/translations.md.
+msgid ""
+msgstr ""
+"Project-Id-Version: HybridInference Cloud Agent \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-10-16 01:54-0400\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: The HybridInference contributors\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../gateway_contracts/README.md:2
+msgid "The gateway contracts this service depends on"
+msgstr "本服务依赖的网关契约"
+
+#: ../../gateway_contracts/README.md:4
+msgid ""
+"The three YAML documents describe the Gateway HTTP APIs consumed by Cloud"
+" Agent. They record the cross-repository boundary: Cloud Agent uses HTTP,"
+" never imports Gateway modules, and never holds the Gateway's signing "
+"secrets."
+msgstr ""
+"这三份 YAML 文档描述了 Cloud Agent 调用的网关 HTTP API，也划清了两个仓库之间的边界：Cloud Agent 只通过 "
+"HTTP 和网关打交道，从不导入网关的模块，也从不持有网关的签名密钥。"
+
+#: ../developer/gateway-contracts.md:1
+msgid "Document"
+msgstr "文档"
+
+#: ../developer/gateway-contracts.md:1
+msgid "Gateway router"
+msgstr "网关中的路由"
+
+#: ../developer/gateway-contracts.md:1
+msgid "Cloud Agent consumer"
+msgstr "Cloud Agent 中的调用方"
+
+#: ../developer/gateway-contracts.md:1
+msgid "[identity.openapi.yaml](identity.openapi.yaml)"
+msgstr ""
+
+#: ../developer/gateway-contracts.md:1
+msgid "`serving/servers/routers/identity.py`"
+msgstr ""
+
+#: ../developer/gateway-contracts.md:1
+msgid ""
+"[identity.py](../apps/backend/cloud_agent/identity.py), "
+"[gateway.py](../apps/backend/cloud_agent/gateway.py), "
+"[api/session.py](../apps/backend/cloud_agent/api/session.py)"
+msgstr ""
+
+#: ../developer/gateway-contracts.md:1
+msgid "[inference-grants.openapi.yaml](inference-grants.openapi.yaml)"
+msgstr ""
+
+#: ../developer/gateway-contracts.md:1
+msgid "`serving/servers/routers/agent_grants.py`"
+msgstr ""
+
+#: ../developer/gateway-contracts.md:1
+msgid "[grants.py](../apps/backend/cloud_agent/grants.py)"
+msgstr ""
+
+#: ../developer/gateway-contracts.md:1
+msgid "[internal-lookups.openapi.yaml](internal-lookups.openapi.yaml)"
+msgstr ""
+
+#: ../developer/gateway-contracts.md:1
+msgid "`serving/servers/routers/internal_lookups.py`"
+msgstr ""
+
+#: ../developer/gateway-contracts.md:1
+msgid "[gateway.py](../apps/backend/cloud_agent/gateway.py)"
+msgstr ""
+
+#: ../../gateway_contracts/README.md:14
+msgid ""
+"This directory also contains the JSON snapshot of Cloud Agent's own "
+"public API, [described below](#the-one-document-here-that-is-ours)."
+msgstr ""
+"这个目录里还有一份 Cloud Agent 自己公开 API 的 JSON 快照，[见下文](#the-one-document-here-"
+"that-is-ours)。"
+
+#: ../../gateway_contracts/README.md:17
+msgid "What these are, and what they are not"
+msgstr "这些文档是什么，不是什么"
+
+#: ../../gateway_contracts/README.md:19
+msgid ""
+"The YAML contracts are hand-written from Gateway source. They document "
+"the agreed interface independently of a running deployment. Only "
+"endpoints consumed by this service are included; they are not a complete "
+"Gateway API reference."
+msgstr ""
+"YAML 契约是对照网关源代码手写的，记录的是双方约定的接口，不依赖任何一套正在运行的部署。里面只收录本服务用到的端点，并不是完整的网关 API "
+"参考。"
+
+#: ../../gateway_contracts/README.md:23
+msgid ""
+"The application does not load these documents or validate every response "
+"against OpenAPI at runtime. Consumer tests and review check agreement "
+"with the contracts. Runtime clients handle compatible additions such as "
+"optional fields; the live contract tests can still flag undeclared "
+"additions for documentation review."
+msgstr ""
+"应用运行时不会加载这些文档，也不会拿 OpenAPI "
+"去校验每个响应。契约是否一致，靠调用方的测试和代码评审来把关。运行时的客户端能兼容新增的可选字段之类的变化；线上契约测试仍会把文档里没声明的新增内容标出来，提醒更新文档。"
+
+#: ../../gateway_contracts/README.md:28
+msgid "Source commits"
+msgstr "来源 commit"
+
+#: ../../gateway_contracts/README.md:30
+msgid ""
+"Each document's `info.x-source` records the repository, branch, source "
+"files, and, when available, commit used to write it. These references are"
+" provenance, not a statement that your Gateway deployment runs that "
+"version."
+msgstr ""
+"每份文档的 `info.x-source` 记录了编写时依据的仓库、分支、源文件，以及能确定时的 "
+"commit。这些只是出处，不代表你的网关部署跑的就是那个版本。"
+
+#: ../../gateway_contracts/README.md:34
+msgid ""
+"A route check recorded on 2026-09-10 found all three routers on the "
+"Gateway's `origin/main`:"
+msgstr "2026-09-10 的一次路由检查记录显示，三个路由都在网关的 `origin/main` 上："
+
+#: ../developer/gateway-contracts.md:1
+msgid "Routes checked"
+msgstr "检查过的路由"
+
+#: ../developer/gateway-contracts.md:1
+msgid "`identity.openapi.yaml`"
+msgstr ""
+
+#: ../developer/gateway-contracts.md:1
+msgid "`/v1/identity/jwks`, `/v1/identity/code`, `/v1/identity/token`"
+msgstr ""
+
+#: ../developer/gateway-contracts.md:1
+msgid "`inference-grants.openapi.yaml`"
+msgstr ""
+
+#: ../developer/gateway-contracts.md:1
+msgid "Grant mint, renew, revoke, and usage routes"
+msgstr "授权的签发、续期、撤销和用量路由"
+
+#: ../developer/gateway-contracts.md:1
+msgid "`internal-lookups.openapi.yaml`"
+msgstr ""
+
+#: ../developer/gateway-contracts.md:1
+#, python-brace-format
+msgid "`/internal/model-catalog` and `/internal/users/{user_id}/agent-access`"
+msgstr "`/internal/model-catalog` 和 `/internal/users/{user_id}/agent-access`"
+
+#: ../../gateway_contracts/README.md:43
+msgid ""
+"That historical check does not establish readiness of a current "
+"deployment. When a Gateway router changes, compare the contract with its "
+"merged source and run the relevant consumer and live contract tests. The "
+"local suite cannot read or verify files in the Gateway repository."
+msgstr "这次检查只是历史记录，不能说明当前的部署已经就绪。网关路由有变化时，要把契约和合并后的源代码对一遍，并跑相关的调用方测试和线上契约测试。本地测试读不到网关仓库里的文件，也就没法替你验证。"
+
+#: ../../gateway_contracts/README.md:48
+#, python-brace-format
+msgid ""
+"Agent admission is described in `internal-lookups.openapi.yaml`; it is "
+"not a fourth contract. The client uses `/internal/users/{user_id}/agent-"
+"access` rather than the user-status lookup. Profile uses the existing "
+"user-status endpoint only to display the owner's current email; its role "
+"and status fields never authorize Agent access. Before connecting an "
+"older Gateway, read [agent access policy](../docs/developer/agent-access-"
+"policy.md) for deployment policy, rollout requirements, and fail-closed "
+"behavior."
+msgstr ""
+"Agent 的准入也写在 `internal-lookups.openapi.yaml` 里，不是第四份契约。客户端调用的是 "
+"`/internal/users/{user_id}/agent-access`，而不是用户状态查询接口。Profile "
+"用现有的用户状态端点，仅仅是为了显示所有者当前的邮箱；其中的角色和状态字段从不用于授权 Agent 访问。接入旧版网关之前，请先读 [Agent "
+"准入策略](../docs/developer/agent-access-"
+"policy.md)，了解部署策略、上线要求，以及出错时一律拒绝访问的行为。"
+
+#: ../../gateway_contracts/README.md:56
+msgid "What these do not cover"
+msgstr "这些文档没有覆盖的内容"
+
+#: ../../gateway_contracts/README.md:58
+msgid ""
+"Response schemas alone do not establish grant timing or the meaning of a "
+"refusal. Keep these dependencies aligned with the Gateway:"
+msgstr "光看响应的 schema，看不出授权的时间规则，也看不出一次拒绝具体意味着什么。下面这些依赖需要和网关保持一致："
+
+#: ../../gateway_contracts/README.md:61
+msgid ""
+"`GATEWAY_MAX_TTL_S = 900` and `GATEWAY_RENEWAL_STEP_S = 300` in "
+"`grants.py` mirror the Gateway's maximum and default grant TTL. The "
+"contract records them as `MAX_GRANT_TTL_S` and `DEFAULT_GRANT_TTL_S` "
+"under `x-constants`. Requests above the maximum are clamped, and renewal "
+"resets expiry using the renewal step, so a mismatch can shorten a live "
+"grant without a failed call."
+msgstr ""
+"`grants.py` 里的 `GATEWAY_MAX_TTL_S = 900` 和 `GATEWAY_RENEWAL_STEP_S = "
+"300`，对应网关授权的最长 TTL 和默认 TTL，契约在 `x-constants` 下把它们记为 `MAX_GRANT_TTL_S` 和 "
+"`DEFAULT_GRANT_TTL_S`。请求的 TTL "
+"超过最大值会被截断，续期时按续期步长重新计算过期时间；所以两边的值一旦对不上，可能没有任何调用报错，有效授权的寿命却悄悄变短了。"
+
+#: ../../gateway_contracts/README.md:66
+msgid ""
+"`DEAD_GRANT_REFUSALS` in `cloud_agent/workers/attempts.py` contains "
+"`unknown_grant`, `grant_not_live`, and `subject_unavailable`. The worker "
+"uses the error type to distinguish a dead grant from a Gateway "
+"configuration or authentication failure. HTTP status alone is "
+"insufficient: a 404 can mean either a dead grant or an unconfigured "
+"internal API."
+msgstr ""
+"`cloud_agent/workers/attempts.py` 里的 `DEAD_GRANT_REFUSALS` 包含 "
+"`unknown_grant`、`grant_not_live` 和 `subject_unavailable`。worker "
+"靠错误类型来区分\"授权已失效\"和\"网关配置或认证出了问题\"。只看 HTTP 状态码是不够的：同样是 404，可能是授权失效了，也可能是内部"
+" API 根本没配置。"
+
+#: ../../gateway_contracts/README.md:72
+msgid ""
+"`test_grant_constants_match_contract.py` compares the client constants "
+"with the YAML document. `test_grant_lifecycle.py` checks them against the"
+" client's renewal cadence and pins the dead-grant error types. The opt-in"
+" live grant lifecycle test checks the deployed Gateway's timing; local "
+"tests cannot establish that it uses these values."
+msgstr ""
+"`test_grant_constants_match_contract.py` 会拿客户端的常量和 YAML "
+"文档对比。`test_grant_lifecycle.py` "
+"会结合客户端的续期节奏检查这些常量，并锁定授权失效时的错误类型。可选的线上授权生命周期测试会检查已部署网关的实际时间规则；本地测试没法确认网关真的用的是这些值。"
+
+#: ../../gateway_contracts/README.md:78
+msgid "The one document here that is ours"
+msgstr "这里唯一属于我们自己的文档"
+
+#: ../../gateway_contracts/README.md:80
+msgid ""
+"[agent-control-plane.openapi.json](agent-control-plane.openapi.json) "
+"records the API served by Cloud Agent. It is generated from "
+"`create_app().openapi()` and committed with sorted keys so API changes "
+"can be reviewed."
+msgstr ""
+"[agent-control-plane.openapi.json](agent-control-plane.openapi.json) 记录 "
+"Cloud Agent 对外提供的 API。它由 `create_app().openapi()` 生成，按键排序后提交，方便评审 API "
+"的改动。"
+
+#: ../../gateway_contracts/README.md:84
+msgid ""
+"`tests/unit/test_api_surface_contract.py` compares the served schema with"
+" this snapshot and fails on disagreement. It does not regenerate the "
+"file. For an intentional API change, use the command in the [developer "
+"guide](../docs/developer/development.md#changing-an-api), review the "
+"diff, and commit it with the implementation change."
+msgstr ""
+"`tests/unit/test_api_surface_contract.py` 会拿实际提供的 schema "
+"和这份快照对比，不一致就失败；它只检查，不会重新生成文件。有意改 API "
+"时，用[开发者指南](../docs/developer/development.md#changing-an-api)里的命令重新生成，看一遍 "
+"diff，和实现代码一起提交。"
+
+#: ../../gateway_contracts/README.md:90
+msgid "Checking them"
+msgstr "怎样检查"
+
+#: ../../gateway_contracts/README.md:92
+msgid "From the repository root, run the local document and snapshot checks:"
+msgstr "在仓库根目录跑本地的文档检查和快照检查："
+
+#: ../../gateway_contracts/README.md:101
+msgid ""
+"The contract checks validate YAML documents as OpenAPI, verify that their"
+" `x-pinned-by.consumer` test paths exist, and check that `/internal/` and"
+" `/v1/` path literals in `gateway.py` and `grants.py` appear in a "
+"document. CI runs these checks. They establish agreement within this "
+"repository, not agreement with a live Gateway."
+msgstr ""
+"契约检查会把 YAML 文档当作 OpenAPI 校验，确认 `x-pinned-by.consumer` 指向的测试文件确实存在，并检查 "
+"`gateway.py` 和 `grants.py` 里出现的每个 `/internal/` 和 `/v1/` 路径都写进了某份文档。CI "
+"会跑这些检查。不过它们只能保证本仓库内部前后一致，保证不了和线上网关一致。"
+
+#: ../../gateway_contracts/README.md:107
+msgid ""
+"To check a deployment, set `AGENT_CONTRACT_GATEWAY_URL` and "
+"`AGENT_CONTRACT_DISPATCH_TOKEN`, then run:"
+msgstr ""
+"要检查一套部署，先设置 `AGENT_CONTRACT_GATEWAY_URL` 和 "
+"`AGENT_CONTRACT_DISPATCH_TOKEN`，然后运行："
+
+#: ../../gateway_contracts/README.md:116
+msgid ""
+"These probes check JWKS keys and typed refusals using randomly named "
+"missing accounts. The grant lifecycle case skips unless "
+"`AGENT_CONTRACT_SUBJECT` names an account selected for the test. Setting "
+"that variable opts into minting, renewing, and revoking a real grant; the"
+" test revokes it during cleanup. See [smoke "
+"testing](../docs/developer/smoke.md) for the wider deployment checks."
+msgstr ""
+"这些探测会用随机命名、实际不存在的账号，检查 JWKS 密钥和带类型的拒绝响应。授权生命周期这个用例默认跳过，除非用 "
+"`AGENT_CONTRACT_SUBJECT` "
+"指定一个专门用于测试的账号。设置了这个变量，就表示你同意测试真的签发、续期和撤销一个授权；测试结束清理时会把它撤销。更全面的部署检查见[冒烟测试](../docs/developer/smoke.md)。"
+

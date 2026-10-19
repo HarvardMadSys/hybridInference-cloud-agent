@@ -48,7 +48,7 @@ from cloud_agent_host.resident_transport import (
 from cloud_agent_host.sandbox import KATA_RUNTIME, ProcessBackend, SandboxError
 from cloud_agent_host.sandbox_archive_runtime import SandboxArchiveController
 from cloud_agent_host.sandbox_manager import SharedSandboxIdentityRequest, create_app
-from cloud_agent_host.session_lifecycle import SessionBusy, SessionLeaseLost
+from cloud_agent_host.session_lifecycle import SessionBusy, SessionLeaseLost, StaleStartFence
 from cloud_agent_host.shared_session_supervisor import (
     SharedChatSessionSupervisor,
     SharedMemberManifest,
@@ -2432,6 +2432,7 @@ def test_guest_network_fail_stop_archives_once_and_does_not_duplicate_on_listing
             observer=None,
             expected_container_id=None,
             defer_network_release_on_fail_stop=False,
+            before_stopped_start=None,
         ):
             stopped = self.stop(
                 spec,
@@ -8313,8 +8314,8 @@ def test_workspace_admission_waits_for_bridge_rechecks(monkeypatch, entrypoint, 
         ensure_running = supervisor._ensure_running
         start = manager.start
 
-        def ensure_then_recheck(current_group):
-            ensure_running(current_group)
+        def ensure_then_recheck(current_group, **kwargs):
+            ensure_running(current_group, **kwargs)
             if race == "failure":
 
                 def fail_start(*args, **kwargs):
@@ -8357,3 +8358,95 @@ def test_workspace_admission_waits_for_bridge_rechecks(monkeypatch, entrypoint, 
         }[race]
         assert isinstance(outcome.get("error"), expected_error), outcome
     assert group.operation_tokens == {} and group.terminal_tokens == {}
+
+
+def _fenced_supervisor(
+    *, sealed_by_checkpoint: int | None = None
+) -> tuple[_Manager, SharedChatSessionSupervisor, list[int | None]]:
+    """A supervisor whose stops record the label their checkpoint would carry."""
+    manager = _Manager()
+    labels: list[int | None] = []
+    supervisor = SharedChatSessionSupervisor(
+        manager,
+        stopped_archive_hook=lambda spec, *_args: labels.append(
+            supervisor.start_seq_for(spec.sandbox_id)
+        ),
+    )
+    supervisor.checkpoint_seq_for = lambda _spec, _inspection: sealed_by_checkpoint
+    supervisor.register_manifest(_spec(), _members())
+    return manager, supervisor, labels
+
+
+def _run_once(supervisor: SharedChatSessionSupervisor, *, start_seq: int | None) -> None:
+    token, _ = supervisor.operation_opened("athr_source", start_seq=start_seq)
+    supervisor.operation_closed("athr_source", token)
+
+
+def test_a_run_is_labelled_only_with_requests_it_admitted() -> None:
+    """A request registered but not yet here cannot lend its fence to another's run.
+
+    Two workspace requests took fences 1 and 2; only the first reached the
+    group before it stopped. Its checkpoint used to name 2, the fence the
+    control plane holds, and so covered the group without the second's work.
+    """
+    manager, supervisor, labels = _fenced_supervisor()
+
+    _run_once(supervisor, start_seq=1)
+    assert supervisor.stop_if_idle("athr_source", generation=1)
+
+    assert labels == [1]
+    # The second request arrives later and starts its own run.
+    _run_once(supervisor, start_seq=2)
+    assert supervisor.start_seq_for("asbx_shared") == 2
+    assert manager.items[_spec().container_name].running
+
+
+def test_a_request_older_than_the_last_stop_cannot_start_the_group_again() -> None:
+    """Its fence is sealed: the checkpoint of that stop may be what the group moves with."""
+    manager, supervisor, labels = _fenced_supervisor()
+    _run_once(supervisor, start_seq=2)
+    assert supervisor.stop_if_idle("athr_source", generation=1)
+    assert labels == [2]
+
+    for late in (1, 2):
+        with pytest.raises(StaleStartFence):
+            supervisor.operation_opened("athr_source", start_seq=late)
+        with pytest.raises(StaleStartFence):
+            supervisor.terminal_opened("athr_source", start_seq=late)
+    assert not manager.items[_spec().container_name].running
+
+    # The refusal is no failed start: the control plane's next fence starts it.
+    _run_once(supervisor, start_seq=3)
+    assert supervisor.start_seq_for("asbx_shared") == 3
+
+
+def test_requests_joining_a_running_group_raise_its_label_or_unlabel_it() -> None:
+    _manager, supervisor, labels = _fenced_supervisor()
+    first, _ = supervisor.operation_opened("athr_source", start_seq=4)
+
+    _run_once(supervisor, start_seq=2)
+    assert supervisor.start_seq_for("asbx_shared") == 4
+    _run_once(supervisor, start_seq=6)
+    assert supervisor.start_seq_for("asbx_shared") == 6
+    # A request without a fence, as from an older control plane.
+    _run_once(supervisor, start_seq=None)
+    supervisor.operation_closed("athr_source", first)
+    assert supervisor.stop_if_idle("athr_source", generation=1)
+
+    # Its checkpoint names no fence, so it covers nothing.
+    assert labels == [None]
+
+
+def test_a_group_found_after_a_restart_seals_its_last_checkpoint() -> None:
+    """The fence of the last checkpoint kept on disk survives the restart."""
+    manager, supervisor, labels = _fenced_supervisor(sealed_by_checkpoint=5)
+    # Found going after the restart, it stops before any request names a fence.
+    assert supervisor.stop_if_idle("athr_source", generation=1)
+    assert labels == [None]
+
+    with pytest.raises(StaleStartFence):
+        supervisor.operation_opened("athr_source", start_seq=5)
+    assert not manager.items[_spec().container_name].running
+
+    _run_once(supervisor, start_seq=6)
+    assert supervisor.start_seq_for("asbx_shared") == 6

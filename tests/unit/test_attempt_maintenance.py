@@ -66,7 +66,7 @@ class _PendingMessages:
     async def expired_send_now_handoffs(self, **_kwargs) -> list[dict[str, Any]]:
         return []
 
-    async def threads_to_settle(self, *, limit: int = 50) -> list[str]:
+    async def threads_to_settle(self, *, limit: int = 50, after: str | None = None) -> list[str]:
         return []
 
 

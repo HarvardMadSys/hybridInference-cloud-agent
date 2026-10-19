@@ -219,15 +219,18 @@ FENCE_START_SQL = (
 )
 
 
-async def fence_sandbox_start(conn: Any, sandbox_id: str) -> str | None:
-    """Fence one group against starts and return its state.
+async def fence_sandbox_start(conn: Any, sandbox_id: str) -> tuple[str, int | None] | None:
+    """Fence one group against starts; return its state and the new fence.
 
     For callers that are about to ask a sandbox manager for something that may
     start a stopped container: a workspace request, a fork, a snapshot. The
-    returned state lets them refuse a group that only a checkpoint holds. A
-    group bound to a revoked host is not fenced: it reads ``host_revoked``, or
-    ``cold`` once a late checkpoint has handed it on
-    (:func:`refuse_start_on_revoked_host`).
+    returned state lets them refuse a group that only a checkpoint holds. The
+    returned ``start_seq`` is the one the request must carry: the manager
+    labels a run, and so the checkpoint of its stop, with the newest fence it
+    was told, and only a receipt naming the current fence covers the group.
+    A group bound to a revoked host is not fenced and has no new fence: it
+    reads ``host_revoked``, or ``cold`` once a late checkpoint has handed it
+    on (:func:`refuse_start_on_revoked_host`).
     """
     group = await conn.fetchrow(
         "SELECT id, state, host FROM agent_sandboxes WHERE id = $1 FOR UPDATE", sandbox_id
@@ -236,16 +239,17 @@ async def fence_sandbox_start(conn: Any, sandbox_id: str) -> str | None:
         return None
     refused = await refuse_start_on_revoked_host(conn, group)
     if refused is not None:
-        return refused
-    return await conn.fetchval(
+        return refused, None
+    row = await conn.fetchrow(
         f"""
         UPDATE agent_sandboxes
         SET {FENCE_START_SQL}, updated_at = NOW()
         WHERE id = $1
-        RETURNING state
+        RETURNING state, start_seq
         """,
         sandbox_id,
     )
+    return str(row["state"]), int(row["start_seq"])
 
 
 def restore_claim_due(attempts: str, failed_at: str) -> str:

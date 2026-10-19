@@ -29,6 +29,18 @@ vi.mock('@/lib/api/agents', () => ({
   pinAgentJob: vi.fn(),
   unpinAgentJob: vi.fn(),
 }));
+vi.mock('@/lib/api/agents/readReceipts', () => ({
+  listAgentReadReceipts: vi.fn(async () => ({
+    user_id: 'drag-user',
+    receipts: [],
+    next_cursor: null,
+  })),
+  saveAgentReadReceipts: vi.fn(async () => ({
+    user_id: 'drag-user',
+    receipts: [],
+    next_cursor: null,
+  })),
+}));
 import { AgentsSidebar } from './AgentsSidebar';
 import { DEFAULT_PREFERENCES, sidebarPreferencesKey } from './sidebarPreferences';
 function row(id: string, repo = 'owner/repo', pinned = false) {

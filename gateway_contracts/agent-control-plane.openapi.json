@@ -6449,6 +6449,142 @@
         "title": "AgentQuestionRequest",
         "type": "object"
       },
+      "AgentReadReceipt": {
+        "description": "Canonical owner-scoped conversation and turn identity for a receipt.",
+        "properties": {
+          "attempt_id": {
+            "anyOf": [
+              {
+                "maximum": 9007199254740991.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Attempt Id"
+          },
+          "job_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[^\\x00]+$",
+            "title": "Job Id",
+            "type": "string"
+          },
+          "thread_id": {
+            "title": "Thread Id",
+            "type": "string"
+          },
+          "turn_no": {
+            "title": "Turn No",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "job_id",
+          "attempt_id",
+          "thread_id",
+          "turn_no"
+        ],
+        "title": "AgentReadReceipt",
+        "type": "object"
+      },
+      "AgentReadReceiptInput": {
+        "description": "The exact completion displayed by a client, never an implicit latest turn.",
+        "properties": {
+          "attempt_id": {
+            "anyOf": [
+              {
+                "maximum": 9007199254740991.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Attempt Id"
+          },
+          "job_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[^\\x00]+$",
+            "title": "Job Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id",
+          "attempt_id"
+        ],
+        "title": "AgentReadReceiptInput",
+        "type": "object"
+      },
+      "AgentReadReceiptsRequest": {
+        "description": "A bounded batch, also used to import existing browser receipts.",
+        "properties": {
+          "receipts": {
+            "items": {
+              "$ref": "#/components/schemas/AgentReadReceiptInput"
+            },
+            "maxItems": 200,
+            "minItems": 1,
+            "title": "Receipts",
+            "type": "array"
+          }
+        },
+        "required": [
+          "receipts"
+        ],
+        "title": "AgentReadReceiptsRequest",
+        "type": "object"
+      },
+      "AgentReadReceiptsResponse": {
+        "description": "Cloud progress and its owner, so a stale tab can detect account changes.",
+        "properties": {
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          },
+          "receipts": {
+            "items": {
+              "$ref": "#/components/schemas/AgentReadReceipt"
+            },
+            "title": "Receipts",
+            "type": "array"
+          },
+          "sync_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "GET checkpoint for the next incremental poll; null on POST.",
+            "title": "Sync Cursor"
+          },
+          "user_id": {
+            "title": "User Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "user_id",
+          "receipts"
+        ],
+        "title": "AgentReadReceiptsResponse",
+        "type": "object"
+      },
       "AgentRunnerHost": {
         "description": "One machine in the agent runner pool.\n\nMost fields below ``seconds_since_seen`` arrived with the dynamic pool\n(phase G) and retain defaults for hosts that joined by polling. The drain\nfence epoch is different: its migration backfills every host and the API\nrequires it so an automation client never mistakes a partial fence\ncontract for a safe compare-and-swap base.",
         "properties": {
@@ -22729,6 +22865,74 @@
         "summary": "Cancel"
       }
     },
+    "/admin/agent/compute-operations/{operation_id}/confirm-absent": {
+      "post": {
+        "description": "Close an acquisition the administrator confirmed created nothing at its provider.",
+        "operationId": "confirm_absent_admin_agent_compute_operations__operation_id__confirm_absent_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "operation_id",
+            "required": true,
+            "schema": {
+              "title": "Operation Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ComputeOperationAction"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Confirm Absent Admin Agent Compute Operations  Operation Id  Confirm Absent Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Confirm Absent"
+      }
+    },
     "/admin/agent/compute-operations/{operation_id}/resolve": {
       "post": {
         "description": "Adopt an explicitly identified result of an unknown acquisition.",
@@ -27831,6 +28035,138 @@
           }
         },
         "summary": "List Agent Conversations"
+      }
+    },
+    "/v1/agent/conversations/read-receipts": {
+      "get": {
+        "description": "Restore account read progress, including chats outside the sidebar page.",
+        "operationId": "list_agent_read_receipts_v1_agent_conversations_read_receipts_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maximum": 9223372036854775807,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 200,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentReadReceiptsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Agent Read Receipts"
+      },
+      "post": {
+        "description": "Persist explicit completed attempts without ever marking later results read.",
+        "operationId": "merge_agent_read_receipts_v1_agent_conversations_read_receipts_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentReadReceiptsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentReadReceiptsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Merge Agent Read Receipts"
       }
     },
     "/v1/agent/environment-action-runs/{run_id}": {

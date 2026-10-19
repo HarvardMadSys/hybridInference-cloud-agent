@@ -1,0 +1,438 @@
+# Simplified Chinese translation of the Cloud Agent developer documentation.
+# See docs/developer/translations.md.
+msgid ""
+msgstr ""
+"Project-Id-Version: HybridInference Cloud Agent \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-10-19 03:26-0400\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: The HybridInference contributors\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.10.3\n"
+
+#: ../developer/context-recall.md:1
+msgid "Native conversation recall"
+msgstr "原生会话的上下文记忆"
+
+#: ../developer/context-recall.md:3
+msgid ""
+"Cloud Agent keeps each chat's native CLI session in its retained sandbox."
+" The CLI owns the conversation history, and Agent passes each user "
+"message through unchanged."
+msgstr ""
+"每个对话的原生 CLI 会话，Cloud Agent 都保存在这个对话的保留沙箱里。对话历史由 CLI 自己管理，Agent "
+"只是把用户的每条消息原封不动地转过去。"
+
+#: ../developer/context-recall.md:7
+msgid ""
+"Two questions need separate answers: did the same native session survive,"
+" and did the model answer correctly from its history? The September "
+"investigation found failures of both kinds. It reproduced native "
+"persistence bugs, but it also found models claiming that history was "
+"missing even when the request was complete."
+msgstr ""
+"\"上下文丢了\"其实要分成两个问题看：同一个原生会话有没有保住？模型有没有根据历史正确回答？九月的调查发现，两种问题都有。调查复现了原生会话持久化的"
+" bug，但也发现：有时请求里的历史明明是完整的，模型却说自己看不到之前的内容。"
+
+#: ../developer/context-recall.md:13
+msgid ""
+"For session architecture, see the [native Fork/shared-workspace "
+"design](../agents/specs/2026-08-31-native-session-fork-shared-workspace-"
+"design.md). The synthetic reproductions and local verification runs "
+"behind this page are kept as a [dated investigation "
+"record](../agents/reviews/2026-09-08-native-context-recall-"
+"investigation.md); they do not describe the current state of a remote "
+"deployment."
+msgstr ""
+"会话的整体架构见[原生 Fork 与共享工作区设计](../agents/specs/2026-08-31-native-session-"
+"fork-shared-workspace-"
+"design.md)。本页依据的合成复现和本地验证结果，保存在一份[带日期的调查记录](../agents/reviews/2026-09-08"
+"-native-context-recall-investigation.md)里；那些结果不代表任何远程部署的现状。"
+
+#: ../developer/context-recall.md ../developer/context-recall.md:20
+msgid "Context status"
+msgstr "上下文状态"
+
+#: ../developer/context-recall.md:22
+msgid "Each turn reports whether the chat's native context survived:"
+msgstr "每个轮次都会报告这个对话的原生上下文是否还在："
+
+#: ../developer/context-recall.md
+msgid "Meaning"
+msgstr "含义"
+
+#: ../developer/context-recall.md
+msgid "`NEW`"
+msgstr ""
+
+#: ../developer/context-recall.md
+msgid "No native turn has previously settled for this member"
+msgstr "这个成员之前还没有完成过任何原生轮次"
+
+#: ../developer/context-recall.md
+msgid "`LIVE`"
+msgstr ""
+
+#: ../developer/context-recall.md
+msgid "The turn uses the compatible resident CLI process"
+msgstr "这一轮用的是仍在运行、且兼容的 CLI 进程"
+
+#: ../developer/context-recall.md
+msgid "`RESTORED`"
+msgstr ""
+
+#: ../developer/context-recall.md
+msgid "A replacement process resumes the retained native session"
+msgstr "新起的进程接上了保留下来的原生会话"
+
+#: ../developer/context-recall.md
+msgid "`LOST`"
+msgstr ""
+
+#: ../developer/context-recall.md
+msgid ""
+"Required native state or container integrity cannot be established; "
+"execution is refused"
+msgstr "无法确认所需的原生状态或容器完整性，拒绝执行"
+
+#: ../developer/context-recall.md:31
+msgid ""
+"Stopping a container preserves its writable layer. Losing the container "
+"or the Docker data root also loses the required native state, unless the "
+"group was stopped cleanly with a current [restorable "
+"checkpoint](operations.md#restoring-a-removed-hosts-sandboxes), which "
+"another host can restore once this one is removed, terminates or moves "
+"out before its lease ends. Transcript replay is never a recovery path."
+msgstr ""
+"停止容器时，它的可写层会保留下来。但如果容器本身丢了，或者 Docker "
+"的数据目录丢了，所需的原生状态也就跟着丢了。唯一的例外是：这个沙箱组之前是正常停止的，并且有一个最新的[可恢复检查点](operations.md#restoring-a"
+"-removed-hosts-"
+"sandboxes)。这样当原来的主机被移除、被回收，或者在租期结束前迁出时，另一台主机就能把它恢复出来。靠重放对话记录来恢复，从来都不在考虑之列。"
+
+#: ../developer/context-recall.md:39
+msgid "Native session identity at the shared boundary"
+msgstr "共享边界上的原生会话身份"
+
+#: ../developer/context-recall.md:41
+msgid ""
+"After each turn settles, the runner verifies the native session ID before"
+" saving it. This check also covers API failures that settled normally. If"
+" a continuation reports a different ID, the turn fails before it can "
+"replace the durable locator."
+msgstr ""
+"每个轮次结束后，runner 会先核对原生会话 ID，确认无误才保存。API 调用失败但轮次正常结束的情况，也会做这项检查。如果续接时报告的 ID"
+" 和之前不一样，这一轮会直接失败，不会覆盖已保存的会话定位信息。"
+
+#: ../developer/context-recall.md:46
+msgid ""
+"If launch omits the locator, the sandbox manager uses the retained "
+"member's saved value. It rejects a conflict between the requested and "
+"observed locators, then checks the identity again when the turn settles. "
+"The runner also rejects any retained chat that has no resume locator."
+msgstr ""
+"如果启动时没有带定位信息，sandbox manager "
+"会用这个保留成员之前保存的值。请求里的定位信息和实际观察到的不一致时，它会拒绝执行，并在轮次结束时再核对一次身份。另外，没有恢复定位信息的保留对话，runner"
+" 一律拒绝。"
+
+#: ../developer/context-recall.md:51
+msgid ""
+"Claude root stream events are checked before normalization, so child-"
+"agent events with `parent_tool_use_id` cannot replace the root session "
+"ID. The other bundled adapters validate their own native resume "
+"handshakes."
+msgstr ""
+"Claude 根会话的流式事件在规范化之前就会被检查，所以带 `parent_tool_use_id` 的子 agent 事件无法顶替根会话的 "
+"ID。其他内置适配器各自校验自己的原生恢复握手。"
+
+#: ../developer/context-recall.md:55
+msgid ""
+"History comes directly from the native session. Cloud Agent does not "
+"replay transcripts, rewrite JSONL, or add a continuation reminder. An "
+"earlier continuation-prompt experiment was withdrawn, so its successful "
+"samples do not validate the current unchanged-input implementation. "
+"Fault-injection tests found a validation gap in the older shared runner; "
+"they did not show that a staging request had actually supplied the wrong "
+"locator."
+msgstr ""
+"历史完全来自原生会话。Cloud Agent 不重放对话记录，不改写 "
+"JSONL，也不额外插入\"请接着上文继续\"之类的提示。之前做过一次加续接提示词的实验，后来撤掉了，所以那次实验的成功样本不能用来证明现在这种\"输入原样传递\"的实现没问题。故障注入测试在旧版共享"
+" runner 里发现过一处校验漏洞，但并没有证据表明某个 staging 请求真的传错了定位信息。"
+
+#: ../developer/context-recall.md:62
+msgid "Other native CLIs"
+msgstr "其他原生 CLI"
+
+#: ../developer/context-recall.md:64
+msgid ""
+"All five bundled CLIs can keep a failed query for a follow-up, but only "
+"when the native turn verifiably ended, activation cleanup completed, and "
+"both the transport and native locator remain usable."
+msgstr ""
+"五个内置 CLI "
+"都支持在查询失败后保留会话，供后续消息继续使用，前提是三件事都能确认：原生轮次确实已经结束，激活时的清理已经完成，传输通道和原生定位信息都还能用。"
+
+#: ../developer/context-recall.md
+msgid "CLI"
+msgstr ""
+
+#: ../developer/context-recall.md
+msgid "Native settlement evidence"
+msgstr "判断原生轮次已结束的依据"
+
+#: ../developer/context-recall.md
+msgid "Claude Code"
+msgstr ""
+
+#: ../developer/context-recall.md
+msgid "`result`, including its `is_error` value"
+msgstr "`result` 事件，包括其中的 `is_error` 值"
+
+#: ../developer/context-recall.md
+msgid "Codex"
+msgstr ""
+
+#: ../developer/context-recall.md
+msgid "`turn/completed` for the active native turn ID"
+msgstr "当前原生轮次 ID 对应的 `turn/completed`"
+
+#: ../developer/context-recall.md
+msgid "Pi"
+msgstr ""
+
+#: ../developer/context-recall.md
+msgid "`agent_end`; the last assistant's `stopReason` determines failure"
+msgstr "`agent_end`；是否失败看最后一条 assistant 消息的 `stopReason`"
+
+#: ../developer/context-recall.md
+msgid "OpenCode / Kilo"
+msgstr ""
+
+#: ../developer/context-recall.md
+msgid "Bridge `settled` for the active turn at native idle"
+msgstr "原生会话空闲时，bridge 为当前轮次发出的 `settled`"
+
+#: ../developer/context-recall.md:75
+msgid ""
+"A command rejection, dead transport, timeout, or cancellation does not "
+"count as native settlement. Pi reports terminal API errors as failures, "
+"not successful empty turns. OpenCode/Kilo use message-role metadata to "
+"collect only assistant-owned text. They resolve late metadata at "
+"settlement and exclude events from earlier bridge turns. This keeps user "
+"text out of assistant output without changing the native model history."
+msgstr ""
+"命令被拒绝、传输断开、超时或被取消，都不算原生轮次正常结束。Pi 遇到终止性的 API "
+"错误时报告为失败，而不是一个成功但内容为空的轮次。OpenCode 和 Kilo 依据消息的角色元数据，只收集 assistant "
+"自己的文本；轮次结束时再处理迟到的元数据，并排除之前 bridge 轮次留下的事件。这样用户的文本不会混进 assistant "
+"的输出，原生模型的历史也不受影响。"
+
+#: ../developer/context-recall.md:82
+msgid ""
+"The pinned Claude 2.1.220 CLI has a reproduced retry-parent-chain defect:"
+" a delayed `system/api_error` can bypass a successfully retried assistant"
+" reply on a later resume. When the driver sees `system/api_retry`, it "
+"settles the current turn, saves the native locator, and gracefully "
+"retires the process. The next turn resumes that same session in the same "
+"container, once the retiring process has flushed its history; a "
+"retirement that cannot confirm the exit still settles the turn, and the "
+"next launch reaps the member's slot before it starts. A successful turn "
+"without a retry keeps the live process. This handling does not repair "
+"transcripts that the older behavior already damaged."
+msgstr ""
+"固定版本的 Claude 2.1.220 CLI 有一个已复现的缺陷，出在重试时的父消息链上：一个迟到的 "
+"`system/api_error`，可能让之后的恢复跳过一条重试成功的 assistant 回复。所以 driver 一看到 "
+"`system/api_retry`，就结束当前轮次、保存原生定位信息，然后让这个进程正常退出。等退出中的进程把历史写完，下一轮就在同一个容器里接上同一个会话；如果退出时没法确认进程已经结束，这一轮照样结束，下一次启动前会先回收这个成员的槽位。没有发生重试的成功轮次，进程照常保留。这个处理无法修复旧版本已经弄坏的对话记录。"
+
+#: ../developer/context-recall.md:92
+msgid ""
+"The sandbox's `http-agent-live-bridge=4` helper pin is required by host "
+"attestation. Version 4 gates every turn on the current live SSE "
+"subscription, and aborts an active native turn if that non-replayable "
+"stream is lost. It also extends autonomous permission replies for both "
+"OpenCode and Kilo to the Task child sessions the root turn explicitly "
+"reports, retries a failed one-shot permission reply, and aborts instead "
+"of leaving that request pending. Version 3 added correlated native "
+"question replies. Deploy the runner, Sandbox Manager and sandbox image "
+"together; an older helper image must not advertise readiness for the new "
+"host."
+msgstr ""
+"沙箱里的辅助程序必须固定为 `http-agent-live-bridge=4`，主机证明会检查这一点。版本 4 要求每个轮次都挂在当前有效的 "
+"SSE 订阅上；这条流无法重放，一旦断开，就中止正在进行的原生轮次。它还会把 OpenCode 和 Kilo "
+"的自动权限回复，扩展到根轮次明确报告的 Task 子会话上；一次性的权限回复失败时会重试，再失败就中止，不会让请求一直挂着。版本 3 "
+"加入了与原生提问一一对应的回复。runner、Sandbox Manager 和沙箱镜像要一起部署；旧版辅助程序的镜像不能对新主机报告就绪。"
+
+#: ../developer/context-recall.md:102
+msgid "Release scope and remaining findings"
+msgstr "这次发布解决了什么，还剩什么"
+
+#: ../developer/context-recall.md:104
+msgid ""
+"The implementation addresses the reproduced retry/flush history loss and "
+"keeps verifiably settled failures across all five CLIs. It also covers Pi"
+" error reporting, OpenCode/Kilo assistant-message ownership, and "
+"runner/Sandbox Manager session identity. The same work corrected the "
+"local Responses fixtures and smoke checks."
+msgstr ""
+"这次的实现解决了已复现的、由重试和刷新导致的历史丢失；五个 CLI 中，凡是能确认已结束的失败轮次，会话都会保留下来。同时还处理了 Pi "
+"的错误报告、OpenCode/Kilo 的 assistant 消息归属，以及 runner 和 Sandbox Manager "
+"两侧的会话身份。本地的 Responses 夹具和冒烟检查也在这项工作里一并修正了。"
+
+#: ../developer/context-recall.md:109
+msgid "The documented investigation also left two separate findings:"
+msgstr "调查记录里还有两项另外的发现："
+
+#: ../developer/context-recall.md
+msgid "Finding"
+msgstr "发现"
+
+#: ../developer/context-recall.md
+msgid "Evidence and limit"
+msgstr "证据与局限"
+
+#: ../developer/context-recall.md
+msgid "Flash can claim missing history with complete outbound messages"
+msgstr "发出的消息完整，Flash 仍可能说看不到历史"
+
+#: ../developer/context-recall.md
+msgid ""
+"Reproduced in native and direct synthetic API calls. Reasoning effort and"
+" newer CLIs did not reliably fix it; client evidence does not identify "
+"the upstream engine/template/model cause."
+msgstr ""
+"在原生调用和直接的合成 API 调用里都复现了。调高推理强度、换新版 CLI "
+"都不能稳定解决；仅凭客户端的证据，也查不出原因到底在上游的推理引擎、模板还是模型本身。"
+
+#: ../developer/context-recall.md
+msgid ""
+"Gateway snapshot loses effort configuration and historical thinking "
+"blocks in translation"
+msgstr "网关快照在转换时丢掉了推理强度配置和历史中的 thinking 块"
+
+#: ../developer/context-recall.md
+msgid ""
+"Reproduced locally. Separate patches outside this repository were not "
+"deployment-verified by this investigation; they do not establish that "
+"Flash recall is fixed."
+msgstr "已在本地复现。本仓库以外的几个独立补丁，这次调查没有在部署环境里验证过；它们也不能说明 Flash 的记忆问题已经解决。"
+
+#: ../developer/context-recall.md:116
+msgid ""
+"A successful HTTP response does not prove factual recall, and neither "
+"does a persisted native session. These fixes do not migrate already "
+"damaged transcripts or old disposable chats. Start a new chat when legacy"
+" history has no native shared-live membership."
+msgstr ""
+"HTTP "
+"请求成功，不代表模型真的记住了内容；原生会话保存下来了，也不代表这一点。这些修复不会迁移已经损坏的对话记录，也不会处理旧的一次性对话。如果旧对话的历史没有原生"
+" shared-live 成员关系，请新开一个对话。"
+
+#: ../developer/context-recall.md:121
+msgid "Verification before accepting a deployment"
+msgstr "上线验收前的检查"
+
+#: ../developer/context-recall.md:123
+msgid ""
+"Require **CI Gate**, including the pinned native CLI request-history "
+"regressions. They compare exact user/assistant text, roles, order and "
+"repeated occurrences through live follow-ups, immediate close/restore, "
+"failed-call retries, and successful internal retries followed by native "
+"restores. Sandbox Manager and runner checks must also reject changed "
+"locators for successful and settled failed turns. The loopback fixture "
+"needs no inference credentials or charges."
+msgstr ""
+"**CI Gate** 必须通过，其中包括固定版本原生 CLI "
+"的请求历史回归测试。这些测试覆盖几种场景：仍在运行时发送后续消息、立刻关闭再恢复、调用失败后重试、内部重试成功后再做原生恢复；在每种场景下逐一比对用户和"
+" assistant 的原文、角色、顺序以及重复出现的次数。Sandbox Manager 和 runner "
+"的检查还必须做到：无论是成功的轮次，还是已结束的失败轮次，只要定位信息变了就拒绝。回环夹具不需要推理凭据，也不产生费用。"
+
+#: ../developer/context-recall.md:129
+msgid ""
+"Verify the exact host/API SHA, reverse sandbox manager probe and fresh "
+"heartbeat using [deployment reliability](deployment-reliability.md). A "
+"working model call does not prove the intended host revision is serving "
+"jobs."
+msgstr ""
+"按[部署可靠性](deployment-reliability.md)里的方法，核对主机和 API 的确切 SHA、反向 sandbox "
+"manager 探测，以及最近一次心跳。模型能正常调用，不代表正在处理任务的就是你预期的那个主机版本。"
+
+#: ../developer/context-recall.md:132
+msgid ""
+"Run the opt-in behavior preflight from the target checkout against the "
+"target inference Gateway:"
+msgstr "在目标版本的本地仓库里，对目标推理网关运行这项可选的行为预检："
+
+#: ../developer/context-recall.md:141
+msgid ""
+"`CLOUD_AGENT_TEST_PROXY` optionally names an HTTP proxy. The key remains "
+"in the trusted test process, outside sandbox credentials and command "
+"arguments. The script sends synthetic messages to `deepseek-v4-flash` and"
+" prints answers and request IDs without authentication headers. Greeting,"
+" repeated-question, task, fact/update and no-history cases produce five "
+"calls per repetition; the default three repetitions make 15 calls with "
+"ordinary inference usage."
+msgstr ""
+"`CLOUD_AGENT_TEST_PROXY` 可以指定一个 HTTP "
+"代理，不设也行。密钥只留在受信任的测试进程里，不会进入沙箱凭据，也不会出现在命令参数中。脚本会向 `deepseek-v4-flash` "
+"发送合成消息，打印回答和请求 "
+"ID，不打印认证头。用例分五类：打招呼、重复提问、任务、事实及其更新、没有历史；每重复一次产生五次调用，默认重复三次，共 15 "
+"次调用，按正常推理用量计费。"
+
+#: ../developer/context-recall.md:148
+msgid ""
+"A non-200 response, stream error, truncation, missing required facts or a"
+" recognized missing-history claim fails the check. The script requests "
+"native `adaptive/high` settings and also requires observed thinking. "
+"Results report `recall_passed` and `thinking_observed` separately, "
+"retaining the answer even when thinking is absent. Observed thinking does"
+" not prove the engine received the exact effort, and missing thinking "
+"does not prove history loss. Inspect conservative detector failures: it "
+"may reject a reply quoting a bad claim in order to correct it. HTTP 200 "
+"alone is insufficient."
+msgstr ""
+"只要出现非 200 响应、流错误、内容被截断、缺少应有的事实，或者识别到\"看不到历史\"之类的说法，检查就失败。脚本会请求原生的 "
+"`adaptive/high` 设置，并且要求能观察到 thinking。结果里 `recall_passed` 和 "
+"`thinking_observed` 分开报告；即使没有 thinking，回答也会保留。观察到 "
+"thinking，不能证明引擎收到了准确的推理强度；没有 "
+"thinking，也不能证明历史丢了。检测器比较保守，失败时要人工看一下：模型如果为了纠正一个错误说法而引用了它，也可能被判失败。只看到 HTTP"
+" 200 是远远不够的。"
+
+#: ../developer/context-recall.md:156
+msgid ""
+"Use the deployed app to check a new chat, live follow-up and idle "
+"restore. Confirm the same retained sandbox and native locator. If an "
+"answer reports lost context, compare the outbound request history and "
+"settlement evidence before attributing it to persistence."
+msgstr "在部署好的应用里实际试一遍：新开对话、在运行中发送后续消息、空闲后恢复。确认用的是同一个保留沙箱和同一个原生定位信息。如果某次回答说上下文丢了，先比对发出去的请求历史和轮次结束的依据，再判断是不是持久化出了问题。"
+
+#: ../developer/context-recall.md:161
+msgid ""
+"The preflight is opt-in and is not automatically run by deployment "
+"workflows. CI receives no inference key. Repeat it when Gateway model "
+"routes, model deployment or CLI pins change. Finite samples test the "
+"reported failure without guaranteeing that a model never makes another "
+"incorrect claim."
+msgstr ""
+"这项预检需要主动运行，部署工作流不会自动跑。CI 拿不到推理密钥。网关的模型路由、模型部署或 CLI "
+"的固定版本变了，就要重新跑一次。有限的样本只能检验已经报告过的那个问题，没法保证模型以后不会再说错。"
+
+#: ../developer/context-recall.md:166
+msgid ""
+"Implementation and checks: "
+"[`runner.py`](../../apps/backend/cloud_agent_host/runner.py), "
+"[`drivers.py`](../../apps/backend/cloud_agent_host/drivers.py), "
+"[`shared_session_supervisor.py`](../../apps/backend/cloud_agent_host/shared_session_supervisor.py),"
+" "
+"[`shared_protocol.py`](../../apps/backend/cloud_agent_shared/shared_protocol.py),"
+" "
+"[`check_model_context.py`](../../deploy/preflight/check_model_context.py)"
+" and "
+"[`test_claude_driver_context.py`](../../tests/external/test_claude_driver_context.py)."
+msgstr ""
+"实现和检查代码：[`runner.py`](../../apps/backend/cloud_agent_host/runner.py)、[`drivers.py`](../../apps/backend/cloud_agent_host/drivers.py)、[`shared_session_supervisor.py`](../../apps/backend/cloud_agent_host/shared_session_supervisor.py)、[`shared_protocol.py`](../../apps/backend/cloud_agent_shared/shared_protocol.py)、[`check_model_context.py`](../../deploy/preflight/check_model_context.py)"
+" 和 "
+"[`test_claude_driver_context.py`](../../tests/external/test_claude_driver_context.py)。"
+

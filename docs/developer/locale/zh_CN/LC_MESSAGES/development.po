@@ -1,0 +1,928 @@
+# Simplified Chinese translation of the Cloud Agent developer documentation.
+# See docs/developer/translations.md.
+msgid ""
+msgstr ""
+"Project-Id-Version: HybridInference Cloud Agent \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-10-19 03:26-0400\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: The HybridInference contributors\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.10.3\n"
+
+#: ../developer/development.md:1
+msgid "Developer guide"
+msgstr "开发者指南"
+
+#: ../developer/development.md:3
+msgid ""
+"This guide will help you get a checkout running, find the code that owns "
+"your change, and choose the right checks for it. Start with "
+"[AGENTS.md](../../AGENTS.md) for the repository rules and "
+"[CONTRIBUTING.md](../../CONTRIBUTING.md) for the pull-request workflow. "
+"For an overview of the product and its deployment topology, see the "
+"[README](../../README.md)."
+msgstr ""
+"这份指南带你把本地仓库跑起来，找到你的改动该落在哪段代码里，并为它选对要跑的检查。仓库规则先看 "
+"[AGENTS.md](../../AGENTS.md)，pull request 流程见 "
+"[CONTRIBUTING.md](../../CONTRIBUTING.md)。想先了解产品和部署架构，可以看 "
+"[README](../../README.md)。"
+
+#: ../developer/development.md:10
+msgid "Set up a checkout"
+msgstr "准备本地仓库"
+
+#: ../developer/development.md:12
+msgid ""
+"Run backend commands from the repository root. Make sure you have Python "
+"3.12 and [`uv`](https://docs.astral.sh/uv/) installed, then create the "
+"environment:"
+msgstr ""
+"后端命令都在仓库根目录下运行。先装好 Python 3.12 和 "
+"[`uv`](https://docs.astral.sh/uv/)，然后创建环境："
+
+#: ../developer/development.md:20
+msgid ""
+"`make setup-dev` creates `.venv`, then uses `uv sync` to install the "
+"project and its development dependencies. It defaults to Python 3.12, "
+"which is also the version used in CI; the project supports both Python "
+"3.12 and 3.13. When you run Python tools from this checkout, use `uv "
+"run`. Package discovery already includes `apps/backend/`, so you do not "
+"need to set `PYTHONPATH` for each package."
+msgstr ""
+"`make setup-dev` 会创建 `.venv`，再用 `uv sync` 安装项目和开发依赖。默认用 Python 3.12，和 CI "
+"一致；项目同时支持 3.12 和 3.13。在这个仓库里跑 Python 工具时，用 `uv run`。包发现已经把 "
+"`apps/backend/` 包含进去了，不需要为每个包单独设置 `PYTHONPATH`。"
+
+#: ../developer/development.md:27
+msgid ""
+"If you are working on the frontend, use Node.js 22 to match CI and "
+"install the locked dependencies:"
+msgstr "如果你要改前端，请用和 CI 一样的 Node.js 22，并安装锁定版本的依赖："
+
+#: ../developer/development.md:35
+msgid ""
+"When you need to exercise sign-in, migrations, host enrollment, and real "
+"Agent CLIs together, use the [complete local Docker "
+"stack](../../deploy/local/README.md). Run it from the repository root:"
+msgstr ""
+"如果要把登录、迁移、主机注册和真实的 Agent CLI 放在一起实际跑一遍，就用[完整的本地 Docker "
+"环境](../../deploy/local/README.md)。在仓库根目录运行："
+
+#: ../developer/development.md:45
+msgid ""
+"The local-stack guide covers Docker prerequisites, ports, logs, "
+"stop/resume, and running multiple isolated checkouts."
+msgstr "本地环境指南里讲了 Docker 的前置条件、端口、日志、停止和恢复，以及怎样同时跑多份互不干扰的仓库副本。"
+
+#: ../developer/development.md:48
+msgid "Find the code that owns a change"
+msgstr "找到改动该落在哪里"
+
+#: ../developer/development.md:50
+msgid ""
+"The backend is split into three installed packages under `apps/backend/`."
+" Choose the package based on who should own the behavior you are "
+"changing:"
+msgstr "后端在 `apps/backend/` 下分成三个可安装的包。你要改的行为该由谁负责，就改哪个包："
+
+#: ../developer/development.md
+msgid "Package"
+msgstr "包"
+
+#: ../developer/development.md
+msgid "Owns"
+msgstr "负责的内容"
+
+#: ../developer/development.md
+msgid "[`cloud_agent/`](../../apps/backend/cloud_agent/)"
+msgstr ""
+
+#: ../developer/development.md
+msgid ""
+"Control plane: HTTP APIs, admission and scheduling, persistence, Gateway "
+"adapters, and publication."
+msgstr "控制平面：HTTP API、准入与调度、持久化、网关适配器以及发布。"
+
+#: ../developer/development.md
+msgid "[`cloud_agent_host/`](../../apps/backend/cloud_agent_host/)"
+msgstr ""
+
+#: ../developer/development.md
+msgid ""
+"Host execution: claims, retained sandboxes, workspace/session sandbox "
+"manager, and Agent CLI adapters."
+msgstr "主机端执行：认领任务、保留沙箱、负责工作区和会话的 sandbox manager，以及 Agent CLI 适配器。"
+
+#: ../developer/development.md
+msgid "[`cloud_agent_shared/`](../../apps/backend/cloud_agent_shared/)"
+msgstr ""
+
+#: ../developer/development.md
+msgid ""
+"Protocol versions, capability names, shared payloads and errors, "
+"profiling collection, and shared Git/archive algorithms."
+msgstr "协议版本、能力名称、共用的数据结构和错误、性能剖析采集，以及共用的 Git 和归档算法。"
+
+#: ../developer/development.md:59
+msgid ""
+"Inside the control plane, look in `api/` for HTTP handlers, "
+"`application/` for reusable flows, `ports/` for persistence interfaces, "
+"and `storage/` for their database implementations. Background maintenance"
+" and reconciliation belong in `workers/`. Resource construction and "
+"lifecycle behavior belong in `bootstrap/`. Finally, `app.py` assembles "
+"the main API and the separate MCP-only listener. The [code structure "
+"guide](code-structure.md) maps the schema domains, runtime adapters, "
+"shared profiling, frontend API clients, and job-detail UI."
+msgstr ""
+"控制平面内部：HTTP 处理函数在 `api/`，可复用的业务流程在 `application/`，持久化接口在 "
+"`ports/`，接口对应的数据库实现在 `storage/`。后台维护和状态调和放在 `workers/`，资源的创建和生命周期管理放在 "
+"`bootstrap/`。最后由 `app.py` 把主 API 和单独的 MCP 专用监听器组装起来。[代码结构指南](code-"
+"structure.md)更细地梳理了 schema 领域、运行时适配器、共用的性能剖析、前端 API 客户端和任务详情界面。"
+
+#: ../developer/development.md:67
+msgid ""
+"For common changes, start with the files below. Backend paths in this "
+"table are relative to `apps/backend/`."
+msgstr "常见的改动可以从下表中的文件入手。表里的后端路径都相对于 `apps/backend/`。"
+
+#: ../developer/development.md
+msgid "Change"
+msgstr "改动"
+
+#: ../developer/development.md
+msgid "Start here"
+msgstr "先看这里"
+
+#: ../developer/development.md
+msgid "Job or conversation HTTP behavior"
+msgstr "任务或对话的 HTTP 行为"
+
+#: ../developer/development.md
+msgid ""
+"`cloud_agent/api/jobs.py`, `catalog.py`, `turns.py`, or `threads.py`. "
+"`api/routes.py` mounts every agent surface listed in `SURFACE_ROUTERS`."
+msgstr ""
+"`cloud_agent/api/jobs.py`、`catalog.py`、`turns.py` 或 "
+"`threads.py`。`SURFACE_ROUTERS` 里列出的每个 agent 接口，都由 `api/routes.py` 统一挂载。"
+
+#: ../developer/development.md
+msgid "Request or response validation"
+msgstr "请求或响应校验"
+
+#: ../developer/development.md
+msgid ""
+"The owning module in `cloud_agent/schemas/`; public imports use "
+"`cloud_agent.schemas`."
+msgstr "`cloud_agent/schemas/` 里对应的模块；对外导入统一用 `cloud_agent.schemas`。"
+
+#: ../developer/development.md
+msgid "A new caller of task creation"
+msgstr "新增一处创建任务的调用"
+
+#: ../developer/development.md
+msgid ""
+"`cloud_agent/application/job_admission.py`; `api/service_jobs.py` is an "
+"existing caller."
+msgstr ""
+"`cloud_agent/application/job_admission.py`；可以参考已有的调用方 "
+"`api/service_jobs.py`。"
+
+#: ../developer/development.md
+msgid "Workspace files, terminals, or Git views"
+msgstr "工作区文件、终端或 Git 视图"
+
+#: ../developer/development.md
+msgid ""
+"`cloud_agent/api/workspace.py` and `sandbox_manager_client.py`; host "
+"handling is in `cloud_agent_host/sandbox_manager.py`."
+msgstr ""
+"`cloud_agent/api/workspace.py` 和 `sandbox_manager_client.py`；主机端的处理在 "
+"`cloud_agent_host/sandbox_manager.py`。"
+
+#: ../developer/development.md
+msgid "A query or persistent field"
+msgstr "查询或持久化字段"
+
+#: ../developer/development.md
+msgid ""
+"The relevant `cloud_agent/ports/` interface and `storage/` "
+"implementation, plus an additive revision under `migrations/versions/` "
+"for schema changes."
+msgstr ""
+"对应的 `cloud_agent/ports/` 接口和 `storage/` 实现；如果改了 schema，还要在 "
+"`migrations/versions/` 下加一个增量修订。"
+
+#: ../developer/development.md
+msgid "Compute-resource lifecycle"
+msgstr "计算资源生命周期"
+
+#: ../developer/development.md
+msgid ""
+"`cloud_agent/application/compute_resources.py`, `compute_reconcile.py`, "
+"`workers/compute_resources.py`, and `providers/compute/`."
+msgstr ""
+"`cloud_agent/application/compute_resources.py`、`compute_reconcile.py`、`workers/compute_resources.py`"
+" 和 `providers/compute/`。"
+
+#: ../developer/development.md
+msgid "Host claims or worker HTTP calls"
+msgstr "主机认领任务，或 worker 的 HTTP 调用"
+
+#: ../developer/development.md
+msgid ""
+"`cloud_agent_host/claimed_job.py`, `control_plane_client.py`, and the "
+"orchestration in `runner.py`."
+msgstr ""
+"`cloud_agent_host/claimed_job.py`、`control_plane_client.py`，以及 "
+"`runner.py` 里的编排逻辑。"
+
+#: ../developer/development.md
+msgid "Retained-container values or lifecycle"
+msgstr "保留容器的数据类型或生命周期"
+
+#: ../developer/development.md
+msgid ""
+"`cloud_agent_host/chat_sandbox_models.py` for value types; "
+"`chat_sandbox.py` for Docker lifecycle."
+msgstr ""
+"数据类型在 `cloud_agent_host/chat_sandbox_models.py`，Docker 生命周期在 "
+"`chat_sandbox.py`。"
+
+#: ../developer/development.md
+msgid "CLI behavior or version compatibility"
+msgstr "CLI 行为或版本兼容性"
+
+#: ../developer/development.md
+msgid ""
+"`cloud_agent_host/runtimes/` and `drivers.py`; discovery facts are in "
+"`cloud_agent_shared/runtime_catalog.py`, shared pins in "
+"`shared_protocol.py`, image pins in `deploy/sandbox/Dockerfile.agent-"
+"sandbox`."
+msgstr ""
+"`cloud_agent_host/runtimes/` 和 `drivers.py`。CLI 的发现信息在 "
+"`cloud_agent_shared/runtime_catalog.py`，共用的版本固定在 "
+"`shared_protocol.py`，镜像里的版本固定在 `deploy/sandbox/Dockerfile.agent-sandbox`。"
+
+#: ../developer/development.md
+msgid "Browser UI or a BFF route"
+msgstr "浏览器界面或 BFF 路由"
+
+#: ../developer/development.md
+msgid ""
+"`apps/frontend/src/`; browser API clients are in `src/lib/api/agents/`, "
+"job-page components and hooks in `components/features/agents/job-"
+"detail/`."
+msgstr ""
+"`apps/frontend/src/`。浏览器端的 API 客户端在 `src/lib/api/agents/`，任务页面的组件和 hook 在"
+" `components/features/agents/job-detail/`。"
+
+#: ../developer/development.md:83
+msgid ""
+"Keep your change in the module that owns the behavior. Extract a flow "
+"when it needs an independent test boundary, or extract a rule when "
+"multiple entry points share it."
+msgstr "改动要放在负责这项行为的模块里。一段流程需要单独测试时，再把它抽出来；一条规则被多个入口共用时，再把规则抽出来。"
+
+#: ../developer/development.md:87
+msgid "Keep the dependency boundaries"
+msgstr "守住依赖边界"
+
+#: ../developer/development.md:89
+msgid ""
+"The deployment images ship different packages, so an import that works in"
+" a checkout can still fail in production. Follow these boundaries:"
+msgstr "不同的部署镜像里装的包不一样，所以一个导入在本地仓库里没问题，到了生产环境照样可能失败。请遵守下面这些边界："
+
+#: ../developer/development.md:92
+msgid ""
+"HTTP adapters call application flows and the storage capabilities they "
+"need. Application flows and workers must not import route modules. Some "
+"application flows use FastAPI's `HTTPException`; follow the actual "
+"interfaces rather than assuming that package is framework-independent."
+msgstr ""
+"HTTP 适配器调用应用流程，以及流程需要的存储能力。应用流程和 worker 不能导入路由模块。有些应用流程用到了 FastAPI 的 "
+"`HTTPException`，所以别想当然地认为这个包和框架无关，以实际的接口为准。"
+
+#: ../developer/development.md:96
+msgid ""
+"`ports/` defines capabilities without importing their implementations. "
+"`Depends(get_storage)` returns the `Storage` assembly: use the surface's "
+"narrow protocol and call a capability such as `store.audit` or "
+"`store.host_pool`. Repository methods belong to those capabilities."
+msgstr ""
+"`ports/` 只定义能力，不导入能力的实现。`Depends(get_storage)` 返回组装好的 "
+"`Storage`：使用这个接口面对应的窄协议，调用 `store.audit`、`store.host_pool` "
+"这样的能力。Repository 方法都归属于这些能力。"
+
+#: ../developer/development.md:100
+msgid ""
+"The host must not import the control plane, and the shared package must "
+"import neither implementation package. Shared Git subprocess and archive "
+"I/O belongs in `cloud_agent_shared/git/`. The only other shared code that"
+" may import a process, network or background-thread module is the "
+"operation-profiling collector. The import-boundary tests list each "
+"exemption and the modules it covers."
+msgstr ""
+"主机端不能导入控制平面，共用包也不能导入这两个实现包中的任何一个。共用的 Git 子进程和归档 I/O 放在 "
+"`cloud_agent_shared/git/`。除此之外，共用代码里只有操作性能剖析采集器可以导入进程、网络或后台线程相关的模块。导入边界测试里列出了每一项豁免，以及它覆盖哪些模块。"
+
+#: ../developer/development.md:106
+msgid ""
+"The control plane must not import the host implementation. Runtime "
+"discovery facts live in `cloud_agent_shared/runtime_catalog.py`; host "
+"adapters and the control plane both consume them. The [import-boundary "
+"tests](../../tests/unit/test_import_boundary.py) enforce both directions "
+"of the service boundary."
+msgstr ""
+"控制平面不能导入主机端的实现。运行时的发现信息放在 "
+"`cloud_agent_shared/runtime_catalog.py`，主机适配器和控制平面都从这里读取。[导入边界测试](../../tests/unit/test_import_boundary.py)会从两个方向检查这条服务边界。"
+
+#: ../developer/development.md:111
+msgid ""
+"The Gateway is reached over HTTP only. Use the contracts in "
+"`gateway_contracts/`; do not import `serving.*`, access the Gateway "
+"database, or use its `API_KEY_SECRET` or `JWT_SECRET_KEY`. This service "
+"uses its own `AGENT_CONTROL_TOKEN_SECRET` and `AGENT_SESSION_SECRET`."
+msgstr ""
+"访问网关只能走 HTTP。请使用 `gateway_contracts/` 里的契约；不要导入 "
+"`serving.*`，不要直接访问网关的数据库，也不要使用网关的 `API_KEY_SECRET` 或 "
+"`JWT_SECRET_KEY`。本服务有自己的 `AGENT_CONTROL_TOKEN_SECRET` 和 "
+"`AGENT_SESSION_SECRET`。"
+
+#: ../developer/development.md:116
+msgid ""
+"Bootstrap owns cross-component wiring. MCP session lifecycle lives in "
+"`mcp/runtime.py`, and eager send-now handoff task lifecycle lives in "
+"`application/send_now.py`. Bootstrap, application flows, workers, and "
+"domain modules must not import HTTP route modules. Domain rules and ports"
+" must not import storage implementations or HTTP frameworks. Callers "
+"outside storage must not import `storage/repositories/`; shared policies "
+"belong to their domain or owning service."
+msgstr ""
+"跨组件的接线由 bootstrap 负责。MCP 会话的生命周期在 `mcp/runtime.py`，立即发送（send-"
+"now）交接任务的生命周期在 `application/send_now.py`。bootstrap、应用流程、worker 和领域模块都不能导入"
+" HTTP 路由模块；领域规则和 port 不能导入存储实现或 HTTP 框架；storage 以外的代码不能导入 "
+"`storage/repositories/`。共用的策略应该放在它所属的领域，或者负责它的服务里。"
+
+#: ../developer/development.md:124
+msgid ""
+"Changes to sandbox networking, credential scope, or isolation also need "
+"review against [the security boundaries in AGENTS.md](../../AGENTS.md#7"
+"-security-boundaries--do-not-relax-without-review). Keep MCP tool calls "
+"on the MCP-only listener and long-lived credentials out of sandboxes. "
+"Inference spend remains subject to Gateway per-user quota; there is no "
+"per-task dollar budget."
+msgstr ""
+"改动沙箱网络、凭据范围或隔离方式时，还要对照 [AGENTS.md 里的安全边界](../../AGENTS.md#7-security-"
+"boundaries--do-not-relax-without-review)做评审。MCP 工具调用只能走 MCP "
+"专用监听器，长期凭据不能进沙箱。推理费用仍然受网关的每用户配额约束，没有按任务设的美元预算。"
+
+#: ../developer/development.md:130
+msgid "Run the relevant checks"
+msgstr "选择要跑的检查"
+
+#: ../developer/development.md:132
+msgid ""
+"While developing the backend, start with the focused tests that exercise "
+"the behavior you changed. Before you open a pull request, run the "
+"complete required backend gate:"
+msgstr "开发后端时，先跑覆盖你所改行为的那几个测试。开 pull request 之前，再把完整的后端必跑检查跑一遍："
+
+#: ../developer/development.md
+msgid "Command"
+msgstr "命令"
+
+#: ../developer/development.md
+msgid "Checks"
+msgstr "检查内容"
+
+#: ../developer/development.md
+msgid "`make format`"
+msgstr ""
+
+#: ../developer/development.md
+msgid "Ruff formatting and automatic lint fixes; changes files."
+msgstr "Ruff 格式化，并自动修复 lint 问题；会改动文件。"
+
+#: ../developer/development.md
+msgid "`make lint`"
+msgstr ""
+
+#: ../developer/development.md
+msgid "Ruff format check, Ruff lint without fixes, and pydocstyle."
+msgstr "Ruff 格式检查、Ruff lint（不自动修复）和 pydocstyle。"
+
+#: ../developer/development.md
+msgid "`make typecheck`"
+msgstr ""
+
+#: ../developer/development.md
+msgid "Mypy over all three backend packages."
+msgstr "对三个后端包全部跑 mypy。"
+
+#: ../developer/development.md
+msgid "`make test`"
+msgstr ""
+
+#: ../developer/development.md
+msgid ""
+"Pytest excluding `external` and `dbtest`, with four workers and each file"
+" kept on one worker."
+msgstr "跑 pytest，不含 `external` 和 `dbtest`；用四个 worker，同一个文件始终在同一个 worker 上跑。"
+
+#: ../developer/development.md
+msgid "`make check`"
+msgstr ""
+
+#: ../developer/development.md
+msgid ""
+"`format`, `lint`, `typecheck`, then `test`. Review any automatic fixes "
+"before committing."
+msgstr "依次运行 `format`、`lint`、`typecheck` 和 `test`。提交前看一遍自动修复改了什么。"
+
+#: ../developer/development.md
+msgid "`make test-db`"
+msgstr ""
+
+#: ../developer/development.md
+msgid "The PostgreSQL-backed `dbtest` tier."
+msgstr "依赖 PostgreSQL 的 `dbtest` 测试层级。"
+
+#: ../developer/development.md
+msgid "`make test-all`"
+msgstr ""
+
+#: ../developer/development.md
+msgid "All tests except `external`, including `dbtest`."
+msgstr "除 `external` 以外的全部测试，`dbtest` 也包括在内。"
+
+#: ../developer/development.md
+msgid "`make docs`"
+msgstr ""
+
+#: ../developer/development.md
+msgid ""
+"Build this documentation site, every language, into `docs/build/html`; "
+"any warning fails."
+msgstr "把整个文档站（所有语言）构建到 `docs/build/html`；出现任何警告都算失败。"
+
+#: ../developer/development.md
+msgid "`make docs-verify`"
+msgstr ""
+
+#: ../developer/development.md
+msgid ""
+"`make docs`, then check that every translation still matches its English "
+"page. CI runs this."
+msgstr "先跑 `make docs`，再检查每份译文是否还和英文页面对得上。CI 跑的就是这个。"
+
+#: ../developer/development.md:153
+msgid "Run CI locally"
+msgstr "在本地跑 CI"
+
+#: ../developer/development.md:155
+msgid ""
+"The portable launcher runs the backend, database, and frontend gates with"
+" check-only formatting and linting:"
+msgstr "这个可移植的启动脚本会把后端、数据库和前端的检查都跑一遍，格式化和 lint 只检查、不改文件："
+
+#: ../developer/development.md:166
+msgid ""
+"Install `uv` and Python 3.12 before running backend or database checks. "
+"Frontend checks require Node.js 22 and npm; database checks require a "
+"running Docker daemon. The launcher synchronizes locked dependencies with"
+" `uv sync --locked` and `npm ci`, and uses the installed runtimes. Like "
+"CI, it fails when `uv.lock` no longer matches `pyproject.toml`; run `uv "
+"lock` and commit the result. Direct invocation works from any directory: "
+"`./scripts/ci-local.sh [all|backend|database|frontend]` from the "
+"checkout, or its absolute path elsewhere. The default tier is `all`."
+msgstr ""
+"跑后端或数据库检查前，先装好 `uv` 和 Python 3.12。前端检查需要 Node.js 22 和 npm，数据库检查需要 Docker "
+"守护进程在运行。启动脚本会用 `uv sync --locked` 和 `npm ci` 同步锁定的依赖，并使用本机已装的运行时。和 CI "
+"一样，`uv.lock` 与 `pyproject.toml` 对不上时它会失败，这时运行 `uv lock` "
+"并提交结果。脚本可以在任何目录下直接调用：在仓库里用 `./scripts/ci-local.sh "
+"[all|backend|database|frontend]`，在别处用它的绝对路径。默认的层级是 `all`。"
+
+#: ../developer/development.md:175
+msgid ""
+"Backend checks run Ruff formatting and lint checks, pydocstyle, mypy, and"
+" pytest with four workers and `--dist loadfile`, excluding `external` and"
+" `dbtest`. The database tier starts a fresh PostgreSQL 15 container on a "
+"random loopback port, creates separate databases for all four workers, "
+"and removes the container on exit or interruption. It rejects a database "
+"run with skipped tests or fewer than 100 tests. Frontend checks run lint,"
+" format check, type-check, tests, and both server-only and runtime-site-"
+"config build guards."
+msgstr ""
+"后端检查包括 Ruff 格式和 lint 检查、pydocstyle、mypy，以及用四个 worker 和 `--dist loadfile` "
+"跑的 pytest（不含 `external` 和 `dbtest`）。数据库层级会在一个随机的回环端口上新起一个 PostgreSQL 15 "
+"容器，给四个 worker 各建一个数据库，退出或被中断时删除容器。只要有测试被跳过，或者测试总数不到 100 个，这一层就不算通过。前端检查包括"
+" lint、格式检查、类型检查、测试，以及 server-only 和运行时站点配置这两项构建守卫。"
+
+#: ../developer/development.md:183
+msgid ""
+"Each run saves logs in a fresh gitignored `.local-ci/<tier>.XXXXXX` "
+"directory. Set `CI_LOG_DIR` to choose an output directory. This local "
+"gate excludes external regressions, rolling upgrades, Gitleaks, Docker "
+"release-image builds, and Kata qualification; those remain part of the "
+"wider hosted CI gate."
+msgstr ""
+"每次运行都会把日志存进一个新建的 `.local-ci/<tier>.XXXXXX` 目录，这个目录已被 git 忽略。想换输出位置，就设置 "
+"`CI_LOG_DIR`。本地检查不包括外部回归测试、滚动升级、Gitleaks、Docker 发布镜像构建和 Kata 资格验证，这些仍由托管 "
+"CI 负责。"
+
+#: ../developer/development.md:188
+msgid ""
+"Every pull request, from a fork or from a branch of this repository, runs"
+" on disposable GitHub-hosted VMs: ARM64 artifacts use `ubuntu-24.04-arm`,"
+" and everything else uses `ubuntu-24.04`. The repository is public, so "
+"these runners consume no minute quota. Pushes to `dev` and `main`, and "
+"authorized manual dispatches, keep the self-hosted pools, which also run "
+"publication and synchronization. Every PR has only a read token, checkout"
+" does not persist it, image jobs use anonymous registry pulls, and no PR "
+"job receives a secret. Release publication shares no builder with any of "
+"them: each publish cell creates a fresh builder under its own "
+"`RUNNER_TEMP` and removes it when the job ends. The only layers a release"
+" reuses come from its own registry cache, a `buildcache-<artifact>-<ISO "
+"week>` tag in the artifact's package that only the publish workflow "
+"writes; it is renamed weekly, so the first release of each week builds "
+"cold. Real Kata host qualification remains excluded from every PR and "
+"runs only on trusted `dev` events."
+msgstr ""
+"每个 pull request，不管来自 fork 还是本仓库的分支，都在用完即弃的 GitHub 托管虚拟机上运行：ARM64 产物用 "
+"`ubuntu-24.04-arm`，其余都用 `ubuntu-24.04`。仓库是公开的，这些 runner 不占分钟配额。推送到 `dev` "
+"和 `main`、以及经过授权的手动触发，仍然使用自托管的 runner 池，发布和同步也在这些池上跑。PR "
+"拿到的只有一个只读令牌，checkout 不会把它保存下来，镜像任务从镜像仓库匿名拉取，所有 PR 任务都拿不到 "
+"secret。发布不和其中任何一个共用构建器：每个发布单元都在自己的 `RUNNER_TEMP` "
+"下新建构建器，任务结束就删掉。发布唯一会复用的层来自它自己的镜像仓库缓存，也就是产物包里的 `buildcache-<artifact>-<ISO"
+" week>` 标签，只有发布工作流会写它。这个标签每周换一次名，所以每周的第一次发布都是冷构建。真实 Kata 主机的资格验证不会在任何 PR "
+"里跑，只在受信任的 `dev` 事件上运行。"
+
+#: ../developer/development.md:204
+msgid ""
+"Pull requests only read the Actions cache. After each push to `dev`, the "
+"optional `pr-caches.yml` workflow fills the uv and npm caches and exports"
+" the sandbox image's build layers from a hosted VM, under the `dev` scope"
+" that every pull request into `dev` may restore. It runs separately from "
+"CI, so publication does not wait for it and its failure does not affect "
+"CI's conclusion. Of the 15 real-CLI MCP cases, a pull request runs Kilo's"
+" three as `MCP conformance (kilo, …)` jobs, one case each, and the other "
+"twelve in the sandbox image job; trusted events run all 15 in the sandbox"
+" image job."
+msgstr ""
+"pull request 只读取 Actions 缓存，不写入。每次推送到 `dev` 后，可选的 `pr-caches.yml` "
+"工作流会在一台托管虚拟机上填好 uv 和 npm 缓存，并导出沙箱镜像的构建层，存在 `dev` 作用域下，所有合入 `dev` 的 pull "
+"request 都能恢复使用。它和 CI 分开运行：发布不用等它，它失败了也不影响 CI 的结果。真实 CLI 的 MCP 用例共 15 "
+"个：pull request 中，Kilo 的三个各自单独作为一个 `MCP conformance (kilo, …)` "
+"任务运行，其余十二个放在沙箱镜像任务里；受信任的事件则把 15 个都放在沙箱镜像任务里跑。"
+
+#: ../developer/development.md:213
+msgid ""
+"A pull request also splits the default test tier, the PostgreSQL tier, "
+"and the frontend unit tests over two hosted VMs each, shown as `Tests "
+"(1/2)` and so on. `scripts/ci_shard.py` deals whole test files to the "
+"pytest shards, and vitest splits its own with `--shard`. Trusted events "
+"run each tier as a single shard. To run one shard locally, pass its files"
+" to pytest:"
+msgstr ""
+"pull request 还会把默认测试层级、PostgreSQL 层级和前端单元测试各拆到两台托管虚拟机上，显示为 `Tests (1/2)` "
+"这样的名字。pytest 由 `scripts/ci_shard.py` 按整个文件分配到各个分片，vitest 则用 `--shard` "
+"自己拆分。受信任的事件每个层级只跑一个分片。想在本地跑某一个分片，把它分到的文件传给 pytest："
+
+#: ../developer/development.md:224
+msgid ""
+"GitHub issue [#464](https://github.com/HarvardMadSys/hybridInference-"
+"cloud-agent/issues/464) tracks the remaining administrator work: the "
+"runner-group controls below, validated against an untrusted fork."
+msgstr ""
+"剩下需要管理员完成的工作记录在 GitHub issue [#464](https://github.com/HarvardMadSys"
+"/hybridInference-cloud-agent/issues/464)：配置下面说的 runner 组限制，并用一个不受信任的 fork"
+" 验证。"
+
+#: ../developer/development.md:228
+msgid ""
+"Because the repository is public, a fork's pull request can run "
+"workflows. Configure GitHub's runner groups to allow persistent pools "
+"only for the trusted workflow references on `refs/heads/dev` and "
+"`refs/heads/main`, including the publication and manual synchronization "
+"workflows. The pools are registered on the repository today, where no "
+"such restriction applies, so they need to move into an organization "
+"runner group first. Deny PR merge/head refs and other workflow files. "
+"Until then, require approval for fork workflows from every external "
+"contributor, not only first-time ones. Verify those rules with an "
+"untrusted fork workflow edit that requests a persistent runner: it must "
+"remain ineligible. A fork can edit its workflow YAML, so the checked-in "
+"runner expressions cannot enforce this restriction themselves. If the "
+"organization cannot restrict runner groups by workflow reference, remove "
+"these persistent runners from the repository's eligible groups and run "
+"trusted CI/publication in a separate restricted repository, or replace "
+"them with credential-free single-job disposable runners. Fork approval "
+"settings alone are insufficient: allowing a test run must never grant "
+"access to publication's hosts or credentials. These are GitHub "
+"administrator settings; repository tests cannot configure or verify them."
+msgstr ""
+"因为仓库是公开的，fork 发来的 pull request 也能运行工作流。所以要配置 GitHub 的 runner 组，让持久化的 "
+"runner 池只能被 `refs/heads/dev` 和 `refs/heads/main` "
+"上受信任的工作流引用使用，其中包括发布和手动同步工作流；PR 的 merge/head "
+"引用和其他工作流文件一律拒绝。这些池目前注册在仓库级别，仓库级别没有这种限制，所以得先把它们挪到组织级的 runner "
+"组里。在此之前，所有外部贡献者的 fork 工作流都必须经过批准，而不只是第一次贡献的人。验证方法是：在一个不受信任的 fork "
+"里修改工作流，让它申请持久化 runner，结果必须是申请不到。fork 可以随意改自己的工作流 YAML，所以仓库里写的 runner "
+"表达式本身拦不住它。如果组织无法按工作流引用限制 runner 组，就把这些持久化 runner 从仓库可用的组里移除，把受信任的 CI "
+"和发布放到另一个受限的仓库里跑，或者换成不带凭据、只跑一个任务就销毁的 runner。光靠 fork "
+"的批准设置是不够的：批准一次测试运行，绝不能顺带给出发布主机或发布凭据的访问权限。这些都是 GitHub "
+"的管理员设置，仓库里的测试既配置不了，也验证不了。"
+
+#: ../developer/development.md:247
+msgid ""
+"The default backend test tier uses four workers in both CI and `make "
+"test`, keeping each test file on one worker. Override the worker count "
+"when needed; zero disables parallel execution for debugging:"
+msgstr ""
+"默认的后端测试层级在 CI 和 `make test` 中都用四个 worker，同一个测试文件始终在同一个 worker 上。需要时可以改 "
+"worker 数量；设为零就关闭并行，方便调试："
+
+#: ../developer/development.md:255
+msgid ""
+"Use markers to select the test tier you need. For example, "
+"`tests/servers/` contains HTTP-level tests that do not require a deployed"
+" server. Tests marked `external` list their prerequisites in the test "
+"module; these may include Docker, a real CLI, or a configured Gateway. CI"
+" runs selected external checks in addition to the default tier."
+msgstr ""
+"用 marker 选择要跑的测试层级。例如 `tests/servers/` 里是 HTTP 层面的测试，不需要真正部署服务器。标了 "
+"`external` 的测试会在测试模块里写明前置条件，可能需要 Docker、真实的 CLI 或配置好的网关。除了默认层级，CI "
+"还会挑一部分外部检查来跑。"
+
+#: ../developer/development.md:261
+msgid ""
+"If you change the database, run `make test-db` against a dedicated test "
+"database. Fixtures read `TEST_DB_HOST`, `TEST_DB_PORT`, `TEST_DB_NAME`, "
+"`TEST_DB_USER`, and `TEST_DB_PASSWORD`; `TEST_DB_NAME` must contain "
+"`_test_`. Check the result for skipped tests, because an unavailable "
+"database can cause fixtures to skip rather than fail. Parallel workers "
+"need separate pre-created databases. See "
+"[ENVIRONMENT.md](../../ENVIRONMENT.md#database) for defaults and worker "
+"naming."
+msgstr ""
+"如果改了数据库，就用一个专门的测试数据库跑 `make test-db`。测试夹具会读取 "
+"`TEST_DB_HOST`、`TEST_DB_PORT`、`TEST_DB_NAME`、`TEST_DB_USER` 和 "
+"`TEST_DB_PASSWORD`，其中 `TEST_DB_NAME` 必须包含 "
+"`_test_`。跑完要看一下有没有被跳过的测试：数据库连不上时，夹具可能直接跳过，而不是报错。并行的 worker "
+"各自需要一个事先建好的数据库。默认值和 worker 的命名规则见 "
+"[ENVIRONMENT.md](../../ENVIRONMENT.md#database)。"
+
+#: ../developer/development.md:269
+msgid ""
+"Deployment tests read the sandbox CLI version settings. If your "
+"development tool exports a different `CODEX_VERSION`, remove that "
+"inherited value for the check:"
+msgstr "部署相关的测试会读取沙箱 CLI 的版本设置。如果你的开发工具导出了另一个 `CODEX_VERSION`，跑检查时把这个继承来的变量去掉："
+
+#: ../developer/development.md:277
+msgid "For a frontend change, run these checks from the repository root:"
+msgstr "改了前端，就在仓库根目录运行下面这些检查："
+
+#: ../developer/development.md:288
+msgid ""
+"CI also runs the following build guards. Run the relevant one locally "
+"when you change server-only imports or runtime site configuration:"
+msgstr "CI 还会跑下面两个构建守卫。如果你改了 server-only 导入或运行时站点配置，在本地跑对应的那个："
+
+#: ../developer/development.md:296
+msgid "Browser recovery regressions run the production Next.js app in Chromium:"
+msgstr "浏览器恢复的回归测试会在 Chromium 里跑生产构建的 Next.js 应用："
+
+#: ../developer/development.md:303
+msgid ""
+"Run these in an isolated checkout on the test host with Node 22. "
+"Chromium's system libraries must be provisioned there; this command does "
+"not install OS packages. `PLAYWRIGHT_BROWSERS_PATH` can keep the browser "
+"download in that checkout's disposable test directory. The runner builds "
+"the root web variant, allocates its own loopback ports, and shuts down "
+"its servers afterwards. Do not run another build against the same `.next`"
+" directory concurrently."
+msgstr ""
+"请在测试主机上一份单独的仓库副本里，用 Node 22 运行这些命令。Chromium 依赖的系统库要事先装好，这条命令不会安装系统软件包。可以用"
+" `PLAYWRIGHT_BROWSERS_PATH` 把浏览器下载到这份副本里用完即删的测试目录。测试运行器会构建根路径的 Web "
+"变体，自己分配回环端口，跑完后关掉它起的服务器。不要同时对同一个 `.next` 目录再跑一次构建。"
+
+#: ../developer/development.md:310
+msgid ""
+"The tests use real page navigation, browser offline mode, and failed "
+"JavaScript chunk downloads. A separate HTTP fixture supplies explicit API"
+" responses and delays or truncates responses after recording a creation. "
+"Unknown API requests fail the suite. This covers browser recovery and "
+"client/API interactions; it does not exercise the Python control plane, "
+"database, authentication provider, or sandbox hosts. Those still need "
+"their integration and staging checks."
+msgstr ""
+"这些测试会真实地切换页面、让浏览器离线，并模拟 JavaScript 分块下载失败。另有一个独立的 HTTP 测试桩，按测试的设定返回 API "
+"响应，也能在记录下一次创建请求之后故意延迟或截断响应。遇到没有预设的 API "
+"请求，整个测试套件直接失败。这些测试覆盖的是浏览器端的恢复，以及客户端和 API 之间的交互；Python "
+"控制平面、数据库、身份认证服务和沙箱主机都不在范围内，它们仍然要靠各自的集成测试和 staging 检查。"
+
+#: ../developer/development.md:317
+msgid ""
+"Chromium aborts requests still waiting for a connection with "
+"`net::ERR_NETWORK_CHANGED` whenever the host's network addresses change, "
+"which happens on shared CI runners when other jobs start or stop "
+"containers. A test whose failed attempt saw that error runs once more and"
+" is reported as flaky. The retry after any other failure fails at once, "
+"so that failure still fails the suite (`apps/frontend/e2e/network-"
+"change.ts`)."
+msgstr ""
+"主机的网络地址一变，Chromium 就会以 `net::ERR_NETWORK_CHANGED` 中止还在等连接的请求。在共享的 CI "
+"runner 上，别的任务启动或停止容器时就会出现这种情况。测试失败的那次尝试如果遇到了这个错误，就会再跑一次，并报告为 "
+"flaky。其他原因导致的失败，重试会直接失败，所以这类失败照样会让整个测试套件失败（`apps/frontend/e2e/network-"
+"change.ts`）。"
+
+#: ../developer/development.md:324
+msgid ""
+"Failures retain screenshots and Playwright traces in `apps/frontend/test-"
+"results/` and an HTML report in `apps/frontend/playwright-report/`; CI "
+"uploads both. To iterate on fixture/spec changes after a successful root "
+"build, use `CLOUD_AGENT_E2E_SKIP_BUILD=1 npm run test:browser`. Rebuild "
+"after app changes."
+msgstr ""
+"测试失败时，截图和 Playwright trace 会留在 `apps/frontend/test-results/`，HTML 报告留在 "
+"`apps/frontend/playwright-report/`，CI "
+"会把两者都上传。根路径构建成功之后，如果只是在改测试桩或测试用例，可以用 `CLOUD_AGENT_E2E_SKIP_BUILD=1 npm "
+"run test:browser` 反复跑；改了应用代码就要重新构建。"
+
+#: ../developer/development.md:329
+msgid ""
+"The `make ci-frontend` target runs the checks above, including browser "
+"recovery. Hosted CI also builds and smoke-tests both the root and "
+"`/agents` web variants when image changes are selected. See "
+"[CONTRIBUTING.md](../../CONTRIBUTING.md#continuous-integration) for the "
+"wider CI gate."
+msgstr ""
+"`make ci-frontend` 会跑上面所有检查，浏览器恢复测试也在内。如果改动涉及镜像，托管 CI 还会构建根路径和 `/agents` "
+"两个 Web 变体并做冒烟测试。完整的 CI 检查见 [CONTRIBUTING.md](../../CONTRIBUTING.md"
+"#continuous-integration)。"
+
+#: ../developer/development.md:335
+msgid "Changing an API"
+msgstr "修改 API"
+
+#: ../developer/development.md:337
+msgid "`gateway_contracts/` contains two different kinds of HTTP contract:"
+msgstr "`gateway_contracts/` 里有两类不同的 HTTP 契约："
+
+#: ../developer/development.md:339
+msgid ""
+"`*.openapi.yaml` describes the Gateway APIs this service consumes. When a"
+" client starts reading a new field or calling a new endpoint, verify the "
+"corresponding Gateway source and update the document in the same PR."
+msgstr ""
+"`*.openapi.yaml` 描述本服务调用的网关 API。客户端开始读取新字段或调用新端点时，要去网关源代码里核实，并在同一个 PR "
+"里更新这份文档。"
+
+#: ../developer/development.md:342
+msgid ""
+"`agent-control-plane.openapi.json` records the API this service "
+"publishes. An intentional API change requires a reviewed snapshot update "
+"in the same PR."
+msgstr ""
+"`agent-control-plane.openapi.json` 记录本服务对外提供的 API。有意修改 API 时，要在同一个 PR "
+"里更新这份快照，并经过评审。"
+
+#: ../developer/development.md:345
+msgid "Regenerate the control-plane snapshot from the repository root:"
+msgstr "在仓库根目录重新生成控制平面的快照："
+
+#: ../developer/development.md:363
+msgid ""
+"Review the generated diff and explain any compatibility implications. The"
+" surface tests also reject duplicate registrations and overlaps between "
+"the agent surface routers. A snapshot update records a change; the "
+"behavioral tests and review establish whether it is compatible. The "
+"[contract guide](../../gateway_contracts/README.md) explains what these "
+"checks can verify and what still needs comparison with Gateway source."
+msgstr ""
+"仔细看一遍生成的 diff，并说明它对兼容性有什么影响。接口测试还会拦下重复注册，以及 agent "
+"接口路由之间的重叠。快照只是记录了改动；改动是否兼容，要靠行为测试和评审来判断。[契约指南](../../gateway_contracts/README.md)讲了这些检查能验证什么，以及哪些地方仍需对照网关源代码确认。"
+
+#: ../developer/development.md:370
+msgid "Packaging and documentation"
+msgstr "打包与文档"
+
+#: ../developer/development.md:372
+msgid ""
+"When adding or moving a package, review package discovery in "
+"`pyproject.toml`, mypy and linter roots, Docker `COPY` paths, and the "
+"path classifier in `.github/workflows/ci.yml`. Verify the built images "
+"contain their dependencies; checkout imports alone cannot establish that."
+" CI builds and starts selected images, and its classifier tests derive "
+"shared package paths from the Dockerfiles."
+msgstr ""
+"新增或移动包时，要检查 `pyproject.toml` 里的包发现、mypy 和 linter 的根目录、Docker 的 `COPY` "
+"路径，以及 `.github/workflows/ci.yml` "
+"里的路径分类器。还要确认构建出来的镜像带齐了依赖：本地仓库里能导入，并不能说明镜像里也能。CI 会构建并启动部分镜像，分类器的测试会根据 "
+"Dockerfile 推出共用包的路径。"
+
+#: ../developer/development.md:379
+msgid ""
+"Schema changes use explicit additive Alembic revisions. The current chain"
+" starts at `migrations/versions/0001_schema_baseline.py`; keep schema "
+"creation out of service startup. There is no SQLAlchemy model metadata "
+"for autogeneration. For databases stamped with the pre-baseline chain, "
+"follow [the rebuild runbook](operations.md#rebuilding-the-agent-"
+"database)."
+msgstr ""
+"schema 改动要写成显式的增量 Alembic 修订。当前的迁移链从 "
+"`migrations/versions/0001_schema_baseline.py` "
+"开始；不要在服务启动时建表。项目里没有可供自动生成迁移的 SQLAlchemy 模型元数据。如果数据库还标记着 baseline "
+"之前的旧迁移链，请按[重建手册](operations.md#rebuilding-the-agent-database)处理。"
+
+#: ../developer/development.md:385
+msgid ""
+"Update the guide that owns any changed configuration, command, or "
+"behavior:"
+msgstr "改了配置、命令或行为，就更新负责它的那份指南："
+
+#: ../developer/development.md
+msgid "Topic"
+msgstr "主题"
+
+#: ../developer/development.md
+msgid "Document"
+msgstr "文档"
+
+#: ../developer/development.md
+msgid "Environment variables and runtime pins"
+msgstr "环境变量和运行时版本固定"
+
+#: ../developer/development.md
+msgid "[ENVIRONMENT.md](../../ENVIRONMENT.md)"
+msgstr ""
+
+#: ../developer/development.md
+msgid "A new migration"
+msgstr "新增迁移"
+
+#: ../developer/development.md
+msgid "[Upgrade notes](upgrade-notes.md)"
+msgstr "[升级说明](upgrade-notes.md)"
+
+#: ../developer/development.md
+msgid "Operation and troubleshooting"
+msgstr "运维和故障排查"
+
+#: ../developer/development.md
+msgid "[operations.md](operations.md)"
+msgstr ""
+
+#: ../developer/development.md
+msgid "Local development stack"
+msgstr "本地开发环境"
+
+#: ../developer/development.md
+msgid "[Local-stack guide](../../deploy/local/README.md)"
+msgstr "[本地环境指南](../../deploy/local/README.md)"
+
+#: ../developer/development.md
+msgid "Release artifacts and validation"
+msgstr "发布产物与验证"
+
+#: ../developer/development.md
+msgid "[Release guide](../../deploy/release/README.md)"
+msgstr "[发布指南](../../deploy/release/README.md)"
+
+#: ../developer/development.md:395
+#, python-brace-format
+msgid ""
+"These guides form the developer documentation site, built with Sphinx and"
+" MyST from `docs/developer/`. Add a new guide there and list it in a "
+"table of contents in `docs/developer/index.md`. A root-level guide such "
+"as `ENVIRONMENT.md` is shown through a one-line `{include}` page "
+"registered in `INCLUDED_PAGES` in `docs/developer/conf.py`. Links to "
+"other repository files may stay relative: the build points them at "
+"GitHub, and fails for a path or heading that does not exist. Run `make "
+"docs-verify` after changing any page; CI's Docs Build job runs the same "
+"target. The site is also published in Simplified Chinese, so an English "
+"edit needs its translation updated too; see [translating the "
+"docs](translations.md)."
+msgstr ""
+"这些指南组成了开发者文档站，用 Sphinx 和 MyST 从 `docs/developer/` 构建。新写的指南放在这个目录下，并加进 "
+"`docs/developer/index.md` 里的某个目录树。`ENVIRONMENT.md` 这类放在仓库根目录的指南，通过一个只有一行 "
+"`{include}` 的页面展示，这个页面要在 `docs/developer/conf.py` 的 `INCLUDED_PAGES` "
+"里注册。指向仓库里其他文件的链接可以继续用相对路径：构建时会把它们换成 GitHub 链接，路径或标题不存在就会报错。改了任何页面都要跑 "
+"`make docs-verify`，CI 的 Docs Build "
+"任务跑的是同一个目标。本站还发布简体中文版，所以改了英文也要更新对应的译文，见[翻译文档](translations.md)。"
+
+#: ../developer/development.md:406
+msgid ""
+"Designs, completed migration checklists, and acceptance records under "
+"[`docs/agents/`](../agents/) document their own baseline. Preserve that "
+"history and update current-use guides when the implementation changes."
+msgstr ""
+"[`docs/agents/`](../agents/) "
+"下的设计、已完成的迁移清单和验收记录，描述的都是它们写成时的状态。这些历史请保持原样；实现变了，就去更新当前在用的指南。"
+

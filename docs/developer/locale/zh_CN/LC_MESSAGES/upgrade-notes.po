@@ -1,0 +1,400 @@
+# Simplified Chinese translation of the Cloud Agent developer documentation.
+# See docs/developer/translations.md.
+msgid ""
+msgstr ""
+"Project-Id-Version: HybridInference Cloud Agent \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-10-19 03:26-0400\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: The HybridInference contributors\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.10.3\n"
+
+#: ../developer/upgrade-notes.md:1
+msgid "Upgrade notes"
+msgstr "升级说明"
+
+#: ../developer/upgrade-notes.md:3
+msgid ""
+"What an operator upgrading an existing deployment needs to know about "
+"recent schema migrations. New installations start from an empty database "
+"and can skip this page. The deployment order itself, and how to roll "
+"back, are in [rolling deployment order](operations.md#rolling-deployment-"
+"order) and [deployment reliability](deployment-reliability.md)."
+msgstr ""
+"升级已有部署时，运维人员需要了解的近期 schema "
+"迁移信息都在这里。全新安装从空数据库开始，可以跳过这一页。部署的先后顺序和回滚方法，见[滚动部署顺序](operations.md"
+"#rolling-deployment-order)和[部署可靠性](deployment-reliability.md)。"
+
+#: ../developer/upgrade-notes.md:9
+msgid "Before starting this release"
+msgstr "启动本次发布之前"
+
+#: ../developer/upgrade-notes.md:11
+msgid ""
+"Before starting this release, run `alembic upgrade head` through "
+"`0086_conversation_read_receipts`. The supported deployment scripts run "
+"migrations before replacing the API; every migration listed here is "
+"additive and safe under the running previous release unless it says "
+"otherwise. The few transitions that need stopped writers are listed in "
+"[applying migrations that are not backwards-compatible](operations.md"
+"#applying-migrations-that-are-not-backwards-compatible)."
+msgstr ""
+"启动本次发布之前，先运行 `alembic upgrade head`，升级到 "
+"`0086_conversation_read_receipts`。官方支持的部署脚本会在替换 API "
+"之前执行迁移；除非下面特别说明，这里列出的每个迁移都只做增量修改，上一个发布还在运行时执行也是安全的。少数几个需要先停掉所有写入的迁移，列在[执行不向后兼容的迁移](operations.md"
+"#applying-migrations-that-are-not-backwards-compatible)里。"
+
+#: ../developer/upgrade-notes.md:18
+msgid ""
+"After migrating, start the main control-plane listener with its existing "
+"complete environment: it imports newly registered settings once, as "
+"described in [Admin Settings](operations.md#admin-settings)."
+msgstr ""
+"迁移完成后，用现有的完整环境变量启动主控制平面监听器：它会把新注册的设置项导入一次，具体见 [Admin "
+"Settings](operations.md#admin-settings)。"
+
+#: ../developer/upgrade-notes.md:22
+msgid "Recent migrations"
+msgstr "近期迁移"
+
+#: ../developer/upgrade-notes.md:24
+msgid "Newest first."
+msgstr "新的排在前面。"
+
+#: ../developer/upgrade-notes.md
+msgid "Migration"
+msgstr "迁移"
+
+#: ../developer/upgrade-notes.md
+msgid "What it changes"
+msgstr "改了什么"
+
+#: ../developer/upgrade-notes.md
+msgid "`0086_conversation_read_receipts`"
+msgstr ""
+
+#: ../developer/upgrade-notes.md
+msgid ""
+"Adds an empty table for each owner's latest read completion per "
+"conversation, with revision and job/attempt indexes for incremental "
+"polling and foreign-key cleanup. It changes no existing rows and takes "
+"brief foreign-key definition locks on the referenced tables. Existing "
+"browser receipts import when that browser next opens the updated UI; a "
+"downgrade drops cloud receipts but leaves browser caches intact."
+msgstr ""
+"新增一张空表，记录每个所有者在每个对话里最近读到的那次完成，并带有版本号索引和 job/attempt "
+"索引，分别用于增量轮询和外键清理。它不改动任何现有行，只会在被引用的表上短暂持有外键定义锁。现有的浏览器回执，会在那个浏览器下次打开更新后的界面时导入；降级会丢掉云端的回执，但浏览器缓存不受影响。"
+
+#: ../developer/upgrade-notes.md
+msgid "`0085_terminal_resume_index`"
+msgstr ""
+
+#: ../developer/upgrade-notes.md
+msgid ""
+"Builds a partial index on `agent_jobs` concurrently, holding only the "
+"turns whose terminals still wait to resume. It reads the whole job "
+"history without blocking the running API; an interrupted run can simply "
+"be repeated. Changes no row."
+msgstr ""
+"在 `agent_jobs` 上以并发方式建一个部分索引，只收录终端还在等待恢复的轮次。它会读完整个任务历史，但不会阻塞正在运行的 "
+"API；如果中途中断，直接重跑即可。不改动任何行。"
+
+#: ../developer/upgrade-notes.md
+msgid "`0084_host_removal_move_out`"
+msgstr ""
+
+#: ../developer/upgrade-notes.md
+msgid ""
+"Adds `agent_runner_hosts.removal_moves_out` and `removal_leaves_unmoved`,"
+" false for every existing host, so a removal already pending keeps its "
+"earlier meaning: revoke once its running turns end."
+msgstr ""
+"新增 `agent_runner_hosts.removal_moves_out` 和 "
+"`removal_leaves_unmoved`，所有已有主机上都是 "
+"false。这样已经在等待中的移除仍保持原来的含义：等正在运行的轮次结束后，再撤销这台主机。"
+
+#: ../developer/upgrade-notes.md
+msgid "`0083_host_move_out`"
+msgstr ""
+
+#: ../developer/upgrade-notes.md
+msgid ""
+"Adds the `move_out` purpose to the admission-hold check constraint. "
+"Changes no existing row. Its downgrade deletes any move-out holds; groups"
+" already moved keep their checkpoints."
+msgstr "给准入限制的检查约束加上 `move_out` 这种用途。不改动任何已有数据。降级时会删除所有迁出用的限制；已经迁走的沙箱组保留各自的检查点。"
+
+#: ../developer/upgrade-notes.md
+msgid "`0082_team_environments`"
+msgstr ""
+
+#: ../developer/upgrade-notes.md
+msgid ""
+"Adds nullable team columns to environments and their bindings, and lets a"
+" repository default name any environment. Changes no existing row. Its "
+"downgrade refuses while a team environment exists, archived ones "
+"included."
+msgstr "给环境和环境绑定加上可为空的团队列，并允许仓库的默认设置指向任意一个环境。不改动任何已有数据。只要还存在团队环境（包括已归档的），降级就会被拒绝。"
+
+#: ../developer/upgrade-notes.md
+msgid "`0081_snapshot_pushed_commit`"
+msgstr ""
+
+#: ../developer/upgrade-notes.md
+msgid ""
+"Adds `agent_sandbox_snapshots.pushed_commit_sha` and copies into it the "
+"commit of every snapshot that was never published. `published_commit_sha`"
+" is left as it was, so the API it replaces keeps working, and no notice "
+"fires."
+msgstr ""
+"新增 `agent_sandbox_snapshots.pushed_commit_sha`，并把每个从未发布过的快照的 commit "
+"复制进去。`published_commit_sha` 保持原样，所以依赖它的旧 API 照常可用，也不会触发任何通知。"
+
+#: ../developer/upgrade-notes.md
+msgid "`0080_user_ssh_servers`"
+msgstr ""
+
+#: ../developer/upgrade-notes.md
+msgid ""
+"Adds the owner SSH server tables; see [SSH servers](operations.md#ssh-"
+"servers). Changes no existing row."
+msgstr "新增所有者 SSH 服务器相关的表，见 [SSH 服务器](operations.md#ssh-servers)。不改动任何已有数据。"
+
+#: ../developer/upgrade-notes.md
+msgid "`0079_teams`"
+msgstr ""
+
+#: ../developer/upgrade-notes.md
+msgid ""
+"Adds teams: members, single-use invitations, join requests and the team "
+"audit log. Nothing else refers to a team yet, so it changes no existing "
+"row and nothing anyone can run or read."
+msgstr "新增团队相关的表：成员、一次性邀请、加入申请和团队审计日志。目前还没有别的地方引用团队，所以它不改动任何已有数据，也不影响任何人能运行或看到的内容。"
+
+#: ../developer/upgrade-notes.md
+msgid "`0078_environment_snapshots`"
+msgstr ""
+
+#: ../developer/upgrade-notes.md
+msgid ""
+"Adds environment installation snapshots and the setup fingerprint on "
+"environment bindings that decides which snapshot a workspace may start "
+"from; see [environment installation snapshots](operations.md#environment-"
+"installation-snapshots)."
+msgstr ""
+"新增环境安装快照，并在环境绑定上加了 setup 指纹，用来决定一个工作区可以从哪个快照启动；见[环境安装快照](operations.md"
+"#environment-installation-snapshots)。"
+
+#: ../developer/upgrade-notes.md
+msgid "`0077_sandbox_usage_days`"
+msgstr ""
+
+#: ../developer/upgrade-notes.md
+msgid ""
+"Adds the per-day container usage table and an owner index on "
+"`agent_sandboxes`, built without `CONCURRENTLY`. That table holds one row"
+" per retained container, so the brief write lock is short."
+msgstr ""
+"新增按天统计的容器用量表，并在 `agent_sandboxes` 上建一个所有者索引，建索引时没有用 "
+"`CONCURRENTLY`。这张表每个保留容器只有一行，所以短暂的写锁很快就会释放。"
+
+#: ../developer/upgrade-notes.md
+msgid "`0076_mcp_residency_fence`"
+msgstr ""
+
+#: ../developer/upgrade-notes.md
+msgid ""
+"Adds a nullable residency generation to MCP approval records; existing "
+"approvals keep it empty."
+msgstr "给 MCP 审批记录加上一个可为空的 residency 代次；已有的审批记录这一列为空。"
+
+#: ../developer/upgrade-notes.md
+msgid "`0075_runtime_upgrades`"
+msgstr ""
+
+#: ../developer/upgrade-notes.md
+msgid ""
+"Adds two empty JSON columns for agent updates from the admin Settings "
+"page."
+msgstr "新增两个空的 JSON 列，用于从管理员设置页面升级 agent。"
+
+#: ../developer/upgrade-notes.md
+msgid "`0074_host_removal_pending`"
+msgstr ""
+
+#: ../developer/upgrade-notes.md
+msgid ""
+"Adds `agent_runner_hosts.removal_requested_at`, empty for every existing "
+"host. A downgrade drops it and leaves a host that was waiting to be "
+"removed draining."
+msgstr ""
+"新增 "
+"`agent_runner_hosts.removal_requested_at`，所有已有主机这一列都为空。降级会删掉这一列，原本在等待移除的主机会停留在排空状态。"
+
+#: ../developer/upgrade-notes.md
+msgid "`0073_sandbox_restore`"
+msgstr ""
+
+#: ../developer/upgrade-notes.md
+msgid ""
+"Adds the `cold` and `restoring` sandbox states and the start fence that "
+"binds a checkpoint to the run it ends; see [restoring a removed host's "
+"sandboxes](operations.md#restoring-a-removed-hosts-sandboxes). Existing "
+"checkpoints carry no fence and never move a group. Its downgrade refuses "
+"while any group is cold or restoring."
+msgstr ""
+"新增 `cold` 和 `restoring` "
+"两种沙箱状态，以及启动栅栏，把检查点和它所终结的那次运行绑在一起；见[恢复被移除主机上的沙箱](operations.md#restoring-a"
+"-removed-hosts-sandboxes)。已有的检查点不带栅栏，永远不会让沙箱组迁移。只要还有沙箱组处于 cold 或 "
+"restoring，降级就会被拒绝。"
+
+#: ../developer/upgrade-notes.md
+msgid "`0072_drop_old_memory_tables`"
+msgstr ""
+
+#: ../developer/upgrade-notes.md
+msgid ""
+"Drops the retired memory tables. A rollback to before `0070` finds them "
+"empty, without the earlier memory's portraits and preferences."
+msgstr "删除已经退役的记忆相关的表。如果回滚到 `0070` 之前，会发现这些表是空的，旧版记忆里的头像和偏好都没了。"
+
+#: ../developer/upgrade-notes.md
+msgid "`0071_temporary_workspaces`"
+msgstr ""
+
+#: ../developer/upgrade-notes.md
+msgid ""
+"Drops `NOT NULL` from `agent_threads.repo` and "
+"`agent_environment_bindings.repo`, so conversations can start without a "
+"repository. Its downgrade refuses while any such conversation exists."
+msgstr ""
+"去掉 `agent_threads.repo` 和 `agent_environment_bindings.repo` 上的 `NOT "
+"NULL`，让对话可以不关联仓库直接开始。只要存在这样的对话，降级就会被拒绝。"
+
+#: ../developer/upgrade-notes.md
+msgid "`0070_memory_cutover`"
+msgstr ""
+
+#: ../developer/upgrade-notes.md
+msgid ""
+"Moves the memory switches and saved preferences onto the durable-memory "
+"table."
+msgstr "把记忆功能的开关和已保存的偏好，搬到持久记忆表里。"
+
+#: ../developer/upgrade-notes.md
+msgid "`0069_agent_memories`"
+msgstr ""
+
+#: ../developer/upgrade-notes.md
+msgid "Adds the durable-memory table."
+msgstr "新增持久记忆表。"
+
+#: ../developer/upgrade-notes.md
+msgid "`0067_failed_snapshot_wake`"
+msgstr ""
+
+#: ../developer/upgrade-notes.md
+msgid "Only replaces a trigger function."
+msgstr "只替换了一个触发器函数。"
+
+#: ../developer/upgrade-notes.md
+msgid "`0066_admin_job_listing_index`"
+msgstr ""
+
+#: ../developer/upgrade-notes.md
+msgid ""
+"Builds an index on `agent_jobs` concurrently. On a long job history it "
+"takes a while without blocking the running API; an interrupted run can "
+"simply be repeated."
+msgstr "在 `agent_jobs` 上以并发方式建索引。任务历史很长时会花一些时间，但不会阻塞正在运行的 API；如果中途中断，直接重跑即可。"
+
+#: ../developer/upgrade-notes.md
+msgid "`0051_host_drain_fence_epoch`"
+msgstr ""
+
+#: ../developer/upgrade-notes.md
+msgid ""
+"Backfills a non-null drain-fence epoch for every host. The database "
+"rotates that epoch whenever drain-relevant lifecycle, credential, "
+"placement or ownership state changes. Once the V2 control plane is "
+"activated, this revision and the `AGENT_DEPLOY_DRAIN_FENCE_V2` recipe "
+"marker are the application and schema rollback floor; see [rollback "
+"compatibility](operations.md#rollback-compatibility)."
+msgstr ""
+"给每台主机回填一个非空的排空栅栏 epoch。之后只要与排空相关的生命周期、凭据、放置或归属状态发生变化，数据库就会轮换这个 epoch。V2 "
+"控制平面激活之后，这个修订和 recipe 标记 `AGENT_DEPLOY_DRAIN_FENCE_V2` 就是应用和 schema "
+"回滚的底线；见[回滚兼容性](operations.md#rollback-compatibility)。"
+
+#: ../developer/upgrade-notes.md
+msgid "`0049_host_drain_fence`"
+msgstr ""
+
+#: ../developer/upgrade-notes.md
+msgid ""
+"Starts every existing host without a deployment drain owner or release "
+"receipt. The V1 marker it introduced remains only so an older "
+"orchestrator can perform the bridge upgrade; it is not a rollback target "
+"after V2 activation."
+msgstr ""
+"让每台已有主机都从\"没有部署排空所有者、也没有释放回执\"的状态开始。它引入的 V1 标记只留给旧版编排器做过渡升级用；V2 "
+"激活之后，就不能再回滚到它了。"
+
+#: ../developer/upgrade-notes.md
+msgid "`0048_sandbox_plugins`"
+msgstr ""
+
+#: ../developer/upgrade-notes.md
+msgid ""
+"Adds `agent_threads.plugins`; existing chats default to no plugins. "
+"Rebuild the sandbox image so the updated CLI wrappers load selected "
+"plugins."
+msgstr "新增 `agent_threads.plugins`，已有对话默认不带插件。需要重新构建沙箱镜像，让更新后的 CLI 包装脚本能加载所选的插件。"
+
+#: ../developer/upgrade-notes.md
+msgid "`0046_job_claim_retry`"
+msgstr ""
+
+#: ../developer/upgrade-notes.md
+msgid ""
+"Adds `agent_jobs.claim_retry_at`, which the worker claim query requires. "
+"Existing queued jobs remain immediately eligible."
+msgstr "新增 `agent_jobs.claim_retry_at`，worker 的认领查询要用到它。已经在排队的任务仍可立即被认领。"
+
+#: ../developer/upgrade-notes.md:53
+msgid ""
+"Older revisions that need a maintenance window are listed in [applying "
+"migrations that are not backwards-compatible](operations.md#applying-"
+"migrations-that-are-not-backwards-compatible). A database still stamped "
+"with the retired pre-2026-09-10 chain cannot be upgraded directly; see "
+"[preserving an old-chain database](operations.md#preserving-an-old-chain-"
+"database)."
+msgstr ""
+"更早的、需要停机维护窗口的修订，列在[执行不向后兼容的迁移](operations.md#applying-migrations-that-"
+"are-not-backwards-compatible)里。如果数据库还标记着 2026-09-10 "
+"之前已退役的旧迁移链，就无法直接升级；见[保留旧迁移链的数据库](operations.md#preserving-an-old-chain-"
+"database)。"
+
+#: ../developer/upgrade-notes.md:59
+msgid "When you add a migration"
+msgstr "新增迁移时"
+
+#: ../developer/upgrade-notes.md:61
+msgid ""
+"Add a row to the table above in the same pull request, saying what an "
+"operator upgrading a live deployment needs to know: what existing rows it"
+" changes, how long it can lock, and whether its downgrade refuses. Then "
+"update the head revision named under *Before starting this release* and "
+"in [ENVIRONMENT.md](../../ENVIRONMENT.md); a test checks that both name "
+"the current head."
+msgstr ""
+"在同一个 pull request "
+"里给上表加一行，写清楚升级线上部署的运维人员需要知道什么：会改动哪些已有数据、可能锁表多久、降级会不会被拒绝。然后把 *启动本次发布之前* 一节和"
+" [ENVIRONMENT.md](../../ENVIRONMENT.md) 里写的 head 修订号也更新掉；有测试会检查这两处写的都是当前的"
+" head。"
+

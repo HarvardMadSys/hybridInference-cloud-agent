@@ -278,6 +278,14 @@ class MemoryResources:
         row["state"] = "cancelled"
         return row
 
+    async def confirm_acquisition_absent(self, *, operation_id):
+        row = self.operations[operation_id]
+        row.update(state="cancelled", result={**row["result"], "confirmed_absent": True})
+        self.allocations[row["allocation_id"]].update(
+            desired_state="absent", observed_state="absent"
+        )
+        return row
+
 
 class NoProviderCalls:
     """Any cloud side effect during an API request fails this suite."""
@@ -1780,6 +1788,45 @@ async def test_released_unknown_acquisition_cannot_be_resolved(compute_api):
         json={"external_id": "already-released"},
     )
     assert resolved.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_unknown_acquisition_closes_as_never_created_and_is_audited(compute_api):
+    client, repo, _ = compute_api
+    _, operation = await allocation(client)
+    repo.operations[operation["id"]].update(state="unknown", result={"external_pending": True})
+    path = f"/admin/agent/compute-operations/{operation['id']}"
+
+    observed = await client.get(path, headers=ADMIN)
+    assert "confirm_absent" in observed.json()["operation"]["allowed_actions"]
+    closed = await client.post(f"{path}/confirm-absent", headers=ADMIN, json={})
+
+    assert closed.status_code == 202, closed.text
+    assert closed.json()["operation"]["state"] == "cancelled"
+    assert closed.json()["operation"]["allowed_actions"] == []
+    assert repo.audit_rows[-1]["action"] == "agent.compute.operation.confirm_absent"
+    again = await client.post(f"{path}/confirm-absent", headers=ADMIN, json={})
+    assert again.status_code == 409
+    assert again.json()["detail"]["code"] == "absence_not_confirmable"
+
+
+@pytest.mark.asyncio
+async def test_acquisition_that_named_its_resource_is_not_closed_as_never_created(compute_api):
+    client, repo, _ = compute_api
+    _, operation = await allocation(client)
+    repo.operations[operation["id"]].update(
+        state="unknown", result={"resource_ref": {"external_id": "experiment"}}
+    )
+    path = f"/admin/agent/compute-operations/{operation['id']}"
+
+    observed = await client.get(path, headers=ADMIN)
+    assert "confirm_absent" not in observed.json()["operation"]["allowed_actions"]
+    refused = await client.post(f"{path}/confirm-absent", headers=ADMIN, json={})
+
+    assert refused.status_code == 409
+    assert refused.json()["detail"]["code"] == "absence_not_confirmable"
+    assert repo.operations[operation["id"]]["state"] == "unknown"
+    assert not any(row["action"].endswith("confirm_absent") for row in repo.audit_rows)
 
 
 @pytest.mark.asyncio

@@ -73,7 +73,7 @@ across restarts. The inventory below records built-in defaults and the
 environment names used for an initial import. Once a setting is registered, the
 service no longer reads it continuously from `.env`.
 
-Run `alembic upgrade head` (through `0085_terminal_resume_index`) before
+Run `alembic upgrade head` (through `0086_conversation_read_receipts`) before
 starting this release; the [upgrade notes](docs/developer/upgrade-notes.md)
 say what each recent migration changes. The main control-plane listener then
 initializes the settings document once from its existing environment. The
@@ -190,21 +190,6 @@ it before deployment; it needs no model API key or deployed-service setting.
 | `AGENT_DATABASE_URL` | Postgres DSN for a database owned exclusively by Cloud Agent. Do not share the gateway's database. |
 | `AGENT_POSTGRES_USER` / `AGENT_POSTGRES_DB` / `AGENT_POSTGRES_PASSWORD` | Supported control-plane Compose database initialization. User and database default to `cloudagent`; password is required. Keep the DSN consistent with these values. PostgreSQL applies initialization settings only to an empty data directory. |
 | `TEST_DB_HOST` / `TEST_DB_PORT` / `TEST_DB_NAME` / `TEST_DB_USER` / `TEST_DB_PASSWORD` | Read by `make test-db` and the CI `dbtest` tier as five separate values, not a DSN. Defaults: `localhost` / `5432` / `hybridinference_test_db` / `postgres` / `postgres`. The database name must contain `_test_`; fixtures refuse other names. With xdist, each worker appends its ID and needs a pre-created database. CI creates `<TEST_DB_NAME>_gw0`…`_gw3` for `-n 4`. |
-
-### Automatic PR merge archiving
-
-These environment values are imported when the Admin Settings row is first
-created. After that, edit the saved **Publication** settings. See
-[the archiving runbook](docs/developer/automatic-pr-archiving.md).
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `AGENT_PR_ARCHIVE_ENABLED` | `true` | Enable automatic archival after verifying that the current published PR merged. |
-| `AGENT_PR_ARCHIVE_POLL_S` | `30` | Seconds between GitHub merge checks; saved setting accepts 5–3600 seconds. |
-
-API timeout, batch size, retry delay limit, and repeated integration-failure
-threshold are saved settings. The worker uses existing GitHub App credentials
-or the configured publication token, and never passes them to the sandbox.
 
 ### pgAdmin database administration
 
@@ -426,7 +411,7 @@ for deployment profiles, verified SSH access and CloudLab endpoint setup.
 | `AGENT_COMPUTE_DIRECTORY` | Absolute host directory mounted read-only at `/run/compute` by the optional Compose overlay; `deploy.sh` includes the overlay when this is set. |
 | `AGENT_CONTROL_PLANE_SSH_HOST` | Editable first-time Server setup address for the service node. The supported deployer defaults to the node's FQDN, falling back to its hostname; set an SSH address explicitly when using another deployment system or a different SSH alias. Saved setups take precedence. |
 | `AGENT_GATEWAY_SSH_HOST` | Optional first-time Server setup gateway address override. Defaults to the hostname of the saved Gateway API URL, such as `gateway.example.org`; use an override when SSH uses a different address. |
-| `AGENT_CLOUDLAB_API_URL` | Operator-verified HTTPS Portal API base. Leave unset to disable the CloudLab adapter. |
+| `AGENT_CLOUDLAB_API_URL` | Operator-verified HTTPS Portal API base: `https://boss.emulab.net:43794` for CloudLab, not the portal's web address `www.cloudlab.us`. Leave unset to disable the CloudLab adapter. |
 | `AGENT_COMPUTE_REGISTRATION_URL` | Optional. The HTTPS address new CloudLab nodes post their SSH host keys to, ending in `/v1/compute/node-registrations`. When unset it is derived from `AGENT_SESSION_REDIRECT_URI` (its `/v1/session/callback` suffix replaced), like MCP callbacks. Only HTTPS is used: a node checks the control plane's certificate before sending its one-time token. Without either, nodes set to register their keys cannot be created. |
 
 Without this configuration the existing Host management remains available;

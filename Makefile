@@ -1,4 +1,4 @@
-.PHONY: help setup-dev format lint typecheck test test-db test-all check docs ci ci-backend ci-database ci-frontend clean
+.PHONY: help setup-dev format lint typecheck test test-db test-all check docs docs-gettext docs-translate docs-lang docs-verify ci ci-backend ci-database ci-frontend clean
 
 .DEFAULT_GOAL := help
 
@@ -56,11 +56,36 @@ test-all:  ## Run all tests except external (includes db-dependent)
 check: format lint typecheck test  ## Format, lint, type-check, and test — the gate every task must pass
 
 # Warnings are errors, and --keep-going reports every one instead of stopping
-# at the first. CI's Docs Build job runs this target, so a build that is clean
-# here is clean there.
-docs:  ## Build the developer documentation into docs/build/html
+# at the first. conf.py builds each translation into docs/build/html/<code>/
+# from this one invocation, so this produces the whole published tree;
+# DOCS_LANGUAGES="en:English" builds English alone. CI's Docs Build job runs
+# docs-verify, which starts with this target.
+docs:  ## Build the developer documentation (every language) into docs/build/html
 	$(UV_RUN) sphinx-build -b html -W --keep-going docs/developer docs/build/html
 	@echo "$(GREEN)OK Docs built: docs/build/html/index.html$(RESET)"
+
+DOCS_LANG ?= zh_CN
+
+docs-gettext:  ## Extract translatable strings from the docs into docs/gettext/
+	$(UV_RUN) sphinx-build -b gettext -q docs/developer docs/gettext
+	@echo "$(GREEN)OK Catalog templates: docs/gettext/$(RESET)"
+
+# uvx rather than a pinned dev dependency: only translators run this.
+docs-translate: docs-gettext  ## Create or update the catalogs for DOCS_LANG (default zh_CN)
+	uvx sphinx-intl update -p docs/gettext -d docs/developer/locale -l $(DOCS_LANG)
+	@echo "$(GREEN)OK Edit docs/developer/locale/$(DOCS_LANG)/LC_MESSAGES/*.po$(RESET)"
+
+docs-lang:  ## Build one translated language into docs/build/html-$(DOCS_LANG)
+	$(UV_RUN) sphinx-build -b html -W --keep-going -D language=$(DOCS_LANG) \
+		docs/developer docs/build/html-$(DOCS_LANG)
+	@echo "$(GREEN)OK Docs built: docs/build/html-$(DOCS_LANG)/index.html$(RESET)"
+
+# A translation never fails loudly: Sphinx falls back to English for any string
+# it cannot translate, so a stale catalog builds clean under -W and reads as
+# English. The checker is what notices.
+docs-verify: docs docs-gettext  ## Build the site and check every translation still applies
+	$(UV_RUN) python scripts/check_docs_translations.py docs/build/html docs/developer/locale \
+		--gettext-dir docs/gettext
 
 ci:  ## Run all local CI tiers (check-only; needs uv, Python 3.12, Node 22, and Docker)
 	./scripts/ci-local.sh
@@ -75,5 +100,5 @@ ci-frontend:  ## Run local frontend CI (lint, format check, types, tests, and bu
 	./scripts/ci-local.sh frontend
 
 clean:  ## Remove caches and build artifacts
-	rm -rf .pytest_cache .ruff_cache .mypy_cache .coverage coverage.xml htmlcov build dist *.egg-info apps/backend/*.egg-info docs/build
+	rm -rf .pytest_cache .ruff_cache .mypy_cache .coverage coverage.xml htmlcov build dist *.egg-info apps/backend/*.egg-info docs/build docs/gettext
 	find . -type d \( -name .venv -o -name venv -o -name node_modules \) -prune -o -type d -name __pycache__ -exec rm -rf {} +

@@ -1,0 +1,86 @@
+# Simplified Chinese translation of the Cloud Agent developer documentation.
+# See docs/developer/translations.md.
+msgid ""
+msgstr ""
+"Project-Id-Version: HybridInference Cloud Agent \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-10-16 01:54-0400\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: The HybridInference contributors\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../SECURITY.md:2
+msgid "Security"
+msgstr "安全"
+
+#: ../../SECURITY.md:4
+msgid "Reporting a vulnerability"
+msgstr "报告漏洞"
+
+#: ../../SECURITY.md:6
+msgid ""
+"Report vulnerabilities through GitHub's private vulnerability reporting "
+"for this repository. Select \"Report a vulnerability\" under the Security"
+" tab. Do not open a public issue for anything you believe is exploitable."
+msgstr ""
+"请通过 GitHub 上本仓库的私密漏洞报告功能提交：在 Security 标签页下点 \"Report a "
+"vulnerability\"。只要你觉得问题可能被利用，就不要开公开 issue。"
+
+#: ../../SECURITY.md:10
+msgid ""
+"Expect an acknowledgement within a few days. We will tell you what we "
+"found, what we changed, and when the change shipped."
+msgstr "一般几天内会回复确认。之后我们会告诉你查到了什么、改了什么，以及修复在什么时候发布。"
+
+#: ../../SECURITY.md:13
+msgid "What is in scope"
+msgstr "受理范围"
+
+#: ../../SECURITY.md:15
+msgid ""
+"The control plane, web app, runner host, and sandbox image in this "
+"repository."
+msgstr "本仓库中的控制平面、Web 应用、runner 主机和沙箱镜像。"
+
+#: ../../SECURITY.md:16
+msgid ""
+"The HTTP contracts under `gateway_contracts/`, as consumed by this "
+"service."
+msgstr "`gateway_contracts/` 下的 HTTP 契约，仅限本服务使用它们的方式。"
+
+#: ../../SECURITY.md:18
+msgid ""
+"The gateway that this service authenticates against is a separate "
+"project: HybridInference. Report gateway issues there."
+msgstr "本服务依赖网关做身份验证，但网关属于另一个项目 HybridInference。网关的问题请到那边报告。"
+
+#: ../../SECURITY.md:21
+msgid "What a deployment must not assume"
+msgstr "部署时不能想当然的地方"
+
+#: ../../SECURITY.md:23
+msgid ""
+"`AGENTS.md` and `docs/developer/operations.md` describe the threat model "
+"for this service. Two deployment requirements bear repeating:"
+msgstr "本服务的威胁模型写在 `AGENTS.md` 和 `docs/developer/operations.md` 里。有两条部署要求，这里再强调一遍："
+
+#: ../../SECURITY.md:26
+msgid ""
+"The plain Docker runner profile isolates trusted repositories from each "
+"other. It does not isolate hostile code from the host. Do not offer it to"
+" untrusted users."
+msgstr "普通 Docker 的 runner 配置只能把受信任的仓库彼此隔开，挡不住恶意代码攻击主机。不要把它开放给不受信任的用户。"
+
+#: ../../SECURITY.md:29
+msgid ""
+"The sandbox never holds a long-lived gateway credential. It receives a "
+"short-lived, job-scoped grant. Putting an admin token into a sandbox "
+"removes the security property that this design rests on."
+msgstr "沙箱里永远不放长期有效的网关凭据，只拿到一个短期、仅限当前任务的授权。一旦把管理员令牌放进沙箱，这套设计赖以成立的安全前提就不存在了。"
+

@@ -1152,13 +1152,16 @@ class PostgresPendingMessageRepository:
             await conn.execute("DELETE FROM agent_pending_messages WHERE id = $1", head["id"])
         return SettleOutcome(job=job, message_id=str(head["id"]))
 
-    async def threads_to_settle(self, *, limit: int = 50) -> list[str]:
+    async def threads_to_settle(self, *, limit: int = 50, after: str | None = None) -> list[str]:
         """Threads whose queue a settlement could move or pause right now.
 
         For the periodic sweep: a turn that ended without the finish route —
         the reaper's verdict, a control plane restarted mid-request — still
-        gets its queue acted on.
+        gets its queue acted on. In thread order, from past ``after`` when
+        given, so a sweep can page through them all.
         """
+        if limit < 1:
+            raise ValueError("limit must be at least 1")
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 f"""
@@ -1166,6 +1169,7 @@ class PostgresPendingMessageRepository:
                 FROM (SELECT DISTINCT thread_id FROM agent_pending_messages) waiting
                 JOIN agent_threads t ON t.id = waiting.thread_id
                 WHERE t.deleted_at IS NULL
+                  AND ($2::text IS NULL OR t.id > $2)
                   AND NOT EXISTS (
                         SELECT 1 FROM agent_jobs j
                         WHERE j.thread_id = t.id AND j.{LIVE_TURN_SQL}
@@ -1193,6 +1197,7 @@ class PostgresPendingMessageRepository:
                 LIMIT $1
                 """,
                 limit,
+                after,
             )
         return [str(row["id"]) for row in rows]
 

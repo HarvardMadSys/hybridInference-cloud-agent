@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -132,6 +133,51 @@ async def test_discard_removes_the_container_without_an_archive(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_discard_on_a_reclaimed_machine_finishes_without_its_host(monkeypatch):
+    """The container went with the machine; its host would never answer the request."""
+    store, sandbox_manager, archives, _ = setup(monkeypatch)
+    store.sandbox.claim_due_admin_sandbox_deletion.return_value["deletion_discard"] = True
+    store.host_pool.get_host.return_value = {"host": "host-one", "compute_node_id": "node-one"}
+    sandbox_manager.discard_sandbox_deletion = AsyncMock()
+    store.sandbox.complete_admin_sandbox_discard = AsyncMock(return_value=True)
+
+    assert await run(store, archives)
+
+    store.sandbox.complete_admin_sandbox_discard.assert_awaited_once_with(
+        sandbox_id="group",
+        request_id="request",
+        claim_token="claim-token",
+        generation=4,
+        container_id="container-one",
+        reclaimed_quiet_seconds=600,
+    )
+    sandbox_manager.discard_sandbox_deletion.assert_not_awaited()
+    store.sandbox.fail_admin_sandbox_deletion.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_discard_on_a_provider_machine_still_asks_its_host_until_it_is_reclaimed(
+    monkeypatch,
+):
+    store, sandbox_manager, archives, _ = setup(monkeypatch)
+    store.sandbox.claim_due_admin_sandbox_deletion.return_value["deletion_discard"] = True
+    store.host_pool.get_host.return_value = {"host": "host-one", "compute_node_id": "node-one"}
+    sandbox_manager.discard_sandbox_deletion = AsyncMock(
+        return_value={"request_id": "request", "container_id": "container-one", "deleted": True}
+    )
+    store.sandbox.complete_admin_sandbox_discard = AsyncMock(
+        side_effect=lambda **kwargs: "reclaimed_quiet_seconds" not in kwargs
+    )
+
+    assert await run(store, archives)
+
+    sandbox_manager.discard_sandbox_deletion.assert_awaited_once()
+    calls = store.sandbox.complete_admin_sandbox_discard.await_args_list
+    assert [call.kwargs.get("reclaimed_quiet_seconds") for call in calls] == [600, None]
+    store.sandbox.fail_admin_sandbox_deletion.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_unconfirmed_discard_retries_without_aborting_or_uploading(monkeypatch):
     store, sandbox_manager, archives, _events = setup(monkeypatch)
     claim = store.sandbox.claim_due_admin_sandbox_deletion.return_value
@@ -217,6 +263,79 @@ async def test_discard_distinguishes_timeout_from_connection_failure(
     output = failure["error"] + JsonLogFormatter().format(caplog.records[-1])
     assert "PRIVATE" not in output
     assert "private.invalid" not in output
+
+
+_SILENT = datetime.now(UTC) - timedelta(hours=3)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("host", "waits_for"),
+    [
+        (
+            {
+                "host": "host-one",
+                "enrolled": True,
+                "status": "offline",
+                "last_heartbeat_at": _SILENT,
+            },
+            "The owning host is offline, and only it can remove the container: "
+            "deletion finishes when the host reconnects.",
+        ),
+        (
+            {
+                "host": "host-one",
+                "enrolled": True,
+                "status": "offline",
+                "last_heartbeat_at": _SILENT,
+                "compute_node_id": "node-one",
+            },
+            "The owning host is offline, and only it can remove the container: "
+            "deletion finishes when the host reconnects, "
+            "or without it once its provider confirms the machine is gone.",
+        ),
+        (
+            {
+                "host": "host-one",
+                "enrolled": False,
+                "status": "disabled",
+                "last_heartbeat_at": _SILENT,
+            },
+            "The owning host was removed from the pool, and only it can remove the container: "
+            "deletion finishes if that host is enrolled again.",
+        ),
+        (
+            # Still reporting: the sandbox manager's own connection is the problem.
+            {
+                "host": "host-one",
+                "enrolled": True,
+                "status": "online",
+                "last_heartbeat_at": datetime.now(UTC) + timedelta(hours=1),
+                "compute_node_id": "node-one",
+            },
+            "The owning host's sandbox manager could not be reached. Check its connectivity.",
+        ),
+    ],
+)
+async def test_discard_says_which_host_it_waits_for_and_what_ends_the_wait(
+    monkeypatch, host, waits_for
+):
+    store, broker, archives, _ = setup(monkeypatch)
+    store.sandbox.claim_due_admin_sandbox_deletion.return_value["deletion_discard"] = True
+    store.host_pool.get_host.return_value = host
+    store.sandbox.complete_admin_sandbox_discard = AsyncMock(return_value=False)
+    failure_cause = SandboxManagerError(503, "PRIVATE broker credential")
+    failure_cause.__cause__ = httpx.ConnectError("https://private.invalid/?token=PRIVATE")
+    broker.discard_sandbox_deletion = AsyncMock(side_effect=failure_cause)
+
+    assert await run(store, archives)
+
+    failure = store.sandbox.fail_admin_sandbox_deletion.call_args.kwargs
+    assert failure["retain_pending"] is True
+    assert failure["error"] == (
+        f"Container removal without an archive could not be confirmed. {waits_for} "
+        "Deletion will be retried."
+    )
 
 
 @pytest.mark.asyncio

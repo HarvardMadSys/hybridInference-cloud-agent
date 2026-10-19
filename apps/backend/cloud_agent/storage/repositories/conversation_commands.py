@@ -15,6 +15,7 @@ import asyncpg
 from cloud_agent.domain.execution import QUEUED, SUCCEEDED
 from cloud_agent.domain.ids import new_job_id, new_thread_id
 from cloud_agent.domain.pending_messages import QUEUE_PAUSED_ARCHIVED
+from cloud_agent.domain.read_receipts import READ_RECEIPT_BATCH_SIZE
 from cloud_agent.domain.requests import check_client_request
 from cloud_agent.execution_profiles import default_execution_profile
 from cloud_agent.goals.models import GOAL_REPORT_PROTOCOL
@@ -29,6 +30,7 @@ from cloud_agent.storage._sql.goals import (
 from cloud_agent.storage._sql.jobs import JOB_SELECT, SESSION_DELETE_BLOCK_SQL
 from cloud_agent.storage._sql.mcp import write_mcp_bindings
 from cloud_agent.storage._sql.pending_messages import PAUSE_QUEUE_SQL
+from cloud_agent.storage._sql.read_receipts import merge_read_receipts
 from cloud_agent.storage._sql.rows import job_row_to_dict, load_json
 from cloud_agent.storage._sql.ssh import enable_ssh_servers
 from cloud_agent.storage.repositories.conversation_queries import PostgresConversationQueries
@@ -80,6 +82,24 @@ class PostgresConversationCommands:
         """
         self._pool = pool
         self._queries = PostgresConversationQueries(pool)
+
+    async def merge_read_receipts(
+        self, *, user_id: str, receipts: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Advance the owner's read progress without modifying chat activity."""
+        if len(receipts) > READ_RECEIPT_BATCH_SIZE:
+            raise ValueError(
+                f"At most {READ_RECEIPT_BATCH_SIZE} read receipts may be merged at once"
+            )
+        async with self._pool.acquire() as conn, conn.transaction():
+            # Allocate revisions only after acquiring the owner's transaction lock.
+            # A sequence alone can commit out of order and lose a late commit when
+            # a polling client has already advanced past its revision.
+            await conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtext('agent_read_receipts'), hashtext($1))",
+                user_id,
+            )
+            return await merge_read_receipts(conn, user_id=user_id, receipts=receipts)
 
     async def create_job(
         self,

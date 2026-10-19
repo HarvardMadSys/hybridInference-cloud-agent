@@ -250,7 +250,10 @@ class ComputeResourceRepository(Protocol):
         request_id: str | None = None,
         kinds: list[str] | None = None,
     ) -> list[dict[str, Any]]:
-        """Find recent operation state, including recovery by request ID."""
+        """Find recent operation state, including recovery by request ID.
+
+        Newest first, keeping every operation not yet settled however old.
+        """
         ...
 
     async def update_policy(
@@ -586,6 +589,14 @@ class ComputeResourceRepository(Protocol):
 
         This never asserts ownership or success. The same operation resumes
         through provider inspection and scope validation before any deployment.
+        """
+        ...
+
+    async def confirm_acquisition_absent(self, *, operation_id: str) -> dict[str, Any]:
+        """Close an acquisition an administrator confirmed created nothing.
+
+        Cancels the operation and makes its allocation absent, so the records
+        can be removed. Refused once anything recorded names a resource.
         """
         ...
 

@@ -38,6 +38,18 @@ vi.mock('@/lib/api/agents', () => ({
   getAgentJob: api.get,
   getAgentJobThread: api.thread,
 }));
+vi.mock('@/lib/api/agents/readReceipts', () => ({
+  listAgentReadReceipts: vi.fn(async () => ({
+    user_id: 'pins-user',
+    receipts: [],
+    next_cursor: null,
+  })),
+  saveAgentReadReceipts: vi.fn(async () => ({
+    user_id: 'pins-user',
+    receipts: [],
+    next_cursor: null,
+  })),
+}));
 import { AgentsSidebar } from './AgentsSidebar';
 import { DEFAULT_PREFERENCES, sidebarPreferencesKey } from './sidebarPreferences';
 

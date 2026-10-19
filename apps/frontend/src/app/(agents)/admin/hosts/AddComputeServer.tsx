@@ -45,6 +45,14 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
   );
 }
 
+// Where CloudLab's small-lan profile, and deploy/cloudlab/cloud-agent-node.py,
+// mount a new experiment's data disk unless told otherwise.
+const CLOUDLAB_DATA_MOUNT = '/mydata';
+
+function defaultSandboxStoragePath(providerId: string, mode: 'attach' | 'provision'): string {
+  return providerId === 'cloudlab' && mode === 'provision' ? CLOUDLAB_DATA_MOUNT : '';
+}
+
 function parseSandboxStoragePath(value: string): string {
   const path = value.trim();
   const invalid = (message: string): never => {
@@ -127,7 +135,10 @@ export default function AddComputeServer({
   const provider = catalog.providers.find((item) => item.id === providerId);
   const [mode, setMode] = useState<'attach' | 'provision'>(provider?.modes[0] ?? 'attach');
   const [name, setName] = useState('');
-  const [sandboxStoragePath, setSandboxStoragePath] = useState('');
+  // Null until the administrator types one: a new CloudLab experiment's disk
+  // is where small-lan mounts it, and that follows the server type until then.
+  const [sandboxStorageInput, setSandboxStorageInput] = useState<string | null>(null);
+  const sandboxStoragePath = sandboxStorageInput ?? defaultSandboxStoragePath(providerId, mode);
   const storageId = useId();
   const [account, setAccount] = useState(() => initialCredential(provider, connections));
   const sshProvider = catalog.providers.find((item) => item.id === 'existing_ssh');
@@ -420,12 +431,15 @@ export default function AddComputeServer({
                   ]
                     .filter(Boolean)
                     .join(' ')}
-                  onChange={(event) => setSandboxStoragePath(event.target.value)}
+                  onChange={(event) => setSandboxStorageInput(event.target.value)}
                 />
               </Field>
               <p id={`${storageId}-help`} className="mt-1 text-xs text-gray-500 dark:text-gray-400">
                 Absolute path to an existing mounted data disk on this server. Sandboxes,
                 workspaces, and session data are stored there.
+                {providerId === 'cloudlab' &&
+                  mode === 'provision' &&
+                  ` CloudLab's small-lan profile mounts its data disk at ${CLOUDLAB_DATA_MOUNT}; change this if your template mounts it elsewhere.`}
               </p>
               {fieldErrors.sandbox_storage_path && (
                 <p

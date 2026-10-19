@@ -23,7 +23,7 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-from tests.support.db import reset_agent_tables
+from tests.support.db import assert_pool_idle, reset_agent_tables
 from tests.support.migrations import apply_migrations
 
 from cloud_agent.api import routes as agent_jobs_router
@@ -337,9 +337,7 @@ async def test_environment_maintenance_lock_does_not_delay_attempt_reaper(api, m
         "superseded"
     )
     assert maintenance_completed.is_set(), "releasing the lock must let maintenance finish"
-    assert pool.get_idle_size() == pool.get_size(), (
-        "worker shutdown must return every pool connection"
-    )
+    await assert_pool_idle(pool, "worker shutdown must return every pool connection")
 
 
 async def test_cancel_running_job_is_delivered_via_heartbeat(api):

@@ -1049,7 +1049,8 @@ async def test_a_removal_counts_a_hosts_groups_under_their_locks(pool, store: St
         try:
             async with request.transaction():
                 # The request's fence, held until it is forwarded to the host.
-                assert await fence_sandbox_start(request, group["sandbox_id"]) == "stopped"
+                fenced = await fence_sandbox_start(request, group["sandbox_id"])
+                assert fenced is not None and fenced[0] == "stopped"
                 removing = asyncio.create_task(store.host_pool.remove_host(host="runner-a"))
                 await _blocked_by(pool, await request.fetchval("SELECT pg_backend_pid()"))
             removed = await asyncio.wait_for(removing, timeout=10)

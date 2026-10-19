@@ -512,7 +512,6 @@ async def test_the_lifespan_hands_the_loops_the_provider_not_a_snapshot(
     monkeypatch.setattr(
         "cloud_agent.bootstrap.lifespan.coordinate_sandbox_deletions", recording("sandbox_deletion")
     )
-    monkeypatch.setattr("cloud_agent.workers.pr_archive.pr_archive_loop", recording("archiver"))
     monkeypatch.setattr(
         "cloud_agent.bootstrap.lifespan.maintain_agent_memories", recording("memory")
     )
@@ -564,8 +563,6 @@ async def test_the_lifespan_hands_the_loops_the_provider_not_a_snapshot(
         assert not hasattr(app.state, "app_credentials")
         assert started["reaper"]["github_app"] is runtime.github
         assert started["publisher"]["github_app"] is runtime.github
-        assert started["archiver"]["github_app"] is runtime.github
-        assert started["archiver"]["client"] is app.state.http
         credentials = runtime.github.get()
         assert credentials is not None
         async with credentials._http() as client:
@@ -575,7 +572,6 @@ async def test_the_lifespan_hands_the_loops_the_provider_not_a_snapshot(
     assert compute_stopped.is_set()
     assert app.state.compute_resource_task.cancelled()
     assert app.state.sandbox_deletion_task.cancelled()
-    assert app.state.pr_archive_task.cancelled()
     assert app.state.agent_memory_task.cancelled()
 
     # The MCP listener shares the database but must not start another scheduler.
@@ -594,7 +590,6 @@ async def test_the_lifespan_hands_the_loops_the_provider_not_a_snapshot(
         assert relay.state.compute_commands is None
         assert relay.state.compute_resource_task is None
         assert relay.state.sandbox_deletion_task is None
-        assert relay.state.pr_archive_task is None
         assert relay.state.agent_memory_task is None
         compute_builder.assert_not_called()
         relay_runtime_builder.assert_not_called()

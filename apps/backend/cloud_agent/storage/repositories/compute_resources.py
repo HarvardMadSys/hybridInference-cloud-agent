@@ -15,6 +15,7 @@ import asyncpg
 
 from cloud_agent.capacity_protocol import FRESH_AFTER_SECONDS
 from cloud_agent.domain.compute import (
+    acquisition_absence_confirmable,
     autoscaling_acquire_can_cancel,
     autoscaling_operation_is_terminal,
     autoscaling_retirement_needs_settlement,
@@ -727,9 +728,17 @@ class PostgresComputeResourceRepository:
                 allocation_id,
             ):
                 raise ValueError("rotation_in_progress")
+            # Only an operation that can still act holds the records: one a
+            # worker runs, one whose outcome is unknown, or one still confirming
+            # a provider call, as the dispatcher and release count them. One
+            # that stopped keeps the flag of the call it last confirmed, since
+            # finishing merges results and a release cancels the rest as they
+            # stand. Once the provider confirms the machine gone, that call can
+            # change nothing; until then a resource must be released anyway,
+            # and without one the flag is a provider receipt like those below.
             if any(
                 operation["state"] in {"running", "unknown"}
-                or operation["result"].get("external_pending")
+                or (operation["state"] == "waiting" and operation["result"].get("external_pending"))
                 for operation in operations
             ):
                 raise ValueError("external_operation_unresolved")
@@ -773,6 +782,7 @@ class PostgresComputeResourceRepository:
                         operation["result"].get("resource_ref")
                         or operation["result"].get("external_id")
                         or operation["result"].get("resolved_external_id")
+                        or operation["result"].get("external_pending")
                         or (
                             operation["kind"] in {"acquire", "add", "import"}
                             and operation["step"] != "pending"
@@ -1741,7 +1751,18 @@ class PostgresComputeResourceRepository:
         request_id: str | None = None,
         kinds: list[str] | None = None,
     ) -> list[dict[str, Any]]:
-        """Find recent operation state, including recovery by request ID."""
+        """Find recent operation state, including recovery by request ID.
+
+        Newest first: the 200 newest matches, every match not yet settled
+        however old, and every failed or blocked acquisition of a server not
+        confirmed gone. Each live server is inspected every few minutes, so
+        newer rows soon push an acquisition out of the window. One whose
+        outcome is unknown holds its server until an administrator adopts or
+        retries it, and one that stopped past its first step holds it until a
+        retry or "Nothing was created" settles it; the Servers page reaches
+        either only through this listing. A server has one acquisition, so
+        this stays small, unlike its stream of inspections.
+        """
         async with self._pool.acquire() as conn:
             return [
                 _row(r)
@@ -1749,7 +1770,18 @@ class PostgresComputeResourceRepository:
                     """SELECT * FROM agent_compute_operations
                 WHERE ($1::text IS NULL OR allocation_id=$1) AND ($2::text IS NULL OR request_id=$2)
                   AND ($3::text[] IS NULL OR kind=ANY($3::text[]))
-                ORDER BY created_at DESC LIMIT 200""",
+                  AND (state IN ('pending','running','waiting','unknown')
+                       OR (state IN ('failed','blocked') AND kind IN ('acquire','add','import')
+                           AND allocation_id IN (
+                               SELECT id FROM agent_compute_allocations
+                               WHERE observed_state NOT IN ('terminated','absent')))
+                       OR id IN (
+                      SELECT id FROM agent_compute_operations
+                      WHERE ($1::text IS NULL OR allocation_id=$1)
+                        AND ($2::text IS NULL OR request_id=$2)
+                        AND ($3::text[] IS NULL OR kind=ANY($3::text[]))
+                      ORDER BY created_at DESC LIMIT 200))
+                ORDER BY created_at DESC""",
                     allocation_id,
                     request_id,
                     kinds,
@@ -3623,6 +3655,69 @@ class PostgresComputeResourceRepository:
                 WHERE id=$1 RETURNING *""",
                     operation_id,
                     external_id,
+                )
+            )
+
+    async def confirm_acquisition_absent(self, *, operation_id: str) -> dict[str, Any]:
+        """Close an acquisition an administrator confirmed created nothing.
+
+        Nothing here asks the provider: the administrator checked its portal,
+        and ``acquisition_absence_confirmable`` names the acquisitions whose
+        records cannot contradict them. A node that registered can, since only
+        a created machine runs one. The operation is cancelled, so nothing
+        retries it into a new request, and the allocation becomes absent,
+        which lets its records be removed.
+        """
+        async with self._pool.acquire() as conn, conn.transaction():
+            await lock_compute_entry(conn, exclusive=True)
+            await conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended('compute-dispatch',0))"
+            )
+            operation = await conn.fetchrow(
+                "SELECT * FROM agent_compute_operations WHERE id=$1 FOR UPDATE", operation_id
+            )
+            if operation is None:
+                raise ValueError("operation_not_found")
+            await conn.execute(
+                "SELECT 1 FROM agent_compute_allocations WHERE id=$1 FOR UPDATE",
+                operation["allocation_id"],
+            )
+            allocation = await self._allocation(conn, operation["allocation_id"])
+            if not acquisition_absence_confirmable(_row(operation), allocation):
+                raise ValueError("absence_not_confirmable")
+            assert allocation is not None
+            # A node's first boot registers under its registration row alone,
+            # without the compute fence. Taking the open rows waits for one
+            # still in flight, which the check below then sees, and leaves a
+            # node that boots later no token to register with.
+            await conn.execute(
+                "DELETE FROM agent_compute_node_registrations "
+                "WHERE allocation_id=$1 AND registered_at IS NULL",
+                allocation["id"],
+            )
+            if await conn.fetchval(
+                "SELECT 1 FROM agent_compute_node_registrations "
+                "WHERE allocation_id=$1 AND registered_at IS NOT NULL LIMIT 1",
+                allocation["id"],
+            ):
+                raise ValueError("provider_node_registered")
+            await conn.execute(
+                """UPDATE agent_compute_allocations
+                   SET desired_state='absent',observed_state='absent',
+                       scope_complete=TRUE,observation_error=NULL,observed_at=NOW(),
+                       revision=revision+1,updated_at=NOW()
+                   WHERE id=$1""",
+                allocation["id"],
+            )
+            return _row(
+                await conn.fetchrow(
+                    """UPDATE agent_compute_operations
+                       SET state='cancelled',
+                           message='An administrator confirmed the provider created nothing for this request.',
+                           result=result || jsonb_build_object('confirmed_absent',TRUE),
+                           completed_at=NOW(),updated_at=NOW()
+                       WHERE id=$1 RETURNING *""",
+                    operation_id,
                 )
             )
 

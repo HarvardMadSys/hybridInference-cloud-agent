@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import socket
 import ssl
 from contextlib import suppress
 from datetime import datetime, timezone
@@ -41,6 +42,7 @@ from cloud_agent.ports.external.compute_provider import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from urllib.parse import SplitResult
 
     from cloud_agent.ports.external.compute_provider import SecretResolver
 
@@ -102,9 +104,16 @@ class CloudLabConfig(ComputeValue):
 _MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 #: An error body is read only for its short ``error`` diagnostic.
 _MAX_ERROR_BYTES = 16 * 1024
+#: httpx's limit on each step of a request: connecting, and each read or write.
+_STEP_TIMEOUT_S = 60.0
 #: One request from connect to its last body byte. httpx's own timeout bounds
 #: each read, so an endpoint that drips a byte at a time is bounded only here.
 _REQUEST_DEADLINE_S = 180.0
+#: OpenSSL verification results (``X509_V_ERR_*``) that name the problem.
+_CERTIFICATE_EXPIRED = 10
+_CERTIFICATE_NAME_MISMATCH = {62, 64}
+#: Points a failure the administrator can correct at the setting that causes it.
+_CHECK_URL = "Check the CloudLab API URL setting."
 _SAFE_DIAGNOSTIC_VALUE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 _SENSITIVE_DIAGNOSTIC_VALUE = re.compile(
     r"token|secret|password|credential|bearer|api[_-]?key|jwt", re.IGNORECASE
@@ -280,28 +289,100 @@ def _safe_diagnostic_context(context: dict[str, Any] | None) -> dict[str, str]:
     return safe
 
 
-def _connection_failure_reason(error: BaseException) -> str:
-    """Distinguish certificate failures without retaining provider exception text."""
-    pending: list[BaseException] = [error]
+def _causes(error: BaseException) -> list[BaseException]:
+    """The error and every exception it was raised from or while handling, once each."""
+    found: list[BaseException] = []
     seen: set[int] = set()
+    pending = [error]
     while pending:
         current = pending.pop()
         if id(current) in seen:
             continue
         seen.add(id(current))
-        if isinstance(current, ssl.SSLError):
-            return "tls_verification_failed"
-        # HTTPX can wrap OpenSSL failures in ConnectError. Inspect only to map
-        # to a fixed label; never persist or log this text.
-        message = str(current).lower()
-        if "certificate" in message and any(
-            phrase in message for phrase in ("verify", "expired", "self-signed", "unknown ca")
+        found.append(current)
+        pending.extend(
+            cause for cause in (current.__cause__, current.__context__) if cause is not None
+        )
+        # A host with several addresses fails with an exception group: one
+        # member per address tried.
+        pending.extend(getattr(current, "exceptions", ()))
+    return found
+
+
+def _connection_failure(error: BaseException, url: SplitResult) -> tuple[str, str]:
+    """Name why no byte reached CloudLab: a fixed reason code and message.
+
+    The message names the configured endpoint, never provider exception text,
+    which is inspected only to choose among fixed phrases.
+    """
+    endpoint, host = url.netloc, url.hostname
+    causes = _causes(error)
+    unreachable = "CloudLab could not be reached:"
+    verification = next(
+        (cause for cause in causes if isinstance(cause, ssl.SSLCertVerificationError)), None
+    )
+    # HTTPX can wrap OpenSSL failures in ConnectError without the SSL error.
+    reported = [
+        text
+        for text in (str(cause).lower() for cause in causes)
+        if "certificate" in text
+        and any(phrase in text for phrase in ("verify", "expired", "self-signed", "unknown ca"))
+    ]
+    if verification is not None or reported:
+        code = verification.verify_code if verification is not None else None
+        if code == _CERTIFICATE_EXPIRED or (
+            code is None and any("expired" in text for text in reported)
         ):
-            return "tls_verification_failed"
-        for cause in (current.__cause__, current.__context__):
-            if isinstance(cause, BaseException):
-                pending.append(cause)
-    return "connect_failed"
+            problem = "has expired."
+        elif code in _CERTIFICATE_NAME_MISMATCH:
+            problem = f"is not valid for {host}. {_CHECK_URL}"
+        else:
+            problem = "could not be verified."
+        return "tls_verification_failed", f"{unreachable} the certificate at {endpoint} {problem}"
+    if any(isinstance(cause, socket.gaierror) for cause in causes):
+        return "connect_failed", f"{unreachable} {host} does not resolve. {_CHECK_URL}"
+    if any(isinstance(cause, ConnectionRefusedError) for cause in causes):
+        return "connect_failed", f"{unreachable} {endpoint} refused the connection. {_CHECK_URL}"
+    if isinstance(error, httpx.ConnectTimeout | httpx.PoolTimeout):
+        # Checked before other TLS errors: a handshake the timeout cut short
+        # leaves an SSLWantReadError behind, which is no certificate problem.
+        return "connect_failed", (
+            f"{unreachable} {endpoint} did not accept a connection within "
+            f"{_STEP_TIMEOUT_S:g} seconds. Check the CloudLab API URL setting and any "
+            "firewall between this server and CloudLab."
+        )
+    if any(isinstance(cause, ConnectionResetError) for cause in causes):
+        return "connect_failed", (
+            f"{unreachable} the connection to {endpoint} was reset. "
+            "Check for a firewall or proxy between this server and CloudLab."
+        )
+    if any(
+        isinstance(cause, ssl.SSLError)
+        and not isinstance(cause, ssl.SSLWantReadError | ssl.SSLWantWriteError)
+        for cause in causes
+    ):
+        return "tls_verification_failed", (
+            f"{unreachable} the TLS handshake with {endpoint} failed. "
+            "Check that the CloudLab API URL setting names CloudLab's HTTPS port."
+        )
+    return "connect_failed", f"CloudLab could not be reached at {endpoint}."
+
+
+def _response_failure(error: BaseException, endpoint: str) -> str:
+    """Name why a read sent to CloudLab got no complete response, in fixed phrases."""
+    if isinstance(error, httpx.ProxyError):
+        return (
+            "CloudLab could not be reached: the outbound proxy refused the connection "
+            f"to {endpoint}."
+        )
+    if isinstance(error, httpx.TimeoutException):
+        return f"CloudLab at {endpoint} did not answer within {_STEP_TIMEOUT_S:g} seconds."
+    if isinstance(error, TimeoutError):
+        return (
+            f"CloudLab at {endpoint} did not finish answering within "
+            f"{_REQUEST_DEADLINE_S:g} seconds."
+        )
+    return f"CloudLab at {endpoint} did not return a complete response."
 
 
 def _diagnostic_context(
@@ -462,24 +543,20 @@ class CloudLabProvider(ComputeProvider):
             # No byte of the request left this process: the TCP or TLS
             # handshake failed (the API host has intermittently served an
             # expired certificate). Even a mutation is safe to send again.
+            reason, message = _connection_failure(exc, urlsplit(api_url))
             raise ProviderError(
                 "temporarily_unavailable",
-                "CloudLab could not be reached",
+                message,
                 retryable=True,
-                diagnostics=self._network_diagnostics(
-                    method,
-                    path,
-                    diagnostic_context,
-                    _connection_failure_reason(exc),
-                ),
+                diagnostics=self._network_diagnostics(method, path, diagnostic_context, reason),
             ) from None
-        except (httpx.RequestError, TimeoutError):
+        except (httpx.RequestError, TimeoutError) as exc:
             mutation = method != "GET"
             raise ProviderError(
                 "result_unknown" if mutation else "temporarily_unavailable",
                 "CloudLab request outcome is unknown"
                 if mutation
-                else "CloudLab could not be reached",
+                else _response_failure(exc, urlsplit(api_url).netloc),
                 retryable=not mutation,
                 diagnostics=self._network_diagnostics(
                     method,
@@ -548,7 +625,7 @@ class CloudLabProvider(ComputeProvider):
             headers=headers,
             json=payload,
             follow_redirects=False,
-            timeout=60,
+            timeout=_STEP_TIMEOUT_S,
         ) as streamed:
             status = streamed.status_code
             limit = (

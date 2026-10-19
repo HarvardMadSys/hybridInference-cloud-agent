@@ -18,6 +18,12 @@ if TYPE_CHECKING:
 class ConversationCommands(Protocol):
     """Port: creating and mutating conversations and their jobs."""
 
+    async def merge_read_receipts(
+        self, *, user_id: str, receipts: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Advance owned completion receipts, ignoring invalid or obsolete inputs."""
+        ...
+
     async def create_job(
         self,
         *,

@@ -6,7 +6,7 @@ import asyncio
 import contextlib
 from typing import TYPE_CHECKING, Any, Protocol
 
-from cloud_agent.application.pending_messages import settle_waiting_queues
+from cloud_agent.application.pending_messages import QueueSweep, settle_waiting_queues
 from cloud_agent.application.send_now import recover_handoffs
 from cloud_agent.gateway import GatewayError
 from cloud_agent.grants import GRANT_TTL_S, RENEWAL_INTERVAL_S
@@ -665,6 +665,7 @@ async def _run_attempt_reaper(
             without one, a message naming either waits for a settlement that
             can check it.
     """
+    queue_sweep = QueueSweep()
     while True:
         await asyncio.sleep(interval_seconds)
         # Hosts first. A machine that stopped heartbeating should be out of the
@@ -789,7 +790,9 @@ async def _run_attempt_reaper(
         # its settlement included. The backstop, not the mechanism; in its own
         # try so a queue cannot stop attempts being recovered.
         try:
-            await settle_waiting_queues(store, gateway=gateway, github_app=github_app)
+            await settle_waiting_queues(
+                store, gateway=gateway, github_app=github_app, sweep=queue_sweep
+            )
         except Exception:
             logger.warning("Pending message queue sweep failed", exc_info=True)
         # After the reaper, so an attempt superseded in this very pass has its

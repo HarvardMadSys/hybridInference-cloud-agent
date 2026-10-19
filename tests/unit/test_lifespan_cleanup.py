@@ -41,7 +41,6 @@ _EXPECTED_SHUTDOWN_TASKS = (
     "agent_memory_task",
     "queue_monitor_task",
     "publish_task",
-    "pr_archive_task",
     "profiling_policy_task",
     "compute_resource_task",
     "notification_listener_task",
@@ -149,7 +148,6 @@ _STAGES = [
         ("job_event_signal", True, False),
         ("owner_change_signal", True, False),
         ("publisher", True, False),
-        ("pr_archiver", True, False),
     ),
     *_only(False, ("mcp_decision_signal", True, False)),
 ]
@@ -362,7 +360,6 @@ def _prepare(
         ("cloud_agent.capacity_history.prune_host_capacity_history", "capacity_task"),
         ("cloud_agent.operational_health.monitor_queue", "queue_monitor_task"),
         ("cloud_agent.publish_worker.publish_loop", "publish_task"),
-        ("cloud_agent.workers.pr_archive.pr_archive_loop", "pr_archive_task"),
         ("cloud_agent.mcp.runtime.maintain_host_sessions", "mcp_maintenance_task"),
     ):
         monkeypatch.setattr(target, _idle(events, label))
@@ -462,7 +459,6 @@ def _inject(monkeypatch: pytest.MonkeyPatch, stage: str | None) -> None:
         "owner_change_signal": ("cloud_agent.bootstrap.lifespan.OwnerChangeSignal", _boom(stage)),
         "listen": ("cloud_agent.bootstrap.lifespan.listen", _boom(stage)),
         "publisher": ("cloud_agent.publish_worker.publish_loop", _boom(stage)),
-        "pr_archiver": ("cloud_agent.workers.pr_archive.pr_archive_loop", _boom(stage)),
         "mcp_maintenance": ("cloud_agent.mcp.runtime.maintain_host_sessions", _boom(stage)),
         "mcp_decision_signal": ("cloud_agent.bootstrap.lifespan.McpDecisionSignal", _boom(stage)),
         "measurement_writer": ("cloud_agent.measurement_writer.MeasurementWriter", _boom(stage)),

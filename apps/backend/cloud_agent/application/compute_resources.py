@@ -22,6 +22,7 @@ from cloud_agent.application.server_queries import ServerQueries
 from cloud_agent.compute_config import current_observation_seconds
 from cloud_agent.domain.compute import (
     ComputeRefusal,
+    acquisition_absence_confirmable,
     autoscaling_acquire_can_cancel,
     autoscaling_operation_is_terminal,
     autoscaling_retirement_needs_settlement,
@@ -783,6 +784,8 @@ class ComputeCommands:
             and not row.get("result", {}).get("resource_ref")
         ):
             result["allowed_actions"].append("resolve")
+        if acquisition_absence_confirmable(row, allocation):
+            result["allowed_actions"].append("confirm_absent")
         if autoscaling_operation_is_terminal(row, allocation):
             result["allowed_actions"] = [
                 action for action in result["allowed_actions"] if action not in {"retry", "cancel"}

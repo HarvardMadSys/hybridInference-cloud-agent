@@ -122,6 +122,7 @@ from cloud_agent_shared.operation_profiling import PROFILING_CONTEXT_HEADER
 from cloud_agent_shared.plugins import MAX_SANDBOX_PLUGINS, SandboxPlugin
 from cloud_agent_shared.sandbox_archive_settings import SandboxArchivePolicyError
 from cloud_agent_shared.sandbox_manager_compat import manager_env
+from cloud_agent_shared.sandbox_restore import START_FENCE_HEADER, parse_start_fence
 from cloud_agent_shared.shared_protocol import SNAPSHOT_BASE_MISSING
 from cloud_agent_shared.workspace_browser import (
     WorkspacePathError,
@@ -2331,6 +2332,9 @@ def create_app(
     if checkpoint_capture is not None and callable(start_seq_for):
         # A receipt names the start fence of the run its stop ended.
         checkpoint_capture.start_seq_for = start_seq_for
+        # A group found again after a restart seals the fence of the last
+        # checkpoint this host kept of its container.
+        shared_supervisor.checkpoint_seq_for = checkpoint_capture.receipt_start_seq
     terminals = _TerminalManager(
         idle_ttl_s=idle_ttl_s,
         hard_ttl_s=hard_ttl_s,
@@ -2737,6 +2741,7 @@ def create_app(
         operation: Callable[[RetainedChatBackend, SandboxManagerCall], dict[str, Any]],
         *,
         call: SandboxManagerCall | None = None,
+        start_seq: int | None = None,
     ) -> dict[str, Any]:
         """Open a workspace, run one operation, and answer its measurement call.
 
@@ -2752,7 +2757,7 @@ def create_app(
         token: str | None = None
         try:
             with active.stage("admission"):
-                token, _ = owner.operation_opened(workspace_id)
+                token, _ = owner.operation_opened(workspace_id, start_seq=start_seq)
             retained = owner.backend(workspace_id)
             with active.stage("network"):
                 retained.manager.require_network(retained.spec)
@@ -2769,13 +2774,15 @@ def create_app(
     async def owner_command(
         workspace_id: str,
         operation: Callable[[RetainedChatBackend, SandboxManagerCall], dict[str, Any]],
+        *,
+        start_seq: int | None = None,
     ) -> dict[str, Any]:
         """Run an owner's one-shot command or Git inspection on the command pool."""
         give_back = command_slots.take(workspace_id)
 
         def run() -> dict[str, Any]:
             try:
-                return retained_operation(workspace_id, operation)
+                return retained_operation(workspace_id, operation, start_seq=start_seq)
             finally:
                 give_back()
 
@@ -2995,7 +3002,6 @@ def create_app(
                 shared_spec(body),
                 shared_manifest(body.members),
                 expected_container_id=body.expected_container_id,
-                start_seq=body.start_seq,
             )
         except (SandboxError, ValueError) as exc:
             raise supervisor_error(exc) from exc
@@ -3559,11 +3565,11 @@ def create_app(
                 shared_spec(body),
                 shared_manifest(source_members),
                 expected_container_id=body.expected_container_id,
-                start_seq=body.start_seq,
             )
             result = await endpoint_calls.run(
                 owner.fork_native,
                 thread_id,
+                start_seq=body.start_seq,
                 operation_id=body.operation_id,
                 source_native_session_id=body.source_native_session_id,
                 source_native_turn_no=body.source_native_turn_no,
@@ -3636,12 +3642,12 @@ def create_app(
                 shared_spec(body),
                 shared_manifest(body.members),
                 expected_container_id=body.expected_container_id,
-                start_seq=body.start_seq,
             )
             result = await endpoint_calls.run(
                 owner.capture_snapshot,
                 thread_id,
                 capture=lambda backend: capture_environment_snapshot(backend, body),
+                start_seq=body.start_seq,
             )
         except (SandboxError, ValueError) as exc:
             raise supervisor_error(exc) from exc
@@ -3679,9 +3685,10 @@ def create_app(
                 shared_spec(body),
                 shared_manifest(body.members),
                 expected_container_id=body.expected_container_id,
-                start_seq=body.start_seq,
             )
-            token, _descriptor = await endpoint_calls.run(owner.operation_opened, thread_id)
+            token, _descriptor = await endpoint_calls.run(
+                owner.operation_opened, thread_id, start_seq=body.start_seq
+            )
             try:
                 # The supervisor's lock is never taken on the event loop.
                 backend = await endpoint_calls.run(owner.backend, thread_id)
@@ -3787,6 +3794,7 @@ def create_app(
         path: str = Query("", max_length=4096),
         _: None = Depends(authenticate),
     ) -> dict[str, Any]:
+        start_seq = parse_start_fence(request.headers.get(START_FENCE_HEADER))
         relative = _relative_path(path)
         # A path alone cannot say what this request is: the empty path is the
         # root listing, but a non-empty one may be a file preview or a
@@ -3811,11 +3819,12 @@ def create_app(
                 active.set_operation("files.open")
             return body
 
-        return retained_operation(workspace_id, _read, call=call)
+        return retained_operation(workspace_id, _read, call=call, start_seq=start_seq)
 
     @app.put("/workspaces/{workspace_id}/files")
     def write_file(
         workspace_id: str,
+        request: Request,
         body: FileWriteRequest,
         path: str = Query(..., min_length=1, max_length=4096),
         _: None = Depends(authenticate),
@@ -3831,11 +3840,13 @@ def create_app(
                 max_preview_bytes=int(applied_settings["workspace_file_preview_max_kib"]) * 1024,
                 max_directory_entries=int(applied_settings["workspace_directory_max_entries"]),
             ),
+            start_seq=parse_start_fence(request.headers.get(START_FENCE_HEADER)),
         )
 
     @app.get("/workspaces/{workspace_id}/archive")
     async def workspace_archive(
         workspace_id: str,
+        request: Request,
         _: None = Depends(authenticate),
     ) -> StreamingResponse:
         """Send workspace files without Git metadata, or refuse the download whole.
@@ -3871,7 +3882,11 @@ def create_app(
             return {}
 
         try:
-            await owner_command(workspace_id, export)
+            await owner_command(
+                workspace_id,
+                export,
+                start_seq=parse_start_fence(request.headers.get(START_FENCE_HEADER)),
+            )
         except BaseException:
             spool.close()
             raise
@@ -3911,7 +3926,10 @@ def create_app(
 
     @app.post("/workspaces/{workspace_id}/environment/prepare")
     async def prepare_environment(
-        workspace_id: str, body: EnvironmentPrepareRequest, _: None = Depends(authenticate)
+        workspace_id: str,
+        request: Request,
+        body: EnvironmentPrepareRequest,
+        _: None = Depends(authenticate),
     ) -> dict[str, Any]:
         # The supervisor's lock and the network check stay off the event loop.
         owner = await endpoint_calls.run(retained_owner, workspace_id)
@@ -3923,6 +3941,7 @@ def create_app(
             body.environment,
             environment_preparation,
             activation_owner=body.activation_owner,
+            start_seq=parse_start_fence(request.headers.get(START_FENCE_HEADER)),
         )
 
     @app.put("/workspaces/{workspace_id}/ssh-access")
@@ -3961,9 +3980,11 @@ def create_app(
     @app.post("/workspaces/{workspace_id}/terminal")
     async def terminal(
         workspace_id: str,
+        request: Request,
         body: TerminalRequest,
         _: None = Depends(authenticate),
     ) -> dict[str, Any]:
+        start_seq = parse_start_fence(request.headers.get(START_FENCE_HEADER))
         if body.environment is not None and body.environment.required:
             owner = await endpoint_calls.run(retained_owner, workspace_id)
             await endpoint_calls.run(
@@ -3971,6 +3992,7 @@ def create_app(
                 workspace_id,
                 body.environment,
                 environment_preparation,
+                start_seq=start_seq,
             )
         return await owner_command(
             workspace_id,
@@ -3983,6 +4005,7 @@ def create_app(
                 * 1024
                 * 1024,
             ),
+            start_seq=start_seq,
         )
 
     @app.post("/workspaces/{workspace_id}/terminals")
@@ -3996,6 +4019,7 @@ def create_app(
             request.headers.get(PROFILING_CONTEXT_HEADER), operations=("terminal.open",)
         )
         owner = await endpoint_calls.run(retained_owner, workspace_id)
+        start_seq = parse_start_fence(request.headers.get(START_FENCE_HEADER))
         terminal_token: str | None = None
         try:
             if body.environment is not None and body.environment.required:
@@ -4004,9 +4028,12 @@ def create_app(
                     workspace_id,
                     body.environment,
                     environment_preparation,
+                    start_seq=start_seq,
                 )
             with call.stage("admission"):
-                token, descriptor = await endpoint_calls.run(owner.terminal_opened, workspace_id)
+                token, descriptor = await endpoint_calls.run(
+                    owner.terminal_opened, workspace_id, start_seq=start_seq
+                )
             terminal_token = token
             retained = await endpoint_calls.run(owner.backend, workspace_id)
             with call.stage("network"):
@@ -4214,6 +4241,7 @@ def create_app(
     @app.get("/workspaces/{workspace_id}/git")
     async def git(
         workspace_id: str,
+        request: Request,
         base_sha: str | None = Query(None, max_length=64),
         _: None = Depends(authenticate),
     ) -> dict[str, Any]:
@@ -4228,6 +4256,7 @@ def create_app(
                 * 1024
                 * 1024,
             ),
+            start_seq=parse_start_fence(request.headers.get(START_FENCE_HEADER)),
         )
 
     return app

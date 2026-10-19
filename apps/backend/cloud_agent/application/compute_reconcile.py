@@ -23,6 +23,7 @@ from cloud_agent.compute_config import current_observation_seconds, current_regi
 from cloud_agent.compute_secrets import ComputeSecretError
 from cloud_agent.domain.compute import (
     MOVE_OUT_RENEWAL_LEAD_SECONDS,
+    RECLAIMED_QUIET_SECONDS,
     ComputeRefusal,
     fingerprint,
     move_out_window_seconds,
@@ -105,9 +106,6 @@ _RELEASE_ATTEMPTS = 3
 # that is off the control plane's commit, it is reported: the Host can neither
 # take work nor be rolled forward until someone resumes it.
 _RELEASE_FENCE_ALERT_AFTER = timedelta(minutes=30)
-# After its provider confirms a machine is gone, how long its Host must have
-# been silent before the groups it still holds are marked lost.
-_RECLAIMED_QUIET_SECONDS = 600
 
 
 # How long past its recorded deadline a missing resource is taken as ended.
@@ -527,7 +525,7 @@ class ComputeReconciler:
     async def _lose_reclaimed_groups(self, row: dict[str, Any]) -> None:
         """End the chats whose sandboxes went with a machine its provider reclaimed."""
         lost = await self.repository.lose_reclaimed_groups(
-            allocation_id=row["id"], quiet_seconds=_RECLAIMED_QUIET_SECONDS
+            allocation_id=row["id"], quiet_seconds=RECLAIMED_QUIET_SECONDS
         )
         if not lost:
             return

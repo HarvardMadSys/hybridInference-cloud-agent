@@ -28,7 +28,7 @@ from cloud_agent_host.sandbox_archive_s3 import (
     SandboxArchiveS3Config,
     SandboxArchiveS3Uploader,
 )
-from cloud_agent_host.sandbox_archives import SandboxArchiveService
+from cloud_agent_host.sandbox_archives import SandboxArchiveService, SandboxInitialArchiveMarker
 from cloud_agent_host.shared_session_supervisor import SharedMemberManifest
 from cloud_agent_shared.errors import SandboxError
 
@@ -141,6 +141,18 @@ class _Manager:
     ) -> bytes | None:
         assert expected_container_id == self.current.container_id
         return self.marker
+
+    def delete_initial_archive_marker(
+        self,
+        _spec: ChatSandboxSpec,
+        expected_payload: bytes,
+        *,
+        expected_container_id: str,
+    ) -> None:
+        assert expected_container_id == self.current.container_id
+        if self.marker != expected_payload:
+            raise SandboxError("marker changed before deletion")
+        self.marker = None
 
     def write_initial_archive_marker(
         self,
@@ -1214,3 +1226,50 @@ def test_a_service_without_checkpoints_keeps_its_status_shape() -> None:
     assert set(service.status()["phases"]) == {"initial", "final"}
     with pytest.raises(SandboxError, match="not configured"):
         service.capture_checkpoint(spec, manager.current, _members())
+
+
+def test_a_restored_containers_inherited_baseline_is_not_its_own() -> None:
+    """A checkpoint carries the stopped generation's initial marker into its restore.
+
+    The restored container is a later generation with another id. Probing finds
+    no baseline of its own instead of refusing, and a capture writes its own.
+    """
+    spec = _spec()
+    manager = _Manager(spec, running=True)
+    uploader = _Uploader(_config())
+    service = _service(manager, uploader)
+    service.start()
+    service.capture_initial(
+        RetainedChatBackend(manager, spec),  # type: ignore[arg-type]
+        expected_container_id=_CONTAINER_ID,
+        preparation_id=_PREPARATION_ID,
+        base_sha=_BASE_SHA,
+        members=(),
+    )
+    inherited = manager.marker
+    assert inherited is not None
+    restored = replace(spec, generation=spec.generation + 1)
+    manager.current = replace(
+        _inspection(restored, running=True), container_id="container-restored"
+    )
+
+    probe = service.probe_initial(
+        RetainedChatBackend(manager, restored),  # type: ignore[arg-type]
+        expected_container_id="container-restored",
+        preparation_id=_PREPARATION_ID,
+        members=(),
+    )
+    assert probe == {"enabled": True, "prepared": False, "stored": False}
+
+    service.capture_initial(
+        RetainedChatBackend(manager, restored),  # type: ignore[arg-type]
+        expected_container_id="container-restored",
+        preparation_id=_PREPARATION_ID,
+        base_sha=_BASE_SHA,
+        members=(),
+    )
+    service.close()
+
+    assert manager.marker != inherited
+    marker = SandboxInitialArchiveMarker.decode(manager.marker)
+    assert (marker.generation, marker.container_id) == (8, "container-restored")
