@@ -126,8 +126,13 @@ class GoalRepository(Protocol):
         """
         ...
 
-    async def clear_goal(self, *, thread_id: str, user_id: str) -> bool:
-        """Remove the goal entirely, cancelling any queued automatic round."""
+    async def clear_goal(
+        self, *, thread_id: str, user_id: str, expected_revision: int | None = None
+    ) -> bool:
+        """Remove the goal entirely, cancelling any queued automatic round.
+
+        Raises ``GoalConflict`` when ``expected_revision`` no longer matches.
+        """
         ...
 
     async def apply_action(

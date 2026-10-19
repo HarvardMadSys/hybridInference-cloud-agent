@@ -10922,7 +10922,7 @@
         "type": "object"
       },
       "GoalRevisionRequest": {
-        "description": "An optional compare-and-set guard on a goal operation.\n\nOmitted means \"act on whatever the goal currently is\", which is what the\npause and resume buttons send: they are idempotent by nature, and refusing\nto press one because a round advanced a counter would be a worse answer than\ndoing what was asked.",
+        "description": "An optional compare-and-set guard on a goal operation.\n\nOmitted means \"act on whatever the goal currently is\", which is what the\npause and resume buttons send: they are idempotent by nature, and refusing\nto press one because a round advanced a counter would be a worse answer than\ndoing what was asked. Clear sends it: the owner confirmed removing the goal\nthey saw, not whatever replaced it since.",
         "properties": {
           "revision": {
             "anyOf": [
@@ -38093,7 +38093,7 @@
     },
     "/v1/agent/threads/{thread_id}/goal": {
       "delete": {
-        "description": "Remove the goal, and every automatic round that was queued for it.\n\nThe revision moves and the identity is cleared, so a report written about\nthe removed objective can never match whatever the owner sets next.",
+        "description": "Remove the goal, and every automatic round that was queued for it.\n\nThe revision moves and the identity is cleared, so a report written about\nthe removed objective can never match whatever the owner sets next.\n\n``revision`` is the goal the owner confirmed removing: one that has moved\npast it since, edited or replaced from another tab, is refused with a 409\nrather than removed unseen. Omitted means \"whatever it currently says\".",
         "operationId": "clear_agent_goal_v1_agent_threads__thread_id__goal_delete",
         "parameters": [
           {
@@ -38122,6 +38122,23 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/GoalRevisionRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "content": {

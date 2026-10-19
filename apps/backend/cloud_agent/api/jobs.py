@@ -656,6 +656,7 @@ async def resume_agent_goal(
 @router.delete("/threads/{thread_id}/goal", response_model=GoalClearedResponse)
 async def clear_agent_goal(
     thread_id: str,
+    body: GoalRevisionRequest | None = None,
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _JobsStorage | None = Depends(get_storage),
 ) -> GoalClearedResponse:
@@ -663,9 +664,20 @@ async def clear_agent_goal(
 
     The revision moves and the identity is cleared, so a report written about
     the removed objective can never match whatever the owner sets next.
+
+    ``revision`` is the goal the owner confirmed removing: one that has moved
+    past it since, edited or replaced from another tab, is refused with a 409
+    rather than removed unseen. Omitted means "whatever it currently says".
     """
     job_store = _require_store(store)
-    cleared = await job_store.goals.clear_goal(thread_id=thread_id, user_id=user["user_id"])
+    try:
+        cleared = await job_store.goals.clear_goal(
+            thread_id=thread_id,
+            user_id=user["user_id"],
+            expected_revision=body.revision if body is not None else None,
+        )
+    except GoalConflict as exc:
+        raise _goal_conflict_error() from exc
     state = await job_store.goals.get_thread_goal_state(
         user_id=user["user_id"], thread_id=thread_id
     )

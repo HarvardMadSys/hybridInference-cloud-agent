@@ -397,9 +397,28 @@ class PostgresGoalRepository:
             )
         return goal_row_to_dict(row)
 
-    async def clear_goal(self, *, thread_id: str, user_id: str) -> bool:
-        """Remove the goal entirely, cancelling any queued automatic round."""
+    async def clear_goal(
+        self, *, thread_id: str, user_id: str, expected_revision: int | None = None
+    ) -> bool:
+        """Remove the goal entirely, cancelling any queued automatic round.
+
+        Raises ``GoalConflict`` when ``expected_revision`` no longer matches, so a
+        clear confirmed against one goal never removes a newer one.
+        """
         async with self._pool.acquire() as conn, conn.transaction():
+            if expected_revision is not None:
+                current = await conn.fetchrow(
+                    """
+                    SELECT goal_revision
+                    FROM agent_threads
+                    WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
+                    FOR UPDATE
+                    """,
+                    thread_id,
+                    user_id,
+                )
+                if current is not None and expected_revision != int(current["goal_revision"] or 0):
+                    raise GoalConflict("This goal changed since you read it. Reload and try again.")
             cleared = await conn.fetchval(
                 """
                 UPDATE agent_threads

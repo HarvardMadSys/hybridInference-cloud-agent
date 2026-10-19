@@ -425,6 +425,23 @@ async def test_clear_removes_the_goal_and_cancels_its_queued_round(client, store
     assert read_back.json() == {"thread_id": thread_id, "goal": None, "revision": 2}
 
 
+async def test_a_clear_against_a_stale_revision_is_refused(client, store):
+    """A confirmed clear removes the goal its owner saw, never a newer one."""
+    _, thread_id = await _conversation(client, store)
+    await _set(client, thread_id)
+    await _set(client, thread_id, objective="ship it safely", revision=1)
+
+    stale = await client.request("DELETE", _path(thread_id), json={"revision": 1})
+    assert stale.status_code == 409
+    assert _error_type(stale) == "goal_revision_conflict"
+    current = await client.get(_path(thread_id))
+    assert current.json()["goal"]["objective"] == "ship it safely"
+
+    cleared = await client.request("DELETE", _path(thread_id), json={"revision": 2})
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json() == {"thread_id": thread_id, "cleared": True, "revision": 3}
+
+
 async def test_clearing_a_conversation_with_no_goal_changes_nothing(client, store):
     _, thread_id = await _conversation(client, store)
 

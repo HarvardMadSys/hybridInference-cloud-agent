@@ -331,6 +331,27 @@ async def test_a_stale_revision_is_refused_and_nothing_is_written(store):
     assert (unchanged["objective"], unchanged["revision"]) == ("ship it safely", 2)
 
 
+async def test_a_clear_against_a_stale_revision_is_refused_and_removes_nothing(store):
+    job, _ = await _goal_job(store)
+    await store.goals.set_goal(
+        thread_id=job["thread_id"],
+        user_id=job["user_id"],
+        goal=GoalInput(objective="ship it safely"),
+        expected_revision=1,
+    )
+    with pytest.raises(GoalConflict):
+        await store.goals.clear_goal(
+            thread_id=job["thread_id"], user_id=job["user_id"], expected_revision=1
+        )
+    unchanged = await store.goals.get_goal(thread_id=job["thread_id"])
+    assert (unchanged["objective"], unchanged["revision"]) == ("ship it safely", 2)
+
+    assert await store.goals.clear_goal(
+        thread_id=job["thread_id"], user_id=job["user_id"], expected_revision=2
+    )
+    assert await store.goals.get_goal(thread_id=job["thread_id"]) is None
+
+
 async def test_editing_a_paused_goal_leaves_it_paused(store):
     """Changing the words is not resuming it, and the reason it stopped stands."""
     job, goal = await _goal_job(store)

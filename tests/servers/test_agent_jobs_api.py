@@ -340,8 +340,15 @@ class FakeGoals:
         )
         return dict(written)
 
-    async def clear_goal(self, *, thread_id: str, user_id: str) -> bool:
-        if not self._owned(thread_id, user_id) or self._goal(thread_id) is None:
+    async def clear_goal(
+        self, *, thread_id: str, user_id: str, expected_revision: int | None = None
+    ) -> bool:
+        if not self._owned(thread_id, user_id):
+            return False
+        revision = self._store.goal_revisions.get(thread_id, 0)
+        if expected_revision is not None and expected_revision != revision:
+            raise GoalConflict("This goal changed since you read it. Reload and try again.")
+        if self._goal(thread_id) is None:
             return False
         del self._store.thread_goals[thread_id]
         # The version keeps moving: the next write compares against the revision
