@@ -190,7 +190,10 @@ export function ArchivedTasksView() {
     if (!(cause instanceof APIError)) return fallback;
     if (cause.code === 'session_selection_too_large')
       return t('archive.bulkLimit', { count: BULK_LIMIT });
-    const key = SESSION_ERROR_KEYS[cause.code as keyof typeof SESSION_ERROR_KEYS];
+    // Own entries only: a code of `__proto__` must not find Object.prototype's.
+    const key = Object.hasOwn(SESSION_ERROR_KEYS, cause.code)
+      ? SESSION_ERROR_KEYS[cause.code as keyof typeof SESSION_ERROR_KEYS]
+      : undefined;
     return key ? t(key) : cause.message;
   }
 

@@ -144,8 +144,9 @@ export function toTrajectory(events: (AgentJobEventApi | AgentThreadEventApi)[])
       attemptId: event.attempt_id,
       seq: event.seq,
       eventType,
-      actor: ACTOR_BY_TYPE[eventType] ?? 'runtime',
-      lane: LANE_BY_TYPE[eventType] ?? 'other',
+      // Own entries only: a type of `__proto__` must not find Object.prototype's.
+      actor: Object.hasOwn(ACTOR_BY_TYPE, eventType) ? ACTOR_BY_TYPE[eventType] : 'runtime',
+      lane: Object.hasOwn(LANE_BY_TYPE, eventType) ? LANE_BY_TYPE[eventType] : 'other',
       label: labelOf(eventType, payload),
       detail: detailOf(eventType, payload),
       at: event.created_at ?? null,

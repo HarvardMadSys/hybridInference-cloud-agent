@@ -16,7 +16,11 @@ const HOST_KEY_FILES: Record<string, string> = {
 };
 
 function fingerprintCommand(type: string): string {
-  return `ssh-keygen -lf /etc/ssh/${HOST_KEY_FILES[type] ?? 'ssh_host_ed25519_key.pub'}`;
+  // Own entries only: a type of `__proto__` must not find Object.prototype's.
+  const file = Object.hasOwn(HOST_KEY_FILES, type)
+    ? HOST_KEY_FILES[type]
+    : 'ssh_host_ed25519_key.pub';
+  return `ssh-keygen -lf /etc/ssh/${file}`;
 }
 
 /**

@@ -590,7 +590,11 @@ export function AgentsSidebar({
       if (activeKey === key) router.replace('/');
     } catch (cause) {
       const code = cause instanceof APIError ? cause.code : undefined;
-      const reason = SESSION_ERROR_KEYS[code as keyof typeof SESSION_ERROR_KEYS];
+      // Own entries only: a code of `__proto__` must not find Object.prototype's.
+      const reason =
+        code && Object.hasOwn(SESSION_ERROR_KEYS, code)
+          ? SESSION_ERROR_KEYS[code as keyof typeof SESSION_ERROR_KEYS]
+          : undefined;
       setDeleteError(
         reason ? t(reason) : cause instanceof Error ? cause.message : t('archive.deleteFailed'),
       );

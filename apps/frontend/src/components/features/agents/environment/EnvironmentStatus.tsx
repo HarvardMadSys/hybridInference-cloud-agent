@@ -84,13 +84,15 @@ export function TeamBadge({ name }: { name: string }) {
 /** A server state as a coloured label; an unrecognised state is shown as sent. */
 export function StateBadge({ state }: { state: string }) {
   const t = useT();
-  const known = STATES[state];
+  // Own entries only, here and for phases: `__proto__` must not find
+  // Object.prototype's.
+  const known = Object.hasOwn(STATES, state) ? STATES[state] : undefined;
   return <Badge tone={known?.tone ?? 'neutral'}>{known ? t(known.key) : state}</Badge>;
 }
 
 export function usePhaseLabel(): (phase: string) => string {
   const t = useT();
-  return (phase) => (PHASES[phase] ? t(PHASES[phase]) : phase);
+  return (phase) => (Object.hasOwn(PHASES, phase) ? t(PHASES[phase]) : phase);
 }
 
 /** What the last test says about the saved version a list row shows. */

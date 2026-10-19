@@ -52,8 +52,10 @@ export function httpStatusToErrorCode(status: number): string {
 }
 
 export function getErrorMessage(error: unknown): string {
+  // Codes come from response bodies, so the table is read by own entry only:
+  // `__proto__` must not find Object.prototype and return it as the message.
   if (error instanceof APIError) {
-    if (error.code && error.code !== 'UNKNOWN_ERROR' && ERROR_MESSAGES[error.code]) {
+    if (error.code && error.code !== 'UNKNOWN_ERROR' && Object.hasOwn(ERROR_MESSAGES, error.code)) {
       return ERROR_MESSAGES[error.code];
     }
     return error.message || ERROR_MESSAGES.UNKNOWN_ERROR;
@@ -64,7 +66,7 @@ export function getErrorMessage(error: unknown): string {
     if (
       errorWithCode.code &&
       errorWithCode.code !== 'UNKNOWN_ERROR' &&
-      ERROR_MESSAGES[errorWithCode.code]
+      Object.hasOwn(ERROR_MESSAGES, errorWithCode.code)
     ) {
       return ERROR_MESSAGES[errorWithCode.code];
     }
