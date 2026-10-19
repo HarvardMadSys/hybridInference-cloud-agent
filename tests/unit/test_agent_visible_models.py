@@ -21,7 +21,9 @@ import pytest
 
 from cloud_agent.gateway import GatewayClient, GatewayError
 from cloud_agent.visible_models import (
+    ModelCatalogUnavailable,
     agent_canonical_model,
+    agent_model_reasoning_efforts,
     agent_model_resolvable,
     agent_visible_models,
 )
@@ -243,12 +245,22 @@ async def test_an_older_gateway_without_the_table_still_resolves_canonicals() ->
 
 
 async def test_an_unreachable_gateway_resolves_nothing() -> None:
-    """Fail closed, as everywhere else: no catalog is no permission."""
+    """Fail closed, as everywhere else: no catalog is no permission.
+
+    Said as an outage, not as ``None``: an unknown name and an unread catalog
+    need different answers, and only the first is the caller's to fix.
+    """
 
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("refused")
 
-    assert await agent_canonical_model(CATALOG[0], _client(handler), user_id="user_1") is None
+    with pytest.raises(ModelCatalogUnavailable):
+        await agent_canonical_model(CATALOG[0], _client(handler), user_id="user_1")
+
+
+async def test_unreadable_effort_domains_raise_rather_than_offer_none() -> None:
+    with pytest.raises(ModelCatalogUnavailable):
+        await agent_model_reasoning_efforts(_client(_serves({}, 503)), user_id="user_1")
 
 
 async def test_resolvable_accepts_an_alias_again() -> None:

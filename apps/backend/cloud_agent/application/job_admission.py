@@ -41,6 +41,7 @@ from cloud_agent.schemas import (
 from cloud_agent.skills.models import SkillError
 from cloud_agent.skills.selection import resolve_skills
 from cloud_agent.visible_models import (
+    ModelCatalogUnavailable,
     agent_canonical_model,
     agent_model_reasoning_efforts,
     agent_visible_models,
@@ -82,6 +83,24 @@ class _JobCreationStorage(Protocol):
     source_control: SourceControlPort
 
 
+def _model_catalog_unavailable() -> HTTPException:
+    """503 while the gateway cannot say which models this owner may call.
+
+    Not a 400: an outage is no verdict on the model or the effort, and a
+    waiting message's check reads anything below 500 as one and holds the
+    message until its owner releases it.
+    """
+    return HTTPException(
+        status_code=503,
+        detail={
+            "error": {
+                "type": "model_catalog_unavailable",
+                "message": "The model catalog is temporarily unavailable. Please try again shortly.",
+            }
+        },
+    )
+
+
 async def _require_resolvable_model(
     model: str,
     *,
@@ -102,7 +121,10 @@ async def _require_resolvable_model(
     nothing. The job was created, and died at its first inference call with a
     404 from a model that plainly exists.
     """
-    canonical = await agent_canonical_model(model, gateway, user_id=user["user_id"])
+    try:
+        canonical = await agent_canonical_model(model, gateway, user_id=user["user_id"])
+    except ModelCatalogUnavailable:
+        raise _model_catalog_unavailable() from None
     if canonical is not None:
         return canonical
     visible = await agent_visible_models(gateway, user_id=user["user_id"])
@@ -337,7 +359,8 @@ async def _require_offered_effort(
         The value to store: ``None`` for Auto, else the validated level.
 
     Raises:
-        HTTPException: 400 when the pair does not offer this value.
+        HTTPException: 400 when the pair does not offer this value, 503 when the
+            model catalog cannot be read.
     """
     if effort is None or effort == RESET_REASONING_EFFORT:
         # The sentinel means unset wherever it appears. On a follow-up it also
@@ -346,13 +369,15 @@ async def _require_offered_effort(
         # spellings are the same answer and neither is a 400.
         return None
     runtime_levels = runtime_reasoning_efforts().get(runtime, [])
+    try:
+        domains = await agent_model_reasoning_efforts(gateway, user_id=user["user_id"])
+    except ModelCatalogUnavailable:
+        raise _model_catalog_unavailable() from None
     # The model's entry is read as a yes/no — does it take the parameter at
     # all — and not for its contents. Per-model domains were tried and
     # withdrawn: the providers' documented lists disagreed with what their
     # APIs accept, so the levels are this platform's and the same everywhere.
-    takes_effort = bool(
-        (await agent_model_reasoning_efforts(gateway, user_id=user["user_id"])).get(model)
-    )
+    takes_effort = bool(domains.get(model))
     offered = (
         [level for level in PLATFORM_REASONING_EFFORTS if level in runtime_levels]
         if takes_effort

@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError,
 from cloud_agent.gateway import ENV_BASE_URL, GatewayError
 from cloud_agent.settings import setting_env
 from cloud_agent.task_titles import is_warmup_title
-from cloud_agent.visible_models import agent_canonical_model
+from cloud_agent.visible_models import ModelCatalogUnavailable, agent_canonical_model
 
 if TYPE_CHECKING:
     from cloud_agent.gateway import GatewayClient
@@ -245,7 +245,7 @@ async def rewrite_prompt(
             return await _completion(
                 client, base_url=base_url, token=token, model=canonical, body=body
             )
-    except (httpx.HTTPError, TimeoutError):
+    except (httpx.HTTPError, TimeoutError, ModelCatalogUnavailable):
         raise _unavailable() from None
     except GatewayError as exc:
         if exc.status_code == 403:

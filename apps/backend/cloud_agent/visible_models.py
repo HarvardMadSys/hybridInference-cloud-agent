@@ -14,6 +14,12 @@ than a call site that says what it now does.
 **Failure is closed.** A gateway that cannot be reached yields *no* models, not
 every model. Getting this backwards would let an outage widen what a job may
 call, at exactly the moment nobody is watching.
+
+**And it is not a verdict.** The checks that admit one model or one effort
+raise :class:`ModelCatalogUnavailable` rather than refusing the choice as
+unknown. A refusal makes its owner fix a request nothing was wrong with, and
+holds a waiting message until they release it by hand; an outage only tells
+the caller to ask again.
 """
 
 from __future__ import annotations
@@ -22,6 +28,10 @@ from cloud_agent.gateway import GatewayClient, GatewayError
 from cloud_agent.logging_utils import get_logger
 
 logger = get_logger(__name__)
+
+
+class ModelCatalogUnavailable(Exception):
+    """The gateway could not say which models this user's jobs may call."""
 
 
 async def agent_visible_models(gateway: GatewayClient, *, user_id: str) -> list[str]:
@@ -65,21 +75,24 @@ async def agent_canonical_model(model: str, gateway: GatewayClient, *, user_id: 
         user_id: The gateway's user identifier.
 
     Returns:
-        The canonical id, or ``None`` when this user cannot reach the model.
-        ``None`` covers an unknown name, an alias for a model outside this
-        user's catalog, and a gateway that could not be read — refusing in all
-        three, because the alternative to "no" here is a job that dies at its
-        first model call, far from the cause.
+        The canonical id, or ``None`` when this user cannot reach the model:
+        an unknown name, or an alias for a model outside this user's catalog.
+
+    Raises:
+        ModelCatalogUnavailable: The catalog could not be read. Nothing is
+            accepted on it, because the alternative to "no" here is a job that
+            dies at its first model call, far from the cause; and nothing is
+            refused, because the model may be fine.
     """
     try:
         models, aliases = await gateway.model_catalog_with_aliases(user_id)
-    except GatewayError:
+    except GatewayError as exc:
         logger.warning(
             "agent_model_catalog_unavailable",
             exc_info=True,
             extra={"event": "agent_model_catalog_unavailable", "user_id": user_id},
         )
-        return None
+        raise ModelCatalogUnavailable(str(exc)) from exc
 
     # An exact catalog entry wins outright. Checking it first means an alias
     # can never shadow a real model, whatever the table says.
@@ -110,9 +123,13 @@ async def agent_model_resolvable(model: str, gateway: GatewayClient, *, user_id:
         user_id: The gateway's user identifier.
 
     Returns:
-        Whether the model resolves in this user's catalog.
+        Whether the model resolves in this user's catalog; ``False`` when the
+        catalog cannot be read.
     """
-    return await agent_canonical_model(model, gateway, user_id=user_id) is not None
+    try:
+        return await agent_canonical_model(model, gateway, user_id=user_id) is not None
+    except ModelCatalogUnavailable:
+        return False
 
 
 async def agent_model_reasoning_efforts(
@@ -120,25 +137,27 @@ async def agent_model_reasoning_efforts(
 ) -> dict[str, list[str]]:
     """The reasoning-effort domain of each model this user's jobs can call.
 
-    Same failure posture as :func:`agent_visible_models`: a gateway that
-    cannot be reached yields *no* domains, so the composer offers no effort
-    control and every create validates against an empty set. Getting this
-    backwards would offer a knob during an outage and produce turns that die
-    at their first model call.
+    Same failure posture as :func:`agent_canonical_model`: a gateway that
+    cannot be reached admits no effort, and refuses none either. Admitting one
+    would produce turns that die at their first model call; refusing one would
+    blame a choice the gateway never judged.
 
     Args:
         gateway: Client for the gateway's internal contracts.
         user_id: The gateway's user identifier.
 
     Returns:
-        ``{model_id: [values]}``, empty when unavailable.
+        ``{model_id: [values]}``.
+
+    Raises:
+        ModelCatalogUnavailable: The catalog could not be read.
     """
     try:
         return await gateway.model_reasoning_efforts(user_id)
-    except GatewayError:
+    except GatewayError as exc:
         logger.warning(
             "agent_model_efforts_unavailable",
             exc_info=True,
             extra={"event": "agent_model_efforts_unavailable", "user_id": user_id},
         )
-        return {}
+        raise ModelCatalogUnavailable(str(exc)) from exc

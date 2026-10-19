@@ -49,6 +49,7 @@ from cloud_agent.application.follow_ups import PreparedFollowUp
 from cloud_agent.attachments.models import AttachmentError
 from cloud_agent.domain.execution import JobStreamState
 from cloud_agent.domain.pending_messages import SettleOutcome
+from cloud_agent.gateway import GatewayError
 from cloud_agent.goals.models import GoalConflict
 from cloud_agent.mcp.registry import mcp_cipher
 from cloud_agent.storage.repositories.goals import _pause_detail
@@ -2865,6 +2866,34 @@ async def test_create_fails_fast_on_a_model_this_deployment_cannot_serve(client:
     assert detail["type"] == "model_not_available"
     # The rejection names what would work, so the caller can fix the request.
     assert "glm-5.1" in detail["message"]
+
+
+@pytest.mark.parametrize(
+    ("read", "choices"),
+    [
+        ("model_catalog_with_aliases", {}),
+        ("model_reasoning_efforts", {"reasoning_effort": "high"}),
+    ],
+    ids=["model", "effort"],
+)
+async def test_create_during_a_catalog_outage_is_unavailable_not_refused(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    read: str,
+    choices: dict[str, Any],
+):
+    """A catalog that could not be read is no verdict on the model: try again, not fix it."""
+
+    async def outage(self: _FakeGateway, user_id: str) -> Any:
+        raise GatewayError("gateway timed out")
+
+    monkeypatch.setattr(_FakeGateway, read, outage)
+    response = await client.post(
+        "/v1/agent/jobs",
+        json={"repo": "owner/name", "task_prompt": "fix it", "model": "glm-5.1", **choices},
+    )
+    assert response.status_code == 503, response.text
+    assert response.json()["detail"]["error"]["type"] == "model_catalog_unavailable"
 
 
 async def test_follow_up_model_switch_gets_the_same_fail_fast(

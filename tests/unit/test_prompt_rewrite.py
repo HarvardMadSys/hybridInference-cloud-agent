@@ -281,6 +281,20 @@ async def test_model_outside_owner_catalog_never_mints_grant(gateway, grants):
     grants.mint.assert_not_awaited()
 
 
+async def test_a_catalog_outage_is_unavailable_not_a_model_refusal(gateway, grants):
+    gateway.model_catalog_with_aliases.side_effect = GatewayError("gateway timed out")
+    with pytest.raises(PromptRewriteError) as error:
+        await rewrite_prompt(
+            PromptRewriteRequest(prompt="Build login", model="allowed-model"),
+            user_id="owner-1",
+            gateway=gateway,
+            grants=grants,
+        )
+    assert error.value.status_code == 503
+    assert error.value.error_type == "rewrite_unavailable"
+    grants.mint.assert_not_awaited()
+
+
 async def test_grant_refusal_is_sanitized(gateway, grants):
     grants.mint.side_effect = GatewayError("sensitive details", status_code=403)
     with pytest.raises(PromptRewriteError) as error:
