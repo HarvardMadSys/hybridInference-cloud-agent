@@ -400,12 +400,14 @@ def test_environment_orphan_poll_is_throttled(monkeypatch):
     assert [call["cleanup_orphans"] for call in calls] == [True, False, False, True]
 
 
-def _environment_worker(monkeypatch, tmp_path, prepare, status):
+def _environment_worker(monkeypatch, tmp_path, prepare, status, *, environment=None, retained=None):
     """A worker whose first claim runs one test run against stand-ins.
 
     The run is handed the stop event the worker gives its claim, as the real
     claim does; ``prepare`` stands in for installation and ``status`` answers
-    every report. Returns the worker, its claims and the run's reports.
+    every report. ``environment`` replaces the run's binding, and ``retained``
+    its container's backend. Returns the worker, its claims and the run's
+    reports.
     """
     claims = []
     reports = []
@@ -452,7 +454,9 @@ def _environment_worker(monkeypatch, tmp_path, prepare, status):
     backend = SimpleNamespace(
         uid=1000, gid=1000, version_stamp=lambda: {"sandbox_image_digest": "sha256:" + "a" * 64}
     )
-    environment = BoundEnvironment(binding_id="b", setup_script="make").model_dump(mode="json")
+    environment = (environment or BoundEnvironment(binding_id="b", setup_script="make")).model_dump(
+        mode="json"
+    )
 
     def claim_and_execute(**kwargs):
         claims.append(kwargs)
@@ -473,7 +477,7 @@ def _environment_worker(monkeypatch, tmp_path, prepare, status):
         return True
 
     monkeypatch.setattr(environment_tests, "ChatSandboxManager", _RunManager)
-    monkeypatch.setattr(environment_tests, "RetainedChatBackend", lambda manager, spec: None)
+    monkeypatch.setattr(environment_tests, "RetainedChatBackend", lambda manager, spec: retained)
     monkeypatch.setattr(environment_tests, "EnvironmentPreparation", _Preparation)
     monkeypatch.setattr(environment_tests, "claim_and_execute", claim_and_execute)
     monkeypatch.setattr("cloud_agent_host.runner._SourcePrefetch", _Source)
@@ -522,6 +526,65 @@ def test_closing_the_environment_worker_still_cancels_its_run(monkeypatch, tmp_p
     worker.close()
     assert not worker.busy
     assert reports[-1]["state"] == "cancelled"
+
+
+class _Verification:
+    """A verify script's process: it exits with ``exit_code``, or runs until killed."""
+
+    def __init__(self, exit_code, *, until_killed):
+        self.exit_code = exit_code
+        self.until_killed = until_killed
+        self.started = threading.Event()
+        self.killed = threading.Event()
+
+    def lines(self):
+        self.started.set()
+        if self.until_killed:
+            self.killed.wait(5)
+            return
+        yield "verifying"
+
+    def wait(self):
+        return self.exit_code
+
+    def kill(self):
+        self.killed.set()
+
+    def stderr_text(self):
+        return ""
+
+
+@pytest.mark.parametrize(
+    ("stopped", "exit_code", "state"),
+    [
+        pytest.param(True, 137, "cancelled", id="stopped"),
+        pytest.param(False, 1, "failed", id="failed"),
+        pytest.param(False, 130, "failed", id="exited-130-itself"),
+    ],
+)
+def test_a_stopped_verification_is_recorded_as_cancelled_and_a_failed_one_as_failed(
+    monkeypatch, tmp_path, stopped, exit_code, state
+):
+    # Stopping the run kills its verify script, which run_setup then reports
+    # as stopped (130). A script that exits 130 by itself still failed.
+    verification = _Verification(exit_code, until_killed=stopped)
+    worker, _, reports = _environment_worker(
+        monkeypatch,
+        tmp_path,
+        lambda callback, cancel: None,
+        200,
+        environment=BoundEnvironment(binding_id="b", verify_script="make check"),
+        retained=SimpleNamespace(spawn=lambda spec: verification),
+    )
+    worker.poll("credential")
+    assert verification.started.wait(5)
+    if stopped:
+        worker.close()
+    worker._thread.join(20)
+    worker.close()
+
+    assert [(step["phase"], step["state"]) for step in reports[-1]["steps"]] == [("verify", state)]
+    assert reports[-1]["state"] == ("cancelled" if stopped else "failed")
 
 
 @pytest.mark.asyncio

@@ -12,7 +12,11 @@ import httpx
 
 from cloud_agent_host.chat_sandbox import ChatSandboxManager, ChatSandboxSpec, RetainedChatBackend
 from cloud_agent_host.chat_sandbox_models import ENVIRONMENT_TEST_LABEL
-from cloud_agent_host.environment_preparation import EnvironmentPreparation, write_setup_marker
+from cloud_agent_host.environment_preparation import (
+    EnvironmentPreparation,
+    step_state,
+    write_setup_marker,
+)
 from cloud_agent_host.setup import run_setup
 from cloud_agent_shared.environment import ENVIRONMENT_CAPABILITY, BoundEnvironment
 from cloud_agent_shared.environment_snapshots import ENVIRONMENT_SNAPSHOT_CAPABILITY
@@ -233,7 +237,7 @@ def execute_test(
                 phase="verify",
             )
             step.update(
-                state="succeeded" if result.exit_code == 0 else "failed",
+                state=step_state(result, cancelled),
                 exit_code=result.exit_code,
                 duration_seconds=time.monotonic() - started,
             )
