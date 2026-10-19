@@ -346,6 +346,58 @@ def test_rename_into_github_is_blocked():
     assert result.requires_human_release is True
 
 
+@pytest.mark.parametrize(
+    ("target", "violation"),
+    [
+        ("../outside.txt", "writes outside the repository"),
+        ("ghp_0123456789abcdefghij.txt", "credential-shaped paths"),
+        (".github/workflows/evil.yml", "CI/workflow configuration"),
+    ],
+)
+def test_a_rename_new_target_is_gated_like_rename_to(target, violation):
+    """`git apply` reads `rename new` as `rename to`, so its target is gated too.
+
+    Here only that line names the target. The parser read `rename to` alone,
+    so the target passed until the re-gate after apply. Confirmed against git
+    2.43: it applies the credential-shaped and `.github/` renames, and refuses
+    the escaping one itself.
+    """
+    patch = (
+        "diff --git a/src.txt b/src.txt\n"
+        "similarity index 100%\n"
+        "rename old src.txt\n"
+        f"rename new {target}\n"
+    )
+
+    result = validate_patch(patch)
+
+    assert result.ok is False
+    assert target in result.changed_files
+    assert violation in result.reason
+
+
+@pytest.mark.parametrize(("source", "target"), [("from", "to"), ("old", "new")])
+def test_a_rename_away_from_github_is_blocked(source, target):
+    """Renaming a workflow away deletes it, whichever spelling names the source.
+
+    Here only the rename lines name it. The parser took sources from the
+    `diff --git` line alone, so the deletion passed until the re-gate after
+    apply. Confirmed against git 2.43, which applies both spellings.
+    """
+    patch = (
+        "diff --git a/notes.txt b/notes.txt\n"
+        "similarity index 100%\n"
+        f"rename {source} .github/workflows/ci.yml\n"
+        f"rename {target} notes.txt\n"
+    )
+
+    result = validate_patch(patch)
+
+    assert result.ok is False
+    assert ".github/workflows/ci.yml" in result.changed_files
+    assert result.requires_human_release is True
+
+
 def test_multiple_violations_are_all_reported():
     """The gate reports every problem, not just the first."""
     patch = _patch_for(".github/workflows/ci.yml", added_line=f'token: "ghp_{"a" * 36}"')

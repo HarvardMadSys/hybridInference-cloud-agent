@@ -85,7 +85,11 @@ _BLOB_SECRET_PATTERNS = tuple(
 # ── Diff parsing ───────────────────────────────────────────────────────
 
 _DIFF_HEADER = re.compile(r"^diff --git (?P<a>.+?) (?P<b>.+)$")
-_RENAME_TO = re.compile(r"^rename to (?P<path>.+)$")
+# `git apply` takes `rename old` for `rename from` and `rename new` for `rename
+# to`: its header table lists both spellings, and these lines, whatever the
+# `diff --git` line says, name the source and target it renames.
+_RENAME_FROM = re.compile(r"^rename (?:from|old) (?P<path>.+)$")
+_RENAME_TO = re.compile(r"^rename (?:to|new) (?P<path>.+)$")
 _COPY_TO = re.compile(r"^copy to (?P<path>.+)$")
 _NEW_MODE = re.compile(r"^(?:new|new file) mode (?P<mode>\d{6})$")
 # A modified entry names its mode only here, after the two object ids.
@@ -375,6 +379,11 @@ def _collect_paths(patch: str) -> tuple[list[str], list[str], list[str]]:
                 remember(path)
             continue
 
+        source = _RENAME_FROM.match(line)
+        if source:
+            # A rename deletes its source, so it changes too. It is not pending
+            # like the target: the mode lines read below describe the target.
+            remember(_strip_prefix(source.group("path")))
         for pattern in (_RENAME_TO, _COPY_TO):
             match = pattern.match(line)
             if match:
