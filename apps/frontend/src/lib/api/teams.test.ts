@@ -1,11 +1,22 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { expectRequestsMatchContract } from './__tests__/contract';
 import { fetchWithAuth } from './client';
 import {
   claimInvitation,
+  createInvitation,
+  createTeam,
+  decideJoinRequest,
   deleteTeam,
   invitationLink,
+  leaveTeam,
+  listInvitations,
+  listJoinRequests,
+  listMembers,
+  listOwnJoinRequests,
+  listTeams,
   removeMember,
   renameTeam,
+  revokeInvitation,
   setTeamMemberRole,
   transferOwnership,
   type Team,
@@ -34,6 +45,46 @@ function lastCall() {
 describe('team API client', () => {
   beforeEach(() => {
     vi.mocked(fetchWithAuth).mockReset();
+  });
+
+  it('sends only requests the server accepts', async () => {
+    vi.mocked(fetchWithAuth).mockImplementation(async () => new Response(JSON.stringify(team)));
+    await createTeam('Platform', 'key-1');
+    await renameTeam(team, 'Infra');
+    await transferOwnership(team, 'bob');
+    await setTeamMemberRole(team, 'bob', 'member');
+    await createInvitation('ateam_1', 'key-2');
+    await decideJoinRequest('ateam_1', 'atjr_1', true);
+    await claimInvitation('A'.repeat(43));
+    vi.mocked(fetchWithAuth).mockImplementation(
+      async () =>
+        new Response(JSON.stringify({ teams: [], members: [], invitations: [], requests: [] })),
+    );
+    await listTeams();
+    await listMembers('ateam_1');
+    await listInvitations('ateam_1');
+    await listJoinRequests('ateam_1');
+    await listOwnJoinRequests();
+    vi.mocked(fetchWithAuth).mockImplementation(async () => new Response(null, { status: 204 }));
+    await deleteTeam(team);
+    await leaveTeam('ateam_1');
+    await removeMember('ateam_1', 'bob');
+    await revokeInvitation('ateam_1', 'atinv_1');
+    expectRequestsMatchContract();
+  });
+
+  it('unwraps each list', async () => {
+    vi.mocked(fetchWithAuth).mockImplementation(
+      async () =>
+        new Response(
+          JSON.stringify({ teams: [team], members: ['m'], invitations: ['i'], requests: ['r'] }),
+        ),
+    );
+    await expect(listTeams()).resolves.toEqual([team]);
+    await expect(listMembers('ateam_1')).resolves.toEqual(['m']);
+    await expect(listInvitations('ateam_1')).resolves.toEqual(['i']);
+    await expect(listJoinRequests('ateam_1')).resolves.toEqual(['r']);
+    await expect(listOwnJoinRequests()).resolves.toEqual(['r']);
   });
 
   it('sends the revision the page read with every change that can conflict', async () => {

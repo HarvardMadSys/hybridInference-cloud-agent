@@ -135,8 +135,13 @@ jobs:
             backend=false
           fi
 
-          # Web: the app itself.
-          if matches '^apps/frontend/'; then web=true; else web=false; fi
+          # Web: the app itself, and the API contracts its client tests check
+          # their requests against.
+          if matches '^(apps/frontend/|gateway_contracts/)'; then
+            web=true
+          else
+            web=false
+          fi
 
           # Every source input to a release image must select image checks.
           # Tests derive COPY inputs from every artifact's Dockerfile, including
