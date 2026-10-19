@@ -435,6 +435,9 @@ export const en = {
   'shell.accessRequired.title': 'Agent access required',
   'shell.accessRequired.body': 'This account has not been granted access to this Agent deployment.',
   'shell.accessRequired.back': 'Back to Dashboard',
+  'shell.renderError.title': 'This page could not be displayed',
+  'shell.renderError.body':
+    'Something on it failed to render. Retry, or open another chat or page.',
 
   // ── Sidebar ─────────────────────────────────────────────────────────────
   'sidebar.pinned': 'Pinned',

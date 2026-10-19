@@ -411,6 +411,8 @@ export const zhCN: Record<TranslationKey, string> = {
   'shell.accessRequired.title': '需要 Agent 使用权限',
   'shell.accessRequired.body': '当前账户尚未获得此 Agent 部署的使用权限。',
   'shell.accessRequired.back': '返回控制台',
+  'shell.renderError.title': '无法显示此页面',
+  'shell.renderError.body': '页面中的部分内容渲染失败。请重试，或打开其他对话或页面。',
 
   // ── Sidebar ─────────────────────────────────────────────────────────────
   'sidebar.pinned': '已置顶',
