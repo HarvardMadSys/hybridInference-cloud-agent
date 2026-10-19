@@ -21,6 +21,7 @@ from tests.unit.test_agent_sandbox_manager import (
 from cloud_agent.sandbox_manager_client import SandboxManagerClient, SandboxManagerError
 from cloud_agent_host import environment_tests
 from cloud_agent_host.action_receipts import ActionReceipts
+from cloud_agent_host.environment_preparation import EnvironmentPreparation
 from cloud_agent_host.environment_snapshot import check_snapshot_secrets
 from cloud_agent_host.sandbox import SandboxError
 from cloud_agent_host.sandbox_manager import _TerminalManager
@@ -405,9 +406,9 @@ def _environment_worker(monkeypatch, tmp_path, prepare, status, *, environment=N
 
     The run is handed the stop event the worker gives its claim, as the real
     claim does; ``prepare`` stands in for installation and ``status`` answers
-    every report. ``environment`` replaces the run's binding, and ``retained``
-    its container's backend. Returns the worker, its claims and the run's
-    reports.
+    every report, or, called with each report, says how to answer it.
+    ``environment`` replaces the run's binding, and ``retained`` its
+    container's backend. Returns the worker, its claims and the run's reports.
     """
     claims = []
     reports = []
@@ -449,7 +450,8 @@ def _environment_worker(monkeypatch, tmp_path, prepare, status, *, environment=N
 
     def post(path, json):
         reports.append(json)
-        return httpx.Response(status, request=httpx.Request("POST", f"http://control{path}"))
+        answer = status(json) if callable(status) else status
+        return httpx.Response(answer, request=httpx.Request("POST", f"http://control{path}"))
 
     backend = SimpleNamespace(
         uid=1000, gid=1000, version_stamp=lambda: {"sandbox_image_digest": "sha256:" + "a" * 64}
@@ -585,6 +587,94 @@ def test_a_stopped_verification_is_recorded_as_cancelled_and_a_failed_one_as_fai
 
     assert [(step["phase"], step["state"]) for step in reports[-1]["steps"]] == [("verify", state)]
     assert reports[-1]["state"] == ("cancelled" if stopped else "failed")
+
+
+class _ChattyScript:
+    """A script's process that prints until it is killed."""
+
+    def __init__(self):
+        self.killed = threading.Event()
+
+    def lines(self):
+        while not self.killed.wait(0.05):
+            yield "still working\n"
+
+    def wait(self):
+        return 137
+
+    def kill(self):
+        self.killed.set()
+
+    def stderr_text(self):
+        return ""
+
+
+def _run_a_chatty_step(monkeypatch, tmp_path, phase, *, answer):
+    """Run a test whose ``phase`` script prints until killed; return its final report.
+
+    The first report of the running step is accepted and every later one is
+    answered with ``answer``, so the run ends while the script prints.
+    """
+    script = _ChattyScript()
+    retained = SimpleNamespace(
+        spec=SimpleNamespace(container_name="container"),
+        manager=SimpleNamespace(
+            inspect=lambda _name: SimpleNamespace(
+                container_id="container-1", running=True, started_at="boot"
+            )
+        ),
+        spawn=lambda spec: script,
+    )
+    if phase == "setup":
+        environment = BoundEnvironment(binding_id="b", setup_script="make")
+
+        def prepare(callback, cancel):
+            EnvironmentPreparation(tmp_path).prepare(
+                retained, environment, callback=callback, cancel=cancel
+            )
+
+    else:
+        environment = BoundEnvironment(binding_id="b", verify_script="make check")
+
+        def prepare(callback, cancel):
+            pass
+
+    accepted = []
+
+    def status(report):
+        if accepted:
+            return answer
+        if report["steps"]:
+            accepted.append(report)
+        return 200
+
+    worker, _, reports = _environment_worker(
+        monkeypatch, tmp_path, prepare, status, environment=environment, retained=retained
+    )
+    worker.poll("credential")
+    worker._thread.join(20)
+    worker.close()
+    assert [(step["phase"], step["state"]) for step in accepted[0]["steps"]] == [(phase, "running")]
+    return reports[-1]
+
+
+@pytest.mark.parametrize("phase", ["setup", "verify"])
+def test_a_step_stopped_through_its_own_output_report_is_recorded_as_cancelled(
+    monkeypatch, tmp_path, phase
+):
+    # The owner stops the run while its script prints often, so a refused
+    # report of that output, not the heartbeat, is the first to learn of it.
+    final = _run_a_chatty_step(monkeypatch, tmp_path, phase, answer=409)
+
+    assert [(step["phase"], step["state"]) for step in final["steps"]] == [(phase, "cancelled")]
+    assert final["state"] == "cancelled"
+
+
+def test_any_other_failed_report_of_a_running_step_still_fails_the_run(monkeypatch, tmp_path):
+    final = _run_a_chatty_step(monkeypatch, tmp_path, "verify", answer=503)
+
+    assert final["state"] == "failed"
+    assert "503" in final["detail"]
 
 
 @pytest.mark.asyncio

@@ -213,7 +213,14 @@ def execute_test(
             if heartbeat_stop.is_set():
                 return
             if step["state"] != "running" or now - last_upload >= 0.5:
-                report()
+                try:
+                    report()
+                except httpx.HTTPStatusError as exc:
+                    # A refused report has cancelled the run. Raised from a
+                    # running step's output, it would leave the step running:
+                    # run_setup stops the script instead, so it ends cancelled.
+                    if step["state"] != "running" or exc.response.status_code != 409:
+                        raise
                 last_upload = now
 
         EnvironmentPreparation().prepare(retained, prepared, callback=on_step, cancel=cancelled)
