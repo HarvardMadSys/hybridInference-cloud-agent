@@ -53,6 +53,8 @@ _ERROR_LINES_QUOTED = 3
 # in positions that look like operands, so an unvalidated ref is an argument
 # injection into a process that holds the repository credential.
 _COMMIT_SHA = re.compile(r"[0-9a-fA-F]{7,64}")
+# What `surrogateescape` decodes a byte that is not UTF-8 to.
+_ESCAPED_BYTE = re.compile("[\udc80-\udcff]")
 
 
 # Hermetic git: no user config, no hooks, no credential helpers, no prompts.
@@ -141,8 +143,12 @@ def _run_git(
     cwd: Path | None = None,
     env_extra: dict[str, str] | None = None,
     remote: bool = False,
+    errors: str = "strict",
 ) -> str:
-    """Run one git command hermetically and return stdout."""
+    """Run one git command hermetically and return stdout.
+
+    ``errors`` handles output bytes that do not decode, as for ``bytes.decode``.
+    """
     timeout_s = number_setting("publish_git_timeout_s", _GIT_TIMEOUT_S)
     try:
         completed = subprocess.run(
@@ -151,6 +157,7 @@ def _run_git(
             env=_git_env(env_extra),
             capture_output=True,
             text=True,
+            errors=errors,
             timeout=timeout_s,
             stdin=subprocess.DEVNULL,
             check=False,
@@ -339,8 +346,15 @@ def _staged_change_set(repo: Path) -> _StagedChangeSet:
     ``-z`` output is NUL-separated and never quoted, which is the point: the
     quoting git applies in a *diff header* is exactly what a hostile patch used
     to hide a path from the pre-apply gate.
+
+    Unquoted also means a name's raw bytes. One that is not UTF-8 is refused
+    here, before anything stores or renders it, and counted rather than shown.
     """
-    raw = _run_git(["diff", "--cached", "--raw", "-z", "--find-renames", "--abbrev=64"], cwd=repo)
+    raw = _run_git(
+        ["diff", "--cached", "--raw", "-z", "--find-renames", "--abbrev=64"],
+        cwd=repo,
+        errors="surrogateescape",
+    )
     paths: list[str] = []
     symlinks: list[str] = []
     gitlinks: list[str] = []
@@ -384,6 +398,11 @@ def _staged_change_set(repo: Path) -> _StagedChangeSet:
                     )
                 )
         index += path_count + 1
+    not_utf8 = [path for path in paths if _ESCAPED_BYTE.search(path)]
+    if not_utf8:
+        raise PatchRejected(
+            f"patch rejected after apply: patch changes {len(not_utf8)} path(s) that are not UTF-8"
+        )
     return _StagedChangeSet(paths=paths, symlinks=symlinks, gitlinks=gitlinks, blobs=blobs)
 
 

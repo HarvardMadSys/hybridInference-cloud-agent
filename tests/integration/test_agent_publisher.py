@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from cloud_agent.publisher import (
+    PatchRejected,
     PublishError,
     TransientPublishError,
     fetch_base_bundle,
@@ -936,6 +937,61 @@ def test_the_post_apply_gate_refuses_a_name_with_a_newline(origin, monkeypatch):
         )
 
     assert "agent/ajob_newline_name" not in _branches(clone_url)
+
+
+def test_a_staged_name_that_is_not_utf8_is_refused(origin):
+    """A Latin-1 byte in a file name is a permanent refusal, not a crash.
+
+    The pre-apply gate reads the quoted byte as a replacement character, and
+    git writes the byte itself. The staged change set prints it unquoted, and
+    decoding that as text raised after the patch had applied.
+    """
+    clone_url, base_sha = origin
+    patch = (
+        'diff --git "a/caf\\351.txt" "b/caf\\351.txt"\n'
+        "new file mode 100644\n"
+        "--- /dev/null\n"
+        '+++ "b/caf\\351.txt"\n'
+        "@@ -0,0 +1 @@\n"
+        "+hello\n"
+    )
+
+    with pytest.raises(
+        PatchRejected, match=r"after apply: patch changes 1 path\(s\) that are not UTF-8"
+    ):
+        publish_patch(
+            job_id="ajob_latin1_name",
+            patch=patch,
+            clone_url=clone_url,
+            base_sha=base_sha,
+            commit_message="agent: add a file",
+        )
+
+    assert "agent/ajob_latin1_name" not in _branches(clone_url)
+
+
+def test_a_staged_name_in_utf8_still_publishes(origin):
+    """Only bytes that are not UTF-8 are refused: `é` written in UTF-8 publishes."""
+    clone_url, base_sha = origin
+    patch = (
+        'diff --git "a/caf\\303\\251.txt" "b/caf\\303\\251.txt"\n'
+        "new file mode 100644\n"
+        "--- /dev/null\n"
+        '+++ "b/caf\\303\\251.txt"\n'
+        "@@ -0,0 +1 @@\n"
+        "+hello\n"
+    )
+
+    result = publish_patch(
+        job_id="ajob_utf8_name",
+        patch=patch,
+        clone_url=clone_url,
+        base_sha=base_sha,
+        commit_message="agent: add a file",
+    )
+
+    assert result.changed_files == ["café.txt"]
+    assert _published_blob(clone_url, result.branch, "café.txt") == b"hello\n"
 
 
 def test_the_post_apply_gate_reports_the_real_paths(origin):
