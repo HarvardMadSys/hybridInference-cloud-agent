@@ -65,8 +65,6 @@ _ERROR_TYPE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
 
 def carried_by_checkpoint(
     *,
-    namespace: str,
-    marker_namespace_sha256: str,
     marker_sandbox_id: str,
     marker_generation: int,
     sandbox_id: str,
@@ -78,17 +76,18 @@ def carried_by_checkpoint(
     manager's own markers included, so a container restored from one holds the
     markers of the generation that stopped. A marker is written only under its
     container's own generation, and a restore always raises the generation: a
-    marker of this same group and deployment from an earlier generation can
-    have come only that way. It describes the earlier container's lifecycle,
-    not this one's, so readers treat it as absent and this container writes its
-    own. A marker of another group or deployment, or of this generation with
-    another container, still refuses the container.
+    marker of this same group from an earlier generation can have come only
+    that way. It describes the earlier container's lifecycle, not this one's,
+    so readers treat it as absent and this container writes its own. A marker
+    of another group, or of this generation with another container or
+    deployment, still refuses the container.
+
+    The marker's deployment namespace is not compared: the checkpoint was
+    taken on another host, and every host is its own deployment. A container
+    of a sibling deployment on this daemon is refused by its namespace label
+    before any marker is read.
     """
-    return (
-        marker_namespace_sha256 == hashlib.sha256(namespace.encode("utf-8")).hexdigest()
-        and marker_sandbox_id == sandbox_id
-        and marker_generation < generation
-    )
+    return marker_sandbox_id == sandbox_id and marker_generation < generation
 
 
 def safe_archive_error_type(error: BaseException) -> str:
@@ -853,8 +852,6 @@ class SandboxArchiveService:
     ) -> bool:
         """Whether ``marker`` is an earlier generation's, restored with its checkpoint."""
         return carried_by_checkpoint(
-            namespace=self._namespace,
-            marker_namespace_sha256=marker.namespace_sha256,
             marker_sandbox_id=marker.sandbox_id,
             marker_generation=marker.generation,
             sandbox_id=spec.sandbox_id,

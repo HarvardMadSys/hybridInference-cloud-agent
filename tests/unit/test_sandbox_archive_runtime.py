@@ -949,16 +949,25 @@ def _stopped_generation_marker(manager: _MarkerManager) -> bytes:
     return manager.marker
 
 
-def test_a_restored_container_replaces_the_final_marker_its_checkpoint_carried() -> None:
+@pytest.mark.parametrize("arriving", ["pool-east", "pool-west"])
+def test_a_restored_container_replaces_the_final_marker_its_checkpoint_carried(
+    arriving: str,
+) -> None:
     """A checkpoint commits the stopped container whole, its final marker included.
 
     The container restored from it on another host is generation 2 with a new
     id. Its first start used to read generation 1's marker as its own and
-    refuse: on staging every restore failed that way (2026-10-19).
+    refuse: on staging every restore failed that way (2026-10-19). That other
+    host is its own deployment, so the marker names the leaving host's
+    namespace, not this one's.
     """
     manager = _MarkerManager()
     _stopped_generation_marker(manager)
-    controller, _services = _controller(manager)
+    controller = SandboxArchiveController(
+        manager,  # type: ignore[arg-type]
+        namespace=arriving,
+        service_factory=_Service,
+    )
     controller.start()
     controller.apply(_policy(1))
     spec = SimpleNamespace(sandbox_id="asbx", generation=2)
@@ -979,7 +988,7 @@ def test_a_restored_container_replaces_the_final_marker_its_checkpoint_carried()
     [
         pytest.param("asbx-other", 2, "container-b", "pool-east", id="another-group"),
         pytest.param("asbx", 1, "container-b", "pool-east", id="same-generation"),
-        pytest.param("asbx", 2, "container-b", "pool-west", id="another-deployment"),
+        pytest.param("asbx", 1, "container-a", "pool-west", id="same-container-another-deployment"),
     ],
 )
 def test_only_an_earlier_generation_of_the_same_group_is_read_as_restored(

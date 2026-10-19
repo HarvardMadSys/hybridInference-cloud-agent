@@ -37,7 +37,10 @@ from cloud_agent_shared.sandbox_archive_settings import SandboxArchivePolicy
 
 pytestmark = pytest.mark.external
 BASE = os.environ.get("AGENT_RESTORE_TEST_IMAGE", "python:3.12-slim")
-NAMESPACE = "restore-roundtrip"
+# Each host is its own deployment (its Compose project), so the leaving and
+# the arriving host stamp different namespaces into their markers.
+LEAVING = "restore-roundtrip-leaving"
+ARRIVING = "restore-roundtrip-arriving"
 SANDBOX_ID = f"asbx_roundtrip{secrets.token_hex(4)}"
 
 
@@ -65,8 +68,9 @@ def cleanup():
 class _FinalUpload:
     """The final-archive upload a clean stop makes, recorded instead of sent."""
 
-    def __init__(self, config) -> None:
+    def __init__(self, config, namespace: str) -> None:
         self.config = config
+        self.namespace = namespace
 
     def start(self) -> None:
         pass
@@ -82,7 +86,7 @@ class _FinalUpload:
             phase="final",
             bucket="freeinference",
             key=(
-                f"cloud-agent/sandbox/v1/{hashlib.sha256(NAMESPACE.encode()).hexdigest()}/"
+                f"cloud-agent/sandbox/v1/{hashlib.sha256(self.namespace.encode()).hexdigest()}/"
                 f"{hashlib.sha256(spec.sandbox_id.encode()).hexdigest()}/"
                 f"g{spec.generation}/final.tar.gz"
             ),
@@ -117,6 +121,19 @@ def _spec(generation: int) -> ChatSandboxSpec:
     )
 
 
+def _host(namespace: str) -> tuple[ChatSandboxManager, SandboxArchiveController]:
+    """One host's Sandbox Manager and archive controller under its own namespace."""
+    manager = ChatSandboxManager(ContainerBackend(image=BASE, sandbox_namespace=namespace))
+    controller = SandboxArchiveController(
+        manager,
+        namespace=namespace,
+        service_factory=lambda config: _FinalUpload(config, namespace),
+    )
+    controller.start()
+    controller.apply(_policy())
+    return manager, controller
+
+
 def _create(spec: ChatSandboxSpec, image: str, *labels: str) -> None:
     flags = [f"--label={key}={value}" for key, value in spec.docker_labels().items()]
     flags += [f"--label={label}" for label in labels]
@@ -129,12 +146,7 @@ def _run(container: str, script: str) -> str:
 
 def test_a_restored_chat_starts_on_its_new_host_with_its_files(docker_ready, cleanup, tmp_path):
     containers, images = cleanup
-    manager = ChatSandboxManager(ContainerBackend(image=BASE, sandbox_namespace=NAMESPACE))
-    controller = SandboxArchiveController(
-        manager, namespace=NAMESPACE, service_factory=_FinalUpload
-    )
-    controller.start()
-    controller.apply(_policy())
+    manager, controller = _host(LEAVING)
     capture = SandboxCheckpointCapture(
         docker_binary="docker",
         spool_dir=tmp_path / "spool",
@@ -194,7 +206,11 @@ def test_a_restored_chat_starts_on_its_new_host_with_its_files(docker_ready, cle
     reference = checkpoint_image_reference(SANDBOX_ID, receipt.checkpoint_id)
     images.append(reference)
 
-    # The new host has only the object: neither the container nor its image.
+    controller.close()
+
+    # The new host is another deployment and has only the object: neither the
+    # container nor its image.
+    manager, controller = _host(ARRIVING)
     _docker("rm", "--force", first.container_name)
     _docker("image", "rm", "--force", reference)
     # The download and the checks before ``docker load``, as ``restore`` runs
@@ -245,12 +261,7 @@ def test_a_restored_chat_starts_on_its_new_host_with_its_files(docker_ready, cle
 def test_a_marker_of_another_group_still_refuses_the_restored_start(docker_ready, cleanup):
     """Only the group's own earlier generation passes: a foreign marker fails closed."""
     containers, _images = cleanup
-    manager = ChatSandboxManager(ContainerBackend(image=BASE, sandbox_namespace=NAMESPACE))
-    controller = SandboxArchiveController(
-        manager, namespace=NAMESPACE, service_factory=_FinalUpload
-    )
-    controller.start()
-    controller.apply(_policy())
+    manager, controller = _host(ARRIVING)
     other = ChatSandboxSpec(
         thread_id="athr_other",
         sandbox_id=f"asbx_other{secrets.token_hex(4)}",

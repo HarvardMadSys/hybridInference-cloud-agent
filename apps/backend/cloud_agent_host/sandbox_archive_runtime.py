@@ -735,8 +735,11 @@ class SandboxArchiveController:
         existing: _FinalArchiveMarker | None = None
         if existing_payload is not None:
             existing = _FinalArchiveMarker.decode(existing_payload)
-        if existing is not None and self._carried_by_checkpoint(
-            spec, existing.namespace_sha256, existing.sandbox_id, existing.generation
+        if existing is not None and carried_by_checkpoint(
+            marker_sandbox_id=existing.sandbox_id,
+            marker_generation=existing.generation,
+            sandbox_id=spec.sandbox_id,
+            generation=spec.generation,
         ):
             # The stopped generation's marker, committed into the checkpoint
             # this container was restored from. This container's lifecycle has
@@ -870,23 +873,6 @@ class SandboxArchiveController:
                     self._condition.notify_all()
             self._close_services(services_to_close)
             raise
-
-    def _carried_by_checkpoint(
-        self,
-        spec: ChatSandboxSpec,
-        namespace_sha256: str,
-        sandbox_id: str,
-        generation: int,
-    ) -> bool:
-        """Whether a marker is an earlier generation's, restored with its checkpoint."""
-        return carried_by_checkpoint(
-            namespace=self._namespace,
-            marker_namespace_sha256=namespace_sha256,
-            marker_sandbox_id=sandbox_id,
-            marker_generation=generation,
-            sandbox_id=spec.sandbox_id,
-            generation=spec.generation,
-        )
 
     def _release_final_pin(self, key: tuple[str, int, str]) -> None:
         with self._condition:
@@ -1169,8 +1155,11 @@ class SandboxArchiveController:
             expected_container_id=expected_container_id,
         )
         marker = None if payload is None else SandboxInitialArchiveMarker.decode(payload)
-        if marker is not None and self._carried_by_checkpoint(
-            backend.spec, marker.namespace_sha256, marker.sandbox_id, marker.generation
+        if marker is not None and carried_by_checkpoint(
+            marker_sandbox_id=marker.sandbox_id,
+            marker_generation=marker.generation,
+            sandbox_id=backend.spec.sandbox_id,
+            generation=backend.spec.generation,
         ):
             marker = None
         if marker is not None:
