@@ -107,6 +107,26 @@ def test_a_stop_kills_a_running_setup_instead_of_waiting_out_its_deadline():
     assert len(asked) == 3
 
 
+def test_a_cancelled_setup_says_it_was_stopped_rather_than_out_of_time():
+    """Environment preparation is revoked through ``cancel``; it is a Stop, not a timeout."""
+    process = _Process(lines=[], silent=True)
+    backend = _Backend(process)
+    cancel = threading.Event()
+    cancel.set()
+
+    result = run_setup(
+        script="npm ci",
+        workdir="/workspace",
+        backend=backend,
+        timeout_s=900,
+        cancel=cancel,
+    )
+
+    assert (result.ran, result.exit_code, result.detail) == (True, 130, "setup was stopped")
+    assert process.killed is True
+    assert process.waited is True
+
+
 @pytest.mark.parametrize("script", ["", "   ", "\n"])
 def test_blank_script_does_not_spawn_a_process(script: str):
     backend = _Backend(_Process(lines=[]))

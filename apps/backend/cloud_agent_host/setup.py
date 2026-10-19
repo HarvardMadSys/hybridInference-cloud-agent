@@ -55,6 +55,8 @@ def run_setup(
     ``stop`` is polled while the script runs. Once it answers true -- the
     owner pressed Stop, or the attempt's lease is gone -- the script is killed
     rather than left to run out its timeout for a turn that will not use it.
+    Setting ``cancel``, which revokes an environment's preparation, does the
+    same, and either reads as stopped rather than as out of time.
     """
     if not script.strip():
         return SetupResult(ran=False)
@@ -99,7 +101,7 @@ def run_setup(
     try:
         while True:
             remaining = deadline - time.monotonic()
-            if remaining <= 0 or (cancel is not None and cancel.is_set()):
+            if remaining <= 0:
                 output.close(drain=True)
                 process.kill()
                 process.wait()
@@ -108,7 +110,7 @@ def run_setup(
                     exit_code=124,
                     detail=f"setup exceeded {timeout_s:.0f}s",
                 )
-            if stop is not None and stop():
+            if (cancel is not None and cancel.is_set()) or (stop is not None and stop()):
                 output.close(drain=True)
                 process.kill()
                 process.wait()

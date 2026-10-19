@@ -25,6 +25,7 @@ from cloud_agent_host.runtimes import ClaudeCodeRuntime, get_runtime
 from cloud_agent_host.sandbox import ContainerBackend, ProcessBackend, SandboxError
 from cloud_agent_host.session_supervisor_client import SessionSupervisorError
 from cloud_agent_shared import operation_profiling
+from cloud_agent_shared.environment import BoundEnvironment
 
 
 @pytest.fixture(autouse=True)
@@ -1038,6 +1039,46 @@ def test_a_stop_during_the_resident_start_is_honoured_right_before_admission(mon
     control.admit_chat_turn.assert_not_called()
     assert control.abandon_chat_sandbox.call_args.kwargs["lost"] is False
     assert finish.call_args.args[:2] == ("cancelled", "cancelled by owner")
+
+
+def test_a_stop_during_environment_preparation_cancels_the_turn(monkeypatch):
+    """Stop kills the running setup script, and the preparation it ends is no failure.
+
+    Nothing has reached the CLI, so the Stop is honoured as anywhere else before
+    admission. The killed script used to fail the turn instead.
+    """
+    heart = SimpleNamespace(cancel_requested=False, lease_lost=False)
+
+    def configure(_control, supervisor, _finish):
+        def prepare(*_args, cancelled, **_kwargs):
+            heart.cancel_requested = True
+            assert cancelled()
+            raise SessionSupervisorError(
+                500,
+                "sandbox manager failed unexpectedly (SandboxError in POST "
+                "/workspaces/{workspace_id}/environment/prepare)",
+            )
+
+        supervisor.prepare_environment.side_effect = prepare
+
+    result, control, supervisor, finish = _run_shared_boundary_case(
+        monkeypatch,
+        0,
+        None,
+        "claude-code",
+        configure=configure,
+        heart=heart,
+        job_changes={"environment": BoundEnvironment(binding_id="b", setup_script="npm ci")},
+    )
+
+    assert result == 0
+    supervisor.prepare_environment.assert_called_once()
+    control.admit_chat_turn.assert_not_called()
+    assert supervisor.abandon_shared.call_args.kwargs["lost"] is False
+    assert control.abandon_chat_sandbox.call_args.kwargs["lost"] is False
+    finish.assert_called_once()
+    assert finish.call_args.args[:2] == ("cancelled", "cancelled by owner")
+    assert all(call.args[0].event_type != "error" for call in control.append_event.call_args_list)
 
 
 def test_a_follow_up_claimed_while_its_sandbox_is_busy_goes_back_to_the_queue(monkeypatch):

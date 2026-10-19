@@ -2893,12 +2893,19 @@ def _run_shared_live_attempt(
                 job.thread_id, job.ssh_access.with_slot(job.thread_id, ssh_slot), starting=True
             )
         if job.environment is not None:
-            prepared = supervisor.prepare_environment(
-                job.thread_id,
-                job.environment,
-                activation_owner=lease_token,
-                cancelled=lambda: heart.cancel_requested or heart.lease_lost,
-            )
+            try:
+                prepared = supervisor.prepare_environment(
+                    job.thread_id,
+                    job.environment,
+                    activation_owner=lease_token,
+                    cancelled=lambda: heart.cancel_requested or heart.lease_lost,
+                )
+            except SessionSupervisorError:
+                # A Stop kills the running script, and the preparation then
+                # fails. Nothing has reached the CLI yet, so it is no failure.
+                if stopped_before_admission(base_sha):
+                    return 0
+                raise
             control.append_event(
                 NormalizedEvent("lifecycle", {"phase": "environment_prepared", **prepared})
             )
