@@ -150,8 +150,30 @@ def test_the_listing_has_exactly_one_line_per_file() -> None:
     prompt = prompt_with_attachments("go", [{"path": "a.txt"}, {"path": "specs/api.md"}])
     listed = [line for line in prompt.splitlines() if line.startswith("- ")]
     assert listed == [
-        f"- {SANDBOX_UPLOAD_DIR}/a.txt",
-        f"- {SANDBOX_UPLOAD_DIR}/specs/api.md",
+        f'- "{SANDBOX_UPLOAD_DIR}/a.txt"',
+        f'- "{SANDBOX_UPLOAD_DIR}/specs/api.md"',
+    ]
+
+
+@pytest.mark.parametrize("path", ["notes.txt ", " report.csv", "  two  spaces.md  "])
+def test_the_listing_shows_the_whitespace_a_name_keeps(path: str) -> None:
+    """Quoted, a trailing space is still there for the agent to open.
+
+    Unquoted, ``- /uploads/notes.txt `` ends in a space nobody can see, and the
+    agent opens ``notes.txt``, which does not exist.
+    """
+    prompt = prompt_with_attachments("go", [{"path": path}])
+    listed = [line for line in prompt.splitlines() if line.startswith("- ")]
+    assert listed == [f'- "{SANDBOX_UPLOAD_DIR}/{path}"']
+
+
+def test_a_quoted_name_stays_one_readable_path() -> None:
+    """A quote or a non-ASCII letter in a name neither ends the path nor is escaped away."""
+    prompt = prompt_with_attachments("go", [{"path": 'say "hi".txt'}, {"path": "报告.csv"}])
+    listed = [line for line in prompt.splitlines() if line.startswith("- ")]
+    assert listed == [
+        f'- "{SANDBOX_UPLOAD_DIR}/say \\"hi\\".txt"',
+        f'- "{SANDBOX_UPLOAD_DIR}/报告.csv"',
     ]
 
 
