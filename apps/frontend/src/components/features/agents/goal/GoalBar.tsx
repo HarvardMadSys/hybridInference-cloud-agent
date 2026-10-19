@@ -497,5 +497,6 @@ const PAUSE_KEYS: Record<string, TranslationKey> = {
 
 /** An unrecognised reason is still a reason: say it stopped, not what it was. */
 function pauseKey(reason: string | null | undefined): TranslationKey {
-  return (reason && PAUSE_KEYS[reason]) || 'goal.pauseUnknown';
+  // Own entries only: a reason named `constructor` must not find Object.prototype's.
+  return reason && Object.hasOwn(PAUSE_KEYS, reason) ? PAUSE_KEYS[reason] : 'goal.pauseUnknown';
 }

@@ -565,7 +565,9 @@ const LIFECYCLE_LABELS: Record<string, string> = {
  */
 export function lifecyclePhaseLabel(value: string): { text: string; milestone: boolean } {
   const phase = value.trim().toLowerCase();
-  const known = LIFECYCLE_LABELS[phase];
+  // Own entries only: the text can be the agent's own words, and `__proto__`
+  // must not find Object.prototype's.
+  const known = Object.hasOwn(LIFECYCLE_LABELS, phase) ? LIFECYCLE_LABELS[phase] : undefined;
   if (known) return { text: known, milestone: true };
   if (phase.includes('superseded')) {
     return { text: 'Run interrupted', milestone: true };

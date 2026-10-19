@@ -140,6 +140,26 @@ describe('GoalBar', () => {
     expect(screen.getByRole('button', { name: 'Resume' })).toBeInTheDocument();
   });
 
+  it('says only that it stopped for a reason this build does not know', () => {
+    // Reasons are the platform's to name. `constructor` is not an entry of the
+    // table, and must not find Object.prototype's in its place.
+    render(
+      <GoalBar
+        threadId="thread_1"
+        goal={goal({
+          state: 'paused',
+          pauseReason: 'constructor' as AgentGoal['pauseReason'],
+          pauseDetail: 'a reason added after this build',
+        })}
+        state={idle}
+        onChanged={() => {}}
+      />,
+    );
+    expect(screen.getByRole('status')).toHaveTextContent(
+      'it stopped · a reason added after this build',
+    );
+  });
+
   it('says a fork will not continue on its own, whatever else it says', () => {
     // The pause reason is `fork`, and the owner needs the consequence rather
     // than the cause: "paused" does not tell them this one never resumes

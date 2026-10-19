@@ -1688,6 +1688,18 @@ describe('lifecycle noise', () => {
     });
   });
 
+  it("shows an error in the agent's own words as said, even one named like a built-in", () => {
+    // The agent chooses those words. `__proto__` and `constructor` are not
+    // entries of the label table, and must not find Object.prototype's.
+    for (const word of ['__proto__', 'constructor']) {
+      expect(
+        toDisplayEvent(event(1, 'error', { detail: `agent reported an error: ${word}` })),
+      ).toEqual({ kind: 'lifecycle', text: word, sourceEventId: 1 });
+    }
+    expect(lifecyclePhaseLabel('__proto__')).toEqual({ text: '  proto  ', milestone: false });
+    expect(lifecyclePhaseLabel('constructor')).toEqual({ text: 'constructor', milestone: false });
+  });
+
   it('collapses consecutive reasoning rows into one status', () => {
     const events = [
       event(1, 'thinking', { text: '' }),
