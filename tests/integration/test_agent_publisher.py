@@ -271,11 +271,33 @@ def test_binary_new_or_duplicated_credential_is_blocked(origin, tmp_path, duplic
     assert _branches(origin[0]) == ["main"]
 
 
-@pytest.mark.parametrize("operation", ["rename", "copy", "modified_rename", "duplicate"])
-def test_only_exact_secret_blob_rename_is_allowed(origin, tmp_path, operation):
-    """Only an exact, source-consuming rename may inherit the old blob baseline."""
+@pytest.mark.parametrize(
+    "operation",
+    [
+        "rename",
+        "modified_rename",
+        "copy",
+        "duplicate",
+        "rename_duplicating_token",
+        "rename_adding_token",
+    ],
+)
+def test_a_secret_blob_rename_inherits_its_source_baseline(origin, tmp_path, operation):
+    """A source-consuming rename, edited or not, inherits the old blob baseline.
+
+    A copy keeps its source and inherits nothing. The counts still apply to a
+    rename: one whose edit repeats the token, or adds another, is refused.
+    """
     credential = ("gh" + "p_" + "a" * 36).encode()
-    content = b"\0" + credential + b"\0existing binary asset"
+    # Git scores a rename by the lines (or 64-byte runs) two blobs share. One
+    # unbroken run matches nothing once edited, and the edited move would reach
+    # the publisher as a deletion and an addition rather than a rename.
+    content = b"\0" + credential + b"\0\n" + b"existing binary asset\n" * 16
+    edits = {
+        "modified_rename": b"innocuous edit\n",
+        "rename_duplicating_token": credential + b"\n",
+        "rename_adding_token": ("gh" + "p_" + "b" * 36).encode() + b"\n",
+    }
     seed = tmp_path / "seed"
     _git(["clone", "--quiet", origin[0], str(seed)], cwd=tmp_path)
     (seed / "asset.bin").write_bytes(content)
@@ -289,9 +311,9 @@ def test_only_exact_secret_blob_rename_is_allowed(origin, tmp_path, operation):
     destination = "copied.bin" if operation == "copy" else "renamed.bin"
     if operation == "rename":
         _git(["mv", "asset.bin", destination], cwd=editor)
-    elif operation == "modified_rename":
+    elif operation in edits:
         _git(["mv", "asset.bin", destination], cwd=editor)
-        (editor / destination).write_bytes(content + b"\0innocuous edit")
+        (editor / destination).write_bytes(content + edits[operation])
     elif operation == "duplicate":
         (editor / "asset.bin").unlink()
         (editor / destination).write_bytes(content)
@@ -301,14 +323,17 @@ def test_only_exact_secret_blob_rename_is_allowed(origin, tmp_path, operation):
     _git(["add", "--all"], cwd=editor)
     source_blob = _git(["rev-parse", f"{base_sha}:asset.bin"], cwd=editor).strip()
     destination_blob = _git(["hash-object", destination], cwd=editor).strip()
-    assert (source_blob == destination_blob) is (operation != "modified_rename")
+    assert (source_blob == destination_blob) is (operation not in edits)
     if operation == "duplicate":
         assert _git(["hash-object", "second-copy.bin"], cwd=editor).strip() == source_blob
-    if operation in {"modified_rename", "duplicate"}:
+    if operation in {"duplicate", *edits}:
         assert not (editor / "asset.bin").exists()
     patch = _git(["diff", "--cached", "--binary", "--full-index"], cwd=editor)
+    # Every move reaches the publisher as a rename, so no refusal below is an
+    # edited move git left unpaired and the publisher saw as an addition.
+    assert ("rename from asset.bin" in patch) is (operation != "copy")
 
-    if operation == "rename":
+    if operation in {"rename", "modified_rename"}:
         result = publish_patch(
             job_id="ajob_secret_rename",
             patch=patch,
@@ -316,10 +341,11 @@ def test_only_exact_secret_blob_rename_is_allowed(origin, tmp_path, operation):
             base_sha=base_sha,
             commit_message="agent: rename existing binary asset",
         )
-        assert _published_blob(origin[0], result.branch, destination) == content
+        moved = (editor / destination).read_bytes()
+        assert _published_blob(origin[0], result.branch, destination) == moved
         assert (
             _git(["rev-parse", f"{result.branch}:{destination}"], cwd=origin[0]).strip()
-            == source_blob
+            == destination_blob
         )
         assert "asset.bin" not in _git(["ls-tree", "--name-only", result.branch], cwd=origin[0])
         assert _branches(origin[0]) == ["agent/ajob_secret_rename", "main"]

@@ -193,7 +193,7 @@ def _error_lines(detail: list[str]) -> str | None:
 
 @dataclass
 class _StagedBlob:
-    """A regular staged file and its same-path object from the base commit."""
+    """A regular staged file and its baseline: the base-commit object it modifies or moves."""
 
     path: str
     sha: str
@@ -384,15 +384,17 @@ def _staged_change_set(repo: Path) -> _StagedChangeSet:
             if dst_mode == "160000":
                 gitlinks.append(path)
             if dst_mode in ("100644", "100755"):
-                unchanged_rename = status.startswith("R") and parts[2] == parts[3]
+                # A rename consumes its source, so the source blob is the
+                # baseline even when the file was also edited; the counts still
+                # catch an added or repeated token. A copy keeps its source,
+                # and git reports it as an added file with no baseline.
                 blobs.append(
                     _StagedBlob(
                         path=path,
                         sha=parts[3],
                         base_sha=(
                             parts[2]
-                            if parts[0] in ("100644", "100755")
-                            and (status.startswith("M") or unchanged_rename)
+                            if parts[0] in ("100644", "100755") and status.startswith(("M", "R"))
                             else None
                         ),
                     )
@@ -461,8 +463,8 @@ def _validate_staged_blobs(
                 )
                 if content.count(token) > old_content.count(token):
                     raise PatchRejected(f"patch rejected: Secret {name} in {blob.path!r}")
-        # Most files need no baseline read. A match requires checking the same
-        # path's original object; deletion has no new blob and is never scanned.
+        # Most files need no baseline read. A match requires checking the object
+        # the file modifies or moves; deletion has no new blob and is never scanned.
         if not scan_blob_secrets(content):
             continue
         baseline = (
