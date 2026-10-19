@@ -145,7 +145,9 @@ make check
 | `make typecheck` | Mypy over all three backend packages. |
 | `make test` | Pytest excluding `external` and `dbtest`, with four workers and each file kept on one worker. |
 | `make check` | `format`, `lint`, `typecheck`, then `test`. Review any automatic fixes before committing. |
-| `make test-db` | The PostgreSQL-backed `dbtest` tier. |
+| `make test-db` | The PostgreSQL-backed `dbtest` tier, against a PostgreSQL you provide. |
+| `make test-db-local` | The `dbtest` tier on this machine's shared test PostgreSQL, in fresh databases of this checkout's own; needs Docker. |
+| `make test-db-local-clean` | Drop the local test databases of checkouts that no longer exist. |
 | `make test-all` | All tests except `external`, including `dbtest`. |
 | `make docs` | Build this documentation site, every language, into `docs/build/html`; any warning fails. |
 | `make docs-verify` | `make docs`, then check that every translation still matches its English page. CI runs this. |
@@ -258,7 +260,23 @@ contains HTTP-level tests that do not require a deployed server. Tests marked
 Docker, a real CLI, or a configured Gateway. CI runs selected external checks
 in addition to the default tier.
 
-If you change the database, run `make test-db` against a dedicated test
+If you change the database, run `make test-db-local`. It needs only Docker. It
+starts one PostgreSQL 15 container per machine (`cloud-agent-test-postgres` on
+`127.0.0.1:54339`, with its data in memory), creates empty databases for this
+checkout, named from its path, and runs the `dbtest` tier with up to twelve
+workers. Every run starts from empty databases, so one run's data or settings
+never reach the next, and two worktrees never share tables. Two runs in the
+same checkout take turns. The run fails if any database test was skipped.
+
+Pass pytest arguments with `ARGS`, for example
+`make test-db-local ARGS="tests/integration/storage/test_team_store.py -x"`. To
+run pytest yourself, `eval "$(scripts/test-db-local.sh env)"` creates the
+databases and exports the `TEST_DB_*` values. When you remove a worktree,
+`make test-db-local-clean` drops its databases. `make test-db-local-down`
+removes the container and every checkout's databases with it, so do not run it
+while someone else may be testing.
+
+To use a PostgreSQL of your own, run `make test-db` against a dedicated test
 database. Fixtures read `TEST_DB_HOST`, `TEST_DB_PORT`, `TEST_DB_NAME`,
 `TEST_DB_USER`, and `TEST_DB_PASSWORD`; `TEST_DB_NAME` must contain `_test_`.
 Check the result for skipped tests, because an unavailable database can cause

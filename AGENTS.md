@@ -83,8 +83,13 @@ make check       # format + lint + type-check + test — must be green before ev
 ```
 
 `make test` runs everything except the `external` and `dbtest` markers.
-Database-backed tests are opt-in: `make test-db` (needs Postgres; see
-[ENVIRONMENT.md](ENVIRONMENT.md)).
+Database-backed tests are opt-in. When a change touches storage, SQL, a
+migration, or a database test, run `make test-db-local` (needs Docker). It uses
+this machine's shared test PostgreSQL, gives the checkout fresh databases of its
+own on every run, and fails if any database test was skipped; `ARGS="<paths>
+-x"` narrows it. Never run `make test-db-local-down`: it discards every
+worktree's databases and fails their runs. `make test-db` runs the tier against
+a PostgreSQL you provide (see [ENVIRONMENT.md](ENVIRONMENT.md)).
 
 For frontend changes, use Node.js 22 and run `make ci-frontend`. It installs the
 locked dependencies with `npm ci`, then checks lint, formatting, types, tests,

@@ -1,4 +1,4 @@
-.PHONY: help setup-dev format lint typecheck test test-db test-all check docs docs-gettext docs-translate docs-lang docs-verify ci ci-backend ci-database ci-frontend clean
+.PHONY: help setup-dev format lint typecheck test test-db test-db-local test-db-local-clean test-db-local-down test-all check docs docs-gettext docs-translate docs-lang docs-verify ci ci-backend ci-database ci-frontend clean
 
 .DEFAULT_GOAL := help
 
@@ -49,6 +49,17 @@ test:  ## Run tests (exclude external and db-dependent)
 
 test-db:  ## Run the dbtest tier (needs Postgres; see TEST_DB_* in ENVIRONMENT.md)
 	$(UV_RUN) pytest -vv -m "dbtest"
+
+# ARGS passes pytest arguments through, e.g. ARGS="tests/integration/storage -x".
+test-db-local:  ## Run the dbtest tier on this machine's shared test PostgreSQL (needs Docker)
+	UV_RUN="$(UV_RUN)" ./scripts/test-db-local.sh run $(ARGS)
+
+test-db-local-clean:  ## Drop local test databases of checkouts that no longer exist
+	UV_RUN="$(UV_RUN)" ./scripts/test-db-local.sh clean
+
+# Discards every checkout's databases and fails their runs; never from an agent.
+test-db-local-down:  ## Remove the shared local test PostgreSQL container
+	./scripts/test-db-local.sh down
 
 test-all:  ## Run all tests except external (includes db-dependent)
 	$(UV_RUN) pytest -q -m "not external"

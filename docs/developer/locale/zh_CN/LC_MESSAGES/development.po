@@ -451,8 +451,26 @@ msgid "`make test-db`"
 msgstr ""
 
 #: ../developer/development.md
-msgid "The PostgreSQL-backed `dbtest` tier."
-msgstr "依赖 PostgreSQL 的 `dbtest` 测试层级。"
+msgid "The PostgreSQL-backed `dbtest` tier, against a PostgreSQL you provide."
+msgstr "依赖 PostgreSQL 的 `dbtest` 测试层级，连的是你自己准备的 PostgreSQL。"
+
+#: ../developer/development.md
+msgid "`make test-db-local`"
+msgstr ""
+
+#: ../developer/development.md
+msgid ""
+"The `dbtest` tier on this machine's shared test PostgreSQL, in fresh "
+"databases of this checkout's own; needs Docker."
+msgstr "在本机共用的测试 PostgreSQL 上跑 `dbtest` 测试层级，用的是这个仓库副本自己的一套新库；需要 Docker。"
+
+#: ../developer/development.md
+msgid "`make test-db-local-clean`"
+msgstr ""
+
+#: ../developer/development.md
+msgid "Drop the local test databases of checkouts that no longer exist."
+msgstr "删掉那些仓库副本已经不在了的本地测试库。"
 
 #: ../developer/development.md
 msgid "`make test-all`"
@@ -482,17 +500,17 @@ msgid ""
 "page. CI runs this."
 msgstr "先跑 `make docs`，再检查每份译文是否还和英文页面对得上。CI 跑的就是这个。"
 
-#: ../developer/development.md:153
+#: ../developer/development.md:155
 msgid "Run CI locally"
 msgstr "在本地跑 CI"
 
-#: ../developer/development.md:155
+#: ../developer/development.md:157
 msgid ""
 "The portable launcher runs the backend, database, and frontend gates with"
 " check-only formatting and linting:"
 msgstr "这个可移植的启动脚本会把后端、数据库和前端的检查都跑一遍，格式化和 lint 只检查、不改文件："
 
-#: ../developer/development.md:166
+#: ../developer/development.md:168
 msgid ""
 "Install `uv` and Python 3.12 before running backend or database checks. "
 "Frontend checks require Node.js 22 and npm; database checks require a "
@@ -509,7 +527,7 @@ msgstr ""
 "并提交结果。脚本可以在任何目录下直接调用：在仓库里用 `./scripts/ci-local.sh "
 "[all|backend|database|frontend]`，在别处用它的绝对路径。默认的层级是 `all`。"
 
-#: ../developer/development.md:175
+#: ../developer/development.md:177
 msgid ""
 "Backend checks run Ruff formatting and lint checks, pydocstyle, mypy, and"
 " pytest with four workers and `--dist loadfile`, excluding `external` and"
@@ -525,7 +543,7 @@ msgstr ""
 "容器，给四个 worker 各建一个数据库，退出或被中断时删除容器。只要有测试被跳过，或者测试总数不到 100 个，这一层就不算通过。前端检查包括"
 " lint、格式检查、类型检查、测试，以及 server-only 和运行时站点配置这两项构建守卫。"
 
-#: ../developer/development.md:183
+#: ../developer/development.md:185
 msgid ""
 "Each run saves logs in a fresh gitignored `.local-ci/<tier>.XXXXXX` "
 "directory. Set `CI_LOG_DIR` to choose an output directory. This local "
@@ -537,7 +555,7 @@ msgstr ""
 "`CI_LOG_DIR`。本地检查不包括外部回归测试、滚动升级、Gitleaks、Docker 发布镜像构建和 Kata 资格验证，这些仍由托管 "
 "CI 负责。"
 
-#: ../developer/development.md:188
+#: ../developer/development.md:190
 msgid ""
 "Every pull request, from a fork or from a branch of this repository, runs"
 " on disposable GitHub-hosted VMs: ARM64 artifacts use `ubuntu-24.04-arm`,"
@@ -564,7 +582,7 @@ msgstr ""
 " week>` 标签，只有发布工作流会写它。这个标签每周换一次名，所以每周的第一次发布都是冷构建。真实 Kata 主机的资格验证不会在任何 PR "
 "里跑，只在受信任的 `dev` 事件上运行。"
 
-#: ../developer/development.md:204
+#: ../developer/development.md:206
 msgid ""
 "Pull requests only read the Actions cache. After each push to `dev`, the "
 "optional `pr-caches.yml` workflow fills the uv and npm caches and exports"
@@ -582,7 +600,7 @@ msgstr ""
 "个：pull request 中，Kilo 的三个各自单独作为一个 `MCP conformance (kilo, …)` "
 "任务运行，其余十二个放在沙箱镜像任务里；受信任的事件则把 15 个都放在沙箱镜像任务里跑。"
 
-#: ../developer/development.md:213
+#: ../developer/development.md:215
 msgid ""
 "A pull request also splits the default test tier, the PostgreSQL tier, "
 "and the frontend unit tests over two hosted VMs each, shown as `Tests "
@@ -595,7 +613,7 @@ msgstr ""
 "这样的名字。pytest 由 `scripts/ci_shard.py` 按整个文件分配到各个分片，vitest 则用 `--shard` "
 "自己拆分。受信任的事件每个层级只跑一个分片。想在本地跑某一个分片，把它分到的文件传给 pytest："
 
-#: ../developer/development.md:224
+#: ../developer/development.md:226
 msgid ""
 "GitHub issue [#464](https://github.com/HarvardMadSys/hybridInference-"
 "cloud-agent/issues/464) tracks the remaining administrator work: the "
@@ -605,7 +623,7 @@ msgstr ""
 "/hybridInference-cloud-agent/issues/464)：配置下面说的 runner 组限制，并用一个不受信任的 fork"
 " 验证。"
 
-#: ../developer/development.md:228
+#: ../developer/development.md:230
 msgid ""
 "Because the repository is public, a fork's pull request can run "
 "workflows. Configure GitHub's runner groups to allow persistent pools "
@@ -638,7 +656,7 @@ msgstr ""
 "的批准设置是不够的：批准一次测试运行，绝不能顺带给出发布主机或发布凭据的访问权限。这些都是 GitHub "
 "的管理员设置，仓库里的测试既配置不了，也验证不了。"
 
-#: ../developer/development.md:247
+#: ../developer/development.md:249
 msgid ""
 "The default backend test tier uses four workers in both CI and `make "
 "test`, keeping each test file on one worker. Override the worker count "
@@ -647,7 +665,7 @@ msgstr ""
 "默认的后端测试层级在 CI 和 `make test` 中都用四个 worker，同一个测试文件始终在同一个 worker 上。需要时可以改 "
 "worker 数量；设为零就关闭并行，方便调试："
 
-#: ../developer/development.md:255
+#: ../developer/development.md:257
 msgid ""
 "Use markers to select the test tier you need. For example, "
 "`tests/servers/` contains HTTP-level tests that do not require a deployed"
@@ -659,46 +677,69 @@ msgstr ""
 "`external` 的测试会在测试模块里写明前置条件，可能需要 Docker、真实的 CLI 或配置好的网关。除了默认层级，CI "
 "还会挑一部分外部检查来跑。"
 
-#: ../developer/development.md:261
+#: ../developer/development.md:263
 msgid ""
-"If you change the database, run `make test-db` against a dedicated test "
-"database. Fixtures read `TEST_DB_HOST`, `TEST_DB_PORT`, `TEST_DB_NAME`, "
-"`TEST_DB_USER`, and `TEST_DB_PASSWORD`; `TEST_DB_NAME` must contain "
-"`_test_`. Check the result for skipped tests, because an unavailable "
-"database can cause fixtures to skip rather than fail. Parallel workers "
-"need separate pre-created databases. See "
+"If you change the database, run `make test-db-local`. It needs only "
+"Docker. It starts one PostgreSQL 15 container per machine (`cloud-agent-"
+"test-postgres` on `127.0.0.1:54339`, with its data in memory), creates "
+"empty databases for this checkout, named from its path, and runs the "
+"`dbtest` tier with up to twelve workers. Every run starts from empty "
+"databases, so one run's data or settings never reach the next, and two "
+"worktrees never share tables. Two runs in the same checkout take turns. "
+"The run fails if any database test was skipped."
+msgstr "如果改了数据库，就跑 `make test-db-local`，只需要 Docker。它在每台机器上起一个 PostgreSQL 15 容器（`cloud-agent-test-postgres`，监听 `127.0.0.1:54339`，数据放在内存里），按仓库副本的路径给它建一套空库，再用最多十二个 worker 跑 `dbtest` 测试层级。每次都从空库开始，所以上一次留下的数据和设置不会带到下一次，两个 worktree 也不会共用表。同一个仓库副本里同时发起两次，会排队依次跑。只要有数据库测试被跳过，这次运行就算失败。"
+
+#: ../developer/development.md:271
+msgid ""
+"Pass pytest arguments with `ARGS`, for example `make test-db-local "
+"ARGS=\"tests/integration/storage/test_team_store.py -x\"`. To run pytest "
+"yourself, `eval \"$(scripts/test-db-local.sh env)\"` creates the "
+"databases and exports the `TEST_DB_*` values. When you remove a worktree,"
+" `make test-db-local-clean` drops its databases. `make test-db-local-"
+"down` removes the container and every checkout's databases with it, so do"
+" not run it while someone else may be testing."
+msgstr "要给 pytest 传参数就用 `ARGS`，例如 `make test-db-local ARGS=\"tests/integration/storage/test_team_store.py -x\"`。想自己跑 pytest，可以先执行 `eval \"$(scripts/test-db-local.sh env)\"`，它会建好库并导出 `TEST_DB_*` 这几个变量。删掉一个 worktree 之后，用 `make test-db-local-clean` 清掉它的库。`make test-db-local-down` 会删掉容器，所有仓库副本的库也跟着一起没了，所以别人可能正在跑测试时不要用它。"
+
+#: ../developer/development.md:279
+msgid ""
+"To use a PostgreSQL of your own, run `make test-db` against a dedicated "
+"test database. Fixtures read `TEST_DB_HOST`, `TEST_DB_PORT`, "
+"`TEST_DB_NAME`, `TEST_DB_USER`, and `TEST_DB_PASSWORD`; `TEST_DB_NAME` "
+"must contain `_test_`. Check the result for skipped tests, because an "
+"unavailable database can cause fixtures to skip rather than fail. "
+"Parallel workers need separate pre-created databases. See "
 "[ENVIRONMENT.md](../../ENVIRONMENT.md#database) for defaults and worker "
 "naming."
 msgstr ""
-"如果改了数据库，就用一个专门的测试数据库跑 `make test-db`。测试夹具会读取 "
+"如果要用你自己的 PostgreSQL，就用一个专门的测试数据库跑 `make test-db`。测试夹具会读取 "
 "`TEST_DB_HOST`、`TEST_DB_PORT`、`TEST_DB_NAME`、`TEST_DB_USER` 和 "
 "`TEST_DB_PASSWORD`，其中 `TEST_DB_NAME` 必须包含 "
 "`_test_`。跑完要看一下有没有被跳过的测试：数据库连不上时，夹具可能直接跳过，而不是报错。并行的 worker "
 "各自需要一个事先建好的数据库。默认值和 worker 的命名规则见 "
 "[ENVIRONMENT.md](../../ENVIRONMENT.md#database)。"
 
-#: ../developer/development.md:269
+#: ../developer/development.md:287
 msgid ""
 "Deployment tests read the sandbox CLI version settings. If your "
 "development tool exports a different `CODEX_VERSION`, remove that "
 "inherited value for the check:"
 msgstr "部署相关的测试会读取沙箱 CLI 的版本设置。如果你的开发工具导出了另一个 `CODEX_VERSION`，跑检查时把这个继承来的变量去掉："
 
-#: ../developer/development.md:277
+#: ../developer/development.md:295
 msgid "For a frontend change, run these checks from the repository root:"
 msgstr "改了前端，就在仓库根目录运行下面这些检查："
 
-#: ../developer/development.md:288
+#: ../developer/development.md:306
 msgid ""
 "CI also runs the following build guards. Run the relevant one locally "
 "when you change server-only imports or runtime site configuration:"
 msgstr "CI 还会跑下面两个构建守卫。如果你改了 server-only 导入或运行时站点配置，在本地跑对应的那个："
 
-#: ../developer/development.md:296
+#: ../developer/development.md:314
 msgid "Browser recovery regressions run the production Next.js app in Chromium:"
 msgstr "浏览器恢复的回归测试会在 Chromium 里跑生产构建的 Next.js 应用："
 
-#: ../developer/development.md:303
+#: ../developer/development.md:321
 msgid ""
 "Run these in an isolated checkout on the test host with Node 22. "
 "Chromium's system libraries must be provisioned there; this command does "
@@ -712,7 +753,7 @@ msgstr ""
 " `PLAYWRIGHT_BROWSERS_PATH` 把浏览器下载到这份副本里用完即删的测试目录。测试运行器会构建根路径的 Web "
 "变体，自己分配回环端口，跑完后关掉它起的服务器。不要同时对同一个 `.next` 目录再跑一次构建。"
 
-#: ../developer/development.md:310
+#: ../developer/development.md:328
 msgid ""
 "The tests use real page navigation, browser offline mode, and failed "
 "JavaScript chunk downloads. A separate HTTP fixture supplies explicit API"
@@ -727,7 +768,7 @@ msgstr ""
 "请求，整个测试套件直接失败。这些测试覆盖的是浏览器端的恢复，以及客户端和 API 之间的交互；Python "
 "控制平面、数据库、身份认证服务和沙箱主机都不在范围内，它们仍然要靠各自的集成测试和 staging 检查。"
 
-#: ../developer/development.md:317
+#: ../developer/development.md:335
 msgid ""
 "Chromium aborts requests still waiting for a connection with "
 "`net::ERR_NETWORK_CHANGED` whenever the host's network addresses change, "
@@ -742,7 +783,7 @@ msgstr ""
 "flaky。其他原因导致的失败，重试会直接失败，所以这类失败照样会让整个测试套件失败（`apps/frontend/e2e/network-"
 "change.ts`）。"
 
-#: ../developer/development.md:324
+#: ../developer/development.md:342
 msgid ""
 "Failures retain screenshots and Playwright traces in `apps/frontend/test-"
 "results/` and an HTML report in `apps/frontend/playwright-report/`; CI "
@@ -755,7 +796,7 @@ msgstr ""
 "会把两者都上传。根路径构建成功之后，如果只是在改测试桩或测试用例，可以用 `CLOUD_AGENT_E2E_SKIP_BUILD=1 npm "
 "run test:browser` 反复跑；改了应用代码就要重新构建。"
 
-#: ../developer/development.md:329
+#: ../developer/development.md:347
 msgid ""
 "The `make ci-frontend` target runs the checks above, including browser "
 "recovery. Hosted CI also builds and smoke-tests both the root and "
@@ -767,15 +808,15 @@ msgstr ""
 "两个 Web 变体并做冒烟测试。完整的 CI 检查见 [CONTRIBUTING.md](../../CONTRIBUTING.md"
 "#continuous-integration)。"
 
-#: ../developer/development.md:335
+#: ../developer/development.md:353
 msgid "Changing an API"
 msgstr "修改 API"
 
-#: ../developer/development.md:337
+#: ../developer/development.md:355
 msgid "`gateway_contracts/` contains two different kinds of HTTP contract:"
 msgstr "`gateway_contracts/` 里有两类不同的 HTTP 契约："
 
-#: ../developer/development.md:339
+#: ../developer/development.md:357
 msgid ""
 "`*.openapi.yaml` describes the Gateway APIs this service consumes. When a"
 " client starts reading a new field or calling a new endpoint, verify the "
@@ -784,7 +825,7 @@ msgstr ""
 "`*.openapi.yaml` 描述本服务调用的网关 API。客户端开始读取新字段或调用新端点时，要去网关源代码里核实，并在同一个 PR "
 "里更新这份文档。"
 
-#: ../developer/development.md:342
+#: ../developer/development.md:360
 msgid ""
 "`agent-control-plane.openapi.json` records the API this service "
 "publishes. An intentional API change requires a reviewed snapshot update "
@@ -793,11 +834,11 @@ msgstr ""
 "`agent-control-plane.openapi.json` 记录本服务对外提供的 API。有意修改 API 时，要在同一个 PR "
 "里更新这份快照，并经过评审。"
 
-#: ../developer/development.md:345
+#: ../developer/development.md:363
 msgid "Regenerate the control-plane snapshot from the repository root:"
 msgstr "在仓库根目录重新生成控制平面的快照："
 
-#: ../developer/development.md:363
+#: ../developer/development.md:381
 msgid ""
 "Review the generated diff and explain any compatibility implications. The"
 " surface tests also reject duplicate registrations and overlaps between "
@@ -809,11 +850,11 @@ msgstr ""
 "仔细看一遍生成的 diff，并说明它对兼容性有什么影响。接口测试还会拦下重复注册，以及 agent "
 "接口路由之间的重叠。快照只是记录了改动；改动是否兼容，要靠行为测试和评审来判断。[契约指南](../../gateway_contracts/README.md)讲了这些检查能验证什么，以及哪些地方仍需对照网关源代码确认。"
 
-#: ../developer/development.md:370
+#: ../developer/development.md:388
 msgid "Packaging and documentation"
 msgstr "打包与文档"
 
-#: ../developer/development.md:372
+#: ../developer/development.md:390
 msgid ""
 "When adding or moving a package, review package discovery in "
 "`pyproject.toml`, mypy and linter roots, Docker `COPY` paths, and the "
@@ -827,7 +868,7 @@ msgstr ""
 "里的路径分类器。还要确认构建出来的镜像带齐了依赖：本地仓库里能导入，并不能说明镜像里也能。CI 会构建并启动部分镜像，分类器的测试会根据 "
 "Dockerfile 推出共用包的路径。"
 
-#: ../developer/development.md:379
+#: ../developer/development.md:397
 msgid ""
 "Schema changes use explicit additive Alembic revisions. The current chain"
 " starts at `migrations/versions/0001_schema_baseline.py`; keep schema "
@@ -841,7 +882,7 @@ msgstr ""
 "开始；不要在服务启动时建表。项目里没有可供自动生成迁移的 SQLAlchemy 模型元数据。如果数据库还标记着 baseline "
 "之前的旧迁移链，请按[重建手册](operations.md#rebuilding-the-agent-database)处理。"
 
-#: ../developer/development.md:385
+#: ../developer/development.md:403
 msgid ""
 "Update the guide that owns any changed configuration, command, or "
 "behavior:"
@@ -895,7 +936,7 @@ msgstr "发布产物与验证"
 msgid "[Release guide](../../deploy/release/README.md)"
 msgstr "[发布指南](../../deploy/release/README.md)"
 
-#: ../developer/development.md:395
+#: ../developer/development.md:413
 #, python-brace-format
 msgid ""
 "These guides form the developer documentation site, built with Sphinx and"
@@ -917,7 +958,7 @@ msgstr ""
 "`make docs-verify`，CI 的 Docs Build "
 "任务跑的是同一个目标。本站还发布简体中文版，所以改了英文也要更新对应的译文，见[翻译文档](translations.md)。"
 
-#: ../developer/development.md:406
+#: ../developer/development.md:424
 msgid ""
 "Designs, completed migration checklists, and acceptance records under "
 "[`docs/agents/`](../agents/) document their own baseline. Preserve that "
