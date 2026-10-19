@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -228,6 +229,43 @@ def test_failed_installation_does_not_start_services_or_record_success(tmp_path)
     result = prepare.prepare(backend, environment)
     assert len(backend.calls) == 3
     assert all(s["state"] == "succeeded" for s in result["steps"])
+
+
+@pytest.mark.parametrize(
+    ("revoked", "exit_code", "state"),
+    [
+        pytest.param(True, 0, "cancelled", id="stopped"),
+        pytest.param(False, 1, "failed", id="failed"),
+        pytest.param(False, 130, "failed", id="exited-130-itself"),
+    ],
+)
+def test_a_stopped_installation_is_recorded_as_cancelled_and_a_failed_one_as_failed(
+    tmp_path, revoked, exit_code, state
+):
+    # A Stop revokes the preparation, whose script run_setup then kills and
+    # reports as stopped (130). A script that exits 130 by itself still failed.
+    backend = _Backend()
+
+    def spawn(spec):
+        backend.calls.append(spec)
+        return _Process("installing", exit_code)
+
+    backend.spawn = spawn
+    cancel = threading.Event()
+    if revoked:
+        cancel.set()
+    environment = BoundEnvironment(binding_id="bound", setup_script="install", start_script="start")
+    prepare = EnvironmentPreparation(tmp_path)
+    reported = []
+
+    with pytest.raises(SandboxError, match="Environment setup"):
+        prepare.prepare(backend, environment, callback=reported.append, cancel=cancel)
+
+    assert len(backend.calls) == 1
+    status = prepare.status(backend, "bound")
+    assert [(step["phase"], step["state"]) for step in status["steps"]] == [("setup", state)]
+    assert reported[-1]["state"] == state
+    assert not status["ready"]
 
 
 def test_masked_output_is_idempotent_and_user_data_ids_are_still_masked():

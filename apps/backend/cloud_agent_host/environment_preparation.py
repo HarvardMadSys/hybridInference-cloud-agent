@@ -156,8 +156,16 @@ class EnvironmentPreparation:
                     cleanup_background=phase != "start",
                     phase=phase,
                 )
+                if result.exit_code == 0:
+                    state = "succeeded"
+                elif result.exit_code == 130 and cancel is not None and cancel.is_set():
+                    # Revoking the preparation killed its script, which run_setup
+                    # reports as stopped; a script's own exit 130 still failed.
+                    state = "cancelled"
+                else:
+                    state = "failed"
                 step.update(
-                    state="succeeded" if result.exit_code == 0 else "failed",
+                    state=state,
                     exit_code=result.exit_code,
                     duration_seconds=time.monotonic() - started,
                     ran=result.ran,
