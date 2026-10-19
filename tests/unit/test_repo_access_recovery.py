@@ -11,6 +11,10 @@ from fastapi.testclient import TestClient
 from cloud_agent import entitlement
 from cloud_agent.app import install_repository_access_errors
 from cloud_agent.entitlement import RepoAccessUnavailable, RepoNotAllowed
+from cloud_agent.github_app import AppConfig, GitHubAppCredentials
+
+# Listing a user's repositories speaks as the user, so no App key is used.
+_APP = AppConfig(app_id="1", private_key="unused", api_base="https://api.test")
 
 
 def _connection(monkeypatch, *, failure: bool):
@@ -79,6 +83,60 @@ async def test_complete_lookup_can_definitively_refuse_access(monkeypatch):
             app_credentials=app,
             env={},
         )
+
+
+def _listed_connection(monkeypatch):
+    """A user connected to one installation, whose listing GitHub answers."""
+    monkeypatch.setattr(
+        entitlement,
+        "user_access_token",
+        AsyncMock(
+            return_value=SimpleNamespace(value="synthetic", ciphertext="synthetic-cipher"),
+        ),
+    )
+    return SimpleNamespace(list_repo_grants=AsyncMock(return_value=[{"installation_id": 77}]))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("limited_page", ["1", "2"])
+async def test_a_rate_limited_listing_is_unavailable_and_not_remembered(monkeypatch, limited_page):
+    """A rate limit, which GitHub may answer with a 403, is no answer about access.
+
+    Read as the installation's refusal, it was an empty answer, settled and kept
+    for a minute; a limit on a later page also discarded the pages before it.
+    """
+    store = _listed_connection(monkeypatch)
+    first_page = [{"full_name": f"owner/r{n}", "permissions": {"push": True}} for n in range(100)]
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.params["page"] == limited_page:
+            return httpx.Response(
+                403,
+                headers={"x-ratelimit-remaining": "0", "x-ratelimit-reset": "0"},
+                json={"message": "API rate limit exceeded"},
+            )
+        return httpx.Response(200, json={"repositories": first_page})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        app = GitHubAppCredentials(_APP, client=client)
+        with pytest.raises(RepoAccessUnavailable):
+            await entitlement.require_entitled_repo(
+                "owner/r0", "user", store=store, app_credentials=app, env={}
+            )
+    assert app.cached_user_repositories("user", (77,)) is None
+
+
+@pytest.mark.asyncio
+async def test_a_plain_refusal_of_the_listing_is_still_no_access(monkeypatch):
+    store = _listed_connection(monkeypatch)
+    refused = httpx.Response(403, json={"message": "Resource not accessible by integration"})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: refused)) as client:
+        app = GitHubAppCredentials(_APP, client=client)
+        with pytest.raises(RepoNotAllowed):
+            await entitlement.require_entitled_repo(
+                "owner/r0", "user", store=store, app_credentials=app, env={}
+            )
+    assert app.cached_user_repositories("user", (77,)) == []
 
 
 @pytest.mark.asyncio

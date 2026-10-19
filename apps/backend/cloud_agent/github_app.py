@@ -777,7 +777,9 @@ class GitHubAppCredentials:
         request opened, which a user who can only read could not do themselves.
 
         An installation the user can no longer reach contributes nothing; a
-        token GitHub refuses is :class:`UserAuthorizationRevoked`.
+        token GitHub refuses is :class:`UserAuthorizationRevoked`. A rate limit,
+        on any page, is an error: it says nothing about access, and an empty
+        answer would be remembered as the settled one.
         """
         repos: list[str] = []
         page = 1
@@ -794,13 +796,15 @@ class GitHubAppCredentials:
                 )
                 if response.status_code == 401:
                     raise UserAuthorizationRevoked("GitHub refused the user's token")
-                if response.status_code in (403, 404):
+                wait = rate_limit_wait(response)
+                if wait is None and response.status_code in (403, 404):
                     return []
                 if response.status_code >= 400:
                     raise GitHubAppError(
                         f"could not list the user's repositories in installation "
                         f"{installation_id} ({response.status_code})",
                         status=response.status_code,
+                        retry_after_s=wait,
                     )
                 entries = response.json().get("repositories", [])
                 repos.extend(

@@ -955,6 +955,30 @@ async def test_an_installation_the_user_lost_contributes_nothing(config, status,
         assert await credentials.writable_repositories_for_user("ghu_user", 77) == expected
 
 
+@pytest.mark.parametrize(
+    ("status", "headers", "body", "wait"),
+    [
+        (403, {"retry-after": "30"}, {}, 30.0),
+        (403, {"x-ratelimit-remaining": "0", "x-ratelimit-reset": "0"}, {}, 0.0),
+        (403, {}, {"message": "You have exceeded a secondary rate limit."}, 0.0),
+        (429, {}, {}, 0.0),
+    ],
+)
+async def test_a_rate_limited_listing_is_an_outage_not_a_lost_installation(
+    config, status, headers, body, wait
+):
+    """GitHub answers its rate limits with 403 too, and a limit says nothing about access."""
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(status, headers=headers, json=body)
+        )
+    ) as client:
+        credentials = GitHubAppCredentials(config, client=client)
+        with pytest.raises(GitHubAppError) as raised:
+            await credentials.writable_repositories_for_user("ghu_user", 77)
+    assert (raised.value.status, raised.value.retry_after_s) == (status, wait)
+
+
 async def test_a_refused_user_token_is_a_revoked_authorization_and_an_outage_is_not(config):
     from cloud_agent.github_app import UserAuthorizationRevoked
 
