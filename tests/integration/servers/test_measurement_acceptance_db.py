@@ -194,6 +194,9 @@ class _SandboxManager:
             pass
         return call
 
+    def with_start_seq(self, _start_seq: int | None):
+        return self
+
     async def register_shared_sandbox(self, _sandbox: dict[str, Any]) -> None:
         """Accept the manifest re-registration a workspace request performs."""
         self.registered.append(dict(_sandbox))

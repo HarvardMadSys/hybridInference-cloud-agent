@@ -63,6 +63,34 @@ _GIT_OBJECT_ID = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
 _ERROR_TYPE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
 
 
+def carried_by_checkpoint(
+    *,
+    namespace: str,
+    marker_namespace_sha256: str,
+    marker_sandbox_id: str,
+    marker_generation: int,
+    sandbox_id: str,
+    generation: int,
+) -> bool:
+    """Whether a marker came into this container with the checkpoint it was restored from.
+
+    A checkpoint is the stopped container committed whole, the sandbox
+    manager's own markers included, so a container restored from one holds the
+    markers of the generation that stopped. A marker is written only under its
+    container's own generation, and a restore always raises the generation: a
+    marker of this same group and deployment from an earlier generation can
+    have come only that way. It describes the earlier container's lifecycle,
+    not this one's, so readers treat it as absent and this container writes its
+    own. A marker of another group or deployment, or of this generation with
+    another container, still refuses the container.
+    """
+    return (
+        marker_namespace_sha256 == hashlib.sha256(namespace.encode("utf-8")).hexdigest()
+        and marker_sandbox_id == sandbox_id
+        and marker_generation < generation
+    )
+
+
 def safe_archive_error_type(error: BaseException) -> str:
     """Return a bounded class name without copying provider-controlled text."""
     name = type(error).__name__
@@ -408,17 +436,31 @@ class SandboxArchiveService:
                 backend.spec,
                 expected_container_id=inspection.container_id,
             )
-            if existing_payload is not None:
-                marker = SandboxInitialArchiveMarker.decode(existing_payload)
+            existing = (
+                None
+                if existing_payload is None
+                else SandboxInitialArchiveMarker.decode(existing_payload)
+            )
+            if existing is not None and self._carried_by_checkpoint(existing, backend.spec):
+                # Generation that stopped's baseline, not one this container
+                # prepared. The marker is never overwritten, so it goes first.
+                assert existing_payload is not None
+                self._manager.delete_initial_archive_marker(
+                    backend.spec,
+                    existing_payload,
+                    expected_container_id=inspection.container_id,
+                )
+                existing = None
+            if existing is not None:
                 if (
-                    marker.namespace_sha256
+                    existing.namespace_sha256
                     != hashlib.sha256(self._namespace.encode("utf-8")).hexdigest()
-                    or marker.sandbox_id != backend.spec.sandbox_id
-                    or marker.generation != backend.spec.generation
-                    or marker.container_id != inspection.container_id
-                    or marker.preparation_id != preparation_id
-                    or marker.base_sha != base_sha
-                    or marker.policy != self._policy
+                    or existing.sandbox_id != backend.spec.sandbox_id
+                    or existing.generation != backend.spec.generation
+                    or existing.container_id != inspection.container_id
+                    or existing.preparation_id != preparation_id
+                    or existing.base_sha != base_sha
+                    or existing.policy != self._policy
                 ):
                     raise SandboxError(
                         "existing initial archive marker does not match this preparation"
@@ -509,6 +551,14 @@ class SandboxArchiveService:
                     "stored": False,
                 }
             marker = SandboxInitialArchiveMarker.decode(payload)
+            if self._carried_by_checkpoint(marker, backend.spec):
+                # The earlier generation's baseline, not one this container prepared.
+                outcome = None
+                return {
+                    "enabled": True,
+                    "prepared": False,
+                    "stored": False,
+                }
             expected_namespace = hashlib.sha256(self._namespace.encode("utf-8")).hexdigest()
             if (
                 marker.namespace_sha256 != expected_namespace
@@ -797,6 +847,19 @@ class SandboxArchiveService:
 
     def _check_deadline(self, deadline: float) -> None:
         self._remaining(deadline)
+
+    def _carried_by_checkpoint(
+        self, marker: SandboxInitialArchiveMarker, spec: ChatSandboxSpec
+    ) -> bool:
+        """Whether ``marker`` is an earlier generation's, restored with its checkpoint."""
+        return carried_by_checkpoint(
+            namespace=self._namespace,
+            marker_namespace_sha256=marker.namespace_sha256,
+            marker_sandbox_id=marker.sandbox_id,
+            marker_generation=marker.generation,
+            sandbox_id=spec.sandbox_id,
+            generation=spec.generation,
+        )
 
     def _acquire_capture_slot(self, deadline: float) -> None:
         """Backpressure before Docker copy, then fence a concurrent close."""

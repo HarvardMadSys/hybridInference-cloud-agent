@@ -17,6 +17,7 @@ the transaction then finds.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
 from fastapi import HTTPException
@@ -273,12 +274,26 @@ async def settle_queue_when_possible(
     )
 
 
+@dataclass
+class QueueSweep:
+    """Where the next periodic sweep starts: past the last queue one reached.
+
+    Each queue visited moves it on, so a pass cancelled mid-page resumes at the
+    queue it was on. A short page reached the end, and the next sweep starts
+    over. However many queues before it cannot move, a waiting queue is reached
+    within one pass over them all.
+    """
+
+    after: str | None = None
+
+
 async def settle_waiting_queues(
     store: QueueStorage,
     *,
     gateway: Any,
     github_app: GitHubAppSource | None,
     limit: int = 50,
+    sweep: QueueSweep | None = None,
 ) -> int:
     """Settle every queue a settlement could move or pause; the periodic sweep.
 
@@ -288,11 +303,18 @@ async def settle_waiting_queues(
     between a turn's end and its settlement, and a message that waited while
     the GitHub App could not be loaded. The App is asked for once per pass.
     Each thread is settled on its own, so one bad thread cannot stop the rest.
+    A ``sweep`` carried from one pass to the next pages through the threads,
+    so a page of queues that cannot move does not hide the ones after it.
     Returns how many were settled.
     """
+    if limit < 1:
+        raise ValueError("limit must be at least 1")
     app_credentials = _app_credentials(github_app)
     settled = 0
-    for thread_id in await store.pending_messages.threads_to_settle(limit=limit):
+    page = await store.pending_messages.threads_to_settle(
+        limit=limit, after=sweep.after if sweep is not None else None
+    )
+    for thread_id in page:
         try:
             await _settle_with(
                 store, thread_id=thread_id, gateway=gateway, app_credentials=app_credentials
@@ -303,13 +325,20 @@ async def settle_waiting_queues(
                 extra={"event": "agent_pending_queue_settle_failed", "thread_id": thread_id},
                 exc_info=True,
             )
+            if sweep is not None:
+                sweep.after = thread_id
             continue
         settled += 1
+        if sweep is not None:
+            sweep.after = thread_id
+    if sweep is not None and len(page) < limit:
+        sweep.after = None
     return settled
 
 
 __all__ = [
     "QueueStorage",
+    "QueueSweep",
     "prepare_message",
     "prepared_head",
     "settle_queue",

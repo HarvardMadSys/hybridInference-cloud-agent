@@ -274,7 +274,12 @@ async def test_a_preparation_that_printed_a_nul_is_recorded(api: Api, monkeypatc
         "steps": [{"phase": "setup", "state": "failed", "output": _PRINTED}],
     }
     sandbox_manager = _sandbox_manager(
-        {"/health": {"capabilities": ["environment-v1"]}, "environment/prepare": receipt}
+        {
+            "/health": {"capabilities": ["environment-v1"]},
+            # Told the fence the preparation took before it may start the group.
+            "/register": {},
+            "environment/prepare": receipt,
+        }
     )
     monkeypatch.setattr(
         "cloud_agent.sandbox_manager_routing.sandbox_manager_for_job",

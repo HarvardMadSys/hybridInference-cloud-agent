@@ -1,0 +1,560 @@
+# Simplified Chinese translation of the Cloud Agent developer documentation.
+# See docs/developer/translations.md.
+msgid ""
+msgstr ""
+"Project-Id-Version: HybridInference Cloud Agent \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-10-17 05:54-0400\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: The HybridInference contributors\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../developer/translations.md:1
+msgid "Translating the docs"
+msgstr "翻译文档"
+
+#: ../developer/translations.md:3
+msgid ""
+"This page is for translators, and for anyone whose English edit changes a"
+" paragraph that has a translation. The site is published in English and "
+"Simplified Chinese; the Chinese pages are at `/zh_CN/` and the sidebar "
+"switches between them."
+msgstr "这一页写给译者，也写给改了英文段落、而这段已经有译文的人。本站同时发布英文版和简体中文版，中文页面在 `/zh_CN/` 下，侧边栏可以随时切换。"
+
+#: ../developer/translations.md:8
+msgid ""
+"The pages are written in English and translated with Sphinx's gettext "
+"workflow, so a translation is attached to each paragraph of source text "
+"rather than to a whole file. Any string without a translation falls back "
+"to English, so the site always builds complete."
+msgstr ""
+"页面先用英文写，再通过 Sphinx 的 gettext "
+"流程翻译。译文按段落对应原文，而不是整份文件对应。哪一段还没有译文，就显示英文，所以站点总能完整构建出来。"
+
+#: ../developer/translations.md:21
+msgid "A catalog entry pairs the English source with its translation:"
+msgstr "catalog 里的每一条，都是一段英文原文配上它的译文："
+
+#: ../developer/translations.md:28
+msgid ""
+"The English text is the lookup key, so editing a paragraph invalidates "
+"its translation automatically: the page falls back to English for that "
+"paragraph instead of serving a translation that no longer matches what "
+"the code does. That is the reason to use catalogs rather than parallel "
+"`.zh-CN.md` files, which drift silently."
+msgstr ""
+"英文原文本身就是查找译文的键。只要改了一段英文，这段的旧译文就自动失效，页面上改为显示英文，不会继续摆着一段和代码对不上的译文。这也是我们用 "
+"catalog、而不另写一份 `.zh-CN.md` 的原因：平行维护的文件过时了也没人察觉。"
+
+#: ../developer/translations.md:34
+msgid ""
+"Commit the `.po` files. `docs/gettext/` and compiled `.mo` files are "
+"generated and ignored."
+msgstr "`.po` 文件要提交。`docs/gettext/` 和编译出来的 `.mo` 文件都是生成的，已经在忽略列表里。"
+
+#: ../developer/translations.md:37
+msgid "When you change an English page"
+msgstr "改了英文页面之后"
+
+#: ../developer/translations.md:39
+msgid ""
+"Run `make docs-translate` and translate the entries it adds or marks `#, "
+"fuzzy`, then delete the `#, fuzzy` line and any obsolete `#~` entries. "
+"`make docs-verify` fails until every English string has a current "
+"translation. If you cannot translate a change yourself, say so in the "
+"pull request; a reviewer who can will add it."
+msgstr ""
+"运行 `make docs-translate`，把新增的条目和标成 `#, fuzzy` 的条目翻译好，再删掉 `#, fuzzy` "
+"这一行，以及所有作废的 `#~` 条目。只要还有一段英文没有对应的最新译文，`make docs-verify` "
+"就不会通过。如果你自己翻不了，就在 pull request 里说一声，由能翻的评审者补上。"
+
+#: ../developer/translations.md:45
+msgid "Chinese style"
+msgstr "中文文风"
+
+#: ../developer/translations.md:47
+msgid ""
+"Write the Chinese an experienced colleague would write to explain the "
+"page, not a sentence-by-sentence rendering of the English. Read the whole"
+" section first, work out what it is telling the reader, and then say that"
+" in Chinese. A reader should not be able to tell which language the page "
+"was written in."
+msgstr "要写成一位有经验的同事给你讲这一页时会说的中文，而不是把英文一句一句搬过来。先把整节读完，弄清楚它想告诉读者什么，再用中文把这件事说出来。理想的效果是，读者看不出这一页原本是用哪种语言写的。"
+
+#: ../developer/translations.md:52
+msgid ""
+"**Keep every fact.** Natural is not looser: a condition, a number, a "
+"default, an order of steps or a warning in the English stays in the "
+"Chinese, with the same strength. Do not add explanations the English does"
+" not give."
+msgstr "**事实一个都不能少。** 自然不等于随意：英文里的条件、数字、默认值、步骤顺序和警告，中文里都要有，语气也不能减弱。英文没说的解释，也不要自己加。"
+
+#: ../developer/translations.md:56
+msgid ""
+"**Rebuild long sentences.** English hangs conditions and details off a "
+"noun in relative clauses; Chinese states the condition first and then the"
+" result, and splits a long sentence into short ones. A string of 的 in "
+"front of a noun is the usual sign that a clause should become its own "
+"sentence."
+msgstr ""
+"**长句要拆开重组。** "
+"英文习惯用从句把条件和细节挂在名词后面；中文一般先说条件、再说结果，长句拆成几个短句。名词前面堆了一串\"的\"，通常就说明有个从句应该单独成句。"
+
+#: ../developer/translations.md:61
+msgid ""
+"**Drop the pronouns and filler English needs.** Most *it*, *its* and "
+"*they* disappear in Chinese or become the noun they stand for. Leave out "
+"进行, 一个 in front of every noun, 能够 and 从而 unless they carry meaning. "
+"Prefer the active voice; use 被 only when the passive is the point."
+msgstr ""
+"**英文离不开的代词和虚词，中文大多可以省掉。** 英文里的 "
+"*it*、*its*、*they*，到了中文多半直接省略，或者换回它指代的名词。\"进行\"、每个名词前的\"一个\"、\"能够\"、\"从而\"，没有实际意思就别写。尽量用主动句，只有在被动本身就是重点时才用\"被\"。"
+
+#: ../developer/translations.md:66
+msgid ""
+"**Translate the meaning, not the word.** *That exact host* is 这台主机, not "
+"那台确切的主机; *runs agents against a repository* is 处理仓库; *buys inference* is "
+"调用模型. When an English idiom has no direct Chinese equivalent, say plainly"
+" what it means."
+msgstr ""
+"**翻意思，不翻字面。** *That exact host* 就是\"这台主机\"，不是\"那台确切的主机\"；*runs agents "
+"against a repository* 是\"处理仓库\"；*buys inference* "
+"是\"调用模型\"。英文里的说法在中文里找不到对应时，就直接把意思讲明白。"
+
+#: ../developer/translations.md:71
+msgid ""
+"**Talk to the reader.** Address the reader as 你 in instructions, and use "
+"请 sparingly. Spell out what to do in the order they will do it."
+msgstr "**跟读者说话。** 在操作说明里称读者为\"你\"，\"请\"字少用。按读者实际操作的顺序，把要做的事一步步写清楚。"
+
+#: ../developer/translations.md
+msgid "Stiff"
+msgstr "生硬"
+
+#: ../developer/translations.md
+msgid "Natural"
+msgstr "自然"
+
+#: ../developer/translations.md
+msgid "Cloud Agent 在保留的沙箱容器中针对用户的仓库运行编码 agent。"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "Cloud Agent 让编码 agent 在保留的沙箱容器里处理用户的仓库。"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "编排器会等待，直到那台确切的主机仍报告 `draining`。"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "编排器会一直等到这台主机报告 `draining`。"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "授权部署就绪检查只接受这一台被命名的排空主机。"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "这样部署的就绪检查只会放行这一台正在排空的主机。"
+msgstr ""
+
+#: ../developer/translations.md:80
+msgid "Chinese traps"
+msgstr "中文里的坑"
+
+#: ../developer/translations.md:82
+msgid ""
+"The first three are silent: the build stays green and the page is wrong. "
+"The structural check in `make docs-verify` catches them."
+msgstr "前三个坑都不会报错：构建照样通过，页面却是错的。`make docs-verify` 里的结构检查能把它们揪出来。"
+
+#: ../developer/translations.md:85
+msgid ""
+"**Keep code, link targets and markup exactly.** Inline code, URLs, link "
+"targets, anchors, environment variable names and command lines stay as "
+"they are. Translate a link's text, never its target. The check compares "
+"the inline code literals and link targets of each translated page with "
+"the English one."
+msgstr ""
+"**代码、链接目标和标记一字不改。** "
+"行内代码、URL、链接目标、锚点、环境变量名和命令行都原样保留。链接只翻译显示的文字，目标绝不能动。检查会逐页比对译文和英文的行内代码与链接目标。"
+
+#: ../developer/translations.md:90
+msgid ""
+"**A heading that starts with a number is dropped.** MyST reads `1. ` as a"
+" list marker, the structure no longer matches the source, and Sphinx "
+"emits the English heading. Escape the period: `msgstr \"1\\. 申请一个节点\"`."
+msgstr ""
+"**以数字开头的标题会丢失。** MyST 会把 `1. ` 当成列表标记，结构和原文对不上，Sphinx "
+"就退回去显示英文标题。把句点转义即可：`msgstr \"1\\. 申请一个节点\"`。"
+
+#: ../developer/translations.md:94
+msgid ""
+"**Emphasis next to Chinese punctuation.** A closing `**` preceded by a "
+"Chinese full stop and followed by a Chinese character is not recognised, "
+"so `**术语。**后文` shows literal asterisks. Put the punctuation outside the "
+"bold: `**术语**。后文`. The same applies when bold text starts or ends with "
+"code or a quotation mark: ``**`AGENT_TIMEOUT_S`**的默认值`` breaks, so add a "
+"space, ``**`AGENT_TIMEOUT_S`** 的默认值``."
+msgstr ""
+"**加粗紧挨中文标点。** 如果收尾的 `**` 前面是中文句号、后面紧跟中文字符，它就不会被识别，`**术语。**后文` "
+"会直接显示出星号。把标点挪到加粗外面：`**术语**。后文`。加粗文字以代码或引号开头、结尾时也一样，``**`AGENT_TIMEOUT_S`**的默认值``"
+" 会出错，要加一个空格：``**`AGENT_TIMEOUT_S`** 的默认值``。"
+
+#: ../developer/translations.md:101
+msgid ""
+"**A stale `.mo` masks your edits.** Sphinx skips recompiling when the "
+"`.mo` is newer than its `.po`. Before checking a build, run `find "
+"docs/developer/locale -name '*.mo' -delete`."
+msgstr ""
+"**旧的 `.mo` 会让你的修改看不出效果。** 只要 `.mo` 比对应的 `.po` 新，Sphinx "
+"就不会重新编译。检查构建结果之前，先运行 `find docs/developer/locale -name '*.mo' -delete`。"
+
+#: ../developer/translations.md:105
+msgid "Chinese terminology"
+msgstr "中文术语"
+
+#: ../developer/translations.md:107
+msgid ""
+"Use the same Chinese for a term on every page. Product and component "
+"names, UI labels shown in bold, API fields, states and command names stay"
+" in English."
+msgstr "同一个术语在所有页面都用同一个中文说法。产品名、组件名、以粗体显示的界面文字、API 字段、状态值和命令名保留英文。"
+
+#: ../developer/translations.md
+msgid "English"
+msgstr "英文"
+
+#: ../developer/translations.md
+msgid "Chinese"
+msgstr "中文"
+
+#: ../developer/translations.md
+msgid "control plane"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "控制平面"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "host, execution host"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "主机、执行主机"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "sandbox, sandbox group"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "沙箱、沙箱组"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "retained sandbox"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "保留沙箱"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "conversation, chat"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "对话"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "task"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "任务"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "turn"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "轮次（一轮）"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "follow-up"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "后续消息"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "workspace"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "工作区"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "snapshot"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "快照"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "publish, publication"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "发布"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "checkpoint"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "检查点"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "archive"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "归档"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "enroll, enrollment"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "注册"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "heartbeat"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "心跳"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "lease"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "租约"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "claim"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "认领"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "drain"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "排空"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "fence"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "栅栏"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "adopt (an issuer or existing data)"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "认定"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "take over, takeover"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "接管"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "checkout (noun / verb)"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "本地仓库、仓库副本 / 检出"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "stack"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "一套服务、环境"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "provider"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "服务商"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "inference grant"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "推理授权"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "credential"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "凭据"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "token"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "令牌"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "relay, tunnel"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "中继、隧道"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "bridge"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "网桥"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "resolver"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "解析器"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "owner"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "所有者"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "member"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "成员"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "operator"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "运维人员"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "administrator"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "管理员"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "deployment"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "部署"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "distribution"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "发行版"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "migration"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "迁移"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "native session"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "原生会话"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "gateway"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "网关（HybridInference Gateway）"
+msgstr ""
+
+#: ../developer/translations.md
+msgid ""
+"runner, Sandbox Manager, Fork, Kata, MCP, attempt, residency, execution "
+"profile"
+msgstr ""
+
+#: ../developer/translations.md
+msgid "runner、Sandbox Manager、Fork、Kata、MCP、attempt、residency、execution profile"
+msgstr ""
+

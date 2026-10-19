@@ -90,6 +90,12 @@ class PostgresSessionForkRepository:
                 return None
             if existing is not None:
                 result = await self._session_fork_details(conn, str(existing["id"]))
+                if result is not None:
+                    # Only the request that created the Fork knows the fence
+                    # it took. The current one may belong to a start still in
+                    # flight, so a replay names none: its run's checkpoint
+                    # then never covers the group, which only costs a move.
+                    result["start_seq"] = None
                 if result is not None and existing["source_job_id"] != source_job_id:
                     result["error"] = "idempotency_conflict"
                 return result

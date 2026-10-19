@@ -66,6 +66,35 @@ def test_ordinary_relative_paths_are_kept_verbatim(path: str) -> None:
 
 
 @pytest.mark.parametrize(
+    "path", [" report.csv ", "notes.txt ", " specs/api.md ", "  two  spaces.md  "]
+)
+def test_surrounding_whitespace_is_part_of_the_name(path: str) -> None:
+    """A name the browser accepts is stored under the name it was given.
+
+    ``isSafeUploadPath`` accepts surrounding whitespace, and on Linux
+    ``" report.csv "`` and ``"report.csv"`` are different files. Trimming here
+    would store a path the user never attached.
+    """
+    assert safe_attachment_path(path) == path
+
+
+def test_names_differing_only_in_whitespace_stay_distinct() -> None:
+    """The trim cannot collapse two names the browser keeps apart.
+
+    Trimming used to make these one stored path, so the second upload silently
+    took the first one's name.
+    """
+    assert safe_attachment_path(" report.csv ") != safe_attachment_path("report.csv")
+
+
+@pytest.mark.parametrize("path", [" ", "   ", "\t", "\n", " \t "])
+def test_a_path_that_is_only_whitespace_is_still_refused(path: str) -> None:
+    """Keeping surrounding whitespace does not make a blank path a name."""
+    with pytest.raises(AttachmentError):
+        safe_attachment_path(path)
+
+
+@pytest.mark.parametrize(
     "path",
     [
         "../escape.txt",
@@ -121,8 +150,30 @@ def test_the_listing_has_exactly_one_line_per_file() -> None:
     prompt = prompt_with_attachments("go", [{"path": "a.txt"}, {"path": "specs/api.md"}])
     listed = [line for line in prompt.splitlines() if line.startswith("- ")]
     assert listed == [
-        f"- {SANDBOX_UPLOAD_DIR}/a.txt",
-        f"- {SANDBOX_UPLOAD_DIR}/specs/api.md",
+        f'- "{SANDBOX_UPLOAD_DIR}/a.txt"',
+        f'- "{SANDBOX_UPLOAD_DIR}/specs/api.md"',
+    ]
+
+
+@pytest.mark.parametrize("path", ["notes.txt ", " report.csv", "  two  spaces.md  "])
+def test_the_listing_shows_the_whitespace_a_name_keeps(path: str) -> None:
+    """Quoted, a trailing space is still there for the agent to open.
+
+    Unquoted, ``- /uploads/notes.txt `` ends in a space nobody can see, and the
+    agent opens ``notes.txt``, which does not exist.
+    """
+    prompt = prompt_with_attachments("go", [{"path": path}])
+    listed = [line for line in prompt.splitlines() if line.startswith("- ")]
+    assert listed == [f'- "{SANDBOX_UPLOAD_DIR}/{path}"']
+
+
+def test_a_quoted_name_stays_one_readable_path() -> None:
+    """A quote or a non-ASCII letter in a name neither ends the path nor is escaped away."""
+    prompt = prompt_with_attachments("go", [{"path": 'say "hi".txt'}, {"path": "报告.csv"}])
+    listed = [line for line in prompt.splitlines() if line.startswith("- ")]
+    assert listed == [
+        f'- "{SANDBOX_UPLOAD_DIR}/say \\"hi\\".txt"',
+        f'- "{SANDBOX_UPLOAD_DIR}/报告.csv"',
     ]
 
 

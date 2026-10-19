@@ -151,6 +151,10 @@ class FakeStore(AllCapabilities):
         # pending" instead of as a fake that had drifted from its port.
         return None
 
+    async def fence_base_import_start(self, *, sandbox_id: str) -> tuple[str, int | None] | None:
+        self.import_fenced = [*getattr(self, "import_fenced", []), sandbox_id]
+        return getattr(self, "import_fence", ("stopped", 7))
+
     async def record_snapshot_base_import_failure(
         self, *, snapshot_id: int, detail: str, delay_s: float | None = None
     ) -> None:
@@ -590,6 +594,7 @@ async def test_shared_snapshot_publishes_group_lineage_and_imports_the_new_base(
         **_JOB,
         "publication_kind": "shared_snapshot",
         "snapshot_id": 9,
+        "sandbox_id": "asbx_1",
         "workspace_epoch": 4,
         "included_job_ids": ["ajob_1", "ajob_2"],
         "anchor_job_id": "ajob_2",
@@ -631,7 +636,9 @@ async def test_shared_snapshot_publishes_group_lineage_and_imports_the_new_base(
     assert store.import_completed == (9, "b" * 40)
     # Completed for the container the import was sent to, and no other.
     assert store.import_completed_for == (1, "container-1")
-    assert sandbox_manager.imported == (snapshot, "b" * 40, b"bundle")
+    # The import may start the container, so it names the fence it took.
+    assert store.import_fenced == [snapshot["sandbox_id"]]
+    assert sandbox_manager.imported == ({**snapshot, "start_seq": 7}, "b" * 40, b"bundle")
     assert "group snapshot" in captured_pr["body"]
     assert "ajob_1" in captured_pr["body"] and "ajob_2" in captured_pr["body"]
 
@@ -670,6 +677,7 @@ async def test_a_retried_base_import_bundles_against_the_workspaces_first_base(m
     monkeypatch.setattr(sandbox_manager_routing, "sandbox_manager_for_job", route)
     pending = {
         "snapshot_id": 9,
+        "sandbox_id": "asbx_1",
         "anchor_job_id": "ajob_1",
         "repo": "o/n",
         "user_id": "u1",
@@ -690,6 +698,38 @@ async def test_a_retried_base_import_bundles_against_the_workspaces_first_base(m
     assert store.import_completed == (9, "c" * 40)
     assert store.import_completed_for == (2, "container-2")
     assert store.import_failed is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fence", [None, ("host_revoked", None), ("cold", 4)])
+async def test_a_base_import_that_cannot_fence_its_start_waits(monkeypatch, fence):
+    """No request leaves without a fence of its own: the import retries later."""
+    from cloud_agent import sandbox_manager_routing
+
+    class _SandboxManager:
+        imported = False
+
+        async def import_shared_base(self, row, *, commit_sha: str, bundle: bytes):
+            self.imported = True
+
+    sandbox_manager = _SandboxManager()
+
+    async def route(_store, _job_id):
+        return sandbox_manager
+
+    monkeypatch.setattr(sandbox_manager_routing, "sandbox_manager_for_job", route)
+    store = FakeStore()
+    store.import_fence = fence
+
+    assert not await publish_worker._import_snapshot_base(
+        store,
+        snapshot={"snapshot_id": 9, "sandbox_id": "asbx_1", "anchor_job_id": "ajob_1"},
+        commit_sha="c" * 40,
+        bundle=b"bundle",
+    )
+
+    assert sandbox_manager.imported is False
+    assert store.import_failed is not None and store.import_failed[0] == 9
 
 
 async def test_shared_snapshot_rejection_does_not_fail_its_successful_turn(monkeypatch):

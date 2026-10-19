@@ -1,0 +1,417 @@
+# Simplified Chinese translation of the Cloud Agent developer documentation.
+# See docs/developer/translations.md.
+msgid ""
+msgstr ""
+"Project-Id-Version: HybridInference Cloud Agent \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-10-16 01:54-0400\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: The HybridInference contributors\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../deploy/local/README.md:2
+msgid "Complete local stack"
+msgstr "完整的本地环境"
+
+#: ../../deploy/local/README.md:4
+msgid ""
+"Run the browser, control plane, runner, and real Agent CLIs together "
+"without production accounts or credentials. This Docker topology "
+"includes:"
+msgstr "不需要生产账号和凭据，就能把浏览器、控制平面、runner 和真实的 Agent CLI 放在一起跑起来。这套 Docker 环境包括："
+
+#: ../../deploy/local/README.md:7
+msgid "the web app and a same-origin reverse proxy;"
+msgstr "Web 应用，以及一个同源的反向代理；"
+
+#: ../../deploy/local/README.md:8
+msgid ""
+"a fixture Gateway serving PKCE/JWKS, account and model lookups, inference"
+" grants, and deterministic model responses;"
+msgstr "一个模拟网关，提供 PKCE/JWKS、账号和模型查询、推理授权，以及结果固定的模型回复；"
+
+#: ../../deploy/local/README.md:10
+msgid "Postgres, migrations, host enrollment, and the sandbox manager;"
+msgstr "Postgres、数据库迁移、主机注册和 sandbox manager；"
+
+#: ../../deploy/local/README.md:11
+msgid ""
+"the sandbox image with pinned Claude Code, Codex, Pi, OpenCode, and Kilo "
+"CLIs;"
+msgstr "沙箱镜像，内置固定版本的 Claude Code、Codex、Pi、OpenCode 和 Kilo CLI；"
+
+#: ../../deploy/local/README.md:12
+msgid ""
+"a read-only `local/demo` Git repository on the private control-plane "
+"network."
+msgstr "控制平面私有网络里的一个只读 Git 仓库 `local/demo`。"
+
+#: ../../deploy/local/README.md:14
+msgid ""
+"Authentication uses the application's normal flow: browser PKCE, RS256 "
+"identity verification through JWKS, and short-lived inference grants. The"
+" Gateway and Git server replace external services. The stack uses plain "
+"Docker isolation for trusted development; public multi-tenant deployments"
+" require Kata."
+msgstr ""
+"认证走的是应用正常的流程：浏览器端 PKCE、通过 JWKS 校验 RS256 身份令牌，以及短期的推理授权。只是把外部的网关和 Git "
+"服务换成了本地的模拟服务。这套环境用的是普通 Docker 隔离，只适合受信任的开发场景；对公众开放的多租户部署必须用 Kata。"
+
+#: ../../deploy/local/README.md:19
+msgid "Run"
+msgstr "运行"
+
+#: ../../deploy/local/README.md:21
+msgid ""
+"Run these commands from the repository root. You need Docker 28 or newer "
+"with Compose, `openssl`, `curl`, and Python 3. Docker 28 supplies the "
+"gateway-priority support used when attaching relays to sandbox networks. "
+"`dev.sh` prefers the Compose v2 plugin and falls back to `docker-"
+"compose`."
+msgstr ""
+"下面的命令都在仓库根目录运行。你需要 Docker 28 或更新版本（带 Compose）、`openssl`、`curl` 和 Python "
+"3。之所以要 Docker 28，是因为把中继接入沙箱网络时要用到它的网关优先级功能。`dev.sh` 优先用 Compose v2 "
+"插件，没有的话就改用 `docker-compose`。"
+
+#: ../../deploy/local/README.md:26
+msgid ""
+"Give Docker Desktop at least 4 GiB of memory; 8 GiB is recommended for "
+"the full smoke test. A roughly 2 GiB VM can run out of memory while "
+"starting Kilo."
+msgstr ""
+"Docker Desktop 至少要分配 4 GiB 内存，跑完整的冒烟测试建议给 8 GiB。只有 2 GiB 左右的虚拟机，启动 Kilo "
+"时可能会内存不足。"
+
+#: ../../deploy/local/README.md:34
+msgid ""
+"Open <http://127.0.0.1:13002>. The first sign-in shows a local consent "
+"page. Use `127.0.0.1` consistently throughout sign-in so the login-flow "
+"cookie reaches the callback."
+msgstr ""
+"打开 <http://127.0.0.1:13002>。第一次登录会出现一个本地的授权确认页。整个登录过程都要用 `127.0.0.1` "
+"访问，否则登录流程的 cookie 到不了回调地址。"
+
+#: ../../deploy/local/README.md:38
+msgid ""
+"The first `up` builds all images, verifies the database credentials, "
+"applies migrations, starts the services, and waits for readiness. "
+"Installing five pinned CLIs can make the first build slow; later builds "
+"reuse Docker's layer cache. The bootstrap records a deployment marker in "
+"`local-host-state`, and claims use the same exact-generation fence as "
+"production."
+msgstr ""
+"第一次运行 `up` 会构建所有镜像、核对数据库凭据、执行迁移、启动服务，并等到服务就绪。要装五个固定版本的 "
+"CLI，所以第一次构建可能比较慢；之后的构建会复用 Docker 的层缓存。初始化过程会在 `local-host-state` "
+"里写一个部署标记，认领任务时用的也是和生产一样的精确代次栅栏。"
+
+#: ../../deploy/local/README.md:44
+msgid ""
+"`dev.sh` generates local credentials in the git-ignored "
+"`deploy/local/.env.local` with mode `0600`. Keep this file with the "
+"stack's retained database. If it is missing while the Postgres volume "
+"still exists, the script refuses to generate replacement credentials. "
+"Restore the original file, especially `AGENT_POSTGRES_PASSWORD` and "
+"`AGENT_DATABASE_URL`, before retrying. Existing environment files are "
+"upgraded without replacing credentials or selected ports."
+msgstr ""
+"`dev.sh` 会把本地凭据生成到 `deploy/local/.env.local`，权限是 `0600`，这个文件已被 git "
+"忽略。它要和这套环境保留的数据库一起保管：如果文件丢了，而 Postgres 卷还在，脚本会拒绝重新生成凭据。这时请先把原文件找回来，尤其是 "
+"`AGENT_POSTGRES_PASSWORD` 和 "
+"`AGENT_DATABASE_URL`，再重试。已有的环境文件会被自动升级，但其中的凭据和已选的端口不会被替换。"
+
+#: ../../deploy/local/README.md:51
+msgid "Useful commands:"
+msgstr "常用命令："
+
+#: ../developer/local-stack.md:1
+msgid "Command"
+msgstr "命令"
+
+#: ../developer/local-stack.md:1
+msgid "Use"
+msgstr "用途"
+
+#: ../developer/local-stack.md:1
+msgid "`./deploy/local/dev.sh status`"
+msgstr ""
+
+#: ../developer/local-stack.md:1
+msgid "List service state."
+msgstr "列出各服务的状态。"
+
+#: ../developer/local-stack.md:1
+msgid "`./deploy/local/dev.sh logs runner`"
+msgstr ""
+
+#: ../developer/local-stack.md:1
+msgid "Follow a service's recent logs; omit `runner` for all services."
+msgstr "持续查看某个服务的最新日志；不写 `runner` 就显示全部服务。"
+
+#: ../developer/local-stack.md:1
+msgid "`./deploy/local/dev.sh config`"
+msgstr ""
+
+#: ../developer/local-stack.md:1
+msgid "Validate Compose configuration without printing secrets."
+msgstr "校验 Compose 配置，不会把 secret 打印出来。"
+
+#: ../developer/local-stack.md:1
+msgid "`./deploy/local/dev.sh stop`"
+msgstr ""
+
+#: ../developer/local-stack.md:1
+msgid "Stop service containers and retain their state."
+msgstr "停止服务容器，保留它们的状态。"
+
+#: ../developer/local-stack.md:1
+msgid "`./deploy/local/dev.sh start`"
+msgstr ""
+
+#: ../developer/local-stack.md:1
+msgid "Verify credentials, apply migrations, and start existing services."
+msgstr "核对凭据、执行迁移，并启动已有的服务。"
+
+#: ../developer/local-stack.md:1
+msgid "`./deploy/local/dev.sh up`"
+msgstr ""
+
+#: ../developer/local-stack.md:1
+msgid "Rebuild and reconcile services after code or configuration changes."
+msgstr "改了代码或配置后，重新构建并调和各服务。"
+
+#: ../../deploy/local/README.md:62
+msgid ""
+"`stop` uses Compose's `stop` command. Service containers, named volumes, "
+"networks, and retained chat containers remain available. The stack has no"
+" host workspace or database bind mounts. The runner and sandbox manager "
+"control Docker through its socket, and Docker's data root holds the "
+"retained state."
+msgstr ""
+"`stop` 用的是 Compose 的 `stop` "
+"命令，服务容器、具名卷、网络和保留的对话容器都还在。这套环境没有把任何主机上的工作区或数据库目录绑定挂载进去：runner 和 sandbox "
+"manager 通过 Docker socket 控制 Docker，保留的状态都存放在 Docker 的数据目录里。"
+
+#: ../../deploy/local/README.md:67
+msgid "Ports and parallel stacks"
+msgstr "端口与多套环境并行"
+
+#: ../../deploy/local/README.md:69
+msgid ""
+"Set `LOCAL_EDGE_PORT` in `.env.local`, or export it before running "
+"`dev.sh`, to change the browser port. Readiness checks, smoke URLs, "
+"browser URLs, and the default OAuth callback allowlist follow that port. "
+"An explicit `LOCAL_IDENTITY_ALLOWED_REDIRECTS` controls the allowlist "
+"when testing custom identity configuration."
+msgstr ""
+"要改浏览器访问的端口，可以在 `.env.local` 里设置 `LOCAL_EDGE_PORT`，或者在运行 `dev.sh` "
+"前导出这个变量。就绪检查、冒烟测试和浏览器用的 URL，以及默认的 OAuth "
+"回调白名单，都会跟着这个端口变。如果在测试自定义的身份配置，可以显式设置 `LOCAL_IDENTITY_ALLOWED_REDIRECTS` "
+"来控制白名单。"
+
+#: ../../deploy/local/README.md:75
+msgid ""
+"For a second checkout on the same Docker engine, give it distinct values "
+"for all of these settings and use them for every `dev.sh` invocation:"
+msgstr "在同一个 Docker 引擎上再跑第二份仓库副本时，下面这些设置都要换成不同的值，而且每次调用 `dev.sh` 都要带上："
+
+#: ../../deploy/local/README.md:78
+msgid ""
+"`LOCAL_PROJECT_NAME`, `LOCAL_SANDBOX_IMAGE`, `AGENT_NETWORK_NAME`, and "
+"`LOCAL_RELAY_NETWORK`;"
+msgstr ""
+"`LOCAL_PROJECT_NAME`、`LOCAL_SANDBOX_IMAGE`、`AGENT_NETWORK_NAME` 和 "
+"`LOCAL_RELAY_NETWORK`；"
+
+#: ../../deploy/local/README.md:80
+msgid "`LOCAL_CHAT_NETWORK_POOL`, with no overlap with the first stack's pool;"
+msgstr "`LOCAL_CHAT_NETWORK_POOL`，不能和第一套环境的地址池重叠；"
+
+#: ../../deploy/local/README.md:81
+msgid ""
+"`LOCAL_EDGE_PORT`, `AGENT_CONTROL_PLANE_PORT`, `AGENT_MCP_RELAY_PORT`, "
+"and `AGENT_WEB_PORT`."
+msgstr ""
+"`LOCAL_EDGE_PORT`、`AGENT_CONTROL_PLANE_PORT`、`AGENT_MCP_RELAY_PORT` 和 "
+"`AGENT_WEB_PORT`。"
+
+#: ../../deploy/local/README.md:84
+msgid ""
+"When no sandbox image override exists, the image tag is derived from the "
+"project name. An existing `.env.local` already contains an explicit tag, "
+"so override it when changing that stack's project name. These settings "
+"separate images, volumes, service discovery, ports, host rules, and group"
+" addresses."
+msgstr ""
+"如果没有单独指定沙箱镜像，镜像标签会根据项目名生成。不过已有的 `.env.local` "
+"里已经写死了一个标签，所以改了这套环境的项目名时，也要把标签一起改掉。这些设置让两套环境的镜像、卷、服务发现、端口、主机防火墙规则和沙箱组地址互不干扰。"
+
+#: ../../deploy/local/README.md:89
+msgid ""
+"`up`, `start`, and `smoke` refuse networks owned by another Compose "
+"project before changing containers. The host rules also refuse "
+"overlapping sandbox address pools; accepting Compose's network warning "
+"can route traffic to the wrong stack."
+msgstr ""
+"`up`、`start` 和 `smoke` 在动容器之前，会先检查网络：属于另一个 Compose "
+"项目的网络一律拒绝使用。主机防火墙规则也会拒绝重叠的沙箱地址池。如果无视 Compose 给出的网络警告，流量可能会被转到另一套环境里。"
+
+#: ../../deploy/local/README.md:94
+msgid "Sandbox networking"
+msgstr "沙箱网络"
+
+#: ../../deploy/local/README.md:96
+msgid ""
+"Each retained sandbox group gets a routable, labelled `freeinference-"
+"chat-net-*` bridge. Before a sandbox joins it, the runner or sandbox "
+"manager installs and verifies this stack's nftables rules on the Docker "
+"engine. The rules allow public IPv4 on TCP 80/443, DNS through "
+"`LOCAL_EGRESS_DNS_SERVER` on TCP/UDP 53, and that group's inference and "
+"MCP relays on their service ports. They block the engine's own addresses,"
+" private and special-purpose ranges, other groups, other ports, and IPv6."
+msgstr ""
+"每个保留的沙箱组都有一个可路由、带标签的 `freeinference-chat-net-*` 网桥。沙箱接入之前，runner 或 "
+"sandbox manager 会先在 Docker 引擎上安装这套环境的 nftables 规则，并确认已经生效。规则只放行三类流量：TCP "
+"80/443 上的公网 IPv4；通过 `LOCAL_EGRESS_DNS_SERVER` 走 TCP/UDP 53 的 "
+"DNS；以及访问本组推理中继和 MCP 中继服务端口的流量。引擎自身的地址、私有和特殊用途的地址段、其他沙箱组、其他端口以及 IPv6 全部拦截。"
+
+#: ../../deploy/local/README.md:104
+msgid ""
+"The relay network is used to discover the two relays; sandboxes never "
+"join it. This is the same network policy used in production. On first "
+"configuration, `dev.sh` records a non-loopback IPv4 resolver supplied by "
+"the Docker engine (for example, Colima's `192.168.5.1`), falling back to "
+"`1.1.1.1` if none is found. Change `LOCAL_EGRESS_DNS_SERVER` if that "
+"resolver is unavailable in your setup."
+msgstr ""
+"中继网络只用来找到那两个中继，沙箱永远不会接入它。这和生产环境用的是同一套网络策略。第一次配置时，`dev.sh` 会记下 Docker "
+"引擎提供的一个非回环 IPv4 DNS 解析器（比如 Colima 的 `192.168.5.1`）；找不到就用 "
+"`1.1.1.1`。如果你的环境里这个解析器用不了，改一下 `LOCAL_EGRESS_DNS_SERVER` 即可。"
+
+#: ../../deploy/local/README.md:110
+msgid "Building through a local proxy"
+msgstr "通过本地代理构建"
+
+#: ../../deploy/local/README.md:112
+msgid ""
+"On Docker Desktop, builds can reach a proxy on the host through "
+"`host.docker.internal`. Start the proxy, prebuild with Docker's standard "
+"proxy arguments, then reuse those images:"
+msgstr ""
+"在 Docker Desktop 上，构建过程可以通过 `host.docker.internal` 访问本机上的代理。先把代理启动起来，用 "
+"Docker 标准的代理参数预先构建镜像，然后直接复用："
+
+#: ../../deploy/local/README.md:124
+msgid ""
+"Use the same project, image, network, and port overrides for both "
+"commands. Re-run `build` after code changes before using `up --no-build`."
+" Proxy arguments apply to build downloads; they do not configure a "
+"runtime sandbox proxy. Certificate and package-signature verification "
+"remain enabled."
+msgstr ""
+"两条命令要用同一套项目、镜像、网络和端口设置。改了代码之后，先重新跑 `build`，再用 `up --no-"
+"build`。代理参数只影响构建时的下载，不会给运行中的沙箱配置代理。证书校验和软件包签名校验照常开启。"
+
+#: ../../deploy/local/README.md:129
+msgid ""
+"Python downloads allow 120 seconds of inactivity by default. For slow "
+"links, override `PIP_DEFAULT_TIMEOUT` and the runner's `UV_HTTP_TIMEOUT` "
+"build arguments. For Debian mirror failures, add a build argument such as"
+" `--build-arg DEBIAN_MIRROR=http://mirrors.aliyun.com`; the default is "
+"`http://deb.debian.org`. This changes archive and security mirror URLs "
+"while keeping the distribution, components, and signed keyring. Index "
+"downloads retry and fail the build if still unavailable. Sandbox Debian "
+"and npm downloads use BuildKit caches, which are never mounted into "
+"running sandboxes."
+msgstr ""
+"Python 下载默认在 120 秒没有数据传输时超时。网络慢的话，可以调大 `PIP_DEFAULT_TIMEOUT` 构建参数，以及 "
+"runner 的 `UV_HTTP_TIMEOUT`。Debian 软件源出问题时，加一个类似 `--build-arg "
+"DEBIAN_MIRROR=http://mirrors.aliyun.com` 的构建参数，默认是 "
+"`http://deb.debian.org`。它只会替换主仓库和安全更新的镜像源地址，发行版、组件和签名密钥环都不变。索引下载会自动重试，还是失败就让构建报错。沙箱构建时的"
+" Debian 和 npm 下载用的是 BuildKit 缓存，这些缓存永远不会挂载进运行中的沙箱。"
+
+#: ../../deploy/local/README.md:138
+msgid "What the smoke test covers"
+msgstr "冒烟测试测了什么"
+
+#: ../../deploy/local/README.md:140
+msgid ""
+"`smoke` logs in through PKCE and exercises all five real CLI binaries. "
+"For each runtime it verifies:"
+msgstr "`smoke` 会通过 PKCE 登录，然后把五个真实的 CLI 都跑一遍。每个运行时都要验证："
+
+#: ../../deploy/local/README.md:143
+msgid "A first turn is `NEW`, followed by a `LIVE` native-session turn."
+msgstr "第一轮是 `NEW`，第二轮是复用原生会话的 `LIVE`。"
+
+#: ../../deploy/local/README.md:144
+msgid ""
+"Idle stop and a `RESTORED` third turn preserve the same mount-free "
+"container."
+msgstr "空闲停止之后，第三轮是 `RESTORED`，用的仍是同一个没有挂载的容器。"
+
+#: ../../deploy/local/README.md:145
+msgid ""
+"A native Fork at turn two contains exactly that historical prefix, while "
+"the source already has turn three."
+msgstr "在第二轮处做原生 Fork，得到的对话正好只包含到第二轮为止的历史，而源对话此时已经有了第三轮。"
+
+#: ../../deploy/local/README.md:147
+msgid ""
+"Source and child remain independently `LIVE` in the shared container and "
+"workspace. Both turns reach `RUNNING`, and their CLI processes overlap at"
+" a two-party inference barrier before either receives a response."
+msgstr ""
+"源对话和 Fork 出的子对话共用一个容器和工作区，各自保持 `LIVE`。两边的轮次都会进入 `RUNNING`，而且两个 CLI "
+"进程会同时卡在一个需要双方都到达的推理屏障上，之后才有任何一方收到回复。"
+
+#: ../../deploy/local/README.md:150
+msgid ""
+"The stopped group restores from the child, and the final quiescent "
+"publication snapshot completes."
+msgstr "已停止的沙箱组从子对话恢复，最后在静止状态下拍的发布快照顺利完成。"
+
+#: ../../deploy/local/README.md:153
+msgid ""
+"The runner defaults to two concurrent turns. `LOCAL_HOST_SLOTS` must be "
+"at least 2 for this test; the admin Servers page can also change capacity"
+" while the stack runs. The local idle timeout is 15 seconds, compared "
+"with production's default 1800 seconds. Active turns are never stopped by"
+" this idle clock."
+msgstr ""
+"runner 默认同时跑两个轮次。这个测试要求 `LOCAL_HOST_SLOTS` 至少为 2；环境运行期间也可以在管理后台的 Servers "
+"页面调整容量。本地的空闲超时是 15 秒，生产默认是 1800 秒。正在运行的轮次不会因为这个空闲计时被停掉。"
+
+#: ../../deploy/local/README.md:158
+msgid "Trying interactions during a turn"
+msgstr "在轮次进行中试试各种交互"
+
+#: ../../deploy/local/README.md:160
+msgid ""
+"The fixture model normally responds immediately. Add `[local-hold:N]` to "
+"the current turn's message to delay its answer by up to 120 seconds. "
+"During that time, try queuing, editing, or deleting waiting messages, or "
+"pressing Stop. A marker in an earlier message does not delay the current "
+"turn."
+msgstr ""
+"模拟模型平时会马上回复。在当前这一轮的消息里加上 `[local-hold:N]`，就能让回复最多推迟 120 "
+"秒。趁这段时间，可以试试把消息排进队列、编辑或删除等待中的消息，或者点 Stop。之前消息里的标记不会让当前这一轮延迟。"
+
+#: ../../deploy/local/README.md:165
+msgid ""
+"Claude Code receives an injected waiting message while a tool is in "
+"flight. Add `[local-tool:N]` to make it run `sleep N` through Bash first,"
+" for up to 60 seconds, then press ↑ on a waiting message while that tool "
+"runs. The answer after the tool quotes the injected message. Codex can "
+"receive a waiting message at any point, so `[local-hold:N]` is sufficient"
+" there."
+msgstr ""
+"Claude Code 会在工具执行期间收到插入的等待消息。加上 `[local-tool:N]`，它会先通过 Bash 执行 `sleep "
+"N`（最多 60 秒）；趁这个工具还在跑，在一条等待消息上按 ↑。工具跑完后的回复会引用那条插入的消息。Codex 随时都能接收等待消息，所以用 "
+"`[local-hold:N]` 就够了。"
+

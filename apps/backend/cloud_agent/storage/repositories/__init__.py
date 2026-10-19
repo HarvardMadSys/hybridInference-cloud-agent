@@ -31,7 +31,6 @@ from cloud_agent.storage.repositories.operation_measurements import (
 )
 from cloud_agent.storage.repositories.owner_usage import PostgresOwnerUsageRepository
 from cloud_agent.storage.repositories.pending_messages import PostgresPendingMessageRepository
-from cloud_agent.storage.repositories.pr_archive import PostgresPrArchiveRepository
 from cloud_agent.storage.repositories.profiling_control import (
     PostgresProfilingControlRepository,
 )
@@ -71,7 +70,6 @@ __all__ = [
     "PostgresOperationMeasurementRepository",
     "PostgresOwnerUsageRepository",
     "PostgresPendingMessageRepository",
-    "PostgresPrArchiveRepository",
     "PostgresProfilingControlRepository",
     "PostgresResidencyRepository",
     "PostgresSandboxRepository",

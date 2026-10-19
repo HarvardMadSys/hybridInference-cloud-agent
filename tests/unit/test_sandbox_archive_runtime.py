@@ -933,3 +933,97 @@ def test_a_skipped_final_is_never_checkpointed() -> None:
     assert services[0].final_calls == 0
     assert services[0].checkpoint_calls == []
     controller.close()
+
+
+def _stopped_generation_marker(manager: _MarkerManager) -> bytes:
+    """The uploaded final marker a clean stop leaves in generation 1's container."""
+    controller, _services = _controller(manager)
+    controller.start()
+    controller.apply(_policy(1))
+    spec = SimpleNamespace(sandbox_id="asbx", generation=1)
+    stopped = SimpleNamespace(container_id="container-a")
+    controller.prepare_final(spec, stopped)
+    controller.queue_final(spec, stopped, ())
+    controller.close()
+    assert manager.marker is not None and b'"state":"uploaded"' in manager.marker
+    return manager.marker
+
+
+def test_a_restored_container_replaces_the_final_marker_its_checkpoint_carried() -> None:
+    """A checkpoint commits the stopped container whole, its final marker included.
+
+    The container restored from it on another host is generation 2 with a new
+    id. Its first start used to read generation 1's marker as its own and
+    refuse: on staging every restore failed that way (2026-10-19).
+    """
+    manager = _MarkerManager()
+    _stopped_generation_marker(manager)
+    controller, _services = _controller(manager)
+    controller.start()
+    controller.apply(_policy(1))
+    spec = SimpleNamespace(sandbox_id="asbx", generation=2)
+    restored = SimpleNamespace(container_id="container-b")
+
+    controller.prepare_start(spec, restored)
+
+    assert manager.marker is not None
+    marker = archive_runtime._FinalArchiveMarker.decode(manager.marker)
+    assert (marker.generation, marker.container_id, marker.state) == (2, "container-b", "pending")
+    controller.complete_start(spec, restored)
+    assert manager.marker is None
+    controller.close()
+
+
+@pytest.mark.parametrize(
+    ("sandbox_id", "generation", "container_id", "namespace"),
+    [
+        pytest.param("asbx-other", 2, "container-b", "pool-east", id="another-group"),
+        pytest.param("asbx", 1, "container-b", "pool-east", id="same-generation"),
+        pytest.param("asbx", 2, "container-b", "pool-west", id="another-deployment"),
+    ],
+)
+def test_only_an_earlier_generation_of_the_same_group_is_read_as_restored(
+    sandbox_id: str, generation: int, container_id: str, namespace: str
+) -> None:
+    """Every other marker that is not the container's own still refuses its start."""
+    manager = _MarkerManager()
+    _stopped_generation_marker(manager)
+    controller = SandboxArchiveController(
+        manager,  # type: ignore[arg-type]
+        namespace=namespace,
+        service_factory=_Service,
+    )
+    controller.start()
+    controller.apply(_policy(1))
+    # Generation 1's marker, read by a container claiming each identity.
+    spec = SimpleNamespace(sandbox_id=sandbox_id, generation=generation)
+
+    with pytest.raises(SandboxError, match="does not match the sandbox"):
+        controller.prepare_start(spec, SimpleNamespace(container_id=container_id))
+    controller.close()
+
+
+def test_a_restored_container_probes_its_baseline_under_the_current_policy() -> None:
+    """The initial marker restored with the checkpoint is generation 1's baseline.
+
+    It neither refuses the restored container nor chooses the policy its probe
+    runs under, as a marker this container prepared would.
+    """
+    manager = _MarkerManager()
+    manager.initial_marker = _initial_marker(_policy(1))
+    controller, services = _controller(manager)
+    controller.start()
+    controller.apply(_policy(2))
+    restored = SimpleNamespace(spec=SimpleNamespace(sandbox_id="asbx", generation=2))
+
+    controller.probe_initial(
+        restored,
+        expected_container_id="container-b",
+        preparation_id="ajob",
+        members=(),
+    )
+
+    assert [(service.config.revision, service.initial_probe_calls) for service in services] == [
+        (2, 1)
+    ]
+    controller.close()

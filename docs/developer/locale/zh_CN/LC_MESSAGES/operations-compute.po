@@ -1,0 +1,1759 @@
+# Simplified Chinese translation of the Cloud Agent developer documentation.
+# See docs/developer/translations.md.
+msgid ""
+msgstr ""
+"Project-Id-Version: HybridInference Cloud Agent \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-10-19 03:26-0400\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: The HybridInference contributors\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.10.3\n"
+
+#: ../developer/operations-compute.md:1
+msgid "Compute resources and the global sandbox location"
+msgstr "计算资源与全局沙箱位置"
+
+#: ../developer/operations-compute.md:3
+msgid ""
+"Use Admin → Servers to deploy existing SSH machines or CloudLab "
+"allocations, manage their leases, and choose where new sandboxes run. "
+"Durable operations and renewal run in the control plane, so closing the "
+"browser does not stop them. The [compute lifecycle "
+"design](../agents/specs/2026-10-04-compute-resource-lifecycle-design.zh-"
+"CN.md) records the underlying protocol; "
+"[ENVIRONMENT.md](../../ENVIRONMENT.md#optional-compute-resource-"
+"management) lists its configuration."
+msgstr ""
+"在 Admin → Servers 里，你可以部署已有的 SSH 机器或 CloudLab "
+"分配、管理它们的租期，并决定新沙箱在哪里运行。持久化的操作和续期都在控制平面里执行，所以关掉浏览器也不会中断。底层协议见[计算资源生命周期设计](../agents/specs/2026-10-04"
+"-compute-resource-lifecycle-design.zh-CN.md)，相关配置列在 "
+"[ENVIRONMENT.md](../../ENVIRONMENT.md#optional-compute-resource-"
+"management) 里。"
+
+#: ../developer/operations-compute.md:10
+msgid ""
+"The global location applies to **all new, still-unassigned sandbox "
+"groups**. Retained groups, including stopped ones and their Fork members,"
+" keep their original Host. `Automatic` clears the global restriction. An "
+"explicitly selected unavailable Host keeps work waiting; it never "
+"triggers a fallback."
+msgstr ""
+"全局位置只对**所有新建、还没分配主机的沙箱组**生效。已保留的沙箱组，包括已停止的组和它们的 Fork 成员，都留在原来的 Host 上。选 "
+"`Automatic` 就取消全局限制。如果明确选了一台当前不可用的 Host，工作会一直等着它，绝不会自动换到别处。"
+
+#: ../developer/operations-compute.md:15
+msgid "What must remain on stable infrastructure"
+msgstr "哪些东西必须放在稳定的基础设施上"
+
+#: ../developer/operations-compute.md:17
+msgid ""
+"Keep the control plane, Postgres, background worker, deployment profiles,"
+" provider credentials and compute encryption key on stable "
+"infrastructure. A managed resource runs only the Host, sandbox manager, "
+"tunnels and sandboxes. Provider expiry remains a hard limit; renewal does"
+" not guarantee uptime."
+msgstr ""
+"控制平面、Postgres、后台 worker、部署配置（deployment "
+"profile）、服务商凭据和计算资源加密密钥，都要放在稳定的基础设施上。托管资源上只跑 Host、sandbox "
+"manager、隧道和沙箱。服务商规定的到期时间是硬性上限；续期也不能保证机器一直在线。"
+
+#: ../developer/operations-compute.md:22
+msgid ""
+"Stored API tokens and management SSH keys are encrypted with "
+"`AGENT_COMPUTE_SECRET_KEY`. The supported deployer generates a random "
+"32-byte value in its persistent `.env` when none is configured; other "
+"deployment systems must provide equivalent stable key material. Back it "
+"up with the encrypted database: restoring the database without this key "
+"cannot recover compute connections. Do not reuse gateway, session, "
+"enrollment or sandbox manager keys. Compute management credentials never "
+"enter sandboxes or the deployed Host."
+msgstr ""
+"保存的 API 令牌和管理用的 SSH 密钥，都用 `AGENT_COMPUTE_SECRET_KEY` "
+"加密。如果没有配置，官方部署脚本会在它持久保存的 `.env` 里生成一个随机的 32 "
+"字节值；用其他部署方式时，必须自己提供一份同样长期不变的密钥。这个密钥要和加密的数据库一起备份：只恢复数据库、没有这个密钥，计算资源的连接就恢复不了。不要拿网关、会话、注册或"
+" sandbox manager 的密钥来充当它。计算资源的管理凭据永远不会进入沙箱，也不会进入部署好的 Host。"
+
+#: ../developer/operations-compute.md:30
+msgid ""
+"The Host separately needs purpose-scoped tunnel credentials and "
+"`AGENT_SANDBOX_MANAGER_TOKEN`. The sandbox manager token is currently "
+"pool-wide: every deployment profile must use the same value as the stable"
+" control plane. Management SSH keys and sandbox manager authentication "
+"serve different purposes."
+msgstr ""
+"Host 还需要另外两样东西：按用途限定的隧道凭据，以及 `AGENT_SANDBOX_MANAGER_TOKEN`。目前整个资源池共用同一个 "
+"sandbox manager 令牌，所以每个部署配置都必须用和稳定控制平面相同的值。管理用的 SSH 密钥和 sandbox manager "
+"的认证是两回事，各管各的。"
+
+#: ../developer/operations-compute.md:35
+msgid "Supported initial deployment"
+msgstr "支持的初始部署方式"
+
+#: ../developer/operations-compute.md:37
+msgid "Automatic SSH bootstrap supports:"
+msgstr "自动 SSH 初始化支持以下环境："
+
+#: ../developer/operations-compute.md:39
+msgid "Ubuntu 22.04 or 24.04 on x86-64."
+msgstr "x86-64 架构上的 Ubuntu 22.04 或 24.04。"
+
+#: ../developer/operations-compute.md:40
+msgid "Python 3, passwordless `sudo` and working KVM."
+msgstr "Python 3、免密 `sudo`，以及可用的 KVM。"
+
+#: ../developer/operations-compute.md:41
+msgid ""
+"Reachable package repositories and the pinned Kata release when "
+"installing prerequisites."
+msgstr "需要安装前置依赖时，能访问软件包仓库和固定版本的 Kata 发布。"
+
+#: ../developer/operations-compute.md:44
+msgid ""
+"With `install_prerequisites=true`, bootstrap installs `docker.io`, "
+"`docker-compose-v2`, `curl`, `ca-certificates`, `xz-utils` and "
+"`nftables`, starts Docker, and runs the repository's checksum-pinned Kata"
+" installer. With it false, Docker/Compose and the approved Kata runtime "
+"must already exist. Both paths require Kata."
+msgstr ""
+"设置 `install_prerequisites=true` 时，初始化程序会安装 `docker.io`、`docker-"
+"compose-v2`、`curl`、`ca-certificates`、`xz-utils` 和 `nftables`，启动 "
+"Docker，并运行仓库里带校验和锁定的 Kata 安装脚本。设为 false 时，Docker/Compose 和经过批准的 Kata "
+"运行时必须事先装好。两种方式都离不开 Kata。"
+
+#: ../developer/operations-compute.md:50
+msgid ""
+"The node does not need Cloud Agent preinstalled. Bootstrap transfers a "
+"reviewed source bundle and configuration, then runs "
+"`deploy/host/sandbox_host.sh up` and `check`. These checks verify Kata, "
+"the guest observer, sandbox manager, relays and nftables. Admission stays"
+" closed until deployment checks, an enrolled Host heartbeat and a "
+"control-plane-to-sandbox-manager health check succeed."
+msgstr ""
+"节点上不需要预先装好 Cloud Agent。初始化程序会把一份评审过的源码包和配置传过去，然后运行 "
+"`deploy/host/sandbox_host.sh up` 和 `check`。这些检查会确认 Kata、guest 观察器、sandbox"
+" manager、中继和 nftables 都正常。只有部署检查通过、注册好的 Host 发来心跳、控制平面访问 sandbox manager "
+"的健康检查也成功之后，才会开始接任务。"
+
+#: ../developer/operations-compute.md:56
+msgid ""
+"Automatic initial deployment supports one node per allocation. Multi-node"
+" CloudLab experiments can be observed, but automatic deployment refuses "
+"them rather than selecting one node. Failed or unsupported installation "
+"leaves the resource visible and does not destroy it."
+msgstr ""
+"自动初始部署每个分配只支持一个节点。多节点的 CloudLab "
+"实验可以纳入观察，但自动部署会直接拒绝，不会替你从中挑一个节点。安装失败或环境不受支持时，资源仍然留在列表里，不会被销毁。"
+
+#: ../developer/operations-compute.md:61
+msgid "Preferred CloudLab node types"
+msgstr "优先选用的 CloudLab 节点类型"
+
+#: ../developer/operations-compute.md:63
+msgid ""
+"New CloudLab allocations try the following default list from top to "
+"bottom. These general-purpose families were introduced in 2021 or later, "
+"have at least 16 physical cores and 128 GiB RAM, and each has more than "
+"20 total nodes. Hardware and totals were checked against the [CloudLab "
+"hardware catalog](https://docs.cloudlab.us/hardware.html) and [public "
+"inventory](https://www.cloudlab.us/portal-hardware.php) on October 12, "
+"2026."
+msgstr ""
+"新建 CloudLab 分配时，会按下面的默认列表从上往下依次尝试。这几个通用机型系列都是 2021 年或之后推出的，至少有 16 "
+"个物理核心、128 GiB 内存，每种的节点总数都超过 20 台。硬件参数和总数已在 2026 年 10 月 12 日对照 [CloudLab "
+"硬件目录](https://docs.cloudlab.us/hardware.html)和[公开清单](https://www.cloudlab.us"
+"/portal-hardware.php)核实过。"
+
+#: ../developer/operations-compute.md
+msgid "Preference"
+msgstr "优先级"
+
+#: ../developer/operations-compute.md
+msgid "Type"
+msgstr "类型"
+
+#: ../developer/operations-compute.md
+msgid "Introduced"
+msgstr "推出年份"
+
+#: ../developer/operations-compute.md
+msgid "Total nodes"
+msgstr "节点总数"
+
+#: ../developer/operations-compute.md
+msgid "Physical cores"
+msgstr "物理核心"
+
+#: ../developer/operations-compute.md
+msgid "RAM (GiB)"
+msgstr "内存（GiB）"
+
+#: ../developer/operations-compute.md
+msgid "1"
+msgstr ""
+
+#: ../developer/operations-compute.md
+msgid "`r6615`"
+msgstr ""
+
+#: ../developer/operations-compute.md
+msgid "2025"
+msgstr ""
+
+#: ../developer/operations-compute.md
+msgid "80"
+msgstr ""
+
+#: ../developer/operations-compute.md
+msgid "32"
+msgstr ""
+
+#: ../developer/operations-compute.md
+msgid "192"
+msgstr ""
+
+#: ../developer/operations-compute.md
+msgid "2"
+msgstr ""
+
+#: ../developer/operations-compute.md
+msgid "`c6620`"
+msgstr ""
+
+#: ../developer/operations-compute.md
+msgid "132"
+msgstr ""
+
+#: ../developer/operations-compute.md
+msgid "28"
+msgstr ""
+
+#: ../developer/operations-compute.md
+msgid "128"
+msgstr ""
+
+#: ../developer/operations-compute.md
+msgid "3"
+msgstr ""
+
+#: ../developer/operations-compute.md
+msgid "`r650`"
+msgstr ""
+
+#: ../developer/operations-compute.md
+msgid "2022"
+msgstr ""
+
+#: ../developer/operations-compute.md
+msgid "72"
+msgstr ""
+
+#: ../developer/operations-compute.md
+msgid "256"
+msgstr ""
+
+#: ../developer/operations-compute.md
+msgid "4"
+msgstr ""
+
+#: ../developer/operations-compute.md
+msgid "`r6525`"
+msgstr ""
+
+#: ../developer/operations-compute.md
+msgid "64"
+msgstr ""
+
+#: ../developer/operations-compute.md
+msgid "5"
+msgstr ""
+
+#: ../developer/operations-compute.md
+msgid "`c6525-100g`"
+msgstr ""
+
+#: ../developer/operations-compute.md
+msgid "2021"
+msgstr ""
+
+#: ../developer/operations-compute.md
+msgid "36"
+msgstr ""
+
+#: ../developer/operations-compute.md
+msgid "24"
+msgstr ""
+
+#: ../developer/operations-compute.md
+msgid "6"
+msgstr ""
+
+#: ../developer/operations-compute.md
+msgid "`c6525-25g`"
+msgstr ""
+
+#: ../developer/operations-compute.md
+msgid "144"
+msgstr ""
+
+#: ../developer/operations-compute.md
+msgid "16"
+msgstr ""
+
+#: ../developer/operations-compute.md:78
+msgid ""
+"Change the ordered list in **Admin → Settings → CloudLab**, or override "
+"it for a particular server or autoscaling policy. The list is saved with "
+"each new allocation. Currently free counts are shown separately and do "
+"not change the preference order. A confirmed capacity rejection advances "
+"to the next type; an uncertain response pauses acquisition for review. If"
+" all types lack capacity, the operation waits and retries from the top. "
+"An explicit nonempty `phystype` profile parameter selects only that type;"
+" clear it to resume ordered selection. Profiles with a different hardware"
+" parameter can use `node_type_binding`; an empty list uses the profile's "
+"own choice."
+msgstr ""
+"这个有序列表可以在 **Admin → Settings → CloudLab** "
+"里修改，也可以针对某台服务器或某条自动扩缩容策略单独覆盖。每次新建分配时，都会把当时的列表一起保存下来。当前空闲的数量会单独显示，但不影响优先顺序。如果确认某个类型没有容量了，就换下一个类型；如果响应含糊不清，就暂停申请，等人来看。所有类型都没有容量时，操作会等一会儿，再从头开始重试。如果"
+" profile 参数里明确写了非空的 `phystype`，就只用这一种类型；把它清空，才会恢复按列表顺序选择。用其他硬件参数的 profile"
+" 可以用 `node_type_binding`；列表为空时，用 profile 自己的选择。"
+
+#: ../developer/operations-compute.md:88
+msgid "Sandbox storage path"
+msgstr "沙箱存储路径"
+
+#: ../developer/operations-compute.md:90
+msgid ""
+"When adding or creating a server, enter **Sandbox storage path**, for "
+"example `/mydata`. This must be an existing writable mounted data disk on"
+" the remote server. A new CloudLab server starts with `/mydata`, where "
+"the `small-lan` profile and the Cloud Agent profile mount their data disk"
+" by default; change it when the server template mounts its disk "
+"elsewhere. Bootstrap stores sandbox workspaces and native session data in"
+" `<path>/docker` and `<path>/containerd`, binding these directories to "
+"the daemons' standard `/var/lib/docker` and `/var/lib/containerd` paths. "
+"The server overview shows the saved choice. Observation-only imports do "
+"not need a storage path. Attachment preflight checks the selected disk "
+"without changing the host; deployment checks it again before preparing "
+"storage."
+msgstr ""
+"添加或新建服务器时，要填 **Sandbox storage path**，比如 "
+"`/mydata`。它必须是远程服务器上一块已经挂载、可写的数据盘。新建的 CloudLab 服务器默认填 `/mydata`，因为 "
+"`small-lan` profile 和 Cloud Agent profile "
+"默认都把数据盘挂在这里；如果服务器模板把盘挂在了别处，就改掉它。初始化程序会把沙箱工作区和原生会话数据放在 `<path>/docker` 和 "
+"`<path>/containerd` 下，并把这两个目录绑定到守护进程的标准路径 `/var/lib/docker` 和 "
+"`/var/lib/containerd`。服务器概览页会显示保存的路径。只做观察的导入不需要填存储路径。挂接前的预检会检查所选磁盘，但不改动主机；部署在准备存储之前还会再检查一次。"
+
+#: ../developer/operations-compute.md:102
+msgid ""
+"The path is saved with the allocation and reused on retries and "
+"replacement nodes, where the same mount must exist. A missing or read-"
+"only mount, symlink or conflicting existing store blocks setup. Any "
+"nonempty Docker or containerd store outside the selected mount also "
+"blocks setup. New hosts require empty `docker` and `containerd` "
+"directories on the selected disk. Deployment retries can reuse nonempty "
+"directories only when the existing deployment identity matches and both "
+"daemon directories are already bound to those same storage directories. "
+"Retained data with missing binds requires operator repair before "
+"retrying. Existing `/etc/fstab` entries for either daemon directory must "
+"match the selected storage bind; conflicting or duplicate entries block "
+"setup before host changes. Native systemd mount units, masks, or mount "
+"overrides for these directories also block setup; ordinary "
+"`fstab`-generated mount units remain supported. Preflight does not query "
+"or start these daemons, and bootstrap never deletes or moves existing "
+"sandbox data to a different disk. Docker and containerd must use their "
+"default `/var/lib/docker` and `/var/lib/containerd` data directories. "
+"Setup rejects custom daemon storage configuration before restarting "
+"services. A host installed by hand uses the same binds, `/etc/fstab` "
+"lines and systemd drop-ins; see [Retained Docker storage on a "
+"host](operations.md#retained-docker-storage-on-a-host). Daemon startup "
+"requires the configured disk and bind mount after a reboot. Older API "
+"clients that omit `sandbox_storage_path` continue to use the operator "
+"profile's `data_mount` configuration."
+msgstr ""
+"这个路径会和分配一起保存，重试和换节点时都沿用，所以新节点上也必须有同样的挂载。挂载缺失或只读、是符号链接，或者和已有的存储冲突，安装都会被拦下。所选挂载以外只要有非空的"
+" Docker 或 containerd 存储，安装也会被拦下。新主机要求所选磁盘上的 `docker` 和 `containerd` "
+"目录都是空的。部署重试时，只有在现有部署身份一致、并且两个守护进程目录都已经绑定到同样的存储目录时，才能沿用非空的目录。如果数据还在、但绑定丢了，需要运维人员先修好再重试。`/etc/fstab`"
+" 里如果已经有这两个守护进程目录的条目，必须和所选的存储绑定一致；有冲突或重复的条目，会在改动主机之前就把安装拦下。针对这些目录的原生 "
+"systemd 挂载单元、mask 或挂载覆盖，同样会拦下安装；由普通 `fstab` "
+"自动生成的挂载单元则没问题。预检不会查询或启动这些守护进程，初始化程序也从不删除已有的沙箱数据，或者把它挪到别的磁盘。Docker 和 "
+"containerd 必须用各自默认的数据目录 `/var/lib/docker` 和 "
+"`/var/lib/containerd`，安装会在重启服务之前拒绝任何自定义的守护进程存储配置。手动安装的主机也用同样的绑定、`/etc/fstab`"
+" 条目和 systemd drop-in，见[主机上的保留 Docker 存储](operations.md#retained-docker-"
+"storage-on-a-host)。重启之后，守护进程要等配置的磁盘和绑定挂载都就位才能启动。不传 `sandbox_storage_path`"
+" 的旧版 API 客户端，仍然使用运维人员 profile 里的 `data_mount` 配置。"
+
+#: ../developer/operations-compute.md:125
+msgid "Prepare a trusted deployment profile"
+msgstr "准备一份受信任的部署配置"
+
+#: ../developer/operations-compute.md:127
+msgid "Automatic setup"
+msgstr "自动安装"
+
+#: ../developer/operations-compute.md:129
+msgid ""
+"Open **Admin → Servers → Server setup** and use **Automatic setup**. The "
+"control-plane image includes the Host source bundle for its own release; "
+"the application supplies the revision, environment and existing sandbox "
+"manager token, generates three separate tunnel keys per setup slot, and "
+"discovers the control-plane listener ports and Docker bridge."
+msgstr ""
+"打开 **Admin → Servers → Server setup**，使用 **Automatic "
+"setup**。控制平面镜像里自带与它同一版本的 Host 源码包；应用会自动填好修订号、环境和现有的 sandbox manager "
+"令牌，为每个安装槽位生成三把独立的隧道密钥，并自动找出控制平面的监听端口和 Docker 网桥。"
+
+#: ../developer/operations-compute.md:135
+msgid "Supply the infrastructure inputs once:"
+msgstr "基础设施相关的信息只需填一次："
+
+#: ../developer/operations-compute.md:137
+msgid ""
+"Add and validate management SSH connections for the stable gateway "
+"machine and control-plane machine, including independently verified host "
+"keys."
+msgstr "为稳定的网关机器和控制平面机器添加管理用 SSH 连接并验证通过，包括通过独立渠道核实过的主机密钥。"
+
+#: ../developer/operations-compute.md:139
+msgid ""
+"Select those connections and confirm the machines' SSH addresses and "
+"users. The gateway address defaults to the saved Gateway API URL's "
+"hostname. The supported control-plane deployer supplies the service "
+"node's FQDN as the control-plane address. Override these with "
+"`AGENT_GATEWAY_SSH_HOST` and `AGENT_CONTROL_PLANE_SSH_HOST` when SSH uses"
+" different addresses; other deployers must supply the control-plane "
+"value. Saved and pending setup inputs take precedence over these first-"
+"time defaults. Both machines need Python 3 and passwordless `sudo`. The "
+"control machine must run the supported Docker Compose deployment, and the"
+" gateway must already listen on the selected inference port."
+msgstr ""
+"选好这两个连接，确认两台机器的 SSH 地址和用户。网关地址默认取已保存的网关 API URL 里的主机名；官方的控制平面部署脚本会把服务节点的 "
+"FQDN 作为控制平面地址。如果 SSH 要用别的地址，就用 `AGENT_GATEWAY_SSH_HOST` 和 "
+"`AGENT_CONTROL_PLANE_SSH_HOST` "
+"覆盖；用其他部署方式时，必须自己提供控制平面的地址。已保存的、或者还在进行中的安装信息，优先于这些首次使用时的默认值。两台机器都需要 Python"
+" 3 和免密 `sudo`。控制平面机器必须是用官方 Docker Compose 方式部署的，网关必须已经在所选的推理端口上监听。"
+
+#: ../developer/operations-compute.md:149
+msgid ""
+"Enter an approved private IPv4 pool for chat networks, a reachable DNS "
+"resolver outside that pool, and the protected infrastructure CIDRs. These"
+" values depend on your network and require an administrator's decision."
+msgstr ""
+"填写对话网络使用的私有 IPv4 地址池（需经批准）、一个在该地址池之外且能访问到的 DNS 解析器，以及需要保护的基础设施 "
+"CIDR。这些值取决于你的网络环境，要由管理员来定。"
+
+#: ../developer/operations-compute.md:152
+msgid ""
+"Choose the number of setup slots and prepare the setups. Two slots allow "
+"separate sandbox manager routes for a current node and its replacement."
+msgstr "选择安装槽位的数量，然后准备安装。有两个槽位时，当前节点和它的替换节点可以各用一条独立的 sandbox manager 路由。"
+
+#: ../developer/operations-compute.md:155
+msgid ""
+"The application creates dedicated restricted SSH accounts on the two "
+"stable machines. Inference and MCP credentials permit only their "
+"respective local service destinations; the control credential permits the"
+" main API and its assigned reverse sandbox manager route. Management "
+"credentials stay in the control plane. Existing SSH policies must permit "
+"these restricted accounts; setup refuses incompatible policies instead of"
+" broadening them. Co-located gateway and control services must use "
+"separate inference, MCP and main API ports."
+msgstr ""
+"应用会在两台稳定的机器上各建一个专用的受限 SSH 账号。推理凭据和 MCP 凭据只能访问各自对应的本机服务；控制凭据可以访问主 "
+"API，以及分配给它的那条反向 sandbox manager 路由。管理凭据只留在控制平面。机器上现有的 SSH "
+"策略必须允许这些受限账号；策略不兼容时，安装会直接拒绝，不会去放宽策略。如果网关和控制服务部署在同一台机器上，推理、MCP 和主 API "
+"必须各用不同的端口。"
+
+#: ../developer/operations-compute.md:163
+msgid ""
+"Generated keys and configuration are encrypted in Postgres before remote "
+"authorization begins. A setup becomes selectable only after all its slots"
+" finish. If a request fails or the browser closes, reopen Server setup "
+"and retry the pending setup to reuse its exact credentials and routes. "
+"Infrastructure defaults are saved for future setups. **Start new setup** "
+"retains those inputs and creates a new request on submission; it leaves "
+"an unfinished setup unavailable. Tunnel credentials, the install "
+"directory, and enrollment stay fixed. A control-plane release rolls "
+"managed hosts forward: stored profiles that share the previous commit and"
+" bundle, and the live allocations and autoscaling reservations using "
+"them, advance together so a later node replacement or new pool member "
+"still sees one revision. That rollout starts only once the new control "
+"plane runs, so the deployment's readiness check does not wait for managed"
+" hosts; they take new chats again when they report the new commit. A "
+"rollout that takes the running generation down and then fails restores "
+"the previous stored bundle. File-backed profile files are not rewritten. "
+"A rollout waits while the Host carries a deployment drain fence. If the "
+"fence stays for 30 minutes on a Host that is off the control plane's "
+"commit, `compute_host_release_blocked` alerts once per release: the Host "
+"takes no work and will not be rolled forward until the deployment that "
+"drained it releases the fence, or an administrator overrides it with "
+"`POST /admin/agent/runner-hosts/<host>/undrain?force=true`."
+msgstr ""
+"生成的密钥和配置，会在开始远程授权之前加密存进 Postgres。一个安装要等它所有的槽位都完成，才能被选用。如果请求失败或者浏览器关了，重新打开"
+" Server setup，重试那个未完成的安装，就会沿用它原来的凭据和路由。基础设施相关的默认值会保存下来，留给以后的安装使用。**Start "
+"new setup** "
+"会保留这些信息，提交时新建一个请求；原来那个没完成的安装就不能再用了。隧道凭据、安装目录和注册信息都固定不变。控制平面发布新版本时，会把托管主机一起往前升级：凡是和上一版共用同一个"
+" commit 和源码包的已保存 "
+"profile，以及正在使用它们的分配和自动扩缩容预留，会一起升级，这样之后换节点或者资源池加入新成员时，看到的仍是同一个版本。这次升级要等新的控制平面跑起来之后才开始，所以部署的就绪检查不会等托管主机；它们报告了新的"
+" commit 之后，就会重新开始接新对话。如果升级时已经把正在运行的那一代停掉了，之后却失败了，就会退回之前保存的源码包。基于文件的 "
+"profile 文件不会被改写。Host 上有部署排空栅栏时，升级会等待。如果一台 Host 的版本和控制平面的 commit "
+"不一致，而栅栏又在它上面停留了 30 分钟，`compute_host_release_blocked` 会在每次发布时告警一次：这台 Host "
+"不接任何工作，也不会被升级，直到当初排空它的那次部署解除栅栏，或者管理员用 `POST /admin/agent/runner-"
+"hosts/<host>/undrain?force=true` 强制解除。"
+
+#: ../developer/operations-compute.md:186
+#, python-brace-format
+msgid ""
+"When the registry named by `AGENT_COMPUTE_SANDBOX_IMAGE_REPOSITORY` "
+"(default `ghcr.io/harvardmadsys/cloud-agent-sandbox`) holds "
+"`sandbox-<commit>` for this release, the generated Host configuration "
+"pulls `<repository>:sandbox-{deployment_sha}` instead of building the "
+"sandbox image. The bootstrap fills in the profile's current revision, so "
+"a profile that advances with a release pulls that release's image. A "
+"pulled image is recorded by its registry digest, which is what lets "
+"another Host restore the node's chats from their checkpoints (see "
+"[Restoring a removed host's sandboxes](operations.md#restoring-a-removed-"
+"hosts-sandboxes)). Without a published image the Host builds its own, as "
+"before, and its chats stay on it; the profile's "
+"`automatic_setup.sandbox_image` says which (`published` or `built`). "
+"Stored setups keep the environment they were created with: use **Start "
+"new setup** to give existing slots the published image. A setup that "
+"pulls fails on a later release whose image was never published."
+msgstr ""
+"如果 `AGENT_COMPUTE_SANDBOX_IMAGE_REPOSITORY`（默认 `ghcr.io/harvardmadsys"
+"/cloud-agent-sandbox`）指向的镜像仓库里有这次发布的 `sandbox-<commit>`，生成的 Host 配置就会直接拉取"
+" `<repository>:sandbox-{deployment_sha}`，不再自己构建沙箱镜像。初始化程序会填入 profile "
+"当前的修订号，所以随发布一起升级的 profile，拉取的就是那个发布的镜像。拉取下来的镜像按镜像仓库的摘要记录，正因为如此，另一台 Host "
+"才能从检查点恢复这个节点上的对话（见[恢复被移除主机上的沙箱](operations.md#restoring-a-removed-hosts-"
+"sandboxes)）。如果没有已发布的镜像，Host 会像以前一样自己构建，它上面的对话也就只能一直留在它上面；profile 里的 "
+"`automatic_setup.sandbox_image` 会注明是哪种情况（`published` 或 "
+"`built`）。已保存的安装保持创建时的环境不变：想让现有槽位改用已发布的镜像，就用 **Start new "
+"setup**。设成拉取镜像的安装，如果之后某个版本的镜像没有发布，就会失败。"
+
+#: ../developer/operations-compute.md:201
+msgid ""
+"Automatic setup requires a control-plane image built with its full "
+"release revision, the compute encryption key and the existing sandbox "
+"manager token. The form shows missing prerequisites. Rebuild or update "
+"older images to include the Host bundle, or use advanced manual setup."
+msgstr ""
+"自动安装有三个前提：控制平面镜像在构建时带上了完整的发布修订号，配置了计算资源加密密钥，以及已有 sandbox manager "
+"令牌。表单上会显示还缺哪些。旧镜像需要重新构建或更新，才能带上 Host 源码包；也可以改用高级的手动安装。"
+
+#: ../developer/operations-compute.md:206
+msgid "Manual and file-backed setup"
+msgstr "手动安装和基于文件的安装"
+
+#: ../developer/operations-compute.md:208
+msgid ""
+"**Advanced manual setup** retains the existing form: upload a reviewed "
+"source archive, enter its exact 40-character revision and installation "
+"directory, paste the Host environment, and provide the three tunnel keys "
+"and verified known-hosts files. The control plane validates the archive, "
+"encrypts all environment and credential values, and stores them in "
+"Postgres. Profile read APIs expose only IDs and labels, never generated "
+"credentials. Create a new profile to replace tunnel credentials, the "
+"install directory, or the Host environment. A control-plane release moves"
+" the commit of stored profiles that still pin the previous bundle; it "
+"does not rewrite a file-backed profile."
+msgstr ""
+"**Advanced manual setup** 保留了原来的表单：上传一份评审过的源码归档，填写它确切的 40 位修订号和安装目录，粘贴 "
+"Host 的环境变量，再提供三把隧道密钥和核实过的 known-hosts 文件。控制平面会校验归档，把所有环境变量和凭据加密后存进 "
+"Postgres。读取 profile 的 API 只返回 ID 和标签，从不返回生成的凭据。要更换隧道凭据、安装目录或 Host "
+"环境变量，就新建一个 profile。控制平面发布新版本时，会把仍然固定在上一个源码包的已保存 profile 的 commit "
+"往前挪；基于文件的 profile 不会被改写。"
+
+#: ../developer/operations-compute.md:218
+msgid ""
+"File-backed configuration remains supported for existing deployments and "
+"recovery. Start with these operator templates:"
+msgstr "基于文件的配置仍然可以用于已有的部署和故障恢复。从这几份运维模板开始："
+
+#: ../developer/operations-compute.md:221
+msgid "[`compute.example.json`](../../deploy/control-plane/compute.example.json)"
+msgstr ""
+
+#: ../developer/operations-compute.md:222
+msgid ""
+"[`compute-host.env.example`](../../deploy/control-plane/compute-"
+"host.env.example)"
+msgstr ""
+
+#: ../developer/operations-compute.md:223
+msgid "[Host field descriptions](../../deploy/host/.env.example)"
+msgstr "[Host 各字段说明](../../deploy/host/.env.example)"
+
+#: ../developer/operations-compute.md:225
+msgid ""
+"Copy them to a private configuration directory. Replace every example "
+"address, token, network and all-zero digest/revision. Keep these files "
+"outside Git. Secret files must be readable by the control-plane "
+"container's UID 10001 and not world-readable; mount the directory read-"
+"only."
+msgstr ""
+"把它们复制到一个私有的配置目录，替换掉所有示例地址、令牌、网络，以及全是零的摘要和修订号。这些文件不要放进 Git。secret "
+"文件必须能被控制平面容器里的 UID 10001 读取，但不能对所有人可读；这个目录要以只读方式挂载。"
+
+#: ../developer/operations-compute.md:230
+msgid ""
+"The Servers form selects the first available profile in configuration "
+"order. API clients may select a profile ID. Requests cannot provide "
+"scripts, source paths, Docker flags or environment values. Encrypted "
+"compute connections are referenced by connection ID. Operator-mounted "
+"deployment secrets use the separate `deployment:<name>` namespace; "
+"deployment files cannot reference compute connections."
+msgstr ""
+"Servers 表单会按配置里的顺序，选第一个可用的 profile；API 客户端可以指定一个 profile "
+"ID。请求里不能带脚本、源码路径、Docker 参数或环境变量值。加密的计算资源连接通过连接 ID 引用。运维人员挂载的部署 secret "
+"用另一套 `deployment:<name>` 命名空间；部署文件里不能引用计算资源连接。"
+
+#: ../developer/operations-compute.md:237
+msgid ""
+"Build a bundle from the reviewed commit that the control plane permits "
+"Hosts to advertise. All components must use the same release revision:"
+msgstr "用控制平面允许 Host 声明的那个评审过的 commit 构建源码包。所有组件都必须用同一个发布修订号："
+
+#: ../developer/operations-compute.md:246
+msgid "Set the profile fields as follows:"
+msgstr "profile 字段按下表填写："
+
+#: ../developer/operations-compute.md
+msgid "Field"
+msgstr "字段"
+
+#: ../developer/operations-compute.md
+msgid "Value"
+msgstr "取值"
+
+#: ../developer/operations-compute.md
+msgid "`deployment_sha`"
+msgstr ""
+
+#: ../developer/operations-compute.md
+msgid "Full 40-character revision."
+msgstr "完整的 40 位修订号。"
+
+#: ../developer/operations-compute.md
+msgid "`source_sha256`"
+msgstr ""
+
+#: ../developer/operations-compute.md
+msgid "Printed SHA-256 digest."
+msgstr "上一步打印出的 SHA-256 摘要。"
+
+#: ../developer/operations-compute.md
+msgid "`source_bundle`"
+msgstr ""
+
+#: ../developer/operations-compute.md
+msgid "Absolute bundle path visible inside the control-plane container."
+msgstr "源码包在控制平面容器里能看到的绝对路径。"
+
+#: ../developer/operations-compute.md
+msgid "`deploy_root`"
+msgstr ""
+
+#: ../developer/operations-compute.md
+msgid "Dedicated installation directory on the remote node."
+msgstr "远程节点上专用的安装目录。"
+
+#: ../developer/operations-compute.md:255
+msgid ""
+"The digest is verified before upload. The archive must contain the "
+"reviewed repository root, without a containing directory or working-tree "
+"secrets. Bootstrap rejects symlinks, path traversal and private "
+"deployment state, and adds `.dockerignore` exclusions to keep tunnel "
+"files out of image build contexts."
+msgstr ""
+"上传之前会先校验摘要。归档里必须直接是评审过的仓库根目录，外面不能再套一层目录，也不能带工作区里的 "
+"secret。初始化程序会拒绝符号链接、路径穿越和私有的部署状态，并加上 `.dockerignore` "
+"排除规则，让隧道相关的文件进不了镜像的构建上下文。"
+
+#: ../developer/operations-compute.md:260
+msgid ""
+"The first installation writes a marker binding `deploy_root` to its "
+"allocation, node and Host. Retries reuse the marker and persisted "
+"enrollment credential. A different marker or an unmarked existing "
+"installation is refused. Manually enrolled Hosts remain manageable "
+"through the original interface; bootstrap does not adopt their files."
+msgstr ""
+"第一次安装时会写一个标记，把 `deploy_root` 和它的分配、节点、Host "
+"绑在一起。重试时会沿用这个标记和已保存的注册凭据。如果遇到的是另一个标记，或者一个没有标记的已有安装，就会拒绝。手动注册的 Host "
+"仍然通过原来的界面管理，初始化程序不会接管它们的文件。"
+
+#: ../developer/operations-compute.md:266
+msgid ""
+"Each present allocation reserves a profile because the sandbox manager "
+"reverse endpoint is fixed. Overlapping old/new Hosts need separate "
+"profiles with different reverse ports, installation directories and "
+"tunnel authorizations. Renaming a profile while reusing its endpoint does"
+" not separate it. Selection skips live reservations; only confirmed "
+"`terminated` or `absent` allocations free them. Identical retries retain "
+"their operation and selected profile. The allocation transaction also "
+"checks occupancy, so concurrent additions cannot share one. Refresh "
+"availability before retrying a refused addition."
+msgstr ""
+"sandbox manager 的反向端点是固定的，所以每个现存的分配都会占用一个 profile。新旧 Host 同时存在时，需要分别用不同的 "
+"profile，各自的反向端口、安装目录和隧道授权都不一样。只给 profile 改个名字、却沿用原来的端点，是分不开的。选择 profile "
+"时会跳过仍被占用的；只有确认为 `terminated` 或 `absent` 的分配才会释放占用。完全相同的重试会沿用原来的操作和选中的 "
+"profile。分配事务本身也会检查占用，所以同时进行的两次添加不会抢到同一个 profile。某次添加被拒绝后，先刷新一下可用情况再重试。"
+
+#: ../developer/operations-compute.md:275
+#, python-brace-format
+msgid ""
+"Choose `AGENT_EGRESS_CHAT_NETWORK_POOL`, the resolver and protected CIDRs"
+" for the actual deployment; the sample range is illustrative. Preserve "
+"the release's per-group nftables policy. Environment values must be "
+"single-line dotenv data; they are never sourced as shell code. Supported "
+"substitutions are `{deploy_root}`, `{host}`, `{node_id}` and "
+"`{allocation_id}`."
+msgstr ""
+"`AGENT_EGRESS_CHAT_NETWORK_POOL`、DNS 解析器和需要保护的 "
+"CIDR，要按实际部署环境来选；示例里的地址段只是演示用。保留这个发布自带的、按沙箱组设置的 nftables 策略。环境变量的值必须是单行的 "
+"dotenv 数据，永远不会被当作 shell 代码执行。可以使用的替换变量有 "
+"`{deploy_root}`、`{host}`、`{node_id}` 和 `{allocation_id}`。"
+
+#: ../developer/operations-compute.md:281
+msgid "Three tunnels and the sandbox manager route"
+msgstr "三条隧道和 sandbox manager 路由"
+
+#: ../developer/operations-compute.md:283
+msgid ""
+"Provision tunnel authorization on the stable gateway/control-plane "
+"machines before adding a server. Bootstrap cannot grant access to them. "
+"Use three distinct keys with no shell authority and narrowly permitted "
+"forwarding:"
+msgstr ""
+"添加服务器之前，先在稳定的网关和控制平面机器上配好隧道授权，初始化程序没有权限替你做这件事。要用三把不同的密钥，都不给 shell "
+"权限，只允许严格限定的端口转发："
+
+#: ../developer/operations-compute.md
+msgid "Tunnel"
+msgstr "隧道"
+
+#: ../developer/operations-compute.md
+msgid "Remote destination"
+msgstr "远端目标"
+
+#: ../developer/operations-compute.md
+msgid "Audience"
+msgstr "谁在用"
+
+#: ../developer/operations-compute.md
+msgid "Inference"
+msgstr "推理"
+
+#: ../developer/operations-compute.md
+msgid "Gateway inference port, default `127.0.0.1:8080`"
+msgstr "网关的推理端口，默认 `127.0.0.1:8080`"
+
+#: ../developer/operations-compute.md
+msgid "Runner and sandbox relay"
+msgstr "runner 和沙箱中继"
+
+#: ../developer/operations-compute.md
+msgid "MCP"
+msgstr ""
+
+#: ../developer/operations-compute.md
+msgid "Control plane's **MCP-only** listener, default `127.0.0.1:8001`"
+msgstr "控制平面的 **MCP 专用**监听器，默认 `127.0.0.1:8001`"
+
+#: ../developer/operations-compute.md
+msgid "Sandbox tool relay"
+msgstr "沙箱的工具中继"
+
+#: ../developer/operations-compute.md
+msgid "Host control"
+msgstr "主机控制"
+
+#: ../developer/operations-compute.md
+msgid "Main API, default `127.0.0.1:8000`"
+msgstr "主 API，默认 `127.0.0.1:8000`"
+
+#: ../developer/operations-compute.md
+msgid "Trusted runner only"
+msgstr "只有受信任的 runner"
+
+#: ../developer/operations-compute.md:293
+msgid ""
+"The Host control connection also reverse-forwards from the stable "
+"control-plane machine to `sandbox-manager:8092`. Bind its listener to the"
+" actual control-plane Docker bridge gateway address, never loopback or "
+"`0.0.0.0`. Configure `GatewayPorts clientspecified`, restricting both the"
+" key's reverse listen address/port and forward destination; never `yes`, "
+"which binds every remote forward to the wildcard address. Firewall the "
+"reverse ports on that machine so they answer only on its Docker bridge "
+"interface ([sandbox manager route](operations.md#the-way-back-the-"
+"control-plane-reaching-this-hosts-sandbox-manager)). Set "
+"`AGENT_SANDBOX_MANAGER_ADVERTISE_URL` to the resulting URL reachable from"
+" the control-plane container. Add its hostname/IP to "
+"`AGENT_SANDBOX_MANAGER_URL_ALLOWED_HOSTS` when that allowlist is enabled."
+" Every simultaneously deployed Host needs a distinct reverse port."
+msgstr ""
+"主机控制这条连接，还会从稳定的控制平面机器反向转发到 `sandbox-manager:8092`。它的监听地址要绑定在控制平面实际的 "
+"Docker 网桥网关地址上，绝不能是回环地址或 `0.0.0.0`。配置 `GatewayPorts "
+"clientspecified`，并同时限定这把密钥的反向监听地址、端口和转发目标；绝不能设成 "
+"`yes`，否则所有远程转发都会绑定到通配地址上。在那台机器上用防火墙把这些反向端口限制住，只在 Docker 网桥接口上响应（见 "
+"[sandbox manager 路由](operations.md#the-way-back-the-control-plane-"
+"reaching-this-hosts-sandbox-manager)）。把 "
+"`AGENT_SANDBOX_MANAGER_ADVERTISE_URL` 设成由此得到的、控制平面容器能访问到的 URL。如果启用了 "
+"`AGENT_SANDBOX_MANAGER_URL_ALLOWED_HOSTS` 白名单，要把它的主机名或 IP 加进去。同时部署的每台 "
+"Host 都需要不同的反向端口。"
+
+#: ../developer/operations-compute.md:307
+msgid ""
+"Verify existing-server and tunnel-server host keys through a trusted "
+"source before adding them to their respective `known_hosts` files. `ssh-"
+"keyscan` collects a candidate key; it does not authenticate it. Those "
+"transports use strict host-key checking, isolated keys, no ambient SSH "
+"configuration or agent, and no trust-on-first-use."
+msgstr ""
+"把已有服务器和隧道服务器的主机密钥写进各自的 `known_hosts` 之前，要通过可信的渠道核实。`ssh-keyscan` "
+"只能拿到一个候选密钥，并不能证明它是真的。这些连接都启用严格的主机密钥检查，使用独立的密钥，不读取环境里的 SSH 配置或 "
+"agent，也不接受\"第一次连上就信任\"。"
+
+#: ../developer/operations-compute.md:313
+msgid ""
+"CloudLab VMs use the manifest's SSH port and, by default, the control "
+"plane connects without verifying the VM host key. This permits automatic "
+"setup but is vulnerable to machine-in-the-middle impersonation of the "
+"CloudLab node. Select **SSH host-key checking → Registered by the node at"
+" first boot** when the Cloud Agent profile is available and host identity"
+" must be pinned."
+msgstr ""
+"CloudLab 虚拟机使用 manifest 里给出的 SSH "
+"端口；默认情况下，控制平面连接时不校验虚拟机的主机密钥。这样自动安装才能进行，但也意味着有人可以冒充 CloudLab 节点做中间人攻击。如果能用"
+" Cloud Agent 的 profile，并且必须锁定主机身份，就选择 **SSH host-key checking → "
+"Registered by the node at first boot**。"
+
+#: ../developer/operations-compute.md:319
+msgid ""
+"Unchecked intent is stored in a shape the immediately previous release "
+"can read, but that release deliberately fails closed when an SSH-"
+"dependent action encounters it. After an application rollback, existing "
+"resource observation, lease and provider operations remain readable; "
+"bootstrap, inventory or retirement that needs SSH must wait until this "
+"release is restored. Redeploy forward before retrying the operation "
+"rather than replacing the marker with unverified key material."
+msgstr ""
+"\"不校验主机密钥\"这个选择，保存的格式紧挨着的上一个发布也能读懂；但那个发布遇到依赖 SSH "
+"的操作时，会有意拒绝执行。所以应用回滚之后，已有的资源观察、租期和服务商操作仍然能读；而需要 SSH "
+"的初始化、清点或退役，要等恢复到这个发布之后才能做。要重试这类操作，请先往前重新部署，而不是拿一份没核实过的密钥去替换这个标记。"
+
+#: ../developer/operations-compute.md:327
+msgid "CloudLab nodes that register their own host keys"
+msgstr "自己登记主机密钥的 CloudLab 节点"
+
+#: ../developer/operations-compute.md:329
+msgid ""
+"For automatic replacement, select **SSH host-key checking → Registered by"
+" the node at first boot** in the CloudLab server's advanced options. This"
+" applies only to experiments created by this control plane from the Cloud"
+" Agent profile:"
+msgstr ""
+"要自动替换节点，在 CloudLab 服务器的高级选项里选择 **SSH host-key checking → Registered by "
+"the node at first boot**。这只对本控制平面用 Cloud Agent profile 创建的实验有效："
+
+#: ../developer/operations-compute.md:334
+msgid ""
+"Publish [`deploy/cloudlab/cloud-agent-node.py`](../../deploy/cloudlab"
+"/cloud-agent-node.py) as a **project-private** CloudLab profile. Set its "
+"project and name as the server template. Its node, image and data-disk "
+"parameters replace `small-lan`'s `phystype`, `osImage`, `dataMount` and "
+"`dataSize`."
+msgstr ""
+"把 [`deploy/cloudlab/cloud-agent-node.py`](../../deploy/cloudlab/cloud-"
+"agent-node.py) 发布为一个**项目私有**的 CloudLab "
+"profile，并把它的项目和名称设为服务器模板。它自带的节点、镜像和数据盘参数，取代 `small-lan` 里的 "
+"`phystype`、`osImage`、`dataMount` 和 `dataSize`。"
+
+#: ../developer/operations-compute.md:338
+msgid ""
+"Provide a public HTTPS control-plane address through "
+"`AGENT_SESSION_REDIRECT_URI` or `AGENT_COMPUTE_REGISTRATION_URL`."
+msgstr ""
+"通过 `AGENT_SESSION_REDIRECT_URI` 或 `AGENT_COMPUTE_REGISTRATION_URL` "
+"提供一个公开的 HTTPS 控制平面地址。"
+
+#: ../developer/operations-compute.md:340
+msgid ""
+"Each acquisition sends a one-time token in experiment parameters. The "
+"control plane stores only its hash; it expires after two hours. At first "
+"boot, the node generates fresh SSH host keys and posts their public "
+"halves to `/v1/compute/node-registrations` over HTTPS. The control plane "
+"pins the strongest registered key and uses strict checking against that "
+"key alone."
+msgstr ""
+"每次申请节点时，都会在实验参数里带上一个一次性令牌。控制平面只保存它的哈希，两小时后过期。节点第一次启动时，会生成新的 SSH 主机密钥，并通过 "
+"HTTPS 把公钥部分发到 `/v1/compute/node-"
+"registrations`。控制平面会锁定登记上来的密钥里最强的那一把，之后只认这一把，严格校验。"
+
+#: ../developer/operations-compute.md:346
+msgid ""
+"The token registers keys once; it cannot claim work, enroll or rename a "
+"Host. Repeating the same keys succeeds, different keys are refused, and a"
+" newer token from a resubmitted acquisition supersedes the old token. "
+"CloudLab project members can read experiment parameters, including the "
+"token, and already administer all project nodes. Keep the profile private"
+" and restrict project membership."
+msgstr ""
+"这个令牌只能用来登记一次密钥，不能认领任务，也不能注册或重命名 "
+"Host。用同样的密钥重复登记会成功，换了密钥会被拒绝；重新提交申请会带来一个新令牌，旧令牌随之作废。CloudLab "
+"项目成员能看到实验参数，令牌也在其中，不过他们本来就能管理项目里的所有节点。所以要让 profile 保持私有，并控制项目成员的范围。"
+
+#: ../developer/operations-compute.md:353
+msgid ""
+"If an operation stays at `waiting_for_registration` and ends with "
+"`registration_expired`, inspect `/var/lib/cloud-agent-node/registration` "
+"through the CloudLab console and verify that the node can reach the "
+"registration URL. After fixing the cause, retry the operation: the node's"
+" own token gets another two hours. Then restart the node from CloudLab so"
+" its boot script posts the token again; it stops trying after an hour or "
+"a refusal. Alternatively, release the server: nothing ran on a node that "
+"never registered, so its release needs no SSH inventory. "
+"`registration_unavailable` means no public HTTPS control-plane address is"
+" configured."
+msgstr ""
+"如果某个操作一直停在 `waiting_for_registration`，最后以 `registration_expired` 结束，就通过 "
+"CloudLab 控制台查看 `/var/lib/cloud-agent-"
+"node/registration`，确认节点能访问登记地址。把原因修好后，重试这个操作，节点自己的令牌会再延长两小时。然后在 CloudLab "
+"上重启节点，让启动脚本再发一次令牌；脚本在一小时后或被拒绝后就不再尝试。另一个办法是直接释放这台服务器：节点从没登记成功，上面什么都没跑过，释放时也就不需要通过"
+" SSH 清点。`registration_unavailable` 表示没有配置公开的 HTTPS 控制平面地址。"
+
+#: ../developer/operations-compute.md:363
+msgid "Enable legacy file-backed profiles"
+msgstr "启用旧式的、基于文件的 profile"
+
+#: ../developer/operations-compute.md:365
+msgid ""
+"Admin-managed profiles require no compute directory or JSON "
+"configuration. CloudLab deployments still set the verified Portal API "
+"URL; existing-SSH deployments do not. The variables below are retained "
+"for deployments that continue to mount profiles and credential files."
+msgstr ""
+"由管理员在界面上管理的 profile，不需要计算资源目录，也不需要 JSON 配置。CloudLab 部署仍然要设置核实过的 Portal "
+"API 地址；已有 SSH 机器的部署则不用。下面这些变量是为仍在挂载 profile 和凭据文件的部署保留的。"
+
+#: ../developer/operations-compute.md:370
+msgid "Set these values in the private deployment environment:"
+msgstr "在私有的部署环境里设置这些值："
+
+#: ../developer/operations-compute.md:378
+msgid ""
+"Place `compute.json`, `bundles/host.tar.gz` and `secrets/` under the "
+"absolute host directory named by `AGENT_COMPUTE_DIRECTORY`. In source and"
+" packaged artifact deployments, `deploy/control-plane/deploy.sh` "
+"automatically adds `docker-compose.compute.yml` when this variable is in "
+"the environment or persistent `.env`. The overlay mounts the directory "
+"read-only at `/run/compute` and sets "
+"`AGENT_COMPUTE_CONFIG=/run/compute/compute.json` on the main API. The "
+"MCP-only listener receives neither the mount nor compute credentials."
+msgstr ""
+"把 `compute.json`、`bundles/host.tar.gz` 和 `secrets/` 放到 "
+"`AGENT_COMPUTE_DIRECTORY` 指定的主机绝对路径下。无论源码部署还是打包的产物部署，只要环境里或持久化的 `.env` "
+"里有这个变量，`deploy/control-plane/deploy.sh` 就会自动加上 `docker-"
+"compose.compute.yml`。这个 overlay 会把目录只读挂载到 `/run/compute`，并给主 API 设置 "
+"`AGENT_COMPUTE_CONFIG=/run/compute/compute.json`。MCP "
+"专用监听器既拿不到这个挂载，也拿不到计算资源凭据。"
+
+#: ../developer/operations-compute.md:386
+msgid ""
+"Manual Compose commands must explicitly include `-f deploy/control-plane"
+"/docker-compose.compute.yml`. Other deployment systems may set "
+"`AGENT_COMPUTE_CONFIG` and supply equivalent read-only mounts. The image "
+"includes `openssh-client`; the control plane receives no Docker socket or"
+" root privilege. Apply database migrations before starting the worker."
+msgstr ""
+"手动执行 Compose 命令时，必须显式加上 `-f deploy/control-plane/docker-"
+"compose.compute.yml`。用其他部署方式时，可以自己设置 "
+"`AGENT_COMPUTE_CONFIG`，并提供同样的只读挂载。镜像里带有 `openssh-client`；控制平面拿不到 Docker "
+"socket，也没有 root 权限。启动 worker 之前，先执行数据库迁移。"
+
+#: ../developer/operations-compute.md:392
+msgid ""
+"Existing-SSH deployments can leave `AGENT_CLOUDLAB_API_URL` unset. "
+"CloudLab has no guessed endpoint default: the public specification's "
+"development HTTP example is unsuitable for credentials. CloudLab's "
+"[portal-api README](https://gitlab.flux.utah.edu/emulab/portal-api) gives"
+" the production HTTPS Portal API as `https://boss.emulab.net:43794`. Set "
+"that as the **CloudLab API URL** setting (or `AGENT_CLOUDLAB_API_URL`), "
+"then run **Connections → Validate**. The portal's web address, "
+"`www.cloudlab.us`, is another machine and does not serve the API: its "
+"port 43794 is filtered, so a URL naming it waits out the 60-second "
+"connect timeout and reports that CloudLab could not be reached. "
+"Validation makes a read-only authenticated experiment-list request, "
+"checks its response shape and refuses redirects. Local downloaded tokens "
+"are never uploaded automatically."
+msgstr ""
+"已有 SSH 机器的部署可以不设 `AGENT_CLOUDLAB_API_URL`。CloudLab 没有预设的默认地址，因为公开规范里开发用的 "
+"HTTP 示例不适合传凭据。CloudLab 的 [portal-api "
+"README](https://gitlab.flux.utah.edu/emulab/portal-api) 给出的生产环境 HTTPS "
+"Portal API 是 `https://boss.emulab.net:43794`。把它填进 **CloudLab API URL** "
+"设置（或者设 `AGENT_CLOUDLAB_API_URL`），然后运行 **Connections → Validate**。门户网站的地址 "
+"`www.cloudlab.us` 是另一台机器，并不提供这个 API：它的 43794 端口被过滤了，所以填这个地址的话，会一直等到 60 "
+"秒的连接超时，然后报告连不上 "
+"CloudLab。验证时会发一个只读的、带认证的实验列表请求，检查响应格式，遇到重定向就拒绝。你在本地下载的令牌永远不会被自动上传。"
+
+#: ../developer/operations-compute.md:405
+msgid "Provider references:"
+msgstr "服务商的参考资料："
+
+#: ../developer/operations-compute.md:407
+msgid ""
+"[CloudLab Portal API manual](https://docs.cloudlab.us/advanced-"
+"topics.html)"
+msgstr "[CloudLab Portal API 手册](https://docs.cloudlab.us/advanced-topics.html)"
+
+#: ../developer/operations-compute.md:408
+msgid ""
+"[Portal API OpenAPI source](https://gitlab.flux.utah.edu/emulab/portal-"
+"api/-/blob/master/openapi.json)"
+msgstr ""
+"[Portal API 的 OpenAPI 源文件](https://gitlab.flux.utah.edu/emulab/portal-"
+"api/-/blob/master/openapi.json)"
+
+#: ../developer/operations-compute.md:410
+msgid "Day-to-day workflow"
+msgstr "日常操作流程"
+
+#: ../developer/operations-compute.md:412
+msgid ""
+"Use **Admin → CloudLab** to set the project, initial duration, template "
+"project, template name, SSH user, and the SSH public key installed for "
+"that user. These are non-secret defaults only; an administrator can "
+"change them for one allocation. Leave the public key blank to use keys "
+"already on the CloudLab account."
+msgstr ""
+"在 **Admin → CloudLab** 里设置项目、初始时长、模板项目、模板名称、SSH 用户，以及给这个用户安装的 SSH "
+"公钥。这些都只是不涉密的默认值，管理员可以针对单个分配另行修改。公钥留空，就用 CloudLab 账号上已有的密钥。"
+
+#: ../developer/operations-compute.md:418
+msgid ""
+"In **Admin → Servers**, choose **Add server** and select existing SSH or "
+"CloudLab."
+msgstr "在 **Admin → Servers** 里点 **Add server**，选择已有 SSH 机器或 CloudLab。"
+
+#: ../developer/operations-compute.md:420
+msgid ""
+"Create or select credentials inline. Existing SSH needs a private key and"
+" verified node host keys. CloudLab needs an API token and a management "
+"SSH private key; its advanced options can replace the default unchecked "
+"host with first-boot host-key registration. Credential responses expose "
+"metadata only."
+msgstr ""
+"在表单里直接新建或选择凭据。已有 SSH 机器需要一把私钥和核实过的节点主机密钥。CloudLab 需要一个 API 令牌和一把管理用的 SSH "
+"私钥；在它的高级选项里，可以把默认的\"不校验主机密钥\"换成节点首次启动时登记主机密钥。凭据相关的响应只返回元数据。"
+
+#: ../developer/operations-compute.md:424
+msgid ""
+"Enter the resource details. Existing SSH needs an address, port and user."
+" CloudLab needs an exact experiment UUID to attach, or a profile and "
+"explicitly selected project to provision, plus its SSH user. A public key"
+" set with that user is sent as the experiment's additional SSH key when "
+"the experiment is created."
+msgstr ""
+"填写资源信息。已有 SSH 机器需要地址、端口和用户。CloudLab 要么提供一个确切的实验 UUID 用来挂接，要么提供一个 profile "
+"和明确选定的项目来新建，另外都要填 SSH 用户。如果给这个用户设置了公钥，创建实验时会把它作为实验的附加 SSH 密钥一起发过去。"
+
+#: ../developer/operations-compute.md:429
+msgid ""
+"Submit and follow the durable operation until ready. HTTP 202 confirms "
+"only that the operation was recorded; allocation, installation, "
+"enrollment and readiness are separate steps."
+msgstr "提交后，跟踪这个持久化的操作，直到它就绪。HTTP 202 只表示操作已经记录下来；分配、安装、注册和就绪是分开的几个步骤。"
+
+#: ../developer/operations-compute.md:432
+msgid ""
+"Select the ready Host as the **global sandbox location** if desired. "
+"Becoming ready does not change the saved location. New unassigned groups "
+"follow it; retained groups remain on their original Host."
+msgstr ""
+"需要的话，把就绪的 Host 设为**全局沙箱位置**。Host 就绪本身不会改动已保存的位置。之后新建、还没分配的沙箱组会去这台 "
+"Host；已保留的沙箱组仍留在原来的 Host 上。"
+
+#: ../developer/operations-compute.md:435
+msgid ""
+"Review the allocation's complete scope before enabling renewal. Attached "
+"or imported resources require explicit lifecycle adoption. Supply a real "
+"reason and ordered lead times. Confirm extensions from observed expiry "
+"and the last result; saving policy alone does not extend a lease."
+msgstr "开启续期之前，先把这个分配的完整范围看一遍。挂接或导入进来的资源，需要你明确接管它的生命周期。要填一个真实的理由，以及按顺序排列的提前时间。延期有没有成功，要看观察到的到期时间和最近一次的结果；光保存策略并不会延长租期。"
+
+#: ../developer/operations-compute.md:440
+msgid ""
+"Observation-only imports record resource facts without installation. "
+"After explicit adoption they can support lease management, but observing "
+"nodes does not establish that their retained state is disposable. Release"
+" still requires active Host bindings and verified inventory."
+msgstr ""
+"只做观察的导入只记录资源的基本情况，不做安装。明确接管之后，可以用来管理租期；但能观察到节点，并不说明节点上保留的状态可以丢掉。释放时仍然要求有活跃的"
+" Host 绑定，以及核实过的清单。"
+
+#: ../developer/operations-compute.md:445
+msgid "Recovery and release boundaries"
+msgstr "恢复与释放的边界"
+
+#: ../developer/operations-compute.md:447
+msgid ""
+"Reuse the recorded operation after browser disconnects or worker "
+"restarts. It persists request ID, exact parameters, step and resource ID."
+" A new request ID creates a new command. **Activity**, and each server's "
+"**Activity** tab, list the 200 most recent operations and every one still"
+" pending, running, waiting or `unknown`, however old, so an operation "
+"waiting for an administrator stays there with its controls. So does a "
+"failed or blocked acquisition of a server not confirmed gone, which can "
+"still hold the server until a retry or **Nothing was created** settles "
+"it."
+msgstr ""
+"浏览器断开或 worker 重启之后，沿用已记录的那个操作即可。操作里保存了请求 ID、确切的参数、当前步骤和资源 ID。换一个新的请求 "
+"ID，就会创建一条新命令。**Activity** 页面和每台服务器的 **Activity** 标签页，会列出最近的 200 "
+"个操作，外加所有还在排队、运行、等待中或者状态是 `unknown` "
+"的操作，不管多久以前的都列。所以等管理员处理的操作会一直留在那里，操作按钮也在。申请服务器时失败或被阻塞、而服务器还没确认已经没了的操作也一样：在重试或"
+" **Nothing was created** 把它了结之前，它仍可能占着这台服务器。"
+
+#: ../developer/operations-compute.md
+msgid "Result"
+msgstr "结果"
+
+#: ../developer/operations-compute.md
+msgid "Recovery"
+msgstr "怎么恢复"
+
+#: ../developer/operations-compute.md
+msgid "CloudLab could not be reached"
+msgstr "连不上 CloudLab"
+
+#: ../developer/operations-compute.md
+msgid ""
+"The message names the endpoint it tried and why. A host name that does "
+"not resolve, a refused connection, or no connection within 60 seconds "
+"points at the **CloudLab API URL** setting or a firewall between the "
+"control plane and CloudLab: the URL is `https://boss.emulab.net:43794`, "
+"and the control plane must reach that port. A reset connection usually "
+"means a proxy or firewall in between. A failed TLS handshake usually "
+"means the URL names a port that does not speak HTTPS. An expired "
+"certificate is CloudLab's to replace: the Portal API has intermittently "
+"served one, so report it to CloudLab. The operation retries every 30 "
+"seconds on its own; **Connections → Validate** checks the setting "
+"immediately."
+msgstr ""
+"消息里会写明它尝试连接的端点，以及失败的原因。主机名解析不了、连接被拒绝，或者 60 秒内连不上，问题一般出在 **CloudLab API "
+"URL** 设置上，或者控制平面和 CloudLab 之间的防火墙上：这个地址应该是 "
+"`https://boss.emulab.net:43794`，控制平面必须能访问这个端口。连接被重置，通常是中间有代理或防火墙。TLS "
+"握手失败，通常是 URL 里写的端口不走 HTTPS。证书过期得由 CloudLab 来换：Portal API "
+"时不时会出现过期的证书，遇到了就报告给 CloudLab。这个操作会每 30 秒自动重试一次；**Connections → Validate**"
+" 可以马上检查这个设置。"
+
+#: ../developer/operations-compute.md
+msgid "SSH key or identity refused"
+msgstr "SSH 密钥或身份被拒绝"
+
+#: ../developer/operations-compute.md
+msgid ""
+"Verify the machine/key, update the selected connection and retry the same"
+" operation. Existing-SSH and registered CloudLab connections keep host-"
+"key checks enabled."
+msgstr "核实机器和密钥，更新所选的连接，然后重试同一个操作。已有 SSH 机器和已登记密钥的 CloudLab 连接，始终开启主机密钥校验。"
+
+#: ../developer/operations-compute.md
+msgid "Cloud create outcome unknown, no UUID saved"
+msgstr "不知道云端创建成功没有，也没保存 UUID"
+
+#: ../developer/operations-compute.md
+msgid ""
+"Identify the actual experiment in the exact account/project and resolve "
+"explicitly. The worker never repeats POST or adopts an experiment by "
+"name. If the portal has no experiment for the request, **Nothing was "
+"created** closes it: the operation is cancelled, never retried, and the "
+"server shows as not created and can be removed. That is the "
+"administrator's statement, made without asking the provider, so check the"
+" portal first. A node of the request that registered refuses it, and so "
+"does any saved UUID, node or Host, or a provider diagnostic that names an"
+" experiment or says the create was accepted. Autoscaled acquisitions keep"
+" their own cancellation."
+msgstr ""
+"在确切的账号和项目里找到实际的那个实验，然后明确地处理。worker 绝不会重复发 "
+"POST，也不会按名字去认定实验。如果门户上没有这次请求对应的实验，就用 **Nothing was created** "
+"把它了结：操作会被取消、不再重试，服务器显示为未创建，可以移除。这是管理员自己的声明，不会去问服务商，所以先去门户上确认清楚。以下情况会拒绝这个操作：这次请求有节点已经注册；保存过任何"
+" UUID、节点或 Host；服务商的诊断信息里提到了某个实验，或者说创建请求已被接受。自动扩缩容的申请有自己的取消方式。"
+
+#: ../developer/operations-compute.md
+msgid "UUID saved, later observation failed"
+msgstr "UUID 已保存，之后的观察失败了"
+
+#: ../developer/operations-compute.md
+msgid ""
+"Repair access and resume the same resource. Releasing the server instead "
+"deletes that experiment by its saved UUID."
+msgstr "修好访问权限，接着处理同一个资源。如果改为释放服务器，就会按保存的 UUID 删除那个实验。"
+
+#: ../developer/operations-compute.md
+msgid "Installation or readiness failed"
+msgstr "安装或就绪检查失败"
+
+#: ../developer/operations-compute.md
+msgid ""
+"Inspect deployment checks, repair prerequisites/profile and retry the "
+"same resource. Failure does not destroy it."
+msgstr "查看部署检查的结果，修好前提条件或 profile，然后对同一个资源重试。失败不会把资源销毁。"
+
+#: ../developer/operations-compute.md
+msgid "Extension pending or unknown"
+msgstr "延期还没确认，或结果不明"
+
+#: ../developer/operations-compute.md
+msgid ""
+"Check actual expiry. Retries retain the fixed absolute target; shorter "
+"extensions are not successful. The provider may reject or limit "
+"extensions. An expiry that has not moved ten minutes after the request "
+"blocks as `extension_unconfirmed`, so the server's other operations and a"
+" replacement can proceed; retry sends the same target again."
+msgstr ""
+"先查实际的到期时间。重试时，目标的绝对到期时间保持不变；只延长了一部分不算成功。服务商可能拒绝延期，或者限制延期的长度。如果请求发出十分钟后到期时间还没变，操作会以"
+" `extension_unconfirmed` 阻塞，这样这台服务器的其他操作和替换还能继续；重试时会再发一次同样的目标。"
+
+#: ../developer/operations-compute.md
+msgid "Retained state remains"
+msgstr "还有保留的状态"
+
+#: ../developer/operations-compute.md
+msgid ""
+"Keep the resource available or manage its chat lifecycle. Stopped "
+"containers and archived chats remain dependencies."
+msgstr "让资源继续可用，或者处理好上面那些对话的生命周期。已停止的容器和已归档的对话，都还算依赖。"
+
+#: ../developer/operations-compute.md
+msgid "Release committed, response unknown"
+msgstr "释放已经提交，但不知道结果"
+
+#: ../developer/operations-compute.md
+msgid ""
+"Keep admission closed and confirm the exact immutable resource ID. "
+"Cancellation cannot undo release."
+msgstr "保持准入关闭，确认那个确切的、不可变的资源 ID。释放一旦提交，取消也撤销不了。"
+
+#: ../developer/operations-compute.md:467
+msgid ""
+"A CloudLab DELETE response of `204` confirms deletion of the exact "
+"experiment UUID. A terminal experiment object with the matching UUID and "
+"project also provides evidence. A `404` alone does not: token visibility "
+"can change even when an authenticated list succeeds. The adapter reports "
+"`resource_visibility_unknown` and keeps the reservation. After a lost "
+"DELETE acknowledgement followed by `404`, the operation remains committed"
+" pending provider confirmation; it neither reports success nor frees the "
+"profile. Restore access and retry the existing operation. Do not bypass "
+"fences or edit database state to infer deletion. The public API has no "
+"project-permission query that strengthens this evidence."
+msgstr ""
+"CloudLab 的 DELETE 返回 `204`，就能确认这个确切的实验 UUID 已经删除。拿到一个 UUID "
+"和项目都对得上、且处于终态的实验对象，也可以作为证据。但单独一个 `404` "
+"不行：即使带认证的列表请求成功了，令牌能看到的范围也可能变了。这时适配器会报告 "
+"`resource_visibility_unknown`，并继续占着那个 profile。如果 DELETE 的确认丢了，之后又拿到 "
+"`404`，操作会停在\"已提交、等待服务商确认\"的状态，既不报告成功，也不释放 "
+"profile。恢复访问权限后，重试现有的这个操作。不要绕过栅栏，也不要改数据库来假定资源已删除。公开 API "
+"里也没有能查项目权限、让这条证据更可靠的接口。"
+
+#: ../developer/operations-compute.md:478
+msgid ""
+"The reconciler can classify a missing experiment as `expired_not_found` "
+"after a previously recorded lease deadline plus ten minutes. Unknown or "
+"unexpired deadlines leave absence ambiguous."
+msgstr ""
+"如果之前记录过租期截止时间，那么过了截止时间再加十分钟，调和器就可以把找不到的实验归为 "
+"`expired_not_found`。截止时间未知或还没到时，\"找不到\"仍然说明不了什么。"
+
+#: ../developer/operations-compute.md:482
+msgid ""
+"Enabled renewal continues while retirement waits on retained state. "
+"Renewal does not clear manual Drain or resource-owned admission holds. "
+"The claim transaction enforces the last known hard lease cutoff even if "
+"the resource worker stops."
+msgstr ""
+"退役在等保留状态清空期间，已开启的续期会照常进行。续期不会解除手动的 Drain，也不会解除资源自己加的准入限制。即使资源 worker "
+"停了，认领事务也会按最后已知的租期硬截止时间执行。"
+
+#: ../developer/operations-compute.md:487
+msgid "Pool and resource actions have different effects:"
+msgstr "资源池操作和资源操作的效果不一样："
+
+#: ../developer/operations-compute.md
+msgid "Action"
+msgstr "操作"
+
+#: ../developer/operations-compute.md
+msgid "Effect"
+msgstr "效果"
+
+#: ../developer/operations-compute.md
+msgid "`Remove from pool`"
+msgstr ""
+
+#: ../developer/operations-compute.md
+msgid ""
+"Revokes the Host credential; leaves the machine intact. A Host still "
+"running sandboxes that can move to another Host moves them out first, as "
+"one does before its lease ends (below): it takes no new work and shows "
+"`removing`, each idle sandbox stops into a checkpoint and is handed over,"
+" and the reaper revokes the Host once none is left and its running turns "
+"have finished. A Host still running turns moves out the same way whenever"
+" another Host could take its sandboxes, since a turn it is restoring, or "
+"one it claimed before the removal, leaves its sandbox running there. A "
+"stopped sandbox its checkpoint covers moves when the Host is revoked. "
+"Before leaving any sandbox behind, because no other Host can take it or "
+"it can never move (its checkpoint failed, or its first turn failed before"
+" Docker created its container, say), the page asks; removing anyway "
+"leaves it on the Host until the Host returns."
+msgstr ""
+"吊销 Host 凭据，机器本身不动。如果这台 Host 上还有能迁到别的 Host "
+"的沙箱，它会先把它们迁出去，做法和租期结束前的迁出一样（见下文）：它不再接新工作，显示 "
+"`removing`；每个空闲沙箱停下来存成检查点，再交出去；等沙箱都迁完、正在跑的轮次也结束了，reaper 就吊销这台 Host。只要别的 "
+"Host 能接手它的沙箱，还有轮次在跑的 Host "
+"也照样这样迁出，因为它正在恢复的轮次，或者移除之前就认领的轮次，会让对应的沙箱继续在它上面运行。已停止、并且有检查点覆盖的沙箱，会在 Host "
+"被吊销时迁走。如果有沙箱要被留下，比如没有别的 Host 能接手，或者它根本没法迁（检查点失败了，或者第一轮在 Docker "
+"创建容器之前就失败了），页面会先问你；坚持移除的话，它会留在这台 Host 上，直到 Host 回来。"
+
+#: ../developer/operations-compute.md
+msgid "`Cancel removal`"
+msgstr ""
+
+#: ../developer/operations-compute.md
+msgid ""
+"Puts a `removing` Host back to work. Sandboxes already moved stay on "
+"their new Hosts."
+msgstr "让一台 `removing` 状态的 Host 重新开始工作。已经迁走的沙箱留在新的 Host 上。"
+
+#: ../developer/operations-compute.md
+msgid "`Remove now`"
+msgstr ""
+
+#: ../developer/operations-compute.md
+msgid ""
+"Revokes a `removing` Host at once and ends its running turns: they are "
+"requeued once, or a chat whose turn may already have run is marked lost. "
+"Sandboxes not yet moved stay on the removed Host."
+msgstr ""
+"立即吊销一台 `removing` 状态的 "
+"Host，并结束它上面正在跑的轮次：这些轮次会重新排队一次；如果某个对话的轮次可能已经跑过，这个对话就标记为 lost。还没迁走的沙箱留在被移除的"
+" Host 上。"
+
+#: ../developer/operations-compute.md
+msgid "`Forget`"
+msgstr ""
+
+#: ../developer/operations-compute.md
+msgid ""
+"Removes an eligible history record. A `cold` sandbox, which waits in its "
+"checkpoint for any Host, does not block it."
+msgstr "删除一条符合条件的历史记录。`cold` 沙箱在自己的检查点里等任意一台 Host 来接手，不会挡住这个操作。"
+
+#: ../developer/operations-compute.md
+msgid "`Retire/release`"
+msgstr ""
+
+#: ../developer/operations-compute.md
+msgid ""
+"Releases the complete allocation; for CloudLab, the whole experiment. An "
+"acquisition still waiting on the server, for its Host's first heartbeat "
+"say, is cancelled when the release commits, and so is an upgrade a "
+"control-plane release queued for it: nothing can run either afterwards. "
+"An autoscaled server's profile is then free for the pool once the release"
+" is confirmed, and later releases move its deployment profile as usual. "
+"Existing SSH has no cloud-destruction capability."
+msgstr ""
+"释放整个分配，对 CloudLab 来说就是整个实验。如果某次申请还在等这台服务器，比如在等它的 Host "
+"第一次心跳，释放一提交，这次申请就会被取消；控制平面发布新版本时给它排上的升级也一样：之后这两件事都不会再执行。自动扩缩容的服务器，释放一经确认，它的"
+" profile 就能交还给资源池；之后的版本发布照常把它的部署 profile 往前升级。已有 SSH 机器没有销毁云资源这一说。"
+
+#: ../developer/operations-compute.md
+msgid "`Remove server`"
+msgstr ""
+
+#: ../developer/operations-compute.md
+msgid ""
+"Deletes the server's records once its resource is released, was never "
+"created, or (attached without release) its Hosts are disabled; it calls "
+"no provider. An operation still running, still confirming a provider "
+"call, or whose outcome is `unknown` keeps them: [Removing a "
+"server](operations.md#removing-a-server) says what ends each. One that "
+"stopped while confirming a call no longer keeps a server whose provider "
+"confirmed the machine gone."
+msgstr ""
+"资源释放之后、从来没创建过，或者（不经释放直接挂接的）它的 Host "
+"已经禁用时，删除这台服务器的记录；不调用任何服务商。只要还有操作在运行、还在确认某次服务商调用，或者结果是 "
+"`unknown`，这些记录就会保留：每种情况怎么了结，见[移除服务器](operations.md#removing-a-server)。如果一个操作在确认调用时停了下来，而服务商已经确认机器没了，它就不会再挡住这台服务器。"
+
+#: ../developer/operations-compute.md:498
+msgid ""
+"The page has no separate pause action. A Host held by a deployment drain "
+"shows `updating`; one drained through the `/drain` API shows `paused` and"
+" offers `Resume new work`."
+msgstr ""
+"页面上没有单独的暂停操作。被部署排空占着的 Host 显示 `updating`；通过 `/drain` API 排空的 Host 显示 "
+"`paused`，并提供 `Resume new work` 按钮。"
+
+#: ../developer/operations-compute.md:502
+msgid ""
+"Release requires complete scope, no global placement reference, no "
+"running, in-flight or retained dependencies, and fresh sandbox manager "
+"and machine inventory. Stopped or unrecognized containers, orphan "
+"networks/volumes, offline sandbox managers and incomplete inventory block"
+" it. There is no force bypass. The only machine without an inventory is a"
+" CloudLab node whose host-key registration never completed: this control "
+"plane never connected to it."
+msgstr ""
+"释放必须满足这些条件：范围完整；没有被全局放置引用；没有正在运行、进行中或保留的依赖；sandbox manager "
+"和机器的清单都是最新的。已停止或认不出来的容器、孤立的网络或卷、离线的 sandbox "
+"manager，以及不完整的清单，都会拦住释放。没有强制绕过的选项。唯一不需要清单的机器，是主机密钥一直没登记成功的 CloudLab "
+"节点，因为本控制平面从来没连上过它。"
+
+#: ../developer/operations-compute.md:509
+msgid "Moving sandboxes out before a lease ends"
+msgstr "租期结束前把沙箱迁出去"
+
+#: ../developer/operations-compute.md:511
+msgid ""
+"A Host whose allocation does not use automatic replacement moves its "
+"sandbox groups to other Hosts one at a time before its lease ends, "
+"through their [restorable checkpoints](operations.md#restoring-a-removed-"
+"hosts-sandboxes). The lead is **Move sandboxes to other servers before "
+"expiry** in the allocation's renewal settings: 120 minutes by default, 0 "
+"to turn it off. Replacement moves the whole Host instead, so the setting "
+"is not offered there. With renewal enabled, extension is tried 15 minutes"
+" before the window opens: longer than an extension the provider neither "
+"applies nor refuses is awaited, so by then it has been granted or given "
+"up, and only a lease it could not extend starts a move. The window is "
+"capped 25 minutes short of the extension horizon, so an extension that "
+"succeeds ends a move rather than starting one."
+msgstr ""
+"如果一台 Host "
+"所在的分配没有开启自动替换，它会在租期结束前，借助各沙箱组的[可恢复检查点](operations.md#restoring-a-removed-"
+"hosts-sandboxes)，把沙箱组一个一个迁到其他 Host 上。提前多久开始，由分配续期设置里的 **Move sandboxes to"
+" other servers before expiry** 决定：默认 120 分钟，设为 0 就关闭。开了自动替换的话，会把整台 Host "
+"一起换掉，所以那里不提供这个设置。开启续期时，会在窗口打开前 15 "
+"分钟先尝试续期。服务商既不执行也不拒绝的续期请求，等待时间比这还短，所以到窗口打开时，续期要么已经批下来，要么已经放弃，只有续不上的租约才会开始迁出。窗口最长只到续期目标时长减"
+" 25 分钟，这样续期成功只会让迁出结束，而不会刚续完又开始迁出。"
+
+#: ../developer/operations-compute.md:523
+msgid ""
+"Inside the window the Host gets a `move_out` admission hold only when its"
+" groups can really move:"
+msgstr "进入窗口之后，只有沙箱组确实能迁走时，这台 Host 才会被加上 `move_out` 准入限制："
+
+#: ../developer/operations-compute.md:526
+msgid ""
+"lifecycle archives and checkpoints are enabled, and every Host of the "
+"allocation advertises `sandbox-checkpoints-v1` and has applied the "
+"current archive revision;"
+msgstr "生命周期归档和检查点都已开启，并且这个分配里的每台 Host 都声明了 `sandbox-checkpoints-v1`、已应用当前的归档配置；"
+
+#: ../developer/operations-compute.md:529
+msgid ""
+"another online, enrolled Host that advertises restore and archives on the"
+" current archive revision would pass claim admission for new groups now. "
+"A Host under a `new_groups` hold, in its own lease window or with a stale"
+" observation does not count, and of two Hosts entering their windows "
+"together only one moves out. When an `untrusted-kata-v1` group would "
+"move, that Host must also run the Kata runtime: no other Host is ever "
+"handed such a chat, so without one the group would wait in its checkpoint"
+" for good."
+msgstr ""
+"另有一台在线、已注册、在当前归档版本上声明了恢复和归档能力的 Host，此刻能通过新建沙箱组的认领准入。处于 `new_groups` "
+"限制下的、自己也在租期窗口里的、或者观测数据已过期的 Host，都不算数；两台 Host 同时进入窗口时，只有一台会迁出。如果要迁的是 "
+"`untrusted-kata-v1` 沙箱组，那台 Host 还必须运行 Kata 运行时：这类对话绝不会交给不带 Kata 的 "
+"Host，所以没有这样的 Host 的话，这个组会永远停在检查点里等。"
+
+#: ../developer/operations-compute.md:537
+msgid ""
+"Without a target nothing changes, and the Host serves until its lease "
+"ends as before. A move that has started continues if its target goes "
+"away, and stops if checkpoints do."
+msgstr ""
+"找不到能接手的 Host，就什么都不变，这台 Host 照旧服务到租期结束。迁出一旦开始，即使接手的 Host "
+"后来没了也会继续；但检查点一停，迁出也就停了。"
+
+#: ../developer/operations-compute.md:541
+msgid ""
+"While the hold is in place the Host claims nothing. Every 15 seconds the "
+"control plane asks it to stop each idle group, as an administrator's stop"
+" would; a group with a running turn, operation, snapshot or open terminal"
+" is left for the next pass, so running turns are never interrupted. The "
+"stop stores the group's final checkpoint, and once that checkpoint covers"
+" the group it becomes `cold` at once, without waiting for the Host to be "
+"removed. Each chat's next turn is claimed by another Host and restored "
+"there; to the user, that message waits a little longer than usual. A "
+"sandbox whose deletion failed before its archive still serves its chats, "
+"so it is counted, moved and, with a reclaimed machine, lost like any "
+"other; one whose deletion is pending or verified is left to that "
+"deletion. A pending deletion without an archive finishes without the Host"
+" once the machine is reclaimed, as below."
+msgstr ""
+"限制生效期间，这台 Host 不认领任何任务。控制平面每 15 "
+"秒让它停掉每个空闲的沙箱组，效果和管理员手动停止一样；还有轮次、操作、快照在进行，或者开着终端的沙箱组，留到下一轮再处理，所以正在跑的轮次绝不会被打断。停止时会保存这个组的最终检查点；检查点一覆盖到这个组，它就立即变成"
+" `cold`，不用等这台 Host 被移除。之后每个对话的下一轮会由另一台 Host "
+"认领，并在那里恢复；在用户看来，只是这条消息比平时多等了一会儿。如果一个沙箱的删除在归档之前就失败了，它仍在为它的对话服务，所以会和其他沙箱一样被计数、被迁走，机器被回收时也一样会丢失；删除正在进行或已经核实的沙箱，交给那次删除去处理。没有归档的待删除操作，在机器被回收之后，不需要这台"
+" Host 也能完成，见下文。"
+
+#: ../developer/operations-compute.md:554
+msgid ""
+"In an autoscaled CloudLab pool a moving-out member stops counting toward "
+"`min_hosts`, so its replacement is acquired while it still serves. It "
+"still counts toward `max_hosts`: keep `max_hosts` at least one above "
+"`min_hosts`, with a spare deployment profile, or the replacement waits. "
+"The Servers page shows such a member as _moving out_; it is released at "
+"its lease end as before. If groups are still unmoved five minutes before "
+"the lease ends (or the claim-stop lead, if longer), because a turn is "
+"still running, a checkpoint is missing or no Host can take them, "
+"`compute_move_out_unfinished` alerts once."
+msgstr ""
+"在自动扩缩容的 CloudLab 资源池里，正在迁出的成员不再计入 `min_hosts`，所以它还在服务时，替换机就开始申请了。但它仍然计入 "
+"`max_hosts`：请让 `max_hosts` 至少比 `min_hosts` 大 1，并多备一个部署 "
+"profile，不然替换机只能干等。Servers 页面会把这样的成员显示为 _moving "
+"out_，它仍然照旧在租期结束时释放。如果到了租期结束前五分钟（如果停止认领的提前量更长，就以那个为准），还有沙箱组没迁走，比如还有轮次在跑、缺检查点，或者没有"
+" Host 能接手，`compute_move_out_unfinished` 会告警一次。"
+
+#: ../developer/operations-compute.md:563
+msgid ""
+"So that there is still time to act, `compute_move_out_blocked` alerts "
+"once when the window opens and groups would stay. Its reason is either "
+"why the move cannot start, followed by how many groups would stay, or how"
+" many groups can never move because no checkpoint covers them or their "
+"image cannot be pulled elsewhere. The reasons are `archives_disabled`, "
+"`checkpoints_disabled`, `host_offline`, `host_without_checkpoints` (the "
+"Host runs a release from before checkpoints), "
+"`archive_settings_not_applied` and `no_restore_target`."
+msgstr ""
+"为了留出处理的时间，如果窗口打开时有沙箱组会留下来，`compute_move_out_blocked` "
+"会告警一次。告警原因有两种：一种是迁出根本开始不了，并附上会留下的沙箱组数量；另一种是有多少个沙箱组永远迁不走，因为没有检查点覆盖它们，或者它们的镜像在别处拉取不到。具体的原因值有"
+" "
+"`archives_disabled`、`checkpoints_disabled`、`host_offline`、`host_without_checkpoints`（这台"
+" Host 跑的是还没有检查点功能的旧版本）、`archive_settings_not_applied` 和 "
+"`no_restore_target`。"
+
+#: ../developer/operations-compute.md:571
+msgid ""
+"When the provider confirms the machine is gone (`terminated`), covered "
+"stopped groups become `cold` as above. Every other group its Host still "
+"holds lost its only Docker copy with the machine: once the Host has been "
+"silent for 10 minutes and no turn, claim or Fork of the group is in "
+"flight, the group and its chats become LOST, their queued turns fail with"
+" a reason, and `compute_groups_lost_with_server` reports how many. A "
+"group an administrator was already deleting without an archive is deleted"
+" instead, by the deletion worker's next attempt after those 10 minutes, "
+"without asking the Host. The Host row stays for **Remove from pool**."
+msgstr ""
+"服务商确认机器已经没了（`terminated`）时，有检查点覆盖的已停止沙箱组会像上面说的一样变成 `cold`。这台 Host "
+"上剩下的其他沙箱组，唯一的 Docker 副本已经随机器一起没了：等这台 Host 已经 10 "
+"分钟没有任何动静，并且这个组没有正在进行的轮次、认领或 Fork，这个组和它的对话就会变成 "
+"LOST，排队中的轮次会带着原因失败，`compute_groups_lost_with_server` "
+"会报告有多少个。如果管理员本来就在不归档地删除某个组，这个组会改为直接删除：在那 10 分钟之后，由删除 worker "
+"的下一次尝试完成，不需要问这台 Host。Host 那一行会保留下来，等你点 **Remove from pool**。"
+
+#: ../developer/operations-compute.md:581
+msgid "Automatic CloudLab node replacement"
+msgstr "CloudLab 节点自动替换"
+
+#: ../developer/operations-compute.md:583
+msgid ""
+"Replacement transfers one entire Host, including stopped sandboxes and "
+"native sessions. It preserves the Host name and sandbox namespace and "
+"enrolls a fresh Host credential. It does not rebuild context from "
+"transcripts; the control plane and database remain on stable "
+"infrastructure."
+msgstr ""
+"替换是把一整台 Host 搬过去，包括已停止的沙箱和原生会话。Host 名称和沙箱命名空间保持不变，并注册一个新的 Host "
+"凭据。它不会用对话记录去重建上下文；控制平面和数据库一直留在稳定的基础设施上。"
+
+#: ../developer/operations-compute.md:588
+msgid "Before enabling replacement:"
+msgstr "开启替换之前："
+
+#: ../developer/operations-compute.md:590
+msgid ""
+"Use a **provisioned, managed** single-Host CloudLab allocation with "
+"`host_key_source=registration` and the private Cloud Agent profile."
+msgstr ""
+"使用一个**新建的、受托管的**单 Host CloudLab 分配，设置 "
+"`host_key_source=registration`，并使用私有的 Cloud Agent profile。"
+
+#: ../developer/operations-compute.md:592
+msgid ""
+"Prepare two alternating deployment profiles with distinct tunnel keys and"
+" reverse sandbox manager ports. Both must pin the same `deployment_sha` "
+"and `source_sha256`; replacement never selects a profile from another "
+"release. A control-plane host rollout advances every stored profile and "
+"live snapshot that still pin that pair, including the spare, so the two "
+"slots stay on one revision. A profile another deployment is installing is"
+" left until its own rollout. Keep Docker/containerd versions compatible. "
+"Set `data_mount` to the profile's local disk, for example `/mydata`; both"
+" daemons use it through bind mounts."
+msgstr ""
+"准备两个轮流使用的部署 profile，各用不同的隧道密钥和反向 sandbox manager 端口。两者必须固定同一个 "
+"`deployment_sha` 和 `source_sha256`；替换时绝不会选用另一个发布的 "
+"profile。控制平面发布新版本、升级主机时，所有仍固定这对值的已保存 profile "
+"和实时快照都会一起升级，备用的那个也不例外，这样两个槽位始终在同一个版本上。另一次部署正在安装的 "
+"profile，会留到它自己那次升级时再处理。Docker 和 containerd 的版本要保持兼容。把 `data_mount` 设成这个 "
+"profile 的本地磁盘，例如 `/mydata`；两个守护进程都通过绑定挂载使用它。"
+
+#: ../developer/operations-compute.md:602
+msgid ""
+"Enable renewal and replacement in Servers → renewal settings. Supply the "
+"renewal reason and candidate hardware types in preference order. UI "
+"defaults are a **180-minute replacement lead time** and **7-day maximum "
+"node age**. Saving policy does not request an immediate move."
+msgstr ""
+"在 Servers → renewal settings "
+"里开启续期和替换。填写续期理由，以及按优先顺序排列的候选硬件类型。界面上的默认值是**提前 180 分钟替换**，**节点最长使用 7 "
+"天**。保存策略并不会立刻触发一次迁移。"
+
+#: ../developer/operations-compute.md:606
+msgid ""
+"Set `AGENT_ALERT_WEBHOOK_URL` for external operational alerts. Without "
+"it, events remain in structured logs and operation status."
+msgstr "想收到外部的运维告警，就设置 `AGENT_ALERT_WEBHOOK_URL`。不设的话，事件只会留在结构化日志和操作状态里。"
+
+#: ../developer/operations-compute.md:609
+msgid ""
+"Within the renewal window, extension is tried first. Refusal or "
+"unconfirmed extension starts replacement; maximum-age nodes move instead "
+"of extending while the move is on time. A move still unfinished at its "
+"drain deadline, one that blocked, failed or was cancelled, keeps the old "
+"node extended so the move cannot outlast its lease. Failed candidates are"
+" released before trying the next type. Configuration or credential errors"
+" stop immediately; the same failure class across three types stops with "
+"an alert. Retry resumes the saved operation."
+msgstr "进入续期窗口后，先尝试延期。延期被拒或无法确认，就开始替换；节点到了最长使用期限时，只要迁移还来得及，就直接迁移而不再延期。如果到排空截止时间迁移还没完成，或者迁移被阻塞、失败或被取消，就让旧节点继续延期，保证迁移不会拖过它的租期。失败的候选节点会先释放，再去试下一个类型。遇到配置或凭据错误会立即停止；同一类错误在三个类型上都出现，也会停止并告警。重试会从已保存的操作接着做。"
+
+#: ../developer/operations-compute.md:618
+msgid ""
+"The candidate installs the host recipe and receives a live pre-copy "
+"without enrolling or claiming. Once it is prepared, the source waits for "
+"an idle moment. At the drain deadline, new claims pause even if the "
+"candidate is still preparing. Running turns finish while new messages "
+"queue; urgent moves never kill an active turn. With the default one-hour "
+"turn limit, this deadline is 100 minutes before expiry."
+msgstr ""
+"候选节点会安装主机 "
+"recipe，并在不注册、不认领的情况下，先接收一次在线的预复制。准备好之后，源节点会等一个空闲的时机。到了排空截止时间，即使候选节点还没准备好，也会暂停新的认领。正在跑的轮次照常跑完，新消息先排队；就算迁移很急，也绝不会杀掉正在进行的轮次。按默认一小时的轮次时限，这个截止时间是到期前"
+" 100 分钟。"
+
+#: ../developer/operations-compute.md:625
+msgid ""
+"The worker stops the source Host and container daemons, copies final "
+"changes, transfers the database binding, starts the replacement and "
+"verifies deployment, fresh heartbeat and sandbox manager access. The stop"
+" takes the runner first, then the sandbox manager alone for up to 10 "
+"minutes: its shutdown stops each running sandbox cleanly and, when "
+"lifecycle archives are enabled, stores its final archive. Remaining "
+"containers stop afterwards. A sandbox that Docker stopped without the "
+"sandbox manager gets no final archive for that stop, but its chat "
+"continues on the replacement. Claims resume only after successful "
+"takeover is recorded durably. Recovery after that boundary can clean up "
+"the source; it cannot restore its stale copy over new work."
+msgstr ""
+"worker 会停掉源 Host 和容器守护进程，复制最后的变更，转移数据库里的绑定，启动替换节点，并确认部署、新的心跳和 sandbox "
+"manager 访问都正常。停止的顺序是：先停 runner，再单独停 sandbox manager，最多等 10 分钟。sandbox "
+"manager 关闭时会把每个正在运行的沙箱正常停掉；如果开启了生命周期归档，还会保存它们的最终归档。剩下的容器随后再停。被 Docker "
+"直接停掉、没经过 sandbox manager "
+"的沙箱，这次停止就没有最终归档，但它的对话仍会在替换节点上继续。只有成功接管这件事被持久记录下来之后，才会恢复认领。过了这个节点之后的恢复，可以清理源节点，但不能拿源节点上过时的副本去覆盖新的工作。"
+
+#: ../developer/operations-compute.md:636
+msgid ""
+"Before confirmed takeover, failures restore the source. If the "
+"replacement cannot be confirmed stopped, claims stay paused and the "
+"operation blocks for attention. A source restart that loses its SSH "
+"connection or times out is retried for ten minutes; a restart that still "
+"fails, or any unexpected error after the source began stopping, blocks "
+"with the urgent `compute_rotation_failed` alert and keeps claims paused. "
+"An unexpected error before the stop blocks and resumes claims. "
+"Cancellation is available before the stop begins; later failures use "
+"recovery/retry. Cleanup failures retry without interrupting the "
+"replacement and remain visible as failures. Source release still passes "
+"retained-state and allocation guards."
+msgstr ""
+"确认接管之前出了错，会恢复源节点。如果无法确认替换节点已经停下，认领会一直暂停，操作会阻塞，等人处理。源节点重启时如果断了 SSH "
+"或超时，会重试十分钟；重启还是失败，或者源节点开始停止之后出现任何意外错误，都会发出紧急的 `compute_rotation_failed` "
+"告警并阻塞，认领继续暂停。如果意外错误发生在停止之前，操作会阻塞，但认领会恢复。停止开始之前可以取消；之后再出错，就走恢复或重试。清理失败会自动重试，不会打断替换，但仍会作为失败显示出来。释放源节点时，仍然要通过保留状态和分配相关的检查。"
+
+#: ../developer/operations-compute.md:647
+msgid "Acceptance before enabling production traffic"
+msgstr "对生产流量开放之前的验收"
+
+#: ../developer/operations-compute.md:649
+msgid ""
+"Use disposable staging conversations and dedicated profiles. Record "
+"operation IDs, source/replacement node identities, release revision and "
+"observed pause without credentials."
+msgstr ""
+"使用用完即弃的 staging 对话和专用的 profile。记录操作 "
+"ID、源节点和替换节点的身份、发布修订号，以及实际观察到的暂停时长，不要记录凭据。"
+
+#: ../developer/operations-compute.md:653
+msgid ""
+"Create a node through the deployed registration endpoint and verify its "
+"pinned key is used for SSH. A boot-script-only probe does not cover this "
+"path."
+msgstr "通过已部署的登记接口新建一个节点，确认 SSH 用的是它被锁定的那把密钥。只测启动脚本的探测，覆盖不到这条路径。"
+
+#: ../developer/operations-compute.md:655
+msgid ""
+"Run Claude Code, its Fork and Codex with files and distinct context "
+"markers. Use **Replace node now** and verify native continuation, Fork "
+"separation, files and container IDs. Repeat across CloudLab sites."
+msgstr ""
+"分别在 Claude Code、它的 Fork 和 Codex 里跑带文件、带不同上下文标记的任务。点 **Replace node "
+"now**，然后确认：原生会话能接上，Fork 之间互不影响，文件都在，容器 ID 也对得上。在不同的 CloudLab 站点上各做一遍。"
+
+#: ../developer/operations-compute.md:658
+msgid ""
+"Submit a message during paused claims; it must queue and run once after "
+"takeover. Verify the source can no longer authenticate after re-"
+"enrollment."
+msgstr "在认领暂停期间发一条消息，它必须先排队，接管之后恰好运行一次。确认重新注册之后，源节点已经无法再通过认证。"
+
+#: ../developer/operations-compute.md:660
+msgid ""
+"Exercise refused renewal, an unavailable first hardware type, failed "
+"final copy, failed target startup and a control-plane restart. Verify "
+"saved-step rollback/continuation, failed-candidate release, and absence "
+"of duplicate allocations or simultaneous serving copies."
+msgstr "实际演练这些情况：续期被拒、首选硬件类型没有容量、最终复制失败、目标节点启动失败，以及控制平面重启。确认能按已保存的步骤回滚或继续、失败的候选节点会被释放，并且不会出现重复的分配，也不会有两份副本同时对外服务。"
+
+#: ../developer/operations-compute.md:664
+msgid ""
+"Run policy for **two weeks with at least two automatic moves**, checking "
+"alerts, cleanup and retained chats. Unit tests and a manual migration do "
+"not replace elapsed-time acceptance."
+msgstr "让策略连续跑**两周，期间至少自动迁移两次**，检查告警、清理和保留的对话。单元测试和一次手动迁移，都代替不了这种需要时间积累的验收。"
+
+#: ../developer/operations-compute.md:668
+msgid ""
+"The [2026-10-10 manual staging drill](../agents/specs/2026-10-10"
+"-cloudlab-node-rotation-design.zh-CN.md#验证二结果2026-10-10staging) moved "
+"real sessions from Clemson to Utah with a 161-second pause. It preceded "
+"the automatic workflow. Abrupt loss of the only source disk or "
+"unavailable replacement capacity before expiry can still lose sessions; "
+"keep separate off-node backups where required."
+msgstr ""
+"[2026-10-10 的手动 staging 演练](../agents/specs/2026-10-10-cloudlab-node-"
+"rotation-design.zh-CN.md#验证二结果2026-10-10staging)把真实的会话从 Clemson 迁到了 "
+"Utah，中间暂停了 161 "
+"秒。那次演练是在自动流程上线之前做的。如果唯一的源磁盘突然坏掉，或者到期前找不到可用的替换容量，会话仍然可能丢失；有需要的话，请另外在节点之外做备份。"
+
+#: ../developer/operations-compute.md:674
+msgid ""
+"Before live traffic, verify the intended CloudLab profile through "
+"deployment, a real task, retained continuation and Fork on the same Host."
+" Renewal success and unit tests do not prove the profile's virtualization"
+" or network suitability. Adapter tests mock HTTP/SSH and neither contact "
+"CloudLab nor spend its resources."
+msgstr ""
+"接入线上流量之前，在同一台 Host 上完整走一遍：部署、跑一个真实任务、续接保留的会话、做一次 Fork，以此确认选定的 CloudLab "
+"profile 没问题。续期成功和单元测试都证明不了这个 profile 的虚拟化和网络是合适的。适配器测试模拟了 HTTP 和 "
+"SSH，既不会连接 CloudLab，也不会消耗它的资源。"
+

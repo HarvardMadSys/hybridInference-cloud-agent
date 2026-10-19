@@ -188,6 +188,10 @@ dev = [
   "ruff==0.15.12",
   # Build the developer documentation in docs/developer/ (`make docs`). The
   # site is plain MyST Markdown, so these are the only packages it needs.
+  # jieba is the word segmenter Sphinx's Chinese search index uses; without it
+  # the zh_CN index holds no Chinese terms and searching that site finds
+  # nothing (conf.py refuses to build it).
+  "jieba>=0.42.1",
   "myst-parser>=4.0.1",
   "sphinx>=8.1.3",
   "sphinx-rtd-theme>=3.0.2",

@@ -316,6 +316,50 @@ GROUP_TURN_CLAIMED_SQL = """EXISTS (
     WHERE claimed.sandbox_id = g.id AND j.state = 'running'
 )"""
 
+#: How long a Host may stay silent before another Host may take its covered
+#: stopped groups. Far longer than ``offline``: a network blip or a restart
+#: must not move anything, but a machine that died should not keep its chats
+#: waiting for a return that never comes.
+SILENT_HOST_HANDOVER_SECONDS = 1800
+
+#: A stopped group ``g`` of a Host silent that long, which another Host may take
+#: at its claim: its checkpoint covers it, and no turn of its chats is running.
+#: Nothing changes until such a claim, so a Host that returns first, or is the
+#: only one, simply continues with its own container.
+SILENT_HOST_GROUP_SQL = f"""(
+    {COVERED_GROUP_SQL}
+    AND NOT {GROUP_TURN_CLAIMED_SQL}
+    AND EXISTS (
+        SELECT 1 FROM agent_runner_hosts silent
+        WHERE silent.host = g.host
+          AND COALESCE(silent.last_heartbeat_at, silent.first_seen_at)
+              < NOW() - make_interval(secs => {SILENT_HOST_HANDOVER_SECONDS})
+    )
+)"""
+
+
+async def take_silent_host_group(conn: Any, *, sandbox_id: str, claimant: str) -> bool:
+    """Hand one stopped group of a long-silent Host to the Host claiming it.
+
+    The group becomes ``cold`` inside the claim that restores it, so it moves
+    only when another Host actually takes it (``SILENT_HOST_GROUP_SQL``). The
+    silent Host keeps its credential: it may only be partitioned, and an
+    administrator decides whether it is gone. If it returns, the group is no
+    longer its own. The caller holds the group row.
+    """
+    taken = await conn.fetchval(
+        f"""
+        UPDATE agent_sandboxes g
+        SET state = 'cold', restore_attempts = 0, restore_attempt_id = NULL,
+            idle_deadline = NULL, updated_at = NOW()
+        WHERE g.id = $1 AND g.host IS DISTINCT FROM $2 AND {SILENT_HOST_GROUP_SQL}
+        RETURNING TRUE
+        """,
+        sandbox_id,
+        claimant,
+    )
+    return bool(taken)
+
 
 async def release_covered_sandboxes(
     conn: Any,

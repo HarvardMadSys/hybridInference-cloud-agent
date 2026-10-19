@@ -1,0 +1,314 @@
+# Simplified Chinese translation of the Cloud Agent developer documentation.
+# See docs/developer/translations.md.
+msgid ""
+msgstr ""
+"Project-Id-Version: HybridInference Cloud Agent \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-10-16 01:54-0400\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: The HybridInference contributors\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../developer/agent-access-policy.md:1
+msgid "Agent admission policy"
+msgstr "Agent 准入策略"
+
+#: ../developer/agent-access-policy.md:3
+msgid ""
+"The Gateway decides who may use Cloud Agent. Cloud Agent represents the "
+"account with its user ID and issuer, then checks the Gateway again on "
+"each protected owner/admin request and on `/v1/session/me`."
+msgstr ""
+"谁能用 Cloud Agent，由网关说了算。Cloud Agent 用用户 ID "
+"加签发方（issuer）来标识一个账号；每个受保护的所有者/管理员请求，以及 `/v1/session/me`，都会再向网关确认一次。"
+
+#: ../developer/agent-access-policy.md:7
+#, python-brace-format
+msgid ""
+"To get the current decision, Agent reads `GET /internal/users/{user_id"
+"}/agent-access` over HTTP with its dispatch credential. The response "
+"contains `user_id`, `allowed`, and `permissions`. Account roles and "
+"profile fields are not authorization inputs."
+msgstr ""
+"要拿到最新的判定，Agent 会带上自己的 dispatch 凭据，通过 HTTP 请求 `GET "
+"/internal/users/{user_id}/agent-access`。响应里有 `user_id`、`allowed` 和 "
+"`permissions`。账号角色和个人资料字段都不参与授权判断。"
+
+#: ../developer/agent-access-policy.md:12
+msgid "Permissions and request checks"
+msgstr "权限与请求检查"
+
+#: ../developer/agent-access-policy.md
+msgid "Permission"
+msgstr "权限"
+
+#: ../developer/agent-access-policy.md
+msgid "Access"
+msgstr "允许访问的范围"
+
+#: ../developer/agent-access-policy.md
+msgid "`agent.use`"
+msgstr ""
+
+#: ../developer/agent-access-policy.md
+msgid "Owner APIs, subject to per-resource ownership checks"
+msgstr "所有者 API，每个资源仍要单独检查所有权"
+
+#: ../developer/agent-access-policy.md
+msgid "`agent.admin`"
+msgstr ""
+
+#: ../developer/agent-access-policy.md
+msgid ""
+"Gateway-authorized administration, including runner-host APIs; requires "
+"`agent.use`"
+msgstr "经网关授权的管理操作，包括 runner 主机相关的 API；必须同时拥有 `agent.use`"
+
+#: ../developer/agent-access-policy.md:19
+msgid ""
+"`allowed` must agree with the presence of `agent.use`. Permissions must "
+"be unique, use recognized values and include `agent.use` whenever "
+"`agent.admin` is present. A decision for another user, or any malformed "
+"or contradictory response, cannot grant access."
+msgstr ""
+"`allowed` 必须和有没有 `agent.use` 保持一致。权限列表不能重复，只能用认得的取值，并且有 `agent.admin` "
+"就必须有 `agent.use`。如果判定针对的是另一个用户，或者响应格式不对、前后矛盾，一律不放行。"
+
+#: ../developer/agent-access-policy.md:24
+msgid ""
+"The FreeInference policy documented by the original rollout grants both "
+"permissions to active admin accounts. Another deployment can register a "
+"policy that admits other accounts without changing Agent. A neutral "
+"Gateway with no registered policy denies access. Verify the policy in the"
+" deployment being operated; this repository consumes its decision."
+msgstr ""
+"按最初上线时记录的 FreeInference 策略，这两项权限都授予状态正常的管理员账号。其他部署可以注册自己的策略，放行别的账号，不用改 "
+"Agent。没有注册任何策略的中立网关会一律拒绝。请在你运维的那套部署里核实实际策略；本仓库只负责执行网关给出的判定。"
+
+#: ../developer/agent-access-policy.md:30
+#, python-brace-format
+msgid ""
+"An active account denied Agent permission can still sign in to see the "
+"access-required page. Missing or inactive accounts cannot create a "
+"session. Existing sessions recheck permissions on each protected "
+"owner/admin request and on `/v1/session/me`. Owner requests may be "
+"admitted on a grant the Gateway gave up to 10 seconds earlier "
+"(`AGENT_ACCESS_ALLOW_TTL_S`): a page load sends a burst of owner "
+"requests, and concurrent lookups for one account share a single Gateway "
+"call. Only a grant is kept. A denial, an unknown account and an "
+"unavailable Gateway are asked again on every request. Sign-in, "
+"`/v1/session/me`, the admin surface and the checks made when a turn "
+"starts never use a kept grant, and a denial `/v1/session/me` receives "
+"ends the kept grant at once. The session response exposes `agent_access: "
+"{allowed, permissions}`. The web app denies access if that field is "
+"missing, including responses from an older backend."
+msgstr ""
+"状态正常、但没有 Agent "
+"权限的账号仍然可以登录，登录后看到的是\"需要访问权限\"页面。不存在或已停用的账号无法建立会话。已有的会话在每个受保护的所有者/管理员请求和 "
+"`/v1/session/me` 上都会重新检查权限。所有者请求可以沿用网关 10 "
+"秒内给出的放行结果（`AGENT_ACCESS_ALLOW_TTL_S`）：打开一个页面会同时发出一批所有者请求，同一账号并发的查询只调用一次网关。只有\"放行\"会被缓存；拒绝、账号不存在、网关不可用这几种情况，每个请求都会重新问一遍。登录、`/v1/session/me`、管理接口，以及轮次开始时的检查，都不用缓存的放行结果；而且只要"
+" `/v1/session/me` 收到一次拒绝，缓存的放行结果立刻作废。会话响应里带有 `agent_access: {allowed, "
+"permissions}`。如果没有这个字段（包括旧版后端返回的响应），Web 应用会拒绝访问。"
+
+#: ../developer/agent-access-policy.md:43
+msgid ""
+"Checks govern admission of each request. A policy change does not itself "
+"close an open stream or cancel a running job. An owner stream (a job's "
+"events, the account's change feed, a terminal's output) is admitted when "
+"it opens and ends after about 15 minutes. The client reconnects from "
+"where it left off, and that request is admitted again, so a withdrawn "
+"permission or an expired session stops a stream within that bound. Agent "
+"keeps no permissions in a session, and an owner request's kept grant "
+"lasts at most 10 seconds; the Gateway's account cache can still delay "
+"direct database edits until its expiry. Ordinary Gateway account-"
+"management operations invalidate that cache."
+msgstr ""
+"这些检查管的是每个请求能不能进来。策略变了，并不会自动关掉已经打开的流，也不会取消正在跑的任务。所有者的流（任务事件、账号的变更推送、终端输出）在打开时检查一次，大约"
+" 15 分钟后自动结束。客户端会从断开的地方重新连接，这个新请求要再检查一次，所以权限被收回或会话过期后，流最多在这个时间内停止。Agent "
+"不在会话里存权限，所有者请求缓存的放行结果最多保留 10 "
+"秒。不过，网关自己的账号缓存在过期之前，可能还看不到直接改数据库造成的变化；通过网关正常的账号管理操作修改，则会让这份缓存立即失效。"
+
+#: ../developer/agent-access-policy.md:53
+msgid "Failure behavior"
+msgstr "出错时的表现"
+
+#: ../developer/agent-access-policy.md
+msgid "Condition"
+msgstr "情况"
+
+#: ../developer/agent-access-policy.md
+msgid "Result"
+msgstr "结果"
+
+#: ../developer/agent-access-policy.md
+msgid "Explicit policy denial"
+msgstr "策略明确拒绝"
+
+#: ../developer/agent-access-policy.md
+msgid ""
+"Protected APIs refuse access; an active account can see the access-"
+"required page"
+msgstr "受保护的 API 拒绝访问；状态正常的账号可以看到\"需要访问权限\"页面"
+
+#: ../developer/agent-access-policy.md
+msgid "Gateway 403 typed `subject_unavailable`"
+msgstr "网关返回 403，类型为 `subject_unavailable`"
+
+#: ../developer/agent-access-policy.md
+msgid "Refuse a new login; existing sessions receive a denied access decision"
+msgstr "拒绝新的登录；已有会话收到\"拒绝访问\"的判定"
+
+#: ../developer/agent-access-policy.md
+msgid ""
+"Missing identity configuration, missing access endpoint or rejected "
+"dispatch credential"
+msgstr "缺少身份配置、缺少访问端点，或 dispatch 凭据被拒绝"
+
+#: ../developer/agent-access-policy.md
+msgid "HTTP 503, typed `agent_configuration_error`; correct the deployment"
+msgstr "HTTP 503，类型为 `agent_configuration_error`；需要修正部署配置"
+
+#: ../developer/agent-access-policy.md
+msgid "Transport/server failure, unreadable decision or untyped/proxy 403"
+msgstr "网络或服务端故障、判定无法解析，或者没有类型的 403、代理返回的 403"
+
+#: ../developer/agent-access-policy.md
+msgid "HTTP 503; retry after the Gateway recovers"
+msgstr "HTTP 503；等网关恢复后重试"
+
+#: ../developer/agent-access-policy.md
+msgid "Expired or invalid login-flow state"
+msgstr "登录流程的状态已过期或无效"
+
+#: ../developer/agent-access-policy.md
+msgid "Return to login and start a fresh flow"
+msgstr "回到登录页，重新走一遍登录流程"
+
+#: ../developer/agent-access-policy.md:63
+msgid ""
+"When `/me` cannot confirm current access, the web app hides protected "
+"content and offers a retry without forcing another sign-in. A callback "
+"outage returns to the public login page with the original destination and"
+" a retry action; the consumed login-flow cookie is cleared. Configuration"
+" failures ask the operator to correct the deployment. An invalid `/me` "
+"payload has its own explanation. Without a configured web destination, "
+"the API retains its HTTP error response. Unverified state and consumed "
+"authorization codes are never reused."
+msgstr ""
+"`/me` 无法确认当前的访问权限时，Web "
+"应用会先把受保护的内容藏起来，并提供重试按钮，不强制重新登录。如果回调时服务出了故障，会回到公开的登录页，带上原来要去的地址和一个重试按钮，并清掉已经用过的登录流程"
+" cookie。配置错误会提示运维人员修正部署。`/me` 返回的数据格式不对时，有专门的说明。没有配置 Web 跳转地址时，API 就直接返回 "
+"HTTP 错误。未经验证的状态和用过的授权码，永远不会再次使用。"
+
+#: ../developer/agent-access-policy.md:71
+msgid "Infrastructure credentials"
+msgstr "基础设施凭据"
+
+#: ../developer/agent-access-policy.md:73
+msgid ""
+"`ADMIN_TOKEN` independently authorizes infrastructure administration even"
+" when the Gateway is unavailable. The on-call dispatch credential must "
+"also pass the configured service account's `agent.use` check before "
+"creating a job; its polling and cancellation access remains available for"
+" cleanup. Host/worker credentials, attempt lease fences and owner checks "
+"are separate controls."
+msgstr ""
+"即使网关不可用，`ADMIN_TOKEN` 也能单独授权基础设施管理。值班用的 dispatch 凭据在创建任务前，还必须通过所配置服务账号的 "
+"`agent.use` 检查；它查询和取消任务的权限始终保留，方便清理。主机/worker 凭据、attempt "
+"租约栅栏和所有者检查是彼此独立的几道控制。"
+
+#: ../developer/agent-access-policy.md:79
+msgid ""
+"Sessions carry minimal identity only. See [minimal identity](minimal-"
+"identity.md) for cookie contents, issuer binding and upgrade constraints."
+msgstr "会话只携带最少的身份信息。cookie 里有什么、签发方如何绑定、升级时有哪些限制，见[最小身份](minimal-identity.md)。"
+
+#: ../developer/agent-access-policy.md:83
+msgid "Verify the Gateway contract"
+msgstr "验证网关契约"
+
+#: ../developer/agent-access-policy.md:85
+msgid ""
+"The schema is in [`internal-"
+"lookups.openapi.yaml`](../../gateway_contracts/internal-"
+"lookups.openapi.yaml). Local tests validate its error types against the "
+"Agent client and permission resolver. To validate an isolated or "
+"otherwise authorized Gateway over HTTP:"
+msgstr ""
+"schema 在 [`internal-lookups.openapi.yaml`](../../gateway_contracts"
+"/internal-lookups.openapi.yaml)。本地测试会拿其中的错误类型去核对 Agent 客户端和权限解析器。要通过 HTTP"
+" 验证一个隔离的、或者其他已获授权的网关，运行："
+
+#: ../developer/agent-access-policy.md:97
+msgid ""
+"The probe queries a randomly named missing account and checks the real "
+"403 against the schema and consumer. It creates no accounts and opens "
+"neither database. It requires explicit Gateway credentials and is "
+"excluded from default CI. Historical verification exercised the "
+"production Gateway router/error handler from `c7987680` "
+"(hybridInference#1408) through an isolated empty-store fixture over "
+"loopback HTTP; it did not verify a live deployment."
+msgstr ""
+"这个探测会查询一个随机命名、实际不存在的账号，然后拿真实返回的 403 去对照 schema "
+"和调用方。它不创建账号，也不打开任何一方的数据库。它需要显式提供网关凭据，默认的 CI 不会跑它。以前的验证是在回环 HTTP "
+"上，用一个隔离的空存储夹具，跑了 "
+"`c7987680`（hybridInference#1408）里生产网关的路由和错误处理；那次并没有验证线上部署。"
+
+#: ../developer/agent-access-policy.md:104
+msgid "Rollout"
+msgstr "上线步骤"
+
+#: ../developer/agent-access-policy.md:106
+msgid "For a deployment first adopting permission-based access:"
+msgstr "一套部署第一次改用基于权限的访问控制时："
+
+#: ../developer/agent-access-policy.md:108
+msgid "Configure its Gateway policy registration."
+msgstr "在网关上注册好策略。"
+
+#: ../developer/agent-access-policy.md:109
+msgid ""
+"Release the Gateway policy hook and access endpoint together with "
+"compatible distribution backend/frontend artifacts. Verify an admitted "
+"account, an active account without permission, and a missing/inactive "
+"account. Ensure the deployment's proxy routes the internal access path "
+"correctly."
+msgstr "把网关的策略钩子和访问端点，连同兼容的发行版前后端产物一起发布。分别用一个已放行的账号、一个状态正常但没有权限的账号，以及一个不存在或已停用的账号验证一遍。确认部署的代理能把内部访问路径转发到正确的地方。"
+
+#: ../developer/agent-access-policy.md:113
+msgid ""
+"Release Agent backend and web app together. Check fresh login, existing "
+"sessions, owner APIs and administration."
+msgstr "Agent 后端和 Web 应用一起发布。检查全新登录、已有会话、所有者 API 和管理功能。"
+
+#: ../developer/agent-access-policy.md:116
+msgid ""
+"A Gateway without the access endpoint is incompatible and causes "
+"protected requests to fail closed. Do not add role-based fallback to "
+"compensate. After adopting minimal identity, follow its [upgrade and "
+"rollback constraints](minimal-identity.md#upgrade-an-existing-"
+"deployment): older Agent binaries do not enforce the database issuer, and"
+" profile-bearing cookies require a fresh login. Source changes alone do "
+"not update pinned images or deploy either service."
+msgstr ""
+"没有访问端点的网关不兼容，受保护的请求会一律失败并拒绝访问。不要为了绕过这一点加基于角色的兜底逻辑。改用最小身份之后，要遵守它的[升级与回滚限制"
+"](minimal-identity.md#upgrade-an-existing-deployment)：旧版 Agent "
+"不会校验数据库里的签发方，而带有个人资料的旧 cookie 需要重新登录。光改源代码不会更新固定的镜像版本，也不会部署任何一个服务。"
+
+#: ../developer/agent-access-policy.md:124
+msgid ""
+"The implementation is in "
+"[`agent_access.py`](../../apps/backend/cloud_agent/agent_access.py), "
+"[`deps.py`](../../apps/backend/cloud_agent/api/deps.py) and "
+"[`session.py`](../../apps/backend/cloud_agent/api/session.py)."
+msgstr ""
+"实现代码在 "
+"[`agent_access.py`](../../apps/backend/cloud_agent/agent_access.py)、[`deps.py`](../../apps/backend/cloud_agent/api/deps.py)"
+" 和 [`session.py`](../../apps/backend/cloud_agent/api/session.py)。"
+

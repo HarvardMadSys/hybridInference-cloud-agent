@@ -10,6 +10,7 @@ import pytest
 
 from cloud_agent import sandbox_manager_client
 from cloud_agent.sandbox_manager_client import SandboxManagerClient, SandboxManagerError
+from cloud_agent_shared.sandbox_restore import START_FENCE_HEADER
 
 
 @pytest.mark.asyncio
@@ -514,3 +515,22 @@ async def test_a_bounded_reply_still_decodes_and_errors_keep_their_detail():
     with pytest.raises(SandboxManagerError) as missing:
         await broker.list_terminals("athr_one")
     assert (missing.value.status_code, missing.value.message) == (404, "terminal not found")
+
+
+@pytest.mark.asyncio
+async def test_a_fenced_client_names_its_fence_on_every_workspace_request() -> None:
+    seen: list[str | None] = []
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers.get(START_FENCE_HEADER))
+        return httpx.Response(200, json={"ok": True})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(answer)) as http:
+        client = SandboxManagerClient("http://manager.test", "token", client=http)
+
+        await client.with_start_seq(27).git("athr_one")
+        await client.git("athr_one")
+
+    # The shared client is left as it was: the fence belongs to one request.
+    assert seen == ["27", None]
+    assert client.with_start_seq(None) is client

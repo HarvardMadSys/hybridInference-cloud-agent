@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import json
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -23,6 +24,7 @@ from cloud_agent_shared.operation_profiling import (
     PROFILING_CONTEXT_HEADER,
     answer_from_headers,
 )
+from cloud_agent_shared.sandbox_restore import START_FENCE_HEADER
 from cloud_agent_shared.storable_text import storable_json
 
 if TYPE_CHECKING:
@@ -132,6 +134,19 @@ class SandboxManagerClient:
         self._base_url = base_url.rstrip("/")
         self._headers = {"X-Agent-Workspace-Token": token, **IDENTITY_ENCODING_HEADERS}
         self._client = client
+
+    def with_start_seq(self, start_seq: int | None) -> SandboxManagerClient:
+        """This client, naming the start fence its caller's request took.
+
+        Every workspace request it sends may start the group's container, and
+        the sandbox manager labels the run the request joins with this fence
+        alone. ``None`` leaves the client as it is.
+        """
+        if start_seq is None:
+            return self
+        fenced = copy.copy(self)
+        fenced._headers = {**self._headers, START_FENCE_HEADER: str(start_seq)}
+        return fenced
 
     @asynccontextmanager
     async def _http(self, timeout: float) -> AsyncIterator[httpx.AsyncClient]:
@@ -885,8 +900,12 @@ class SandboxManagerClient:
         target_slot_id: int,
         source_launch: dict[str, Any],
         target_launch: dict[str, Any],
+        start_seq: int | None = None,
     ) -> dict[str, Any]:
-        """Materialize a prompt-free native child in the same sandbox."""
+        """Materialize a prompt-free native child in the same sandbox.
+
+        ``start_seq`` is the fence the Fork took, as it may start the source.
+        """
         return await self._shared_sandbox_request(
             "POST",
             source_thread_id,
@@ -912,6 +931,7 @@ class SandboxManagerClient:
                 "target_slot_id": target_slot_id,
                 "source_launch": source_launch,
                 "target_launch": target_launch,
+                "start_seq": start_seq,
             },
             timeout=(
                 SHARED_PLUGIN_SESSION_FORK_TIMEOUT_S
@@ -922,7 +942,11 @@ class SandboxManagerClient:
 
     @staticmethod
     def _shared_identity(snapshot: dict[str, Any]) -> dict[str, Any]:
-        """Copy only the reviewed immutable group/member manifest fields."""
+        """Copy only the reviewed immutable group/member manifest fields.
+
+        With them goes the group's start fence, read after the request's own
+        was taken: both requests may start the container.
+        """
         return {
             "sandbox_id": snapshot["sandbox_id"],
             "generation": snapshot["generation"],
@@ -937,6 +961,7 @@ class SandboxManagerClient:
             "disk_limit_mib": snapshot.get("disk_limit_mib", 0),
             "stop_timeout_s": snapshot["stop_timeout_seconds"],
             "members": snapshot["members"],
+            "start_seq": snapshot.get("start_seq"),
         }
 
     async def capture_shared_snapshot(self, snapshot: dict[str, Any]) -> dict[str, Any]:

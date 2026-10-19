@@ -147,7 +147,8 @@ make check
 | `make check` | `format`, `lint`, `typecheck`, then `test`. Review any automatic fixes before committing. |
 | `make test-db` | The PostgreSQL-backed `dbtest` tier. |
 | `make test-all` | All tests except `external`, including `dbtest`. |
-| `make docs` | Build this documentation site into `docs/build/html`; any warning fails. |
+| `make docs` | Build this documentation site, every language, into `docs/build/html`; any warning fails. |
+| `make docs-verify` | `make docs`, then check that every translation still matches its English page. CI runs this. |
 
 ### Run CI locally
 
@@ -397,8 +398,10 @@ in `docs/developer/index.md`. A root-level guide such as `ENVIRONMENT.md` is
 shown through a one-line `{include}` page registered in `INCLUDED_PAGES` in
 `docs/developer/conf.py`. Links to other repository files may stay relative:
 the build points them at GitHub, and fails for a path or heading that does not
-exist. Run `make docs` after changing any Markdown file; CI's Docs Build job
-runs the same target.
+exist. Run `make docs-verify` after changing any page; CI's Docs Build job runs
+the same target. The site is also published in Simplified Chinese, so an
+English edit needs its translation updated too; see
+[translating the docs](translations.md).
 
 Designs, completed migration checklists, and acceptance records under
 [`docs/agents/`](../agents/) document their own baseline. Preserve that history

@@ -86,6 +86,9 @@ class _SandboxManager:
         self.delay_s = delay_s
         self.calls: list[str] = []
 
+    def with_start_seq(self, _start_seq: int | None):
+        return self
+
     async def register_shared_sandbox(self, _sandbox: dict[str, object]) -> None:
         """Accept the manifest re-registration a workspace request performs."""
         return None

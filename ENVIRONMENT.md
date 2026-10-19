@@ -183,6 +183,22 @@ The test uses disposable containers without network access or mounts and runs
 the production normalizer as separate member UIDs without capabilities. CI runs
 it before deployment; it needs no model API key or deployed-service setting.
 
+### Local and CI restore regression
+
+`AGENT_RESTORE_TEST_IMAGE` names the base image for
+`tests/external/test_checkpoint_restore_roundtrip.py`, `python:3.12-slim` by
+default; it must already be pulled. The test stops a chat container the way
+the Sandbox Manager does, checkpoints it, loads the checkpoint as a later
+generation and starts that container through the archive start fence, all in
+real Docker. Only S3 is a local file. Run:
+
+```bash
+uv run pytest -q -m external tests/external/test_checkpoint_restore_roundtrip.py
+```
+
+CI runs it before deployment; it needs no S3 bucket, model API key or
+deployed-service setting.
+
 ### Database
 
 | Variable | Value / who provisions |
@@ -190,21 +206,6 @@ it before deployment; it needs no model API key or deployed-service setting.
 | `AGENT_DATABASE_URL` | Postgres DSN for a database owned exclusively by Cloud Agent. Do not share the gateway's database. |
 | `AGENT_POSTGRES_USER` / `AGENT_POSTGRES_DB` / `AGENT_POSTGRES_PASSWORD` | Supported control-plane Compose database initialization. User and database default to `cloudagent`; password is required. Keep the DSN consistent with these values. PostgreSQL applies initialization settings only to an empty data directory. |
 | `TEST_DB_HOST` / `TEST_DB_PORT` / `TEST_DB_NAME` / `TEST_DB_USER` / `TEST_DB_PASSWORD` | Read by `make test-db` and the CI `dbtest` tier as five separate values, not a DSN. Defaults: `localhost` / `5432` / `hybridinference_test_db` / `postgres` / `postgres`. The database name must contain `_test_`; fixtures refuse other names. With xdist, each worker appends its ID and needs a pre-created database. CI creates `<TEST_DB_NAME>_gw0`…`_gw3` for `-n 4`. |
-
-### Automatic PR merge archiving
-
-These environment values are imported when the Admin Settings row is first
-created. After that, edit the saved **Publication** settings. See
-[the archiving runbook](docs/developer/automatic-pr-archiving.md).
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `AGENT_PR_ARCHIVE_ENABLED` | `true` | Enable automatic archival after verifying that the current published PR merged. |
-| `AGENT_PR_ARCHIVE_POLL_S` | `30` | Seconds between GitHub merge checks; saved setting accepts 5–3600 seconds. |
-
-API timeout, batch size, retry delay limit, and repeated integration-failure
-threshold are saved settings. The worker uses existing GitHub App credentials
-or the configured publication token, and never passes them to the sandbox.
 
 ### pgAdmin database administration
 

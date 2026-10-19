@@ -1,12 +1,11 @@
 # Documentation
 
 Start with the [project README](../README.md) for a product overview and local
-quickstart. `docs/` has three folders:
+quickstart. `docs/` has two folders:
 
 | Folder | What it holds |
 |---|---|
 | [developer/](developer/) | Maintained guides for setup, configuration, operations, and contributing. Start with the [developer guide](developer/development.md), the [code structure](developer/code-structure.md), and the [operations runbook](developer/operations.md). These describe current behavior and are updated with the code. |
-| [user/](user/) | User-facing feature notes, such as [avatars and memory](user/user-memory.md), [tool approvals](user/mcp-approvals.md), and [conversation navigation](user/conversation-navigation.md). This is a temporary home; the notes will move to the FreeInference distribution's user documentation. |
 | [agents/](agents/) | Engineering records written by and for coding agents: [specs/](agents/specs/) and [reviews/](agents/reviews/). |
 
 Repository-wide references stay at the root: [AGENTS.md](../AGENTS.md),

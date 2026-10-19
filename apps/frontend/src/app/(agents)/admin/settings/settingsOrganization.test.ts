@@ -70,8 +70,6 @@ describe('application settings organization', () => {
   it.each([
     ['gateway_base_url', 'Gateway connection', 'important'],
     ['gateway_request_timeout_s', 'Gateway connection', 'advanced'],
-    ['pr_archive_enabled', 'Archive after merge', 'important'],
-    ['pr_archive_poll_s', 'Archive after merge', 'advanced'],
     ['attachments.max_file_bytes', 'Attachments', 'important'],
     ['task_titles.timeout_seconds', 'Task titles', 'advanced'],
     ['default_execution_profile', 'Sandbox execution', 'important'],
