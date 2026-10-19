@@ -4599,6 +4599,42 @@ async def test_failed_preadmission_before_container_creation_can_be_reprovisione
     assert abandoned["idle_deadline"] is None
 
 
+async def test_an_activation_whose_lease_lapsed_cannot_be_released_as_intact(
+    pool,
+    store: Storage,
+):
+    """Once the lease lapses the reaper decides, and it fails the activation closed.
+
+    An expired runner may have started a container it never reported, so the
+    reaper marks an expired activation lost instead of guessing that a retry
+    is safe. A release saying the opposite after the lapse was still accepted:
+    it asked the attempt for nothing but its generation.
+    """
+    job, claim, sandbox = await _reserve_retained_chat(store)
+    await _expire_attempt(pool, store, claim["attempt_id"])
+
+    abandoned = await store.sandbox.abandon_thread_sandbox(
+        thread_id=job["thread_id"],
+        attempt_id=claim["attempt_id"],
+        lease_generation=claim["lease_generation"],
+        sandbox_generation=sandbox["generation"],
+        activation_generation=sandbox["activation_generation"],
+        lost=False,
+        detail="checkout failed",
+        idle_timeout_seconds=1800,
+    )
+
+    assert abandoned is None
+    held = await store.sandbox.thread_sandbox(thread_id=job["thread_id"])
+    assert held is not None and held["active_attempt_id"] == claim["attempt_id"]
+    actions = await store.attempt_commands.reap_expired(max_attempts=3)
+    assert [(action["attempt_id"], action["action"]) for action in actions] == [
+        (claim["attempt_id"], "failed")
+    ]
+    lost = await store.sandbox.thread_sandbox(thread_id=job["thread_id"])
+    assert lost is not None and lost["context_status"] == "lost"
+
+
 async def test_invalid_context_before_admission_marks_chat_and_queued_turns_lost(
     store: Storage,
 ):

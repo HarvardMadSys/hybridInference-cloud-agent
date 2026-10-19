@@ -1895,14 +1895,21 @@ class PostgresAttemptCommands:
                     )
                     if released is not None:
                         cleanup_residency = dict(released)
-            await conn.execute(
-                "UPDATE agent_attempts SET context_status = 'lost' WHERE id = $1",
-                attempt_id,
-            )
-            await fail_unrunnable_follow_ups(
-                conn,
-                thread_id=sandbox_thread_id,
-            )
+                await conn.execute(
+                    "UPDATE agent_attempts SET context_status = 'lost' WHERE id = $1",
+                    attempt_id,
+                )
+                await fail_unrunnable_follow_ups(
+                    conn,
+                    thread_id=sandbox_thread_id,
+                )
+            else:
+                # The read above does not lock the membership: a writer that
+                # does not take the attempt can still release the activation
+                # between that read and this write. Nothing was marked lost,
+                # so nothing below treats the context as lost, and the turn
+                # ends as any expired turn does.
+                retained_activation_expired = False
         elif settled_finalization_expired:
             # The native context boundary is durable; only the final
             # job transition was lost. Never replay this prompt and

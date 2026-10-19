@@ -2728,6 +2728,16 @@ class PostgresSandboxRepository:
                 await conn.execute(
                     "SELECT id FROM agent_threads WHERE id = $1 FOR UPDATE", thread_id
                 )
+            elif not await self._lock_running_attempt(
+                conn, attempt_id, lease_generation
+            ) or not await self._attempt_is_live(conn, attempt_id):
+                # Releasing an activation as intact is its runner's word that
+                # the context is as the last turn left it, and only a live
+                # lease can give that word. Once the lease lapses the reaper
+                # decides, and it fails an expired activation closed. The
+                # attempt is taken first, as the reaper takes it, so the two
+                # never both decide.
+                return None
             shared = await conn.fetchrow(
                 """
                 UPDATE agent_thread_sandbox_memberships m

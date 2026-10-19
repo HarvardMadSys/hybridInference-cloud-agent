@@ -1153,6 +1153,126 @@ async def test_an_attempt_the_reaper_cannot_close_does_not_undo_the_others(
     ]
 
 
+async def test_the_attempt_reaper_ends_a_turn_by_the_membership_it_wrote(pool, store: Storage):
+    """A release between the reaper's read and its write leaves the context intact.
+
+    The reaper reads an expired attempt's membership without locking it. A
+    writer that released the activation before admission in between left the
+    reaper's write matching nothing, and the reaper still marked the attempt's
+    context lost, failed the turn queued behind it and failed its job as
+    context lost, though the membership said the context was intact.
+    """
+    job, claim, _sandbox = await _reserve_shared_chat(store)
+    queued = await store.conversation_commands.create_follow_up(
+        parent_job_id=job["id"], user_id=job["user_id"], prompt="and update the docs"
+    )
+    assert queued is not None and queued.get("error") is None
+    await _expire_attempt(pool, store, claim["attempt_id"])
+    reap = None
+    async with pool.acquire() as releaser:
+        try:
+            async with releaser.transaction():
+                # The membership, as a release takes it: the reaper reads it
+                # and then waits to write it.
+                await releaser.execute(
+                    "SELECT thread_id FROM agent_thread_sandbox_memberships "
+                    "WHERE thread_id = $1 FOR UPDATE",
+                    job["thread_id"],
+                )
+                reap = asyncio.create_task(store.attempt_commands.reap_expired(max_attempts=3))
+                await _blocked_by(pool, await releaser.fetchval("SELECT pg_backend_pid()"))
+                # What releasing the activation before admission leaves.
+                await releaser.execute(
+                    "UPDATE agent_thread_sandbox_memberships "
+                    "SET active_attempt_id = NULL, resident_state = 'stopped' "
+                    "WHERE thread_id = $1",
+                    job["thread_id"],
+                )
+            actions = await asyncio.wait_for(reap, timeout=10)
+        finally:
+            await _settle(reap)
+    # An ordinary expiry: the turn waits in the queue for its next attempt.
+    assert actions == [{"job_id": job["id"], "attempt_id": claim["attempt_id"], "action": "queued"}]
+    member = await store.sandbox.thread_sandbox(thread_id=job["thread_id"])
+    assert member is not None and member["context_status"] == "new"
+    still_queued = await store.conversation_queries.get_job(queued["id"])
+    assert still_queued is not None and still_queued["state"] == "queued"
+    async with pool.acquire() as conn:
+        assert (
+            await conn.fetchval(
+                "SELECT context_status FROM agent_attempts WHERE id = $1", claim["attempt_id"]
+            )
+            != "lost"
+        )
+
+
+async def test_releasing_an_activation_waits_for_the_reaper_holding_its_attempt(
+    pool, store: Storage, monkeypatch
+):
+    """The reaper and a release cannot both decide what an activation left.
+
+    Releasing an activation before admission took no lock on its attempt and
+    asked it for nothing but its generation. It committed while the reaper
+    held the expired attempt between reading the membership and writing it,
+    so the membership said the context was intact while the reaper failed
+    the job and the turn queued behind it as context lost. The release takes
+    the attempt first now: it waits, and the reaper's answer stands alone.
+    """
+    job, claim, sandbox = await _reserve_shared_chat(store)
+    queued = await store.conversation_commands.create_follow_up(
+        parent_job_id=job["id"], user_id=job["user_id"], prompt="and update the docs"
+    )
+    assert queued is not None and queued.get("error") is None
+    await _expire_attempt(pool, store, claim["attempt_id"])
+    original = attempt_module.insert_event
+    reaper_pid: list[int] = []
+    resume = asyncio.Event()
+
+    async def pause_after_the_read(conn, **fields):
+        # The reaper's control event: after it read the membership, before it
+        # writes the membership.
+        if fields["attempt_id"] == claim["attempt_id"]:
+            reaper_pid.append(await conn.fetchval("SELECT pg_backend_pid()"))
+            await resume.wait()
+        return await original(conn, **fields)
+
+    monkeypatch.setattr(attempt_module, "insert_event", pause_after_the_read)
+    reap = asyncio.create_task(store.attempt_commands.reap_expired(max_attempts=3))
+    abandon = None
+    try:
+        async with asyncio.timeout(10):
+            while not reaper_pid:
+                await asyncio.sleep(0.01)
+        abandon = asyncio.create_task(
+            store.sandbox.abandon_thread_sandbox(
+                thread_id=job["thread_id"],
+                attempt_id=claim["attempt_id"],
+                lease_generation=claim["lease_generation"],
+                sandbox_generation=sandbox["generation"],
+                activation_generation=sandbox["activation_generation"],
+                lost=False,
+                detail="checkout failed",
+                idle_timeout_seconds=1800,
+            )
+        )
+        await _blocked_by(pool, reaper_pid[0])
+        resume.set()
+        actions = await asyncio.wait_for(reap, timeout=10)
+        abandoned = await asyncio.wait_for(abandon, timeout=10)
+    finally:
+        resume.set()
+        await _settle(abandon)
+        await _settle(reap)
+    assert abandoned is None
+    assert [(action["attempt_id"], action["action"]) for action in actions] == [
+        (claim["attempt_id"], "failed")
+    ]
+    member = await store.sandbox.thread_sandbox(thread_id=job["thread_id"])
+    assert member is not None and member["context_status"] == "lost"
+    failed = await store.conversation_queries.get_job(queued["id"])
+    assert failed is not None and failed["state"] == "failed"
+
+
 async def test_deleting_snapshots_does_not_deadlock_with_a_build_receipt(
     pool, store: Storage, monkeypatch
 ):
