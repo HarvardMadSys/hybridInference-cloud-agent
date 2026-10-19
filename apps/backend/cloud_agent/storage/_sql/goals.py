@@ -300,6 +300,14 @@ async def goal_after_terminal(
     Only an automatic round pauses a goal this way. A person's own turn failing
     is reported to the person, and is not by itself a reason to stop their goal.
 
+    And only the goal the round was created for, by the identity rule the round
+    count uses (``j.goal_id = t.goal_id``). Replacing the objective withdraws
+    the queued rounds, but one already running carries on under the old
+    identity, and its ending is no verdict on the goal that replaced it. An
+    active goal always has an identity, so a round that carries none -- left
+    from before identities, on a conversation that had no goal then -- pauses
+    nothing.
+
     Unlike the owner-facing ``pause_goal``, this is not revision-fenced: a
     reaper has no revision to offer, and a revision it invented would be a
     fence it could not check.
@@ -319,6 +327,7 @@ async def goal_after_terminal(
             WHERE t.id = $1 AND j.id = $2 AND j.thread_id = t.id
               AND t.goal_state = 'active'
               AND j.turn_source = 'goal'
+              AND j.goal_id = t.goal_id
             RETURNING t.id
             """,
             thread_id,
