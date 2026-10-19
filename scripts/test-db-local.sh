@@ -77,6 +77,11 @@ database_name() {
   if ! [[ "${name}" =~ ^[a-z0-9_]+$ && "${name}" == *_test_* ]]; then
     die "database name '${name}' must be lower-case letters, digits and underscores and contain _test_"
   fi
+  # "<name>_gw<digits>" is a worker's database. A name of that form would put
+  # this checkout's base database inside another checkout's set of workers.
+  if [[ "${name}" =~ _gw[0-9]+$ ]]; then
+    die "database name '${name}' must not end in _gw<digits>, which names a worker's database"
+  fi
   echo "${name}"
 }
 
@@ -132,10 +137,13 @@ psql_in() {
   docker exec -i "${CONTAINER}" psql -U postgres -d postgres -qAtX -v ON_ERROR_STOP=1 "$@"
 }
 
-# Hold a PostgreSQL advisory lock on this database until the script exits.
-# The lock belongs to a psql session reading from this shell (fd 7), so it is
-# released whenever the shell goes away, however it goes: no lock file to go
-# stale. FIFOs rather than `coproc`, which macOS's bash 3.2 lacks.
+# Hold a PostgreSQL advisory lock on this database until the script exits,
+# or until the next call takes another one. The lock belongs to a psql session
+# reading from this shell (fd 7), so it is released whenever that session ends
+# (the shell going away, however it goes, or fd 7 being replaced): no lock file
+# to go stale. FIFOs rather than `coproc`, which macOS's bash 3.2 lacks.
+#
+# With "try", return 1 at once when another run holds it instead of waiting.
 lock_database() {
   local dir key got
   dir="$(mktemp -d)"
@@ -147,6 +155,7 @@ lock_database() {
   echo "SELECT pg_try_advisory_lock(${key});" >&7
   read -r got <&8 || die "could not reach ${CONTAINER} to lock ${TEST_DB_NAME}"
   if [ "${got}" != "t" ]; then
+    [ "${1:-}" = try ] && return 1
     echo "test-db-local: another run is using ${TEST_DB_NAME}; waiting for it to finish" >&2
     echo "SELECT 'locked' FROM pg_advisory_lock(${key}) AS taken;" >&7
     read -r got <&8 || die "lost ${CONTAINER} while waiting for ${TEST_DB_NAME}"
@@ -158,37 +167,49 @@ lock_database() {
 OWNED="datname = :'name' OR (starts_with(datname, :'name' || '_gw') \
   AND substr(datname, length(:'name') + 4) ~ '^[0-9]+$')"
 
+# What marks a database as this checkout's.
+mark() {
+  printf '%s%s' "${OWNER_PREFIX}" "$1"
+}
+
+# Drop this checkout's databases. With a mark, only those still carrying it:
+# `clean` passes the one it read before taking the lock, so a database a new
+# checkout has taken over since is left alone.
 drop_databases() {
-  psql_in -v name="${TEST_DB_NAME}" <<SQL
-SELECT format('DROP DATABASE %I WITH (FORCE)', datname) FROM pg_database WHERE ${OWNED}
+  psql_in -v name="${TEST_DB_NAME}" -v mark="${1:-}" <<SQL
+SELECT format('DROP DATABASE %I WITH (FORCE)', datname) FROM pg_database
+WHERE (${OWNED})
+  AND (:'mark' = '' OR shobj_description(oid, 'pg_database') = :'mark')
 \gexec
 SQL
 }
 
-# Refuse a name another existing checkout owns, so TEST_DB_LOCAL_NAME cannot
-# drop a neighbour's databases in the middle of its run.
+# Refuse unless every database the drop would remove is this checkout's, or
+# was left by one that no longer exists. Each worker's database is checked as
+# well as the base one: it is dropped with them, and a mark on the base alone
+# says nothing about it.
 check_owner() {
-  local recorded
-  # One row, "exists:<comment>", when the database is there; none otherwise.
-  recorded="$(psql_in -v name="${TEST_DB_NAME}" <<'SQL'
-SELECT 'exists:' || coalesce(shobj_description(oid, 'pg_database'), '')
-FROM pg_database WHERE datname = :'name'
-SQL
-)"
-  case "${recorded}" in
-    "") ;;
-    "exists:${OWNER_PREFIX}"*)
-      recorded="${recorded#"exists:${OWNER_PREFIX}"}"
-      if [ "${recorded}" != "${ROOT}" ] && [ -d "${recorded}" ]; then
-        echo "test-db-local: ${TEST_DB_NAME} belongs to ${recorded}, which still exists" >&2
+  local name comment owner
+  while IFS=$'\t' read -r name comment; do
+    case "${comment}" in
+      "${OWNER_PREFIX}"*)
+        owner="${comment#"${OWNER_PREFIX}"}"
+        if [ "${owner}" != "${ROOT}" ] && [ -d "${owner}" ]; then
+          echo "test-db-local: ${name} belongs to ${owner}, which still exists" >&2
+          exit 2
+        fi
+        ;;
+      *)
+        echo "test-db-local: ${name} exists and was not made by this script; refusing to drop it" >&2
         exit 2
-      fi
-      ;;
-    *)
-      echo "test-db-local: ${TEST_DB_NAME} exists and was not made by this script; refusing to drop it" >&2
-      exit 2
-      ;;
-  esac
+        ;;
+    esac
+  done < <(
+    psql_in -F $'\t' -v name="${TEST_DB_NAME}" <<SQL
+SELECT datname, coalesce(shobj_description(oid, 'pg_database'), '')
+FROM pg_database WHERE ${OWNED} ORDER BY datname
+SQL
+  )
 }
 
 # Empty databases for this checkout: the base one, which some tests use
@@ -198,14 +219,15 @@ fresh_databases() {
   count="$(workers)"
   check_owner
   drop_databases
-  {
-    printf 'CREATE DATABASE %s;\n' "${TEST_DB_NAME}"
-    for ((index = 0; index < count; index++)); do
-      printf 'CREATE DATABASE %s_gw%d;\n' "${TEST_DB_NAME}" "${index}"
-    done
-    printf "COMMENT ON DATABASE %s IS '%s%s';\n" \
-      "${TEST_DB_NAME}" "${OWNER_PREFIX}" "${ROOT//\'/\'\'}"
-  } | psql_in >/dev/null
+  local names=("${TEST_DB_NAME}") owner
+  for ((index = 0; index < count; index++)); do
+    names+=("${TEST_DB_NAME}_gw${index}")
+  done
+  owner="$(mark "${ROOT}")"
+  for name in "${names[@]}"; do
+    printf 'CREATE DATABASE %s;\n' "${name}"
+    printf "COMMENT ON DATABASE %s IS '%s';\n" "${name}" "${owner//\'/\'\'}"
+  done | psql_in >/dev/null
 }
 
 # The fixtures skip, rather than fail, when they cannot reach their database,
@@ -293,17 +315,36 @@ case "${cmd}" in
   clean)
     up
     # Only databases this script marked, and only when the checkout that
-    # marked them is gone. Anything made another way is never touched.
-    psql_in -F $'\t' -v prefix="${OWNER_PREFIX}" <<'SQL' |
-SELECT datname, substr(shobj_description(oid, 'pg_database'), length(:'prefix') + 1)
+    # marked them is gone. Anything made another way is never touched. Each
+    # set is dropped under the lock a run of it holds, and only the databases
+    # that still carry the mark read here: a checkout can take a name over
+    # between this scan and the drop.
+    stale=()
+    while IFS=$'\t' read -r name owner; do
+      [ -d "${owner}" ] || stale+=("${name}"$'\t'"${owner}")
+    done < <(
+      psql_in -F $'\t' -v prefix="${OWNER_PREFIX}" <<'SQL'
+SELECT DISTINCT regexp_replace(datname, '_gw[0-9]+$', ''),
+       substr(shobj_description(oid, 'pg_database'), length(:'prefix') + 1)
 FROM pg_database WHERE starts_with(shobj_description(oid, 'pg_database'), :'prefix')
+ORDER BY 1
 SQL
-      while IFS=$'\t' read -r name owner; do
-        [ -d "${owner}" ] && continue
-        TEST_DB_NAME="${name}"
-        drop_databases
-        echo "dropped ${name} (its checkout ${owner} is gone)"
-      done
+    )
+    for entry in ${stale[@]+"${stale[@]}"}; do
+      TEST_DB_NAME="${entry%%$'\t'*}"
+      owner="${entry#*$'\t'}"
+      if ! lock_database try; then
+        echo "kept ${TEST_DB_NAME} (a run is using it)"
+        continue
+      fi
+      # Under the lock: a checkout restored at that path keeps its databases.
+      if [ -d "${owner}" ]; then
+        echo "kept ${TEST_DB_NAME} (its checkout ${owner} exists again)"
+        continue
+      fi
+      drop_databases "$(mark "${owner}")"
+      echo "dropped ${TEST_DB_NAME} (its checkout ${owner} is gone)"
+    done
     ;;
   -h | --help | help)
     usage
