@@ -1031,6 +1031,7 @@ export const zhCN: Record<TranslationKey, string> = {
   'goal.resumeHint': '继续这个目标,并安排下一轮',
   'goal.editHint': '修改目标;正在跑的这一轮不受影响',
   'goal.clearHint': '移除目标并停止后续自动续跑;对话和执行历史都会保留',
+  'goal.clearConfirm': '清除此目标？后续自动续跑将停止；对话和执行历史都会保留。',
   // 唯一存在的上限是用户自己写的,产品里没有任何地方能改它。
   // 所以「继续」就是解除它的入口,状态条要把这件事说清楚。
   'goal.limitResumeLifts': '点「继续」会解除你为这个目标设置的 {max} 轮上限。',

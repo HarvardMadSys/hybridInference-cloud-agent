@@ -1096,6 +1096,7 @@ export const en = {
   'goal.resumeHint': 'Continue the goal and queue its next round',
   'goal.editHint': 'Change the objective; the round in flight is left alone',
   'goal.clearHint': 'Remove the goal and stop future rounds; the chat and its history stay',
+  'goal.clearConfirm': 'Clear this goal? Future rounds stop; the chat and its history stay.',
   // The one bound that exists is one the owner wrote, and nothing in the
   // product edits it. So Resume is what lifts it, and the band says so.
   'goal.limitResumeLifts':

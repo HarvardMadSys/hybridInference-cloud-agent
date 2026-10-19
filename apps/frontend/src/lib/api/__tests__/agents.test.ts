@@ -43,6 +43,7 @@ import {
   writeAgentJobFile,
 } from '../agents';
 import * as client from '../client';
+import { contractErrors } from './contract';
 
 function sseResponse(chunks: string[]): Response {
   const encoder = new TextEncoder();
@@ -1180,7 +1181,7 @@ describe('agents api', () => {
     );
   });
 
-  it('pauses, resumes and clears without a revision, because those buttons are idempotent', async () => {
+  it('pauses and resumes without a revision, because those buttons are idempotent', async () => {
     fetchWithAuth.mockResolvedValue(jsonResponse({ thread_id: 'thread-1', revision: 6 }));
     await pauseAgentGoal('thread-1');
     expect(fetchWithAuth).toHaveBeenLastCalledWith(
@@ -1195,18 +1196,25 @@ describe('agents api', () => {
       '/v1/agent/threads/thread-1/goal/resume',
       { method: 'POST' },
     );
+  });
+
+  it('clears only the goal revision its owner confirmed', async () => {
+    // Clearing is not idempotent across a replacement: without the revision,
+    // a goal set from another tab would be removed unseen.
     fetchWithAuth.mockResolvedValue(
       jsonResponse({ thread_id: 'thread-1', cleared: true, revision: 8 }),
     );
-    await expect(clearAgentGoal('thread-1')).resolves.toEqual({
+    await expect(clearAgentGoal('thread-1', 7)).resolves.toEqual({
       thread_id: 'thread-1',
       cleared: true,
       revision: 8,
     });
+    const body = JSON.stringify({ revision: 7 });
     expect(fetchWithAuth).toHaveBeenLastCalledWith(
       expect.any(String),
       '/v1/agent/threads/thread-1/goal',
-      { method: 'DELETE' },
+      { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body },
     );
+    expect(contractErrors('DELETE', '/v1/agent/threads/thread-1/goal', body)).toEqual([]);
   });
 });

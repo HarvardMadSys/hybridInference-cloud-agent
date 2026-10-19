@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
 
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { clearAgentGoal, pauseAgentGoal, resumeAgentGoal, setAgentGoal } from '@/lib/api/agents';
@@ -434,8 +434,50 @@ describe('GoalBar controls', () => {
     );
     fireEvent.click(screen.getByRole('button', { name: 'Goal options' }));
     fireEvent.click(screen.getByRole('menuitem', { name: 'Clear goal' }));
-    await waitFor(() => expect(clearAgentGoal).toHaveBeenCalledWith('thread_1'));
+    fireEvent.click(screen.getByRole('button', { name: 'Clear goal' }));
+    await waitFor(() => expect(clearAgentGoal).toHaveBeenCalledWith('thread_1', 3));
     expect(pauseAgentGoal).not.toHaveBeenCalled();
+  });
+
+  it('asks before clearing, and clears the goal revision it showed', async () => {
+    const cleared = vi.fn();
+    render(
+      <GoalBar
+        threadId="thread_1"
+        goal={goal()}
+        state={idle}
+        onChanged={() => {}}
+        onCleared={cleared}
+      />,
+    );
+    const trigger = screen.getByRole('button', { name: 'Goal options' });
+    fireEvent.click(trigger);
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Clear goal' }));
+    const prompt = screen.getByRole('group', { name: /Clear this goal\?/ });
+    expect(within(prompt).getByRole('button', { name: 'Cancel' })).toHaveFocus();
+    expect(clearAgentGoal).not.toHaveBeenCalled();
+    fireEvent.click(within(prompt).getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByRole('group', { name: /Clear this goal\?/ })).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+
+    // Escape answers the question. It must not travel on to the page, where
+    // an unhandled Escape is the Stop shortcut.
+    const page = vi.fn();
+    window.addEventListener('keydown', page);
+    fireEvent.click(trigger);
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Clear goal' }));
+    fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
+    window.removeEventListener('keydown', page);
+    expect(page).not.toHaveBeenCalled();
+    expect(screen.queryByRole('group', { name: /Clear this goal\?/ })).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+    expect(clearAgentGoal).not.toHaveBeenCalled();
+
+    fireEvent.click(trigger);
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Clear goal' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Clear goal' }));
+    await waitFor(() => expect(cleared).toHaveBeenCalledOnce());
+    expect(clearAgentGoal).toHaveBeenCalledExactlyOnceWith('thread_1', 3);
   });
 
   it('resumes a goal whose stated bound is spent, and says what that does', async () => {

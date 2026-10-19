@@ -132,12 +132,22 @@ export async function resumeAgentGoal(threadId: string): Promise<GoalResponseApi
   return jsonOrThrow(resp);
 }
 
-/** Remove the goal and every automatic round queued for it. */
-export async function clearAgentGoal(threadId: string): Promise<GoalClearedApi> {
+/**
+ * Remove the goal and every automatic round queued for it.
+ *
+ * `revision` is the goal the owner confirmed removing. Unlike pause and
+ * resume, clearing is not safe to repeat against whatever is there now: a
+ * goal edited or replaced from another tab since is refused, not removed.
+ */
+export async function clearAgentGoal(threadId: string, revision: number): Promise<GoalClearedApi> {
   const resp = await fetchWithAuth(
     API_BASE,
     `/v1/agent/threads/${encodeURIComponent(threadId)}/goal`,
-    { method: 'DELETE' },
+    {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ revision }),
+    },
   );
   return jsonOrThrow(resp);
 }

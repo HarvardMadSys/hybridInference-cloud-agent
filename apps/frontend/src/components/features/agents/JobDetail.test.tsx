@@ -6017,8 +6017,9 @@ describe('JobDetail', () => {
       await composer();
       fireEvent.click(screen.getByRole('button', { name: 'Goal options' }));
       fireEvent.click(screen.getByRole('menuitem', { name: 'Clear goal' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Clear goal' }));
 
-      await waitFor(() => expect(clearAgentGoal).toHaveBeenCalledWith('thread_9'));
+      await waitFor(() => expect(clearAgentGoal).toHaveBeenCalledWith('thread_9', 4));
       // Clearing removes the goal and the rounds queued for it; the chat and
       // its history are not the client's to delete.
       expect(submitThreadMessage).not.toHaveBeenCalled();
@@ -6065,6 +6066,7 @@ describe('JobDetail', () => {
       });
       fireEvent.click(trigger);
       fireEvent.click(screen.getByRole('menuitem', { name: 'Clear goal' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Clear goal' }));
       await waitFor(() => expect(box).toHaveFocus());
       expect(box).toHaveValue('my next message');
       expect(cancelAgentJob).not.toHaveBeenCalled();
