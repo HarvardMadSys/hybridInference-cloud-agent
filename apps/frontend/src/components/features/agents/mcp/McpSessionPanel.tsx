@@ -500,7 +500,14 @@ function McpSessionPanelContent({
       };
       const response = await updateMcpThreadBinding(threadId, payload);
       setBindings(response.bindings);
-      setSelections(draftSelections(response.bindings));
+      // Only this server's draft is now saved. Keep unsaved edits to every
+      // other server, as the Always allow sync does.
+      const saved = response.bindings.find((item) => item.connection_id === binding.connection_id);
+      setSelections((drafts) => ({
+        ...draftSelections(response.bindings),
+        ...drafts,
+        ...(saved ? { [saved.connection_id]: draftSelection(saved) } : {}),
+      }));
       setNotice(message);
     } catch (cause: unknown) {
       setError(cause instanceof Error ? cause.message : 'Could not save server settings.');
