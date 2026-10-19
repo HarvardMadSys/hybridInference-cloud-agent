@@ -7,6 +7,7 @@ import io
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -2097,20 +2098,24 @@ def test_shared_writer_census_rejects_exiting_nonleaders_even_with_matching_coun
     assert result.stdout == b"unknown"
 
 
+def _local_shared_writer_command(argv, tmp_path, owned_processes):
+    """Confine a generated script's census traversal to owned PIDs."""
+    command = list(argv)
+    targets = " ".join(f"/proc/{process.pid}" for process in owned_processes)
+    assert targets
+    command[2] = command[2].replace("/proc/[0-9]*", targets)
+    assert "/proc/[0-9]*" not in command[2]
+    return [argument.replace(ACTIVATION_TMPFS, str(tmp_path)) for argument in command]
+
+
 def _local_shared_writer_manager(monkeypatch, tmp_path, owned_processes):
     """Run the generated scripts with census traversal confined to owned PIDs."""
     manager = ChatSandboxManager(ContainerBackend(image="img", uid=os.getuid(), gid=os.getgid()))
 
     def local_exec(_spec, argv, **kwargs):
         assert kwargs["user_uid"] == os.getuid()
-        command = list(argv)
-        targets = " ".join(f"/proc/{process.pid}" for process in owned_processes)
-        assert targets
-        command[2] = command[2].replace("/proc/[0-9]*", targets)
-        assert "/proc/[0-9]*" not in command[2]
-        command = [argument.replace(ACTIVATION_TMPFS, str(tmp_path)) for argument in command]
         return subprocess.run(
-            command,
+            _local_shared_writer_command(argv, tmp_path, owned_processes),
             input=kwargs.get("input_bytes"),
             capture_output=True,
             timeout=5,
@@ -2235,6 +2240,7 @@ def test_shared_writer_freeze_and_thaw_keep_live_writers_fenced_beside_zombies(
     manager.thaw_shared_writers(_spec(), slot_ids=[], manifest=manifest)
     assert _shared_writer_process_state(writer.pid) not in {"T", "t"}
     assert _shared_writer_process_state(zombie.pid) == "Z"
+    assert list(tmp_path.glob("snapshot-*")) == []
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="writer census uses Linux /proc")
@@ -2335,6 +2341,118 @@ def test_shared_writer_freeze_failure_resumes_live_threads_behind_a_zombie_leade
         manager.freeze_shared_writers(_spec(), slot_ids=[], token="2" * 32)
 
     _wait_for_shared_writer_growth(writes_path, writes_path.stat().st_size)
+
+
+def _after_census_stops_a_new_writer(argv, command):
+    """Run ``command`` in the guest census right after it stops an unseen writer."""
+    anchor = 'receipt="$receipt $item"; stable=0;;'
+    assert argv[2].count(anchor) == 1
+    script = argv[2].replace(anchor, f'receipt="$receipt $item"; stable=0; {command};;')
+    return [*argv[:2], script, *argv[3:]]
+
+
+def _wait_for_shared_writer_state(pid, state):
+    # A stop signal takes effect once its target next runs, not when it is sent.
+    deadline = time.monotonic() + 2
+    while _shared_writer_process_state(pid) != state:
+        assert time.monotonic() < deadline, f"process {pid} did not reach state {state}"
+        time.sleep(0.01)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="writer census uses Linux /proc")
+@pytest.mark.parametrize("census_end", ["committed", "killed"])
+def test_shared_writer_freeze_failure_resumes_a_census_whose_reply_was_lost(
+    monkeypatch, tmp_path, owned_shared_writer_processes, census_end
+):
+    # The guest census has stopped the writer, then either committed its
+    # receipt or died before its trap could run; the host never sees a reply.
+    writer = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    owned_shared_writer_processes.append(writer)
+    manager = _local_shared_writer_manager(monkeypatch, tmp_path, owned_shared_writer_processes)
+    local_exec = manager.exec_capture
+
+    def lose_census_reply(spec, argv, **kwargs):
+        if "resume_receipt()" not in argv[2]:
+            return local_exec(spec, argv, **kwargs)
+        if census_end == "killed":
+            argv = _after_census_stops_a_new_writer(argv, "kill -KILL $$")
+        census = local_exec(spec, argv, **kwargs)
+        assert census.returncode == (0 if census_end == "committed" else -signal.SIGKILL)
+        _wait_for_shared_writer_state(writer.pid, "T")
+        raise SandboxError("chat sandbox exec failed: reply lost")
+
+    monkeypatch.setattr(manager, "exec_capture", lose_census_reply)
+
+    with pytest.raises(SandboxError, match="reply lost"):
+        manager.freeze_shared_writers(_spec(), slot_ids=[], token="3" * 32)
+
+    assert _shared_writer_process_state(writer.pid) not in {"T", "t"}
+    assert list(tmp_path.glob("snapshot-*")) == []
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="writer census uses Linux /proc")
+def test_shared_writer_freeze_failure_kills_a_census_still_running_before_resuming(
+    monkeypatch, tmp_path, owned_shared_writer_processes
+):
+    writer = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    owned_shared_writer_processes.append(writer)
+    manager = _local_shared_writer_manager(monkeypatch, tmp_path, owned_shared_writer_processes)
+    local_exec = manager.exec_capture
+    censuses = []
+
+    def abandon_census(spec, argv, **kwargs):
+        if "resume_receipt()" not in argv[2]:
+            return local_exec(spec, argv, **kwargs)
+        # The guest census is descheduled mid-scan, and the host gives up on it.
+        argv = _after_census_stops_a_new_writer(argv, "kill -STOP $$")
+        census = subprocess.Popen(
+            _local_shared_writer_command(argv, tmp_path, owned_shared_writer_processes),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        censuses.append(census)
+        owned_shared_writer_processes.append(census)
+        _wait_for_shared_writer_state(census.pid, "T")
+        _wait_for_shared_writer_state(writer.pid, "T")
+        raise SandboxError("chat sandbox exec failed: connection reset")
+
+    monkeypatch.setattr(manager, "exec_capture", abandon_census)
+
+    with pytest.raises(SandboxError, match="connection reset"):
+        manager.freeze_shared_writers(_spec(), slot_ids=[], token="4" * 32)
+
+    (census,) = censuses
+    # Scheduled again, a census left alive would stop the writer once more.
+    os.kill(census.pid, signal.SIGCONT)
+    assert census.wait(timeout=5) == -signal.SIGKILL
+    assert _shared_writer_process_state(writer.pid) not in {"T", "t"}
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="writer census uses Linux /proc")
+def test_shared_writer_census_past_its_deadline_resumes_through_its_own_trap(
+    monkeypatch, tmp_path, owned_shared_writer_processes
+):
+    writer = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    owned_shared_writer_processes.append(writer)
+    manager = _local_shared_writer_manager(monkeypatch, tmp_path, owned_shared_writer_processes)
+    local_exec = manager.exec_capture
+    monkeypatch.setattr(chat_sandbox_mod, "_SHARED_WRITER_CENSUS_BUDGET_S", 0)
+    censuses = []
+
+    def census_only(spec, argv, **kwargs):
+        # Nothing the host sends after the census reaches the guest.
+        if "resume_receipt()" not in argv[2]:
+            raise SandboxError("chat sandbox exec failed: connection refused")
+        censuses.append(local_exec(spec, argv, **kwargs))
+        return censuses[-1]
+
+    monkeypatch.setattr(manager, "exec_capture", census_only)
+
+    with pytest.raises(SandboxError, match="writer freeze failed"):
+        manager.freeze_shared_writers(_spec(), slot_ids=[], token="5" * 32)
+
+    assert [census.returncode for census in censuses] == [47]
+    assert _shared_writer_process_state(writer.pid) not in {"T", "t"}
 
 
 def test_shared_writer_thaw_detects_replacement_after_exact_id_cleanup(monkeypatch):

@@ -184,6 +184,10 @@ SHARED_WORKSPACE_PERMISSIONS_SCRIPT = (
 )
 ACTIVATION_TMPFS = "/run/agent-activation"
 MEMBER_TMPFS_ROOT = "/run/agent-members"
+#: Seconds a shared-writer census may hold writers stopped before it gives up
+#: and resumes them itself. Its exec allows 20, which leaves that resume time to
+#: finish before the host stops waiting for the census's reply.
+_SHARED_WRITER_CENSUS_BUDGET_S = 10
 #: Sandbox Manager-owned durable receipt for the immutable pre-prompt archive. It is
 #: deliberately outside every agent-writable or archived root.  Guest root
 #: creates this directory as 0700 and the one marker as 0600; all operations
@@ -2372,8 +2376,18 @@ print(' '.join(str(uid) for uid in sorted(uids) if uid in (30000,30001,30002) or
         # an idle CLI background process forks while /proc is being scanned.
         # Exclude only fully exited thread groups: a zombie leader can retain
         # live workers, and the leader stays Z even when SIGSTOP stops them.
+        #
+        # The host can lose a reply after its census stopped writers: the exec
+        # times out, or its transport fails while the guest carries on.  Once
+        # it has stopped anything, the census therefore gives up at its own
+        # deadline, well inside the exec timeout, and resumes through its trap.
+        # It also keeps its receipt in the identity's private tmpfs, naming
+        # itself first and recording each writer before stopping it, so that
+        # recovery resumes the processes its trap or the thaw would.  Resuming
+        # every stopped process of the identity instead would also wake ones
+        # stopped on purpose meanwhile, such as a suspended terminal.
         script = self._shared_writer_task_state_script() + (
-            'set -eu; expected_uid="$1"; committed=0; receipt=""; '
+            'set -eu; expected_uid="$1"; committed=0; receipt=""; receipt_file="$2"; '
             "resume_receipt() { "
             '[ "$committed" = 0 ] || return 0; '
             "for item in $receipt; do pid=${item%%:*}; started=${item#*:}; "
@@ -2383,8 +2397,14 @@ print(' '.join(str(uid) for uid in sorted(uids) if uid in (30000,30001,30002) or
             '[ "$uid" = "$expected_uid" ] && [ "$current" = "$started" ] '
             '&& kill -CONT "$pid" 2>/dev/null || :; done; }; '
             "trap resume_receipt EXIT; trap 'exit 46' HUP INT TERM; round=0; "
+            "read -r now _ < /proc/uptime; deadline=$((${now%%.*} + $3)); "
+            'in_time() { read -r now _ < /proc/uptime; [ "${now%%.*}" -lt "$deadline" ]; }; '
+            'raw=$(cat "/proc/$$/stat"); fields=${raw##*) }; '
+            'started=$(set -- $fields; printf "%s" "${20:-}"); '
+            'printf "%s:%s\\n" "$$" "$started" > "$receipt_file"; '
             "while :; do round=$((round + 1)); stable=1; "
-            "for proc in /proc/[0-9]*; do pid=${proc##*/}; "
+            'for proc in /proc/[0-9]*; do [ -z "$receipt" ] || in_time || exit 47; '
+            "pid=${proc##*/}; "
             '[ "$pid" != 1 ] && [ "$pid" != "$$" ] || continue; '
             'uid=$(stat -c %u "$proc" 2>/dev/null || :); '
             '[ "$uid" = "$expected_uid" ] || continue; '
@@ -2394,9 +2414,11 @@ print(' '.join(str(uid) for uid in sorted(uids) if uid in (30000,30001,30002) or
             'case "$started" in ""|*[!0-9]*) continue;; esac; item="$pid:$started"; '
             'case " $receipt " in *" $item "*) '
             'case "$state" in stopped) ;; *) kill -STOP "$pid" 2>/dev/null || continue; '
-            'stable=0;; esac;; *) kill -STOP "$pid" 2>/dev/null || continue; '
+            'stable=0;; esac;; *) printf "%s\\n" "$item" >> "$receipt_file"; '
+            'kill -STOP "$pid" 2>/dev/null || continue; '
             'receipt="$receipt $item"; stable=0;; esac; done; '
             '[ "$stable" = 1 ] && break; [ "$round" -lt 64 ] || exit 45; done; '
+            '[ -z "$receipt" ] || in_time || exit 47; '
             "for item in $receipt; do pid=${item%%:*}; started=${item#*:}; "
             'printf "%s %s %s\\n" "$pid" "$expected_uid" "$started"; done; '
             "committed=1"
@@ -2406,7 +2428,15 @@ print(' '.join(str(uid) for uid in sorted(uids) if uid in (30000,30001,30002) or
             for uid in target_uids:
                 result = self.exec_capture(
                     spec,
-                    ["/bin/sh", "-c", script, "sh", str(uid)],
+                    [
+                        "/bin/sh",
+                        "-c",
+                        script,
+                        "sh",
+                        str(uid),
+                        self._writer_receipt_path(spec, uid, token),
+                        str(_SHARED_WRITER_CENSUS_BUDGET_S),
+                    ],
                     workdir="/",
                     timeout_s=20,
                     user_uid=uid,
@@ -2451,6 +2481,7 @@ print(' '.join(str(uid) for uid in sorted(uids) if uid in (30000,30001,30002) or
                     spec,
                     target_uids=target_uids,
                     frozen=frozen,
+                    token=token,
                     require_exact_census=False,
                     expected_container_id=expected_container_id,
                 )
@@ -2467,9 +2498,10 @@ print(' '.join(str(uid) for uid in sorted(uids) if uid in (30000,30001,30002) or
         expected_container_id: str | None = None,
     ) -> None:
         """Resume exactly the frozen PID/start pairs and detect new writers."""
-        if not re.fullmatch(
-            rf"{re.escape(ACTIVATION_TMPFS)}/snapshot-[0-9a-f]{{32}}\.pids", manifest
-        ):
+        named = re.fullmatch(
+            rf"{re.escape(ACTIVATION_TMPFS)}/snapshot-([0-9a-f]{{32}})\.pids", manifest
+        )
+        if named is None:
             raise ValueError("snapshot writer manifest path is invalid")
         unique_slots = sorted(set(slot_ids))
         if any(slot < 0 or slot >= spec.resident_slot_capacity for slot in unique_slots):
@@ -2505,6 +2537,7 @@ print(' '.join(str(uid) for uid in sorted(uids) if uid in (30000,30001,30002) or
                 spec,
                 target_uids=target_uids,
                 frozen=frozen,
+                token=named.group(1),
                 require_exact_census=require_exact_census,
                 expected_container_id=expected_container_id,
             )
@@ -2562,22 +2595,42 @@ print(' '.join(str(uid) for uid in sorted(uids) if uid in (30000,30001,30002) or
             "ascii"
         )
 
+    def _writer_receipt_path(self, spec: ChatSandboxSpec, uid: int, token: str) -> str:
+        """Name one identity's census receipt in the tmpfs only it can write."""
+        if uid == self.backend.uid:
+            directory = ACTIVATION_TMPFS
+        elif uid in (*ENVIRONMENT_UIDS, *ACTION_UIDS):
+            directory = f"/run/agent-environments/{uid}"
+        elif 0 <= uid - MEMBER_UID_BASE < spec.resident_slot_capacity:
+            directory = f"{MEMBER_TMPFS_ROOT}/{uid - MEMBER_UID_BASE}"
+        else:
+            raise ValueError("snapshot writer identity has no private tmpfs")
+        return f"{directory}/snapshot-{token}.receipt"
+
     def _resume_frozen_processes(
         self,
         spec: ChatSandboxSpec,
         *,
         target_uids: builtins.list[int],
         frozen: builtins.list[tuple[int, int, int]],
+        token: str,
         require_exact_census: bool,
         expected_container_id: str | None = None,
     ) -> None:
-        """Resume each receipt as its owner and report any changed census."""
+        """Resume each receipt as its owner and report any changed census.
+
+        Each identity's guest-side census receipt is resumed too, then removed:
+        it is the only record of a census whose reply never reached the host.
+        The census it names first may still be running and would stop again
+        what this resumes, so it is killed and its exit awaited before anything
+        is resumed.
+        """
         by_uid = {
             uid: [(pid, started) for pid, owner, started in frozen if owner == uid]
             for uid in target_uids
         }
         script = self._shared_writer_task_state_script() + (
-            'set -u; exact="$1"; expected_uid="$2"; shift 2; unknown=0; '
+            'set -u; exact="$1"; expected_uid="$2"; receipt_file="$3"; shift 3; unknown=0; '
             'if [ "$exact" = 1 ]; then for proc in /proc/[0-9]*; do '
             'pid=${proc##*/}; [ "$pid" != 1 ] && [ "$pid" != "$$" ] || continue; '
             'uid=$(stat -c %u "$proc" 2>/dev/null || :); '
@@ -2587,12 +2640,26 @@ print(' '.join(str(uid) for uid in sorted(uids) if uid in (30000,30001,30002) or
             'started=$(set -- $fields; printf "%s" "${20:-}"); found=0; '
             'for item in "$@"; do [ "$item" = "$pid:$started" ] && found=1; done; '
             '[ "$found" = 1 ] || unknown=1; done; fi; '
+            'census=""; [ ! -f "$receipt_file" ] || read -r census < "$receipt_file" || :; '
+            "pid=${census%%:*}; started=${census#*:}; attempt=0; "
+            'while [ -n "$census" ]; do '
+            'uid=$(stat -c %u "/proc/$pid" 2>/dev/null || :); '
+            'raw=$(cat "/proc/$pid/stat" 2>/dev/null || :); fields=${raw##*) }; '
+            'current=$(set -- $fields; printf "%s" "${20:-}"); '
+            '[ "$uid" = "$expected_uid" ] && [ "$current" = "$started" ] || break; '
+            '[ "$(writer_state "/proc/$pid")" != exited ] || break; '
+            'kill -KILL "$pid" 2>/dev/null || :; attempt=$((attempt + 1)); '
+            '[ "$attempt" -lt 100 ] || break; sleep 0.05; done; '
+            'if [ -f "$receipt_file" ]; then { read -r _ || :; while read -r item; do '
+            'case " $* " in *" $item "*) ;; *) set -- "$@" "$item";; esac; '
+            'done; } < "$receipt_file"; fi; '
             'for item in "$@"; do pid=${item%%:*}; started=${item#*:}; '
             'uid=$(stat -c %u "/proc/$pid" 2>/dev/null || :); '
             'raw=$(cat "/proc/$pid/stat" 2>/dev/null || :); fields=${raw##*) }; '
             'current=$(set -- $fields; printf "%s" "${20:-}"); '
             '[ "$uid" = "$expected_uid" ] && [ "$current" = "$started" ] '
-            '&& kill -CONT "$pid" 2>/dev/null || :; done; [ "$unknown" = 0 ]'
+            '&& kill -CONT "$pid" 2>/dev/null || :; done; '
+            'rm -f -- "$receipt_file"; [ "$unknown" = 0 ]'
         )
         errors: builtins.list[str] = []
         for uid in target_uids:
@@ -2607,6 +2674,7 @@ print(' '.join(str(uid) for uid in sorted(uids) if uid in (30000,30001,30002) or
                         "sh",
                         "1" if require_exact_census else "0",
                         str(uid),
+                        self._writer_receipt_path(spec, uid, token),
                         *expected,
                     ],
                     workdir="/",
