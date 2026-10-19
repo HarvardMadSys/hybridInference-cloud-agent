@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import json
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -23,6 +24,7 @@ from cloud_agent_shared.operation_profiling import (
     PROFILING_CONTEXT_HEADER,
     answer_from_headers,
 )
+from cloud_agent_shared.sandbox_restore import START_FENCE_HEADER
 from cloud_agent_shared.storable_text import storable_json
 
 if TYPE_CHECKING:
@@ -132,6 +134,19 @@ class SandboxManagerClient:
         self._base_url = base_url.rstrip("/")
         self._headers = {"X-Agent-Workspace-Token": token, **IDENTITY_ENCODING_HEADERS}
         self._client = client
+
+    def with_start_seq(self, start_seq: int | None) -> SandboxManagerClient:
+        """This client, naming the start fence its caller's request took.
+
+        Every workspace request it sends may start the group's container, and
+        the sandbox manager labels the run the request joins with this fence
+        alone. ``None`` leaves the client as it is.
+        """
+        if start_seq is None:
+            return self
+        fenced = copy.copy(self)
+        fenced._headers = {**self._headers, START_FENCE_HEADER: str(start_seq)}
+        return fenced
 
     @asynccontextmanager
     async def _http(self, timeout: float) -> AsyncIterator[httpx.AsyncClient]:

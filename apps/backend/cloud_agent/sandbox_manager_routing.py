@@ -403,6 +403,10 @@ async def hydrate_shared_sandbox_manager(
         if start_seq is not None:
             sandbox = {**sandbox, "start_seq": start_seq}
         await sandbox_manager.register_shared_sandbox(sandbox)
+        if start_seq is not None:
+            # The request that follows names the fence too: only it may count
+            # in the label of the run it joins, not one registered beside it.
+            sandbox_manager = sandbox_manager.with_start_seq(start_seq)
     return sandbox_manager
 
 

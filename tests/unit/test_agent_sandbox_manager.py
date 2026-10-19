@@ -405,9 +405,8 @@ class _SharedSupervisor:
             raise SandboxError("unknown member")
         return [_descriptor("athr_source"), _descriptor("athr_child")]
 
-    def register_manifest(self, spec, members, *, expected_container_id=None, start_seq=None):
+    def register_manifest(self, spec, members, *, expected_container_id=None):
         self.calls.append(("manifest", spec, members, expected_container_id))
-        self.start_seqs.append(start_seq)
         self.threads.update(member.thread_id for member in members)
         return []
 
@@ -448,16 +447,18 @@ class _SharedSupervisor:
             stages=[],
         )
 
-    def operation_opened(self, thread_id: str):
+    def operation_opened(self, thread_id: str, *, start_seq: int | None = None):
         self.calls.append(("operation_opened", thread_id))
+        self.start_seqs.append(start_seq)
         return "operation-token", _descriptor(thread_id)
 
     def operation_closed(self, thread_id: str, token: str):
         self.calls.append(("operation_closed", thread_id, token))
         return _descriptor(thread_id)
 
-    def terminal_opened(self, thread_id: str):
+    def terminal_opened(self, thread_id: str, *, start_seq: int | None = None):
         self.calls.append(("terminal_opened", thread_id))
+        self.start_seqs.append(start_seq)
         return "terminal-token", _descriptor(thread_id)
 
     def terminal_closed(self, thread_id: str, token: str, **kwargs):
@@ -469,8 +470,9 @@ class _SharedSupervisor:
         self.calls.append(("backend", thread_id))
         return self.workspace_backend
 
-    def capture_snapshot(self, thread_id: str, *, capture):
+    def capture_snapshot(self, thread_id: str, *, capture, start_seq: int | None = None):
         self.calls.append(("snapshot", thread_id))
+        self.start_seqs.append(start_seq)
         return {"patch": "diff --git a/a.txt b/a.txt\n"}
 
     def pending_questions(self, thread_id: str, *, owner: str):
@@ -1550,7 +1552,7 @@ async def test_a_refused_snapshot_patch_keeps_its_final_status(monkeypatch):
     """
     supervisor = _SharedSupervisor()
     supervisor.capture_snapshot = (  # type: ignore[method-assign]
-        lambda _thread_id, *, capture: capture(object())
+        lambda _thread_id, *, capture, **_kwargs: capture(object())
     )
 
     def refuse(*_args, **_kwargs):
@@ -1725,7 +1727,9 @@ async def test_a_capture_whose_base_git_pruned_asks_for_it_again(tmp_path, monke
 
     supervisor = _SharedSupervisor()
     supervisor.capture_snapshot = (  # type: ignore[method-assign]
-        lambda _thread_id, *, capture: capture(ProcessBackend(acknowledged_unsafe=True))
+        lambda _thread_id, *, capture, **_kwargs: capture(
+            ProcessBackend(acknowledged_unsafe=True)
+        )
     )
     monkeypatch.setattr(sandbox_manager_mod, "CHAT_WORKDIR", workspace)
     app = _app(supervisor)
@@ -3633,3 +3637,32 @@ async def test_only_a_starting_turn_has_its_members_ssh_keys_written(monkeypatch
     assert response.status_code == 200, response.text
     assert response.json() == {"newest": True, "revision": 3, "running": True}
     assert applied == ["athr_source" if starting else None]
+
+
+async def test_workspace_routes_admit_each_request_under_the_fence_it_names(monkeypatch):
+    """The fence travels with the request to the admission that may start the group."""
+    supervisor = _SharedSupervisor()
+    monkeypatch.setattr(
+        "cloud_agent_host.sandbox_manager.read_retained_file",
+        lambda _backend, relative, **_kwargs: {"path": relative, "kind": "file", "content": ""},
+    )
+    monkeypatch.setattr(
+        "cloud_agent_host.sandbox_manager._run_git",
+        lambda *_args, **_kwargs: {"available": True},
+    )
+    app = _app(supervisor)
+    headers = {"X-Agent-Workspace-Token": "sandbox-manager-secret"}
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://sandbox_manager"
+    ) as client:
+        for fence in ("7", None, "not-a-fence"):
+            sent = headers if fence is None else {**headers, "X-Agent-Start-Seq": fence}
+            listed = await client.get("/workspaces/athr_source/files?path=a", headers=sent)
+            assert listed.status_code == 200, listed.text
+        inspected = await client.get(
+            "/workspaces/athr_source/git", headers={**headers, "X-Agent-Start-Seq": "8"}
+        )
+        assert inspected.status_code == 200, inspected.text
+
+    # Without a usable fence the request is served, and its run covers nothing.
+    assert supervisor.start_seqs == [7, None, None, 8]

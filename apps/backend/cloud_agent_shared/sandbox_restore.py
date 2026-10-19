@@ -16,6 +16,24 @@ from typing import Final
 #: hands a cold group only to a replica that attests it.
 SANDBOX_RESTORE_CAPABILITY: Final = "sandbox-restore-v1"
 
+#: The start fence a workspace request took, sent with it to a sandbox manager
+#: route that may start the group's container. The fence labels only the run
+#: that request is admitted to, so a checkpoint names no request whose work it
+#: does not hold, and a start under a fence sealed by a stop is refused.
+START_FENCE_HEADER: Final = "X-Agent-Start-Seq"
+
+
+def parse_start_fence(value: str | None) -> int | None:
+    """The start fence a request header names, or ``None`` when it names none.
+
+    A request without a usable fence is still served; its run is left
+    unlabelled, so no checkpoint of it covers the group.
+    """
+    if value is None or not value.isascii() or not value.isdigit() or len(value) > 18:
+        return None
+    return int(value)
+
+
 #: How long a cold group waits after its first, second and third failed restore
 #: before a host may claim it again. A restore fails on a registry or S3
 #: outage as readily as on a broken checkpoint. Spaced only by the queue's short

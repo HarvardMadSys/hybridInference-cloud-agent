@@ -742,15 +742,14 @@ class SandboxArchiveController:
             # this container was restored from. This container's lifecycle has
             # no marker yet; the one written below replaces it.
             existing = None
-        if existing is not None:
-            if (
-                existing.sandbox_id != spec.sandbox_id
-                or existing.generation != spec.generation
-                or existing.container_id != inspection.container_id
-                or existing.namespace_sha256
-                != hashlib.sha256(self._namespace.encode("utf-8")).hexdigest()
-            ):
-                raise SandboxError("final archive marker does not match the sandbox")
+        if existing is not None and (
+            existing.sandbox_id != spec.sandbox_id
+            or existing.generation != spec.generation
+            or existing.container_id != inspection.container_id
+            or existing.namespace_sha256
+            != hashlib.sha256(self._namespace.encode("utf-8")).hexdigest()
+        ):
+            raise SandboxError("final archive marker does not match the sandbox")
         # An uploaded or skipped final completed the prior stopped lifecycle.
         replace_uploaded_history = bool(
             stopped and existing is not None and existing.state in _COMPLETED_FINAL_STATES

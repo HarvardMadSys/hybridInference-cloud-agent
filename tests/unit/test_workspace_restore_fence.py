@@ -80,10 +80,16 @@ async def test_the_manifest_names_the_fence_taken_after_the_job_was_read(monkeyp
 
     registered: list[dict[str, Any]] = []
 
+    fenced: list[int | None] = []
+
     class _Manager:
         async def register_shared_sandbox(self, sandbox: dict[str, Any]) -> dict[str, Any]:
             registered.append(sandbox)
             return {}
+
+        def with_start_seq(self, start_seq: int | None) -> Any:
+            fenced.append(start_seq)
+            return self
 
     manager = _Manager()
 
@@ -100,4 +106,7 @@ async def test_the_manifest_names_the_fence_taken_after_the_job_was_read(monkeyp
     assert await _workspace_access._sandbox_manager_for_job(_store("stopped"), job) is manager
 
     assert [sandbox["start_seq"] for sandbox in registered] == [27]
+    # The request itself names it too: the manager labels a run only with
+    # the fences of the requests it admitted.
+    assert fenced == [27]
     assert job["thread_sandbox"]["start_seq"] == 26

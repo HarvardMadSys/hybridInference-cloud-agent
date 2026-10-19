@@ -982,6 +982,19 @@ class SandboxCheckpointCapture:
         #: wires its supervisor in once both exist.
         self.start_seq_for: Callable[[str], int | None] = lambda _sandbox_id: None
 
+    def receipt_start_seq(
+        self, spec: ChatSandboxSpec, inspection: ChatSandboxInspection
+    ) -> int | None:
+        """The start fence of this host's last checkpoint of exactly this container."""
+        receipt = self.store.latest(spec.sandbox_id)
+        if (
+            receipt is None
+            or receipt.generation != spec.generation
+            or receipt.container_id != inspection.container_id
+        ):
+            return None
+        return receipt.start_seq
+
     def capture(
         self,
         spec: ChatSandboxSpec,

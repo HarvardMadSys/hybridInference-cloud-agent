@@ -1074,6 +1074,7 @@ async def retry_preparation(
     if broker is None:
         raise HTTPException(503, "Workspace host is unavailable")
     await hydrate_shared_sandbox_manager(job, broker, start_seq=start_seq)
+    broker = broker.with_start_seq(start_seq)
     bound = await store.environments.get_environment_binding(
         user["user_id"], job["environment_binding_id"]
     )
