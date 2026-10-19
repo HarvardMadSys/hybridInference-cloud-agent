@@ -2045,15 +2045,16 @@ class PostgresSandboxRepository:
                     )
         return bool(inserted)
 
-    async def fence_workspace_start(self, *, thread_id: str) -> str | None:
-        """Count a start a workspace request may cause; return the group's state.
+    async def fence_workspace_start(self, *, thread_id: str) -> tuple[str, int | None] | None:
+        """Count a start a workspace request may cause; return state and fence.
 
         Opening a file, a terminal or a Git view of a stopped group starts its
         container through the sandbox manager, which records nothing here. The
         fence is taken before the request is forwarded, so the checkpoint of
-        the last stop stops covering the group from that moment on. ``None``
-        when the chat has no group, and ``host_revoked`` when its host has
-        left the pool: nothing may start it there, and it is not fenced.
+        the last stop stops covering the group from that moment on, and the
+        request carries the new ``start_seq`` so the next one does. ``None``
+        when the chat has no group, and ``host_revoked`` with no fence when
+        its host has left the pool: nothing may start it there.
         """
         async with self._pool.acquire() as conn, conn.transaction():
             sandbox_id = await conn.fetchval(

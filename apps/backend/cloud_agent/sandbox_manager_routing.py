@@ -374,7 +374,10 @@ async def sandbox_manager_for_job(
 
 
 async def hydrate_shared_sandbox_manager(
-    job: dict[str, Any], sandbox_manager: SandboxManagerClient | None
+    job: dict[str, Any],
+    sandbox_manager: SandboxManagerClient | None,
+    *,
+    start_seq: int | None = None,
 ) -> SandboxManagerClient | None:
     """Restore a shared group's aliases before a generic workspace request.
 
@@ -382,6 +385,11 @@ async def hydrate_shared_sandbox_manager(
     restart, but forked thread ids are database-owned aliases.  Re-registering
     the current bounded manifest makes Files/Terminal/Git work for a child even
     when no subsequent Agent turn has happened yet.
+
+    ``start_seq`` is the fence the caller took after reading ``job``, and the
+    one the manifest names in its place. The manager keeps the highest fence it
+    was told, so a stale one would leave the request's run labelled with the
+    previous fence, and the checkpoint of its stop would never cover the group.
     """
     sandbox = job.get("thread_sandbox")
     if not isinstance(sandbox, dict) or sandbox.get("shared_live") is not True:
@@ -392,6 +400,8 @@ async def hydrate_shared_sandbox_manager(
         # checkpoint the restoring turn carries.
         return sandbox_manager
     if sandbox_manager is not None:
+        if start_seq is not None:
+            sandbox = {**sandbox, "start_seq": start_seq}
         await sandbox_manager.register_shared_sandbox(sandbox)
     return sandbox_manager
 

@@ -1795,9 +1795,13 @@ async def test_the_import_retry_brings_back_a_base_git_pruned_with_the_one_befor
         outcomes.append(("completed", snapshot_id, commit_sha))
         return True
 
+    async def fenced(*, sandbox_id: str) -> tuple[str, int | None]:
+        return "stopped", 3
+
     monkeypatch.setattr(sandbox_manager_routing, "sandbox_manager_for_job", route)
     store = SimpleNamespace(
         snapshot=SimpleNamespace(
+            fence_base_import_start=fenced,
             record_snapshot_base_import_failure=failed,
             complete_snapshot_base_import=completed,
         ),
@@ -1806,6 +1810,7 @@ async def test_the_import_retry_brings_back_a_base_git_pruned_with_the_one_befor
     )
     pending = {
         "snapshot_id": 12,
+        "sandbox_id": "asbx_gc",
         "anchor_job_id": "ajob_gc2",
         "repo": "o/n",
         "user_id": "u1",

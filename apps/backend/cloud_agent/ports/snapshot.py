@@ -194,6 +194,13 @@ class SnapshotRepository(Protocol):
         """Return one published group commit whose object import is pending."""
         ...
 
+    async def fence_base_import_start(self, *, sandbox_id: str) -> tuple[str, int | None] | None:
+        """Fence a base import about to be sent; return state and the new fence.
+
+        As :func:`cloud_agent.storage._sql.sandbox.fence_sandbox_start`.
+        """
+        ...
+
     async def complete_snapshot_base_import(
         self,
         *,

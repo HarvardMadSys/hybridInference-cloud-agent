@@ -885,8 +885,12 @@ class SandboxManagerClient:
         target_slot_id: int,
         source_launch: dict[str, Any],
         target_launch: dict[str, Any],
+        start_seq: int | None = None,
     ) -> dict[str, Any]:
-        """Materialize a prompt-free native child in the same sandbox."""
+        """Materialize a prompt-free native child in the same sandbox.
+
+        ``start_seq`` is the fence the Fork took, as it may start the source.
+        """
         return await self._shared_sandbox_request(
             "POST",
             source_thread_id,
@@ -912,6 +916,7 @@ class SandboxManagerClient:
                 "target_slot_id": target_slot_id,
                 "source_launch": source_launch,
                 "target_launch": target_launch,
+                "start_seq": start_seq,
             },
             timeout=(
                 SHARED_PLUGIN_SESSION_FORK_TIMEOUT_S
@@ -922,7 +927,11 @@ class SandboxManagerClient:
 
     @staticmethod
     def _shared_identity(snapshot: dict[str, Any]) -> dict[str, Any]:
-        """Copy only the reviewed immutable group/member manifest fields."""
+        """Copy only the reviewed immutable group/member manifest fields.
+
+        With them goes the group's start fence, read after the request's own
+        was taken: both requests may start the container.
+        """
         return {
             "sandbox_id": snapshot["sandbox_id"],
             "generation": snapshot["generation"],
@@ -937,6 +946,7 @@ class SandboxManagerClient:
             "disk_limit_mib": snapshot.get("disk_limit_mib", 0),
             "stop_timeout_s": snapshot["stop_timeout_seconds"],
             "members": snapshot["members"],
+            "start_seq": snapshot.get("start_seq"),
         }
 
     async def capture_shared_snapshot(self, snapshot: dict[str, Any]) -> dict[str, Any]:

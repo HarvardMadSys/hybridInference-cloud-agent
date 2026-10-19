@@ -360,10 +360,11 @@ class SandboxRepository(Protocol):
         """Record one host-reported checkpoint receipt for its current group."""
         ...
 
-    async def fence_workspace_start(self, *, thread_id: str) -> str | None:
-        """Count a start a workspace request may cause; return the group's state.
+    async def fence_workspace_start(self, *, thread_id: str) -> tuple[str, int | None] | None:
+        """Count a start a workspace request may cause; return state and fence.
 
-        ``host_revoked`` when the group's host has left the pool: nothing may
+        The fence is the ``start_seq`` the request must carry. ``host_revoked``
+        with no fence when the group's host has left the pool: nothing may
         start the group there, and it is not fenced.
         """
         ...

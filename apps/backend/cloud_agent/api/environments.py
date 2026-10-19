@@ -1057,18 +1057,23 @@ async def retry_preparation(
 ) -> dict[str, Any]:
     """Retry failed preparation using the same workspace binding."""
     from cloud_agent.api._owner_auth import _owned_job
-    from cloud_agent.sandbox_manager_routing import sandbox_manager_for_job
+    from cloud_agent.sandbox_manager_routing import (
+        hydrate_shared_sandbox_manager,
+        sandbox_manager_for_job,
+    )
 
     store = require_store(store)
     job = await _owned_job(store.conversation_queries, job_id, user)
     await _job_entitled(store, user["user_id"], job, credentials)
     if not job.get("environment_binding_id"):
         raise HTTPException(409, "Workspace has no environment binding")
-    # Preparation runs inside the container, starting it if stopped.
-    await fence_workspace_start(store, job)
+    # Preparation runs inside the container, starting it if stopped, so the
+    # manager is told the fence the start belongs to before it runs.
+    start_seq = await fence_workspace_start(store, job)
     broker = await sandbox_manager_for_job(store.host_pool, job_id)
     if broker is None:
         raise HTTPException(503, "Workspace host is unavailable")
+    await hydrate_shared_sandbox_manager(job, broker, start_seq=start_seq)
     bound = await store.environments.get_environment_binding(
         user["user_id"], job["environment_binding_id"]
     )

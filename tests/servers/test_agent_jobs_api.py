@@ -1684,12 +1684,17 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
     async def thread_workspace_ready(self, *, thread_id: str) -> bool:
         return self.thread_workspace_readiness.get(thread_id, True)
 
-    async def fence_workspace_start(self, *, thread_id: str) -> str | None:
+    async def fence_workspace_start(self, *, thread_id: str) -> tuple[str, int | None] | None:
         self.workspace_start_fences.append(thread_id)
         for job in self.jobs.values():
             sandbox = job.get("thread_sandbox")
             if job.get("thread_id") == thread_id and isinstance(sandbox, dict):
-                return sandbox.get("state")
+                state = sandbox.get("state")
+                if state is None:
+                    return None
+                if state == "host_revoked":
+                    return state, None
+                return state, int(sandbox.get("start_seq") or 0) + 1
         return None
 
     async def fence_terminal_workspace(self, *, attempt_id: int, lease_generation: int) -> bool:
