@@ -24,6 +24,7 @@ import {
   ErrorNotice,
   Field,
   inputClass,
+  neverCreated,
   primaryClass,
   Reasons,
   remainingTime,
@@ -141,7 +142,9 @@ export default function ComputeResourcePanel({
               <dt className="shrink-0 text-gray-500 dark:text-gray-400">Status</dt>
               <dd className="text-right">
                 {allocation.state === 'absent'
-                  ? 'Deregistered (machine still exists)'
+                  ? neverCreated(allocation)
+                    ? 'Not created'
+                    : 'Deregistered (machine still exists)'
                   : allocation.state}
               </dd>
             </div>

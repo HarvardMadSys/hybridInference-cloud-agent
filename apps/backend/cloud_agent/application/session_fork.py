@@ -254,6 +254,7 @@ async def materialize_session_fork(
             disk_limit_mib=int(operation.get("disk_limit_mib", 0)),
             stop_timeout_s=int(operation["stop_timeout_seconds"]),
             members=members,
+            start_seq=operation.get("start_seq"),
             operation_id=operation_id,
             source_native_session_id=str(operation["source_native_session_id"]),
             source_native_turn_no=int(operation["source_native_turn_no"]),

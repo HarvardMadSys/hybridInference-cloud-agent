@@ -35,11 +35,15 @@ function formatFileSize(size?: number | null): string {
 
 /** Whether the diff deletes this file: Git's `deleted file mode` header, before any hunk. */
 function deletedByDiff(file: AgentDiffFile): boolean {
+  // A change of file type deletes the path and then creates it, so the last
+  // of these says what is there now. A hunk's lines each start with a marker,
+  // so none of them can read as one.
+  let deleted = false;
   for (const line of file.lines) {
-    if (line.marker === 'hunk') return false;
-    if (line.text.startsWith('deleted file mode ')) return true;
+    if (line.text.startsWith('deleted file mode ')) deleted = true;
+    else if (line.text.startsWith('new file mode ')) deleted = false;
   }
-  return false;
+  return deleted;
 }
 
 function basename(path: string): string {

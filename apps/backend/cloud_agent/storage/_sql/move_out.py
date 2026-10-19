@@ -10,9 +10,10 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from cloud_agent.execution_profiles import KATA_RUNTIME, ExecutionProfile
 from cloud_agent.sandbox_archive_credentials import load_stored_archive_policy
 from cloud_agent.storage._sql.compute_admission import host_compute_admission
-from cloud_agent.storage._sql.hosts import COVERED_GROUP_SQL
+from cloud_agent.storage._sql.hosts import COVERED_GROUP_SQL, UNDELETED_GROUP_SQL
 from cloud_agent.storage._sql.rows import load_json
 from cloud_agent_shared.sandbox_archive_settings import (
     SANDBOX_ARCHIVE_CAPABILITY,
@@ -40,8 +41,10 @@ async def move_out_blocker(conn: Any, leaving: list[str], *, need_target: bool) 
     revision. Otherwise its stopped groups would have no checkpoint and their
     chats would only wait. With ``need_target``, another Host must also pass
     the claim's own admission for new groups now, since restoring creates the
-    group's container there. The reason is a fixed code an operator alert can
-    name, never remote output.
+    group's container there, and run the Kata runtime when an
+    ``untrusted-kata-v1`` group would move: the claim hands such a chat to no
+    other Host, so it would wait in its checkpoint for good. The reason is a
+    fixed code an operator alert can name, never remote output.
     """
     if not leaving:
         return "no_host"
@@ -84,16 +87,28 @@ async def move_out_blocker(conn: Any, leaving: list[str], *, need_target: bool) 
         return "archive_settings_not_applied"
     if not need_target:
         return None
+    untrusted = await conn.fetchval(
+        f"""SELECT EXISTS (
+               SELECT 1 FROM agent_sandboxes g
+               WHERE g.host = ANY($1::text[]) AND {MOVABLE_GROUP_SQL}
+                 AND g.execution_profile = $2
+           )""",
+        leaving,
+        ExecutionProfile.UNTRUSTED_KATA_V1.value,
+    )
     candidates = await conn.fetch(
         """SELECT host FROM agent_runner_hosts
            WHERE status = 'online' AND credential_hash IS NOT NULL
              AND capabilities @> $2::jsonb
              AND sandbox_archive_settings_applied_revision = $3
              AND NOT host = ANY($1::text[])
+             AND (NOT $4::boolean OR sandbox_runtime = $5)
            ORDER BY host""",
         leaving,
         json.dumps([SANDBOX_RESTORE_CAPABILITY, SANDBOX_ARCHIVE_CAPABILITY]),
         archive.revision,
+        untrusted,
+        KATA_RUNTIME,
     )
     for candidate in candidates:
         # Restoring creates the group's container there, which needs the same
@@ -105,7 +120,7 @@ async def move_out_blocker(conn: Any, leaving: list[str], *, need_target: bool) 
 
 
 #: Groups still held only by a Host: not yet handed over, lost or deleted.
-UNMOVED_GROUP_SQL = """g.deletion_state = 'none' AND g.state NOT IN ('cold', 'restoring', 'lost')"""
+UNMOVED_GROUP_SQL = f"""{UNDELETED_GROUP_SQL} AND g.state NOT IN ('cold', 'restoring', 'lost')"""
 
 #: An unmoved group a leaving Host can still move: its checkpoint covers it
 #: now, or it has not stopped yet and its stop will record a checkpoint of an

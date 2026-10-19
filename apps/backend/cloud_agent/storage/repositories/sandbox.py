@@ -20,6 +20,8 @@ from cloud_agent.owner_usage import measured_interval, utc_day_shares
 from cloud_agent.storage._sql.compute_admission import lock_compute_entry
 from cloud_agent.storage._sql.hosts import (
     MOVING_OUT_HOST_SQL,
+    RECLAIMED_HOST_SQL,
+    UNDELETED_GROUP_SQL,
     moving_out_hosts,
     release_covered_sandboxes,
 )
@@ -596,8 +598,16 @@ class PostgresSandboxRepository:
         claim_token: str,
         generation: int,
         container_id: str,
+        reclaimed_quiet_seconds: float | None = None,
     ) -> bool:
-        """Mark native context lost after the host removes a container with no archive."""
+        """Mark native context lost after the host removes a container with no archive.
+
+        With ``reclaimed_quiet_seconds`` the discard finishes without that
+        host, which can never confirm it: only when its provider confirmed the
+        machine it ran on terminated and it has been silent that long
+        (``RECLAIMED_HOST_SQL``). The container went with the machine.
+        Otherwise this returns ``False`` and changes nothing.
+        """
         async with self._pool.acquire() as conn, conn.transaction():
             await conn.fetch(
                 "SELECT t.id FROM agent_threads t "
@@ -619,6 +629,13 @@ class PostgresSandboxRepository:
                 return bool(group["deletion_discard"])
             if group["deletion_state"] != "pending" or not group["deletion_discard"]:
                 return False
+            host_reclaimed = reclaimed_quiet_seconds is not None
+            if host_reclaimed and not await conn.fetchval(
+                "SELECT " + RECLAIMED_HOST_SQL.format(host="$1", quiet="$2"),
+                group["host"],
+                reclaimed_quiet_seconds,
+            ):
+                return False
             await self._record_trajectory_event(
                 conn,
                 group=group,
@@ -627,7 +644,8 @@ class PostgresSandboxRepository:
                 actor_id="sandbox-deletion-worker",
                 from_state="pending",
                 to_state="deleted",
-                details={"request_id": request_id, "discard": True},
+                details={"request_id": request_id, "discard": True}
+                | ({"host_reclaimed": True} if host_reclaimed else {}),
             )
             await conn.execute(
                 """
@@ -658,6 +676,7 @@ class PostgresSandboxRepository:
                 group=group,
                 request_id=request_id,
                 action="agent.sandbox.delete.discarded",
+                host_reclaimed=host_reclaimed,
             )
         return True
 
@@ -772,6 +791,7 @@ class PostgresSandboxRepository:
         archive_version_id: str | None = None,
         sandbox_manager_confirmed_stopped: bool = False,
         confirmed_docker_status: str | None = None,
+        host_reclaimed: bool = False,
     ) -> None:
         """Keep each deletion transition and content-free audit atomic."""
         await conn.execute(
@@ -803,6 +823,7 @@ class PostgresSandboxRepository:
                     if sandbox_manager_confirmed_stopped
                     else {}
                 )
+                | ({"host_reclaimed": True} if host_reclaimed else {})
             ),
             action != "agent.sandbox.delete.failed",
         )
@@ -1061,7 +1082,7 @@ class PostgresSandboxRepository:
                 f"""
                 SELECT g.id AS sandbox_id, g.host, g.generation, g.container_id
                 FROM agent_sandboxes g
-                WHERE g.state = 'running' AND g.deletion_state = 'none'
+                WHERE g.state = 'running' AND {UNDELETED_GROUP_SQL}
                   AND g.container_id IS NOT NULL AND g.stop_requested_at IS NULL
                   AND {MOVING_OUT_HOST_SQL.format(host="g.host")}
                 ORDER BY g.last_activity_at NULLS FIRST, g.id
@@ -1090,7 +1111,8 @@ class PostgresSandboxRepository:
             )
             group = await conn.fetchrow(
                 f"""
-                SELECT g.*, {MOVING_OUT_HOST_SQL.format(host="g.host")} AS moving_out
+                SELECT g.*, {MOVING_OUT_HOST_SQL.format(host="g.host")} AS moving_out,
+                       {UNDELETED_GROUP_SQL} AS undeleted
                 FROM agent_sandboxes g WHERE g.id = $1 FOR UPDATE
                 """,
                 sandbox_id,
@@ -1099,7 +1121,7 @@ class PostgresSandboxRepository:
                 return "not_found"
             if group["generation"] != generation or group["container_id"] != container_id:
                 return "stale"
-            if not group["moving_out"] or group["deletion_state"] != "none":
+            if not group["moving_out"] or not group["undeleted"]:
                 return "stale"
             if group["state"] == "stopping" and group["stop_requested_at"] is not None:
                 return "accepted"
@@ -1140,8 +1162,8 @@ class PostgresSandboxRepository:
             # A claim of a group's next turn holds the group row; waiting for
             # it here lets the hand-over see that turn and leave the group.
             await conn.fetch(
-                "SELECT id FROM agent_sandboxes WHERE host = ANY($1::text[]) "
-                "AND state = 'stopped' AND deletion_state = 'none' ORDER BY id FOR UPDATE",
+                "SELECT g.id FROM agent_sandboxes g WHERE g.host = ANY($1::text[]) "
+                f"AND g.state = 'stopped' AND {UNDELETED_GROUP_SQL} ORDER BY g.id FOR UPDATE",
                 hosts,
             )
             return await release_covered_sandboxes(conn, hosts, live_host=True)
@@ -2023,15 +2045,16 @@ class PostgresSandboxRepository:
                     )
         return bool(inserted)
 
-    async def fence_workspace_start(self, *, thread_id: str) -> str | None:
-        """Count a start a workspace request may cause; return the group's state.
+    async def fence_workspace_start(self, *, thread_id: str) -> tuple[str, int | None] | None:
+        """Count a start a workspace request may cause; return state and fence.
 
         Opening a file, a terminal or a Git view of a stopped group starts its
         container through the sandbox manager, which records nothing here. The
         fence is taken before the request is forwarded, so the checkpoint of
-        the last stop stops covering the group from that moment on. ``None``
-        when the chat has no group, and ``host_revoked`` when its host has
-        left the pool: nothing may start it there, and it is not fenced.
+        the last stop stops covering the group from that moment on, and the
+        request carries the new ``start_seq`` so the next one does. ``None``
+        when the chat has no group, and ``host_revoked`` with no fence when
+        its host has left the pool: nothing may start it there.
         """
         async with self._pool.acquire() as conn, conn.transaction():
             sandbox_id = await conn.fetchval(
@@ -2055,22 +2078,40 @@ class PostgresSandboxRepository:
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
-                SELECT origin_thread_id AS thread_id, generation,
-                       0::bigint AS activation_generation,
+                SELECT g.origin_thread_id AS thread_id, g.generation,
                        CASE
-                           WHEN stop_requested_at IS NOT NULL THEN 'idle'
-                           WHEN state IN ('stopped_dirty', 'lost') THEN 'lost'
-                           WHEN state = 'stopping' THEN 'orphaned_attempt'
+                           WHEN (g.state = 'stopping' AND g.stop_requested_at IS NULL)
+                             OR origin.activation_generation = 0 THEN 0::bigint
+                           ELSE origin.activation_generation
+                       END AS activation_generation,
+                       CASE
+                           WHEN EXISTS (
+                               SELECT 1 FROM agent_thread_sandbox_memberships m
+                               WHERE m.sandbox_id = g.id
+                           ) AND NOT EXISTS (
+                               SELECT 1 FROM agent_thread_sandbox_memberships m
+                               WHERE m.sandbox_id = g.id
+                                 AND COALESCE(m.context_status, '') <> 'lost'
+                                 AND COALESCE(m.native_state, '') <> 'lost'
+                           ) THEN 'lost'
+                           WHEN g.state IN ('stopped_dirty', 'lost') THEN 'lost'
+                           WHEN origin.activation_generation = 0 THEN 'orphaned_attempt'
+                           WHEN g.state = 'stopping' AND g.stop_requested_at IS NULL
+                               THEN 'orphaned_attempt'
                            ELSE 'idle'
                        END AS reason,
                        TRUE AS shared_live,
-                       CASE WHEN stop_requested_at IS NOT NULL THEN (
-                           SELECT COALESCE(jsonb_object_agg(m.thread_id, m.activation_generation),
-                                           '{}'::jsonb)
+                       (
+                           SELECT COALESCE(
+                               jsonb_object_agg(m.thread_id, m.activation_generation),
+                               '{}'::jsonb
+                           )
                            FROM agent_thread_sandbox_memberships m
-                           WHERE m.sandbox_id = g.id AND m.resident_slot_id IS NOT NULL
-                       ) END AS member_activation_generations
+                           WHERE m.sandbox_id = g.id
+                       ) AS member_activation_generations
                 FROM agent_sandboxes g
+                JOIN agent_thread_sandbox_memberships origin
+                  ON origin.sandbox_id = g.id AND origin.thread_id = g.origin_thread_id
                 WHERE g.id = $1 AND g.origin_thread_id = $2 AND g.host = $3
                   AND g.container_id = $4 AND g.generation = $5
                   AND g.active_operation_count = 0
@@ -2645,6 +2686,27 @@ class PostgresSandboxRepository:
                 or int(group["active_operation_count"]) > 0
                 or (group["snapshot_state"] == "snapshotting")
             )
+            # A runner may have died after every durable member context became
+            # LOST while the sandbox manager still holds a stale local lease.
+            # That lease must not keep the shared container RUNNING forever.
+            lost_only_group = False
+            if not durable_activity and (
+                running or (group["state"] == "running" and group["idle_deadline"] is None)
+            ):
+                lost_only_group = await conn.fetchval(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1 FROM agent_thread_sandbox_memberships
+                        WHERE sandbox_id = $1
+                    ) AND NOT EXISTS (
+                        SELECT 1 FROM agent_thread_sandbox_memberships
+                        WHERE sandbox_id = $1
+                          AND COALESCE(context_status, '') <> 'lost'
+                          AND COALESCE(native_state, '') <> 'lost'
+                    )
+                    """,
+                    sandbox_id,
+                )
             # Docker creation can outlive the runner that requested it. An
             # explicit pre-admission abandon leaves the group PROVISIONING
             # with no active member; if Docker reports that exact labelled
@@ -2678,6 +2740,21 @@ class PostgresSandboxRepository:
                         sandbox_id,
                     )
                 return None if recovered is None else str(recovered)
+            if running and lost_only_group and not durable_activity:
+                row = await conn.fetchrow(
+                    """
+                    UPDATE agent_sandboxes
+                    SET state = CASE
+                            WHEN state IN ('lost', 'stopped_dirty') THEN state
+                            ELSE 'stopping'
+                        END,
+                        idle_deadline = NULL, updated_at = NOW()
+                    WHERE id = $1
+                    RETURNING state
+                    """,
+                    sandbox_id,
+                )
+                return None if row is None else str(row["state"])
             if running:
                 if group["stop_requested_at"] is not None:
                     # A heartbeat is an observation of a still-running

@@ -374,6 +374,32 @@ describe('Side Chat', () => {
     await screen.findByRole('button', { name: 'Stop side chat' });
   });
 
+  it('keeps what was typed while a message was being sent', async () => {
+    let releaseSubmission!: () => void;
+    const submit = vi.mocked(submitThreadMessage).getMockImplementation()!;
+    vi.mocked(submitThreadMessage).mockImplementationOnce(async (...args) => {
+      await new Promise<void>((resolve) => {
+        releaseSubmission = resolve;
+      });
+      return submit(...args);
+    });
+    render(<SideChat {...props()} />);
+    await ready();
+    fireEvent.click(screen.getByRole('button', { name: 'Send side chat message' }));
+    await waitFor(() => expect(releaseSubmission).toBeDefined());
+    fireEvent.change(screen.getByRole('textbox', { name: 'Message side chat' }), {
+      target: { value: 'And what about the logs?' },
+    });
+    await act(async () => releaseSubmission());
+    await screen.findByRole('button', { name: 'Stop side chat' });
+    expect(submitThreadMessage).toHaveBeenCalledExactlyOnceWith('side', {
+      prompt: 'Why keep the files?',
+    });
+    expect(screen.getByRole('textbox', { name: 'Message side chat' })).toHaveValue(
+      'And what about the logs?',
+    );
+  });
+
   it('opens and answers the child agent question without sending a chat message or stopping the child', async () => {
     vi.mocked(listThreadQuestions).mockResolvedValue({
       job_id: next.id,

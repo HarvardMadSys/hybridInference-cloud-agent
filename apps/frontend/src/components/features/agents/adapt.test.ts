@@ -1572,6 +1572,38 @@ describe('patch parsing', () => {
     }
   });
 
+  it('reads a file that became a symlink as one changed file', () => {
+    // What `git diff` writes for a change of file type: a deletion and a
+    // creation, each with its own header, under the one name.
+    const patch = [
+      'diff --git a/config.yml b/config.yml',
+      'deleted file mode 100644',
+      'index a52e282..0000000',
+      '--- a/config.yml',
+      '+++ /dev/null',
+      '@@ -1 +0,0 @@',
+      '-plain text',
+      'diff --git a/config.yml b/config.yml',
+      'new file mode 120000',
+      'index 0000000..0190743',
+      '--- /dev/null',
+      '+++ b/config.yml',
+      '@@ -0,0 +1 @@',
+      '+shared/config.yml',
+      '\\ No newline at end of file',
+    ].join('\n');
+    expect(toDiffFiles(patch)).toEqual(['config.yml']);
+    const files = toDiffFileDetails(patch);
+    expect(files).toEqual([expect.objectContaining({ path: 'config.yml', add: 1, del: 1 })]);
+    expect(files[0].lines.filter((line) => line.marker !== 'ctx')).toEqual([
+      { marker: 'hunk', text: '@@ -1 +0,0 @@' },
+      { marker: 'del', text: '-plain text' },
+      { marker: 'hunk', text: '@@ -0,0 +1 @@' },
+      { marker: 'add', text: '+shared/config.yml' },
+    ]);
+    expect(toDisplayJob(JOB, { patch }).diffStat).toEqual({ add: 1, del: 1 });
+  });
+
   it('handles a job that produced no patch', () => {
     const job = toDisplayJob(JOB, { patch: null });
     expect(job.diffFiles).toEqual([]);

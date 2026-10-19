@@ -12,7 +12,8 @@ import time
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field, replace
-from typing import TYPE_CHECKING, Any, Literal
+from enum import Enum
+from typing import TYPE_CHECKING, Any, Final, Literal
 
 from cloud_agent_host.chat_sandbox import (
     CHAT_CPU_LIMIT_LABEL,
@@ -66,6 +67,7 @@ from cloud_agent_host.session_lifecycle import (
     DEFAULT_SWEEP_INTERVAL_S,
     SessionBusy,
     SessionLeaseLost,
+    StaleStartFence,
 )
 from cloud_agent_shared.environment_snapshots import SNAPSHOT_LABEL, EnvironmentSnapshotRef
 from cloud_agent_shared.errors import SandboxArchiveBlocked
@@ -100,6 +102,15 @@ DueCensus = tuple[
 ]
 
 logger = logging.getLogger(__name__)
+
+
+class _SameRun(Enum):
+    """A start that finishes one a request already admitted, under its fence."""
+
+    SAME_RUN = "same_run"
+
+
+_SAME_RUN: Final = _SameRun.SAME_RUN
 
 _ARCHIVE_FAILURE_DIAGNOSTICS_ATTR = "_cloud_agent_archive_failure_diagnostics"
 _ARCHIVE_ERROR_TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
@@ -481,14 +492,24 @@ class _Group:
     lifecycle_check: _LifecycleCheck | None = field(default=None, repr=False)
     idle_deadline: float | None = None
     fork_mutex: threading.Lock = field(default_factory=threading.Lock, repr=False)
-    # The control plane's start fence. A request names the fence it took
-    # (``start_seq_pending``); it becomes the group's (``start_seq``) only when
-    # the container is actually started or reused for it, so a checkpoint of a
-    # stop that came first still names the earlier run. ``None`` until a
-    # request names one, as after a sandbox manager restart: a checkpoint then
-    # carries no fence and never covers the group.
+    # The control plane's start fences. Every request that may start the
+    # container names the fence it took, and a run is labelled with the
+    # highest fence of the requests it actually admitted (``start_seq``), so
+    # the checkpoint of its stop names only requests whose work it holds. A
+    # request that is fenced but not yet here cannot lend its fence to another
+    # request's run. ``None`` until a fenced request is admitted, as for a run
+    # this host found already going after a restart.
     start_seq: int | None = None
-    start_seq_pending: int | None = None
+    # A request without a fence was admitted to this run, as from an older
+    # control plane. It counted no start, so the run's checkpoint names no
+    # fence and never covers the group.
+    run_unfenced: bool = False
+    # The highest label of a run that ended (``start_seq`` as it stopped), or
+    # of the last checkpoint receipt this host kept when it found the group
+    # after a restart. That checkpoint may be the one the group moves with,
+    # so no request under a fence at or below it may start the group again:
+    # it changes the group after its checkpoint was taken.
+    sealed_seq: int | None = None
 
 
 @dataclass(frozen=True, eq=False)
@@ -596,6 +617,12 @@ class SharedChatSessionSupervisor:
         #: Turns a moved group's checkpoint into a local image name. Without
         #: it this sandbox manager refuses to recreate any moved group.
         self.checkpoint_restore_hook = checkpoint_restore_hook
+        #: The fence of the last checkpoint this host kept of a container, for
+        #: a group found again after a restart; the sandbox manager wires in
+        #: its checkpoint store. Its stop is sealed, as if this host saw it.
+        self.checkpoint_seq_for: Callable[[ChatSandboxSpec, ChatSandboxInspection], int | None] = (
+            lambda _spec, _inspection: None
+        )
         #: Turns an installation snapshot into a local image name. Without it a
         #: new group is always created from the sandbox image.
         self.environment_snapshot_hook: EnvironmentSnapshotHook | None = None
@@ -1241,10 +1268,18 @@ class SharedChatSessionSupervisor:
         self,
         group: _Group,
         *,
+        start_seq: int | None | _SameRun = _SAME_RUN,
         facts: SandboxActionFacts | None = None,
         observer: StageRecorder | None = None,
     ) -> ChatSandboxInspection:
-        """Start a group and archive a guest-network fail-stop exactly once."""
+        """Start a group and archive a guest-network fail-stop exactly once.
+
+        ``start_seq`` is the fence of the request the start is for. When the
+        container is found stopped, the run this starts is labelled with it,
+        and a fence already sealed is refused (:meth:`_begin_run_locked`).
+        A running container is reused as it is: the request joins its run
+        once it is admitted (:meth:`_join_run_locked`).
+        """
         with self._lock:
             self._wait_for_start_locked(group, retry_failed=True)
             if group.lifecycle_check is not None:
@@ -1260,16 +1295,19 @@ class SharedChatSessionSupervisor:
             if group.orphan_finalization_pending:
                 raise SessionBusy("shared workspace orphan finalization is pending")
             group.starting = True
-            # Whatever runs from here on belongs to the newest fenced start.
-            if group.start_seq_pending is not None:
-                group.start_seq = group.start_seq_pending
             members = self._archive_members_locked(group)
             expected_container_id = group.inspection.container_id
         start_fence_prepared = False
         start_completed = False
+        refused = False
 
         def prepare_stopped_start(current: ChatSandboxInspection) -> None:
             nonlocal start_fence_prepared
+            # Docker has just proved this exact container stopped, and starts
+            # it next: this is where a new run begins.
+            if start_seq is not _SAME_RUN:
+                with self._lock:
+                    self._begin_run_locked(group, start_seq)
             if self._starting_archive_prepare_hook is None:
                 return
             self._starting_archive_prepare_hook(group.spec, current)
@@ -1300,23 +1338,18 @@ class SharedChatSessionSupervisor:
                         group.start_archive_completion_pending = False
                     start_completed = True
                     return current
-            if self._starting_archive_prepare_hook is None:
-                inspection = self._manager.start(
-                    group.spec,
-                    facts=facts,
-                    observer=observer,
-                    expected_container_id=expected_container_id,
-                    defer_network_release_on_fail_stop=(self._stopped_archive_hook is not None),
-                )
-            else:
-                inspection = self._manager.start(
-                    group.spec,
-                    facts=facts,
-                    observer=observer,
-                    expected_container_id=expected_container_id,
-                    defer_network_release_on_fail_stop=(self._stopped_archive_hook is not None),
-                    before_stopped_start=prepare_stopped_start,
-                )
+            inspection = self._manager.start(
+                group.spec,
+                facts=facts,
+                observer=observer,
+                expected_container_id=expected_container_id,
+                defer_network_release_on_fail_stop=(self._stopped_archive_hook is not None),
+                before_stopped_start=prepare_stopped_start,
+            )
+        except StaleStartFence:
+            # Refused before Docker was asked: nothing about the start failed.
+            refused = True
+            raise
         except RetainedChatLost:
             with self._lock:
                 self._mark_container_lost_locked(group)
@@ -1364,7 +1397,8 @@ class SharedChatSessionSupervisor:
             return inspection
         finally:
             with self._lock:
-                group.start_failed = not start_completed
+                if not refused:
+                    group.start_failed = not start_completed
                 group.starting = False
                 self._condition.notify_all()
 
@@ -1400,7 +1434,11 @@ class SharedChatSessionSupervisor:
                     continue
                 discovered = group is None
                 if group is None:
-                    group = _Group(spec=spec, inspection=inspection)
+                    group = _Group(
+                        spec=spec,
+                        inspection=inspection,
+                        sealed_seq=self.checkpoint_seq_for(spec, inspection),
+                    )
                     origin = _Member(thread_id=spec.thread_id, resident_slot_id=0)
                     group.members[origin.thread_id] = origin
                     self._groups[spec.sandbox_id] = group
@@ -1833,7 +1871,6 @@ class SharedChatSessionSupervisor:
         expected_container_id: str | None = None,
         facts: SandboxActionFacts | None = None,
         observer: StageRecorder | None = None,
-        start_seq: int | None = None,
         restore: CheckpointRestore | None = None,
         environment_snapshot: EnvironmentSnapshotRef | None = None,
     ) -> builtins.list[SharedSessionDescriptor]:
@@ -1884,7 +1921,6 @@ class SharedChatSessionSupervisor:
                         raise SessionLeaseLost(
                             "shared sandbox lifecycle changed during manifest admission"
                         )
-                self._note_start_seq_locked(group, start_seq)
                 return self._install_manifest_locked(
                     group,
                     spec,
@@ -1922,10 +1958,12 @@ class SharedChatSessionSupervisor:
             group = self._groups.get(spec.sandbox_id)
             if group is None:
                 group = _Group(
-                    spec=spec, inspection=created, environment_snapshot_failure=snapshot_failure
+                    spec=spec,
+                    inspection=created,
+                    environment_snapshot_failure=snapshot_failure,
+                    sealed_seq=self.checkpoint_seq_for(spec, created),
                 )
                 self._groups[spec.sandbox_id] = group
-            self._note_start_seq_locked(group, start_seq)
             return self._install_manifest_locked(
                 group,
                 spec,
@@ -1944,15 +1982,18 @@ class SharedChatSessionSupervisor:
     ) -> ChatSandboxInspection:
         """Recreate a moved group's container from its checkpoint, stopped.
 
-        Any failure leaves nothing behind that could be taken for the group and
-        is reported as :class:`SandboxRestoreFailed`, which hands the turn back
-        rather than marking the chat lost: the checkpoint is unchanged.
+        Any failure is reported as :class:`SandboxRestoreFailed`, which hands
+        the turn back rather than marking the chat lost: the checkpoint is
+        unchanged. What the attempt made goes with it: ``create`` removes a
+        container it made that failed its checks, and the image this restore
+        loaded is removed here. Any host may claim the next try, and nothing
+        would tell this one that the group lives elsewhere.
         """
         hook = self.checkpoint_restore_hook
         if hook is None:
             raise SandboxRestoreFailed("this sandbox manager cannot restore checkpoints")
         try:
-            self._manager.remove_superseded(spec)
+            self._manager.remove_superseded(spec, keep_checkpoint=restore.checkpoint_id)
             image = hook(spec.sandbox_id, restore)
             return self._manager.create(
                 spec,
@@ -1974,8 +2015,13 @@ class SharedChatSessionSupervisor:
                     "error_type": type(exc).__name__,
                 },
             )
+            # Nothing is kept for a retry here: an older container goes with
+            # its image even when it is this checkpoint's, and so does the
+            # image this restore loaded. Docker keeps one a container uses.
             with contextlib.suppress(Exception):
                 self._manager.remove_superseded(spec)
+            with contextlib.suppress(Exception):
+                self._manager.remove_checkpoint_image(spec, restore.checkpoint_id)
             raise SandboxRestoreFailed(f"sandbox checkpoint could not be restored: {exc}") from exc
 
     def _create_from_snapshot(
@@ -2037,17 +2083,50 @@ class SharedChatSessionSupervisor:
         return None
 
     @staticmethod
-    def _note_start_seq_locked(group: _Group, start_seq: int | None) -> None:
-        if start_seq is not None and (
-            group.start_seq_pending is None or start_seq > group.start_seq_pending
-        ):
-            group.start_seq_pending = start_seq
+    def _begin_run_locked(group: _Group, start_seq: int | None) -> None:
+        """Label the run a stopped group is about to start with its request's fence.
+
+        The run that ended is sealed first: the checkpoint of its stop names
+        its label, and may be what the group moves with. A request under a
+        fence at or below it was counted in that label without its work being
+        in the checkpoint, so it is refused; the control plane fences again.
+        """
+        ended = group.start_seq
+        if ended is not None and (group.sealed_seq is None or ended > group.sealed_seq):
+            group.sealed_seq = ended
+        if start_seq is not None and group.sealed_seq is not None and start_seq <= group.sealed_seq:
+            raise StaleStartFence("this request's start fence predates the group's last stop")
+        group.start_seq = start_seq
+        group.run_unfenced = start_seq is None
+
+    @staticmethod
+    def _join_run_locked(group: _Group, start_seq: int | None | _SameRun) -> None:
+        """Count a request admitted while the group runs in that run's label.
+
+        Called where the request is admitted, under the lock that keeps the
+        group from stopping before its work is done. A request without a
+        fence leaves the run unlabelled, so its checkpoint covers nothing.
+
+        A run with no label yet (one found going after a restart) takes the
+        request's: every request it ran before took a lower fence, and one
+        that arrives after its stop is refused as sealed.
+        """
+        if start_seq is _SAME_RUN:
+            return
+        if group.stopping or not group.inspection.running:
+            raise SessionBusy("shared workspace stopped before the request was admitted")
+        if start_seq is None:
+            group.run_unfenced = True
+        elif group.start_seq is None or start_seq > group.start_seq:
+            group.start_seq = start_seq
 
     def start_seq_for(self, sandbox_id: str) -> int | None:
         """The start fence of the run a stop of this group ends, if known."""
         with self._lock:
             group = self._groups.get(sandbox_id)
-            return None if group is None else group.start_seq
+            if group is None or group.run_unfenced:
+                return None
+            return group.start_seq
 
     def _install_manifest_locked(
         self,
@@ -2109,7 +2188,11 @@ class SharedChatSessionSupervisor:
                     raise SandboxError("member resident slot changed in place")
                 if member.lease_token is None and member.current_turn is None:
                     member.native_session_id = manifest.native_session_id
-                    member.context_status = manifest.context_status
+                    member.context_status = (
+                        "lost"
+                        if member.context_status == "lost" or manifest.context_status == "lost"
+                        else manifest.context_status
+                    )
                     member.activation_generation = max(
                         member.activation_generation,
                         manifest.activation_generation,
@@ -2131,7 +2214,9 @@ class SharedChatSessionSupervisor:
                         )
                     member.last_settled_job_id = manifest.last_settled_job_id
                     if member.transport is None:
-                        member.resident_state = manifest.resident_state
+                        member.resident_state = (
+                            "lost" if member.context_status == "lost" else manifest.resident_state
+                        )
                         if member.resident_state == "live":
                             member.resident_state = (
                                 "restarting" if member.native_session_id else "stopped"
@@ -2215,7 +2300,6 @@ class SharedChatSessionSupervisor:
             expected_container_id=expected_container_id,
             facts=facts,
             observer=recorder,
-            start_seq=start_seq,
             restore=restore,
             environment_snapshot=environment_snapshot,
         )
@@ -2236,6 +2320,8 @@ class SharedChatSessionSupervisor:
                 raise SessionBusy("shared workspace final archive retry is pending")
             if group.orphan_finalization_pending:
                 raise SessionBusy("shared workspace orphan finalization is pending")
+            if member.context_status == "lost":
+                raise RetainedChatLost("shared member context was lost")
             if member.lease_token is not None:
                 if member.lease_owner == owner:
                     return self._lease(
@@ -2266,6 +2352,7 @@ class SharedChatSessionSupervisor:
 
         inspection = self._start_group(
             group,
+            start_seq=start_seq,
             facts=facts,
             observer=recorder,
         )
@@ -2298,6 +2385,7 @@ class SharedChatSessionSupervisor:
                 member.resident_state = "lost"
                 raise RetainedChatLost("shared sandbox container identity changed")
             group.inspection = inspection
+            self._join_run_locked(group, start_seq)
             member.activation_generation = activation_generation
             member.settlement_receipt = None
             member.lease_token = secrets.token_urlsafe(32)
@@ -3474,8 +3562,12 @@ class SharedChatSessionSupervisor:
         target_slot_id: int,
         source_launch: ResidentLaunch,
         target_launch: ResidentLaunch,
+        start_seq: int | None = None,
     ) -> NativeSessionForkResult:
-        """Fork immediately, then prove the child live before returning."""
+        """Fork immediately, then prove the child live before returning.
+
+        ``start_seq`` is the fence the control plane took for the Fork.
+        """
         if self._native_forker is None:
             raise SandboxError("native session fork is not configured on this host")
         with self._lock:
@@ -3500,6 +3592,7 @@ class SharedChatSessionSupervisor:
                     return self._fork_native_locked_source(
                         group,
                         source,
+                        start_seq=start_seq,
                         operation_id=operation_id,
                         source_thread_id=source_thread_id,
                         source_native_session_id=source_native_session_id,
@@ -3521,6 +3614,7 @@ class SharedChatSessionSupervisor:
         group: _Group,
         source: _Member,
         *,
+        start_seq: int | None,
         operation_id: str,
         source_thread_id: str,
         source_native_session_id: str,
@@ -3536,10 +3630,12 @@ class SharedChatSessionSupervisor:
         # Docker start and CLI initialization can block for seconds. Neither
         # happens under the supervisor-wide metadata lock, so sibling turns
         # and terminals continue while this source is being prepared.
-        self._ensure_running(group)
+        self._ensure_running(group, start_seq=start_seq)
         stale_transport: ResidentTransport[DialectRuntime] | None = None
         with self._lock:
             self._require_mutation_admission(group)
+            # The Fork's activity token keeps the group from stopping.
+            self._join_run_locked(group, start_seq)
             fork_lifecycle_generation = group.lifecycle_generation
             current_group, current_source = self._member(source_thread_id)
             if current_group is not group or current_source is not source:
@@ -3700,8 +3796,13 @@ class SharedChatSessionSupervisor:
                 target_residency_generation=child.residency_generation,
             )
 
-    def operation_opened(self, thread_id: str) -> tuple[str, SharedSessionDescriptor]:
-        """Reference-count one shared workspace operation without serializing it."""
+    def operation_opened(
+        self, thread_id: str, *, start_seq: int | None = None
+    ) -> tuple[str, SharedSessionDescriptor]:
+        """Reference-count one shared workspace operation without serializing it.
+
+        ``start_seq`` is the fence the control plane took for this request.
+        """
         with self._lock:
             group, member = self._member(thread_id)
         self._recover_start_archive_completion(group)
@@ -3713,7 +3814,7 @@ class SharedChatSessionSupervisor:
                 raise SessionLeaseLost("shared membership changed before operation admission")
             self._require_mutation_admission(group)
             lifecycle_generation = group.lifecycle_generation
-        self._ensure_running(group)
+        self._ensure_running(group, start_seq=start_seq)
         with self._lock:
             self._wait_for_start_locked(group)
             current_group, current_member = self._member(thread_id)
@@ -3726,6 +3827,7 @@ class SharedChatSessionSupervisor:
                     "shared sandbox lifecycle changed during operation admission"
                 )
             self._require_mutation_admission(group)
+            self._join_run_locked(group, start_seq)
             token = secrets.token_urlsafe(24)
             group.operation_tokens[token] = thread_id
             group.idle_deadline = None
@@ -3738,6 +3840,7 @@ class SharedChatSessionSupervisor:
         preparer: Any,
         *,
         activation_owner: str | None = None,
+        start_seq: int | None | _SameRun = _SAME_RUN,
     ) -> dict[str, Any]:
         """Serialize preparation with writers, preserving this activation's lease.
 
@@ -3745,10 +3848,15 @@ class SharedChatSessionSupervisor:
         the metadata lock, which every other group's calls would otherwise wait
         behind. An observation that a lifecycle call superseded while it was in
         flight never replaces that call's own.
+
+        ``start_seq`` is the fence of an owner's request for the preparation.
+        A turn's own preparation runs under the fence its activation took.
         """
+        if start_seq is None and activation_owner is not None:
+            start_seq = _SAME_RUN
         with self._lock:
             group, _ = self._member(thread_id)
-        self._ensure_running(group)
+        self._ensure_running(group, start_seq=start_seq)
         with self._lock:
             group, member = self._member(thread_id)
             observed = group.inspection
@@ -3776,6 +3884,7 @@ class SharedChatSessionSupervisor:
                 for m in group.members.values()
             ):
                 raise SessionBusy("Environment preparation waits for active workspace operations")
+            self._join_run_locked(group, start_seq)
             cancelled = threading.Event()
             group.environment_cancel = cancelled
             group.environment_owner = activation_owner
@@ -3844,6 +3953,7 @@ class SharedChatSessionSupervisor:
         thread_id: str,
         *,
         capture: Callable[[RetainedChatBackend], dict[str, Any]],
+        start_seq: int | None = None,
     ) -> dict[str, Any]:
         """Run one bounded Git capture while all existing writers are stopped.
 
@@ -3880,6 +3990,9 @@ class SharedChatSessionSupervisor:
                     raise RetainedChatLost("shared sandbox container is missing")
                 self._accept_inspection_locked(group, current)
                 expected_container_id = group.inspection.container_id
+                if current.running:
+                    # The barrier keeps the group from stopping under it.
+                    self._join_run_locked(group, start_seq)
         except BaseException:
             with self._lock:
                 group.snapshotting = False
@@ -3892,7 +4005,7 @@ class SharedChatSessionSupervisor:
         result: dict[str, Any] | None = None
         try:
             if not current.running:
-                started = self._start_group(group)
+                started = self._start_group(group, start_seq=start_seq)
                 with self._lock:
                     if group.stopping or group.lifecycle_generation != lifecycle_generation:
                         raise SessionLeaseLost(
@@ -4267,8 +4380,13 @@ class SharedChatSessionSupervisor:
             raise SessionLeaseLost("shared sandbox lifecycle changed during initial archive")
         return result
 
-    def terminal_opened(self, thread_id: str) -> tuple[str, SharedSessionDescriptor]:
-        """Reference-count one member-owned PTY against the shared group."""
+    def terminal_opened(
+        self, thread_id: str, *, start_seq: int | None = None
+    ) -> tuple[str, SharedSessionDescriptor]:
+        """Reference-count one member-owned PTY against the shared group.
+
+        ``start_seq`` is the fence the control plane took for this request.
+        """
         with self._lock:
             group, member = self._member(thread_id)
         self._recover_start_archive_completion(group)
@@ -4280,7 +4398,7 @@ class SharedChatSessionSupervisor:
                 raise SessionLeaseLost("shared membership changed before terminal admission")
             self._require_mutation_admission(group)
             lifecycle_generation = group.lifecycle_generation
-        self._ensure_running(group)
+        self._ensure_running(group, start_seq=start_seq)
         with self._lock:
             self._wait_for_start_locked(group)
             current_group, current_member = self._member(thread_id)
@@ -4291,6 +4409,7 @@ class SharedChatSessionSupervisor:
             ):
                 raise SessionLeaseLost("shared sandbox lifecycle changed during terminal admission")
             self._require_mutation_admission(group)
+            self._join_run_locked(group, start_seq)
             token = secrets.token_urlsafe(24)
             group.terminal_tokens[token] = thread_id
             group.idle_deadline = None
@@ -4485,9 +4604,12 @@ class SharedChatSessionSupervisor:
                 raise RetainedChatLost("shared sandbox container identity was lost")
             if group.spec.generation != generation:
                 raise SessionLeaseLost("shared sandbox generation is stale")
-            if (
-                activation_generation is not None
-                and requested.activation_generation != activation_generation
+            if activation_generation == 0 and (
+                reason not in {"orphaned_attempt", "lost"} or member_activation_generations is None
+            ):
+                raise SessionLeaseLost("group-level stop is missing its durable member fence")
+            if activation_generation not in (None, 0) and (
+                requested.activation_generation != activation_generation
             ):
                 raise SessionLeaseLost("shared member activation generation is stale")
             if member_activation_generations is not None and any(
@@ -5167,7 +5289,9 @@ class SharedChatSessionSupervisor:
         # process returned above.
         return "resume" if launch.native_session_id else "new"
 
-    def _ensure_running(self, group: _Group) -> None:
+    def _ensure_running(
+        self, group: _Group, *, start_seq: int | None | _SameRun = _SAME_RUN
+    ) -> None:
         current = self._manager.inspect(group.spec.container_name)
         if current is None:
             raise RetainedChatLost("shared sandbox container is missing")
@@ -5175,7 +5299,7 @@ class SharedChatSessionSupervisor:
             raise SessionBusy("shared workspace final archive retry is pending")
         if group.orphan_finalization_pending:
             raise SessionBusy("shared workspace orphan finalization is pending")
-        group.inspection = self._start_group(group)
+        group.inspection = self._start_group(group, start_seq=start_seq)
 
     def _recover_start_archive_completion(self, group: _Group) -> None:
         """Retry an idempotent post-start marker completion before admission."""
@@ -5398,25 +5522,31 @@ class SharedChatSessionSupervisor:
         closed — stop them all, which releases their bridges and
         keeps their workspaces. Waking one reinstalls and verifies the rules
         before it runs again, and refuses while they cannot be.
+
+        The running groups are named to the check: a table it (or another
+        process) reinstalled holds none of their relay or SSH exceptions, and
+        it gives back what each still-running group lost.
         """
         with self._lock:
-            running = [
-                (next(iter(group.members)), group.spec.generation)
+            groups = [
+                group
                 for group in self._groups.values()
                 if group.inspection.running and not group.stopping and group.members
             ]
+            running = [(next(iter(group.members)), group.spec.generation) for group in groups]
+            specs = [group.spec for group in groups]
         if not running:
             self._renew_idle_host_rules()
             return []
         try:
-            self._manager.verify_host_rules()
+            self._manager.verify_host_rules(specs)
             return []
         except SandboxError:
             pass
         try:
             # A failed check is never cached, so this is a full second attempt:
             # one Docker hiccup is not reason enough to stop every group.
-            self._manager.verify_host_rules()
+            self._manager.verify_host_rules(specs)
             return []
         except SandboxError as exc:
             logger.error(

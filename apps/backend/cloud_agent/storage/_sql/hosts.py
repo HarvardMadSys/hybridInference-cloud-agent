@@ -125,6 +125,13 @@ LIVE_ATTEMPT_HOST = """EXISTS (
 HOST_RETAINED_GROUP = "g.deletion_state <> 'deleted' AND g.state <> 'cold'"
 
 
+#: Group ``g`` has no deletion in progress or done, as the claim reads it. A
+#: deletion that failed before its archive (``failed``) kept the container,
+#: and the group serves its chats as one never asked to be deleted: it is
+#: counted, moved out, handed over and lost with its machine like any other.
+UNDELETED_GROUP_SQL = "g.deletion_state NOT IN ('pending', 'archived', 'deleted')"
+
+
 def host_claim_ceiling(slots_total: int | None, slots_desired: int | None) -> int | None:
     """The concurrency a host may be asked for: the lower of its two numbers.
 
@@ -234,8 +241,8 @@ async def lock_revocation_rows(conn: Any, hosts: list[str]) -> None:
         hosts,
     )
     await conn.execute(
-        "SELECT id FROM agent_sandboxes WHERE host = ANY($1::text[]) "
-        "AND deletion_state = 'none' ORDER BY id FOR UPDATE",
+        "SELECT g.id FROM agent_sandboxes g WHERE g.host = ANY($1::text[]) "
+        f"AND {UNDELETED_GROUP_SQL} ORDER BY g.id FOR UPDATE",
         hosts,
     )
 
@@ -270,7 +277,7 @@ async def lock_hosts_for_revocation(conn: Any, hosts: list[str]) -> None:
 #: leave behind, uses this one condition.
 COVERED_GROUP_SQL = f"""(
     g.state = 'stopped'
-    AND g.deletion_state = 'none'
+    AND {UNDELETED_GROUP_SQL}
     AND g.stop_requested_at IS NULL
     AND EXISTS (
         SELECT 1 FROM agent_sandbox_checkpoints c
@@ -308,6 +315,50 @@ GROUP_TURN_CLAIMED_SQL = """EXISTS (
     JOIN agent_jobs j ON j.thread_id = claimed.thread_id
     WHERE claimed.sandbox_id = g.id AND j.state = 'running'
 )"""
+
+#: How long a Host may stay silent before another Host may take its covered
+#: stopped groups. Far longer than ``offline``: a network blip or a restart
+#: must not move anything, but a machine that died should not keep its chats
+#: waiting for a return that never comes.
+SILENT_HOST_HANDOVER_SECONDS = 1800
+
+#: A stopped group ``g`` of a Host silent that long, which another Host may take
+#: at its claim: its checkpoint covers it, and no turn of its chats is running.
+#: Nothing changes until such a claim, so a Host that returns first, or is the
+#: only one, simply continues with its own container.
+SILENT_HOST_GROUP_SQL = f"""(
+    {COVERED_GROUP_SQL}
+    AND NOT {GROUP_TURN_CLAIMED_SQL}
+    AND EXISTS (
+        SELECT 1 FROM agent_runner_hosts silent
+        WHERE silent.host = g.host
+          AND COALESCE(silent.last_heartbeat_at, silent.first_seen_at)
+              < NOW() - make_interval(secs => {SILENT_HOST_HANDOVER_SECONDS})
+    )
+)"""
+
+
+async def take_silent_host_group(conn: Any, *, sandbox_id: str, claimant: str) -> bool:
+    """Hand one stopped group of a long-silent Host to the Host claiming it.
+
+    The group becomes ``cold`` inside the claim that restores it, so it moves
+    only when another Host actually takes it (``SILENT_HOST_GROUP_SQL``). The
+    silent Host keeps its credential: it may only be partitioned, and an
+    administrator decides whether it is gone. If it returns, the group is no
+    longer its own. The caller holds the group row.
+    """
+    taken = await conn.fetchval(
+        f"""
+        UPDATE agent_sandboxes g
+        SET state = 'cold', restore_attempts = 0, restore_attempt_id = NULL,
+            idle_deadline = NULL, updated_at = NOW()
+        WHERE g.id = $1 AND g.host IS DISTINCT FROM $2 AND {SILENT_HOST_GROUP_SQL}
+        RETURNING TRUE
+        """,
+        sandbox_id,
+        claimant,
+    )
+    return bool(taken)
 
 
 async def release_covered_sandboxes(
@@ -388,6 +439,22 @@ REVOKED_HOST_SQL = """EXISTS (
     SELECT 1 FROM agent_runner_hosts revoked
     WHERE revoked.host = {host}
       AND revoked.credential_hash IS NULL AND revoked.status = 'disabled'
+)"""
+
+
+#: Whether host ``{host}`` runs on a machine its provider confirmed
+#: ``terminated`` and has been silent for ``{quiet}`` seconds: whatever Docker
+#: held there went with the machine, and the host will never answer again. The
+#: rule the compute reconciler marks such a host's remaining groups lost by.
+RECLAIMED_HOST_SQL = """EXISTS (
+    SELECT 1 FROM agent_runner_hosts reclaimed
+    JOIN agent_compute_nodes reclaimed_node ON reclaimed_node.id = reclaimed.compute_node_id
+    JOIN agent_compute_allocations reclaimed_machine
+        ON reclaimed_machine.id = reclaimed_node.allocation_id
+    WHERE reclaimed.host = {host}
+      AND reclaimed_machine.observed_state = 'terminated'
+      AND (reclaimed.last_heartbeat_at IS NULL
+           OR reclaimed.last_heartbeat_at < NOW() - make_interval(secs => {quiet}))
 )"""
 
 

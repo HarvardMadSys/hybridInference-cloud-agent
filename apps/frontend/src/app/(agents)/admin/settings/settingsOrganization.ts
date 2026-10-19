@@ -108,17 +108,6 @@ const SETTING_GROUPS: SettingGroup[] = [
     ],
   },
   {
-    title: 'Archive after merge',
-    important: ['pr_archive_enabled'],
-    advanced: [
-      'pr_archive_poll_s',
-      'pr_archive_timeout_s',
-      'pr_archive_batch_size',
-      'pr_archive_retry_max_s',
-      'pr_archive_max_failures',
-    ],
-  },
-  {
     title: 'MCP catalog',
     important: ['mcp_registry_url'],
     advanced: [

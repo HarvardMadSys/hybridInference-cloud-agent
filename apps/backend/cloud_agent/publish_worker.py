@@ -574,6 +574,15 @@ async def _import_snapshot_base(
             detail="the owning sandbox manager is unavailable for base import",
         )
         return False
+    # The import may start the container, so it carries a fence of its own.
+    fenced = await store.snapshot.fence_base_import_start(sandbox_id=str(snapshot["sandbox_id"]))
+    if fenced is None or fenced[1] is None or fenced[0] in {"cold", "restoring"}:
+        await store.snapshot.record_snapshot_base_import_failure(
+            snapshot_id=snapshot_id,
+            detail="the group cannot be started for base import on its host now",
+        )
+        return False
+    snapshot = {**snapshot, "start_seq": fenced[1]}
     try:
         await sandbox_manager.import_shared_base(snapshot, commit_sha=commit_sha, bundle=bundle)
     except Exception as exc:

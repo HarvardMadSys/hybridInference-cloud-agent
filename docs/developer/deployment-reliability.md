@@ -180,7 +180,7 @@ minutes old:
 
 | Event | Meaning |
 | --- | --- |
-| `queued_without_host` | Waiting work has no enrolled, fresh, compatible host, accounting for retained ownership and the new-chat placement pin. |
+| `queued_without_host` | Waiting work has no enrolled, fresh, compatible host, accounting for retained ownership and the new-chat placement pin. A turn of a `cold` sandbox counts any Host that restores, but not the Host it left while that one still holds its container. |
 | `queue_not_starting` | Old queue heads remain and no job is running, even if host heartbeats look healthy. |
 | `queue_health_unavailable` | Repeated database observations failed. |
 | `queue_recovered` | A reported problem cleared. |

@@ -369,6 +369,46 @@ describe('workspace navigation and copying', () => {
     expect(screen.getByRole('button', { name: 'Retry loading file' })).toBeVisible();
   });
 
+  it('does not call a file that became a symlink deleted', async () => {
+    vi.mocked(getAgentJobFiles).mockImplementation(async (_jobId, path = '') => {
+      if (!path) return { path: '', kind: 'directory', entries: [] };
+      // A link whose target is not there reads as nothing at its path.
+      throw new APIError('NOT_FOUND', 'workspace path does not exist', 404);
+    });
+    // A change of file type deletes the path and creates it again.
+    const patch = [
+      'diff --git a/config.yml b/config.yml',
+      'deleted file mode 100644',
+      'index a52e282..0000000',
+      '--- a/config.yml',
+      '+++ /dev/null',
+      '@@ -1 +0,0 @@',
+      '-plain text',
+      'diff --git a/config.yml b/config.yml',
+      'new file mode 120000',
+      'index 0000000..0190743',
+      '--- /dev/null',
+      '+++ b/config.yml',
+      '@@ -0,0 +1 @@',
+      '+shared/config.yml',
+      '\\ No newline at end of file',
+      '',
+    ].join('\n');
+    const job = {
+      ...JOB,
+      diffFiles: toDiffFiles(patch),
+      diffFileDetails: toDiffFileDetails(patch),
+    };
+    render(<WorkspaceFiles job={job} active />);
+    fireEvent.click(screen.getByRole('tab', { name: /^Changes/ }));
+
+    const changed = await screen.findByRole('button', { name: 'config.yml' });
+    expect(changed).toHaveTextContent('+1 −1');
+    fireEvent.click(changed);
+    expect(await screen.findByRole('alert')).toHaveTextContent('workspace path does not exist');
+    expect(screen.queryByText('This file was deleted by the run.')).not.toBeInTheDocument();
+  });
+
   it('retries a failed folder beside its error without refreshing the rest of the tree', async () => {
     let folderReads = 0;
     vi.mocked(getAgentJobFiles).mockImplementation(async (_jobId, path = '') => {

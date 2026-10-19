@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from pydantic import Field
+from pydantic import BeforeValidator, Field
 
 from cloud_agent_shared.shared_protocol import HOST_VERSION_MENU_MAX_ITEMS
+from cloud_agent_shared.storable_text import storable_text
 
 # What a host may say about itself, bounded. A host is trusted to run turns,
 # not to size rows: these values are stored as JSONB that the admin pool view
@@ -29,3 +30,14 @@ _HostVersionMenu = Annotated[
 ]
 _HostCapability = Annotated[str, Field(max_length=HOST_CAPABILITY_MAX_CHARS)]
 _HostLabelValue = Annotated[str, Field(max_length=HOST_LABEL_VALUE_MAX_CHARS)]
+
+
+def _storable(value: object) -> object:
+    return storable_text(value) if isinstance(value, str) else value
+
+
+#: A reason a host reports in its sandbox's own words -- a CLI's last error, the
+#: tail of what it printed. Text Postgres cannot store is replaced, not refused:
+#: refusing the reason would refuse the report that carries it. The replacement
+#: comes before the field's own checks, which cannot measure a surrogate.
+ReportedText = Annotated[str, BeforeValidator(_storable)]

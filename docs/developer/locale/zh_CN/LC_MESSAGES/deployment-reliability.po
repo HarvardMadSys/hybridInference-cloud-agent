@@ -1,0 +1,538 @@
+# Simplified Chinese translation of the Cloud Agent developer documentation.
+# See docs/developer/translations.md.
+msgid ""
+msgstr ""
+"Project-Id-Version: HybridInference Cloud Agent \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-10-19 03:26-0400\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: The HybridInference contributors\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.10.3\n"
+
+#: ../developer/deployment-reliability.md:1
+msgid "Deployment failure checks and queue monitoring"
+msgstr "部署失败检查与队列监控"
+
+#: ../developer/deployment-reliability.md:3
+msgid ""
+"Deployment checks protect the serving generation and detect work that "
+"remains queued after a rollout. Every activation must pass the exact-SHA "
+"readiness fence. The control-plane wait has a 900-second budget for cold "
+"host builds; host-local checks retain a 120-second budget after the "
+"build."
+msgstr ""
+"部署检查有两个作用：保护当前正在服务的那一代，以及发现上线后一直卡在队列里的工作。每次激活都必须通过按确切 SHA 判断的就绪栅栏。控制平面最多等"
+" 900 秒，给冷构建的主机留足时间；构建完成后，主机本地的检查还有 120 秒。"
+
+#: ../developer/deployment-reliability.md:8
+msgid ""
+"When an Actions deployment sets `DEPLOY_PEER_JOB`, "
+"[`deploy/watch_peer.py`](../../deploy/watch_peer.py) supervises only the "
+"read-only readiness wait. It reads the peer host job from the **current "
+"run attempt** with an Actions read token. A failed or cancelled job ends "
+"the wait and removes its named one-off container. If the Actions API is "
+"unavailable, the bounded readiness fence continues; activation still "
+"requires success. The watcher never interrupts migrations or service "
+"replacement. Deployments outside Actions use the bounded check directly."
+msgstr ""
+"如果 Actions 部署设置了 "
+"`DEPLOY_PEER_JOB`，[`deploy/watch_peer.py`](../../deploy/watch_peer.py) "
+"会盯着只读的就绪等待这一步，别的不管。它用 Actions "
+"的只读令牌，从**当前这次运行尝试**里读取对端主机任务的状态。对端任务失败或被取消，它就结束等待，并删掉自己起的那个一次性容器。如果 "
+"Actions API 访问不了，有时限的就绪栅栏照常进行，激活仍然要求成功。这个监视器从不打断迁移或服务替换。不走 Actions "
+"的部署，直接使用有时限的检查。"
+
+#: ../developer/deployment-reliability.md:17
+msgid "Drain through both activations"
+msgstr "两次激活期间一直保持排空"
+
+#: ../developer/deployment-reliability.md:19
+msgid ""
+"A single-host rollout that must not interrupt work uses one explicit host"
+" as a database-backed admission fence. The orchestrator runs on the "
+"control-plane machine, outside the pool it is draining. It first reads "
+"the host's current owner token and canonical `drain_fence_epoch`, then "
+"asks the API to replace that exact pair with a fresh opaque owner token. "
+"The database accepts the change only if both observations are still "
+"current and rotates the epoch as it commits."
+msgstr ""
+"如果单台主机上线时不能打断任何工作，就把一台明确指定的主机当作准入栅栏，栅栏状态存在数据库里。编排器跑在控制平面机器上，不在它要排空的资源池里。它先读取这台主机当前的所有者令牌和规范的"
+" `drain_fence_epoch`，然后请求 API "
+"把这一对值换成一个新的、不透明的所有者令牌。只有这两个值在提交时仍然是最新的，数据库才接受这次变更，并在提交时轮换 epoch。"
+
+#: ../developer/deployment-reliability.md:26
+msgid ""
+"The orchestrator then waits until that exact host still reports "
+"`draining` and `slots_used=0`. A claim that committed just before Drain "
+"is allowed to finish; no later claim can commit while the status remains "
+"draining. The host is activated while the fence stays in place. Control-"
+"plane activation sets `AGENT_DEPLOY_DRAINING_HOST` to the exact "
+"enrollment name, which authorizes the deployment readiness check to "
+"accept only that named draining host. When new-chat placement is pinned "
+"to a different enrolled host, that host must be online at the same target"
+" commit; the name difference is not itself a failure. The check requires "
+"zero occupied slots on the draining host, the target deployment "
+"capability, a fresh heartbeat and a successful reverse sandbox manager "
+"probe, then rereads the same conditions after the network await. Ordinary"
+" readiness remains online-only."
+msgstr ""
+"接着，编排器会一直等到这台主机报告 `draining` 且 `slots_used=0`。在 Drain 之前刚提交的认领可以跑完；只要状态还是"
+" draining，之后的认领都提交不了。激活主机期间，栅栏一直保留。激活控制平面时，会把 "
+"`AGENT_DEPLOY_DRAINING_HOST` "
+"设为这台主机确切的注册名，这样部署的就绪检查只会放行这一台正在排空的主机。如果新对话的放置被固定到了另一台已注册的主机，那台主机必须在线，并且处于同一个目标"
+" commit；名字不一样本身不算失败。检查要求排空主机上占用的槽位为零、具备目标部署能力、心跳是新的、反向 sandbox manager "
+"探测成功，并在等完网络之后再把这些条件重新读一遍。普通的就绪检查仍然只认在线的主机。"
+
+#: ../developer/deployment-reliability.md:39
+msgid ""
+"Only a normal fenced release holding the exact active owner token may put"
+" the host online. An identical acquire or release retry is idempotent, "
+"including after a lost success response. A successor may transfer "
+"ownership only from the exact token and epoch it observed; an operator "
+"action, lifecycle or credential change, placement change, or competing "
+"rollout rotates the epoch and makes the stale request fail. The database "
+"also refuses deletion of a host while its fence is active. Deployment "
+"remains serialized for the rest of the activation protocol, but drain "
+"safety no longer depends on that serialization or on operators leaving "
+"the row untouched."
+msgstr ""
+"只有持有当前有效所有者令牌、按正常流程解除栅栏的那一方，才能把主机重新设为在线。完全相同的获取或释放请求重试多次也没关系，即使上一次的成功响应丢了也一样。后来者只能凭自己亲眼看到的那个令牌和"
+" epoch 接手所有权；运维人员的操作、生命周期或凭据的变化、放置的变化，或者另一个同时进行的上线，都会轮换 "
+"epoch，让过期的请求失败。栅栏生效期间，数据库也不允许删除这台主机。激活协议的其余部分仍然按顺序串行执行，但排空是否安全，已经不再依赖这种串行，也不依赖运维人员不去动那条记录。"
+
+#: ../developer/deployment-reliability.md:49
+msgid ""
+"On cancellation or an uncertain result, fail closed: leave the host "
+"draining and retry with the same verified owner. Queued work waits; an "
+"in-flight turn is never killed or replayed. Migration "
+"`0051_host_drain_fence_epoch` and the `AGENT_DEPLOY_DRAIN_FENCE_V2` "
+"recipe marker are the rollback floor after V2 activation. The V1 marker "
+"remains only for an older orchestrator performing the bridge upgrade."
+msgstr ""
+"遇到取消或结果不确定时，宁可保守：让主机继续保持排空，用同一个已核实的所有者重试。排队的工作会等着；进行中的轮次绝不会被杀掉或重放。V2 "
+"激活之后，迁移 `0051_host_drain_fence_epoch` 和 recipe 标记 "
+"`AGENT_DEPLOY_DRAIN_FENCE_V2` 就是回滚的底线。V1 标记只留给执行过渡升级的旧版编排器使用。"
+
+#: ../developer/deployment-reliability.md:56
+msgid "Before stopping a serving runner"
+msgstr "停掉正在服务的 runner 之前"
+
+#: ../developer/deployment-reliability.md:58
+msgid ""
+"Source and artifact deployments resolve the candidate runner image "
+"through Compose, then run `cloud_agent_host.candidate_check` before "
+"stopping the old runners. The candidate container has no network, "
+"enrollment state, sandbox manager token or live stack mounts other than "
+"the Docker socket. It creates and removes its own temporary guest on "
+"network `none`, verifies kernel isolation and the guest observer, and "
+"compares the **built image's** runtime/helper labels with the candidate's"
+" pins."
+msgstr ""
+"无论源码部署还是产物部署，都会先通过 Compose 解析出候选的 runner 镜像，在停掉旧 runner 之前运行 "
+"`cloud_agent_host.candidate_check`。候选容器没有网络、没有注册状态、没有 sandbox manager "
+"令牌，除了 Docker socket，也不挂载正在运行的服务的任何目录。它在 `none` 网络上自己创建、自己删除一个临时 "
+"guest，确认内核隔离和 guest 观察器都正常，并把**构建出来的镜像**上的运行时和辅助程序标签，与候选版本的固定值逐一比对。"
+
+#: ../developer/deployment-reliability.md:66
+msgid ""
+"The stop signal drains the host service itself: it stops claiming and "
+"waits for every tracked turn child to exit without forwarding SIGTERM to "
+"those children. Each child owns exactly one turn and exits naturally when"
+" that turn settles. Turn children also install their drain handler before"
+" preflight as protection against an out-of-band signal, but deployment "
+"does not rely on that fallback."
+msgstr ""
+"停止信号会让主机服务自己完成排空：不再认领新任务，并等所有在跟踪的轮次子进程退出，不会把 SIGTERM "
+"转发给这些子进程。每个子进程只负责一个轮次，那一轮结束时它就自然退出。轮次子进程在 preflight "
+"之前也会装好自己的排空处理函数，以防收到意料之外的信号，但部署并不依赖这层兜底。"
+
+#: ../developer/deployment-reliability.md:72
+msgid ""
+"If that check fails, the old readiness marker and runners remain in "
+"place. The replacement runners, relays and sandbox manager must still "
+"pass their live checks before `mark-ready`; a later failure uses the "
+"recorded-generation recovery path."
+msgstr ""
+"如果这项检查没通过，旧的就绪标记和旧 runner 都原样保留。新的 runner、中继和 sandbox manager 在 `mark-"
+"ready` 之前，仍要通过各自的实时检查；之后再出错，就按已记录的代次走恢复流程。"
+
+#: ../developer/deployment-reliability.md:76
+msgid "Host runtime qualification"
+msgstr "主机运行时的资格验证"
+
+#: ../developer/deployment-reliability.md:78
+msgid ""
+"The host service performs the full Kata probe at startup, whenever the "
+"sandbox image or root-owned runtime epoch changes, and at least every 30 "
+"minutes. This last interval bounds detection of changes made outside the "
+"supported installer. A Docker restart also restarts the runner, which "
+"probes again."
+msgstr ""
+"主机服务会在这几个时候做完整的 Kata 探测：启动时；沙箱镜像或 root 所有的运行时 epoch 变化时；以及无论如何至少每 30 "
+"分钟一次。最后这个间隔，保证了绕过官方安装程序做的改动最晚多久能被发现。Docker 重启时 runner 也会跟着重启，于是又会探测一次。"
+
+#: ../developer/deployment-reliability.md:83
+msgid ""
+"The installer writes an `updating` epoch before changing runtime files "
+"and a new `ready` generation only after verification. Updating or "
+"malformed evidence blocks acceptance. Deployment initializes a missing "
+"epoch on existing hosts after the normal runtime check. A failed "
+"qualification stops claims, logs the failure once, and retries after five"
+" seconds with exponential backoff capped at five minutes. Probe "
+"containers carry `org.freeinference.chat-probe-created`, so the sandbox "
+"manager excludes them from orphan-chat adoption. Each probe removes "
+"abandoned probe containers in its namespace that are over an hour old."
+msgstr ""
+"安装程序改运行时文件之前，先写一个 `updating` epoch；验证通过后，才写新的 `ready` "
+"代次。只要证据显示正在更新，或者格式不对，就不接任务。对已有的主机，部署会在常规运行时检查之后，补上缺失的 "
+"epoch。资格验证失败时，主机停止认领，记一次失败日志，五秒后重试，之后按指数退避，最长间隔五分钟。探测容器带有 "
+"`org.freeinference.chat-probe-created` 标签，所以 sandbox manager "
+"不会把它们当作孤儿对话接管。每次探测还会清理所在命名空间里超过一小时、被遗弃的探测容器。"
+
+#: ../developer/deployment-reliability.md:92
+msgid ""
+"The host adds its qualification verdict to the child's stdin payload "
+"after stripping claim-supplied underscore keys. The child rereads the "
+"epoch, declines during an update, and probes for itself if the epoch "
+"changed. It verifies the host network before accepting the turn. A "
+"missing epoch requires the full per-turn probe; deployment canaries "
+"without a payload always run it. The probe reads the guest kernel from "
+"the same temporary container used for member isolation and observer "
+"delivery."
+msgstr ""
+"主机会先去掉认领数据里以下划线开头的键，再把自己的资格验证结论放进子进程的 stdin 数据里。子进程会重新读一次 "
+"epoch：正在更新就拒绝，epoch 变了就自己再探测一次。接下这个轮次之前，它还会核实主机网络。缺少 epoch "
+"时，每个轮次都要做完整探测；没有附带数据的部署金丝雀，每次都会完整探测。探测读取 guest "
+"内核时，用的是同一个临时容器，它同时也用来检查成员隔离和观察器投递。"
+
+#: ../developer/deployment-reliability.md:100
+msgid ""
+"See [Kata runtime qualification generation](../../ENVIRONMENT.md#kata-"
+"runtime-qualification-generation) for the marker format and installer "
+"requirements."
+msgstr ""
+"标记文件的格式和安装程序要满足的条件，见 [Kata 运行时资格验证代次](../../ENVIRONMENT.md#kata-runtime-"
+"qualification-generation)。"
+
+#: ../developer/deployment-reliability.md:103
+msgid "Network verification and startup work"
+msgstr "网络核实与启动阶段的工作"
+
+#: ../developer/deployment-reliability.md:105
+msgid ""
+"The sandbox manager verifies a group's bridge when acquiring a turn "
+"activation and returns `network_verified`. The runner may rely on that "
+"proof for up to one minute, matching the network guard's existing "
+"freshness window. Commands after that minute verify again, including "
+"after a long setup script or at turn end. Terminals and sandbox manager "
+"workspace operations always check, as does every command when the sandbox"
+" manager did not supply that proof. The turn child still installs and "
+"reads back host rules before acceptance."
+msgstr ""
+"sandbox manager 在为一个轮次做激活时，会核实这个沙箱组的网桥，并返回 `network_verified`。runner "
+"可以在一分钟之内直接相信这个结果，和网络防护现有的有效期一致。超过一分钟才执行的命令会重新核实，比如跑完一个很长的 setup "
+"脚本之后，或者轮次结束时。终端和 sandbox manager 的工作区操作每次都会检查；sandbox manager "
+"没给出这个结果时，每条命令也都会检查。轮次子进程在接任务之前，仍然会装好主机防火墙规则并读回确认。"
+
+#: ../developer/deployment-reliability.md:113
+msgid ""
+"Network-rule reads share a disposable helper; route reads use a separate "
+"helper without capabilities. Reconciliation caches inspections only "
+"within one command, rereads after mutations, and verifies the final "
+"bridge identity, membership and relay addresses. It skips unchanged guest"
+" hosts/resolver writes while retaining ownership, mode and symlink "
+"checks. These optimizations preserve the network policy and freshness "
+"requirements."
+msgstr ""
+"读取网络规则时共用一个用完即删的辅助容器；读取路由则用另一个不带任何权限的辅助容器。调和过程只在一条命令内部缓存检查结果，改动之后会重新读取，并核实最终的网桥身份、成员关系和中继地址。guest"
+" 的 hosts 文件和 DNS "
+"解析配置没变时，就不再重写，但属主、权限和符号链接的检查照做。这些优化都不会放松网络策略，也不会降低对时效性的要求。"
+
+#: ../developer/deployment-reliability.md:120
+msgid ""
+"A new chat's repository is cloned, scrubbed and archived on the host "
+"while the container starts. Its `checkout` measurement includes the "
+"remaining clone wait (`source_wait`) and import (`source_import`). Clone "
+"failures still fail at that stage; an earlier stop discards prepared "
+"source. Startup measurements attribute qualification to `preflight` and "
+"cover claim request through prompt dispatch, excluding queue wait and "
+"model response time. Declined children do not publish a successful "
+"startup. A host at capacity checks completed children every second."
+msgstr ""
+"新对话的仓库，会在容器启动的同时，在主机上完成克隆、清除敏感信息并打包。它的 `checkout` "
+"测量包括剩下的克隆等待（`source_wait`）和导入（`source_import`）。克隆失败时，仍在这一阶段报错；如果在这之前就停止了，已准备好的源码直接丢弃。启动阶段的测量把资格验证算在"
+" `preflight` "
+"里，范围是从认领请求到发出提示词，不包括排队等待和模型回复的时间。拒绝了任务的子进程不会上报一次成功的启动。满负荷的主机每秒检查一次有没有子进程跑完。"
+
+#: ../developer/deployment-reliability.md:128
+msgid "Empty-queue waits and CI evidence"
+msgstr "队列为空时的等待，以及 CI 的证据"
+
+#: ../developer/deployment-reliability.md:130
+msgid ""
+"After an empty claim, the host calls `/v1/agent/worker/wait`. The control"
+" plane wakes waiting hosts when Postgres reports queued, requeued or "
+"ended work (migration `0029`), or after five seconds. The host then "
+"claims again; the wait endpoint never assigns work. Its dedicated "
+"database listener reconnects independently and wakes all waiters on "
+"connection or disconnection. Changes the triggers cannot observe, such as"
+" a moved placement pin or a finished Fork, are therefore still found "
+"within the normal five-second interval."
+msgstr ""
+"认领不到任务时，主机会调用 `/v1/agent/worker/wait` 等待。Postgres 报告有工作排队、重新入队或结束时（迁移 "
+"`0029`），控制平面会唤醒等待中的主机；最多等五秒也会唤醒。主机醒来后重新认领，等待接口本身从不分配工作。它有一个专用的数据库监听连接，断了会自己重连，连上或断开时都会唤醒所有等待者。所以触发器察觉不到的变化，比如放置固定换了主机、某次"
+" Fork 完成了，也照样能在常规的五秒间隔内被发现。"
+
+#: ../developer/deployment-reliability.md:138
+msgid ""
+"If the endpoint returns 404, the host resumes polling and retries the "
+"endpoint after five minutes. Hosts can deploy before the control plane."
+msgstr "如果这个接口返回 404，主机就退回到轮询，五分钟后再试这个接口。所以主机可以比控制平面先部署。"
+
+#: ../developer/deployment-reliability.md:141
+msgid ""
+"CI runs the candidate check on the real Kata host for reviewed `dev` "
+"commits before `CI Gate` permits release. It uses uniquely tagged images "
+"and never runs Compose against the deployed stack. This job does not send"
+" PR code to that machine; static checks across artifacts also run on PRs."
+" A local Docker test does not establish that the real Kata-host check "
+"passed: use the named CI job's result as evidence."
+msgstr ""
+"对于评审过的 `dev` commit，CI 会在 `CI Gate` 放行发布之前，在真实的 Kata "
+"主机上跑候选检查。它用带唯一标签的镜像，从不对已部署的服务执行 Compose。这个任务不会把 PR 的代码送到那台机器上；跨产物的静态检查在 "
+"PR 上也会跑。本地 Docker 测试过了，不代表真实 Kata 主机上的检查也过了：要以那个 CI 任务的结果为准。"
+
+#: ../developer/deployment-reliability.md:148
+msgid "Old process, candidate schema"
+msgstr "旧进程对新 schema"
+
+#: ../developer/deployment-reliability.md:150
+msgid ""
+"The Postgres CI job finds the latest `agent-*` release tag reachable from"
+" the change's base and runs "
+"[`scripts/check_rolling_upgrade.py`](../../scripts/check_rolling_upgrade.py)."
+" It creates a random `rolling_test_*` database, migrates it with the "
+"previous release's Alembic graph, and warms that release's storage pool "
+"with conversation reads and writes and with the writes a runner's turn "
+"makes through the worker routes: a host heartbeat, the claim, a lease "
+"heartbeat, an event, the sandbox reservation, residency, admission and "
+"settlement, and the terminal transition, for a new chat and for a follow-"
+"up in a retained one. While the old process remains alive, it applies the"
+" candidate migration and repeats those operations on the same database "
+"backend. It also tests an idempotent migration retry, then removes the "
+"database and archived source."
+msgstr ""
+"Postgres 的 CI 任务会找出从改动的 base 能追溯到的最新 `agent-*` 发布标签，然后运行 "
+"[`scripts/check_rolling_upgrade.py`](../../scripts/check_rolling_upgrade.py)。脚本新建一个随机命名的"
+" `rolling_test_*` 数据库，先用上一个发布的 Alembic 迁移图把它迁移好，再让那个发布的存储连接池热身：既做对话的读写，也做"
+" runner 跑一个轮次时通过 worker "
+"路由产生的写入，包括主机心跳、认领、租约心跳、一个事件、沙箱预留、residency、准入和结算，以及转入终态；新对话和保留对话里的后续消息各走一遍。在旧进程还活着的时候，它执行候选版本的迁移，并在同一个数据库上把这些操作再做一遍。它还会测试迁移重试是否幂等，最后删掉数据库和归档的源码。"
+
+#: ../developer/deployment-reliability.md:162
+msgid ""
+"Run it against disposable local Postgres. Replace the quoted placeholder "
+"with an existing prior `agent-*` release tag:"
+msgstr "用一个可以随时丢弃的本地 Postgres 来跑。把引号里的占位符换成一个真实存在的旧 `agent-*` 发布标签："
+
+#: ../developer/deployment-reliability.md:171
+msgid ""
+"This checks common storage paths against the previous release. "
+"Authenticated browser flows and compatibility with every historical "
+"release need separate evidence."
+msgstr "这只能针对上一个发布检查常用的存储路径。需要登录的浏览器流程，以及和每一个历史发布的兼容性，还需要另外的证据。"
+
+#: ../developer/deployment-reliability.md:175
+msgid "Detection after deployment"
+msgstr "部署之后的检测"
+
+#: ../developer/deployment-reliability.md:177
+msgid ""
+"The main API runs one queue monitor; the MCP listener runs none. After "
+"two consecutive observations one minute apart, it reports queue heads at "
+"least ten minutes old:"
+msgstr "主 API 里运行一个队列监控器，MCP 监听器里没有。连续两次观察（间隔一分钟）都看到队首已经等了至少十分钟时，它会报告："
+
+#: ../developer/deployment-reliability.md
+msgid "Event"
+msgstr "事件"
+
+#: ../developer/deployment-reliability.md
+msgid "Meaning"
+msgstr "含义"
+
+#: ../developer/deployment-reliability.md
+msgid "`queued_without_host`"
+msgstr ""
+
+#: ../developer/deployment-reliability.md
+msgid ""
+"Waiting work has no enrolled, fresh, compatible host, accounting for "
+"retained ownership and the new-chat placement pin. A turn of a `cold` "
+"sandbox counts any Host that restores, but not the Host it left while "
+"that one still holds its container."
+msgstr ""
+"等待中的工作找不到可用的主机：没有已注册、心跳新、并且兼容的主机。判断时已经考虑了保留归属和新对话的放置固定。`cold` "
+"沙箱的轮次，任何能做恢复的主机都算数，但它刚离开的那台主机只要还留着它的容器，就不算。"
+
+#: ../developer/deployment-reliability.md
+msgid "`queue_not_starting`"
+msgstr ""
+
+#: ../developer/deployment-reliability.md
+msgid ""
+"Old queue heads remain and no job is running, even if host heartbeats "
+"look healthy."
+msgstr "队首已经等了很久，而且没有任何任务在运行，哪怕主机心跳看起来都正常。"
+
+#: ../developer/deployment-reliability.md
+msgid "`queue_health_unavailable`"
+msgstr ""
+
+#: ../developer/deployment-reliability.md
+msgid "Repeated database observations failed."
+msgstr "多次读取数据库都失败了。"
+
+#: ../developer/deployment-reliability.md
+msgid "`queue_recovered`"
+msgstr ""
+
+#: ../developer/deployment-reliability.md
+msgid "A reported problem cleared."
+msgstr "之前报告的问题已经消失。"
+
+#: ../developer/deployment-reliability.md:188
+msgid ""
+"Follow-ups waiting behind an earlier turn are excluded. Occupied slots "
+"with running work are normal backpressure. The monitor reports state; it "
+"never claims jobs, restarts hosts, changes scheduling or relaxes "
+"isolation. Compute-managed hosts follow a new control-plane commit "
+"through the compute worker's upgrade operation, which uses the host "
+"recipe's drain. External process/HTTP monitoring remains necessary "
+"because a dead API cannot monitor itself."
+msgstr ""
+"排在前一个轮次后面等待的后续消息不算在内。槽位被正在运行的工作占满，是正常的背压。监控器只负责报告状态，从不认领任务、重启主机、修改调度或放松隔离。由计算资源管理的主机，会通过"
+" compute worker 的升级操作跟上新的控制平面 commit，这个操作会走主机 recipe 里的排空流程。外部的进程和 HTTP "
+"监控仍然不可少，因为 API 自己挂了，是没法监控自己的。"
+
+#: ../developer/deployment-reliability.md:195
+msgid ""
+"Events are logged even without external delivery. To enable "
+"notifications, set `AGENT_ALERT_WEBHOOK_URL` in the control-plane `.env` "
+"to an operator-owned receiver. Queue alerts send JSON with `text`, "
+"`event`, `deployment_sha` and aggregate `queue` counts. The receiver must"
+" accept that contract; chat providers may need an adapter. Deployment-"
+"workflow alerts belong to the downstream distribution."
+msgstr ""
+"即使没有配置外部投递，事件也会写进日志。要开启通知，在控制平面的 `.env` 里把 `AGENT_ALERT_WEBHOOK_URL` "
+"设为运维人员自己的接收端。队列告警发送的 JSON 包含 `text`、`event`、`deployment_sha`，以及汇总的 "
+"`queue` 计数。接收端必须能处理这个格式；聊天工具可能需要加一层适配。部署工作流本身的告警，由下游发行版负责。"
+
+#: ../developer/deployment-reliability.md:202
+msgid ""
+"Queue notifications contain no prompts, repository names, job IDs, host "
+"credentials or log dumps. Redirects are refused. Delivery failures are "
+"logged without the webhook URL and do not affect requests or the reaper. "
+"Notifications follow state changes, repeat at most once every 30 minutes "
+"while unchanged, and retry failed delivery the next minute. External "
+"alerts are active only after the deployment owner configures the receiver"
+" and its credentials."
+msgstr ""
+"队列通知里不含提示词、仓库名、任务 ID、主机凭据或成段的日志。遇到重定向直接拒绝。投递失败会记日志（日志里不带 webhook "
+"URL），但不影响请求，也不影响 reaper。通知只在状态变化时发送；状态不变时，最多每 30 "
+"分钟重复一次；投递失败会在下一分钟重试。只有部署负责人配置好接收端和它的凭据之后，外部告警才会真正生效。"
+
+#: ../developer/deployment-reliability.md:209
+msgid "Recovery boundaries"
+msgstr "恢复的边界"
+
+#: ../developer/deployment-reliability.md:211
+msgid ""
+"The [backup and recovery runbook](disaster-recovery.md) defines initial "
+"retention and recovery targets, coordinated database/host recovery sets, "
+"encryption-key preservation, restore-drill acceptance, and previous "
+"artifact-release recovery."
+msgstr ""
+"初始的保留期和恢复目标、彼此对应的数据库与主机恢复集、加密密钥的保存、恢复演练的验收标准，以及如何退回上一个产物发布，都写在[备份与恢复手册"
+"](disaster-recovery.md)里。"
+
+#: ../developer/deployment-reliability.md:215
+msgid ""
+"Inspect both machines' deployment markers and the failure reason, then "
+"retry the same verified target. A failed host rollout remains a failed "
+"rollout even if it restored the recorded generation. Control-plane "
+"failure leaves compatible migrations in place; there is no automatic "
+"database downgrade."
+msgstr "先看两台机器上的部署标记和失败原因，然后对同一个已核实的目标重试。主机上线失败了，就算已经恢复到记录的那一代，也仍然算一次失败的上线。控制平面失败时，兼容的迁移会保留下来；数据库不会自动降级。"
+
+#: ../developer/deployment-reliability.md:220
+msgid ""
+"A hard-cancelled host activation may leave the readiness marker pending "
+"while Docker Engine continues the unbounded graceful runner stop. Running"
+" turns still finish naturally without a deployment signal reaching their "
+"child processes; after the runner exits, the host remains unavailable "
+"until activation is rerun for the same verified target. Do not publish "
+"readiness by hand."
+msgstr ""
+"如果主机的激活被强行取消，就绪标记可能停在 pending，而 Docker Engine 还在继续那次不限时的 runner "
+"优雅停止。正在跑的轮次仍会自然结束，部署信号不会传到它们的子进程。runner "
+"退出后，这台主机会一直不可用，直到对同一个已核实的目标重新执行激活。不要手动发布就绪状态。"
+
+#: ../developer/deployment-reliability.md:226
+msgid ""
+"If the host succeeds before the control plane fails, the exact-SHA gate "
+"can keep new work queued until the retry succeeds. The queue monitor "
+"detects this state. These checks protect and expose interrupted "
+"deployments; activation still spans two machines and PostgreSQL without a"
+" single transaction."
+msgstr ""
+"如果主机成功了，控制平面却失败了，精确 SHA "
+"的门槛会让新工作一直排队，直到重试成功为止。队列监控器能发现这种情况。这些检查能防止部署中断造成破坏，并把问题暴露出来；但激活本身仍然横跨两台机器和"
+" PostgreSQL，不是在一个事务里完成的。"
+
+#: ../developer/deployment-reliability.md:231
+msgid "Snapshot publication failures"
+msgstr "快照发布失败"
+
+#: ../developer/deployment-reliability.md:233
+msgid ""
+"A publication that fails — a refused patch, an unavailable GitHub "
+"credential, a failed Git or PR request — leaves its snapshot `failed` "
+"with a reason and its sandbox group `dirty`; the included agent turns "
+"stay successful. It does not hold the workspace back: the owner's next "
+"**Create PR** / **Update PR** request captures a new snapshot of the "
+"whole diff since the last published commit, which supersedes the failed "
+"one. If the failed attempt had already pushed its commit, the publisher "
+"recorded that commit as the snapshot's `pushed_commit_sha` before "
+"pushing, and the next snapshot builds on it rather than treating it as a "
+"moved branch. GitHub rate limits and transient draft-PR refusals are "
+"retried automatically. The full rules are in [Resume, Fork, and "
+"publication](operations.md#resume-fork-and-publication)."
+msgstr ""
+"发布失败时（补丁被拒、拿不到 GitHub 凭据、Git 或 PR 请求出错），对应的快照会变成 `failed` 并记下原因，沙箱组被标为 "
+"`dirty`；快照包含的那些 agent 轮次仍然算成功。工作区不会因此卡住：所有者下一次点 **Create PR** 或 **Update "
+"PR** 时，会拍一个新快照，包含上次成功发布以来的全部改动，并取代失败的那个。如果失败的那次已经把 commit "
+"推上去了，发布器在推送之前就已经把这个 commit 记成了快照的 "
+"`pushed_commit_sha`，下一个快照会接着它往下做，不会把它当成分支被人改动过。GitHub 的速率限制和临时性的草稿 PR "
+"拒绝，都会自动重试。完整规则见 [Resume、Fork 与发布](operations.md#resume-fork-and-"
+"publication)。"
+
+#: ../developer/deployment-reliability.md:245
+msgid ""
+"To investigate one, read the snapshot's `last_error`, the anchor job's "
+"event whose phase is `shared_snapshot_publish_rejected`, and GitHub's "
+"branch and PR state. Do not edit snapshot or group state in the database:"
+" marking a snapshot published or clearing `dirty` bypasses the ordered "
+"publication lineage. Fix the cause — access, network, or the refused "
+"content — and publish again."
+msgstr ""
+"排查时，看三样东西：快照的 `last_error`；锚点任务里 phase 为 "
+"`shared_snapshot_publish_rejected` 的事件；以及 GitHub 上分支和 PR "
+"的状态。不要直接在数据库里改快照或沙箱组的状态：把快照标成已发布、或者清掉 "
+"`dirty`，都会绕过按顺序排列的发布链。把根本原因（访问权限、网络或被拒的内容）修好，再重新发布。"
+

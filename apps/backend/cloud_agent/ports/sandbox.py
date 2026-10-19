@@ -86,8 +86,14 @@ class SandboxRepository(Protocol):
         claim_token: str,
         generation: int,
         container_id: str,
+        reclaimed_quiet_seconds: float | None = None,
     ) -> bool:
-        """Mark native context lost after the host removes a container with no archive."""
+        """Mark native context lost after the host removes a container with no archive.
+
+        With ``reclaimed_quiet_seconds``, finish without the host instead, only
+        when its provider confirmed the machine terminated and the host has
+        been silent that long; otherwise return ``False`` and change nothing.
+        """
         ...
 
     async def fail_admin_sandbox_deletion(
@@ -354,10 +360,11 @@ class SandboxRepository(Protocol):
         """Record one host-reported checkpoint receipt for its current group."""
         ...
 
-    async def fence_workspace_start(self, *, thread_id: str) -> str | None:
-        """Count a start a workspace request may cause; return the group's state.
+    async def fence_workspace_start(self, *, thread_id: str) -> tuple[str, int | None] | None:
+        """Count a start a workspace request may cause; return state and fence.
 
-        ``host_revoked`` when the group's host has left the pool: nothing may
+        The fence is the ``start_seq`` the request must carry. ``host_revoked``
+        with no fence when the group's host has left the pool: nothing may
         start the group there, and it is not fenced.
         """
         ...

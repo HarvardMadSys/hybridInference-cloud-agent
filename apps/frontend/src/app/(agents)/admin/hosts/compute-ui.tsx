@@ -2,12 +2,19 @@
 
 import { useEffect, useId, useRef, type ReactNode, type Ref } from 'react';
 
-import type { BlockedReason, ComputeField, ComputeOperation } from '@/lib/api/compute';
+import type {
+  BlockedReason,
+  ComputeAllocation,
+  ComputeField,
+  ComputeOperation,
+} from '@/lib/api/compute';
 
 export const inputClass =
   'ui-input min-h-11 w-full disabled:cursor-not-allowed disabled:opacity-50 aria-[invalid=true]:border-status-error';
 export const buttonClass = 'ui-button ui-button-secondary min-h-11';
 export const primaryClass = 'ui-button ui-button-primary min-h-11';
+export const dangerClass =
+  'ui-button min-h-11 border border-status-error/25 bg-status-error/10 text-status-error hover:bg-status-error/20';
 
 export function Panel({
   title,
@@ -266,6 +273,16 @@ export function absoluteTime(value: string | null | undefined): string {
   const date = new Date(value);
   if (!Number.isFinite(date.getTime())) return 'Unknown';
   return date.toLocaleString(undefined, { timeZoneName: 'short' });
+}
+
+/** An absent provider resource that never existed: no identity or node was ever recorded. */
+export function neverCreated(allocation: ComputeAllocation): boolean {
+  return (
+    allocation.state === 'absent' &&
+    allocation.provider_id !== 'existing_ssh' &&
+    !allocation.external_id &&
+    allocation.nodes.length === 0
+  );
 }
 
 export function remainingTime(value: string): string {

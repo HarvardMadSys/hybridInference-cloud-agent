@@ -598,9 +598,12 @@ async def test_an_import_answered_by_the_old_host_after_the_restore_changes_noth
     )
 
     # Now runner-a answers: the commit landed in its old container.
+    answered: list[int] = []
+
     class _OldHost:
         async def import_shared_base(self, row, *, commit_sha: str, bundle: bytes):
             assert (row["generation"], row["container_id"]) == (1, "container-a")
+            answered.append(row["generation"])
             return {"ok": True}
 
     async def route(_store, job_id: str):
@@ -612,6 +615,7 @@ async def test_an_import_answered_by_the_old_host_after_the_restore_changes_noth
     assert not await publish_worker._import_snapshot_base(
         store, snapshot=sent, commit_sha=commit_sha, bundle=b"bundle"
     )
+    assert answered == [1]
 
     # The restored container still lacks the base, and it is what the import
     # is sent to next.
@@ -1102,7 +1106,8 @@ async def test_a_group_its_checkpoint_does_not_cover_stays_on_its_host(
     )
     if spoil == "started_after":
         # Opening the workspace starts the container after the checkpoint.
-        assert await store.sandbox.fence_workspace_start(thread_id=job["thread_id"]) == "stopped"
+        fenced = await store.sandbox.fence_workspace_start(thread_id=job["thread_id"])
+        assert fenced is not None and fenced[0] == "stopped"
 
     # Nowhere to move it, so the administrator removes the host anyway.
     assert await store.host_pool.remove_host(host="runner-a", allow_unmoved=True) == "ok"
@@ -1112,9 +1117,54 @@ async def test_a_group_its_checkpoint_does_not_cover_stays_on_its_host(
     assert state["host"] == "runner-a"
 
 
+async def test_a_checkpoint_after_a_workspace_request_still_covers_the_group(pool, store: Storage):
+    """The fence a workspace request took is the one its run's checkpoint names.
+
+    The web app reads a chat's Git status after every turn. That request
+    fences the group after its job was read, so a manager told the job's own
+    sequence labelled the run one behind: no checkpoint of its stop ever
+    covered the group, and on staging two expiring hosts lost every chat.
+    """
+    job, group = await _settled_stopped_group(pool, store)
+
+    fenced = await store.sandbox.fence_workspace_start(thread_id=job["thread_id"])
+    assert fenced == ("stopped", group["start_seq"] + 1)
+
+    assert await store.sandbox.record_sandbox_checkpoint(
+        host="runner-a",
+        thread_id=job["thread_id"],
+        checkpoint=_receipt(group, job, start_seq=fenced[1]),
+    )
+    assert (await _state(pool))["restore_checkpoint_id"] == "c" * 32
+
+
+async def test_a_capture_and_a_base_import_name_the_fence_they_took(pool, store: Storage):
+    """Both may start the container, so each hands the manager its own fence."""
+    job, group = await _settled_stopped_group(pool, store)
+    requested = await store.snapshot.request_snapshot_publication(
+        thread_id=job["thread_id"], user_id=job["user_id"]
+    )
+    assert requested.get("requested") is True, requested
+
+    capture = await store.snapshot.claim_due_sandbox_snapshot()
+
+    assert capture is not None
+    assert capture["start_seq"] == group["start_seq"] + 1
+    assert await store.snapshot.fence_base_import_start(sandbox_id=group["sandbox_id"]) == (
+        "stopped",
+        group["start_seq"] + 2,
+    )
+    assert await store.host_pool.remove_host(host="runner-a", allow_unmoved=True) == "ok"
+    assert await store.snapshot.fence_base_import_start(sandbox_id=group["sandbox_id"]) == (
+        "host_revoked",
+        None,
+    )
+
+
 async def test_a_repeated_receipt_cannot_cover_the_group_again(pool, store: Storage):
     job, group = await _covered(pool, store)
-    assert await store.sandbox.fence_workspace_start(thread_id=job["thread_id"]) == "stopped"
+    fenced = await store.sandbox.fence_workspace_start(thread_id=job["thread_id"])
+    assert fenced is not None and fenced[0] == "stopped"
 
     # The next beat repeats the same receipt; it must not restore the point.
     assert not await store.sandbox.record_sandbox_checkpoint(
@@ -1143,7 +1193,7 @@ async def test_workspace_requests_wait_for_a_cold_group(pool, store: Storage):
     job, _ = await _covered(pool, store)
     assert await store.host_pool.remove_host(host="runner-a") == "ok"
 
-    assert await store.sandbox.fence_workspace_start(thread_id=job["thread_id"]) == "cold"
+    assert await store.sandbox.fence_workspace_start(thread_id=job["thread_id"]) == ("cold", 2)
     # The fence never discards the checkpoint a cold group is restored from.
     assert (await _state(pool))["restore_checkpoint_id"] == "c" * 32
 
@@ -1183,7 +1233,7 @@ async def test_a_workspace_request_hands_on_a_group_its_late_checkpoint_covers(
         host="runner-a", thread_id=job["thread_id"], checkpoint=_receipt(group, job)
     )
 
-    assert await store.sandbox.fence_workspace_start(thread_id=job["thread_id"]) == "cold"
+    assert await store.sandbox.fence_workspace_start(thread_id=job["thread_id"]) == ("cold", None)
 
     state = await _state(pool)
     assert (state["state"], state["restore_checkpoint_id"]) == ("cold", "c" * 32)
@@ -1194,7 +1244,10 @@ async def test_a_workspace_request_to_a_removed_hosts_group_starts_nothing(pool,
     job, group = await _settled_stopped_group(pool, store)
     assert await store.host_pool.remove_host(host="runner-a", allow_unmoved=True) == "ok"
 
-    assert await store.sandbox.fence_workspace_start(thread_id=job["thread_id"]) == "host_revoked"
+    assert await store.sandbox.fence_workspace_start(thread_id=job["thread_id"]) == (
+        "host_revoked",
+        None,
+    )
 
     assert await store.sandbox.record_sandbox_checkpoint(
         host="runner-a", thread_id=job["thread_id"], checkpoint=_receipt(group, job)

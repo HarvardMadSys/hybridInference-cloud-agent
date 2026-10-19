@@ -220,6 +220,48 @@ async def test_conversation_usage_is_owner_scoped_and_does_not_include_other_thr
     assert await ledger.ledger_rows_for_conversation(job_id="missing", user_id="user-1") == []
 
 
+async def test_a_turn_that_never_called_a_model_leaves_no_gap_in_its_conversation(
+    db, store, ledger: PostgresLedgerRepository
+):
+    """The conversation total reads such a turn as the turn's own usage does.
+
+    A turn that ended before its agent could call a model has no reference and
+    spent nothing, and its job usage says so. The conversation read left out
+    whether that turn ever reported model usage, so its summary named it
+    unattributed, and a conversation holding one read as incomplete beside the
+    totals of every turn that did run.
+    """
+    first, _, _ = await _seed_attempt(
+        db, store, grant_id=None, finished_at=datetime.now(timezone.utc)
+    )
+    second = await store.conversation_commands.create_follow_up(
+        parent_job_id=first["id"], user_id="user-1", prompt="second turn"
+    )
+    assert second is not None and second.get("error") is None
+    _, _, second_ledger = await _seed_attempt(db, store, job=second)
+    async with db.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_attempt_ledger SET snapshot = $2::jsonb, queried_at = NOW() "
+            "WHERE id = $1",
+            second_ledger,
+            json.dumps(report_payload(grant_id="grant-one")),
+        )
+    first_usage = summarize_job_usage(
+        ledger_rows=await ledger.ledger_rows_for_job(job_id=first["id"]),
+        runtime_inputs={"job_ids": [first["id"]], "attempts": [], "events": []},
+        runtime="claude-code",
+        terminal=False,
+    )
+    assert first_usage.ledger.attempts[0].reason == "no_model_calls"
+
+    summary = summarize_conversation(
+        await ledger.ledger_rows_for_conversation(job_id=second["id"], user_id="user-1")
+    )
+    assert summary.turn_count == 2
+    assert summary.totals.calls == 1
+    assert summary.incomplete is False
+
+
 async def _complete(
     store: Storage,
     claim: dict,

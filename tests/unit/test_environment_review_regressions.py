@@ -168,6 +168,43 @@ def test_snapshot_scan_never_imports_from_the_workspace(git_workspace):
     check_snapshot_secrets(backend, base, bound, workdir=str(root))
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="other filesystems refuse non-UTF-8 names")
+@pytest.mark.parametrize("holds_secret", [False, True])
+def test_snapshot_scans_a_file_whose_name_is_not_utf8(git_workspace, holds_secret):
+    root, _, base, backend = git_workspace
+    value = "example-private-credential"
+    # Git keeps a name as the bytes it was written with, here Latin-1.
+    with open(os.path.join(os.fsencode(root), b"r\xe9sum\xe9.txt"), "wb") as handle:
+        handle.write(b"TOKEN=" + value.encode() if holds_secret else b"cv\n")
+    bound = BoundEnvironment(
+        binding_id="b", variables=[EnvironmentVariable(name="TOKEN", value=value)]
+    )
+    if holds_secret:
+        with pytest.raises(SandboxError, match="Secret value"):
+            check_snapshot_secrets(backend, base, bound, workdir=str(root))
+    else:
+        check_snapshot_secrets(backend, base, bound, workdir=str(root))
+
+
+def test_snapshot_scan_passes_a_repository_cloned_into_the_workspace(git_workspace):
+    root, _, base, backend = git_workspace
+    nested = root / "dependency"
+    nested.mkdir()
+    (nested / "README").write_text("another project\n")
+    for args in (
+        ["init", "-q"],
+        ["add", "README"],
+        ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "x"],
+    ):
+        subprocess.check_output(["git", *args], cwd=nested, stderr=subprocess.STDOUT)
+    bound = BoundEnvironment(
+        binding_id="b",
+        variables=[EnvironmentVariable(name="TOKEN", value="example-private-credential")],
+    )
+    # Its entry is a commit id, which carries no file content into the patch.
+    check_snapshot_secrets(backend, base, bound, workdir=str(root))
+
+
 def test_completed_action_is_not_reexecuted_after_reaping_or_broker_restart(tmp_path):
     receipts = ActionReceipts(tmp_path)
     manager = _TerminalManager(

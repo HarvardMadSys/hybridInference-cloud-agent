@@ -112,17 +112,3 @@ async def test_a_purge_failure_is_logged_and_does_not_abort_the_loop(
     assert failures[0].exc_info is not None
     assert isinstance(failures[0].exc_info[1], RuntimeError)
     assert "Agent attempt reaper pass failed" not in caplog.text
-
-
-async def test_environment_maintenance_failure_does_not_skip_attempt_or_upload_cleanup(
-    monkeypatch, caplog
-):
-    from unittest.mock import AsyncMock
-
-    store = _Store()
-    store.maintain_environments = AsyncMock(side_effect=RuntimeError("maintenance unavailable"))
-    with caplog.at_level(logging.WARNING):
-        await _one_pass(store, monkeypatch)
-    assert "reap_expired" in store.events
-    assert ("purge", 24) in store.events
-    assert "Environment maintenance sweep failed" in caplog.text

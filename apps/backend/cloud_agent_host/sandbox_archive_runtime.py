@@ -35,6 +35,7 @@ from cloud_agent_host.sandbox_archive_s3 import (
 from cloud_agent_host.sandbox_archives import (
     SandboxArchiveService,
     SandboxInitialArchiveMarker,
+    carried_by_checkpoint,
     safe_archive_error_type,
 )
 from cloud_agent_shared.sandbox_archive_settings import (
@@ -734,14 +735,21 @@ class SandboxArchiveController:
         existing: _FinalArchiveMarker | None = None
         if existing_payload is not None:
             existing = _FinalArchiveMarker.decode(existing_payload)
-            if (
-                existing.sandbox_id != spec.sandbox_id
-                or existing.generation != spec.generation
-                or existing.container_id != inspection.container_id
-                or existing.namespace_sha256
-                != hashlib.sha256(self._namespace.encode("utf-8")).hexdigest()
-            ):
-                raise SandboxError("final archive marker does not match the sandbox")
+        if existing is not None and self._carried_by_checkpoint(
+            spec, existing.namespace_sha256, existing.sandbox_id, existing.generation
+        ):
+            # The stopped generation's marker, committed into the checkpoint
+            # this container was restored from. This container's lifecycle has
+            # no marker yet; the one written below replaces it.
+            existing = None
+        if existing is not None and (
+            existing.sandbox_id != spec.sandbox_id
+            or existing.generation != spec.generation
+            or existing.container_id != inspection.container_id
+            or existing.namespace_sha256
+            != hashlib.sha256(self._namespace.encode("utf-8")).hexdigest()
+        ):
+            raise SandboxError("final archive marker does not match the sandbox")
         # An uploaded or skipped final completed the prior stopped lifecycle.
         replace_uploaded_history = bool(
             stopped and existing is not None and existing.state in _COMPLETED_FINAL_STATES
@@ -862,6 +870,23 @@ class SandboxArchiveController:
                     self._condition.notify_all()
             self._close_services(services_to_close)
             raise
+
+    def _carried_by_checkpoint(
+        self,
+        spec: ChatSandboxSpec,
+        namespace_sha256: str,
+        sandbox_id: str,
+        generation: int,
+    ) -> bool:
+        """Whether a marker is an earlier generation's, restored with its checkpoint."""
+        return carried_by_checkpoint(
+            namespace=self._namespace,
+            marker_namespace_sha256=namespace_sha256,
+            marker_sandbox_id=sandbox_id,
+            marker_generation=generation,
+            sandbox_id=spec.sandbox_id,
+            generation=spec.generation,
+        )
 
     def _release_final_pin(self, key: tuple[str, int, str]) -> None:
         with self._condition:
@@ -1144,6 +1169,10 @@ class SandboxArchiveController:
             expected_container_id=expected_container_id,
         )
         marker = None if payload is None else SandboxInitialArchiveMarker.decode(payload)
+        if marker is not None and self._carried_by_checkpoint(
+            backend.spec, marker.namespace_sha256, marker.sandbox_id, marker.generation
+        ):
+            marker = None
         if marker is not None:
             expected_namespace = hashlib.sha256(self._namespace.encode("utf-8")).hexdigest()
             if (

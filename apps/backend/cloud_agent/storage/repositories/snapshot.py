@@ -18,7 +18,7 @@ from cloud_agent.logging_utils import get_logger
 from cloud_agent.storage._sql.events import insert_event
 from cloud_agent.storage._sql.hosts import REVOKED_HOST_SQL, refuse_start_on_revoked_host
 from cloud_agent.storage._sql.rows import load_json
-from cloud_agent.storage._sql.sandbox import FENCE_START_SQL
+from cloud_agent.storage._sql.sandbox import FENCE_START_SQL, fence_sandbox_start
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -438,8 +438,13 @@ class PostgresSnapshotRepository:
                 """,
                 row["sandbox_id"],
             )
+            # Read after the fence: the capture must name the start it fenced.
+            start_seq = await conn.fetchval(
+                "SELECT start_seq FROM agent_sandboxes WHERE id = $1", row["sandbox_id"]
+            )
         result = dict(row)
         result["members"] = load_json(result.get("members")) or []
+        result["start_seq"] = start_seq
         return result
 
     async def record_sandbox_snapshot_capture(
@@ -1493,6 +1498,18 @@ class PostgresSnapshotRepository:
         result = dict(row)
         result["members"] = load_json(result.get("members")) or []
         return result
+
+    async def fence_base_import_start(self, *, sandbox_id: str) -> tuple[str, int | None] | None:
+        """Fence a base import about to be sent; return state and the new fence.
+
+        Recording the commit fenced the group already, but that fence was
+        read by no request, and a retry may leave much later. The request
+        names a fence of its own: a later one would label the import's run
+        with a start still in flight, so a checkpoint could cover the group
+        before that start changes it.
+        """
+        async with self._pool.acquire() as conn, conn.transaction():
+            return await fence_sandbox_start(conn, sandbox_id)
 
     async def complete_snapshot_base_import(
         self,

@@ -1,0 +1,237 @@
+# Simplified Chinese translation of the Cloud Agent developer documentation.
+# See docs/developer/translations.md.
+msgid ""
+msgstr ""
+"Project-Id-Version: HybridInference Cloud Agent \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-10-16 01:54-0400\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: The HybridInference contributors\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../CONTRIBUTING.md:2
+msgid "Contributing"
+msgstr "贡献指南"
+
+#: ../../CONTRIBUTING.md:4
+msgid ""
+"Before changing this repository, read [AGENTS.md](AGENTS.md). See the "
+"[developer guide](docs/developer/development.md) for local setup, code "
+"ownership, dependency boundaries, and checks for common changes."
+msgstr ""
+"动手改这个仓库之前，先读 "
+"[AGENTS.md](AGENTS.md)。本地环境搭建、代码归属、依赖边界，以及常见改动要跑哪些检查，都在[开发者指南](docs/developer/development.md)里。"
+
+#: ../../CONTRIBUTING.md:8
+msgid "The short version"
+msgstr "一句话流程"
+
+#: ../../CONTRIBUTING.md:10
+msgid ""
+"Create a branch from `dev` named `<user>/<scope>/<name>`. Keep the change"
+" focused on one feature, fix, or documentation update."
+msgstr "从 `dev` 拉分支，命名为 `<user>/<scope>/<name>`。一次改动只做一件事：一个功能、一个修复，或一次文档更新。"
+
+#: ../../CONTRIBUTING.md:12
+msgid ""
+"Run tests that cover the behavior you changed, and add coverage where "
+"needed. Keep the tests strong: fix regressions instead of weakening "
+"assertions just to make them pass."
+msgstr "跑覆盖你所改行为的测试，缺的就补上。测试不能放水：出了回归就修代码，不要为了让测试通过而放宽断言。"
+
+#: ../../CONTRIBUTING.md:15
+msgid ""
+"Keep affected contracts, migrations, and current-use documentation up to "
+"date."
+msgstr "受影响的契约、迁移和当前在用的文档，要一并更新。"
+
+#: ../../CONTRIBUTING.md:17
+msgid ""
+"Run `make check` and any other checks the change requires. Review the "
+"formatting and lint fixes it applies automatically."
+msgstr "跑 `make check`，以及这次改动需要的其他检查。它会自动做格式化和 lint 修复，提交前看一遍改了什么。"
+
+#: ../../CONTRIBUTING.md:19
+msgid ""
+"Open a pull request against `dev`. Describe the resulting behavior, and "
+"list the checks you actually ran and their results."
+msgstr "向 `dev` 发起 pull request。写清楚改完之后的行为，并列出你实际跑过的检查和结果。"
+
+#: ../../CONTRIBUTING.md:22
+msgid ""
+"Use conventional commit format for commit subjects and PR titles: "
+"`type(scope): summary`. Pull requests are squash merged, so the PR title "
+"becomes the commit subject on `dev`. `main` advances through the manual "
+"[fast-forward workflow](.github/workflows/sync-main.yml)."
+msgstr ""
+"commit 标题和 PR 标题都用 conventional commit 格式：`type(scope): summary`。Pull "
+"request 用 squash 方式合并，所以 PR 标题就是 `dev` 上那条 commit 的标题。`main` 通过手动触发的 "
+"[fast-forward 工作流](.github/workflows/sync-main.yml)往前推进。"
+
+#: ../../CONTRIBUTING.md:27
+msgid ""
+"Treat every commit as public. Never commit secrets, tokens, or keys. "
+"Before submitting, use the [PR "
+"checklist](.github/pull_request_template.md) to review the diff. "
+"[MIGRATION.md](MIGRATION.md) documents the completed repository "
+"extraction. Its move-only restrictions are historical, but the service "
+"and security boundaries in `AGENTS.md` still apply."
+msgstr ""
+"每个 commit 都要当成公开内容对待，绝不能提交 secret、令牌或密钥。提交前，对照 [PR "
+"检查清单](.github/pull_request_template.md)把 diff "
+"过一遍。[MIGRATION.md](MIGRATION.md) 记录的是已经完成的仓库拆分；里面\"只搬不改\"的限制已成历史，但 "
+"`AGENTS.md` 里的服务边界和安全边界依然有效。"
+
+#: ../../CONTRIBUTING.md:33
+msgid "Checks before review"
+msgstr "提交评审前的检查"
+
+#: ../../CONTRIBUTING.md:35
+msgid "Run these backend commands from the repository root:"
+msgstr "在仓库根目录运行这些后端命令："
+
+#: ../../CONTRIBUTING.md:42
+msgid ""
+"Use `make setup-dev` for the initial environment setup. `make check` "
+"formats, lints, and type-checks all three Python packages. It also runs "
+"tests, excluding the `external` and `dbtest` tiers."
+msgstr ""
+"第一次搭环境用 `make setup-dev`。`make check` 会对三个 Python 包做格式化、lint "
+"和类型检查，并跑测试（不含 `external` 和 `dbtest` 两个层级）。"
+
+#: ../../CONTRIBUTING.md:46
+msgid "For frontend changes, also run:"
+msgstr "改了前端，还要跑："
+
+#: ../../CONTRIBUTING.md:57
+msgid ""
+"CI also runs build guards for server-only and runtime site configuration."
+" If you change those boundaries, follow the [developer "
+"guide](docs/developer/development.md#run-the-relevant-checks) and run the"
+" relevant guard locally."
+msgstr ""
+"CI 还会跑 server-only "
+"和运行时站点配置的构建守卫。如果你动了这两处边界，请按[开发者指南](docs/developer/development.md#run-the-"
+"relevant-checks)在本地跑对应的守卫。"
+
+#: ../../CONTRIBUTING.md:62
+msgid ""
+"Use the [developer guide](docs/developer/development.md#run-the-relevant-"
+"checks) to choose the database and external tests you need. Database "
+"changes require the `dbtest` tier against a dedicated PostgreSQL test "
+"database. Schema changes need an additive Alembic migration. Service "
+"startup must not create or alter the schema."
+msgstr ""
+"需要跑哪些数据库测试和外部测试，参考[开发者指南](docs/developer/development.md#run-the-relevant-"
+"checks)来选。改了数据库，就要用专门的 PostgreSQL 测试库跑 `dbtest` 层级。改 schema 要写增量的 Alembic"
+" 迁移，服务启动时不能建表或改表。"
+
+#: ../../CONTRIBUTING.md:68
+msgid ""
+"If you change environment variables, Compose files, Docker packaging, or "
+"workflows, run the tests that verify their wiring. Document new variables"
+" in [ENVIRONMENT.md](ENVIRONMENT.md). Update the documentation in the "
+"same change when commands or behavior change."
+msgstr ""
+"如果改了环境变量、Compose 文件、Docker 打包或工作流，要跑验证这些配置是否接对的测试。新增的变量写进 "
+"[ENVIRONMENT.md](ENVIRONMENT.md)。命令或行为变了，在同一次改动里更新文档。"
+
+#: ../../CONTRIBUTING.md:73
+msgid "Continuous integration"
+msgstr "持续集成"
+
+#: ../../CONTRIBUTING.md:75
+msgid ""
+"[CI](.github/workflows/ci.yml) classifies the changed paths and chooses "
+"the backend, frontend, and image jobs to run. A pull request is compared "
+"with its base, and a push with the newest `agent-*` release, so a "
+"released commit has had every change since the previous release checked. "
+"It uses Python 3.12 and Node.js 22. The `CI Gate` requires the classifier"
+" to succeed. Every other job must either succeed or be deliberately "
+"skipped."
+msgstr ""
+"[CI](.github/workflows/ci.yml) 会根据改动了哪些路径，决定要跑哪些后端、前端和镜像任务。pull request "
+"和它的 base 比较，push 则和最新的 `agent-*` 发布比较，所以一个 commit "
+"发布时，上次发布以来的所有改动都已经检查过。CI 用的是 Python 3.12 和 Node.js 22。`CI Gate` "
+"要求路径分类这一步必须成功，其他任务要么成功，要么是按规则跳过的。"
+
+#: ../../CONTRIBUTING.md:82
+msgid ""
+"Secret scanning and the default test tier run for every change: the "
+"tier's tests also read documentation, `ENVIRONMENT.md` and the web app's "
+"sources. Depending on the paths changed, other jobs cover backend "
+"formatting, lint, mypy, the PostgreSQL test tier, frontend checks, "
+"Compose rendering, image builds, and image smoke tests. CI also exercises"
+" selected real CLI/session and MCP flows. After review, the real-Kata "
+"candidate check runs for relevant `dev` commits. Pull-request image jobs "
+"build and smoke-test without publishing."
+msgstr ""
+"secret 扫描和默认测试层级每次都会跑，这一层的测试还会读取文档、`ENVIRONMENT.md` 和 Web "
+"应用的源码。其余任务视改动的路径而定，涵盖后端格式化、lint、mypy、PostgreSQL 测试层级、前端检查、Compose "
+"渲染、镜像构建和镜像冒烟测试。CI 还会实际跑一部分真实的 CLI、会话和 MCP 流程。评审通过后，相关的 `dev` commit "
+"会再跑一次真实 Kata 的候选检查。pull request 里的镜像任务只构建和冒烟测试，不发布。"
+
+#: ../../CONTRIBUTING.md:91
+msgid ""
+"Every pull request, from a fork or from a branch here, runs on disposable"
+" GitHub-hosted runners; pushes to `dev` and `main` run on the self-hosted"
+" pools. Checked-in runner routing is not a security boundary: a fork can "
+"edit it. Issue [#464](https://github.com/HarvardMadSys/hybridInference-"
+"cloud-agent/issues/464) tracks the runner-group restrictions that are, "
+"and the [developer guide](docs/developer/development.md#run-the-relevant-"
+"checks) describes them. Release publication has its own "
+"[workflow](.github/workflows/publish.yml) and "
+"[guide](deploy/release/README.md)."
+msgstr ""
+"每个 pull request，不管来自 fork 还是本仓库的分支，都在用完即弃的 GitHub 托管 runner 上运行；推送到 `dev`"
+" 和 `main` 则在自托管的 runner 池上运行。仓库里写的 runner 路由不算安全边界，因为 fork 可以随便改。真正起作用的是 "
+"runner 组的限制，这项工作记录在 issue [#464](https://github.com/HarvardMadSys"
+"/hybridInference-cloud-"
+"agent/issues/464)，具体说明见[开发者指南](docs/developer/development.md#run-the-"
+"relevant-"
+"checks)。发布有自己的[工作流](.github/workflows/publish.yml)和[指南](deploy/release/README.md)。"
+
+#: ../../CONTRIBUTING.md:100
+msgid "Contracts"
+msgstr "契约"
+
+#: ../../CONTRIBUTING.md:102
+msgid ""
+"`gateway_contracts/*.openapi.yaml` records the Gateway HTTP APIs that "
+"this service consumes. Check changes against the corresponding Gateway "
+"source. If you change a client's endpoints or fields, update the relevant"
+" contract in the same PR. Identify the Gateway change that it tracks. "
+"Tests pin this service's side of the contract, but they cannot verify the"
+" current implementation in another repository."
+msgstr ""
+"`gateway_contracts/*.openapi.yaml` 记录本服务调用的网关 HTTP "
+"API，改动时要对照网关的源代码核实。如果改了某个客户端用到的端点或字段，就在同一个 PR "
+"里更新对应的契约，并注明它对应网关的哪次改动。测试只能锁定本服务这一侧的契约，没法验证另一个仓库里当前的实现。"
+
+#: ../../CONTRIBUTING.md:109
+msgid ""
+"`gateway_contracts/agent-control-plane.openapi.json` records this "
+"service's own API. For an intentional change, regenerate it with [the "
+"developer-guide command](docs/developer/development.md#changing-an-api). "
+"Review the diff, and explain the compatibility implications in the PR."
+msgstr ""
+"`gateway_contracts/agent-control-plane.openapi.json` 记录本服务自己的 API。有意改 API"
+" 时，用[开发者指南里的命令](docs/developer/development.md#changing-an-api)重新生成，看一遍 "
+"diff，并在 PR 里说明对兼容性的影响。"
+
+#: ../../CONTRIBUTING.md:114
+msgid ""
+"The shared Python protocols in `apps/backend/cloud_agent_shared/` form a "
+"separate contract between the control plane and hosts. When you change "
+"that boundary, review the protocol versions, capabilities, and runtime "
+"pins together."
+msgstr ""
+"`apps/backend/cloud_agent_shared/` 里共用的 Python "
+"协议，是控制平面和主机之间的另一份契约。动这条边界时，协议版本、能力声明和运行时版本固定要放在一起审视。"
+

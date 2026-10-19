@@ -249,6 +249,34 @@ class TestNetPolicy:
         with pytest.raises(net_policy.EndpointRejected, match="never dials"):
             net_policy.check_addresses("bridge.internal", ["93.184.216.34", address], policy)
 
+    @pytest.mark.parametrize(
+        "address",
+        [
+            "168.63.129.16",
+            "::ffff:168.63.129.16",
+            "64:ff9b::a83f:8110",
+            "2002:a83f:8110::1",
+        ],
+    )
+    @pytest.mark.parametrize(
+        "policy",
+        [
+            net_policy.EgressPolicy(),
+            net_policy.EgressPolicy(allow_private=True, allow_plain_http=True),
+            net_policy.EgressPolicy(allowed_hosts=frozenset({"bridge.internal"})),
+        ],
+    )
+    def test_the_platform_address_the_sandbox_never_reaches_is_never_dialled(
+        self, address: str, policy: net_policy.EgressPolicy
+    ) -> None:
+        """Azure's WireServer sits on a public address but is the VM's own platform service.
+
+        The sandbox rules protect it on every host; a connection dialled from
+        the control plane, which runs on such a VM too, must not reach it either.
+        """
+        with pytest.raises(net_policy.EndpointRejected, match="never dials"):
+            net_policy.check_addresses("bridge.internal", [address], policy)
+
     @pytest.mark.parametrize("address", ["fd00:ec2::1", "fd20:ce::1"])
     @pytest.mark.parametrize(
         "policy",

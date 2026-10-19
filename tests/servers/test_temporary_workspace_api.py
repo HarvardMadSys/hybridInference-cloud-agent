@@ -239,6 +239,9 @@ class _SandboxManager:
         self.archive = archive
         self.calls: list[tuple[str, str]] = []
 
+    def with_start_seq(self, _start_seq: int | None):
+        return self
+
     async def register_shared_sandbox(self, _sandbox: dict[str, Any]) -> None:
         return None
 

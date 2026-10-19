@@ -1,4 +1,5 @@
-import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
+import { type APIRequestContext, type Page } from '@playwright/test';
+import { expect, test } from './network-change';
 
 async function configure(request: APIRequestContext, settings: Record<string, boolean>) {
   expect((await request.post('/__fixture/config', { data: settings })).ok()).toBe(true);
@@ -24,12 +25,48 @@ async function openFork(page: Page) {
   await page.getByRole('menuitem', { name: /Fork/ }).click();
 }
 
+// Only an attempt that a host network change aborted is retried; see
+// network-change.ts.
+test.describe.configure({ retries: 1 });
 test.beforeEach(async ({ request, page }) => {
   expect((await request.post('/__fixture/reset')).ok()).toBe(true);
   page.on('dialog', (dialog) => dialog.accept());
 });
 test.afterEach(async ({ request }) => {
   expect((await state(request)).unknown).toEqual([]);
+});
+
+test('a fresh browser restores cloud read receipts without marking other chats read', async ({
+  page,
+  request,
+  browser,
+  baseURL,
+}) => {
+  await page.goto('/');
+  const source = page.getByRole('link', { name: 'Source conversation', exact: true });
+  await expect(source.getByLabel('Unread result', { exact: true })).toBeVisible();
+  await source.click();
+  await expect
+    .poll(async () => (await state(request)).readReceipts)
+    .toEqual([{ thread_id: 'thread-source', job_id: 'source', turn_no: 1, attempt_id: null }]);
+
+  const fresh = await browser.newContext({ baseURL });
+  try {
+    const newPage = await fresh.newPage();
+    await newPage.goto('/');
+    await expect(
+      newPage
+        .getByRole('link', { name: 'Other conversation', exact: true })
+        .getByLabel('Unread result', { exact: true }),
+    ).toBeVisible();
+    await expect(
+      newPage
+        .getByRole('link', { name: 'Source conversation', exact: true })
+        .getByLabel('Unread result', { exact: true }),
+    ).toHaveCount(0);
+  } finally {
+    await fresh.close();
+  }
 });
 
 test('leaving a conversation prevents a delayed Fork from stealing navigation', async ({

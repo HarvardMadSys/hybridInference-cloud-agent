@@ -49,6 +49,7 @@ from cloud_agent_host.chat_sandbox import (
     RetainedChatLost,
 )
 from cloud_agent_host.environment_tests import environment_run_spec
+from cloud_agent_host.network_guard import HostNetworkGuard
 from cloud_agent_host.sandbox import KATA_RUNTIME, ContainerBackend, SandboxError
 from cloud_agent_host.shared_session_supervisor import SharedChatSessionSupervisor
 from cloud_agent_shared.egress import SandboxNetwork, network_from_env
@@ -56,7 +57,7 @@ from cloud_agent_shared.egress import SandboxNetwork, network_from_env
 _NAMESPACE = "this-stack"
 
 
-def _config(namespace: str = _NAMESPACE) -> SandboxNetwork:
+def _config(namespace: str = _NAMESPACE, *, mcp_port: int = 8000) -> SandboxNetwork:
     return network_from_env(
         {
             "AGENT_SANDBOX_NAMESPACE": namespace,
@@ -64,7 +65,7 @@ def _config(namespace: str = _NAMESPACE) -> SandboxNetwork:
             "AGENT_EGRESS_DNS_SERVER": "1.1.1.1",
             "AGENT_RELAY_NETWORK": "agent-relays",
             "AGENT_GATEWAY_URL": "http://agent-gateway:8080",
-            "AGENT_SANDBOX_MCP_URL": "http://agent-mcp:8000",
+            "AGENT_SANDBOX_MCP_URL": f"http://agent-mcp:{mcp_port}",
         }
     )
 
@@ -105,7 +106,9 @@ class FakeGuard:
         self.relays[bridge] = set(endpoints)
         self.network_ids[bridge] = network_id
 
-    def sync_ssh_targets(self, bridge: str, endpoints: set[tuple[str, int]]) -> None:
+    def sync_ssh_targets(
+        self, bridge: str, endpoints: set[tuple[str, int]], *, network_id: str | None = None
+    ) -> None:
         self.events.append("sync_ssh_targets")
         self.ssh_targets[bridge] = set(endpoints)
 
@@ -399,8 +402,8 @@ class FakeDocker:
         return subprocess.CompletedProcess([], 1, "", stderr)
 
 
-def _world(monkeypatch, *, runtime: str | None = None):
-    config = _config()
+def _world(monkeypatch, *, runtime: str | None = None, config: SandboxNetwork | None = None):
+    config = config or _config()
     backend = ContainerBackend(
         image="img", runtime=runtime, sandbox_network=config, sandbox_namespace=_NAMESPACE
     )
@@ -1263,6 +1266,139 @@ def test_guest_network_snapshot_still_checks_files_and_skips_unchanged_writes(
     hosts.symlink_to(resolv)
     with pytest.raises(SandboxError, match="network sync failed"):
         manager._sync_kata_guest_network(spec, current, addresses)
+
+
+# ── a table the sweep reinstalls ──────────────────────────────────────
+
+
+def _guarded_world(monkeypatch, config: SandboxNetwork | None = None):
+    """The lifecycle against the Docker model, and its rules through the real guard."""
+    from tests.unit.test_network_guard import FakeNft
+
+    manager, docker, _ = _world(monkeypatch, config=config)
+    nft = FakeNft()
+    guard = HostNetworkGuard(manager._network(), helper_image="sha256:" + "a" * 64, run=nft)
+    manager.backend._network_guard = guard
+    return manager, docker, guard, nft
+
+
+def _running_on_its_bridge(manager, docker, spec) -> str:
+    docker.add_sandbox(spec, running=True)
+    name = manager._ensure_group_network(spec)
+    docker.connect(docker.network(name)["Id"], "sandbox-container", [])
+    return name
+
+
+def test_a_flushed_table_gives_each_running_group_its_exceptions_back(monkeypatch):
+    """A firewall reload flushes the host's ruleset, and the sweep's check reinstalls it.
+
+    The table comes back with empty relay and SSH sets. A group that kept
+    running would stay cut off from its gateway and MCP relays, and from its
+    SSH servers, until its next turn; the check puts back what it held.
+    """
+    manager, docker, guard, nft = _guarded_world(monkeypatch)
+    spec = _spec()
+    bridge = manager._network().bridge_name(_running_on_its_bridge(manager, docker, spec))
+    manager.sync_ssh_targets(spec, {("93.184.216.34", 22)})
+    relays = guard.relay_endpoints(bridge)
+    assert len(relays) == 2
+
+    nft.tables.clear()  # `flush ruleset`, from a firewall reload
+    manager.verify_host_rules([spec])
+
+    assert guard.relay_endpoints(bridge) == relays
+    assert guard.ssh_target_endpoints(bridge) == {("93.184.216.34", 22)}
+
+
+@pytest.mark.parametrize("mcp_port", [8000, 8080], ids=["own-ports", "one-port"])
+def test_a_relay_exception_lost_on_its_own_comes_back(monkeypatch, mcp_port):
+    """One endpoint gone cuts the group off from that relay as surely as both.
+
+    Both relays may listen on one port, so the port alone cannot say which.
+    """
+    manager, docker, guard, nft = _guarded_world(monkeypatch, _config(mcp_port=mcp_port))
+    spec = _spec()
+    bridge = manager._network().bridge_name(_running_on_its_bridge(manager, docker, spec))
+    relays = guard.relay_endpoints(bridge)
+    assert len(relays) == 2
+    address, _port = max(relays)
+    for table in nft.tables.values():
+        if "relays" in table["sets"]:
+            table["sets"]["relays"] = [
+                element for element in table["sets"]["relays"] if element["concat"][1] != address
+            ]
+    assert len(guard.relay_endpoints(bridge)) == 1
+
+    manager.verify_host_rules([spec])
+
+    assert guard.relay_endpoints(bridge) == relays
+
+
+def test_a_running_group_whose_exceptions_are_held_costs_the_check_no_docker_call(monkeypatch):
+    manager, docker, _guard, _nft = _guarded_world(monkeypatch)
+    spec = _spec()
+    _running_on_its_bridge(manager, docker, spec)
+    manager.sync_ssh_targets(spec, {("93.184.216.34", 22)})
+    docker.calls.clear()
+
+    manager.verify_host_rules([spec])
+
+    assert docker.calls == []
+
+
+def test_ssh_exceptions_never_come_back_on_a_successor_bridge(monkeypatch):
+    """A bridge removed and created again keeps its name; it gets its SSH servers from its turn."""
+    manager, docker, guard, nft = _guarded_world(monkeypatch)
+    spec = _spec()
+    name = _running_on_its_bridge(manager, docker, spec)
+    bridge = manager._network().bridge_name(name)
+    manager.sync_ssh_targets(spec, {("93.184.216.34", 22)})
+    # Another process (the runner, with a guard of its own) removed the
+    # bridge, and the group came back on a new one with the same name.
+    old = docker.network(name)
+    for container in docker.containers.values():
+        container["networks"].pop(name, None)
+    del docker.networks[old["Id"]]
+    HostNetworkGuard(guard.network, helper_image="sha256:" + "a" * 64, run=nft).release_bridge(
+        bridge
+    )
+    _running_on_its_bridge(manager, docker, spec)
+    assert docker.network(name)["Id"] != old["Id"]
+
+    nft.tables.clear()
+    manager.verify_host_rules([spec])
+
+    assert len(guard.relay_endpoints(bridge)) == 2, "relays come from Docker, so they come back"
+    assert guard.ssh_target_endpoints(bridge) == set()
+
+
+def test_a_group_whose_exceptions_cannot_be_restored_does_not_fail_the_check(monkeypatch, caplog):
+    """The rules are in place; a group cut off from its relays is not an unguarded host."""
+    manager, docker, guard, nft = _guarded_world(monkeypatch)
+    spec = _spec()
+    bridge = manager._network().bridge_name(_running_on_its_bridge(manager, docker, spec))
+    nft.tables.clear()
+    docker.containers["relay-gateway"]["running"] = False  # mid-rollout
+
+    with caplog.at_level(logging.WARNING):
+        manager.verify_host_rules([spec])
+
+    assert guard.relay_endpoints(bridge) == set()
+    assert "chat_group_exceptions_not_restored" in caplog.text
+
+
+def test_a_group_no_longer_on_its_bridge_gets_nothing_back(monkeypatch):
+    manager, docker, guard, nft = _guarded_world(monkeypatch)
+    spec = _spec()
+    bridge = manager._network().bridge_name(_running_on_its_bridge(manager, docker, spec))
+    manager.sync_ssh_targets(spec, {("93.184.216.34", 22)})
+    docker.containers["sandbox-container"]["running"] = False
+
+    nft.tables.clear()
+    manager.verify_host_rules([spec])
+
+    assert guard.relay_endpoints(bridge) == set()
+    assert guard.ssh_target_endpoints(bridge) == set()
 
 
 # ── releasing and pruning ─────────────────────────────────────────────

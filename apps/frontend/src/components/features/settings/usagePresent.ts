@@ -93,9 +93,16 @@ export function tokenTotal(usage: AdminUsageAggregate): number | null {
   return tokensIn === null || tokensOut === null ? null : tokensIn + tokensOut;
 }
 
-/** Turns whose usage the Gateway has not reported yet. */
+/**
+ * Turns whose usage the Gateway has not reported yet: pending or unavailable.
+ *
+ * Only those two statuses mean a turn has no readable report. A turn with one is
+ * available, partial or stale, even while it is read again. A turn that ended
+ * before its agent called a model has no report and needs none, and is available,
+ * so counting turns without a snapshot named it unrecorded for good.
+ */
 export function unrecordedTurns(usage: AdminUsageAggregate): number {
-  return Math.max(0, usage.run_count - usage.runs_with_snapshot);
+  return (usage.status_counts.pending ?? 0) + (usage.status_counts.unavailable ?? 0);
 }
 
 export interface ChartDay {

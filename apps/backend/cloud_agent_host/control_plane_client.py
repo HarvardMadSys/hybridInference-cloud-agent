@@ -18,6 +18,8 @@ from cloud_agent_host.logging_utils import get_logger
 from cloud_agent_host.measurement_delivery import DELIVERY_TIMEOUT_S
 from cloud_agent_host.runtimes import NormalizedEvent  # noqa: TC001 — Public method introspection.
 from cloud_agent_shared.secret_redaction import SecretRedactor
+from cloud_agent_shared.shared_protocol import ABANDON_DETAIL_MAX_CHARS
+from cloud_agent_shared.storable_text import storable_json
 
 # Heartbeats must answer before ordinary lifecycle requests consume the lease.
 _HEARTBEAT_TIMEOUT_S = 10.0
@@ -77,9 +79,13 @@ class ControlPlane:
         timeout: float | None = None,
         already_redacted: bool = False,
     ) -> dict[str, Any]:
+        body = (payload or {}) if already_redacted else self._redactor.payload(payload or {})
         response = self._client.post(
             f"{self._base}{path}",
-            json=(payload or {}) if already_redacted else self._redactor.payload(payload or {}),
+            # A reason quoting what the sandbox printed can hold half a
+            # surrogate pair, which httpx cannot encode as UTF-8, or a NUL,
+            # which the control plane cannot store.
+            json=storable_json(body),
             timeout=self._client.timeout if timeout is None else timeout,
         )
         if response.status_code == 409:
@@ -382,14 +388,18 @@ class ControlPlane:
         detail: str | None,
         idle_timeout_seconds: float,
     ) -> dict[str, Any]:
-        """Release a failed activation without claiming context continuity."""
+        """Release a failed activation without claiming context continuity.
+
+        The reason is kept to what the control plane accepts, since it refuses
+        the whole release for a longer one.
+        """
         return self._post(
             f"/v1/agent/worker/jobs/{self.job_id}/sandbox/abandon",
             {
                 "sandbox_generation": sandbox_generation,
                 "activation_generation": activation_generation,
                 "lost": lost,
-                "detail": detail,
+                "detail": None if detail is None else detail[:ABANDON_DETAIL_MAX_CHARS],
                 "idle_timeout_seconds": idle_timeout_seconds,
             },
         )

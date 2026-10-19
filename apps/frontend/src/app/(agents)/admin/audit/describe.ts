@@ -224,12 +224,21 @@ export function describeActor(
   return { label: userId.length > 10 ? `${userId.slice(0, 8)}…` : userId, title: userId };
 }
 
-/** "2 min ago", "3 h ago", "Yesterday" or a date, with the exact time kept for the title. */
+/**
+ * "2 min ago", "3 h ago", "Yesterday" or a date, with the exact time kept for
+ * the title. Days are UTC days, as on every admin page.
+ */
 export function describeWhen(iso: string, now: number = Date.now()): string {
-  const seconds = Math.max(0, (now - new Date(iso).getTime()) / 1000);
+  const time = new Date(iso).getTime();
+  const seconds = Math.max(0, (now - time) / 1000);
   if (seconds < 60) return 'Just now';
   if (seconds < 3_600) return `${Math.floor(seconds / 60)} min ago`;
   if (seconds < 86_400) return `${Math.floor(seconds / 3_600)} h ago`;
-  if (seconds < 2 * 86_400) return 'Yesterday';
-  return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  // The day before today's, not anything under two days old.
+  if (Math.floor(now / 86_400_000) - Math.floor(time / 86_400_000) === 1) return 'Yesterday';
+  return new Date(iso).toLocaleDateString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    timeZone: 'UTC',
+  });
 }

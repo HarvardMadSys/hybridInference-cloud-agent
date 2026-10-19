@@ -77,7 +77,7 @@ def _workspace_host_removed() -> HTTPException:
     )
 
 
-async def fence_workspace_start(store: _WorkspaceAccessStorage, job: dict[str, Any]) -> None:
+async def fence_workspace_start(store: _WorkspaceAccessStorage, job: dict[str, Any]) -> int | None:
     """Fence a request that may start the chat's stopped container.
 
     Every workspace operation and terminal opens the container. Counting the
@@ -85,15 +85,24 @@ async def fence_workspace_start(store: _WorkspaceAccessStorage, job: dict[str, A
     group whose files are about to change. A group only a checkpoint holds is
     refused instead: its next turn recreates it. So is a group still on a
     host that has left the pool, which nothing may start any more.
+
+    Returns the new ``start_seq``, which the request must hand the sandbox
+    manager (:func:`hydrate_shared_sandbox_manager`). ``job`` was read before
+    the fence, so its own sequence is one behind: a run labelled with it would
+    end in a checkpoint that never covers the group.
     """
     thread_id = job.get("thread_id")
     if not thread_id:
-        return
-    state = await store.sandbox.fence_workspace_start(thread_id=str(thread_id))
+        return None
+    fenced = await store.sandbox.fence_workspace_start(thread_id=str(thread_id))
+    if fenced is None:
+        return None
+    state, start_seq = fenced
     if state in _RESTORE_STATES:
         raise _workspace_restoring()
     if state == "host_revoked":
         raise _workspace_host_removed()
+    return start_seq
 
 
 _TERMINAL_ID_PATTERN = r"^term_[A-Za-z0-9_-]{1,80}$"
@@ -120,10 +129,10 @@ async def _sandbox_manager_for_job(
     job: dict[str, Any],
 ) -> SandboxManagerClient | None:
     """Resolve the owning sandbox manager and restore shared aliases before use."""
-    await fence_workspace_start(store, job)
+    start_seq = await fence_workspace_start(store, job)
     sandbox_manager = await sandbox_manager_for_job(store.host_pool, job["id"])
     try:
-        return await hydrate_shared_sandbox_manager(job, sandbox_manager)
+        return await hydrate_shared_sandbox_manager(job, sandbox_manager, start_seq=start_seq)
     except SandboxManagerError as exc:
         raise _sandbox_manager_http_error(exc) from exc
 

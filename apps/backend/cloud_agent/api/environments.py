@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, R
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api._workspace_access import fence_workspace_start
@@ -43,6 +43,7 @@ from cloud_agent_shared.environment import (
     parse_env,
 )
 from cloud_agent_shared.environment_snapshots import ENVIRONMENT_SNAPSHOT_CAPABILITY
+from cloud_agent_shared.storable_text import storable_json
 
 
 class CredentialSafeRoute(APIRoute):
@@ -220,6 +221,16 @@ class TestUpdate(BaseModel):
     cleanup_complete: bool = False
     #: The host's receipt for the installation snapshot this run saved.
     snapshot: dict[str, Any] | None = Field(None, repr=False)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _storable(cls, data: Any) -> Any:
+        """Replace what Postgres cannot store in what the scripts printed.
+
+        Refusing it would refuse the report, and a host stops a test whose
+        report is refused; so it comes before any field is checked.
+        """
+        return storable_json(data)
 
 
 def _snapshots(store: Any) -> Any:
@@ -1046,18 +1057,24 @@ async def retry_preparation(
 ) -> dict[str, Any]:
     """Retry failed preparation using the same workspace binding."""
     from cloud_agent.api._owner_auth import _owned_job
-    from cloud_agent.sandbox_manager_routing import sandbox_manager_for_job
+    from cloud_agent.sandbox_manager_routing import (
+        hydrate_shared_sandbox_manager,
+        sandbox_manager_for_job,
+    )
 
     store = require_store(store)
     job = await _owned_job(store.conversation_queries, job_id, user)
     await _job_entitled(store, user["user_id"], job, credentials)
     if not job.get("environment_binding_id"):
         raise HTTPException(409, "Workspace has no environment binding")
-    # Preparation runs inside the container, starting it if stopped.
-    await fence_workspace_start(store, job)
+    # Preparation runs inside the container, starting it if stopped, so the
+    # manager is told the fence the start belongs to before it runs.
+    start_seq = await fence_workspace_start(store, job)
     broker = await sandbox_manager_for_job(store.host_pool, job_id)
     if broker is None:
         raise HTTPException(503, "Workspace host is unavailable")
+    await hydrate_shared_sandbox_manager(job, broker, start_seq=start_seq)
+    broker = broker.with_start_seq(start_seq)
     bound = await store.environments.get_environment_binding(
         user["user_id"], job["environment_binding_id"]
     )

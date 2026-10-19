@@ -14,7 +14,7 @@ import httpx
 from cloud_agent.gateway import ENV_BASE_URL
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.settings import setting_env
-from cloud_agent.task_titles import is_warmup_title
+from cloud_agent.task_titles import is_incomplete_completion, is_warmup_title
 
 if TYPE_CHECKING:
     from cloud_agent.grants import GrantClient
@@ -97,7 +97,8 @@ async def generate_pr_title(
     transcript longer than :data:`_MAX_FRAGMENTS` chunks returns None without
     asking the model anything. The publication owns its own grant: it cannot
     revive or revoke an Agent turn's credential, and it never renews this
-    bounded capability.
+    bounded capability. Each try of a publication has its own, because each
+    try revokes the one it used.
     """
     base_url = (setting_env(ENV_BASE_URL) or "").strip().rstrip("/")
     model = job.get("model")
@@ -131,10 +132,14 @@ async def generate_pr_title(
             fallback("conversation_too_long")
             return None
         async with asyncio.timeout(_TOTAL_TIMEOUT_S), contextlib.AsyncExitStack() as stack:
+            # The gateway's mint is idempotent on (job, attempt), even after
+            # revoke, and every try revokes its grant: a retry asking for the
+            # same attempt had every completion refused, and renamed its pull
+            # request to the fallback title. A claim's attempt count is its own.
             grant = await grants.mint(
                 user_id=job["user_id"],
                 job_id=job["job_id"],
-                attempt_id=f"pr-title:{job['snapshot_id']}",
+                attempt_id=f"pr-title:{job['snapshot_id']}:{job['publish_attempt_count']}",
                 models=[model],
                 ttl_seconds=120,
             )
@@ -164,10 +169,12 @@ async def generate_pr_title(
                         follow_redirects=False,
                     )
                     response.raise_for_status()
-                    content = response.json()["choices"][0]["message"]["content"]
+                    choice = response.json()["choices"][0]
+                    content = choice["message"]["content"]
                     if (
                         isinstance(content, str)
                         and content.strip()
+                        and not is_incomplete_completion(choice)
                         and not is_warmup_title(content)
                         and (not title_only or _normalize_title(content) is not None)
                     ):
@@ -191,6 +198,12 @@ async def generate_pr_title(
                 finally:
                     for task in pending:
                         task.cancel()
+                    # Cancellation is only a request: join the tasks so no
+                    # sibling request is still in flight when the title path
+                    # returns and the publication grant is revoked. Their
+                    # results are already unusable, so only the shutdown
+                    # matters here.
+                    await asyncio.gather(*pending, return_exceptions=True)
                 combined = json.dumps({"session_fragment_summaries": summaries}, ensure_ascii=False)
                 if len(combined) >= len(source):
                     fallback("summary_not_reduced")

@@ -56,6 +56,32 @@ async def test_the_lifespan_gives_both_gateway_clients_one_pool(monkeypatch) -> 
     assert shared.is_closed, "the pool outlived the application that owned it"
 
 
+async def test_the_lifespan_opens_its_database_pool_without_jit(monkeypatch) -> None:
+    """Every database session the service opens leaves PostgreSQL's JIT compiler off.
+
+    The planner prices a correlated subquery once per outer row, so a statement
+    that reads a few hundred indexed rows can be estimated far past
+    ``jit_above_cost``. At a thousand hosts the admin host list then spent
+    1.9 s compiling a statement that ran in 85 ms, and every reaper pass spent
+    170 ms compiling a host-removal check that ran in under one.
+    """
+    monkeypatch.setenv("AGENT_DATABASE_URL", "postgresql://test-only")
+    monkeypatch.delenv("GATEWAY_BASE_URL", raising=False)
+    monkeypatch.delenv("GATEWAY_ISSUER", raising=False)
+    create_pool = AsyncMock(return_value=AsyncMock())
+    monkeypatch.setattr(asyncpg, "create_pool", create_pool)
+    monkeypatch.setattr("cloud_agent.settings.initialize_settings", AsyncMock())
+    monkeypatch.setattr(
+        "cloud_agent.identity_namespace.ensure_gateway_namespace", AsyncMock(return_value=None)
+    )
+
+    async with lifespan(FastAPI(), background=False):
+        pass
+
+    settings = create_pool.await_args.kwargs.get("server_settings") or {}
+    assert settings.get("jit") == "off", f"the pool opens sessions with {settings or 'defaults'}"
+
+
 async def test_the_github_app_keeps_one_client_for_its_lifetime() -> None:
     """Entitlement resolves through this object on every workspace request."""
     credentials = _credentials()

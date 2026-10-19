@@ -982,6 +982,19 @@ class SandboxCheckpointCapture:
         #: wires its supervisor in once both exist.
         self.start_seq_for: Callable[[str], int | None] = lambda _sandbox_id: None
 
+    def receipt_start_seq(
+        self, spec: ChatSandboxSpec, inspection: ChatSandboxInspection
+    ) -> int | None:
+        """The start fence of this host's last checkpoint of exactly this container."""
+        receipt = self.store.latest(spec.sandbox_id)
+        if (
+            receipt is None
+            or receipt.generation != spec.generation
+            or receipt.container_id != inspection.container_id
+        ):
+            return None
+        return receipt.start_seq
+
     def capture(
         self,
         spec: ChatSandboxSpec,
@@ -1311,9 +1324,12 @@ class SandboxCheckpointCapture:
                 raise SandboxCheckpointError("sandbox image could not be pulled for restore")
         base_layers = self.base_layers(base_image, deadline)
         self._spool_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        # Unnamed, like a capture's spool: the spool directory is durable, and
+        # a process killed mid-restore runs no cleanup, so a named file would
+        # stay there for good. Docker reads the checked archive on stdin.
         with (
-            tempfile.NamedTemporaryFile(dir=self._spool_dir, prefix="restore-") as downloaded,
-            tempfile.NamedTemporaryFile(dir=self._spool_dir, prefix="restore-") as prepared,
+            tempfile.TemporaryFile(dir=self._spool_dir, prefix="restore-") as downloaded,
+            tempfile.TemporaryFile(dir=self._spool_dir, prefix="restore-") as prepared,
         ):
             try:
                 download_into(downloaded)
@@ -1332,8 +1348,10 @@ class SandboxCheckpointCapture:
             except SandboxCheckpointError as exc:
                 raise CheckpointArchiveInvalid(str(exc)) from exc
             prepared.flush()
+            prepared.seek(0)
             loaded = self._run(
-                [self._docker, "image", "load", "--quiet", "--input", prepared.name],
+                [self._docker, "image", "load", "--quiet"],
+                stdin=prepared,
                 capture_output=True,
                 text=True,
                 timeout=min(_LOAD_TIMEOUT_S, self._remaining(deadline)),

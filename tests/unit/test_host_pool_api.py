@@ -2911,15 +2911,16 @@ async def test_host_heartbeat_returns_only_durable_due_idle_stop_fences(
     ]
 
 
-async def test_host_heartbeat_accepts_a_generation_zero_fork_target_idle_stop(residency_client):
-    """A sandbox-manager-reconstructed pre-turn fork target has no activation yet."""
+async def test_host_heartbeat_accepts_a_fenced_generation_zero_group_stop(residency_client):
+    """A generation-zero target stops only through its explicit group fence."""
     client, store, _grants = residency_client
     credential = await _enroll(client, store)
     store.sandbox_stop_due = {
         "thread_id": "athr_fork",
         "generation": 1,
         "activation_generation": 0,
-        "reason": "idle",
+        "reason": "orphaned_attempt",
+        "member_activation_generations": {"athr_fork": 0},
     }
 
     response = await client.post(
@@ -2938,10 +2939,9 @@ async def test_host_heartbeat_accepts_a_generation_zero_fork_target_idle_stop(re
         },
         headers={"Authorization": f"Bearer {credential}"},
     )
-
     assert response.status_code == 200, response.text
     assert response.json()["retained_sandboxes_stop"] == [
-        {**store.sandbox_stop_due, "shared_live": True, "member_activation_generations": None}
+        {**store.sandbox_stop_due, "shared_live": True}
     ]
 
 

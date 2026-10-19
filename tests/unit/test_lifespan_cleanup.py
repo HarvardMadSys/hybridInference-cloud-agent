@@ -29,6 +29,10 @@ _EXPECTED_SHUTDOWN_TASKS = (
     "mcp_maintenance_task",
     "mcp_catalog_task",
     "reaper_task",
+    "environment_maintenance_task",
+    "queued_follow_up_maintenance_task",
+    "goal_wakeup_maintenance_task",
+    "goal_scheduling_maintenance_task",
     "snapshot_task",
     "sandbox_deletion_task",
     "sandbox_move_out_task",
@@ -37,7 +41,6 @@ _EXPECTED_SHUTDOWN_TASKS = (
     "agent_memory_task",
     "queue_monitor_task",
     "publish_task",
-    "pr_archive_task",
     "profiling_policy_task",
     "compute_resource_task",
     "notification_listener_task",
@@ -126,6 +129,10 @@ _STAGES = [
         ("mcp_catalog", True, False),
         ("mcp_catalog_run", True, False),
         ("reaper", True, False),
+        ("environment_maintenance", True, False),
+        ("queued_follow_up_maintenance", True, False),
+        ("goal_wakeup_maintenance", True, False),
+        ("goal_scheduling_maintenance", True, False),
         ("background_wake", True, False),
         ("snapshots", True, False),
         ("sandbox_deletions", True, False),
@@ -141,7 +148,6 @@ _STAGES = [
         ("job_event_signal", True, False),
         ("owner_change_signal", True, False),
         ("publisher", True, False),
-        ("pr_archiver", True, False),
     ),
     *_only(False, ("mcp_decision_signal", True, False)),
 ]
@@ -329,6 +335,22 @@ def _prepare(
     for target, label in (
         ("cloud_agent.settings.synchronize_settings", "settings_task"),
         ("cloud_agent.bootstrap.lifespan.reap_expired_attempts", "reaper_task"),
+        (
+            "cloud_agent.bootstrap.lifespan.run_environment_maintenance",
+            "environment_maintenance_task",
+        ),
+        (
+            "cloud_agent.bootstrap.lifespan.run_queued_follow_up_maintenance",
+            "queued_follow_up_maintenance_task",
+        ),
+        (
+            "cloud_agent.bootstrap.lifespan.run_goal_wakeup_maintenance",
+            "goal_wakeup_maintenance_task",
+        ),
+        (
+            "cloud_agent.bootstrap.lifespan.run_goal_scheduling_maintenance",
+            "goal_scheduling_maintenance_task",
+        ),
         ("cloud_agent.bootstrap.lifespan.coordinate_shared_snapshots", "snapshot_task"),
         ("cloud_agent.bootstrap.lifespan.coordinate_sandbox_deletions", "sandbox_deletion_task"),
         ("cloud_agent.bootstrap.lifespan.coordinate_move_out", "sandbox_move_out_task"),
@@ -338,7 +360,6 @@ def _prepare(
         ("cloud_agent.capacity_history.prune_host_capacity_history", "capacity_task"),
         ("cloud_agent.operational_health.monitor_queue", "queue_monitor_task"),
         ("cloud_agent.publish_worker.publish_loop", "publish_task"),
-        ("cloud_agent.workers.pr_archive.pr_archive_loop", "pr_archive_task"),
         ("cloud_agent.mcp.runtime.maintain_host_sessions", "mcp_maintenance_task"),
     ):
         monkeypatch.setattr(target, _idle(events, label))
@@ -391,6 +412,22 @@ def _inject(monkeypatch: pytest.MonkeyPatch, stage: str | None) -> None:
         "mcp_catalog": ("cloud_agent.mcp.catalog.McpCatalog", _boom(stage)),
         "mcp_catalog_run": ("cloud_agent.mcp.catalog.McpCatalog.run", _boom(stage)),
         "reaper": ("cloud_agent.bootstrap.lifespan.reap_expired_attempts", _boom(stage)),
+        "environment_maintenance": (
+            "cloud_agent.bootstrap.lifespan.run_environment_maintenance",
+            _boom(stage),
+        ),
+        "queued_follow_up_maintenance": (
+            "cloud_agent.bootstrap.lifespan.run_queued_follow_up_maintenance",
+            _boom(stage),
+        ),
+        "goal_wakeup_maintenance": (
+            "cloud_agent.bootstrap.lifespan.run_goal_wakeup_maintenance",
+            _boom(stage),
+        ),
+        "goal_scheduling_maintenance": (
+            "cloud_agent.bootstrap.lifespan.run_goal_scheduling_maintenance",
+            _boom(stage),
+        ),
         "background_wake": ("cloud_agent.bootstrap.lifespan.BackgroundWake", _boom(stage)),
         "snapshots": ("cloud_agent.bootstrap.lifespan.coordinate_shared_snapshots", _boom(stage)),
         "sandbox_deletions": (
@@ -422,7 +459,6 @@ def _inject(monkeypatch: pytest.MonkeyPatch, stage: str | None) -> None:
         "owner_change_signal": ("cloud_agent.bootstrap.lifespan.OwnerChangeSignal", _boom(stage)),
         "listen": ("cloud_agent.bootstrap.lifespan.listen", _boom(stage)),
         "publisher": ("cloud_agent.publish_worker.publish_loop", _boom(stage)),
-        "pr_archiver": ("cloud_agent.workers.pr_archive.pr_archive_loop", _boom(stage)),
         "mcp_maintenance": ("cloud_agent.mcp.runtime.maintain_host_sessions", _boom(stage)),
         "mcp_decision_signal": ("cloud_agent.bootstrap.lifespan.McpDecisionSignal", _boom(stage)),
         "measurement_writer": ("cloud_agent.measurement_writer.MeasurementWriter", _boom(stage)),

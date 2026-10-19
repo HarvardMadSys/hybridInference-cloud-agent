@@ -1687,7 +1687,6 @@ class PostgresEnvironmentRepository:
             )
             if time.monotonic() < self._next_gc:
                 return
-            self._next_gc = time.monotonic() + 3600
             owners = await conn.fetch(
                 "SELECT DISTINCT user_id FROM agent_environments WHERE archived_at<NOW()-INTERVAL '30 days'"
             )
@@ -1707,6 +1706,9 @@ class PostgresEnvironmentRepository:
                     AND NOT EXISTS(SELECT 1 FROM agent_environment_bindings b WHERE b.environment_version_id=v.id OR b.global_version_id=v.id)""",
                     owner["user_id"],
                 )
+        # A cancelled or failed pass must retry incomplete owner cleanup on
+        # the next maintenance interval.
+        self._next_gc = time.monotonic() + 3600
 
     async def claim_environment_run(
         self,

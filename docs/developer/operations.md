@@ -126,11 +126,6 @@ shows the value in effect; save a valid value or confirm **Restore default**
 to clear the warning. Undecryptable or unencrypted stored credentials still
 stop the listener.
 
-Automatic session archiving after a verified GitHub PR merge is enabled by
-default. Configure it under **Publication**; see
-[automatic PR archiving](automatic-pr-archiving.md) for its session selection,
-retry ledger, verification, and rollout steps.
-
 For a new installation, provision the database, a stable
 `AGENT_SETTINGS_ENCRYPTION_KEY` of at least 32 bytes and a separate random
 `ADMIN_TOKEN`, plus the infrastructure/build fields in the minimal
@@ -669,9 +664,15 @@ acknowledgement can survive a sandbox manager restart.
 uploading workspace files or native session history. It does not require an S3
 bucket. The host still refuses a running, busy, or changed container, and the
 control plane marks native resume lost only after the host confirms removal.
-Chat history and the lifecycle audit remain. There is no S3 object to restore
-from. An archive deletion that is already pending or verified is left unchanged;
-wait for it to finish or fail before choosing this action.
+While that host is offline or removed from the pool, the details say so and
+what ends the wait: the host reconnecting, or being enrolled again. The one
+exception is a host whose server its provider confirmed `terminated`:
+once that host has been silent for 10 minutes, the container is taken as gone
+with the machine and the deletion finishes without it, the rule that marks the
+machine's other sandboxes lost. Its trajectory and audit record
+`host_reclaimed`. Chat history and the lifecycle audit remain. There is no S3
+object to restore from. An archive deletion that is already pending or verified
+is left unchanged; wait for it to finish or fail before choosing this action.
 
 One deletion worker handles requests one at a time, in the order they became
 due. A failed attempt shows its error and is retried a minute later, behind any
@@ -943,7 +944,7 @@ The relay enforces these rules:
   treated as an aged approval.
 - **`confirm` holds the original call.** The relay records a pending invocation
   and waits for the owner's decision in the conversation's Tools panel or the
-  account's [Approvals inbox](../user/mcp-approvals.md). Approval
+  account's [Approvals inbox](web-app.md#tool-approvals). Approval
   dispatches that request once under the current attempt and permission fence;
   the CLI receives the result without asking the model to retry. Denial, expiry
   or changed authorization prevents dispatch.
@@ -1547,7 +1548,8 @@ GitHub repositories retain the complete Agent lifecycle: checkout, branch
 discovery, push, and draft PR publishing use short-lived GitHub App installation
 tokens. Draft PR titles summarize the captured user and assistant messages across
 the shared session through a bounded inference request under a separate,
-owner-scoped grant. A Fork's copies of earlier turns are read once, in the chat
+owner-scoped grant, which each try of a publication mints for itself and revokes
+when its title is written. A Fork's copies of earlier turns are read once, in the chat
 they were copied from. A session longer than one request is summarized in at
 most four fragments, all at once, and the title is written from their summaries
 within the same one-minute budget. A longer session is not sent to the model at
@@ -1860,9 +1862,30 @@ Release cloud resources before removing their records. Attached servers without
 release support can be removed after their hosts are disabled. Remove retained
 sandboxes through the sandbox deletion flow and wait for cleanup to finish; clear
 the default placement pin, running attempts, and deployment drains first. Removal
-checks these dependencies in the same transaction as cleanup and refuses work
-whose provider result is unresolved. An acquisition that never submitted to its
-provider can be removed even when resource observation is unavailable.
+checks these dependencies in the same transaction as cleanup. An acquisition that
+never submitted to its provider can be removed even when resource observation is
+unavailable.
+
+Removal also refuses with _The external operation is unresolved_ in three cases.
+The server's **Activity** tab lists the operations involved:
+
+- An operation that is running, or waiting while it confirms a provider call (an
+  acquisition waiting for its experiment, an extension or a release waiting for
+  the provider's answer), is still in progress. Wait for it to finish or stop.
+- An operation whose outcome is `unknown`, such as an acquisition whose create
+  request timed out, waits for an administrator, and a release requested
+  meanwhile waits behind it. Open it and retry it or, for an acquisition, adopt
+  the experiment it created.
+- A server that never recorded its provider resource is refused while one of its
+  operations suggests the provider has one: an answer that named it, an
+  acquisition past submission, a registered node, or a call never confirmed.
+  Release the server. The release deletes a resource an operation named, and
+  otherwise records that there is none, so first check the provider for one the
+  request created.
+
+Once the provider has confirmed the machine gone, an operation that stopped
+(blocked, failed or cancelled) no longer keeps the server, even one that stopped
+while it was confirming a provider call: that call can change nothing now.
 
 The compute API is `DELETE /admin/agent/servers/<allocation_id>` with
 `{"expected_revision": N}`. A revision conflict requires refreshing the server.
@@ -2086,17 +2109,25 @@ see [Restoring a removed host's sandboxes](#restoring-a-removed-hosts-sandboxes)
   become `verified` once a restore has loaded and started them.
 - Each receipt names the control plane's start fence (`start_seq`) for the run
   its stop ended. Every path that may start the container (a turn, a workspace
-  file, terminal, Git or environment request, a Fork, a snapshot) advances the
-  fence first, and a running container clears it too. A receipt covers its
-  group only while its fence is still current; receipts from sandbox managers
-  that predate restore carry none and never cover a group.
+  file, terminal, Git or environment request, a Fork, a snapshot capture or a
+  base import) advances the fence first and sends the value it took with the
+  request itself: in its body, or for a workspace request in an
+  `X-Agent-Start-Seq` header. The Sandbox Manager labels a run only with the
+  fences of the requests it admitted to that run. Once the run stops, a
+  request at or below its label that would start the container again is
+  refused (409), and the control plane advances the fence and retries. A
+  running container clears the restore point too. A receipt covers its group
+  only while its fence is still current; receipts from sandbox managers that
+  predate restore carry none and never cover a group.
 - The policy omits the default and carries only an opt-out
   (`checkpoints_enabled: false`), which is sent only to hosts that advertise
   `sandbox-checkpoints-v1`. Older sandbox managers parse the policy unchanged
   and keep archiving without checkpoints.
 - The archive holds the container's writable layer: workspace, native session
   state, and anything installed outside `/workspace`. Credential tmpfs mounts
-  are not part of a commit. Bucket lifecycle and retention rules apply to the
+  are not part of a commit. It also holds the Sandbox Manager's own archive
+  markers for the generation that stopped; a restored container reads a marker
+  from an earlier generation of its group as absent and writes its own. Bucket lifecycle and retention rules apply to the
   `v2/` prefix like the rest of the archives.
 
 #### Restoring a removed host's sandboxes
@@ -2149,6 +2180,26 @@ old host still holds is fenced out. The new host's Sandbox Manager:
 4. loads it, creates the container from it with the group's own limits and
    network, labelled with the checkpoint id, and resumes each native session as
    after any restart.
+
+The download and the checked archive are unnamed files in
+`AGENT_SANDBOX_ARCHIVE_STATE_DIR/checkpoint-spool`, and Docker reads the
+archive on standard input, so a restore or snapshot load cut short by a
+reboot, a forced stop or the OOM killer leaves nothing in that durable
+directory. Sandbox Managers that predate this named them `restore-*`; any such
+file is an interrupted restore's and can be deleted while no restore is
+running.
+
+The loaded image, `freeinference-checkpoint/<sandbox hash>:<checkpoint id>`,
+is that container's alone, and it goes with the container: when the group is
+deleted or discarded, and when a later move back onto the same host replaces
+the older container. A move back that restores the older container's own
+checkpoint uses its image and loads nothing again. A restore that fails before
+the group starts removes the container it created, with any anonymous volume,
+and the image it loaded: any host may claim the next try, so a retry on the
+same host downloads the checkpoint again. A failure to remove the image is
+logged as `sandbox_checkpoint_image_remove_failed` and one to remove the
+container as `sandbox_create_cleanup_failed`; `docker image rm` and
+`docker rm --volumes` clear what they leave.
 
 A restore that fails before the turn is admitted returns the group to `cold`
 and the turn to the queue without spending an attempt. The group is not
@@ -3567,7 +3618,12 @@ rules, not the host's.
 - **Watched while groups run.** While any group of this deployment is
   running, the sandbox manager reads the tables back on every five-second sweep, logs
   `network_guard_rules_changed` when they differ from what it installed, and
-  reinstalls whatever is missing. If that fails twice in a row, it logs
+  reinstalls whatever is missing. A reinstalled table holds no group's
+  exceptions, so the same pass gives each running group whose bridge lost
+  them its relays back, from what Docker reports, and its SSH targets as the
+  sandbox manager last wrote them for that same Docker network; a group that
+  cannot get them back logs `chat_group_exceptions_not_restored` and is synced
+  again by its next activation. If the check fails twice in a row, it logs
   `shared_chat_network_unguarded` and stops every running group — workspaces
   and native sessions kept — rather than let one go on without the boundary it
   was started behind. Waking a group reinstalls and verifies the rules first,
@@ -3625,8 +3681,8 @@ own and no one else's — with the helper above:
 `bridge`. Never delete or flush a table a running deployment uses: Docker
 routes and masquerades every group bridge, and the table is what limits it.
 Anything that flushes the host's whole ruleset removes these tables too; they
-are reinstalled at the next check, so do not run such a reload on a host with
-active groups.
+are reinstalled at the next check, with each running group's relay and SSH
+exceptions, but do not run such a reload on a host with active groups.
 
 #### Choosing the resolver
 
@@ -3663,8 +3719,9 @@ image's own parser before any runner is drained, and a refusal prints
 these:
 
 - `AGENT_EGRESS_CHAT_NETWORK_POOL must name this deployment's group address pool`
-  or `… must be RFC1918 space holding at least one /29` — unset, not private,
-  or smaller than a `/29`;
+  or `… must be RFC1918 space holding at least one /29` — unset, outside
+  `10.0.0.0/8`, `172.16.0.0/12` and `192.168.0.0/16` (link-local, loopback and
+  the other special-purpose blocks are refused too), or smaller than a `/29`;
 - `AGENT_EGRESS_DNS_SERVER='…' must be one IPv4 resolver address` or
   `… must be reachable from a group bridge` — unset, not IPv4, loopback,
   unspecified, or inside the pool;
@@ -4004,6 +4061,10 @@ An interrupted launch without a recoverable result is reported as `unknown` and
 is never automatically replayed. Inspect external effects before starting a new
 run with a different idempotency key. These receipts do not promise exactly-once
 side effects in external services.
+
+The output of a test, a preparation or an action is stored masked and bounded,
+with each NUL and unpaired surrogate replaced by U+FFFD: Postgres stores
+neither, and refusing the output would leave the test or command unfinished.
 
 Empty bindings still pin the original task's selection, but require neither
 `environment-v1` nor preparation. Each environment test reserves one local slot

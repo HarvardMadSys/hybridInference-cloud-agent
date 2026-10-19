@@ -43,7 +43,13 @@ flowchart TD
 ```
 
 `app.py` mounts the owner/admin API and the separate MCP-only listener. It
-installs shared HTTP response and exception policies. `bootstrap/lifespan.py`
+installs shared HTTP response and exception policies, and on both listeners a
+dependency that runs ahead of every route's own (`api/_parameters.py`): a path
+or query parameter holding NUL, or a route's integer parameter too wide for a
+`bigint`, is refused with a 422 before any query reads it. So is a JSON body
+holding NUL or half a surrogate pair, on a route an owner, an administrator or
+the on-call relay calls; host and sandbox reports keep their own models, which
+replace those characters instead. `bootstrap/lifespan.py`
 constructs the resources and starts and stops background work; route modules
 do not own service startup or shutdown.
 
@@ -56,7 +62,7 @@ do not own service startup or shutdown.
 | `ports/` | Narrow typed capabilities | A caller needs a new operation from an adapter |
 | `storage/assembly.py` | Construction of Postgres repository capabilities | A storage capability is wired into the service |
 | `storage/repositories/` | SQL and transaction/fencing behavior | A durable query or mutation changes |
-| `workers/` | Scheduled work and recovery loops | Work continues independently of a request |
+| `workers/` | Scheduled work and recovery loops | Work continues independently of a request; queue and goal recovery cannot hold up attempt lease recovery |
 | `bootstrap/` | Resources and lifecycle | A component must be constructed, started, or closed |
 | `mcp/` | MCP hosting, transport, policy, and process-local runtime | Protocol or upstream session behavior changes |
 | `goals/` | Goal orchestration and retry policy | Goal scheduling or progress policy changes |

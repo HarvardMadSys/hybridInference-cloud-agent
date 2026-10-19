@@ -51,7 +51,7 @@ database stamped with the chain that predates it.
 | `apps/backend/cloud_agent/schemas/` | Domain-organized wire models, explicitly exported by `cloud_agent.schemas` |
 | `apps/backend/cloud_agent/application/` | Flows that run without a request: job admission and creation, native Fork materialization, residency credentials |
 | `apps/backend/cloud_agent/bootstrap/` | Internal assembly: the resources the listeners are built from, and the lifespan that starts and stops them |
-| `apps/backend/cloud_agent/workers/` | The background loops — attempt reaping, grant renewal, shared-workspace snapshot capture |
+| `apps/backend/cloud_agent/workers/` | The background loops — attempt reaping, grant renewal, queue and goal recovery, shared-workspace snapshot capture |
 | `apps/backend/cloud_agent/ports/`, `apps/backend/cloud_agent/storage/` | Narrow capability contracts and Postgres repositories: claims, fences, residency, publication |
 | `apps/backend/cloud_agent/grants.py`, `ledger.py`, `grant_usage.py` | Gateway inference grants, and the usage snapshots read back from them |
 | `apps/backend/cloud_agent/gateway.py`, `agent_access.py`, `identity.py` | The three gateway contracts: lookups, admission, identity |
@@ -89,6 +89,16 @@ Database-backed tests are opt-in: `make test-db` (needs Postgres; see
 For frontend changes, use Node.js 22 and run `make ci-frontend`. It installs the
 locked dependencies with `npm ci`, then checks lint, formatting, types, tests,
 and build guards. `make setup-dev` installs backend dependencies only.
+
+The developer documentation site is published in English and Simplified
+Chinese, and CI fails while any English string lacks a current translation.
+When a change edits a page under `docs/developer/` or a root guide the site
+includes (`ENVIRONMENT.md`, `CONTRIBUTING.md`, `SECURITY.md`,
+`deploy/local/README.md`, `deploy/release/README.md`,
+`gateway_contracts/README.md`), run `make docs-translate`, translate the
+entries it adds or marks fuzzy, and run `make docs-verify`.
+[Translating the docs](docs/developer/translations.md) has the workflow and
+terminology.
 
 If `apps/frontend/node_modules` is absent, install it before reporting checks
 as blocked. From `apps/frontend`, run `npm ci`, `npm run type-check`, and

@@ -117,8 +117,25 @@ describe('coverage', () => {
   });
 
   it('counts turns the Gateway has not reported', () => {
-    expect(unrecordedTurns(aggregate({ run_count: 5, runs_with_snapshot: 3 }))).toBe(2);
+    const usage = aggregate({
+      run_count: 5,
+      runs_with_snapshot: 3,
+      status_counts: { available: 3, partial: 0, stale: 0, pending: 1, unavailable: 1 },
+    });
+    expect(unrecordedTurns(usage)).toBe(2);
     expect(unrecordedTurns(aggregate())).toBe(0);
+  });
+
+  it('leaves out a turn that never called a model, and one refreshing its report', () => {
+    // One turn has a report and is reading it again, one ended before its
+    // agent called a model, and one is waiting for its first report.
+    const usage = aggregate({
+      run_count: 3,
+      runs_with_snapshot: 1,
+      status_counts: { available: 2, partial: 0, stale: 0, pending: 1, unavailable: 0 },
+      refreshing_runs: 2,
+    });
+    expect(unrecordedTurns(usage)).toBe(1);
   });
 
   it('adds input and output tokens only when both are known', () => {

@@ -76,7 +76,9 @@ flowchart LR
 
 没有 attempt 的任务：非终态为 `pending`，终态为 `unavailable`，与 `summarize_job_usage()` 当前特殊处理一致。若抽取一个只处理 job ledger 的公共函数，让 owner、Admin Run 和本接口都调用它；不向 `summarize_job_usage()` 塞伪造 runtime 输入。
 
-聚合不调用 `usage_inputs()`，不读取 `agent_job_events`，不计算 runtime 用量，也不为了每个任务发一次 SQL/API 请求。
+没有账本引用的 attempt 与 Admin Run 的读法相同：仍在运行的是 `pending`；已结束、从未上报模型用量的是 `no_model_calls`，计为 `available`，不算缺失；只有其余的才是缺失的归属。投影因此与单任务读取共用 `UNREFERENCED_ATTEMPT_SQL`：带上 attempt 的状态，并只对已结束且没有引用的 attempt 用 `EXISTS` 问 `agent_job_events` 有没有用量事件。
+
+聚合不调用 `usage_inputs()`，除上面这个存在性判断外不读取 `agent_job_events`，不计算 runtime 用量，也不为了每个任务发一次 SQL/API 请求。
 
 ### 3.3 数值与缺失值
 
