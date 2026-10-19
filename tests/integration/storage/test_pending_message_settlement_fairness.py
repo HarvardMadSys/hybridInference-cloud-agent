@@ -34,15 +34,8 @@ class _SweepRepository:
         self.blocked = blocked
         self.visited: list[str] = []
 
-    async def settlement_sweep_boundary(self):
-        return await self.repository.settlement_sweep_boundary()
-
-    async def threads_to_settle(
-        self, *, limit: int = 50, after: str | None = None, created_before=None
-    ) -> list[str]:
-        return await self.repository.threads_to_settle(
-            limit=limit, after=after, created_before=created_before
-        )
+    async def threads_to_settle(self, *, limit: int = 50, after: str | None = None) -> list[str]:
+        return await self.repository.threads_to_settle(limit=limit, after=after)
 
     async def settle_queue(self, *, thread_id: str, prepared=None):
         self.visited.append(thread_id)
@@ -110,39 +103,6 @@ async def test_a_page_of_stuck_queues_does_not_hide_the_ones_after_it(store, poo
     # A short page reached the end: the next pass starts over.
     assert sweep.after is None
     assert await run() == threads[:2]
-
-
-async def test_a_sweep_watermark_excludes_new_threads_until_the_next_cycle(store, pool):
-    threads = await _waiting_threads(store, pool, 5)
-    blocked = set(threads)
-    storage = _SweepStorage(store, blocked)
-    sweep = QueueSweep()
-
-    async def run() -> list[str]:
-        storage.pending_messages.visited.clear()
-        await settle_waiting_queues(storage, gateway=None, github_app=None, limit=2, sweep=sweep)
-        return list(dict.fromkeys(storage.pending_messages.visited))
-
-    assert await run() == threads[:2]
-    first_boundary = sweep.created_before
-    assert first_boundary is not None
-
-    arrived_during_sweep = await _waiting_threads(store, pool, 2)
-    blocked.remove(threads[0])
-
-    # New arrivals are excluded by creation time even when random IDs sort
-    # before the current cursor. The older queue that became eligible behind
-    # the cursor waits for the next bounded cycle.
-    assert await run() == threads[2:4]
-    assert await run() == [threads[4]]
-    assert sweep.after is None
-    assert sweep.created_before is None
-
-    visited_next_cycle: list[str] = []
-    for _ in range(4):
-        visited_next_cycle.extend(await run())
-    assert threads[0] in visited_next_cycle
-    assert set(arrived_during_sweep) <= set(visited_next_cycle)
 
 
 async def test_a_sweep_rejects_a_zero_page_limit(store):

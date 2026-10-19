@@ -33,8 +33,6 @@ from cloud_agent.owner_access import (
 from cloud_agent.source_control_runtime import SourceControlUnavailable
 
 if TYPE_CHECKING:
-    from datetime import datetime
-
     from cloud_agent.ports import (
         AttachmentRepository,
         ConversationQueries,
@@ -278,17 +276,15 @@ async def settle_queue_when_possible(
 
 @dataclass
 class QueueSweep:
-    """Where the current finite sweep starts and ends.
+    """Where the next periodic sweep starts: past the last queue one reached.
 
-    ``created_before`` is captured once per pass from the database clock. New
-    threads cannot extend an in-progress sweep, even though IDs are random and
-    do not provide a monotonic high-water mark. Each completed queue advances
-    ``after``; a short page ends the pass and clears both bounds after every
-    queue in it has been visited.
+    Each queue visited moves it on, so a pass cancelled mid-page resumes at the
+    queue it was on. A short page reached the end, and the next sweep starts
+    over. However many queues before it cannot move, a waiting queue is reached
+    within one pass over them all.
     """
 
     after: str | None = None
-    created_before: datetime | None = None
 
 
 async def settle_waiting_queues(
@@ -315,12 +311,8 @@ async def settle_waiting_queues(
         raise ValueError("limit must be at least 1")
     app_credentials = _app_credentials(github_app)
     settled = 0
-    if sweep is not None and sweep.created_before is None:
-        sweep.created_before = await store.pending_messages.settlement_sweep_boundary()
     page = await store.pending_messages.threads_to_settle(
-        limit=limit,
-        after=sweep.after if sweep is not None else None,
-        created_before=sweep.created_before if sweep is not None else None,
+        limit=limit, after=sweep.after if sweep is not None else None
     )
     for thread_id in page:
         try:
@@ -341,7 +333,6 @@ async def settle_waiting_queues(
             sweep.after = thread_id
     if sweep is not None and len(page) < limit:
         sweep.after = None
-        sweep.created_before = None
     return settled
 
 

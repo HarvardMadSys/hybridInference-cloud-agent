@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -67,16 +66,7 @@ class _PendingMessages:
     async def expired_send_now_handoffs(self, **_kwargs) -> list[dict[str, Any]]:
         return []
 
-    async def settlement_sweep_boundary(self) -> datetime:
-        return datetime.now(UTC)
-
-    async def threads_to_settle(
-        self,
-        *,
-        limit: int = 50,
-        after: str | None = None,
-        created_before: datetime | None = None,
-    ) -> list[str]:
+    async def threads_to_settle(self, *, limit: int = 50, after: str | None = None) -> list[str]:
         return []
 
 
