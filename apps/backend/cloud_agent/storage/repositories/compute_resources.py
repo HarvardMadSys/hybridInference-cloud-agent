@@ -31,6 +31,7 @@ from cloud_agent.storage._sql.hosts import (
     lock_hosts_for_revocation,
     release_covered_sandboxes,
     revoke_host_credentials,
+    superseded_containers,
 )
 from cloud_agent.storage._sql.jobs import fail_unrunnable_follow_ups
 from cloud_agent.storage._sql.move_out import (
@@ -2009,10 +2010,34 @@ class PostgresComputeResourceRepository:
                 await self._release_terminal_autoscaling_reservation(conn, allocation_id)
                 if row["observed_state"] == "terminated":
                     await self._release_terminated_groups(conn, allocation_id)
+                if row["desired_state"] == "absent" and row["release_committed_at"] is None:
+                    await self._resume_blocked_retirement(conn, allocation_id)
                 row = await conn.fetchrow(
                     "SELECT * FROM agent_compute_allocations WHERE id=$1", allocation_id
                 )
             return _row(row)
+
+    @staticmethod
+    async def _resume_blocked_retirement(conn: Any, allocation_id: str) -> None:
+        """Queue again a release that stopped for attention once its machine is gone.
+
+        A release blocked by what the Host still held waits for an
+        administrator, but the provider ending the machine settles it: the
+        next run finds the resource terminal and commits the release
+        (``_settle_terminal_retirement``). Without this the operation stayed
+        blocked, and the allocation unreleased, after the machine was gone.
+        A pool member's terminal release settles through its reservation.
+        """
+        await conn.execute(
+            """UPDATE agent_compute_operations o
+               SET state='pending',next_attempt_at=NOW(),completed_at=NULL,updated_at=NOW()
+               WHERE o.allocation_id=$1 AND o.kind='retire' AND o.state='blocked'
+                 AND NOT EXISTS (
+                     SELECT 1 FROM agent_cloudlab_autoscaling_members m
+                     WHERE m.allocation_id=o.allocation_id
+                 )""",
+            allocation_id,
+        )
 
     @staticmethod
     async def _release_terminated_groups(conn: Any, allocation_id: str) -> None:
@@ -2755,6 +2780,16 @@ class PostgresComputeResourceRepository:
                     allocation_id,
                 )
             )
+
+    async def superseded_containers(
+        self, *, host: str, containers: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Of the chat containers ``host`` reports, the ones its groups left behind.
+
+        See :data:`~cloud_agent.storage._sql.hosts.SUPERSEDED_CONTAINER_SQL`.
+        """
+        async with self._pool.acquire() as conn:
+            return await superseded_containers(conn, host, containers)
 
     async def move_out_report(self, *, allocation_id: str) -> dict[str, Any]:
         """Whether this allocation's groups are moving out, why not, and what stays.

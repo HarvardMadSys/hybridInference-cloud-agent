@@ -506,6 +506,16 @@ and incomplete inventory block it. There is no force bypass. The only machine
 without an inventory is a CloudLab node whose host-key registration never
 completed: this control plane never connected to it.
 
+Before taking inventory, release removes the stopped containers that groups
+which moved away left behind: a group handed over through its checkpoint, even
+one nobody has used since, or one restored on another Host. A container still
+needed stays and blocks release: its group's own, one whose group has no
+recorded checkpoint left, one whose group is being deleted, and one whose group
+was lost after its restores failed. The operation's result counts the removed
+containers in `superseded_removed`. A removal the Host does not answer is
+retried as the same request. A release that stopped for attention runs again
+once the provider confirms the machine is gone, and settles.
+
 ## Moving sandboxes out before a lease ends
 
 A Host whose allocation does not use automatic replacement moves its sandbox

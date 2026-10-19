@@ -466,6 +466,12 @@ class ComputeResourceRepository(Protocol):
         """Mark LOST each group that went with a machine its provider reclaimed."""
         ...
 
+    async def superseded_containers(
+        self, *, host: str, containers: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Of the chat containers ``host`` reports, the ones its groups left behind."""
+        ...
+
     async def running_attempts(self, *, host: str) -> int:
         """Count the turns a Host is executing now."""
         ...

@@ -433,6 +433,89 @@ async def release_late_covered_sandboxes(conn: Any) -> list[str]:
     return await release_covered_sandboxes(conn, hosts) if hosts else []
 
 
+#: Whether the container that host ``$1`` holds for group ``g`` under
+#: generation ``x.generation`` and Docker id ``x.container_id`` is left behind
+#: for good: nothing will ever start it again, and the group's data no longer
+#: depends on it.
+#:
+#: It never starts again once the group is past its generation (generations
+#: only grow, and every start is fenced by one), or once the group is
+#: ``cold`` here under that generation and names that container or none: a
+#: ``cold`` group is refused every start, and the claim that ends it raises
+#: the generation (and refuses this host while it still names the
+#: container). A restore that failed here leaves the group ``cold`` with no
+#: container. Neither condition can become false again, so a removal acting on
+#: an earlier read removes nothing that is still needed.
+#:
+#: The data lives elsewhere once a newer generation has a container, or while
+#: the group waits for a restore from a checkpoint that is still recorded.
+#: A ``lost`` group is never matched: its restores failed, and the container
+#: may be the only good copy. A group being deleted belongs to its deletion;
+#: one already deleted needs nothing kept.
+SUPERSEDED_CONTAINER_SQL = """(
+    g.state <> 'lost'
+    AND g.deletion_state NOT IN ('pending', 'archived')
+    AND (
+        g.generation > x.generation
+        OR (
+            g.state = 'cold' AND g.host = $1 AND g.generation = x.generation
+            AND (g.container_id IS NULL OR g.container_id = x.container_id)
+        )
+    )
+    AND (
+        g.deletion_state = 'deleted'
+        OR (g.state NOT IN ('cold', 'restoring') AND g.container_id IS NOT NULL)
+        OR (
+            g.state IN ('cold', 'restoring')
+            AND EXISTS (
+                SELECT 1 FROM agent_sandbox_checkpoints c
+                WHERE c.id = g.restore_checkpoint_id AND c.sandbox_id = g.id
+                  AND c.state IN ('reported', 'verified')
+            )
+        )
+    )
+)"""
+
+
+async def superseded_containers(
+    conn: Any, host: str, containers: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Of the chat containers ``host`` reports, the ones its groups left behind.
+
+    ``containers`` carries each container's ``sandbox_id``, ``generation``,
+    ``container_id`` and ``origin_thread_id`` as the host's Sandbox Manager
+    reported them. Returned are those :data:`SUPERSEDED_CONTAINER_SQL`
+    matches; the group's own origin thread must be the one reported.
+    """
+    if not containers:
+        return []
+    rows = await conn.fetch(
+        f"""
+        SELECT x.sandbox_id, x.generation, x.container_id, x.origin_thread_id
+        FROM unnest($2::text[], $3::bigint[], $4::text[], $5::text[])
+            AS x(sandbox_id, generation, container_id, origin_thread_id)
+        JOIN agent_sandboxes g
+            ON g.id = x.sandbox_id AND g.origin_thread_id = x.origin_thread_id
+        WHERE {SUPERSEDED_CONTAINER_SQL}
+        ORDER BY x.sandbox_id, x.container_id
+        """,
+        host,
+        [str(item["sandbox_id"]) for item in containers],
+        [int(item["generation"]) for item in containers],
+        [str(item["container_id"]) for item in containers],
+        [str(item["origin_thread_id"]) for item in containers],
+    )
+    return [
+        {
+            "sandbox_id": str(row["sandbox_id"]),
+            "generation": int(row["generation"]),
+            "container_id": str(row["container_id"]),
+            "origin_thread_id": str(row["origin_thread_id"]),
+        }
+        for row in rows
+    ]
+
+
 #: Whether host ``{host}`` has been revoked (:func:`revoke_host_credentials`)
 #: and not enrolled again. ``{host}`` names the host column or parameter.
 REVOKED_HOST_SQL = """EXISTS (

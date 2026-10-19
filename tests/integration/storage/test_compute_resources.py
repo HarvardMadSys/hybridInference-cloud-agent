@@ -3787,3 +3787,31 @@ async def test_two_hosts_entering_their_windows_together_never_both_stop(store, 
 
     assert sorted(outcomes) == [False, True]
     assert len(await _move_out_holds(db)) == 1
+
+
+@pytest.mark.parametrize("gone", ["terminated", "absent"])
+async def test_a_release_blocked_by_what_its_host_held_resumes_once_the_machine_is_gone(
+    store, hosts, gone
+):
+    repo = store.compute_resources
+    allocation_id, _node, _ = await resource(store, hosts)
+    release = await operation(repo, allocation_id)
+    await repo.begin_retirement(allocation_id=allocation_id, operation_id=release["id"])
+    await repo.finish_operation(**fence(release), state="blocked", step="checking_retention")
+    renewal = await operation(repo, allocation_id, "extend")
+    await repo.finish_operation(**fence(renewal), state="blocked", step="extension_unconfirmed")
+
+    # While the machine is there, an administrator decides.
+    await repo.observe_allocation(
+        allocation_id=allocation_id, observation={"observed_state": "ready", "scope_complete": True}
+    )
+    assert (await repo.get_operation(release["id"]))["state"] == "blocked"
+
+    await repo.observe_allocation(
+        allocation_id=allocation_id, observation={"observed_state": gone, "scope_complete": True}
+    )
+    # The release runs again and settles; nothing else is retried for it.
+    assert (await repo.get_operation(release["id"]))["state"] == "pending"
+    assert (await repo.get_operation(renewal["id"]))["state"] == "blocked"
+    resumed = await repo.claim_operation(worker_id="worker")
+    assert resumed is not None and resumed["id"] == release["id"]
