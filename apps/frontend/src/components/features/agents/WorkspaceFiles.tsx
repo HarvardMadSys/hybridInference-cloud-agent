@@ -204,7 +204,9 @@ function glyphFor(name: string): GlyphName {
   const byName = GLYPH_BY_NAME.find(([prefix]) => lower.startsWith(prefix));
   if (byName) return byName[1];
   const dot = lower.lastIndexOf('.');
-  return (dot > 0 ? GLYPH_BY_EXTENSION[lower.slice(dot + 1)] : undefined) ?? 'plain';
+  const extension = dot > 0 ? lower.slice(dot + 1) : '';
+  // Own entries only: `x.constructor` must not find Object.prototype's.
+  return Object.hasOwn(GLYPH_BY_EXTENSION, extension) ? GLYPH_BY_EXTENSION[extension] : 'plain';
 }
 
 function FileGlyph({ name }: { name: string }) {

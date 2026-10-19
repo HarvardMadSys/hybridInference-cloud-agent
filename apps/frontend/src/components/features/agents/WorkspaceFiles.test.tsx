@@ -474,6 +474,44 @@ describe('workspace navigation and copying', () => {
     expect(screen.getByText('Some entries in this folder are not listed.')).toBeVisible();
   });
 
+  // Workspace names are the agent's to choose. As plain-object keys they used
+  // to find Object.prototype members: such a file crashed its row's glyph,
+  // and such a folder rendered open with no listing, or crashed the tree.
+  it('shows a file whose extension names an Object.prototype member', async () => {
+    vi.mocked(getAgentJobFiles).mockResolvedValue({
+      path: '',
+      kind: 'directory',
+      entries: [
+        { path: 'x.constructor', name: 'x.constructor', kind: 'file' },
+        { path: 'y.__proto__', name: 'y.__proto__', kind: 'file' },
+      ],
+    });
+    render(<WorkspaceFiles job={JOB} active />);
+
+    expect(await screen.findByRole('button', { name: 'x.constructor' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'y.__proto__' })).toBeVisible();
+  });
+
+  it.each(['constructor', 'toString', '__proto__'])(
+    'keeps a folder named %s closed until it is opened, then lists it',
+    async (name) => {
+      vi.mocked(getAgentJobFiles).mockImplementation(async (_jobId, path = '') => ({
+        path,
+        kind: 'directory',
+        entries: path
+          ? [{ path: `${path}/inside.txt`, name: 'inside.txt', kind: 'file' }]
+          : [{ path: name, name, kind: 'directory' }],
+      }));
+      render(<WorkspaceFiles job={JOB} active />);
+      const folder = await screen.findByRole('button', { name });
+      expect(folder).toHaveAttribute('aria-expanded', 'false');
+
+      fireEvent.click(folder);
+      expect(await screen.findByRole('button', { name: `${name}/inside.txt` })).toBeVisible();
+      expect(folder).toHaveAttribute('aria-expanded', 'true');
+    },
+  );
+
   it('does not call a folder empty when every entry was left out of its listing', async () => {
     vi.mocked(getAgentJobFiles).mockResolvedValue({
       path: '',

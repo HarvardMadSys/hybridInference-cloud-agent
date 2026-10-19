@@ -759,6 +759,15 @@ export interface WorkspaceDirectory {
 const partialListing = (truncated: boolean | undefined) =>
   truncated ? { truncated: true as const } : {};
 
+/**
+ * A path-keyed record with no prototype, holding the entries of `sources`.
+ * Workspace paths are the agent's to choose. On a plain object, a folder named
+ * `constructor` or `__proto__` reads back an Object.prototype member: shown
+ * open before anyone opened it, with that member standing in for its listing.
+ */
+const byPath = <T>(...sources: Array<Record<string, T>>): Record<string, T> =>
+  Object.assign(Object.create(null) as Record<string, T>, ...sources);
+
 export interface WorkspaceFilesState {
   /** Loaded directories keyed by path; the workspace root is the empty string. */
   directories: Record<string, WorkspaceDirectory>;
@@ -797,8 +806,8 @@ export function useWorkspaceFiles(
   enabled: boolean,
   refreshKey = '',
 ): WorkspaceFilesState {
-  const [directories, setDirectories] = useState<Record<string, WorkspaceDirectory>>({});
-  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const [directories, setDirectories] = useState(() => byPath<WorkspaceDirectory>());
+  const [expanded, setExpanded] = useState(() => byPath<boolean>());
   const [selected, setSelected] = useState<string | null>(null);
   const [directoryPath, setDirectoryPath] = useState<string | null>(null);
   const [file, setFile] = useState<AgentJobFileApi | AgentJobSymlinkApi | null>(null);
@@ -842,35 +851,38 @@ export function useWorkspaceFiles(
         alive.current &&
         mine === generation.current &&
         directoryRequests.current.get(path)?.request === request;
-      setDirectories((current) => ({
-        ...current,
-        [path]: {
-          entries: current[path]?.entries ?? null,
-          ...partialListing(current[path]?.truncated),
-          loading: true,
-          error: null,
-        },
-      }));
+      setDirectories((current) =>
+        byPath(current, {
+          [path]: {
+            entries: current[path]?.entries ?? null,
+            ...partialListing(current[path]?.truncated),
+            loading: true,
+            error: null,
+          },
+        }),
+      );
       try {
         const node = await getAgentJobFiles(jobId, path);
         if (!isCurrent()) return;
         directoryGenerations.current.set(path, mine);
-        setDirectories((current) => ({
-          ...current,
-          [path]: {
-            entries: node.kind === 'directory' ? (node.entries ?? []) : [],
-            ...partialListing(node.kind === 'directory' && node.truncated),
-            loading: false,
-            error: null,
-          },
-        }));
+        setDirectories((current) =>
+          byPath(current, {
+            [path]: {
+              entries: node.kind === 'directory' ? (node.entries ?? []) : [],
+              ...partialListing(node.kind === 'directory' && node.truncated),
+              loading: false,
+              error: null,
+            },
+          }),
+        );
         if (path === '') setSource(node.source ?? null);
       } catch (cause) {
         if (!isCurrent()) return;
-        setDirectories((current) => ({
-          ...current,
-          [path]: { entries: null, loading: false, error: filesError(cause) },
-        }));
+        setDirectories((current) =>
+          byPath(current, {
+            [path]: { entries: null, loading: false, error: filesError(cause) },
+          }),
+        );
       } finally {
         if (directoryRequests.current.get(path)?.request === request)
           directoryRequests.current.delete(path);
@@ -898,19 +910,19 @@ export function useWorkspaceFiles(
           const ancestors = parts.map((_, index) => parts.slice(0, index + 1).join('/'));
           directoryRequests.current.delete(node.path);
           directoryGenerations.current.set(node.path, mine);
-          setDirectories((current) => ({
-            ...current,
-            [node.path]: {
-              entries: node.entries ?? [],
-              ...partialListing(node.truncated),
-              loading: false,
-              error: null,
-            },
-          }));
-          setExpanded((current) => ({
-            ...current,
-            ...Object.fromEntries(ancestors.map((ancestor) => [ancestor, true])),
-          }));
+          setDirectories((current) =>
+            byPath(current, {
+              [node.path]: {
+                entries: node.entries ?? [],
+                ...partialListing(node.truncated),
+                loading: false,
+                error: null,
+              },
+            }),
+          );
+          setExpanded((current) =>
+            byPath(current, Object.fromEntries(ancestors.map((ancestor) => [ancestor, true]))),
+          );
           for (const ancestor of ancestors.slice(0, -1)) {
             if (directoryGenerations.current.get(ancestor) !== mine) void loadDirectory(ancestor);
           }
@@ -952,7 +964,7 @@ export function useWorkspaceFiles(
   const toggleDirectory = useCallback(
     (path: string) => {
       const open = Boolean(expanded[path]);
-      setExpanded((current) => ({ ...current, [path]: !open }));
+      setExpanded((current) => byPath(current, { [path]: !open }));
       if (
         !open &&
         (!directories[path]?.entries ||

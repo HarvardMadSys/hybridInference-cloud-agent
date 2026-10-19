@@ -170,13 +170,21 @@ const FILENAMES: Record<string, SpecName> = {
   '.editorconfig': 'data',
 };
 
+/**
+ * `table[key]` when the table itself has that entry. Paths and fence labels
+ * are data, and on a plain object `constructor` or `__proto__` would find an
+ * Object.prototype member instead of nothing.
+ */
+const own = (table: Record<string, SpecName>, key: string): SpecName | undefined =>
+  Object.hasOwn(table, key) ? table[key] : undefined;
+
 function specForPath(path: string): LanguageSpec | null {
   const name = (path.split('/').pop() ?? '').toLowerCase();
-  const byName = FILENAMES[name];
+  const byName = own(FILENAMES, name);
   if (byName) return SPECS[byName];
   const dot = name.lastIndexOf('.');
   if (dot <= 0) return null;
-  const byExtension = EXTENSIONS[name.slice(dot + 1)];
+  const byExtension = own(EXTENSIONS, name.slice(dot + 1));
   return byExtension ? SPECS[byExtension] : null;
 }
 
@@ -352,7 +360,8 @@ const LANGUAGE_ALIASES: Record<string, SpecName> = {
 /** Tokenize a fenced code block by the language its fence names. */
 export function highlightFence(source: string, language: string): CodeToken[][] {
   const key = language.trim().toLowerCase();
-  const name = LANGUAGE_ALIASES[key] ?? EXTENSIONS[key];
-  if (!name || source.length > MAX_HIGHLIGHT_CHARS) return plainLines(source);
-  return splitLines(scan(source, SPECS[name]));
+  const name = own(LANGUAGE_ALIASES, key) ?? own(EXTENSIONS, key);
+  const spec = name ? SPECS[name] : null;
+  if (!spec || source.length > MAX_HIGHLIGHT_CHARS) return plainLines(source);
+  return splitLines(scan(source, spec));
 }

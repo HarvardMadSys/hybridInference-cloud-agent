@@ -58,6 +58,13 @@ describe('highlightCode', () => {
 
     expect(kinds(line, 'comment')).toEqual(['# base image']);
   });
+
+  it.each(['constructor', 'src/__proto__', 'lib/x.constructor', 'x.__proto__'])(
+    'leaves %s plain rather than reading its name off Object.prototype',
+    (path) => {
+      expect(highlightCode('a', path)).toEqual([[{ text: 'a', kind: 'plain' }]]);
+    },
+  );
 });
 
 describe('highlightFence', () => {
@@ -75,4 +82,17 @@ describe('highlightFence', () => {
       [{ text: 'b', kind: 'plain' }],
     ]);
   });
+
+  // A fence label is the message author's text. As a plain-object key it
+  // used to find Object.prototype members, and scanning with no language
+  // threw while the message rendered.
+  it.each(['constructor', 'Constructor', '__proto__'])(
+    'leaves a fence labelled %s plain',
+    (language) => {
+      expect(highlightFence('a\nb', language)).toEqual([
+        [{ text: 'a', kind: 'plain' }],
+        [{ text: 'b', kind: 'plain' }],
+      ]);
+    },
+  );
 });
