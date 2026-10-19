@@ -189,8 +189,17 @@ SQL
 # well as the base one: it is dropped with them, and a mark on the base alone
 # says nothing about it.
 check_owner() {
-  local name comment owner
+  local rows name comment owner
+  # Read in full first: a query that fails inside `done < <(...)` would end
+  # the loop as if no database existed, and the drop would go ahead.
+  rows="$(
+    psql_in -F $'\t' -v name="${TEST_DB_NAME}" <<SQL
+SELECT datname, coalesce(shobj_description(oid, 'pg_database'), '')
+FROM pg_database WHERE ${OWNED} ORDER BY datname
+SQL
+  )" || die "could not read who owns ${TEST_DB_NAME}'s databases; dropping nothing"
   while IFS=$'\t' read -r name comment; do
+    [ -n "${name}" ] || continue
     case "${comment}" in
       "${OWNER_PREFIX}"*)
         owner="${comment#"${OWNER_PREFIX}"}"
@@ -204,12 +213,7 @@ check_owner() {
         exit 2
         ;;
     esac
-  done < <(
-    psql_in -F $'\t' -v name="${TEST_DB_NAME}" <<SQL
-SELECT datname, coalesce(shobj_description(oid, 'pg_database'), '')
-FROM pg_database WHERE ${OWNED} ORDER BY datname
-SQL
-  )
+  done <<<"${rows}"
 }
 
 # Empty databases for this checkout: the base one, which some tests use
@@ -319,17 +323,19 @@ case "${cmd}" in
     # set is dropped under the lock a run of it holds, and only the databases
     # that still carry the mark read here: a checkout can take a name over
     # between this scan and the drop.
-    stale=()
-    while IFS=$'\t' read -r name owner; do
-      [ -d "${owner}" ] || stale+=("${name}"$'\t'"${owner}")
-    done < <(
+    marked="$(
       psql_in -F $'\t' -v prefix="${OWNER_PREFIX}" <<'SQL'
 SELECT DISTINCT regexp_replace(datname, '_gw[0-9]+$', ''),
        substr(shobj_description(oid, 'pg_database'), length(:'prefix') + 1)
 FROM pg_database WHERE starts_with(shobj_description(oid, 'pg_database'), :'prefix')
 ORDER BY 1
 SQL
-    )
+    )" || die "could not list the marked databases; dropping nothing"
+    stale=()
+    while IFS=$'\t' read -r name owner; do
+      [ -n "${name}" ] || continue
+      [ -d "${owner}" ] || stale+=("${name}"$'\t'"${owner}")
+    done <<<"${marked}"
     for entry in ${stale[@]+"${stale[@]}"}; do
       TEST_DB_NAME="${entry%%$'\t'*}"
       owner="${entry#*$'\t'}"

@@ -46,6 +46,9 @@ elif "psql" in args:
     names = dict(a.split("=", 1) for a in args if "=" in a and a != "ON_ERROR_STOP=1")
     with open(log, "a") as out:
         out.write("sql " + repr(names) + " " + sql.replace("\n", " ") + "\n")
+    if os.environ.get("FAKE_FAIL", "\0") in sql:
+        # The server going away mid-query, or a statement timing out.
+        sys.exit("psql: error: server closed the connection unexpectedly")
     if "ORDER BY datname" in sql:
         # The databases the query selects, with their marks: "name<TAB>comment".
         # As the server would, the workers' only when it asks for the whole set.
@@ -236,6 +239,25 @@ def test_clean_drops_under_the_lock_only_what_still_carries_the_stale_mark(
     lock = next(i for i, call in enumerate(calls) if "test-db-local:ca_gone_test_db" in call)
     assert lock < calls.index(next(c for c in calls if "DROP DATABASE" in c))
     assert all("ca_alive_test_db" not in call for call in calls if call.startswith("lock "))
+
+
+@pytest.mark.parametrize("command", ["run", "env", "reset"])
+def test_a_failed_owner_query_drops_nothing(fake, tmp_path: Path, command: str) -> None:
+    # Answered, the query would refuse: another existing checkout owns a worker.
+    rows = f"{NAME}_gw0|{OWNER}{tmp_path}\n"
+    result, calls = fake(command, FAKE_SET=rows, FAKE_FAIL="ORDER BY datname")
+    assert result.returncode == 1
+    assert f"could not read who owns {NAME}'s databases; dropping nothing" in result.stderr
+    assert _drops(calls) == []
+    assert not any(call.startswith("pytest ") for call in calls)
+
+
+def test_a_failed_clean_scan_drops_nothing(fake, tmp_path: Path) -> None:
+    marked = f"ca_gone_test_db|{tmp_path / 'removed'}\n"
+    result, calls = fake("clean", FAKE_MARKED=marked, FAKE_FAIL="regexp_replace")
+    assert result.returncode == 1
+    assert "could not list the marked databases; dropping nothing" in result.stderr
+    assert _drops(calls) == []
 
 
 def test_clean_keeps_a_set_a_run_is_using(fake, tmp_path: Path) -> None:
