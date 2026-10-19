@@ -745,7 +745,10 @@ def _run_shared_boundary_case(
             **(job_changes or {}),
         ),
         control=control,
-        heart=heart or SimpleNamespace(cancel_requested=False, lease_lost=False),
+        heart=heart
+        or SimpleNamespace(
+            cancel_requested=False, lease_lost=False, ttl=runner_mod.DEFAULT_LEASE_TTL_S
+        ),
         backend=backend,
         host="host-a",
         gateway_base_url="http://gateway",
@@ -1315,6 +1318,99 @@ def test_control_lease_rejection_never_retries_settlement(monkeypatch):
     with pytest.raises(LeaseLost):
         runner_mod._retry_lifecycle_receipt("settle", "ajob_test", request)
     request.assert_called_once()
+
+
+@pytest.mark.parametrize("stage", ["admission", "control_settle"])
+def test_a_control_plane_restart_at_the_turn_boundary_does_not_fail_the_turn(monkeypatch, stage):
+    """Admission and settlement wait out the control plane being recreated.
+
+    A deploy refuses connections for longer than the three quick tries these
+    receipts had. A settlement given up on that way failed a turn the sandbox
+    had already settled, and the control plane marked the conversation lost.
+    """
+    clock = _virtual_clock(monkeypatch)
+    tries: list[float] = []
+
+    def receipt(**_kwargs):
+        tries.append(clock.now)
+        if clock.now < 30:
+            raise httpx.ConnectError("connection refused")
+        return {}
+
+    def configure(control, _supervisor, _finish):
+        if stage == "admission":
+            control.admit_chat_turn.side_effect = receipt
+        else:
+            control.settle_chat_sandbox.side_effect = receipt
+
+    result, control, supervisor, finish = _run_shared_boundary_case(
+        monkeypatch, 0, None, "claude-code", configure=configure
+    )
+
+    assert result == 0
+    assert [call.args[0] for call in finish.call_args_list] == ["succeeded"]
+    supervisor.settle_shared.assert_called_once()
+    supervisor.abandon_shared.assert_not_called()
+    control.abandon_chat_sandbox.assert_not_called()
+    assert len(tries) > 3 and tries[-1] >= 30
+    assert max(clock.sleeps) == control_plane_client._EVENT_RETRY_MAX_DELAY_S
+
+
+@pytest.mark.parametrize("lease_runs_out", [True, False])
+def test_a_settlement_the_control_plane_never_records_keeps_the_sandboxs_session(
+    monkeypatch, lease_runs_out
+):
+    """Once the sandbox has settled the turn, its session is never torn down as lost.
+
+    The receipt is retried while the lease holds: the control plane marks an
+    admitted turn it never saw settle lost however the attempt ends, so only
+    the receipt landing keeps the conversation. Once the heartbeat has lost the
+    lease, nothing more is sent. A control plane that keeps renewing the lease
+    while it fails the receipt is given up on after one lease, and the failure
+    reported.
+    """
+    clock = _virtual_clock(monkeypatch)
+    tries: list[float] = []
+    ttl = runner_mod.DEFAULT_LEASE_TTL_S
+
+    class Heart:
+        cancel_requested = False
+
+        def __init__(self) -> None:
+            self.ttl = ttl
+
+        @property
+        def lease_lost(self) -> bool:
+            # The heartbeat's last renewal was 30 seconds before the turn ended.
+            return lease_runs_out and clock.now >= ttl - 30
+
+    def receipt(**_kwargs):
+        tries.append(clock.now)
+        if lease_runs_out:
+            raise httpx.ConnectError("connection refused")
+        raise _status_error(503)
+
+    def configure(control, _supervisor, _finish):
+        control.settle_chat_sandbox.side_effect = receipt
+
+    result, control, supervisor, finish = _run_shared_boundary_case(
+        monkeypatch, 0, None, "claude-code", configure=configure, heart=Heart()
+    )
+
+    supervisor.settle_shared.assert_called_once()
+    supervisor.abandon_shared.assert_not_called()
+    assert max(clock.sleeps) == control_plane_client._EVENT_RETRY_MAX_DELAY_S
+    if lease_runs_out:
+        assert result == 3
+        assert tries[-1] >= ttl - 30
+        finish.assert_not_called()
+        assert all(
+            call.args[0].event_type != "error" for call in control.append_event.call_args_list
+        )
+    else:
+        assert result == 2
+        assert ttl - control_plane_client._EVENT_RETRY_MAX_DELAY_S <= tries[-1] <= ttl
+        assert [call.args[0] for call in finish.call_args_list] == ["failed"]
 
 
 @pytest.mark.parametrize(

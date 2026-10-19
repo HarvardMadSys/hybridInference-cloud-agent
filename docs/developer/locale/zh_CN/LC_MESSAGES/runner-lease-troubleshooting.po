@@ -304,15 +304,26 @@ msgstr ""
 
 #: ../developer/runner-lease-troubleshooting.md:95
 msgid ""
-"Admission and settlement receipts allow **up to three attempts**, using "
-"ten-second HTTP timeouts and five-second delays. Only transport failures "
-"and HTTP 408/502/503/504 are retried; 409/410 are definitive. The prompt "
-"is sent exactly once, after its admission acknowledgement succeeds."
+"The control plane's admission and settlement receipts are retried **for "
+"as long as the lease holds**, using ten-second HTTP timeouts and delays "
+"that double from one second up to eight. That rides out a control-plane "
+"container being recreated: however an attempt ends, by a failed finish or"
+" the reaper, a turn the control plane admitted but never saw settle is "
+"marked LOST, even when the supervisor had settled it. Retries stop once "
+"the heartbeat has lost the lease, or after a whole lease of failures from"
+" a control plane that keeps renewing it, and a failed receipt never tears "
+"down a session the supervisor has settled. Supervisor settlement allows "
+"three attempts, five seconds apart. Only transport failures and HTTP "
+"408/502/503/504 are retried; 409/410 are definitive. The prompt is sent "
+"exactly once, after its admission acknowledgement succeeds."
 msgstr ""
-"准入回执和结算回执**最多尝试三次**，每次 HTTP 超时十秒，间隔五秒。只有网络传输失败和 HTTP 408/502/503/504 "
+"控制平面的准入回执和结算回执会**在租约有效期间一直重试**，每次 HTTP 超时十秒，重试间隔从一秒起逐次加倍，最长八秒。这样能撑过控制平面容器被重建的那段时间：不管"
+" attempt 怎样结束，是 finish 失败还是被 reaper 回收，只要某个轮次在控制平面那边已准入、却从未结算，就会被标记为 LOST，哪怕"
+" supervisor 已经结算了它。心跳一旦失去租约，或者控制平面一直在续租、却整整一个租约期都没能接受回执，重试就停止；回执失败也绝不会拆掉"
+" supervisor 已经结算好的会话。supervisor 的结算最多尝试三次，间隔五秒。只有网络传输失败和 HTTP 408/502/503/504 "
 "会重试；409/410 就是最终结果。提示词只发送一次，而且是在准入确认成功之后。"
 
-#: ../developer/runner-lease-troubleshooting.md:100
+#: ../developer/runner-lease-troubleshooting.md:107
 msgid ""
 "Supervisor settlement retains the last token's receipt until another "
 "activation takes ownership. Control-plane settlement returns the recorded"
@@ -325,11 +336,11 @@ msgstr ""
 "和激活，返回已记录的边界。重复结算不会让工作区的 epoch 加一，不会追加快照，也不会改变原生轮次的序号。sandbox manager "
 "重启后，内存里的回执就没了，所以跨重启、无法确定是否完成的情况，一律按失败处理。"
 
-#: ../developer/runner-lease-troubleshooting.md:107
+#: ../developer/runner-lease-troubleshooting.md:114
 msgid "When a retained conversation can continue"
 msgstr "保留对话什么时候还能继续"
 
-#: ../developer/runner-lease-troubleshooting.md:109
+#: ../developer/runner-lease-troubleshooting.md:116
 msgid ""
 "A reported preparation failure **before admission** can leave an existing"
 " conversation usable. The runner abandons the activation and reports a "
@@ -341,7 +352,7 @@ msgstr ""
 "**准入之前**报告的准备失败，已有的对话可能还能继续用。runner "
 "会放弃这次激活，报告一个失败的轮次；下一条消息可以接着用保留的原生会话。前提是确切知道是哪个保留容器。如果在记下容器身份之前就失败了，就证明不了这一点；而且能不能上报错误事件，不能成为报告失败的前提。"
 
-#: ../developer/runner-lease-troubleshooting.md:115
+#: ../developer/runner-lease-troubleshooting.md:122
 msgid ""
 "An admission request with no received acknowledgement is different: the "
 "database may have committed it even though the runner has not sent the "
@@ -355,7 +366,7 @@ msgstr ""
 "只能释放准入之前的轮次（`admitted_job_id IS NULL`），所以释放不了这个状态不确定的轮次；转入终态时，会把它的上下文标成 "
 "LOST。runner 绝不会重放一个没有确认过的已准入提示词。"
 
-#: ../developer/runner-lease-troubleshooting.md:122
+#: ../developer/runner-lease-troubleshooting.md:129
 msgid ""
 "Recovery after an expired activation or killed runner requires a further "
 "protocol: durably quarantine the member, fence the old runner's "
@@ -372,7 +383,7 @@ msgstr ""
 "`busy=false` 是不够的，因为工作区的 setup 命令不走它的 agent "
 "轮次通道。绝不能只因为准入字段为空就把一个轮次重新入队，也不能清掉 lost 标记，更不能为了让界面显示正常就重放一个已准入的提示词。"
 
-#: ../developer/runner-lease-troubleshooting.md:131
+#: ../developer/runner-lease-troubleshooting.md:138
 msgid ""
 "Owner-facing wording describes interrupted responses and unavailable "
 "conversations in plain language. Infrastructure details stay in API "
@@ -383,31 +394,31 @@ msgstr ""
 "给所有者看的文字，会用大白话说明回复被中断了、对话用不了了。基础设施层面的细节留在 API 记录和运维日志里；任务错误和 assistant "
 "消息都原样保留。改了这些文字之后，历史上已经是 LOST 的成员关系依然保持禁用。"
 
-#: ../developer/runner-lease-troubleshooting.md:136
+#: ../developer/runner-lease-troubleshooting.md:143
 msgid "The safe release case: a child never accepted its turn"
 msgstr "可以安全释放的情况：子进程从没接下这个轮次"
 
-#: ../developer/runner-lease-troubleshooting.md:138
+#: ../developer/runner-lease-troubleshooting.md:145
 msgid ""
 "The host runs each turn in a child process. It can release a claim back "
 "to the queue only when it can prove that child never accepted the turn:"
 msgstr "主机为每个轮次单独起一个子进程。只有能证明这个子进程从没接下这一轮时，主机才能把认领释放回队列："
 
-#: ../developer/runner-lease-troubleshooting.md:141
+#: ../developer/runner-lease-troubleshooting.md:148
 msgid "Process creation failed."
 msgstr "进程没创建成功。"
 
-#: ../developer/runner-lease-troubleshooting.md:142
+#: ../developer/runner-lease-troubleshooting.md:149
 msgid "Payload delivery failed."
 msgstr "数据没送到子进程。"
 
-#: ../developer/runner-lease-troubleshooting.md:143
+#: ../developer/runner-lease-troubleshooting.md:150
 msgid ""
 "The child closed its handover descriptor without accepting, including a "
 "failed read-only Docker/network preflight before acceptance."
 msgstr "子进程没接任务就关闭了交接用的描述符，包括接任务之前那次只读的 Docker 或网络 preflight 失败的情况。"
 
-#: ../developer/runner-lease-troubleshooting.md:146
+#: ../developer/runner-lease-troubleshooting.md:153
 msgid ""
 "A silent child that remains alive is not proof and is never released. "
 "After acceptance, crashes, kills and lost acknowledgements belong to the "
@@ -415,7 +426,7 @@ msgid ""
 " turn."
 msgstr "子进程一直不吭声但还活着，这不算证据，永远不会因此释放。一旦接下任务，之后的崩溃、被杀和确认丢失都交给租约协议处理；对话可能因此丢失，但绝不会把这一轮重跑一遍。"
 
-#: ../developer/runner-lease-troubleshooting.md:150
+#: ../developer/runner-lease-troubleshooting.md:157
 msgid ""
 "Release uses `POST /v1/agent/worker/jobs/<job>/release` with that turn's "
 "worker token. The control plane requires the same still-running attempt "
@@ -427,7 +438,7 @@ msgstr ""
 "令牌。控制平面要求两点都满足：是同一个仍在运行的 "
 "attempt、同一个租约代次，**并且**没有任何成员关系已经准入了这个任务。准入条件由数据库语句本身强制检查，所以主机即使观察错了，也没法把已准入的工作重新入队。"
 
-#: ../developer/runner-lease-troubleshooting.md:156
+#: ../developer/runner-lease-troubleshooting.md:163
 msgid ""
 "Consecutive launch failures stop claims on that host and back off. "
 "Heartbeats report `launch_error`, which appears beside the host on Admin "

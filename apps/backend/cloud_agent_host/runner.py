@@ -67,6 +67,7 @@ from cloud_agent_host.claimed_job import (
     WorkWaitUnsupported as WorkWaitUnsupported,
 )
 from cloud_agent_host.control_plane_client import (
+    _EVENT_RETRY_MAX_DELAY_S,
     _HEARTBEAT_TIMEOUT_S,
     ControlPlane as ControlPlane,
 )
@@ -204,8 +205,12 @@ HEARTBEAT_INTERVAL_S = 30.0
 FIRST_SETTINGS_WAIT_S = 30.0
 # Heartbeats use a short per-request timeout and retry promptly, so a slow
 # control request cannot consume the remaining lease in normal cadence sleeps.
-# Idempotent lifecycle receipts reuse the same short retry interval.
+# Idempotent lifecycle receipts reuse the same short retry interval, except the
+# control plane's admission and settlement, which wait out a restart instead.
 _CONTROL_RETRY_INTERVAL_S = 5.0
+#: Answers a repeated receipt can change: the answer was lost on the way, or
+#: the server was briefly unavailable. Anything else is the receipt refused.
+_RECEIPT_RETRY_STATUSES = frozenset({408, 502, 503, 504})
 #: Heartbeat answers no retry can change. The worker token and the job it names
 #: are fixed for the attempt, so a renewal refused for either is refused every
 #: time, and the lease runs out regardless.
@@ -283,11 +288,48 @@ def _retry_lifecycle_receipt(operation: str, job_id: str, call: Callable[[], Any
                 if isinstance(exc, SessionSupervisorError)
                 else None
             )
-            if attempt == 2 or (status is not None and status not in {408, 502, 503, 504}):
+            if attempt == 2 or (status is not None and status not in _RECEIPT_RETRY_STATUSES):
                 raise
             _log_control_failure(operation, job_id, exc)
             time.sleep(_CONTROL_RETRY_INTERVAL_S)
     raise AssertionError("lifecycle retry exhausted without a result")
+
+
+def _retry_control_receipt(
+    operation: str, job_id: str, call: Callable[[], Any], *, heart: Heartbeater
+) -> Any:
+    """Retry the control plane's admission or settlement receipt while the lease holds.
+
+    A deploy that recreates the control-plane container refuses connections,
+    or its proxy answers 502, for longer than three quick tries cover, and
+    giving up on either receipt failed the turn over a restart. A settlement
+    costs more: however the attempt then ends, by a failed finish or by the
+    lease reaper, the control plane marks an admitted turn it never saw settle
+    lost, though the sandbox holds it settled. So these back off as event
+    uploads do for as long as the lease holds; once the heartbeat has lost it,
+    no receipt can land. A control plane that renews the lease all along but
+    fails the receipt for a whole lease is not restarting, and is given up on.
+    """
+    give_up_at: float | None = None
+    delay = 1.0
+    while True:
+        try:
+            return call()
+        except (httpx.TransportError, httpx.HTTPStatusError) as exc:
+            if (
+                isinstance(exc, httpx.HTTPStatusError)
+                and exc.response.status_code not in _RECEIPT_RETRY_STATUSES
+            ):
+                raise
+            if heart.lease_lost:
+                raise LeaseLost(f"lease lost while retrying {operation}") from exc
+            if give_up_at is None:
+                give_up_at = time.monotonic() + heart.ttl
+            if time.monotonic() + delay > give_up_at:
+                raise
+            _log_control_failure(operation, job_id, exc)
+        time.sleep(delay)
+        delay = min(delay * 2, _EVENT_RETRY_MAX_DELAY_S)
 
 
 # Both are interpolated into a URL and handed to git, which reads a leading
@@ -366,6 +408,11 @@ class Heartbeater:
         self._thread: threading.Thread | None = None
         self.cancel_requested = False
         self.lease_lost = False
+
+    @property
+    def ttl(self) -> float:
+        """How long each renewal extends the lease."""
+        return self._ttl
 
     def start(self) -> None:
         """Begin heartbeating on a daemon thread."""
@@ -2403,6 +2450,9 @@ def _run_shared_live_attempt(
     source: _SourcePrefetch | None = None
     lease_token: str | None = None
     settled = False
+    # The sandbox manager has settled the turn: its session is good whatever
+    # the control plane's receipt says next, and no longer leased to this attempt.
+    locally_settled = False
     abandoned = False
     turn_admitted = False
     terminals_suspended = False
@@ -2416,7 +2466,7 @@ def _run_shared_live_attempt(
         nonlocal abandoned
         if abandoned or settled:
             return
-        if supervisor is not None and lease_token is not None:
+        if supervisor is not None and lease_token is not None and not locally_settled:
             try:
                 supervisor.abandon_shared(job.thread_id, token=lease_token, lost=lost)
             except Exception as exc:
@@ -2963,7 +3013,7 @@ def _run_shared_live_attempt(
         # The last point at which a Stop costs nothing.
         if stopped_before_admission(base_sha):
             return 0
-        _retry_lifecycle_receipt(
+        _retry_control_receipt(
             "prompt_admission_retry",
             job.job_id,
             lambda: control.admit_chat_turn(
@@ -2971,6 +3021,7 @@ def _run_shared_live_attempt(
                 activation_generation=activation_generation,
                 residency_generation=launch.residency_generation,
             ),
+            heart=heart,
         )
         turn_admitted = True
         result_frame: dict[str, Any] | None = None
@@ -3091,7 +3142,8 @@ def _run_shared_live_attempt(
             observed_session_id=local_settle.get("native_session_id"),
             has_context=has_context,
         )
-        _retry_lifecycle_receipt(
+        locally_settled = True
+        _retry_control_receipt(
             "control_settlement_retry",
             job.job_id,
             lambda: control.settle_chat_sandbox(
@@ -3103,6 +3155,7 @@ def _run_shared_live_attempt(
                 base_sha=base_sha,
                 idle_timeout_seconds=idle_timeout_s,
             ),
+            heart=heart,
         )
         settled = True
         if settled_failure:
