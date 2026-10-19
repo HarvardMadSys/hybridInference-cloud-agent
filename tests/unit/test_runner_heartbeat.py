@@ -47,6 +47,36 @@ def test_brief_control_outage_recovers_before_the_original_lease_expires(monkeyp
     assert attempts[-1] < 120
 
 
+def test_the_first_renewal_is_sent_as_soon_as_the_heartbeat_starts(monkeypatch):
+    """The lease runs from the claim, and the turn's process has spent part of it starting.
+
+    The heartbeat starts only after the child's handover and preflight, and
+    its first renewal then waited a whole interval more, so a slow start
+    reached a lease that had already expired, which the control plane
+    refuses to renew.
+    """
+    clock = SimpleNamespace(now=0.0)
+    beats = []
+
+    class Stop:
+        def wait(self, delay):
+            clock.now += delay
+            return len(beats) >= 3
+
+    def heartbeat(_ttl):
+        beats.append(clock.now)
+        return {}
+
+    control = Mock(job_id="ajob_prompt")
+    control.heartbeat.side_effect = heartbeat
+    monkeypatch.setattr(runner.time, "monotonic", lambda: clock.now)
+    heart = runner.Heartbeater(control, ttl=120, interval=30)
+    heart._stop = Stop()
+    heart._run()
+
+    assert beats == [0, 30, 60]
+
+
 def test_heartbeat_recovery_restores_normal_cadence_and_logs_no_credentials(monkeypatch, caplog):
     """Error diagnostics contain identity, type and status, never request secrets."""
     clock = SimpleNamespace(now=0.0)
@@ -76,7 +106,7 @@ def test_heartbeat_recovery_restores_normal_cadence_and_logs_no_credentials(monk
     heart._stop = Stop()
     heart._run()
 
-    assert waits == [30, 5, 30]
+    assert waits == [0, 5, 30]
     assert "status_code=503" in caplog.text
     assert "agent_heartbeat_recovered" in caplog.text
     assert "ajob_redaction" in caplog.text
@@ -110,7 +140,7 @@ def test_repeated_heartbeat_failures_record_the_detail_once(monkeypatch, caplog)
     heart._stop = Stop()
     heart._run()
 
-    assert waits == [30, 5, 5]
+    assert waits == [0, 5, 5]
     assert caplog.text.count("agent_control_failure") == 1
     assert caplog.text.count("agent_heartbeat_retry") == 2
     assert "consecutive_failures=2" in caplog.text
@@ -190,7 +220,7 @@ def test_an_outage_longer_than_the_lease_stops_the_agent(monkeypatch, caplog):
 
     assert heart.lease_lost and not heart.cancel_requested
     # Every renewal that could still have landed inside the lease was tried.
-    assert attempts == [30, 45, 60, 75, 90, 105, 120]
+    assert attempts == [0, 15, 30, 45, 60, 75, 90, 105, 120]
     assert clock.now == 130
     assert "operation=heartbeat_expired" in caplog.text
 
@@ -223,7 +253,7 @@ def test_a_refused_worker_credential_stops_the_agent_at_once(status):
 
 @pytest.mark.parametrize("configured", ["5", "30", "40"])
 def test_a_lease_no_renewal_could_reach_is_not_used(monkeypatch, capsys, configured):
-    """A lease that ends before its first renewal would lose every attempt."""
+    """A lease that ends before its next renewal would lose every attempt."""
     monkeypatch.setenv("AGENT_LEASE_TTL", configured)
 
     assert runner.build_parser().parse_args([]).lease_ttl == runner.DEFAULT_LEASE_TTL_S

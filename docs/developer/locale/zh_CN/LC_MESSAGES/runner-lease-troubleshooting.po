@@ -149,19 +149,22 @@ msgstr ""
 
 #: ../developer/runner-lease-troubleshooting.md:35
 msgid ""
-"With the first heartbeat at 30 seconds and repeated ten-second read "
-"timeouts, retry requests start at 30, 45, 60, 75, 90 and 105 seconds "
-"after claim. This illustrates opportunities to reconnect before the "
-"original 120-second lease ends; it is not a wall-clock guarantee. HTTP "
-"timeout limits apply separately to connection, pool, write and read "
-"operations. An outage longer than the remaining lease still loses the "
-"lease."
+"The first heartbeat is sent as soon as the process running the turn "
+"starts: the lease runs from the claim, and that process's handover and "
+"preflight have already spent part of it. With repeated ten-second read "
+"timeouts, retry requests then start at 0, 15, 30, 45, 60, 75, 90 and 105 "
+"seconds after it starts. This illustrates opportunities to reconnect "
+"before the original 120-second lease ends; it is not a wall-clock "
+"guarantee. HTTP timeout limits apply separately to connection, pool, "
+"write and read operations. An outage longer than the remaining lease "
+"still loses the lease."
 msgstr ""
-"假设第一次心跳在第 30 秒，之后每次读取都等满十秒超时，那么重试请求会在认领后的第 30、45、60、75、90 和 105 "
+"运行这一轮的进程一启动，就立即发出第一次心跳：租约从认领时就开始计时，而这个进程的交接和 preflight "
+"已经用掉了其中一部分。假设之后每次读取都等满十秒超时，那么重试请求会在进程启动后的第 0、15、30、45、60、75、90 和 105 "
 "秒发出。这说明在最初 120 秒的租约结束之前，有好几次重新连上的机会；但这不是按墙上时钟严格保证的。HTTP "
 "超时分别作用在建立连接、连接池、写入和读取上。如果中断的时间比剩下的租约还长，租约照样会丢。"
 
-#: ../developer/runner-lease-troubleshooting.md:42
+#: ../developer/runner-lease-troubleshooting.md:44
 msgid ""
 "The regression suite drives a silent six-minute turn through the real "
 "heartbeat thread, stream loop and HTTP client against a simulated lease "
@@ -174,11 +177,11 @@ msgstr ""
 "客户端，对着一个模拟的租约接口，跑一个六分钟没有任何输出的轮次。测试覆盖两种情况：续期一直正常；以及读取超时之后，在第 100 或 105 "
 "秒恢复。按以前的节奏，后一种情况会丢租约。这些测试复现的是一种出错的机制，并不能断定某次历史事故的原因。"
 
-#: ../developer/runner-lease-troubleshooting.md:48
+#: ../developer/runner-lease-troubleshooting.md:50
 msgid "Diagnose from positive evidence"
 msgstr "凭确切的证据下结论"
 
-#: ../developer/runner-lease-troubleshooting.md:50
+#: ../developer/runner-lease-troubleshooting.md:52
 msgid ""
 "Distinguish a renewal-request timeout from an execution timeout, explicit"
 " cancellation or agent exit. `lease_expired` proves only that the "
@@ -189,7 +192,7 @@ msgstr ""
 "先分清是续期请求超时，还是执行超时、主动取消或 agent 自己退出。`lease_expired` "
 "只能说明数据库没有及时记下续期。没有错误事件，也不代表 worker 一切正常：让续期失败的那次控制面中断，很可能也让错误上报发不出去。"
 
-#: ../developer/runner-lease-troubleshooting.md:55
+#: ../developer/runner-lease-troubleshooting.md:57
 msgid "Use these ordinary process-log records:"
 msgstr "看下面这些普通的进程日志记录："
 
@@ -237,14 +240,14 @@ msgstr ""
 msgid "Renewal succeeded after failures."
 msgstr "失败几次之后，续期又成功了。"
 
-#: ../developer/runner-lease-troubleshooting.md:64
+#: ../developer/runner-lease-troubleshooting.md:66
 msgid ""
 "The failure diagnostics exclude request URLs, tokens, response bodies and"
 " exception messages. The heartbeat's exception class/status are logged "
 "once per outage; retry records carry the changing count and timing."
 msgstr "失败诊断里不包含请求 URL、令牌、响应内容和异常消息。每次中断期间，心跳的异常类和状态码只记录一次；之后的重试记录只带不断变化的次数和时间。"
 
-#: ../developer/runner-lease-troubleshooting.md:68
+#: ../developer/runner-lease-troubleshooting.md:70
 msgid ""
 "Correlate logs with the attempt's persisted `lease_owner`, "
 "`lease_expires_at` and event timestamps. Collect runner and control-plane"
@@ -256,7 +259,7 @@ msgstr ""
 "和控制平面的日志要收集到容器之外：替换容器时，它的 Docker 日志可能就没了。runner "
 "不会帮你配置外部日志收集，也恢复不了已经删掉的日志。"
 
-#: ../developer/runner-lease-troubleshooting.md:73
+#: ../developer/runner-lease-troubleshooting.md:75
 msgid ""
 "An `attempt_superseded` event does not establish that another attempt "
 "ran. Retained sessions can become lost without a replacement, including "
@@ -266,11 +269,11 @@ msgstr ""
 "看到 `attempt_superseded` 事件，不代表真的有另一个 attempt "
 "跑过。保留会话有可能在没有任何替代的情况下丢失，比如准备阶段激活的归属不确定时。只有另一个 attempt 确实留下了事件，界面上才会显示它。"
 
-#: ../developer/runner-lease-troubleshooting.md:78
+#: ../developer/runner-lease-troubleshooting.md:80
 msgid "Reporting and acknowledgement failures"
 msgstr "上报和确认失败"
 
-#: ../developer/runner-lease-troubleshooting.md:80
+#: ../developer/runner-lease-troubleshooting.md:82
 msgid ""
 "Error-event upload and the terminal `finish` request are independent. The"
 " runner attempts the terminal transition even if event upload fails. If "
@@ -279,7 +282,7 @@ msgstr ""
 "上传错误事件和发出终态的 `finish` 请求，是两件互不依赖的事。即使事件上传失败，runner "
 "也会尝试把任务转入终态。如果两者都一直发不出去，最后由 reaper 兜底。"
 
-#: ../developer/runner-lease-troubleshooting.md:84
+#: ../developer/runner-lease-troubleshooting.md:86
 msgid ""
 "Post-claim preparation outside the shared execution handler, such as "
 "image inspection or manifest validation, has an outer failure handler "
@@ -291,7 +294,7 @@ msgstr ""
 "认领之后、在共享执行处理流程之外的准备工作，比如检查镜像或校验清单，外面也包了一层失败处理。它会在停止心跳续期之前，先尝试写入一个失败的终态；即使上报失败，也会把异常类记进日志。如果租约已被明确拒绝，就跳过这次写入。这样早期的"
 " setup 失败能留下记录，但问题本身不会因此被修好。"
 
-#: ../developer/runner-lease-troubleshooting.md:90
+#: ../developer/runner-lease-troubleshooting.md:92
 msgid ""
 "After supervisor and control-plane settlement both succeed, a failed "
 "upload of the final `shared_workspace_settled` notice does not fail the "
@@ -302,7 +305,7 @@ msgstr ""
 "supervisor 和控制平面两边的结算都成功之后，如果最后那条 `shared_workspace_settled` "
 "通知没传上去，这一轮不会因此失败：runner 照样提交成功的终态。租约被拒绝时，这次写入不会发生。更早阶段的结算失败，仍然按失败处理。"
 
-#: ../developer/runner-lease-troubleshooting.md:95
+#: ../developer/runner-lease-troubleshooting.md:97
 msgid ""
 "The control plane's admission and settlement receipts are retried **for "
 "as long as the lease holds**, using ten-second HTTP timeouts and delays "
@@ -323,7 +326,7 @@ msgstr ""
 " supervisor 已经结算好的会话。supervisor 的结算最多尝试三次，间隔五秒。只有网络传输失败和 HTTP 408/502/503/504 "
 "会重试；409/410 就是最终结果。提示词只发送一次，而且是在准入确认成功之后。"
 
-#: ../developer/runner-lease-troubleshooting.md:107
+#: ../developer/runner-lease-troubleshooting.md:109
 msgid ""
 "Supervisor settlement retains the last token's receipt until another "
 "activation takes ownership. Control-plane settlement returns the recorded"
@@ -336,11 +339,11 @@ msgstr ""
 "和激活，返回已记录的边界。重复结算不会让工作区的 epoch 加一，不会追加快照，也不会改变原生轮次的序号。sandbox manager "
 "重启后，内存里的回执就没了，所以跨重启、无法确定是否完成的情况，一律按失败处理。"
 
-#: ../developer/runner-lease-troubleshooting.md:114
+#: ../developer/runner-lease-troubleshooting.md:116
 msgid "When a retained conversation can continue"
 msgstr "保留对话什么时候还能继续"
 
-#: ../developer/runner-lease-troubleshooting.md:116
+#: ../developer/runner-lease-troubleshooting.md:118
 msgid ""
 "A reported preparation failure **before admission** can leave an existing"
 " conversation usable. The runner abandons the activation and reports a "
@@ -352,7 +355,7 @@ msgstr ""
 "**准入之前**报告的准备失败，已有的对话可能还能继续用。runner "
 "会放弃这次激活，报告一个失败的轮次；下一条消息可以接着用保留的原生会话。前提是确切知道是哪个保留容器。如果在记下容器身份之前就失败了，就证明不了这一点；而且能不能上报错误事件，不能成为报告失败的前提。"
 
-#: ../developer/runner-lease-troubleshooting.md:122
+#: ../developer/runner-lease-troubleshooting.md:124
 msgid ""
 "An admission request with no received acknowledgement is different: the "
 "database may have committed it even though the runner has not sent the "
@@ -366,7 +369,7 @@ msgstr ""
 "只能释放准入之前的轮次（`admitted_job_id IS NULL`），所以释放不了这个状态不确定的轮次；转入终态时，会把它的上下文标成 "
 "LOST。runner 绝不会重放一个没有确认过的已准入提示词。"
 
-#: ../developer/runner-lease-troubleshooting.md:129
+#: ../developer/runner-lease-troubleshooting.md:131
 msgid ""
 "Recovery after an expired activation or killed runner requires a further "
 "protocol: durably quarantine the member, fence the old runner's "
@@ -383,7 +386,7 @@ msgstr ""
 "`busy=false` 是不够的，因为工作区的 setup 命令不走它的 agent "
 "轮次通道。绝不能只因为准入字段为空就把一个轮次重新入队，也不能清掉 lost 标记，更不能为了让界面显示正常就重放一个已准入的提示词。"
 
-#: ../developer/runner-lease-troubleshooting.md:138
+#: ../developer/runner-lease-troubleshooting.md:140
 msgid ""
 "Owner-facing wording describes interrupted responses and unavailable "
 "conversations in plain language. Infrastructure details stay in API "
@@ -394,31 +397,31 @@ msgstr ""
 "给所有者看的文字，会用大白话说明回复被中断了、对话用不了了。基础设施层面的细节留在 API 记录和运维日志里；任务错误和 assistant "
 "消息都原样保留。改了这些文字之后，历史上已经是 LOST 的成员关系依然保持禁用。"
 
-#: ../developer/runner-lease-troubleshooting.md:143
+#: ../developer/runner-lease-troubleshooting.md:145
 msgid "The safe release case: a child never accepted its turn"
 msgstr "可以安全释放的情况：子进程从没接下这个轮次"
 
-#: ../developer/runner-lease-troubleshooting.md:145
+#: ../developer/runner-lease-troubleshooting.md:147
 msgid ""
 "The host runs each turn in a child process. It can release a claim back "
 "to the queue only when it can prove that child never accepted the turn:"
 msgstr "主机为每个轮次单独起一个子进程。只有能证明这个子进程从没接下这一轮时，主机才能把认领释放回队列："
 
-#: ../developer/runner-lease-troubleshooting.md:148
+#: ../developer/runner-lease-troubleshooting.md:150
 msgid "Process creation failed."
 msgstr "进程没创建成功。"
 
-#: ../developer/runner-lease-troubleshooting.md:149
+#: ../developer/runner-lease-troubleshooting.md:151
 msgid "Payload delivery failed."
 msgstr "数据没送到子进程。"
 
-#: ../developer/runner-lease-troubleshooting.md:150
+#: ../developer/runner-lease-troubleshooting.md:152
 msgid ""
 "The child closed its handover descriptor without accepting, including a "
 "failed read-only Docker/network preflight before acceptance."
 msgstr "子进程没接任务就关闭了交接用的描述符，包括接任务之前那次只读的 Docker 或网络 preflight 失败的情况。"
 
-#: ../developer/runner-lease-troubleshooting.md:153
+#: ../developer/runner-lease-troubleshooting.md:155
 msgid ""
 "A silent child that remains alive is not proof and is never released. "
 "After acceptance, crashes, kills and lost acknowledgements belong to the "
@@ -426,7 +429,7 @@ msgid ""
 " turn."
 msgstr "子进程一直不吭声但还活着，这不算证据，永远不会因此释放。一旦接下任务，之后的崩溃、被杀和确认丢失都交给租约协议处理；对话可能因此丢失，但绝不会把这一轮重跑一遍。"
 
-#: ../developer/runner-lease-troubleshooting.md:157
+#: ../developer/runner-lease-troubleshooting.md:159
 msgid ""
 "Release uses `POST /v1/agent/worker/jobs/<job>/release` with that turn's "
 "worker token. The control plane requires the same still-running attempt "
@@ -438,7 +441,7 @@ msgstr ""
 "令牌。控制平面要求两点都满足：是同一个仍在运行的 "
 "attempt、同一个租约代次，**并且**没有任何成员关系已经准入了这个任务。准入条件由数据库语句本身强制检查，所以主机即使观察错了，也没法把已准入的工作重新入队。"
 
-#: ../developer/runner-lease-troubleshooting.md:163
+#: ../developer/runner-lease-troubleshooting.md:165
 msgid ""
 "Consecutive launch failures stop claims on that host and back off. "
 "Heartbeats report `launch_error`, which appears beside the host on Admin "

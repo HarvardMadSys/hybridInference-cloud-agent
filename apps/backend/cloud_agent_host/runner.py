@@ -215,10 +215,11 @@ _RECEIPT_RETRY_STATUSES = frozenset({408, 502, 503, 504})
 #: are fixed for the attempt, so a renewal refused for either is refused every
 #: time, and the lease runs out regardless.
 _HEARTBEAT_REFUSALS = frozenset({401, 403, 404})
-#: The longest lease that still cannot be renewed: the first renewal is sent
-#: one heartbeat interval in and may take a whole request timeout to land, so a
-#: lease no longer than that expires first and every attempt is lost at its
-#: first beat. The control plane itself only requires a positive number.
+#: The longest lease that still cannot be renewed: each renewal after the first
+#: is sent one heartbeat interval after the last and may take a whole request
+#: timeout to land, so a lease no longer than that expires first and every
+#: attempt is lost by its second beat. The control plane itself only requires a
+#: positive number.
 _UNRENEWABLE_LEASE_S = HEARTBEAT_INTERVAL_S + _HEARTBEAT_TIMEOUT_S
 #: How long a host polls before asking again for the wait endpoint a control
 #: plane did not have. Hosts deploy first, so this is the rest of a rollout.
@@ -426,7 +427,11 @@ class Heartbeater:
             self._thread.join(timeout=5)
 
     def _run(self) -> None:
-        delay = self._interval
+        # The first renewal goes out at once. The lease runs from the claim,
+        # and the process running the turn has already spent part of it on its
+        # handover and preflight; a whole interval more let a slow start reach
+        # an expired lease, which the control plane refuses to renew.
+        delay = 0.0
         last_success = time.monotonic()
         failures = 0
         while not self._stop.wait(delay):
@@ -4946,7 +4951,7 @@ def _env_float(name: str, fallback: float) -> float:
 
 
 def _lease_ttl_arg(raw: str) -> float:
-    """Parse ``--lease-ttl``, refusing a lease that expires before its first renewal."""
+    """Parse ``--lease-ttl``, refusing a lease that expires before its next renewal."""
     try:
         ttl = float(raw)
     except ValueError as exc:

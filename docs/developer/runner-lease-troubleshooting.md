@@ -32,8 +32,10 @@ request timeout (40 seconds): a shorter `AGENT_LEASE_TTL` is ignored in favour
 of the default, and a shorter `--lease-ttl` is refused. A cancellation does not
 end renewal; the lease is kept while the runner releases or drains the turn.
 
-With the first heartbeat at 30 seconds and repeated ten-second read timeouts,
-retry requests start at 30, 45, 60, 75, 90 and 105 seconds after claim. This
+The first heartbeat is sent as soon as the process running the turn starts: the
+lease runs from the claim, and that process's handover and preflight have
+already spent part of it. With repeated ten-second read timeouts, retry requests
+then start at 0, 15, 30, 45, 60, 75, 90 and 105 seconds after it starts. This
 illustrates opportunities to reconnect before the original 120-second lease
 ends; it is not a wall-clock guarantee. HTTP timeout limits apply separately to
 connection, pool, write and read operations. An outage longer than the remaining
