@@ -569,6 +569,39 @@ async def test_preflight_failure_never_starts_archive_preparation(
 
 
 @pytest.mark.asyncio
+async def test_a_dead_container_is_archived_and_deleted(monkeypatch):
+    """Force deletion accepts a dead container, and so does the host's export."""
+    store, sandbox_manager, archives, events = setup(monkeypatch)
+    status = await sandbox_manager.shared_chat_sandbox_status("origin", timeout=10)
+    events.clear()
+    sandbox_manager.shared_chat_sandbox_status.side_effect = None
+    sandbox_manager.shared_chat_sandbox_status.return_value = {**status, "docker_status": "dead"}
+
+    assert await run(store, archives)
+
+    assert events == ["prepare", "upload", "verify", "record", "delete", "complete"]
+    store.sandbox.fail_admin_sandbox_deletion.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("docker_status", ["running", "paused", "restarting", None])
+async def test_a_container_neither_stopped_nor_dead_is_never_prepared(monkeypatch, docker_status):
+    store, sandbox_manager, archives, _events = setup(monkeypatch)
+    status = await sandbox_manager.shared_chat_sandbox_status("origin", timeout=10)
+    sandbox_manager.shared_chat_sandbox_status.side_effect = None
+    sandbox_manager.shared_chat_sandbox_status.return_value = {
+        **status,
+        "docker_status": docker_status,
+    }
+
+    assert await run(store, archives)
+
+    sandbox_manager.prepare_sandbox_deletion.assert_not_awaited()
+    failure = store.sandbox.fail_admin_sandbox_deletion.call_args.kwargs
+    assert failure["failure_code"] == "stop_verification_rejected"
+
+
+@pytest.mark.asyncio
 async def test_busy_host_preflight_never_starts_archive_preparation(monkeypatch):
     store, sandbox_manager, archives, _events = setup(monkeypatch)
     sandbox_manager.shared_chat_sandbox_status.side_effect = None

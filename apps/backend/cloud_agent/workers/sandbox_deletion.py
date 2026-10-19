@@ -179,7 +179,13 @@ def _prearchive_failure_is_retryable(cause: BaseException) -> bool:
 
 
 def _verify_stopped_status(status: dict[str, Any], expected: dict[str, Any]) -> None:
-    """Require live host proof that this exact container is stopped and idle."""
+    """Require live host proof that this exact container is stopped or dead, and idle.
+
+    Dead is accepted as the host's archive export and the force-delete review
+    accept it: Docker's dead state is terminal and not running. Refusing it
+    here would leave a force-deleted dead container undeletable, since the
+    refusal needs an operator and resuming it meets the same refusal.
+    """
     identity = {
         "thread_id": expected["thread_id"],
         "origin_thread_id": expected["thread_id"],
@@ -189,7 +195,10 @@ def _verify_stopped_status(status: dict[str, Any], expected: dict[str, Any]) -> 
     }
     if any(status.get(key) != value for key, value in identity.items()):
         raise ValueError("The owning host reported a different sandbox identity.")
-    if status.get("running") is not False or status.get("docker_status") != "stopped":
+    if status.get("running") is not False or status.get("docker_status") not in {
+        "stopped",
+        "dead",
+    }:
         raise ValueError("The owning host did not prove that the sandbox is stopped.")
     terminal_count = status.get("terminal_count")
     operation_count = status.get("operation_count")
