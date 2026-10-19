@@ -86,9 +86,27 @@ def _options(args: list[str]) -> dict[str, str]:
         elif arg.startswith("--") and "=" in arg:
             name, value = arg.split("=", 1)
             values[name] = value
-        elif arg[:2] in _VALUE_OPTIONS and len(arg) > 2:
-            # A short option's value may be attached: `-Htopic` or `-H=topic`.
-            values[_LONG_OPTION.get(arg[:2], arg[:2])] = arg[2:].removeprefix("=")
+        elif arg.startswith("-") and not arg.startswith("--"):
+            # Short options share one dash the way `gh`'s flag parser reads
+            # them: `-dH topic`, `-dHtopic` and `-dH=topic` all name the head.
+            # A letter that takes no value leaves the next one to be an option
+            # of its own; the first that takes one ends the cluster, its value
+            # being the rest of it, or else the next argument.
+            letters = arg[1:]
+            for at, letter in enumerate(letters):
+                option, rest = f"-{letter}", letters[at + 1 :]
+                if option not in _VALUE_OPTIONS:
+                    if rest.startswith("="):
+                        break  # `-d=true`: the rest is that flag's own value
+                    continue
+                if len(rest) > 1 and rest.startswith("="):
+                    rest = rest[1:]
+                if rest:
+                    values[_LONG_OPTION.get(option, option)] = rest
+                elif position < len(args):
+                    values[_LONG_OPTION.get(option, option)] = args[position]
+                    position += 1
+                break
     return values
 
 
