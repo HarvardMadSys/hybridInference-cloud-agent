@@ -388,6 +388,21 @@ jobs:
             --junitxml="${RUNNER_TEMP}/shared-member-permissions.xml"
           uv run python scripts/ci_tests_ran.py "${RUNNER_TEMP}/shared-member-permissions.xml"
 
+      # A checkpoint commits the container whole, the Sandbox Manager's own
+      # markers included. Unit doubles never do, so a restore that every unit
+      # test passed failed on staging. Commit, load and start one for real.
+      - name: A restored chat starts from its checkpoint
+        if: matrix.shard == 1
+        timeout-minutes: 5
+        env:
+          AGENT_RESTORE_TEST_IMAGE: python:3.12-slim
+        run: |
+          set -euo pipefail
+          docker pull "${AGENT_RESTORE_TEST_IMAGE}"
+          uv run pytest -q -m external tests/external/test_checkpoint_restore_roundtrip.py \
+            --junitxml="${RUNNER_TEMP}/checkpoint-restore.xml"
+          uv run python scripts/ci_tests_ran.py "${RUNNER_TEMP}/checkpoint-restore.xml"
+
       # Completion can precede the native CLI's history flush. Unit doubles
       # cannot catch that race; exercise the shipped pin before CI can deploy.
       # Inference is a loopback protocol fixture, with no API key or model cost.

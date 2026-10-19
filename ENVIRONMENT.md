@@ -183,6 +183,22 @@ The test uses disposable containers without network access or mounts and runs
 the production normalizer as separate member UIDs without capabilities. CI runs
 it before deployment; it needs no model API key or deployed-service setting.
 
+### Local and CI restore regression
+
+`AGENT_RESTORE_TEST_IMAGE` names the base image for
+`tests/external/test_checkpoint_restore_roundtrip.py`, `python:3.12-slim` by
+default; it must already be pulled. The test stops a chat container the way
+the Sandbox Manager does, checkpoints it, loads the checkpoint as a later
+generation and starts that container through the archive start fence, all in
+real Docker. Only S3 is a local file. Run:
+
+```bash
+uv run pytest -q -m external tests/external/test_checkpoint_restore_roundtrip.py
+```
+
+CI runs it before deployment; it needs no S3 bucket, model API key or
+deployed-service setting.
+
 ### Database
 
 | Variable | Value / who provisions |
