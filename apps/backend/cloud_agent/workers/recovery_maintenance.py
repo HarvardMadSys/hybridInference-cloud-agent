@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING, Any, Protocol
 
+from cloud_agent.application.pending_messages import QueueSweep, settle_waiting_queues
 from cloud_agent.goals.controller import run_goal_wakeups
 from cloud_agent.grants import RENEWAL_INTERVAL_S
 from cloud_agent.logging_utils import get_logger
@@ -12,6 +13,7 @@ from cloud_agent.logging_utils import get_logger
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
+    from cloud_agent.application.pending_messages import QueueStorage
     from cloud_agent.ports import (
         AttachmentRepository,
         AttemptCommands,
@@ -30,6 +32,7 @@ logger = get_logger("cloud_agent.app")
 QUEUED_FOLLOW_UP_DEADLINE_S = 30.0
 GOAL_WAKEUP_DEADLINE_S = 90.0
 GOAL_SCHEDULING_DEADLINE_S = 30.0
+PENDING_MESSAGE_DEADLINE_S = 90.0
 
 
 class _FollowUpMaintenanceStore(Protocol):
@@ -147,6 +150,33 @@ async def run_goal_scheduling_maintenance(
     await _run_periodic_loop(
         "goal_scheduling_maintenance",
         sweep,
+        interval_seconds=interval_seconds,
+        deadline_seconds=deadline_seconds,
+    )
+
+
+async def run_pending_message_maintenance(
+    store: QueueStorage,
+    *,
+    github_app: GitHubAppSource | None = None,
+    gateway: Any | None = None,
+    interval_seconds: float = RENEWAL_INTERVAL_S,
+    deadline_seconds: float = PENDING_MESSAGE_DEADLINE_S,
+) -> None:
+    """Settle owners' waiting queues independently of attempt lease recovery.
+
+    Each queue's check can wait on the gateway and GitHub. One sweep cursor
+    lasts as long as this task, so a pass the deadline cuts short resumes at
+    the queue it was on rather than at the start of the page.
+    """
+    sweep = QueueSweep()
+
+    async def settle() -> None:
+        await settle_waiting_queues(store, gateway=gateway, github_app=github_app, sweep=sweep)
+
+    await _run_periodic_loop(
+        "pending_message_maintenance",
+        settle,
         interval_seconds=interval_seconds,
         deadline_seconds=deadline_seconds,
     )

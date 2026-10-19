@@ -48,6 +48,7 @@ from cloud_agent.source_control_runtime import SourceControlUnavailable
 from cloud_agent.storage.assembly import Storage
 from cloud_agent.storage.repositories import pending_messages as pending_message_storage
 from cloud_agent.workers.attempts import reap_expired_attempts
+from cloud_agent.workers.recovery_maintenance import run_pending_message_maintenance
 from cloud_agent_host.shared_protocol import (
     NATIVE_FORK_AT_ANCHOR_CAPABILITY,
     SHARED_SANDBOX_CAPABILITY,
@@ -683,8 +684,12 @@ async def test_a_turn_the_reaper_fails_is_paused_by_the_periodic_sweep(api: Api)
     assert await api.store.pending_messages.threads_to_settle() == []
 
 
-async def test_the_reaper_loop_runs_queue_and_staged_attachment_sweeps(api: Api, monkeypatch):
-    """The sweep is wired into the loop that runs in production, not only callable."""
+async def test_the_maintenance_loops_run_queue_and_staged_attachment_sweeps(api: Api, monkeypatch):
+    """The sweeps are wired into the loops that run in production, not only callable.
+
+    The staged-upload purge runs in the reaper; the queue sweep in a loop of its
+    own, so that a slow queue cannot hold up lease recovery.
+    """
     claimed_upload = await api.store.attachments.create_attachment(
         user_id=_OWNER, path="claimed.txt", content=b"claimed", content_type="text/plain"
     )
@@ -717,21 +722,35 @@ async def test_the_reaper_loop_runs_queue_and_staged_attachment_sweeps(api: Api,
         lambda key, fallback: 1 if key == "attachments.staged_retention_hours" else fallback,
     )
 
-    loop = asyncio.create_task(
-        reap_expired_attempts(api.store, interval_seconds=0.05, max_attempts=1, gateway=api.gateway)
-    )
+    loops = [
+        asyncio.create_task(
+            reap_expired_attempts(api.store, interval_seconds=0.05, max_attempts=1)
+        ),
+        asyncio.create_task(
+            run_pending_message_maintenance(api.store, gateway=api.gateway, interval_seconds=0.05)
+        ),
+    ]
     try:
         # Generous: one loop pass also reaps hosts, residencies and goals, and
         # a slow disk can make that pass take seconds.
         deadline = asyncio.get_running_loop().time() + 60
         while asyncio.get_running_loop().time() < deadline:
-            if (await api.queue(thread_id))["queue_paused_reason"] == "failed":
+            # Both effects, because two loops make them: the queue sweep can
+            # pause the queue before the reaper's pass reaches the purge.
+            async with api.pool.acquire() as conn:
+                purged = not await conn.fetchval(
+                    "SELECT EXISTS (SELECT 1 FROM agent_job_attachments WHERE id = $1)",
+                    abandoned_upload["id"],
+                )
+            if purged and (await api.queue(thread_id))["queue_paused_reason"] == "failed":
                 break
             await asyncio.sleep(0.05)
     finally:
-        loop.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await loop
+        for loop in loops:
+            loop.cancel()
+        for loop in loops:
+            with pytest.raises(asyncio.CancelledError):
+                await loop
 
     assert (await api.queue(thread_id))["queue_paused_reason"] == "failed"
     assert [turn["state"] for turn in await api.turns(thread_id)] == ["failed"]

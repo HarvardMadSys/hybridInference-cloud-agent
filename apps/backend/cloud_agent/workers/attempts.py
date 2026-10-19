@@ -6,7 +6,6 @@ import asyncio
 import contextlib
 from typing import TYPE_CHECKING, Any, Protocol
 
-from cloud_agent.application.pending_messages import QueueSweep, settle_waiting_queues
 from cloud_agent.application.send_now import recover_handoffs
 from cloud_agent.gateway import GatewayError
 from cloud_agent.grants import GRANT_TTL_S, RENEWAL_INTERVAL_S
@@ -30,7 +29,6 @@ if TYPE_CHECKING:
         SnapshotRepository,
         SourceControlRepository,
     )
-    from cloud_agent.source_control_runtime import GitHubAppSource
 
 #: The moved loop keeps logging under the module it came from: the deployment's
 #: log selection is on ``cloud_agent.app``, and a relocation must not move these
@@ -173,8 +171,8 @@ GRANT_RENEWAL_PASS_DEADLINE_S = (GRANT_TTL_S - RENEWAL_INTERVAL_S) / 2
 #: generation, and the host's next heartbeat is told so and stops the process
 #: itself, so the call only makes that prompt. Most attempts the reaper ends
 #: expired because their host went away, and a host that no longer answers
-#: must not hold the pass -- every other host's reaping, queue settlement and
-#: grant revocation -- for a whole request timeout per member.
+#: must not hold the pass -- every other host's reaping and grant revocation
+#: -- for a whole request timeout per member.
 RESIDENCY_CLEANUP_TIMEOUT_S = 5.0
 
 
@@ -644,10 +642,13 @@ async def _run_attempt_reaper(
     interval_seconds: float = REAP_INTERVAL_S,
     max_attempts: int | None = None,
     grants: Any | None = None,
-    github_app: GitHubAppSource | None = None,
-    gateway: Any | None = None,
 ) -> None:
     """Recover attempts and related resources whose leases or work stalled.
+
+    Owners' waiting queues are not settled here. A queue's check can wait on
+    the gateway and GitHub, so the sweep is a task of its own with its own
+    deadline (``run_pending_message_maintenance``), and a slow one cannot delay
+    grant revocation or the next lease pass.
 
     Args:
         store: The agent store.
@@ -656,16 +657,7 @@ async def _run_attempt_reaper(
         grants: The grant client used for revocation after maintenance. ``None``
             skips inline revocation; the public loop also omits the independent
             renewal task, so capabilities expire at their own TTL.
-        github_app: Where to ask for the GitHub App's credentials when settling
-            an owner's waiting message. Asked rather than held: the credentials
-            this process has at startup are not necessarily the ones it has now
-            (issue #47).
-        gateway: The gateway client. Sending an owner's waiting message checks
-            the model and effort it names, exactly as sending it by hand does;
-            without one, a message naming either waits for a settlement that
-            can check it.
     """
-    queue_sweep = QueueSweep()
     while True:
         await asyncio.sleep(interval_seconds)
         # Hosts first. A machine that stopped heartbeating should be out of the
@@ -783,18 +775,6 @@ async def _run_attempt_reaper(
             )
         except Exception:
             logger.warning("Staged upload purge failed", exc_info=True)
-        # The owner's waiting messages after the attempt pass. A turn the
-        # reaper just ended — failed or cancelled — reached no finish route, so
-        # nothing else would act on it: this pauses its queue, and sends what a
-        # settlement missed, a control plane restarted between a turn's end and
-        # its settlement included. The backstop, not the mechanism; in its own
-        # try so a queue cannot stop attempts being recovered.
-        try:
-            await settle_waiting_queues(
-                store, gateway=gateway, github_app=github_app, sweep=queue_sweep
-            )
-        except Exception:
-            logger.warning("Pending message queue sweep failed", exc_info=True)
         # After the reaper, so an attempt superseded in this very pass has its
         # grant withdrawn in the same one — and in its own try for the reason
         # the host reaper has one: a gateway having a bad minute must not stop
@@ -824,8 +804,8 @@ async def _replay_settled_terminals(store: _SettledTerminals, *, interval_second
     answering therefore costs each of its markers a full request timeout on
     every pass, and the turns the reaper ends because their host died are
     among the ones that leave markers behind. Keeping this replay in its own
-    task prevents it from holding up lease reaping, queue settlement and grant
-    renewal for the whole pool.
+    task prevents it from holding up lease reaping and grant renewal for the
+    whole pool.
     """
     while True:
         try:
@@ -841,17 +821,15 @@ async def reap_expired_attempts(
     interval_seconds: float = REAP_INTERVAL_S,
     max_attempts: int | None = None,
     grants: Any | None = None,
-    github_app: GitHubAppSource | None = None,
-    gateway: Any | None = None,
 ) -> None:
     """Run attempt maintenance beside independent handoff and grant loops.
 
     Send-now handoff recovery and settled-terminal replay each run in an owned
     task, once at startup and then on the same cadence, so a slow host sandbox
-    manager cannot hold up attempt reaping, queue settlement, or grant
-    revocation. Grant renewal has its own cadence, so a slow maintenance or
-    sandbox manager call cannot hold up authorization renewal. Cancelling this
-    worker cancels and joins all three owned tasks, including work they own.
+    manager cannot hold up attempt reaping or grant revocation. Grant renewal
+    has its own cadence, so a slow maintenance or sandbox manager call cannot
+    hold up authorization renewal. Cancelling this worker cancels and joins all
+    three owned tasks, including work they own.
     """
     # Created first, so a restarted control plane still replays settled
     # terminals before anything else, as it did when that replay ran ahead of
@@ -878,8 +856,6 @@ async def reap_expired_attempts(
             interval_seconds=interval_seconds,
             max_attempts=max_attempts,
             grants=grants,
-            github_app=github_app,
-            gateway=gateway,
         )
     finally:
         tasks = [recovery, terminals]

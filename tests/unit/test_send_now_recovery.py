@@ -127,7 +127,6 @@ async def test_hung_handoff_recovery_does_not_delay_attempt_reaping(monkeypatch)
     monkeypatch.setattr(attempts, "_reap_offline_hosts", AsyncMock())
     monkeypatch.setattr(attempts, "_reap_lapsed_residencies", AsyncMock())
     monkeypatch.setattr(attempts, "_cleanup_reaped_shared_residencies", AsyncMock())
-    monkeypatch.setattr(attempts, "settle_waiting_queues", AsyncMock())
     store = SimpleNamespace(
         host_pool=object(),
         residency=object(),

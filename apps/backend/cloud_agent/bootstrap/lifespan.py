@@ -28,6 +28,7 @@ from cloud_agent.workers.owner_change_signal import OwnerChangeSignal
 from cloud_agent.workers.recovery_maintenance import (
     run_goal_scheduling_maintenance,
     run_goal_wakeup_maintenance,
+    run_pending_message_maintenance,
     run_queued_follow_up_maintenance,
 )
 from cloud_agent.workers.sandbox_deletion import coordinate_sandbox_deletions
@@ -109,6 +110,7 @@ _SHUTDOWN_TASK_ATTRS: tuple[str, ...] = (
     "queued_follow_up_maintenance_task",
     "goal_wakeup_maintenance_task",
     "goal_scheduling_maintenance_task",
+    "pending_message_maintenance_task",
     "snapshot_task",
     "sandbox_deletion_task",
     "sandbox_move_out_task",
@@ -435,14 +437,7 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
             app.state.mcp_catalog = McpCatalog(storage.mcp_catalog, http)
             app.state.mcp_catalog_task = asyncio.create_task(app.state.mcp_catalog.run())
             app.state.mcp_catalog_task.add_done_callback(_forget_background_task)
-            reaper = asyncio.create_task(
-                reap_expired_attempts(
-                    storage,
-                    grants=app.state.grants,
-                    github_app=app.state.source_control.github,
-                    gateway=app.state.gateway,
-                )
-            )
+            reaper = asyncio.create_task(reap_expired_attempts(storage, grants=app.state.grants))
             environment_maintenance = asyncio.create_task(
                 run_environment_maintenance(storage.environments, storage.environment_snapshots)
             )
@@ -458,6 +453,13 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
             )
             goal_scheduling_maintenance = asyncio.create_task(
                 run_goal_scheduling_maintenance(storage)
+            )
+            pending_message_maintenance = asyncio.create_task(
+                run_pending_message_maintenance(
+                    storage,
+                    github_app=app.state.source_control.github,
+                    gateway=app.state.gateway,
+                )
             )
             # The workers below wait on this as well as their clocks; the shared
             # listener started further down is what sets it.
@@ -487,6 +489,7 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
             _BACKGROUND_TASKS.add(queued_follow_up_maintenance)
             _BACKGROUND_TASKS.add(goal_wakeup_maintenance)
             _BACKGROUND_TASKS.add(goal_scheduling_maintenance)
+            _BACKGROUND_TASKS.add(pending_message_maintenance)
             _BACKGROUND_TASKS.add(snapshot_coordinator)
             _BACKGROUND_TASKS.add(sandbox_deletions)
             _BACKGROUND_TASKS.add(sandbox_move_out)
@@ -498,6 +501,7 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
             queued_follow_up_maintenance.add_done_callback(_forget_background_task)
             goal_wakeup_maintenance.add_done_callback(_forget_background_task)
             goal_scheduling_maintenance.add_done_callback(_forget_background_task)
+            pending_message_maintenance.add_done_callback(_forget_background_task)
             snapshot_coordinator.add_done_callback(_forget_background_task)
             sandbox_deletions.add_done_callback(_forget_background_task)
             sandbox_move_out.add_done_callback(_forget_background_task)
@@ -509,6 +513,7 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
             app.state.queued_follow_up_maintenance_task = queued_follow_up_maintenance
             app.state.goal_wakeup_maintenance_task = goal_wakeup_maintenance
             app.state.goal_scheduling_maintenance_task = goal_scheduling_maintenance
+            app.state.pending_message_maintenance_task = pending_message_maintenance
             app.state.snapshot_task = snapshot_coordinator
             app.state.sandbox_deletion_task = sandbox_deletions
             app.state.sandbox_move_out_task = sandbox_move_out
@@ -572,6 +577,7 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
             app.state.queued_follow_up_maintenance_task = None
             app.state.goal_wakeup_maintenance_task = None
             app.state.goal_scheduling_maintenance_task = None
+            app.state.pending_message_maintenance_task = None
             app.state.snapshot_task = None
             app.state.sandbox_deletion_task = None
             app.state.sandbox_move_out_task = None

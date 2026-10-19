@@ -68,6 +68,17 @@ class _Store(AllCapabilities):
         self.events.append("settle_queues")
         return []
 
+    async def take_revocable_grants(self) -> list[object]:
+        self.events.append("revoke_grants")
+        return []
+
+
+class _Grants:
+    """A grant client with nothing to revoke; its presence turns revocation on."""
+
+    async def revoke(self, _grant_id: str) -> bool:
+        return True
+
 
 async def _one_pass(store: _Store, monkeypatch: pytest.MonkeyPatch) -> None:
     """Run the loop body once, then stop at the sleep that would start the next."""
@@ -81,7 +92,9 @@ async def _one_pass(store: _Store, monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(attempts.asyncio, "sleep", _sleep)
     with pytest.raises(asyncio.CancelledError):
-        await attempts.reap_expired_attempts(store, interval_seconds=0, max_attempts=1, grants=None)
+        await attempts.reap_expired_attempts(
+            store, interval_seconds=0, max_attempts=1, grants=_Grants()
+        )
     assert sleeps == 2
 
 
@@ -92,19 +105,19 @@ async def test_one_reaper_pass_purges_abandoned_staged_uploads(monkeypatch: pyte
     await _one_pass(store, monkeypatch)
 
     assert attempts.STAGED_UPLOAD_RETENTION_HOURS == 24
-    assert store.events == ["reap_expired", ("purge", 24), "settle_queues"]
+    assert store.events == ["reap_expired", ("purge", 24), "revoke_grants"]
 
 
 async def test_a_purge_failure_is_logged_and_does_not_abort_the_loop(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ):
-    """A purge exception stays in its own try, so the queue sweep still runs."""
+    """A purge exception stays in its own try, so the grant revocation after it still runs."""
     store = _Store(purge_error=RuntimeError("attachment store unavailable"))
 
     with caplog.at_level(logging.WARNING, logger="cloud_agent.app"):
         await _one_pass(store, monkeypatch)
 
-    assert store.events == ["reap_expired", ("purge", 24), "settle_queues"]
+    assert store.events == ["reap_expired", ("purge", 24), "revoke_grants"]
     failures = [
         record for record in caplog.records if record.message == "Staged upload purge failed"
     ]

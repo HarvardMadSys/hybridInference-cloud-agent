@@ -33,6 +33,7 @@ _EXPECTED_SHUTDOWN_TASKS = (
     "queued_follow_up_maintenance_task",
     "goal_wakeup_maintenance_task",
     "goal_scheduling_maintenance_task",
+    "pending_message_maintenance_task",
     "snapshot_task",
     "sandbox_deletion_task",
     "sandbox_move_out_task",
@@ -133,6 +134,7 @@ _STAGES = [
         ("queued_follow_up_maintenance", True, False),
         ("goal_wakeup_maintenance", True, False),
         ("goal_scheduling_maintenance", True, False),
+        ("pending_message_maintenance", True, False),
         ("background_wake", True, False),
         ("snapshots", True, False),
         ("sandbox_deletions", True, False),
@@ -351,6 +353,10 @@ def _prepare(
             "cloud_agent.bootstrap.lifespan.run_goal_scheduling_maintenance",
             "goal_scheduling_maintenance_task",
         ),
+        (
+            "cloud_agent.bootstrap.lifespan.run_pending_message_maintenance",
+            "pending_message_maintenance_task",
+        ),
         ("cloud_agent.bootstrap.lifespan.coordinate_shared_snapshots", "snapshot_task"),
         ("cloud_agent.bootstrap.lifespan.coordinate_sandbox_deletions", "sandbox_deletion_task"),
         ("cloud_agent.bootstrap.lifespan.coordinate_move_out", "sandbox_move_out_task"),
@@ -426,6 +432,10 @@ def _inject(monkeypatch: pytest.MonkeyPatch, stage: str | None) -> None:
         ),
         "goal_scheduling_maintenance": (
             "cloud_agent.bootstrap.lifespan.run_goal_scheduling_maintenance",
+            _boom(stage),
+        ),
+        "pending_message_maintenance": (
+            "cloud_agent.bootstrap.lifespan.run_pending_message_maintenance",
             _boom(stage),
         ),
         "background_wake": ("cloud_agent.bootstrap.lifespan.BackgroundWake", _boom(stage)),
