@@ -2232,10 +2232,11 @@ def test_shared_writer_freeze_and_thaw_keep_live_writers_fenced_beside_zombies(
 
     manifest = manager.freeze_shared_writers(_spec(), slot_ids=[], token="d" * 32)
 
-    receipt = manager._parse_frozen_processes(
+    receipt, already_stopped = manager._parse_frozen_processes(
         (tmp_path / Path(manifest).name).read_bytes(), allowed_uids={os.getuid()}
     )
     assert [(pid, uid) for pid, uid, _started in receipt] == [(writer.pid, os.getuid())]
+    assert already_stopped == []
     assert _shared_writer_process_state(writer.pid) == "T"
     manager.thaw_shared_writers(_spec(), slot_ids=[], manifest=manifest)
     assert _shared_writer_process_state(writer.pid) not in {"T", "t"}
@@ -2273,10 +2274,11 @@ def test_shared_writer_freeze_and_thaw_fence_live_threads_behind_a_zombie_leader
 
     manifest = manager.freeze_shared_writers(_spec(), slot_ids=[], token="f" * 32)
 
-    receipt = manager._parse_frozen_processes(
+    receipt, already_stopped = manager._parse_frozen_processes(
         (tmp_path / Path(manifest).name).read_bytes(), allowed_uids={os.getuid()}
     )
     assert [(pid, uid) for pid, uid, _started in receipt] == [(writer.pid, os.getuid())]
+    assert already_stopped == []
     task_states = {
         task_stat.read_text().rsplit(") ", 1)[1].split()[0]
         for task_stat in Path(f"/proc/{writer.pid}/task").glob("*/stat")
@@ -2455,6 +2457,127 @@ def test_shared_writer_census_past_its_deadline_resumes_through_its_own_trap(
     assert _shared_writer_process_state(writer.pid) not in {"T", "t"}
 
 
+def _spawn_suspended_process(owned_processes):
+    """Start a process stopped before any census, as a suspended terminal is."""
+    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    owned_processes.append(process)
+    os.kill(process.pid, signal.SIGSTOP)
+    _wait_for_shared_writer_state(process.pid, "T")
+    return process
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="writer census uses Linux /proc")
+@pytest.mark.parametrize("require_exact_census", [True, False])
+def test_shared_writer_thaw_does_not_resume_a_process_stopped_before_the_freeze(
+    monkeypatch, tmp_path, owned_shared_writer_processes, require_exact_census
+):
+    # Owner terminals are suspended before environment preparation and group
+    # snapshot capture, whose freezes thaw without and with the exact census.
+    suspended = _spawn_suspended_process(owned_shared_writer_processes)
+    writer = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    owned_shared_writer_processes.append(writer)
+    manager = _local_shared_writer_manager(monkeypatch, tmp_path, owned_shared_writer_processes)
+
+    manifest = manager.freeze_shared_writers(_spec(), slot_ids=[], token="6" * 32)
+    receipt = (tmp_path / Path(manifest).name).read_bytes()
+    assert _shared_writer_process_state(writer.pid) == "T"
+    manager.thaw_shared_writers(
+        _spec(), slot_ids=[], manifest=manifest, require_exact_census=require_exact_census
+    )
+
+    assert _shared_writer_process_state(writer.pid) not in {"T", "t"}
+    assert _shared_writer_process_state(suspended.pid) == "T"
+    frozen, already_stopped = manager._parse_frozen_processes(receipt, allowed_uids={os.getuid()})
+    assert [pid for pid, _uid, _started in frozen] == [writer.pid]
+    assert [pid for pid, _uid, _started in already_stopped] == [suspended.pid]
+    assert list(tmp_path.glob("snapshot-*")) == []
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="writer census uses Linux /proc")
+@pytest.mark.parametrize(
+    ("failure", "error"),
+    [
+        ("census", "writer freeze failed"),
+        ("reply", "reply lost"),
+        ("manifest", "writer manifest failed"),
+    ],
+)
+def test_shared_writer_freeze_failure_does_not_resume_a_process_stopped_before_it(
+    monkeypatch, tmp_path, owned_shared_writer_processes, failure, error
+):
+    # The census's own trap, its guest receipt, and the host's copy of its
+    # reply each resume the writer it stopped, and nothing else.
+    suspended = _spawn_suspended_process(owned_shared_writer_processes)
+    writer = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    owned_shared_writer_processes.append(writer)
+    manager = _local_shared_writer_manager(monkeypatch, tmp_path, owned_shared_writer_processes)
+    local_exec = manager.exec_capture
+
+    def failing_exec(spec, argv, **kwargs):
+        if "resume_receipt()" in argv[2]:
+            if failure == "census":
+                argv = [*argv[:2], argv[2].replace("committed=1", "exit 45"), *argv[3:]]
+            census = local_exec(spec, argv, **kwargs)
+            if failure == "reply":
+                raise SandboxError("chat sandbox exec failed: reply lost")
+            return census
+        if failure == "manifest" and kwargs.get("input_bytes") is not None:
+            return SimpleNamespace(returncode=1, stdout=b"", stderr=b"injected manifest failure")
+        return local_exec(spec, argv, **kwargs)
+
+    monkeypatch.setattr(manager, "exec_capture", failing_exec)
+
+    with pytest.raises(SandboxError, match=error):
+        manager.freeze_shared_writers(_spec(), slot_ids=[], token="7" * 32)
+
+    assert _shared_writer_process_state(writer.pid) not in {"T", "t"}
+    assert _shared_writer_process_state(suspended.pid) == "T"
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="writer census uses Linux /proc")
+def test_shared_writer_census_takes_over_a_stopped_process_resumed_during_it(
+    monkeypatch, tmp_path, owned_shared_writer_processes
+):
+    # Resumed after the census first saw it stopped, the process is a live
+    # writer again: a later round stops it, and so the thaw resumes it.
+    process = _spawn_suspended_process(owned_shared_writer_processes)
+    manager = _local_shared_writer_manager(monkeypatch, tmp_path, owned_shared_writer_processes)
+    local_exec = manager.exec_capture
+    anchor = 'already="$already $item"; stable=0;'
+
+    def resume_once_seen(spec, argv, **kwargs):
+        if "resume_receipt()" in argv[2]:
+            assert argv[2].count(anchor) == 1
+            script = argv[2].replace(anchor, f'{anchor} kill -CONT "$pid";')
+            argv = [*argv[:2], script, *argv[3:]]
+        return local_exec(spec, argv, **kwargs)
+
+    monkeypatch.setattr(manager, "exec_capture", resume_once_seen)
+
+    manifest = manager.freeze_shared_writers(_spec(), slot_ids=[], token="8" * 32)
+
+    assert _shared_writer_process_state(process.pid) == "T"
+    manager.thaw_shared_writers(_spec(), slot_ids=[], manifest=manifest)
+    assert _shared_writer_process_state(process.pid) not in {"T", "t"}
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="writer census uses Linux /proc")
+def test_shared_writer_exact_thaw_rejects_a_new_writer_even_once_stopped(
+    monkeypatch, tmp_path, owned_shared_writer_processes
+):
+    # Only a process the census itself found stopped is known to the thaw.
+    writer = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    owned_shared_writer_processes.append(writer)
+    manager = _local_shared_writer_manager(monkeypatch, tmp_path, owned_shared_writer_processes)
+    manifest = manager.freeze_shared_writers(_spec(), slot_ids=[], token="9" * 32)
+    _spawn_suspended_process(owned_shared_writer_processes)
+
+    with pytest.raises(SandboxError, match="writer census changed"):
+        manager.thaw_shared_writers(_spec(), slot_ids=[], manifest=manifest)
+
+    assert _shared_writer_process_state(writer.pid) not in {"T", "t"}
+
+
 def test_shared_writer_thaw_detects_replacement_after_exact_id_cleanup(monkeypatch):
     spec = ChatSandboxSpec(
         thread_id="athr_shared",
@@ -2515,7 +2638,9 @@ def test_shared_writer_thaw_detects_replacement_after_exact_id_cleanup(monkeypat
         b"31 0 300\n",
         b"31 10001 0\n",
         b"31 10001 300 extra\n",
+        b"31 10001 300 stopped extra\n",
         b"31 10001 300\n31 10001 301\n",
+        b"31 10001 300\n31 10001 301 stopped\n",
         "31 10001 300\N{SNOWMAN}\n".encode(),
     ],
 )

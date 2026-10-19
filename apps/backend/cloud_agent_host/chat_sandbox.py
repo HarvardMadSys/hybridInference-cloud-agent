@@ -2377,6 +2377,14 @@ print(' '.join(str(uid) for uid in sorted(uids) if uid in (30000,30001,30002) or
         # Exclude only fully exited thread groups: a zombie leader can retain
         # live workers, and the leader stays Z even when SIGSTOP stops them.
         #
+        # A process already stopped when the census first sees it was stopped
+        # on purpose, such as an owner terminal the Sandbox Manager suspended.
+        # It counts as frozen but enters neither receipt, so neither the thaw
+        # nor recovery resumes it; the manifest marks it only so that the
+        # exact thaw census knows it.  Like any newly seen process it costs
+        # another round, since it may have forked while the round scanned,
+        # and seen running in a later round it is frozen as a writer.
+        #
         # The host can lose a reply after its census stopped writers: the exec
         # times out, or its transport fails while the guest carries on.  Once
         # it has stopped anything, the census therefore gives up at its own
@@ -2387,7 +2395,7 @@ print(' '.join(str(uid) for uid in sorted(uids) if uid in (30000,30001,30002) or
         # every stopped process of the identity instead would also wake ones
         # stopped on purpose meanwhile, such as a suspended terminal.
         script = self._shared_writer_task_state_script() + (
-            'set -eu; expected_uid="$1"; committed=0; receipt=""; receipt_file="$2"; '
+            'set -eu; expected_uid="$1"; committed=0; receipt=""; already=""; receipt_file="$2"; '
             "resume_receipt() { "
             '[ "$committed" = 0 ] || return 0; '
             "for item in $receipt; do pid=${item%%:*}; started=${item#*:}; "
@@ -2414,16 +2422,22 @@ print(' '.join(str(uid) for uid in sorted(uids) if uid in (30000,30001,30002) or
             'case "$started" in ""|*[!0-9]*) continue;; esac; item="$pid:$started"; '
             'case " $receipt " in *" $item "*) '
             'case "$state" in stopped) ;; *) kill -STOP "$pid" 2>/dev/null || continue; '
-            'stable=0;; esac;; *) printf "%s\\n" "$item" >> "$receipt_file"; '
+            'stable=0;; esac;; *) case "$state" in stopped) case " $already " in '
+            '*" $item "*) ;; *) already="$already $item"; stable=0;; esac;; '
+            '*) printf "%s\\n" "$item" >> "$receipt_file"; '
             'kill -STOP "$pid" 2>/dev/null || continue; '
-            'receipt="$receipt $item"; stable=0;; esac; done; '
+            'receipt="$receipt $item"; stable=0;; esac;; esac; done; '
             '[ "$stable" = 1 ] && break; [ "$round" -lt 64 ] || exit 45; done; '
             '[ -z "$receipt" ] || in_time || exit 47; '
             "for item in $receipt; do pid=${item%%:*}; started=${item#*:}; "
             'printf "%s %s %s\\n" "$pid" "$expected_uid" "$started"; done; '
+            'for item in $already; do case " $receipt " in *" $item "*) continue;; esac; '
+            "pid=${item%%:*}; started=${item#*:}; "
+            'printf "%s %s %s stopped\\n" "$pid" "$expected_uid" "$started"; done; '
             "committed=1"
         )
         frozen: builtins.list[tuple[int, int, int]] = []
+        already_stopped: builtins.list[tuple[int, int, int]] = []
         try:
             for uid in target_uids:
                 result = self.exec_capture(
@@ -2448,10 +2462,15 @@ print(' '.join(str(uid) for uid in sorted(uids) if uid in (30000,30001,30002) or
                         "shared snapshot writer freeze failed: "
                         + result.stderr.decode("utf-8", "replace")[:300]
                     )
-                frozen.extend(self._parse_frozen_processes(result.stdout, allowed_uids={uid}))
-            if len({pid for pid, _uid, _started in frozen}) != len(frozen):
+                census_frozen, census_stopped = self._parse_frozen_processes(
+                    result.stdout, allowed_uids={uid}
+                )
+                frozen.extend(census_frozen)
+                already_stopped.extend(census_stopped)
+            census = [*frozen, *already_stopped]
+            if len({pid for pid, _uid, _started in census}) != len(census):
                 raise SandboxError("shared snapshot writer census returned a duplicate pid")
-            payload = self._encode_frozen_processes(frozen)
+            payload = self._encode_frozen_processes(frozen, already_stopped)
             write_script = (
                 'set -eu; manifest="$1"; temporary="$manifest.tmp.$$"; umask 077; '
                 "trap 'rm -f -- \"$temporary\"' EXIT HUP INT TERM; "
@@ -2481,6 +2500,7 @@ print(' '.join(str(uid) for uid in sorted(uids) if uid in (30000,30001,30002) or
                     spec,
                     target_uids=target_uids,
                     frozen=frozen,
+                    already_stopped=already_stopped,
                     token=token,
                     require_exact_census=False,
                     expected_container_id=expected_container_id,
@@ -2527,16 +2547,17 @@ print(' '.join(str(uid) for uid in sorted(uids) if uid in (30000,30001,30002) or
                 "shared snapshot writer manifest is unavailable: "
                 + read.stderr.decode("utf-8", "replace")[:300]
             )
-        frozen = self._parse_frozen_processes(
+        frozen, already_stopped = self._parse_frozen_processes(
             read.stdout, allowed_uids={*target_uids, *ENVIRONMENT_UIDS, *ACTION_UIDS}
         )
-        target_uids = sorted({*target_uids, *(uid for _, uid, _ in frozen)})
+        target_uids = sorted({*target_uids, *(uid for _, uid, _ in [*frozen, *already_stopped])})
         resume_error: BaseException | None = None
         try:
             self._resume_frozen_processes(
                 spec,
                 target_uids=target_uids,
                 frozen=frozen,
+                already_stopped=already_stopped,
                 token=named.group(1),
                 require_exact_census=require_exact_census,
                 expected_container_id=expected_container_id,
@@ -2567,16 +2588,24 @@ print(' '.join(str(uid) for uid in sorted(uids) if uid in (30000,30001,30002) or
         payload: bytes,
         *,
         allowed_uids: set[int],
-    ) -> builtins.list[tuple[int, int, int]]:
-        """Validate the private PID/start-time receipt before any signal."""
+    ) -> tuple[builtins.list[tuple[int, int, int]], builtins.list[tuple[int, int, int]]]:
+        """Validate the private PID/start-time receipt before any signal.
+
+        Returns the processes the census stopped, then those it found already
+        stopped, which a trailing ``stopped`` marks and nothing may resume.
+        """
         try:
             text = payload.decode("ascii")
         except UnicodeDecodeError as exc:
             raise SandboxError("shared snapshot writer census is not ASCII") from exc
         frozen: builtins.list[tuple[int, int, int]] = []
+        already_stopped: builtins.list[tuple[int, int, int]] = []
         seen: set[int] = set()
         for line in text.splitlines():
             fields = line.split()
+            found_stopped = fields[3:] == ["stopped"]
+            if found_stopped:
+                fields.pop()
             if len(fields) != 3 or any(
                 not field.isascii() or not field.isdigit() for field in fields
             ):
@@ -2585,15 +2614,20 @@ print(' '.join(str(uid) for uid in sorted(uids) if uid in (30000,30001,30002) or
             if pid <= 1 or started <= 0 or uid not in allowed_uids or pid in seen:
                 raise SandboxError("shared snapshot writer census is outside its identity fence")
             seen.add(pid)
-            frozen.append((pid, uid, started))
-        return frozen
+            (already_stopped if found_stopped else frozen).append((pid, uid, started))
+        return frozen, already_stopped
 
     @staticmethod
-    def _encode_frozen_processes(frozen: builtins.list[tuple[int, int, int]]) -> bytes:
+    def _encode_frozen_processes(
+        frozen: builtins.list[tuple[int, int, int]],
+        already_stopped: builtins.list[tuple[int, int, int]],
+    ) -> bytes:
         """Encode a deterministic, private manifest for the later thaw."""
-        return "".join(f"{pid} {uid} {started}\n" for pid, uid, started in sorted(frozen)).encode(
-            "ascii"
-        )
+        lines = [f"{pid} {uid} {started}\n" for pid, uid, started in sorted(frozen)]
+        lines += [
+            f"{pid} {uid} {started} stopped\n" for pid, uid, started in sorted(already_stopped)
+        ]
+        return "".join(lines).encode("ascii")
 
     def _writer_receipt_path(self, spec: ChatSandboxSpec, uid: int, token: str) -> str:
         """Name one identity's census receipt in the tmpfs only it can write."""
@@ -2613,6 +2647,7 @@ print(' '.join(str(uid) for uid in sorted(uids) if uid in (30000,30001,30002) or
         *,
         target_uids: builtins.list[int],
         frozen: builtins.list[tuple[int, int, int]],
+        already_stopped: builtins.list[tuple[int, int, int]],
         token: str,
         require_exact_census: bool,
         expected_container_id: str | None = None,
@@ -2623,22 +2658,23 @@ print(' '.join(str(uid) for uid in sorted(uids) if uid in (30000,30001,30002) or
         it is the only record of a census whose reply never reached the host.
         The census it names first may still be running and would stop again
         what this resumes, so it is killed and its exit awaited before anything
-        is resumed.
+        is resumed.  A process the census found already stopped is known to the
+        exact census, but never resumed.
         """
         by_uid = {
             uid: [(pid, started) for pid, owner, started in frozen if owner == uid]
             for uid in target_uids
         }
         script = self._shared_writer_task_state_script() + (
-            'set -u; exact="$1"; expected_uid="$2"; receipt_file="$3"; shift 3; unknown=0; '
-            'if [ "$exact" = 1 ]; then for proc in /proc/[0-9]*; do '
+            'set -u; exact="$1"; expected_uid="$2"; receipt_file="$3"; already="$4"; shift 4; '
+            'unknown=0; if [ "$exact" = 1 ]; then for proc in /proc/[0-9]*; do '
             'pid=${proc##*/}; [ "$pid" != 1 ] && [ "$pid" != "$$" ] || continue; '
             'uid=$(stat -c %u "$proc" 2>/dev/null || :); '
             '[ "$uid" = "$expected_uid" ] || continue; '
             'raw=$(cat "$proc/stat" 2>/dev/null || :); fields=${raw##*) }; '
             'state=$(writer_state "$proc"); [ "$state" != exited ] || continue; '
             'started=$(set -- $fields; printf "%s" "${20:-}"); found=0; '
-            'for item in "$@"; do [ "$item" = "$pid:$started" ] && found=1; done; '
+            'for item in "$@" $already; do [ "$item" = "$pid:$started" ] && found=1; done; '
             '[ "$found" = 1 ] || unknown=1; done; fi; '
             'census=""; [ ! -f "$receipt_file" ] || read -r census < "$receipt_file" || :; '
             "pid=${census%%:*}; started=${census#*:}; attempt=0; "
@@ -2664,6 +2700,9 @@ print(' '.join(str(uid) for uid in sorted(uids) if uid in (30000,30001,30002) or
         errors: builtins.list[str] = []
         for uid in target_uids:
             expected = [f"{pid}:{started}" for pid, started in by_uid[uid]]
+            already = " ".join(
+                f"{pid}:{started}" for pid, owner, started in already_stopped if owner == uid
+            )
             try:
                 result = self.exec_capture(
                     spec,
@@ -2675,6 +2714,7 @@ print(' '.join(str(uid) for uid in sorted(uids) if uid in (30000,30001,30002) or
                         "1" if require_exact_census else "0",
                         str(uid),
                         self._writer_receipt_path(spec, uid, token),
+                        already,
                         *expected,
                     ],
                     workdir="/",
