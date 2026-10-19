@@ -2114,17 +2114,25 @@ see [Restoring a removed host's sandboxes](#restoring-a-removed-hosts-sandboxes)
   become `verified` once a restore has loaded and started them.
 - Each receipt names the control plane's start fence (`start_seq`) for the run
   its stop ended. Every path that may start the container (a turn, a workspace
-  file, terminal, Git or environment request, a Fork, a snapshot) advances the
-  fence first, and a running container clears it too. A receipt covers its
-  group only while its fence is still current; receipts from sandbox managers
-  that predate restore carry none and never cover a group.
+  file, terminal, Git or environment request, a Fork, a snapshot capture or a
+  base import) advances the fence first and sends the value it took with the
+  request itself: in its body, or for a workspace request in an
+  `X-Agent-Start-Seq` header. The Sandbox Manager labels a run only with the
+  fences of the requests it admitted to that run. Once the run stops, a
+  request at or below its label that would start the container again is
+  refused (409), and the control plane advances the fence and retries. A
+  running container clears the restore point too. A receipt covers its group
+  only while its fence is still current; receipts from sandbox managers that
+  predate restore carry none and never cover a group.
 - The policy omits the default and carries only an opt-out
   (`checkpoints_enabled: false`), which is sent only to hosts that advertise
   `sandbox-checkpoints-v1`. Older sandbox managers parse the policy unchanged
   and keep archiving without checkpoints.
 - The archive holds the container's writable layer: workspace, native session
   state, and anything installed outside `/workspace`. Credential tmpfs mounts
-  are not part of a commit. Bucket lifecycle and retention rules apply to the
+  are not part of a commit. It also holds the Sandbox Manager's own archive
+  markers for the generation that stopped; a restored container reads a marker
+  from an earlier generation of its group as absent and writes its own. Bucket lifecycle and retention rules apply to the
   `v2/` prefix like the rest of the archives.
 
 #### Restoring a removed host's sandboxes
