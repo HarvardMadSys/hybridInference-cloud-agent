@@ -18,6 +18,7 @@ from tests.integration.storage.test_agent_job_store import (  # noqa: F401
     store,
 )
 from tests.integration.storage.test_environment_store import _job, _save
+from tests.support.db import assert_pool_idle
 
 from cloud_agent.storage.repositories import (
     environment_snapshots as snapshots_module,
@@ -208,7 +209,7 @@ async def test_environment_maintenance_worker_retires_expired_snapshots(store, p
         with suppress(asyncio.CancelledError):
             await task
 
-    assert pool.get_idle_size() == pool.get_size()
+    await assert_pool_idle(pool)
 
 
 @pytest.mark.parametrize(
@@ -266,7 +267,7 @@ async def test_cancelling_a_blocked_maintenance_pass_returns_its_connection(
             await transaction.rollback()
         await pool.release(lock_connection)
 
-    assert pool.get_idle_size() == pool.get_size()
+    await assert_pool_idle(pool)
 
 
 async def test_a_prebuild_needs_a_capable_host_and_never_takes_the_owners_test(

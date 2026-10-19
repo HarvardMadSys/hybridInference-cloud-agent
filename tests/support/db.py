@@ -10,6 +10,7 @@ will be wrong. ``CASCADE`` empties whatever references the named tables.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 
@@ -23,6 +24,24 @@ async def backdate_measurement_arrival(pool: Any, *, moment: Any) -> None:
     """
     async with pool.acquire() as conn:
         await conn.execute("UPDATE agent_operation_measurements SET received_at = $1", moment)
+
+
+async def assert_pool_idle(pool: Any, message: str = "", *, timeout: float = 3) -> None:
+    """Assert that every connection returns to the pool, allowing for asyncpg's shield.
+
+    asyncpg returns a connection under ``asyncio.shield``, so a task cancelled
+    while it releases one finishes before the release does, and the connection
+    reaches the idle queue a moment later. Checking the pool the instant the
+    task is awaited races that release and fails as ``1 == 2``. A connection
+    that never comes back still fails, once ``timeout`` seconds have passed.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while pool.get_idle_size() != pool.get_size():
+        if loop.time() >= deadline:
+            missing = pool.get_size() - pool.get_idle_size()
+            raise AssertionError(message or f"{missing} pool connection(s) never returned")
+        await asyncio.sleep(0.005)
 
 
 async def reset_agent_tables(conn: Any) -> None:
