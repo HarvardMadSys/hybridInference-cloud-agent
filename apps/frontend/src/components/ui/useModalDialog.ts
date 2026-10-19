@@ -2,7 +2,8 @@
 
 import { useEffect, useLayoutEffect, useRef, type RefObject } from 'react';
 
-const FOCUSABLE = 'button, input:not([type="hidden"]), select, textarea, a[href], [tabindex]';
+const FOCUSABLE =
+  'button, input:not([type="hidden"]), select, textarea, a[href], summary, [tabindex]';
 const dialogs: HTMLElement[] = [];
 const isolated = new Map<HTMLElement, { count: number; previous: string | null }>();
 let previousOverflow = '';
@@ -16,6 +17,14 @@ function visible(element: HTMLElement): boolean {
       style.display === 'none' ||
       style.visibility === 'hidden' ||
       style.visibility === 'collapse'
+    )
+      return false;
+    // A closed <details> renders its own summary and nothing else.
+    const parent: HTMLElement | null = ancestor.parentElement;
+    if (
+      parent instanceof HTMLDetailsElement &&
+      !parent.open &&
+      ancestor !== [...parent.children].find((child) => child.localName === 'summary')
     )
       return false;
   }
@@ -106,18 +115,17 @@ export function useModalDialog(
         return;
       }
       const items = controls(node);
-      if (!items.length) {
-        node.focus();
-        return;
-      }
+      const step = event.shiftKey ? -1 : 1;
       const at = items.indexOf(document.activeElement as HTMLElement);
-      const next =
-        at < 0
-          ? event.shiftKey
-            ? items.length - 1
-            : 0
-          : (at + (event.shiftKey ? -1 : 1) + items.length) % items.length;
-      items[next].focus();
+      let next = at < 0 ? (event.shiftKey ? items.length - 1 : 0) : at + step;
+      // A control can still refuse focus for a reason the DOM does not show.
+      // Go on to the next one rather than holding Tab where it was.
+      for (let tried = 0; tried < items.length; tried += 1, next += step) {
+        const item = items[(next + items.length) % items.length];
+        item.focus();
+        if (document.activeElement === item) return;
+      }
+      node.focus();
     };
     document.addEventListener('focusin', contain);
     window.addEventListener('keydown', keyboard, true);
