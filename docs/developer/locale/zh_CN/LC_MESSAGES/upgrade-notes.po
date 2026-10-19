@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: HybridInference Cloud Agent \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-19 03:26-0400\n"
+"POT-Creation-Date: 2026-10-19 06:39-0400\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: The HybridInference contributors\n"
 "Language: zh_CN\n"
@@ -38,7 +38,7 @@ msgstr "启动本次发布之前"
 #: ../developer/upgrade-notes.md:11
 msgid ""
 "Before starting this release, run `alembic upgrade head` through "
-"`0086_conversation_read_receipts`. The supported deployment scripts run "
+"`0088_sandbox_retry_budget`. The supported deployment scripts run "
 "migrations before replacing the API; every migration listed here is "
 "additive and safe under the running previous release unless it says "
 "otherwise. The few transitions that need stopped writers are listed in "
@@ -46,7 +46,7 @@ msgid ""
 "#applying-migrations-that-are-not-backwards-compatible)."
 msgstr ""
 "启动本次发布之前，先运行 `alembic upgrade head`，升级到 "
-"`0086_conversation_read_receipts`。官方支持的部署脚本会在替换 API "
+"`0088_sandbox_retry_budget`。官方支持的部署脚本会在替换 API "
 "之前执行迁移；除非下面特别说明，这里列出的每个迁移都只做增量修改，上一个发布还在运行时执行也是安全的。少数几个需要先停掉所有写入的迁移，列在[执行不向后兼容的迁移](operations.md"
 "#applying-migrations-that-are-not-backwards-compatible)里。"
 
@@ -74,6 +74,32 @@ msgstr "迁移"
 #: ../developer/upgrade-notes.md
 msgid "What it changes"
 msgstr "改了什么"
+
+#: ../developer/upgrade-notes.md
+msgid "`0088_sandbox_retry_budget`"
+msgstr "`0088_sandbox_retry_budget`"
+
+#: ../developer/upgrade-notes.md
+msgid ""
+"Adds the automatic deletion retry window and attempt count. Existing "
+"pending requests begin their 24-hour window at their request time; "
+"retries stop after eight claims with bounded backoff. An administrator "
+"resumes an archived terminal request under its existing request ID and "
+"verified receipt. A terminal prearchive request is atomically replaced "
+"through the authorized deletion path, giving the host a fresh archive "
+"identity after an acknowledged abort."
+msgstr ""
+"新增自动删除重试的时间窗口和尝试次数。已经在等待的请求，24 "
+"小时窗口从各自的请求时间算起；认领满八次后不再重试，重试间隔有上限。管理员恢复一个已归档、已停止重试的请求时，沿用原来的请求 ID "
+"和已核实的回执。还没归档就停止的请求，会通过经过授权的删除流程原子地换成一个新请求，这样主机在确认中止之后，拿到的是一个新的归档标识。"
+
+#: ../developer/upgrade-notes.md
+msgid "`0087_sandbox_deletion_attempts`"
+msgstr "`0087_sandbox_deletion_attempts`"
+
+#: ../developer/upgrade-notes.md
+msgid "Adds the admin-only, secret-free attempt history for sandbox deletion."
+msgstr "新增沙箱删除的尝试记录，只有管理员能看到，不含任何密钥。"
 
 #: ../developer/upgrade-notes.md
 msgid "`0086_conversation_read_receipts`"
@@ -366,7 +392,7 @@ msgid ""
 "Existing queued jobs remain immediately eligible."
 msgstr "新增 `agent_jobs.claim_retry_at`，worker 的认领查询要用到它。已经在排队的任务仍可立即被认领。"
 
-#: ../developer/upgrade-notes.md:53
+#: ../developer/upgrade-notes.md:55
 msgid ""
 "Older revisions that need a maintenance window are listed in [applying "
 "migrations that are not backwards-compatible](operations.md#applying-"
@@ -380,11 +406,11 @@ msgstr ""
 "之前已退役的旧迁移链，就无法直接升级；见[保留旧迁移链的数据库](operations.md#preserving-an-old-chain-"
 "database)。"
 
-#: ../developer/upgrade-notes.md:59
+#: ../developer/upgrade-notes.md:61
 msgid "When you add a migration"
 msgstr "新增迁移时"
 
-#: ../developer/upgrade-notes.md:61
+#: ../developer/upgrade-notes.md:63
 msgid ""
 "Add a row to the table above in the same pull request, saying what an "
 "operator upgrading a live deployment needs to know: what existing rows it"
