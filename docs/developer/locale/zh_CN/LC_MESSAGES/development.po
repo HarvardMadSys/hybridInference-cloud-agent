@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: HybridInference Cloud Agent \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-17 03:18-0400\n"
+"POT-Creation-Date: 2026-10-19 03:26-0400\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: The HybridInference contributors\n"
 "Language: zh_CN\n"
@@ -13,7 +13,7 @@ msgstr ""
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
-"Generated-By: Babel 2.18.0\n"
+"Generated-By: Babel 2.10.3\n"
 
 #: ../developer/development.md:1
 msgid "Developer guide"
@@ -729,6 +729,21 @@ msgstr ""
 
 #: ../developer/development.md:317
 msgid ""
+"Chromium aborts requests still waiting for a connection with "
+"`net::ERR_NETWORK_CHANGED` whenever the host's network addresses change, "
+"which happens on shared CI runners when other jobs start or stop "
+"containers. A test whose failed attempt saw that error runs once more and"
+" is reported as flaky. The retry after any other failure fails at once, "
+"so that failure still fails the suite (`apps/frontend/e2e/network-"
+"change.ts`)."
+msgstr ""
+"主机的网络地址一变，Chromium 就会以 `net::ERR_NETWORK_CHANGED` 中止还在等连接的请求。在共享的 CI "
+"runner 上，别的任务启动或停止容器时就会出现这种情况。测试失败的那次尝试如果遇到了这个错误，就会再跑一次，并报告为 "
+"flaky。其他原因导致的失败，重试会直接失败，所以这类失败照样会让整个测试套件失败（`apps/frontend/e2e/network-"
+"change.ts`）。"
+
+#: ../developer/development.md:324
+msgid ""
 "Failures retain screenshots and Playwright traces in `apps/frontend/test-"
 "results/` and an HTML report in `apps/frontend/playwright-report/`; CI "
 "uploads both. To iterate on fixture/spec changes after a successful root "
@@ -740,7 +755,7 @@ msgstr ""
 "会把两者都上传。根路径构建成功之后，如果只是在改测试桩或测试用例，可以用 `CLOUD_AGENT_E2E_SKIP_BUILD=1 npm "
 "run test:browser` 反复跑；改了应用代码就要重新构建。"
 
-#: ../developer/development.md:322
+#: ../developer/development.md:329
 msgid ""
 "The `make ci-frontend` target runs the checks above, including browser "
 "recovery. Hosted CI also builds and smoke-tests both the root and "
@@ -752,15 +767,15 @@ msgstr ""
 "两个 Web 变体并做冒烟测试。完整的 CI 检查见 [CONTRIBUTING.md](../../CONTRIBUTING.md"
 "#continuous-integration)。"
 
-#: ../developer/development.md:328
+#: ../developer/development.md:335
 msgid "Changing an API"
 msgstr "修改 API"
 
-#: ../developer/development.md:330
+#: ../developer/development.md:337
 msgid "`gateway_contracts/` contains two different kinds of HTTP contract:"
 msgstr "`gateway_contracts/` 里有两类不同的 HTTP 契约："
 
-#: ../developer/development.md:332
+#: ../developer/development.md:339
 msgid ""
 "`*.openapi.yaml` describes the Gateway APIs this service consumes. When a"
 " client starts reading a new field or calling a new endpoint, verify the "
@@ -769,7 +784,7 @@ msgstr ""
 "`*.openapi.yaml` 描述本服务调用的网关 API。客户端开始读取新字段或调用新端点时，要去网关源代码里核实，并在同一个 PR "
 "里更新这份文档。"
 
-#: ../developer/development.md:335
+#: ../developer/development.md:342
 msgid ""
 "`agent-control-plane.openapi.json` records the API this service "
 "publishes. An intentional API change requires a reviewed snapshot update "
@@ -778,11 +793,11 @@ msgstr ""
 "`agent-control-plane.openapi.json` 记录本服务对外提供的 API。有意修改 API 时，要在同一个 PR "
 "里更新这份快照，并经过评审。"
 
-#: ../developer/development.md:338
+#: ../developer/development.md:345
 msgid "Regenerate the control-plane snapshot from the repository root:"
 msgstr "在仓库根目录重新生成控制平面的快照："
 
-#: ../developer/development.md:356
+#: ../developer/development.md:363
 msgid ""
 "Review the generated diff and explain any compatibility implications. The"
 " surface tests also reject duplicate registrations and overlaps between "
@@ -794,11 +809,11 @@ msgstr ""
 "仔细看一遍生成的 diff，并说明它对兼容性有什么影响。接口测试还会拦下重复注册，以及 agent "
 "接口路由之间的重叠。快照只是记录了改动；改动是否兼容，要靠行为测试和评审来判断。[契约指南](../../gateway_contracts/README.md)讲了这些检查能验证什么，以及哪些地方仍需对照网关源代码确认。"
 
-#: ../developer/development.md:363
+#: ../developer/development.md:370
 msgid "Packaging and documentation"
 msgstr "打包与文档"
 
-#: ../developer/development.md:365
+#: ../developer/development.md:372
 msgid ""
 "When adding or moving a package, review package discovery in "
 "`pyproject.toml`, mypy and linter roots, Docker `COPY` paths, and the "
@@ -812,7 +827,7 @@ msgstr ""
 "里的路径分类器。还要确认构建出来的镜像带齐了依赖：本地仓库里能导入，并不能说明镜像里也能。CI 会构建并启动部分镜像，分类器的测试会根据 "
 "Dockerfile 推出共用包的路径。"
 
-#: ../developer/development.md:372
+#: ../developer/development.md:379
 msgid ""
 "Schema changes use explicit additive Alembic revisions. The current chain"
 " starts at `migrations/versions/0001_schema_baseline.py`; keep schema "
@@ -826,7 +841,7 @@ msgstr ""
 "开始；不要在服务启动时建表。项目里没有可供自动生成迁移的 SQLAlchemy 模型元数据。如果数据库还标记着 baseline "
 "之前的旧迁移链，请按[重建手册](operations.md#rebuilding-the-agent-database)处理。"
 
-#: ../developer/development.md:378
+#: ../developer/development.md:385
 msgid ""
 "Update the guide that owns any changed configuration, command, or "
 "behavior:"
@@ -880,7 +895,7 @@ msgstr "发布产物与验证"
 msgid "[Release guide](../../deploy/release/README.md)"
 msgstr "[发布指南](../../deploy/release/README.md)"
 
-#: ../developer/development.md:388
+#: ../developer/development.md:395
 #, python-brace-format
 msgid ""
 "These guides form the developer documentation site, built with Sphinx and"
@@ -902,7 +917,7 @@ msgstr ""
 "`make docs-verify`，CI 的 Docs Build "
 "任务跑的是同一个目标。本站还发布简体中文版，所以改了英文也要更新对应的译文，见[翻译文档](translations.md)。"
 
-#: ../developer/development.md:399
+#: ../developer/development.md:406
 msgid ""
 "Designs, completed migration checklists, and acceptance records under "
 "[`docs/agents/`](../agents/) document their own baseline. Preserve that "

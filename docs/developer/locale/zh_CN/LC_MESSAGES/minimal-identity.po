@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: HybridInference Cloud Agent \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-16 01:54-0400\n"
+"POT-Creation-Date: 2026-10-19 03:26-0400\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: The HybridInference contributors\n"
 "Language: zh_CN\n"
@@ -13,7 +13,7 @@ msgstr ""
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
-"Generated-By: Babel 2.18.0\n"
+"Generated-By: Babel 2.10.3\n"
 
 #: ../developer/minimal-identity.md:1
 msgid "Minimal Agent identity"
@@ -91,6 +91,23 @@ msgstr ""
 
 #: ../developer/minimal-identity.md:23
 msgid ""
+"Where cookies carry `Secure` (the default), the session is read only from"
+" `__Host-cloud_agent_session` and a sign-in in progress only from "
+"`__Host-cloud_agent_login`. Another host on the same site can set a "
+"cookie of the plain name, so a `cloud_agent_session` cookie left from "
+"before the prefix signs nobody in; a browser that holds only that one "
+"signs in again. Plain-HTTP local stacks, where browsers refuse the "
+"prefix, keep the plain names; see `AGENT_SESSION_COOKIE_SECURE` in "
+"[ENVIRONMENT.md](../../ENVIRONMENT.md)."
+msgstr ""
+"cookie 带 `Secure` 时（默认如此），会话只从 `__Host-cloud_agent_session` 读取，进行到一半的登录只从"
+" `__Host-cloud_agent_login` 读取。同一站点下的其他主机能设置普通名字的 cookie，所以加前缀之前留下的 "
+"`cloud_agent_session` cookie 不会让任何人登录；浏览器里如果只剩这一个，就要重新登录。纯 HTTP "
+"的本地环境里，浏览器会拒绝这个前缀，所以仍用普通名字；见 [ENVIRONMENT.md](../../ENVIRONMENT.md) 里的 "
+"`AGENT_SESSION_COOKIE_SECURE`。"
+
+#: ../developer/minimal-identity.md:31
+msgid ""
 "An active account without Agent permission may establish a minimal "
 "session for the access-required page. A missing/inactive account is "
 "refused through the access contract's typed `subject_unavailable` error. "
@@ -99,7 +116,7 @@ msgstr ""
 "状态正常、但没有 Agent 权限的账号，可以建立一个最小会话，用来显示\"需要访问权限\"页面。不存在或已停用的账号，会收到访问契约里带类型的 "
 "`subject_unavailable` 错误，无法登录。响应无法解析或代理出错时，都不会放行。"
 
-#: ../developer/minimal-identity.md:28
+#: ../developer/minimal-identity.md:36
 #, python-brace-format
 msgid ""
 "`GET /v1/session/me` returns `id` and `agent_access`. My Settings offers "
@@ -116,7 +133,7 @@ msgstr ""
 "从不存储，也不放进会话声明。这个接口返回的角色和账号状态字段不授予任何 Agent 权限；当前能否访问，仍以 `agent-access` "
 "的检查结果为准。"
 
-#: ../developer/minimal-identity.md:35
+#: ../developer/minimal-identity.md:43
 msgid ""
 "The names and picture are owner-authored Cloud Agent display data, "
 "separate from Gateway login identity and the automatically generated "
@@ -141,7 +158,7 @@ msgstr ""
 "万像素；服务器保存前会把它们重新编码成不带元数据的 PNG，尺寸最大 512×512 像素。迁移 `0063_user_profiles` 新建了"
 " `agent_user_profiles` 表，里面没有邮箱、角色或凭据。编辑 Profile 不会改动网关里的账号信息。"
 
-#: ../developer/minimal-identity.md:49
+#: ../developer/minimal-identity.md:57
 msgid ""
 "The frontend shares successful profile and homepage-insights reads in "
 "memory, keyed by account. Returning to New task displays the cached "
@@ -156,13 +173,13 @@ msgstr ""
 "会立即更新这份共享缓存，并让更早发出的读取结果作废。缓存只在当前浏览器标签页里有效，退出登录或切换账号之前会被清空；它不影响各 API 的 "
 "`Cache-Control: no-store` 策略。"
 
-#: ../developer/minimal-identity.md:56
+#: ../developer/minimal-identity.md:64
 msgid ""
 "Tasks, messages, connection identifiers, encrypted Git/MCP credentials, "
 "and other user-authored content remain Agent-owned data."
 msgstr "任务、消息、连接标识、加密存储的 Git/MCP 凭据，以及用户编写的其他内容，仍然是 Agent 自己的数据。"
 
-#: ../developer/minimal-identity.md:59
+#: ../developer/minimal-identity.md:67
 msgid ""
 "There is no individual session-revocation table. A copied cookie remains "
 "valid until expiry; protected requests still require current Gateway "
@@ -172,11 +189,11 @@ msgstr ""
 "系统没有逐个吊销会话的表。被人复制走的 cookie 在过期前一直有效，但受保护的请求仍然要求网关当前允许访问。轮换 "
 "`AGENT_SESSION_SECRET` 会让所有会话一起失效。在网关上收回权限，之后的受保护请求就都会被拒绝。"
 
-#: ../developer/minimal-identity.md:64
+#: ../developer/minimal-identity.md:72
 msgid "Database identity boundary"
 msgstr "数据库身份边界"
 
-#: ../developer/minimal-identity.md:66
+#: ../developer/minimal-identity.md:74
 msgid ""
 "`agent_identity_namespace` has one record binding the database to a "
 "`GATEWAY_ISSUER`. Both the main API and MCP listener validate the binding"
@@ -238,7 +255,7 @@ msgid ""
 "authentication stays unavailable"
 msgstr "允许本地的基础设施管理；身份和会话认证不可用"
 
-#: ../developer/minimal-identity.md:80
+#: ../developer/minimal-identity.md:88
 msgid ""
 "Concurrent initialization is serialized. Adoption can fill an absent "
 "binding; it cannot replace one. Use the exact `iss` signed by the "
@@ -252,11 +269,11 @@ msgstr ""
 "值，一字不差。`GATEWAY_BASE_URL` 和 JWKS URL "
 "只是访问地址，可以改，不影响身份命名空间。相互独立的网关必须使用不同的签发方。在同一个签发方下，把网关的账号数据库换成一批毫不相干的身份，这种做法不受支持。"
 
-#: ../developer/minimal-identity.md:87
+#: ../developer/minimal-identity.md:95
 msgid "Upgrade an existing deployment"
 msgstr "升级现有部署"
 
-#: ../developer/minimal-identity.md:89
+#: ../developer/minimal-identity.md:97
 msgid ""
 "Prepare each environment before its distribution advances the Agent "
 "release. Merging upstream source does not deploy a named environment, and"
@@ -265,7 +282,7 @@ msgstr ""
 "在发行版把 Agent "
 "升级到新版本之前，先把每个环境准备好。合并上游源代码并不会部署到任何一个具体的环境；而且光看已有的所有者数据，也看不出原来的网关签发方是什么。"
 
-#: ../developer/minimal-identity.md:93
+#: ../developer/minimal-identity.md:101
 msgid ""
 "Verify the original Gateway's effective issuer from its running "
 "environment. In the Gateway implementation used by the original rollout, "
@@ -278,7 +295,7 @@ msgstr ""
 " 先读 `IDENTITY_ISSUER`，没有就用 `base_url`，并去掉末尾的斜杠。把确认后的实际值同时固定写进网关的 "
 "`IDENTITY_ISSUER` 和 Agent 的 `GATEWAY_ISSUER`。staging 和 production 要分别确认。"
 
-#: ../developer/minimal-identity.md:99
+#: ../developer/minimal-identity.md:107
 msgid ""
 "Back up the Agent database. If it still uses the migration chain from "
 "before 2026-09-10, follow the conversion/rebuild procedure in "
@@ -290,14 +307,14 @@ msgstr ""
 "之前的迁移链，运行迁移前先按[运维手册](operations.md)里的转换或重建流程处理；`upgrade head` "
 "无法直接处理已退役的修订号标记。如果已经是受支持的 schema，就用准备好的发布镜像迁移到 head。"
 
-#: ../developer/minimal-identity.md:104
+#: ../developer/minimal-identity.md:112
 msgid ""
 "Adopt existing owner data into its original issuer, then verify the "
 "binding. In an environment with the Agent package and database "
 "configuration:"
 msgstr "把已有的所有者数据认定为属于原来的签发方，然后检查绑定。在装有 Agent 包、并配置好数据库的环境里运行："
 
-#: ../developer/minimal-identity.md:112
+#: ../developer/minimal-identity.md:120
 msgid ""
 "The adoption argument must exactly match `GATEWAY_ISSUER`. It changes "
 "only an absent binding, preserving tasks, connections and owner IDs. "
@@ -306,19 +323,19 @@ msgstr ""
 "认定时传入的签发方必须和 `GATEWAY_ISSUER` 完全一致。这一步只会补上缺失的绑定，任务、连接和所有者 ID "
 "都原样保留。没有可以长期开着的自动认定开关。"
 
-#: ../developer/minimal-identity.md:116
+#: ../developer/minimal-identity.md:124
 msgid ""
 "For Compose, use the existing project name, active environment file and "
 "prepared checkout:"
 msgstr "用 Compose 部署时，沿用现有的项目名、当前生效的环境文件和准备好的本地仓库："
 
-#: ../developer/minimal-identity.md:132
+#: ../developer/minimal-identity.md:140
 msgid ""
 "These commands require the existing Postgres service to be running. They "
 "prepare the binding without replacing the API or MCP relay."
 msgstr "这些命令需要现有的 Postgres 服务正在运行。它们只负责准备绑定，不会替换 API 或 MCP 中继。"
 
-#: ../developer/minimal-identity.md:134
+#: ../developer/minimal-identity.md:142
 msgid ""
 "Release Agent backend and web app together through the deployment "
 "workflow. Verify fresh login, `/me`, owner/admin permissions and "
@@ -327,7 +344,7 @@ msgstr ""
 "通过部署流程，同时发布 Agent 后端和 Web 应用。检查全新登录、`/me`、所有者和管理员权限，以及已有任务的归属是否正确。确认旧 "
 "cookie 会被拒绝。"
 
-#: ../developer/minimal-identity.md:138
+#: ../developer/minimal-identity.md:146
 msgid ""
 "`deploy/control-plane/deploy.sh` runs the identity check after migration "
 "and before bootstrap, host-readiness waiting or API/MCP replacement. "
@@ -339,7 +356,7 @@ msgstr ""
 "之前，先做身份检查。只要有未认定归属的所有者数据、缺少必需的签发方，或者绑定冲突，这次部署就会中止。主机的上线可能同时在进行，所以要先把身份边界准备好。两个"
 " Compose 监听器用的是同一个签发方。"
 
-#: ../developer/minimal-identity.md:144
+#: ../developer/minimal-identity.md:152
 msgid ""
 "A permission-capable Gateway may remove profile claims before or after "
 "this Agent release; Agent treats them as optional. Older Gateways without"
@@ -351,11 +368,11 @@ msgstr ""
 "把这些声明当作可有可无。不支持访问契约的旧版网关仍然不兼容。本地 Docker 环境使用固定的签发方 `freeinference-"
 "local`；已有但还没绑定的演示数据，同样需要明确认定这个签发方。"
 
-#: ../developer/minimal-identity.md:150
+#: ../developer/minimal-identity.md:158
 msgid "Rollback and restore constraints"
 msgstr "回滚和恢复时的限制"
 
-#: ../developer/minimal-identity.md:152
+#: ../developer/minimal-identity.md:160
 msgid ""
 "Do not use `alembic downgrade base` to undo identity binding: the "
 "baseline drops owner tables and `agent_identity_namespace` together. No "
@@ -364,21 +381,21 @@ msgstr ""
 "不要用 `alembic downgrade base` 来撤销身份绑定：baseline 会把所有者相关的表和 "
 "`agent_identity_namespace` 一起删掉。没有哪种局部降级能只删掉这条记录、同时保住所有者数据。"
 
-#: ../developer/minimal-identity.md:156
+#: ../developer/minimal-identity.md:164
 msgid ""
 "Re-upgrading an empty database automatically binds the currently "
 "configured issuer. It cannot protect history already deleted by the "
 "downgrade."
 msgstr "对空数据库重新升级时，会自动绑定当前配置的签发方；但降级时已经删掉的历史，它也救不回来。"
 
-#: ../developer/minimal-identity.md:158
+#: ../developer/minimal-identity.md:166
 msgid ""
 "Restoring owner rows without their matching binding causes the identity "
 "check to fail. Restore the original binding or explicitly adopt the "
 "verified original issuer using the procedure above."
 msgstr "如果恢复了所有者数据，却没有恢复对应的绑定，身份检查就会失败。这时要么恢复原来的绑定，要么按上面的流程，明确认定核实过的原签发方。"
 
-#: ../developer/minimal-identity.md:162
+#: ../developer/minimal-identity.md:170
 msgid ""
 "An older Agent binary may accept profile cookies and ignore the stored "
 "issuer. Prefer a compatible forward fix, or stop Agent while keeping the "
@@ -388,7 +405,7 @@ msgstr ""
 "旧版 Agent 可能会接受带个人资料的 cookie，并且无视已保存的签发方。所以出问题时，优先做兼容的向前修复；或者先停掉 "
 "Agent，让网关继续运行。备份和恢复绑定时，要和它所指向的那批所有者数据放在一起。"
 
-#: ../developer/minimal-identity.md:166
+#: ../developer/minimal-identity.md:174
 msgid ""
 "The implementation is in "
 "[`identity.py`](../../apps/backend/cloud_agent/identity.py), "

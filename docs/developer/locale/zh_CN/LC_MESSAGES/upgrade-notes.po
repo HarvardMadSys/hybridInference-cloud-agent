@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: HybridInference Cloud Agent \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-17 03:18-0400\n"
+"POT-Creation-Date: 2026-10-19 03:26-0400\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: The HybridInference contributors\n"
 "Language: zh_CN\n"
@@ -13,7 +13,7 @@ msgstr ""
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
-"Generated-By: Babel 2.18.0\n"
+"Generated-By: Babel 2.10.3\n"
 
 #: ../developer/upgrade-notes.md:1
 msgid "Upgrade notes"
@@ -38,7 +38,7 @@ msgstr "启动本次发布之前"
 #: ../developer/upgrade-notes.md:11
 msgid ""
 "Before starting this release, run `alembic upgrade head` through "
-"`0084_host_removal_move_out`. The supported deployment scripts run "
+"`0086_conversation_read_receipts`. The supported deployment scripts run "
 "migrations before replacing the API; every migration listed here is "
 "additive and safe under the running previous release unless it says "
 "otherwise. The few transitions that need stopped writers are listed in "
@@ -46,7 +46,7 @@ msgid ""
 "#applying-migrations-that-are-not-backwards-compatible)."
 msgstr ""
 "启动本次发布之前，先运行 `alembic upgrade head`，升级到 "
-"`0084_host_removal_move_out`。官方支持的部署脚本会在替换 API "
+"`0086_conversation_read_receipts`。官方支持的部署脚本会在替换 API "
 "之前执行迁移；除非下面特别说明，这里列出的每个迁移都只做增量修改，上一个发布还在运行时执行也是安全的。少数几个需要先停掉所有写入的迁移，列在[执行不向后兼容的迁移](operations.md"
 "#applying-migrations-that-are-not-backwards-compatible)里。"
 
@@ -74,6 +74,36 @@ msgstr "迁移"
 #: ../developer/upgrade-notes.md
 msgid "What it changes"
 msgstr "改了什么"
+
+#: ../developer/upgrade-notes.md
+msgid "`0086_conversation_read_receipts`"
+msgstr ""
+
+#: ../developer/upgrade-notes.md
+msgid ""
+"Adds an empty table for each owner's latest read completion per "
+"conversation, with revision and job/attempt indexes for incremental "
+"polling and foreign-key cleanup. It changes no existing rows and takes "
+"brief foreign-key definition locks on the referenced tables. Existing "
+"browser receipts import when that browser next opens the updated UI; a "
+"downgrade drops cloud receipts but leaves browser caches intact."
+msgstr ""
+"新增一张空表，记录每个所有者在每个对话里最近读到的那次完成，并带有版本号索引和 job/attempt "
+"索引，分别用于增量轮询和外键清理。它不改动任何现有行，只会在被引用的表上短暂持有外键定义锁。现有的浏览器回执，会在那个浏览器下次打开更新后的界面时导入；降级会丢掉云端的回执，但浏览器缓存不受影响。"
+
+#: ../developer/upgrade-notes.md
+msgid "`0085_terminal_resume_index`"
+msgstr ""
+
+#: ../developer/upgrade-notes.md
+msgid ""
+"Builds a partial index on `agent_jobs` concurrently, holding only the "
+"turns whose terminals still wait to resume. It reads the whole job "
+"history without blocking the running API; an interrupted run can simply "
+"be repeated. Changes no row."
+msgstr ""
+"在 `agent_jobs` 上以并发方式建一个部分索引，只收录终端还在等待恢复的轮次。它会读完整个任务历史，但不会阻塞正在运行的 "
+"API；如果中途中断，直接重跑即可。不改动任何行。"
 
 #: ../developer/upgrade-notes.md
 msgid "`0084_host_removal_move_out`"
@@ -336,7 +366,7 @@ msgid ""
 "Existing queued jobs remain immediately eligible."
 msgstr "新增 `agent_jobs.claim_retry_at`，worker 的认领查询要用到它。已经在排队的任务仍可立即被认领。"
 
-#: ../developer/upgrade-notes.md:51
+#: ../developer/upgrade-notes.md:53
 msgid ""
 "Older revisions that need a maintenance window are listed in [applying "
 "migrations that are not backwards-compatible](operations.md#applying-"
@@ -350,11 +380,11 @@ msgstr ""
 "之前已退役的旧迁移链，就无法直接升级；见[保留旧迁移链的数据库](operations.md#preserving-an-old-chain-"
 "database)。"
 
-#: ../developer/upgrade-notes.md:57
+#: ../developer/upgrade-notes.md:59
 msgid "When you add a migration"
 msgstr "新增迁移时"
 
-#: ../developer/upgrade-notes.md:59
+#: ../developer/upgrade-notes.md:61
 msgid ""
 "Add a row to the table above in the same pull request, saying what an "
 "operator upgrading a live deployment needs to know: what existing rows it"
