@@ -17,6 +17,7 @@ from tests.integration.storage.test_agent_job_store import (
     store as store,
 )
 
+from cloud_agent.goals.models import GoalInput
 from cloud_agent.storage._sql.compute_admission import host_compute_admission
 from cloud_agent_shared.sandbox_archive_settings import SANDBOX_ARCHIVE_CAPABILITY
 from cloud_agent_shared.sandbox_restore import (
@@ -767,6 +768,56 @@ async def test_a_group_its_restores_lost_fails_every_chats_queued_turns(pool, st
     answered = await store.conversation_queries.get_job(waiting["id"])
     assert answered is not None and answered["state"] == "failed"
     assert "sandbox" in answered["detail"]
+
+
+async def test_a_goal_round_its_last_restore_failed_under_pauses_its_goal(pool, store: Storage):
+    """The release that runs out the group's restores stops the goal it failed.
+
+    The round the release put back was failed with the group, and its goal was
+    left active with nothing to run, until the stall sweep paused it fifteen
+    minutes later as a scheduling failure nobody could explain. The reaper,
+    running out the same attempts, pauses at once.
+    """
+    job, _ = await _covered(pool, store)
+    goal = await store.goals.set_goal(
+        thread_id=job["thread_id"], user_id=job["user_id"], goal=GoalInput(objective="ship it")
+    )
+    assert goal is not None
+    async with store.goal_wakeups.transaction() as conn:
+        round_job = await store.conversation_commands.create_goal_round(
+            conn=conn,
+            thread_id=job["thread_id"],
+            goal_id=goal["goal_id"],
+            revision=goal["revision"],
+            kind="work",
+            round_number=1,
+            prompt='<goal_round kind="work" round="1">',
+            client_request_id=f"goal:{job['thread_id']}:{goal['goal_id']}:work:1",
+            client_request_fingerprint="goal-round:work:1",
+        )
+    assert round_job is not None
+    assert await store.host_pool.remove_host(host="runner-a") == "ok"
+    await _host(store, "runner-c", _RESTORE_HOST)
+
+    for attempt in range(1, MAX_RESTORE_ATTEMPTS + 1):
+        claim = await _claim(store, "runner-c", _RESTORE_HOST)
+        assert claim is not None and claim["id"] == round_job["id"]
+        assert await store.attempt_commands.release_claim(
+            job_id=round_job["id"],
+            attempt_id=claim["attempt_id"],
+            lease_generation=claim["lease_generation"],
+            reason="sandbox_restore_failed",
+        )
+        if attempt < MAX_RESTORE_ATTEMPTS:
+            assert (await store.goals.get_goal(thread_id=job["thread_id"]))["state"] == "active"
+            await _age_restore_failure(pool, RESTORE_RETRY_DELAYS_S[attempt - 1])
+
+    assert (await _state(pool))["state"] == "lost"
+    failed = await store.conversation_queries.get_job(round_job["id"])
+    assert failed is not None and failed["state"] == "failed"
+    after = await store.goals.get_goal(thread_id=job["thread_id"])
+    assert (after["state"], after["pause_reason"]) == ("paused", "execution_failed")
+    assert "could not be restored" in after["pause_detail"]
 
 
 async def test_restore_failures_during_a_short_outage_do_not_lose_the_chat(pool, store: Storage):

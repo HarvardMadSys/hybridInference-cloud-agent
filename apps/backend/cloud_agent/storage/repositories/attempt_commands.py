@@ -787,13 +787,27 @@ class PostgresAttemptCommands:
             if restored_state == "lost":
                 # The attempts ran out: this turn and those queued behind it
                 # can never run, including the one just put back.
+                thread_id = await conn.fetchval(
+                    "SELECT thread_id FROM agent_jobs WHERE id = $1", released
+                )
                 await fail_unrunnable_follow_ups(
                     conn,
-                    thread_id=await conn.fetchval(
-                        "SELECT thread_id FROM agent_jobs WHERE id = $1", released
-                    ),
+                    thread_id=thread_id,
                     detail="not run because the sandbox could not be restored",
                 )
+                if released_state == QUEUED:
+                    # An automatic round failed with them stops its goal now,
+                    # as the reaper's does when the attempts run out under it.
+                    # Left active with nothing to run, the goal waited for the
+                    # stall sweep to pause it as a failure nobody could explain.
+                    await goal_after_terminal(
+                        conn,
+                        job_id=released,
+                        thread_id=thread_id,
+                        state=FAILED,
+                        detail="the automatic round could not run: "
+                        "its sandbox could not be restored",
+                    )
             if released_state == CANCELLED:
                 # The owner's Stop ended the turn before it began, as a cancel
                 # in the queue does, and an automatic round stops its goal
