@@ -508,8 +508,21 @@ def test_a_cpu_gap_does_not_hide_the_memory_point() -> None:
 def test_the_window_is_floored_to_the_minute_by_the_servers_clock() -> None:
     now = datetime(2026, 9, 11, 12, 34, 56, tzinfo=UTC)
     since, until = history_window(now=now, seconds=HISTORY_RANGES["1h"])
-    assert until == datetime(2026, 9, 11, 12, 34, 0, tzinfo=UTC)
+    assert until == datetime(2026, 9, 11, 12, 33, 0, tzinfo=UTC)
     assert since == until - timedelta(hours=1)
+
+
+def test_the_window_ends_at_the_last_complete_minute() -> None:
+    """The minute in progress has no point: unobserved yet, it would draw as a gap."""
+    now = datetime(2026, 9, 11, 12, 34, 20, tzinfo=UTC)
+    since, until = history_window(now=now, seconds=HISTORY_RANGES["1h"])
+    points = history_point_grid(rows=[history_row(bucket_for(now))], since=since, until=until)
+
+    assert until == datetime(2026, 9, 11, 12, 33, 0, tzinfo=UTC)
+    assert points[-1].bucket_at == until
+    assert all(point.bucket_at < bucket_for(now) for point in points)
+    assert all(point.sampled_at is None for point in points)
+    assert len(points) == HISTORY_RANGES["1h"] // 60 + 1
 
 
 def test_only_three_ranges_are_served() -> None:

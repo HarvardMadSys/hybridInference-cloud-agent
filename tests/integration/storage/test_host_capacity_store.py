@@ -155,6 +155,12 @@ async def _enrol(store: Storage, host: str = "runner-a", *, credential: str | No
     return digest
 
 
+#: A sample this old belongs to a minute that has ended, which is where the
+#: history read stops: it leaves out the minute in progress. Still young enough
+#: to be kept for the curve.
+_ENDED_MINUTE_AGE_MS = 60_000
+
+
 async def _beat(
     store: Storage,
     host: str,
@@ -282,7 +288,7 @@ async def test_an_accepted_observation_is_kept_in_the_history_too(
 ):
     """The request that takes the sample is what puts it in the chart."""
     digest = await _enrol(store)
-    await _beat(store, "runner-a", digest, block=capacity_block(), age_ms=100)
+    await _beat(store, "runner-a", digest, block=capacity_block(), age_ms=_ENDED_MINUTE_AGE_MS)
 
     history = await capacity.host_capacity_history(host="runner-a", range_seconds=3600)
     assert history is not None
@@ -298,7 +304,7 @@ async def test_an_accepted_observation_is_kept_in_the_history_too(
 
 
 async def test_every_reported_sample_lands_even_across_a_minute(
-    store, capacity: PostgresHostCapacityRepository
+    db, store, capacity: PostgresHostCapacityRepository
 ):
     """The regression this write path exists for.
 
@@ -325,9 +331,14 @@ async def test_every_reported_sample_lands_even_across_a_minute(
         age_ms=20_000,
     )
 
-    history = await capacity.host_capacity_history(host="runner-a", range_seconds=3600)
-    assert history is not None
-    buckets = [row["bucket_at"] for row in history["rows"]]
+    # The table rather than the history read: the newer sample can still be in
+    # the minute in progress, which the read leaves out.
+    async with db.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT bucket_at FROM agent_host_capacity_history WHERE host = $1 ORDER BY bucket_at",
+            "runner-a",
+        )
+    buckets = [row["bucket_at"] for row in rows]
     # Two minutes, in order, neither of them the other: which two depends on
     # when the clock ran, and that is not what this is about.
     assert len(buckets) == 2
@@ -401,7 +412,7 @@ async def _record_point(
     store: Storage,
     host: str,
     *,
-    minutes_ago: int = 0,
+    minutes_ago: int = 1,
     sample_id: str = "00000000-0000-4000-8000-0000000000aa",
     cpu_percent: float | None = 37.2,
     cpu_missing_reason: str | None = None,
@@ -411,7 +422,9 @@ async def _record_point(
     Directly, rather than through a heartbeat, wherever a test needs a point in
     a minute it chooses: a heartbeat's minute is whatever the clock says when
     it runs, and a test that asserted on two of them would fail whenever a
-    minute happened to turn over between the two calls.
+    minute happened to turn over between the two calls. The default is the
+    minute that just ended, because the history read leaves out the minute in
+    progress.
     """
     # The epoch is read off the pool projection, which is the only read that
     # carries the capacity columns.
@@ -482,7 +495,7 @@ async def test_a_cpu_gap_still_stores_its_memory_half(
         "runner-a",
         digest,
         block=capacity_block(cpu_percent=None, cpu_missing="warming_up"),
-        age_ms=100,
+        age_ms=_ENDED_MINUTE_AGE_MS,
     )
 
     history = await capacity.host_capacity_history(host="runner-a", range_seconds=3600)
@@ -534,7 +547,7 @@ async def test_pruning_removes_only_expired_rows_and_is_bounded(
             db,
             store,
             "runner-a",
-            minutes_ago=index,
+            minutes_ago=index + 1,
             sample_id=f"00000000-0000-4000-8000-0000000000{index:02d}",
         )
 
