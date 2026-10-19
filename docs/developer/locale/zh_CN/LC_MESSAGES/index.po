@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: HybridInference Cloud Agent \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-16 01:54-0400\n"
+"POT-Creation-Date: 2026-10-19 04:47-0400\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: The HybridInference contributors\n"
 "Language: zh_CN\n"
@@ -13,17 +13,17 @@ msgstr ""
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
-"Generated-By: Babel 2.18.0\n"
+"Generated-By: Babel 2.10.3\n"
 
-#: ../developer/index.md:41
+#: ../developer/index.md:42
 msgid "Getting started"
 msgstr "快速上手"
 
-#: ../developer/index.md:52
+#: ../developer/index.md:53
 msgid "Concepts"
 msgstr "概念"
 
-#: ../developer/index.md:63
+#: ../developer/index.md:65
 msgid "Operations"
 msgstr "运维"
 
@@ -99,6 +99,14 @@ msgid "[Code structure](code-structure.md)"
 msgstr "[代码结构](code-structure.md)"
 
 #: ../developer/index.md
+msgid "Change the owner web app, and see the rules and APIs behind each feature"
+msgstr "改动面向所有者的 Web 应用，或者查看每个功能背后的规则和 API"
+
+#: ../developer/index.md
+msgid "[The owner web app](web-app.md)"
+msgstr ""
+
+#: ../developer/index.md
 msgid "Send a change"
 msgstr "提交改动"
 
@@ -162,11 +170,11 @@ msgstr "看看 Cloud Agent 用到了网关的哪些 API"
 msgid "[Gateway contracts](gateway-contracts.md)"
 msgstr "[网关契约](gateway-contracts.md)"
 
-#: ../developer/index.md:33
+#: ../developer/index.md:34
 msgid "Scope of this site"
 msgstr "本站涵盖的内容"
 
-#: ../developer/index.md:35
+#: ../developer/index.md:36
 msgid ""
 "These pages document the software, not any one installation of it. How "
 "end users work with a particular deployment, which agents and models it "

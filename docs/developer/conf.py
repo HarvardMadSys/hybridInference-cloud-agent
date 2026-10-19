@@ -122,7 +122,13 @@ source_suffix = {
 html_theme = "sphinx_rtd_theme"
 html_static_path = ["_static"]
 html_css_files = ["custom.css"]
+# The browser tab's suffix. Config values are not in the gettext catalogs, so
+# each published language names its own here, and `_localize_html_title` picks
+# it once the language is final: a translated build sets it with `-D
+# language=...`, after this file has run. A language missing from the map keeps
+# the English title.
 html_title = "Cloud Agent documentation"
+_HTML_TITLES = {"zh_CN": "Cloud Agent 文档"}
 
 html_context = {
     "doc_languages": _languages,
@@ -372,8 +378,13 @@ def _not_found_base(app, pagename, templatename, context, doctree):
     context["page_base_url"] = f"/{language}/" if nested else "/"
 
 
+def _localize_html_title(app, config):
+    config.html_title = _HTML_TITLES.get(config.language, config.html_title)
+
+
 def setup(app):
     """Register the repository-link rewrite, its anchor check and translations."""
+    app.connect("config-inited", _localize_html_title)
     app.add_search_language(_SearchChinese)
     app.connect("builder-inited", _require_chinese_segmenter)
     app.connect("html-page-context", _not_found_base)

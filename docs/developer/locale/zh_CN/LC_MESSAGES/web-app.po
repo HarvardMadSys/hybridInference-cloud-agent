@@ -1,0 +1,836 @@
+# Simplified Chinese translation of the Cloud Agent developer documentation.
+# See docs/developer/translations.md.
+msgid ""
+msgstr ""
+"Project-Id-Version: HybridInference Cloud Agent \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-10-19 04:47-0400\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: The HybridInference contributors\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.10.3\n"
+
+#: ../developer/web-app.md:1
+msgid "The owner web app"
+msgstr "面向所有者的 Web 应用"
+
+#: ../developer/web-app.md:3
+msgid ""
+"This page is for developers changing the owner-facing web app. It records"
+" the rules each feature follows, the endpoints behind it and what only a "
+"real browser can check. How to use the app is user documentation, which "
+"belongs to a distribution; FreeInference's is the [Cloud Agents "
+"guide](https://doc.freeinference.org/agents.html)."
+msgstr ""
+"这一页写给要改动面向所有者的 Web "
+"应用的开发者，记录每个功能遵循的规则、背后的接口，以及哪些东西只能在真实浏览器里检查。怎么使用这个应用属于用户文档，归发行版负责；FreeInference"
+" 的用户文档是它的 [Cloud Agents 指南](https://doc.freeinference.org/agents.html)。"
+
+#: ../developer/web-app.md:9
+msgid "Sidebar and conversation list"
+msgstr "侧边栏和对话列表"
+
+#: ../developer/web-app.md:11
+msgid ""
+"Grouping (by project or in one list), ordering (last updated or manual), "
+"expanded projects, manual positions and added workspaces are stored per "
+"signed-in user in the current browser. Conversation ids are stored for "
+"ordering only once manual order is chosen, and switching back to last "
+"updated keeps the saved positions. Pinned conversations have one manual "
+"order shared by both groupings, appear once outside the project folders, "
+"and return to their usual place when unpinned. Conversations without a "
+"repository are grouped in a **Start from scratch** folder."
+msgstr ""
+"分组方式（按项目或合成一个列表）、排序方式（按最近更新或手动）、展开了哪些项目、手动排好的位置，以及添加的工作区，都按登录用户保存在当前浏览器里。只有选了手动排序之后，才会为排序保存对话"
+" "
+"id；切回按最近更新时，已保存的位置也会保留。置顶对话在两种分组方式下共用一套手动顺序，只在项目文件夹之外出现一次，取消置顶后回到原来的位置。没有仓库的对话归在"
+" **Start from scratch** 文件夹里。"
+
+#: ../developer/web-app.md:20
+msgid ""
+"Search matches conversation titles and full repository names across "
+"history. Its shortcut is Command+K on a Mac and Ctrl+K elsewhere; on a "
+"Mac, Control+K stays the text field's own key. Each result shows the "
+"conversation's original title and opens its latest turn. Restoring an "
+"archived conversation refreshes its sidebar row at once without changing "
+"its activity time."
+msgstr ""
+"搜索会在全部历史里匹配对话标题和完整的仓库名。快捷键在 Mac 上是 Command+K，其他系统是 Ctrl+K；在 Mac "
+"上，Control+K "
+"仍然留给文本框自己用。每条结果显示对话最初的标题，点开进入它最新的一轮。恢复一个已归档的对话，会立刻刷新它在侧边栏里的那一行，但不改变它的活动时间。"
+
+#: ../developer/web-app.md:26
+msgid ""
+"A completed turn shows an unread dot until it is opened, and a completion"
+" already on screen is marked read. Read receipts are saved to the "
+"account: open tabs synchronize on focus, on reconnection and every 30 "
+"seconds while visible, fetching only changes after the first sync. "
+"Receipts a browser held before cloud synchronization are imported the "
+"next time it opens the app; offline reads are cached and uploaded when "
+"the connection returns. Pinning, archiving and renaming do not reset read"
+" state."
+msgstr ""
+"一轮完成后，在打开之前会显示一个未读圆点；如果完成时它正显示在屏幕上，就直接记为已读。已读记录保存在账号上：打开的标签页在获得焦点、重新连上，以及可见期间每"
+" 30 "
+"秒同步一次，首次同步之后只拉取变化的部分。浏览器在云端同步上线之前保存的已读记录，会在它下次打开应用时导入；离线时的已读先缓存起来，连上网后再上传。置顶、归档和重命名都不会重置已读状态。"
+
+#: ../developer/web-app.md:34
+msgid "Creating a repository"
+msgstr "创建仓库"
+
+#: ../developer/web-app.md:36
+msgid ""
+"**Create repository**, in the workspace and new-task repository pickers, "
+"creates a repository in the signed-in user's personal GitHub account with"
+" a README, so it has a default branch; organization repositories are not "
+"offered. It needs the GitHub App's **Repository creation: write** "
+"permission, or **Administration: Read and write** (see "
+"[Credentials](operations.md#2-credentials)). Creating a repository does "
+"not give the App access to it, and repository-access checks still apply. "
+"After a connection failure the request may have succeeded on GitHub, so "
+"the dialog keeps what was entered and does not retry by itself."
+msgstr ""
+"工作区和新任务的仓库选择器里都有 **Create repository**，它会在登录用户的个人 GitHub 账号下建一个带 README "
+"的仓库，这样仓库就有默认分支；不提供在组织下创建。它需要 GitHub App 有 **Repository creation: write** "
+"权限，或者 **Administration: Read and "
+"write**（见[凭据](operations.md#2-credentials)）。建好仓库并不会让 App "
+"获得它的访问权限，仓库访问检查也照常进行。如果连接失败，请求可能其实已经在 GitHub 上成功了，所以对话框会保留填过的内容，不会自己重试。"
+
+#: ../developer/web-app.md:45
+msgid "Getting started"
+msgstr "新手引导"
+
+#: ../developer/web-app.md:47
+msgid ""
+"An account with no conversations, archived ones included, sees a "
+"**Getting started** row: **Connect GitHub**, **Grant a repository**, then"
+" **Run your first task**. Connection and repository state come from "
+"`/config`, and the row is hidden when the deployment has no GitHub App "
+"configured. The sidebar, the new-task page and the conversation "
+"explanations share one first-run check, `GET "
+"/v1/agent/conversations?include_archived=true&limit=2`, which refreshes "
+"on page changes until two conversations exist. **Skip** hides the row per"
+" account in the current browser, with an **Undo** notice; the settings "
+"page brings it back."
+msgstr ""
+"没有任何对话（包括已归档的）的账号，会看到一行 **Getting started**：依次是 **Connect "
+"GitHub**、**Grant a repository** 和 **Run your first task**。连接和仓库状态来自 "
+"`/config`；部署没有配置 GitHub App 时，这一行不显示。侧边栏、新任务页面和对话里的说明共用同一个首次使用检查 `GET "
+"/v1/agent/conversations?include_archived=true&limit=2`，它在页面切换时刷新，直到有两个对话为止。**Skip**"
+" 按账号在当前浏览器里隐藏这一行，并显示一条 **Undo** 提示；在设置页面可以把它找回来。"
+
+#: ../developer/web-app.md:57
+msgid "Conversations API"
+msgstr "对话列表 API"
+
+#: ../developer/web-app.md:59
+msgid ""
+"`GET /v1/agent/conversations` returns `conversations` and `next_cursor`. "
+"Each row carries the latest `job`, the canonical `title`, `archived` and "
+"`last_activity_at`."
+msgstr ""
+"`GET /v1/agent/conversations` 返回 `conversations` 和 `next_cursor`。每一行带着最新的"
+" `job`、规范的 `title`、`archived` 和 `last_activity_at`。"
+
+#: ../developer/web-app.md
+msgid "Parameter"
+msgstr "参数"
+
+#: ../developer/web-app.md
+msgid "Meaning"
+msgstr "含义"
+
+#: ../developer/web-app.md
+msgid "`q`"
+msgstr ""
+
+#: ../developer/web-app.md
+msgid ""
+"Case-insensitive literal substring of the title or full repository name; "
+"at most 200 characters. `%` and `_` match themselves"
+msgstr "在标题或完整仓库名里按字面做不区分大小写的子串匹配，最多 200 个字符。`%` 和 `_` 只匹配它们自己"
+
+#: ../developer/web-app.md
+msgid "`repo`"
+msgstr ""
+
+#: ../developer/web-app.md
+msgid "Exact repository"
+msgstr "精确匹配仓库"
+
+#: ../developer/web-app.md
+msgid "`temporary`"
+msgstr ""
+
+#: ../developer/web-app.md
+msgid ""
+"`true` lists only conversations without a repository; not combined with "
+"`repo`"
+msgstr "`true` 只列出没有仓库的对话；不能和 `repo` 一起用"
+
+#: ../developer/web-app.md
+msgid "`include_archived`"
+msgstr ""
+
+#: ../developer/web-app.md
+msgid "Include archived conversations; defaults to false"
+msgstr "包含已归档的对话；默认为 false"
+
+#: ../developer/web-app.md
+msgid "`pinned`"
+msgstr ""
+
+#: ../developer/web-app.md
+msgid "`true` or `false` restricts to one pin partition; omitted, both"
+msgstr "`true` 或 `false` 限定只看置顶或只看未置顶；不传则两者都有"
+
+#: ../developer/web-app.md
+msgid "`limit`"
+msgstr ""
+
+#: ../developer/web-app.md
+msgid "Page size, 1–200; defaults to 50"
+msgstr "每页条数，1–200；默认 50"
+
+#: ../developer/web-app.md
+msgid "`cursor`"
+msgstr ""
+
+#: ../developer/web-app.md
+msgid ""
+"Opaque cursor from the previous response, scoped to the owner and the "
+"filters"
+msgstr "上一次响应给出的不透明游标，限定在当前所有者和这组过滤条件内"
+
+#: ../developer/web-app.md:73
+msgid ""
+"Rows are ordered by pin time, then meaningful activity, then thread id. "
+"Conversation and message updates and job transitions count as activity; "
+"lease heartbeats do not. A conversation can move ahead of an older "
+"cursor, so a client refreshes from the first page when activity changes. "
+"The grouped view requests unpinned rows for each expanded repository and "
+"one global pinned list, and refreshes loaded rows in batches of up to "
+"200. The backend finds each matching conversation's most recently updated"
+" job through the thread/update index, applies the page boundary, and only"
+" then reads the latest turn for that page; keyset pagination does not "
+"make the query constant-time across all of an owner's conversations. "
+"`/jobs` keeps its separate semantics."
+msgstr ""
+"排序先看置顶时间，再看有意义的活动，最后看 thread id。对话和消息的更新、job "
+"的状态变化都算活动；租约心跳不算。一个对话可能跑到旧游标的前面去，所以活动有变化时，客户端要从第一页重新刷新。分组视图会为每个展开的仓库请求未置顶的行，再单独请求一个全局的置顶列表；刷新已加载的行时，每批最多"
+" 200 条。后端先通过 thread/update 索引，找到每个匹配对话最近更新的 "
+"job，划定分页边界，然后只为这一页读取最新的一轮；keyset 分页并不能让这个查询在所有者的全部对话上变成常数时间。`/jobs` "
+"保持它自己的语义。"
+
+#: ../developer/web-app.md:84
+msgid ""
+"Sources: "
+"[`AgentsSidebar.tsx`](../../apps/frontend/src/components/features/agents/AgentsSidebar.tsx),"
+" "
+"[`sidebarPreferences.ts`](../../apps/frontend/src/components/features/agents/sidebarPreferences.ts),"
+" [`catalog.py`](../../apps/backend/cloud_agent/api/catalog.py) and "
+"[`conversation_queries.py`](../../apps/backend/cloud_agent/storage/repositories/conversation_queries.py)."
+msgstr ""
+"源码：[`AgentsSidebar.tsx`](../../apps/frontend/src/components/features/agents/AgentsSidebar.tsx)、[`sidebarPreferences.ts`](../../apps/frontend/src/components/features/agents/sidebarPreferences.ts)、[`catalog.py`](../../apps/backend/cloud_agent/api/catalog.py)"
+" 和 "
+"[`conversation_queries.py`](../../apps/backend/cloud_agent/storage/repositories/conversation_queries.py)。"
+
+#: ../developer/web-app.md:89
+msgid "Conversation view"
+msgstr "对话视图"
+
+#: ../developer/web-app.md:91
+msgid "The turn rail"
+msgstr "轮次导航条"
+
+#: ../developer/web-app.md:93
+msgid ""
+"The rail sits in the Chat column's right gutter. It appears when the "
+"conversation has at least two visible turns, the column is at least 720px"
+" wide, the reading area is at least 200px high and the device reports a "
+"fine pointer; Trajectory has none. The current turn has the longest, "
+"darkest mark, and a hovered or focused mark widens slightly. Mark lengths"
+" show interaction state only, never message length, duration, tokens or "
+"progress. Marks keep their spacing in long conversations; the rail "
+"scrolls on its own, with faded ends, and scrolling it does not scroll the"
+" transcript."
+msgstr ""
+"导航条在 Chat 栏右侧的空白处。要同时满足这几个条件才会出现：对话至少有两轮可见的内容，这一栏至少 720px 宽，阅读区域至少 200px "
+"高，并且设备报告的是精确指针；Trajectory "
+"里没有导航条。当前轮次的标记最长、颜色最深，鼠标悬停或获得焦点的标记会稍微变宽。标记的长度只表示交互状态，从不代表消息长短、耗时、token "
+"数或进度。对话很长时，标记之间的间距保持不变；导航条自己可以滚动，两端渐隐，滚动它不会带着对话一起滚。"
+
+#: ../developer/web-app.md:102
+msgid ""
+"A preview shows the question as sent, not the conversation title, and the"
+" attempt's last visible reply once the turn is terminal, so a running "
+"answer does not change beneath the pointer. It excludes reasoning, tool "
+"arguments, tool output and runtime records, and caps the question at 50 "
+"characters and the reply at 120. Copied Fork history uses durable "
+"messages for both transcript and preview, even where those turns have no "
+"stored event log."
+msgstr ""
+"预览显示的是当时发出去的问题，而不是对话标题；等这一轮结束后，再显示这次 attempt "
+"最后一条可见的回复，这样正在生成的回答不会在鼠标底下变来变去。预览不包含推理过程、工具参数、工具输出和运行时记录；问题最多显示 50 "
+"个字符，回复最多 120 个字符。Fork 复制过来的历史，对话和预览用的都是持久化的消息，即使那些轮次没有保存事件日志也一样。"
+
+#: ../developer/web-app.md:109
+msgid ""
+"A jump places the turn's first question about 24px below the top of the "
+"reading area, or a turn without a question at its first visible content. "
+"It changes neither the URL, the selected attempt nor the workspace state."
+" A later jump, manual scrolling or leaving the conversation cancels an "
+"unfinished one; a target that cannot be found leaves the transcript in "
+"place and announces that the turn is unavailable. Hovering and jumping "
+"send no request and persist nothing. A historical turn link limits the "
+"rail to the turns that view rendered."
+msgstr ""
+"跳转时，会把这一轮的第一个问题放在阅读区域顶部往下大约 24px 的位置；没有问题的轮次，就落在它第一处可见的内容上。跳转不改变 URL、选中的 "
+"attempt "
+"和工作区状态。之后再跳一次、手动滚动，或者离开这个对话，都会取消还没完成的跳转；找不到目标时，对话停在原处，并播报这一轮无法定位。悬停和跳转都不发请求，也不保存任何东西。打开某一轮的历史链接时，导航条只覆盖那个视图渲染出来的轮次。"
+
+#: ../developer/web-app.md:117
+msgid ""
+"The rail is a named navigation region of real buttons with one mark in "
+"the tab order; arrow keys, Home and End reach the others. The current "
+"mark has `aria-current`, the preview is the mark's description, and a "
+"requested jump is announced once, while streaming output announces "
+"nothing."
+msgstr ""
+"导航条是一个有名字的导航区域，里面是真正的按钮，同一时间只有一个标记在 Tab 顺序里；用方向键、Home 和 End "
+"可以到达其他标记。当前标记带有 `aria-current`，预览作为标记的描述；请求的跳转只播报一次，流式输出则什么都不播报。"
+
+#: ../developer/web-app.md:122
+msgid "Reading position"
+msgstr "阅读位置"
+
+#: ../developer/web-app.md:124
+msgid ""
+"The transcript either follows new output at its end or holds the reader's"
+" text in place as output arrives. It opens following, and follows again "
+"after **Back to bottom**, scrolling to the live end, or acceptance of a "
+"follow-up the reader sent. Scrolling up, jumping through the rail or "
+"selecting an older attempt holds the position. While held, new content "
+"adds a dot to **Back to bottom** and updates its name, without pulling "
+"the reader back. Switching to Trajectory and back keeps the position; "
+"reloading opens at the end."
+msgstr ""
+"对话记录有两种状态：要么跟随末尾的新输出，要么在新输出到来时把读者正在看的文字固定在原处。刚打开时是跟随状态；点了 **Back to "
+"bottom**、滚到实时的末尾，或者读者发出的后续消息被接受之后，也会恢复跟随。往上滚动、通过导航条跳转，或者选中一个较早的 "
+"attempt，会把位置固定住。固定期间有新内容时，**Back to bottom** 上会多一个圆点并更新它的名字，但不会把读者拉回去。切到 "
+"Trajectory 再切回来，位置不变；重新加载则从末尾打开。"
+
+#: ../developer/web-app.md:132
+msgid "Tasks and subagents"
+msgstr "任务和子代理"
+
+#: ../developer/web-app.md:134
+msgid ""
+"The **Tasks and subagents** window shows the selected turn and attempt's "
+"latest recorded task list and delegated agents. It appears only when one "
+"of them has meaningful recorded data. A task creation result links the "
+"assigned id to the task's name, so later status updates change the same "
+"row; **Status not recorded** means the selected events hold no status for"
+" it."
+msgstr ""
+"**Tasks and subagents** 窗口显示所选轮次和 attempt "
+"最近记录下来的任务列表和委派出去的代理。只有其中某一项有实际记录的数据时，窗口才会出现。创建任务的结果会把分配的 id "
+"和任务名对应起来，所以之后的状态更新改的是同一行；**Status not recorded** 表示所选的事件里没有这个任务的状态。"
+
+#: ../developer/web-app.md:140
+msgid ""
+"A subagent card's reply, under **Returned to the main agent**, comes from"
+" where each runtime records it:"
+msgstr "子代理卡片在 **Returned to the main agent** 下显示的回复，取自各个运行时记录它的地方："
+
+#: ../developer/web-app.md:143
+msgid ""
+"Claude Code's Agent or Task, and OpenCode's and Kilo's task, return the "
+"agent's answer as the call's own result; Claude records the agent's "
+"status beside it."
+msgstr ""
+"Claude Code 的 Agent 或 Task，以及 OpenCode 和 Kilo 的 "
+"task，把代理的回答作为这次调用自己的结果返回；Claude 还会在旁边记下代理的状态。"
+
+#: ../developer/web-app.md:146
+msgid ""
+"Codex returns a finished agent's answer, or its error, as the message of "
+"the agent state its `wait` call reports."
+msgstr "Codex 把完成的代理的回答或错误，放在它的 `wait` 调用所报告的代理状态的消息里。"
+
+#: ../developer/web-app.md:148
+msgid "pi has no subagents."
+msgstr "pi 没有子代理。"
+
+#: ../developer/web-app.md:150
+msgid ""
+"A tool from an MCP server is never shown as a task list or a subagent, "
+"whatever its name; Codex, pi, OpenCode and Kilo sessions recorded before "
+"each call stored its MCP server can still show one as a subagent. A card "
+"says when a reply is still pending, was not recorded or was stored in "
+"part, and a background launch says it returned only a launch notice. "
+"Trajectory links a child step to its delegating step through runtime "
+"ownership records: Claude Code records the delegating call, and Codex the"
+" subagent's own thread. Sessions recorded before those records keep a "
+"flat step list."
+msgstr ""
+"来自 MCP 服务器的工具，不管叫什么名字，都不会显示成任务列表或子代理；不过 Codex、pi、OpenCode 和 Kilo "
+"在每次调用开始记录 MCP "
+"服务器之前录下的会话，仍可能把这样的工具显示成子代理。回复还没到、没有记录下来或者只存了一部分时，卡片会写明；后台启动的代理只返回一条启动通知，卡片也会这样说明。Trajectory"
+" 通过运行时的归属记录，把子步骤和委派它的步骤连起来：Claude Code 记录的是委派它的那次调用，Codex 记录的是子代理自己的 "
+"thread。有这些记录之前录下的会话，步骤列表仍是平铺的。"
+
+#: ../developer/web-app.md:159
+msgid "Workspace pane keyboard"
+msgstr "工作区面板的键盘操作"
+
+#: ../developer/web-app.md:161
+msgid ""
+"Workspace, Git, file-list and terminal tabs select a view with "
+"Left/Right, Home and End while focus stays in the tab strip. Narrow Git "
+"panes use a changed-file selector so the diff keeps the width, and the "
+"diff and file preview are keyboard-scrollable regions. Opening a file in "
+"a narrow pane focuses its preview; **Back** or Escape returns to the list"
+" and focuses that file."
+msgstr ""
+"工作区、Git、文件列表和终端的标签页，用左右方向键、Home 和 End 切换视图，焦点一直留在标签栏里。较窄的 Git "
+"面板用一个改动文件选择器，让 diff 占满宽度；diff "
+"和文件预览都是可以用键盘滚动的区域。在窄面板里打开文件时，焦点会移到预览上；**Back** 或 Escape "
+"回到列表，并让焦点落在刚才打开的文件上。"
+
+#: ../developer/web-app.md:167
+msgid "Checking it in a browser"
+msgstr "在浏览器里检查"
+
+#: ../developer/web-app.md:169
+msgid ""
+"Unit and DOM tests cover the navigation data, focus and an injected box "
+"model (`useConversationScroll.dom.test.tsx`). Markdown reflow, the sticky"
+" composer, resize timing and real pixel positions need a browser and a "
+"conversation with several turns:"
+msgstr ""
+"单元测试和 DOM "
+"测试覆盖了导航数据、焦点和一个注入的盒模型（`useConversationScroll.dom.test.tsx`）。Markdown "
+"重排、sticky 输入区、尺寸变化的时机和真实的像素位置，需要用浏览器和一个有好几轮的对话来检查："
+
+#: ../developer/web-app.md:174
+msgid ""
+"Click a middle mark. Its question lands about 24px below the reading "
+"area's top and the mark becomes current."
+msgstr "点中间的一个标记。它的问题应该落在阅读区域顶部往下大约 24px 处，这个标记变成当前标记。"
+
+#: ../developer/web-app.md:176
+msgid ""
+"Scroll well into a long turn until its question is off-screen. That "
+"turn's mark stays current."
+msgstr "在一个很长的轮次里往下滚，直到它的问题移出屏幕。这一轮的标记应该仍是当前标记。"
+
+#: ../developer/web-app.md:178
+msgid ""
+"Scroll up while output streams. The text keeps its screen position within"
+" a few pixels and **Back to bottom** appears."
+msgstr "在输出流式到来时往上滚。文字在屏幕上的位置偏差应该只有几个像素，并且出现 **Back to bottom**。"
+
+#: ../developer/web-app.md:180
+msgid ""
+"Use **Back to bottom**, or scroll to the end. Following resumes; scroll "
+"up again and it stays paused."
+msgstr "点 **Back to bottom**，或者滚到末尾。应该恢复跟随；再往上滚，跟随应该保持暂停。"
+
+#: ../developer/web-app.md:182
+msgid ""
+"Try columns on both sides of 720px, reading areas on both sides of 200px,"
+" and touch input. Without the rail, the transcript still scrolls "
+"normally."
+msgstr "分别试试栏宽在 720px 两侧、阅读区域高度在 200px 两侧，以及触摸输入的情况。没有导航条时，对话记录仍应正常滚动。"
+
+#: ../developer/web-app.md:184
+msgid ""
+"Expand a tool row, resize the composer, and open and close the workspace "
+"while reading history. The text under the reader stays in place."
+msgstr "在看历史内容时展开一个工具行、调整输入区大小、打开再关上工作区。读者眼前的文字应该停在原处。"
+
+#: ../developer/web-app.md:186
+msgid ""
+"With about 100 turns, check mark spacing, rail scrolling and keyboard "
+"access to every mark."
+msgstr "在大约 100 轮的对话里，检查标记间距、导航条滚动，以及每个标记都能用键盘到达。"
+
+#: ../developer/web-app.md:188
+msgid "Fork a conversation; the copied turns have marks and previews."
+msgstr "Fork 一个对话；复制过来的轮次应该有标记和预览。"
+
+#: ../developer/web-app.md:189
+msgid "Switch to Trajectory and back: no rail there, and Chat keeps its position."
+msgstr "切到 Trajectory 再切回来：那里没有导航条，Chat 保持原来的位置。"
+
+#: ../developer/web-app.md:190
+msgid ""
+"Repeat the keyboard checks in both languages, both themes and with "
+"reduced motion."
+msgstr "在两种语言、两种主题和减少动效的设置下，把键盘检查再做一遍。"
+
+#: ../developer/web-app.md:193
+msgid ""
+"The design and its sizing measurements are in the [turn navigation "
+"design](../agents/specs/2026-09-11-conversation-turn-navigation-"
+"design.zh.md). Sources: "
+"[`JobDetail.tsx`](../../apps/frontend/src/components/features/agents/JobDetail.tsx),"
+" "
+"[`TurnNavigator.tsx`](../../apps/frontend/src/components/features/agents/TurnNavigator.tsx),"
+" "
+"[`conversationTurnNavigation.ts`](../../apps/frontend/src/components/features/agents/conversationTurnNavigation.ts)"
+" and "
+"[`useConversationScroll.ts`](../../apps/frontend/src/components/features/agents/useConversationScroll.ts)."
+msgstr ""
+"设计和尺寸测量见[轮次导航设计](../agents/specs/2026-09-11-conversation-turn-navigation-"
+"design.zh.md)。源码：[`JobDetail.tsx`](../../apps/frontend/src/components/features/agents/JobDetail.tsx)、[`TurnNavigator.tsx`](../../apps/frontend/src/components/features/agents/TurnNavigator.tsx)、[`conversationTurnNavigation.ts`](../../apps/frontend/src/components/features/agents/conversationTurnNavigation.ts)"
+" 和 "
+"[`useConversationScroll.ts`](../../apps/frontend/src/components/features/agents/useConversationScroll.ts)。"
+
+#: ../developer/web-app.md:200
+msgid "Tool approvals"
+msgstr "工具审批"
+
+#: ../developer/web-app.md:202
+msgid ""
+"The **Approvals** inbox lists pending MCP calls across the owner's "
+"conversations, including ones a collapsed task list hides. Its badge "
+"counts the loaded calls, with a trailing **+** when more exist. "
+"**Approve** releases that one held request under its current "
+"authorization and attempt fence; **Deny** refuses it. The inbox never "
+"changes a conversation's permission rules. The queue refreshes when the "
+"owner's change stream reports a relevant change, with polling as a "
+"fallback. An expired call leaves the queue even before the worker records"
+" the expiry, and a decision that loses a race with expiry or another tab "
+"cannot revive it."
+msgstr ""
+"**Approvals** 收件箱列出所有者各个对话里待审批的 MCP "
+"调用，包括被折叠的任务列表挡住的那些。角标数的是已加载的调用，还有更多时后面带一个 **+**。**Approve** 在当前的授权和 "
+"attempt 栅栏下放行这一个被扣住的请求；**Deny** "
+"拒绝它。收件箱从不改动对话的权限规则。所有者的变更流报告相关变化时，队列会刷新，轮询作为兜底。过期的调用即使 worker "
+"还没记下过期，也会离开队列；在和过期或另一个标签页的竞争中输掉的决定，不能让它复活。"
+
+#: ../developer/web-app.md:212
+msgid ""
+"**Always allow**, in a conversation's tools panel, records the approval "
+"and the future permission in one server-side transaction, so the owner "
+"can leave or refresh after submitting. The rule is saved once no call on "
+"that conversation's connection is waiting for approval or dispatch, and "
+"covers only the named capability in that conversation. Before saving, the"
+" server checks the owner, connection and policy revisions and the "
+"capability fingerprint again: a reconnection, a disabled connection, a "
+"permission change or a changed capability definition discards the intent "
+"instead of restoring a revoked permission. The call history shows whether"
+" the save is pending, applied or discarded."
+msgstr ""
+"对话 Tools 面板里的 **Always "
+"allow**，会在一个服务端事务里同时记下这次批准和以后的权限，所以所有者提交后可以离开或刷新页面。等这个对话的连接上没有调用在等审批或派发时，规则才会保存，而且只覆盖这个对话里指定的那项能力。保存之前，服务端会再核对一遍所有者、连接和策略的版本，以及能力指纹：如果重新连接过、连接被停用、权限改过，或者能力定义变了，就丢弃这个意图，而不是恢复一个已经撤销的权限。调用历史会显示这次保存是待处理、已应用还是已丢弃。"
+
+#: ../developer/web-app.md:223
+msgid ""
+"A held call waits up to ten minutes. Claude Code's per-server HTTP "
+"request timeout and remote idle timeout are set to the same 26-minute "
+"window as its overall tool timeout; raising only the overall timer would "
+"leave the network timers able to abandon a request that Approvals still "
+"shows as pending. A client that accepts SSE gets an immediate response "
+"and keepalive comments during the wait, then the call's single JSON-RPC "
+"result or error. Disconnecting cancels the wait and expires the approval;"
+" nothing keeps dispatching on behalf of an abandoned request. An expired "
+"approval was never dispatched, and a changed session authorization also "
+"stops a held call before dispatch. An error after dispatch can leave the "
+"outcome unknown."
+msgstr ""
+"被扣住的调用最多等十分钟。Claude Code 的单服务器 HTTP 请求超时和远程空闲超时，都设成和它整体工具超时一样的 26 "
+"分钟；如果只调大整体计时器，网络层的计时器仍可能在 Approvals 还显示待审批时就放弃这个请求。接受 SSE "
+"的客户端会立刻收到响应，等待期间收到 keepalive 注释，最后收到这次调用唯一的 JSON-RPC "
+"结果或错误。断开连接会取消等待并让这次审批过期；不会有任何东西替一个被放弃的请求继续派发。过期的审批从来没有派发过；会话授权发生变化，也会在派发前拦下被扣住的调用。派发之后才出错，结果可能就不确定了。"
+
+#: ../developer/web-app.md:234
+msgid ""
+"`GET /v1/agent/mcp/invocations?pending_only=true` reads the authenticated"
+" owner's pending inbox; `job_id` or `thread_id` narrows it. History reads"
+" need one of those scopes, so omitting both never exposes account-wide "
+"history. `limit` defaults to 50 and accepts 1 to 100. A response carries "
+"`invocations`, `has_more` and `next_before_id`; while `has_more` is true,"
+" pass `next_before_id` as `before_id`. Ids run newest first and the "
+"cursor is exclusive, so new calls do not shift older pages. Reads and "
+"decisions are scoped to the owner and omit deleted conversations, whose "
+"audit history is kept. Reading never changes an invocation or grants a "
+"permission. The relay side is in [MCP servers](operations.md"
+"#authorization-and-routing)."
+msgstr ""
+"`GET /v1/agent/mcp/invocations?pending_only=true` 读取已认证所有者的待审批收件箱；加上 "
+"`job_id` 或 `thread_id` 可以缩小范围。读取历史必须带其中一个范围，所以两个都不带时，绝不会暴露整个账号的历史。`limit`"
+" 默认 50，接受 1 到 100。响应带有 `invocations`、`has_more` 和 "
+"`next_before_id`；`has_more` 为真时，把 `next_before_id` 作为 `before_id` 传入。id "
+"按从新到旧排列，游标不含边界本身，所以新来的调用不会挤动较早的分页。读取和决定都限定在所有者范围内，并且不包含已删除的对话，但这些对话的审计历史会保留。读取从不改动调用记录，也不授予任何权限。中继这一侧见"
+" [MCP 服务器](operations.md#authorization-and-routing)。"
+
+#: ../developer/web-app.md:245
+msgid "Memory, avatars and home suggestions"
+msgstr "记忆、头像和首页建议"
+
+#: ../developer/web-app.md:247
+msgid ""
+"Memory is the lasting rules agents follow for an owner. Avatars and home "
+"suggestions are derived from recent requests on each read; nothing about "
+"them is stored, given to agents or affected by memory settings. The "
+"[memory redesign](../agents/specs/2026-10-13-memory-redesign.zh-CN.md) "
+"explains the split."
+msgstr ""
+"记忆是代理替所有者长期遵守的规则。头像和首页建议则是每次读取时根据最近的请求推算出来的；它们不保存任何东西，不交给代理，也不受记忆设置影响。为什么这样拆分，见[记忆重新设计](../agents/specs/2026-10-13"
+"-memory-redesign.zh-CN.md)。"
+
+#: ../developer/web-app.md:253
+msgid "Memory"
+msgstr "记忆"
+
+#: ../developer/web-app.md:255
+msgid ""
+"Each memory is one rule in one of two scopes: user memory applies to "
+"every project, and project memory to one repository, where it takes "
+"precedence."
+msgstr "每条记忆是一条规则，属于两个范围之一：用户记忆对所有项目生效，项目记忆只对一个仓库生效，并且优先于用户记忆。"
+
+#: ../developer/web-app.md:258
+msgid ""
+"**Tools.** Every task can call `memory_save`, `memory_update` and "
+"`memory_delete` on the platform's MCP endpoint; the agent decides when, "
+"and writes each memory as one English sentence. No extra model call is "
+"made. Updating or deleting archives the old memory, owner-written ones "
+"included."
+msgstr ""
+"**工具。** 每个任务都可以在平台的 MCP 端点上调用 `memory_save`、`memory_update` 和 "
+"`memory_delete`；什么时候调用由代理决定，每条记忆写成一句英文。不会额外调用模型。更新或删除会把旧记忆归档，所有者自己写的也一样。"
+
+#: ../developer/web-app.md:262
+msgid ""
+"**Injection.** When a task starts, its repository's active memories and "
+"the owner's user memories are added before the request with the ids the "
+"tools take, up to 12,000 characters: repository memories first, and "
+"within a scope the most recently written or edited first. Only the "
+"memories added get a new `last_used_at`; nothing is added when there are "
+"none."
+msgstr ""
+"**注入。** 任务开始时，它所在仓库的有效记忆和所有者的用户记忆，会带着工具要用的 id 加到请求前面，最多 12,000 "
+"个字符：先放仓库记忆，同一范围内最近写入或编辑的排在前面。只有加进去的记忆会更新 `last_used_at`；没有记忆时什么都不加。"
+
+#: ../developer/web-app.md:267
+msgid ""
+"**Fence.** Every write checks, in its own transaction, that the task's "
+"attempt is still the running one, so a stopped or replaced task cannot "
+"change memory even with a request under way."
+msgstr ""
+"**栅栏。** 每次写入都会在自己的事务里检查这个任务的 attempt "
+"是否仍是正在运行的那一个，所以已停止或被替换的任务即使还有请求在途，也改不了记忆。"
+
+#: ../developer/web-app.md:270
+msgid ""
+"**Scope.** An agent saves to its task's repository unless told a rule "
+"applies to every project; a chat without a repository saves user "
+"memories. An agent sees and changes only its task's repository memories "
+"and the owner's user memories."
+msgstr ""
+"**范围。** "
+"代理默认存到任务所在的仓库，除非被告知这条规则适用于所有项目；没有仓库的对话存的是用户记忆。代理只能看到和修改任务所在仓库的记忆，以及所有者的用户记忆。"
+
+#: ../developer/web-app.md:274
+msgid ""
+"**Limits.** Each scope has its own switch; a scope that is off is neither"
+" injected nor written, and keeps its memories. A scope keeps 30 active "
+"memories of at most 240 characters. When it is full, the least recently "
+"used agent-saved memory is archived to make room; owner-written or edited"
+" memories never are, so a scope full of them refuses a new one. Archived "
+"memories can be restored and are deleted after 90 days, by an hourly "
+"purge in every control-plane process. Adding a memory identical to an "
+"active one in the same scope, ignoring case and final punctuation, "
+"returns the existing memory."
+msgstr ""
+"**上限。** 每个范围都有自己的开关；关掉的范围既不注入也不写入，已有的记忆保留。一个范围最多保留 30 条有效记忆，每条最多 240 "
+"个字符。满了以后，会把最久没用过的、代理保存的记忆归档腾出位置；所有者写的或编辑过的记忆从不这样归档，所以一个范围全是这类记忆时，会拒绝新的记忆。归档的记忆可以恢复，90"
+" 天后由每个控制平面进程每小时一次的清理删除。在同一范围里添加一条和现有有效记忆相同的记忆（忽略大小写和末尾标点），会直接返回已有的那条。"
+
+#: ../developer/web-app.md:283
+#, python-brace-format
+msgid ""
+"`GET /v1/agent/memories` returns every project's memories, and "
+"`?repo=owner/repository` one repository's, as `{repo, enabled, memories, "
+"archived}`. `POST` with `{content, repo}` adds an owner-written memory "
+"(`repo` is `null` for every project). `PATCH /v1/agent/memories/{id}` "
+"with `{content, repo, expected_version}` rewrites or moves it, `DELETE` "
+"with `{expected_version}` deletes it, and `POST "
+"/v1/agent/memories/{id}/restore` with `{expected_version}` restores an "
+"archived one. `DELETE /v1/agent/memories` clears one scope, archived "
+"memories included. `PUT /v1/agent/memories/settings` with `{repo, "
+"enabled}` turns a scope on or off, and `GET /v1/agent/memories/projects` "
+"lists the repositories the owner worked in or keeps memories for. "
+"Refusals carry a typed reason: `memory_changed` (409, a stale version), "
+"`memory_scope_full` (409), `memory_invalid` (422: credentials, over 240 "
+"characters, or limited to the current task) and `memory_not_found` (404)."
+" No response echoes memory text. The tables and their migrations are in "
+"the [upgrade notes](upgrade-notes.md)."
+msgstr ""
+"`GET /v1/agent/memories` 返回所有项目的记忆，加上 `?repo=owner/repository` "
+"则返回一个仓库的，格式为 `{repo, enabled, memories, archived}`。`POST` 带上 `{content, "
+"repo}` 添加一条所有者自己写的记忆（`repo` 为 `null` 表示所有项目）。`PATCH "
+"/v1/agent/memories/{id}` 带上 `{content, repo, expected_version}` "
+"改写或移动它，`DELETE` 带上 `{expected_version}` 删除它，`POST "
+"/v1/agent/memories/{id}/restore` 带上 `{expected_version}` "
+"恢复一条已归档的记忆。`DELETE /v1/agent/memories` 清空一个范围，已归档的也一起清掉。`PUT "
+"/v1/agent/memories/settings` 带上 `{repo, enabled}` 打开或关闭一个范围，`GET "
+"/v1/agent/memories/projects` "
+"列出所有者工作过或存有记忆的仓库。拒绝时会带上明确的原因：`memory_changed`（409，版本已过时）、`memory_scope_full`（409）、`memory_invalid`（422：包含凭据、超过"
+" 240 个字符，或只适用于当前任务）和 `memory_not_found`（404）。任何响应都不会回显记忆的内容。相关的表和迁移见[升级说明"
+"](upgrade-notes.md)。"
+
+#: ../developer/web-app.md:299
+msgid "Avatars and home suggestions"
+msgstr "头像和首页建议"
+
+#: ../developer/web-app.md:301
+msgid ""
+"Without an uploaded profile photo, an account is shown as a generated "
+"Pokémon companion: one of seven, with an expression and pose fixed for "
+"the account. The account menu and **Profile** show its fixed form, which "
+"`GET /v1/agent/profile` returns as `companion_data_url`, derived from the"
+" account alone so showing it on every page reads no requests. On the "
+"homepage, the habitat colors and orbiting badges follow the work areas "
+"detected, with English keywords, in the owner's latest 50 requests. Every"
+" shape is drawn locally as a standalone SVG; account identifiers and "
+"request text are never embedded, and no image service or model is used."
+msgstr ""
+"没有上传头像照片的账号，会显示一个自动生成的宝可梦伙伴：七种之一，表情和姿势对这个账号固定不变。账号菜单和 **Profile** "
+"显示它的固定形态，由 `GET /v1/agent/profile` 以 `companion_data_url` "
+"返回；它只根据账号推算，所以每个页面都显示它也不会多读任何请求。在首页上，栖息地的颜色和环绕的徽章，会跟随从所有者最近 50 "
+"条请求里用英文关键词识别出的工作领域。所有图形都在本地画成一个独立的 SVG；账号标识和请求内容从不嵌入其中，也不使用任何图像服务或模型。"
+
+#: ../developer/web-app.md:311
+#, python-brace-format
+msgid ""
+"The homepage also lists up to three fixed suggestions, chosen by counting"
+" English keywords in the same 50 requests: change requests without "
+"success checks or verification, failure reports without reproduction "
+"steps, and reviews without a stated scope. Only the owner's own lines "
+"count: quoted text, code blocks, assistant replies, forked copies, "
+"automatic goal turns and deleted chats are ignored. `GET "
+"/v1/agent/insights` returns `{focus_areas, suggestions, avatar}`, derived"
+" on each read."
+msgstr ""
+"首页还会列出最多三条固定的建议，依据是统计同样这 50 "
+"条请求里的英文关键词：要求改动却没说怎么验证成功的、报告失败却没给复现步骤的，以及要求审查却没说明范围的。只计算所有者自己写的内容：引用的文字、代码块、assistant"
+" 的回复、Fork 复制的内容、自动的目标轮次和已删除的对话都会被忽略。`GET /v1/agent/insights` 返回 "
+"`{focus_areas, suggestions, avatar}`，每次读取时现算。"
+
+#: ../developer/web-app.md:319
+msgid "Workspace files"
+msgstr "工作区文件"
+
+#: ../developer/web-app.md:321
+msgid ""
+"The **Files** pane reads the retained sandbox's current repository and is"
+" read-only. Paths use forward slashes and stay inside the repository: "
+"absolute paths, parent traversal and `.git` paths are refused, and "
+"symlinks are shown without being followed. A folder listing is bounded: "
+"entries past the limit, and names that are not UTF-8, are left out, and "
+"the folder says so instead of reading as complete. An entry left out for "
+"the limit can still be opened by path. Returning to the workspace root "
+"cancels an unfinished path read, so a late response cannot move the tree."
+" A file the run deleted reports that rather than a failed read."
+msgstr ""
+"**Files** 面板读取保留沙箱里当前的仓库，并且是只读的。路径用正斜杠，必须留在仓库之内：绝对路径、往上跳出的路径和 `.git` "
+"路径都会被拒绝，符号链接只显示、不跟随。目录列表有数量上限：超出上限的条目，以及不是 UTF-8 "
+"的文件名，会被略去，并且这个目录会写明这一点，而不是看起来像是完整的。因为上限被略去的条目，仍然可以按路径打开。回到工作区根目录会取消还没完成的按路径读取，免得迟到的响应把目录树带走。打开一个被这次运行删掉的文件，会说明它已被删除，而不是报告读取失败。"
+
+#: ../developer/web-app.md:331
+msgid ""
+"Copy and download offer only complete contents within the preview size "
+"limit; an oversized file shows the limit instead of a partial copy. "
+"Raster images get a preview, and HTML and SVG stay escaped text. "
+"**Download workspace**, on each turn's result in a conversation without a"
+" repository, saves the workspace as one `.tar.gz` without `.git` "
+"directories and metadata files; other hidden files are included and "
+"`.gitignore` does not filter it. A workspace over the server's download "
+"limit is refused rather than saved in part. See [Temporary "
+"workspaces](operations.md#temporary-workspaces)."
+msgstr ""
+"复制和下载只提供预览大小上限之内的完整内容；超出上限的文件会显示这个上限，而不是给出一部分。栅格图片有预览，HTML 和 SVG "
+"一律作为转义后的文本显示。在没有仓库的对话里，每一轮的结果上都有 **Download workspace**，它把工作区打成一个 "
+"`.tar.gz`，不含 `.git` 目录和元数据文件；其他隐藏文件都包含在内，`.gitignore` "
+"也不做过滤。超过服务器下载上限的工作区会被拒绝，而不是只存一部分。见[临时工作区](operations.md#temporary-"
+"workspaces)。"
+
+#: ../developer/web-app.md:340
+msgid "Smaller features"
+msgstr "其他小功能"
+
+#: ../developer/web-app.md:342
+msgid ""
+"**Notifications.** **My Settings → Notifications** enables browser "
+"notifications for agent questions and finished turns, each toggled "
+"separately and stored per account. While the app is open they cover every"
+" chat, and clicking one opens its turn; nothing is delivered while the "
+"browser is closed."
+msgstr ""
+"**通知。** 在 **My Settings → Notifications** "
+"里可以打开浏览器通知，分别针对代理提问和轮次完成，两者各自开关，按账号保存。应用开着的时候，通知覆盖所有对话，点击通知会打开对应的那一轮；浏览器关着时什么都收不到。"
+
+#: ../developer/web-app.md:347
+msgid ""
+"**Plugins.** Chosen with **+ → Plugins** before a chat's first task. "
+"Claude Code and Codex accept `name@marketplace` with a GitHub repository "
+"or public HTTPS marketplace source; pi, OpenCode and Kilo accept npm "
+"package names, optionally pinned to an exact version such as "
+"`@example/plugin@1.2.3`. Up to eight per chat. The sandbox installs them "
+"before the first prompt, and a failed installation stops startup as a "
+"task error. Selections persist with the chat and are inherited by Fork."
+msgstr ""
+"**插件。** 在对话发出第一个任务之前，通过 **+ → Plugins** 选择。Claude Code 和 Codex 接受 "
+"`name@marketplace`，来源是一个 GitHub 仓库或公开的 HTTPS marketplace；pi、OpenCode 和 "
+"Kilo 接受 npm 包名，可以固定到某个确切版本，比如 "
+"`@example/plugin@1.2.3`。每个对话最多八个。沙箱会在第一个提示词之前装好它们，安装失败会让启动停下，作为任务错误报出来。选择会随对话保存，并由"
+" Fork 继承。"
+
+#: ../developer/web-app.md:354
+msgid ""
+"**Prompt rewriting.** See [Draft prompt rewriting](operations.md#draft-"
+"prompt-rewriting)."
+msgstr "**改写提示词。** 见[改写草稿提示词](operations.md#draft-prompt-rewriting)。"
+
+#: ../developer/web-app.md:356
+msgid ""
+"**Review.** Starts an independent code-review subagent in a workspace "
+"tab, covering every change since the conversation's original base, "
+"current workspace changes included, and instructed not to edit files. It "
+"needs an available native Fork, so it cannot start from an archived chat "
+"or one whose context was lost. Selecting it again reopens the chat's "
+"existing review."
+msgstr ""
+"**Review。** "
+"在工作区的一个标签页里启动一个独立的代码审查子代理，审查范围是从对话最初的基线以来的所有改动，包括工作区里当前的改动，并且要求它不修改文件。它需要有可用的原生"
+" Fork，所以不能从已归档的对话或已经丢失上下文的对话启动。再选一次会重新打开这个对话已有的审查。"
+
+#: ../developer/web-app.md:361
+msgid ""
+"**Watch PR and merge.** Starts a follow-up in the same chat that watches "
+"checks and reviews, fixes failures and feedback, and merges once the "
+"current head meets the required checks and reviews; repository rules "
+"decide what may merge without a person. It keeps unsent composer text and"
+" attachments, and starts only while no chat sharing the workspace has "
+"active work or waiting messages. The agent needs source-control tools "
+"that read checks and reviews, mark drafts ready and merge: the GitHub "
+"preset with a token holding Contents and Pull requests read and write. A "
+"connection to `/mcp/readonly` must be reconnected with the preset. "
+"Watching ends with the turn's timeout, and a turn that made fixes ends so"
+" the platform can publish them."
+msgstr ""
+"**Watch PR and merge。** 在同一个对话里启动一条后续消息，让代理盯着检查和审查，修复失败和反馈，等当前的 head "
+"满足必需的检查和审查后合并；哪些东西不经人就能合并，由仓库规则决定。它会保留输入区里还没发出的文字和附件，并且只有在共用这个工作区的所有对话都没有正在进行的工作或等待中的消息时才能启动。代理需要能读取检查和审查、把草稿标为就绪并合并的源代码管理工具：也就是"
+" GitHub 预设，搭配一个对 Contents 和 Pull requests 有读写权限的令牌。连接到 `/mcp/readonly` "
+"的连接必须用这个预设重新连接。盯守会随这一轮的超时结束；如果这一轮做了修复，它会结束，让平台去发布这些修复。"
+

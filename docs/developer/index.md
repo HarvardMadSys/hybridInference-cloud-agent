@@ -21,6 +21,7 @@ under the MIT license; bugs and questions go to its
 | Run the browser, API, gateway fixture, hosts, and sandboxes on one machine | [Local Docker stack](local-stack.md) |
 | Set up a checkout, find the code that owns a change, and run checks | [Developer guide](development.md) |
 | Find the module that owns a responsibility and follow its dependencies | [Code structure](code-structure.md) |
+| Change the owner web app, and see the rules and APIs behind each feature | [The owner web app](web-app.md) |
 | Send a change | [Contributing](contributing.md) |
 | Translate a page, or update a translation after an English edit | [Translating the docs](translations.md) |
 | Configure credentials, enroll hosts, qualify Kata, deploy, and migrate | [Operations runbook](operations.md) |
@@ -58,6 +59,7 @@ agent-access-policy
 minimal-identity
 gateway-contracts
 security
+web-app
 ```
 
 ```{toctree}

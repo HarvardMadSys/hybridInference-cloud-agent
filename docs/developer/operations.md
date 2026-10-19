@@ -949,7 +949,7 @@ The relay enforces these rules:
   treated as an aged approval.
 - **`confirm` holds the original call.** The relay records a pending invocation
   and waits for the owner's decision in the conversation's Tools panel or the
-  account's [Approvals inbox](../user/mcp-approvals.md). Approval
+  account's [Approvals inbox](web-app.md#tool-approvals). Approval
   dispatches that request once under the current attempt and permission fence;
   the CLI receives the result without asking the model to retry. Denial, expiry
   or changed authorization prevents dispatch.

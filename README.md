@@ -137,7 +137,7 @@ before deploying for untrusted users.
 | Deploy and operate a self-hosted instance | [Operations runbook](docs/developer/operations.md) |
 | Look up a configuration value | [ENVIRONMENT.md](ENVIRONMENT.md) |
 | Build and deploy a release | [Release guide](deploy/release/README.md) |
-| Learn how a user feature works | [User notes](docs/user/) |
+| Learn the rules and APIs behind a web app feature | [The owner web app](docs/developer/web-app.md) |
 | Browse everything, including designs and reviews | [Documentation index](docs/README.md) |
 
 Read the [developer documentation online](https://doc.agent.hybridinference.org/), also in
