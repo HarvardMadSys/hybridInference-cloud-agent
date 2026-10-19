@@ -1852,8 +1852,8 @@ jobs:
       - name: Set up Python
         run: uv python install ${{ env.PYTHON_VERSION }}
 
-      # --only-group: the build needs Sphinx, myst-parser and the theme from
-      # the `dev` group, never the application or its runtime dependencies.
+      # --only-group: the build needs Sphinx, myst-parser, the theme and jieba
+      # from the `dev` group, never the application or its runtime dependencies.
       - name: Sync dependencies
         run: uv sync --locked --only-group dev
 

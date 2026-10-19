@@ -6,7 +6,8 @@ for any string it cannot translate, so a stale catalog, a missing catalog or a
 translation Sphinx refuses to apply all produce a page that builds clean under
 ``-W`` and reads as English. Nothing else in CI notices.
 
-Five checks, each aimed at one way that happens:
+Five checks, each aimed at one way that happens, and a sixth on the search
+index:
 
 ``fuzzy``
     Editing an English sentence changes its ``msgid``, which is the lookup key,
@@ -39,6 +40,15 @@ Five checks, each aimed at one way that happens:
     translated along with its label. The rendered structure diverges while the
     build stays green, so compare the built trees directly.
 
+``search index``
+    Sphinx's Chinese search splits text into words with jieba. Without it the
+    zh_CN index holds only the Latin-script words, the build is clean, and the
+    Chinese site's search finds nothing for a Chinese query. conf.py refuses
+    that build; this confirms the index that was published has Chinese terms,
+    and that each language's search script binds a stemmer class it defines
+    (Sphinx 9.1 binds `ChineseStemmer`, which nothing defines, and the search
+    page then throws before it runs a query).
+
 Run it against the tree ``make docs`` produces::
 
     python scripts/check_docs_translations.py docs/build/html docs/developer/locale \\
@@ -50,6 +60,7 @@ Stdlib only: the docs CI job installs Sphinx and nothing else.
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
 from collections import Counter
@@ -228,6 +239,49 @@ def check_structure(build_dir: Path, languages: list[str]) -> list[str]:
     return problems
 
 
+_CJK = re.compile(r"[\u4e00-\u9fff]")
+
+
+_STEMMER_BINDING = re.compile(r"window\.Stemmer = (\w+);")
+
+
+def check_search_index(build_dir: Path, languages: list[str]) -> list[str]:
+    """Report a search page that cannot run, or a Chinese index without Chinese."""
+    problems = []
+    for tree in [build_dir] + [build_dir / lang for lang in languages]:
+        script = tree / "_static" / "language_data.js"
+        if not script.exists():
+            continue
+        text = script.read_text(encoding="utf-8")
+        for name in _STEMMER_BINDING.findall(text):
+            if not re.search(
+                rf"\b(?:var|let|const|class)\s+{name}\b|\b{name}\s*=\s*function", text
+            ):
+                problems.append(
+                    f"{script}: binds `window.Stemmer` to {name}, which the script never "
+                    f"defines, so the search page throws before it runs a query"
+                )
+    for lang in languages:
+        if not lang.lower().startswith("zh"):
+            continue
+        index = build_dir / lang / "searchindex.js"
+        if not index.exists():
+            continue  # check_structure reports a missing language directory
+        text = index.read_text(encoding="utf-8")
+        try:
+            terms = json.loads(text[text.index("(") + 1 : text.rindex(")")])["terms"]
+        except (ValueError, KeyError) as error:
+            problems.append(f"{index}: not a Sphinx search index Sphinx can read ({error})")
+            continue
+        if not any(_CJK.search(term) for term in terms):
+            problems.append(
+                f"{index}: no Chinese words in the search index, so searching the "
+                f"{lang} site finds nothing\n"
+                f"    Build with jieba installed (`uv sync --only-group dev`)."
+            )
+    return problems
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("build_dir", type=Path, help="root of the built site (English at its top)")
@@ -265,6 +319,7 @@ def main() -> int:
         + check_block_starts(args.locale_dir)
         + check_coverage(args.build_dir, args.locale_dir, languages)
         + check_structure(args.build_dir, languages)
+        + check_search_index(args.build_dir, languages)
     )
     if args.gettext_dir and args.gettext_dir.is_dir():
         problems += check_staleness(args.gettext_dir, args.locale_dir, languages)

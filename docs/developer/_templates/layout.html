@@ -35,3 +35,15 @@
   </div>
   {%- endif %}
 {% endblock %}
+
+{# The 404 page is served at whatever URL the reader asked for, so its
+   relative links resolve against its own tree's root instead (conf.py sets
+   `page_base_url` for that page alone). In `htmltitle` because that is the
+   theme's first block in <head>: a <base> must come before the stylesheet and
+   script URLs it is meant to resolve. #}
+{% block htmltitle %}
+  {%- if page_base_url %}
+  <base href="{{ page_base_url }}">
+  {%- endif %}
+  {{ super() }}
+{% endblock %}

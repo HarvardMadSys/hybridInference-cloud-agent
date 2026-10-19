@@ -1,9 +1,9 @@
 """Sphinx configuration for the Cloud Agent developer documentation.
 
 The site is plain MyST Markdown -- no page uses autodoc, so nothing here
-imports the application. `sphinx-build` needs only Sphinx, myst-parser and the
-theme, and makes no network requests, so an offline contributor gets the same
-result as CI.
+imports the application. `sphinx-build` needs only Sphinx, myst-parser, the
+theme and jieba (the Chinese search index's word segmenter), and makes no
+network requests, so an offline contributor gets the same result as CI.
 
 Pages link freely to repository files that are not part of the site: scripts,
 examples, tests and dated design records. Those links work when the Markdown is
@@ -22,6 +22,8 @@ from pathlib import Path
 
 from docutils import nodes
 from sphinx import addnodes
+from sphinx.errors import ExtensionError
+from sphinx.search.zh import SearchChinese
 from sphinx.transforms import i18n as _sphinx_i18n
 from sphinx.util import logging
 
@@ -53,7 +55,7 @@ myst_enable_extensions = [
 # GitHub but Sphinx reports `myst.xref_missing`, which fails the `-W` build.
 myst_heading_anchors = 4
 
-exclude_patterns = ["_build"]
+exclude_patterns = ["_build", "_search"]
 templates_path = ["_templates"]
 
 # -- Translations ------------------------------------------------------------
@@ -313,8 +315,68 @@ def _build_nested_languages(app, exception):
         shutil.rmtree(scratch, ignore_errors=True)
 
 
+def _require_chinese_segmenter(app):
+    """Refuse to build a Chinese site whose search cannot find Chinese words.
+
+    Sphinx's Chinese search index splits text into words with jieba. When jieba
+    is not installed it indexes only the Latin-script words, so the build
+    succeeds and the published search finds nothing for a Chinese query. The
+    `dev` dependency group pins it; a hosting build that installs its own
+    packages must install it too.
+    """
+    if app.builder.name != "html" or not app.config.language.lower().startswith("zh"):
+        return
+    try:
+        import jieba
+    except ImportError as error:
+        raise ExtensionError(
+            f"building the {app.config.language} docs needs jieba for the search index: "
+            "install the `dev` dependency group (`uv sync --only-group dev`) or `pip install jieba`"
+        ) from error
+    # jieba logs at DEBUG to stderr each time it loads its dictionary.
+    jieba.setLogLevel(60)
+
+
+class _SearchChinese(SearchChinese):
+    """Sphinx's Chinese search, with a query splitter that segments Han text.
+
+    The index side is Sphinx's own: jieba splits each page into words. The
+    browser has no segmenter, so the query side splits against the index's own
+    words instead; see `_search/zh_split_query.js`.
+    """
+
+    js_splitter_code = (_SOURCE_DIR / "_search" / "zh_split_query.js").read_text(encoding="utf-8")
+
+    # Sphinx 9.1 binds the browser stemmer as `window.Stemmer =
+    # <language_name>Stemmer`, which for Chinese names `ChineseStemmer`, a class
+    # nothing defines: language_data.js throws, and the search page finds
+    # nothing for any query. The Latin words of a Chinese page are stemmed in
+    # English (english-stemmer.js), so name the class that file does define.
+    language_name = "English"
+
+
+# Cloudflare Pages serves `404.html` from the nearest directory for a path that
+# matches no file, at the requested URL rather than by redirect. The page's
+# relative links would then resolve against wherever the reader was, so the
+# 404 page gets a base URL: its own tree's root, which assumes the site is
+# published at the domain root (doc.agent.hybridinference.org and every Pages
+# preview are).
+NOT_FOUND_PAGE = "404"
+
+
+def _not_found_base(app, pagename, templatename, context, doctree):
+    if pagename != NOT_FOUND_PAGE:
+        return
+    language = app.config.language.replace("-", "_")
+    nested = bool(_languages) and language.lower() != _root_language.lower()
+    context["page_base_url"] = f"/{language}/" if nested else "/"
+
+
 def setup(app):
     """Register the repository-link rewrite, its anchor check and translations."""
+    app.add_search_language(_SearchChinese)
+    app.connect("builder-inited", _require_chinese_segmenter)
+    app.connect("html-page-context", _not_found_base)
     # Before the download collector, so repository files are not copied into
     # the site as downloads.
     app.connect("doctree-read", _rewrite_repository_links, priority=400)
