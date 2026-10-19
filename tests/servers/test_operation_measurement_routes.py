@@ -293,6 +293,9 @@ class _RecordingClient:
             pass
         return call
 
+    def with_start_seq(self, _start_seq: int | None):
+        return self
+
     async def register_shared_sandbox(self, _sandbox: dict[str, Any]) -> None:
         """Accept the manifest re-registration a workspace request performs."""
         return None

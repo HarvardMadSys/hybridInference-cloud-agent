@@ -3796,6 +3796,9 @@ async def test_live_workspace_routes_use_the_job_sandbox_manager(store: FakeStor
         def __init__(self) -> None:
             self.calls: list[tuple] = []
 
+        def with_start_seq(self, _start_seq: int | None):
+            return self
+
         async def register_shared_sandbox(self, _sandbox: dict[str, Any]):
             return None
 
@@ -3878,6 +3881,9 @@ async def test_binary_workspace_payload_preserves_owner_and_path_checks(
         def __init__(self) -> None:
             self.calls: list[tuple[str, str]] = []
 
+        def with_start_seq(self, _start_seq: int | None):
+            return self
+
         async def register_shared_sandbox(self, _sandbox: dict[str, Any]):
             return None
 
@@ -3935,6 +3941,9 @@ async def test_missing_shared_workspace_is_a_conflict_not_a_missing_file(
     from cloud_agent.sandbox_manager_client import SandboxManagerError
 
     class SandboxManager:
+        def with_start_seq(self, _start_seq: int | None):
+            return self
+
         async def register_shared_sandbox(self, _sandbox: dict[str, Any]):
             return None
 
@@ -3963,6 +3972,9 @@ async def test_retained_mutations_honor_thread_fence_even_through_a_settled_turn
     class SandboxManager:
         def __init__(self) -> None:
             self.calls: list[tuple[Any, ...]] = []
+
+        def with_start_seq(self, _start_seq: int | None):
+            return self
 
         async def register_shared_sandbox(self, _sandbox: dict[str, Any]):
             return None
@@ -4057,6 +4069,9 @@ class _TerminalSessionSandboxManager:
             b'event: output\ndata: {"seq":1,"data":"aGk="}\n\n',
             b'event: exit\ndata: {"seq":2,"exit_code":0}\n\n',
         )
+
+    def with_start_seq(self, _start_seq: int | None):
+        return self
 
     async def register_shared_sandbox(self, _sandbox: dict[str, Any]):
         return None

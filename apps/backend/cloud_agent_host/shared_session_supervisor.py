@@ -103,6 +103,7 @@ DueCensus = tuple[
 
 logger = logging.getLogger(__name__)
 
+
 class _SameRun(Enum):
     """A start that finishes one a request already admitted, under its fence."""
 

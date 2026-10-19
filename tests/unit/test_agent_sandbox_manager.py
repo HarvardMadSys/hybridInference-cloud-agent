@@ -1727,9 +1727,7 @@ async def test_a_capture_whose_base_git_pruned_asks_for_it_again(tmp_path, monke
 
     supervisor = _SharedSupervisor()
     supervisor.capture_snapshot = (  # type: ignore[method-assign]
-        lambda _thread_id, *, capture, **_kwargs: capture(
-            ProcessBackend(acknowledged_unsafe=True)
-        )
+        lambda _thread_id, *, capture, **_kwargs: capture(ProcessBackend(acknowledged_unsafe=True))
     )
     monkeypatch.setattr(sandbox_manager_mod, "CHAT_WORKDIR", workspace)
     app = _app(supervisor)
