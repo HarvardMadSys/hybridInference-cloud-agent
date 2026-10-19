@@ -146,9 +146,9 @@ export async function editableTeams(): Promise<EnvironmentTeam[]> {
 /**
  * The Environments card in My Settings: personal global variables, then each
  * repository's environments, your own and your teams'. Editing happens in
- * `EnvironmentDialog`; copying and removing are confirmed in place under their
- * row. A team's environment is changed only by its owner and admins; other
- * members can view, test, copy and choose it.
+ * `EnvironmentDialog`; copying, removing and deleting a saved installation are
+ * confirmed in place under their row. A team's environment is changed only by
+ * its owner and admins; other members can view, test, copy and choose it.
  */
 export function EnvironmentManager() {
   const t = useT();
@@ -165,6 +165,7 @@ export function EnvironmentManager() {
   const [teams, setTeams] = useState<EnvironmentTeam[]>([]);
   const copyRequest = useRef<{ fingerprint: string; key: string } | null>(null);
   const [removing, setRemoving] = useState<string | null>(null);
+  const [discarding, setDiscarding] = useState<string | null>(null);
   const [snapshotsEnabled, setSnapshotsEnabled] = useState(false);
   // Only the most recently sent read may land: a poll sent before an action
   // must not put back the list that action changed.
@@ -346,6 +347,7 @@ export function EnvironmentManager() {
                       actions={menu}
                       onAction={(action) => {
                         setRemoving(null);
+                        setDiscarding(null);
                         setCopying(null);
                         if (action === 'copy') {
                           copyRequest.current = null;
@@ -360,13 +362,40 @@ export function EnvironmentManager() {
                         } else if (action === 'rebuild') {
                           void perform(() => rebuildEnvironmentSnapshot(item.id!));
                         } else if (action === 'discard') {
-                          void perform(() => deleteEnvironmentSnapshot(item.id!));
+                          setDiscarding(item.id);
                         } else {
                           setRemoving(item.id);
                         }
                       }}
                     />
                   </div>
+                  {discarding === item.id ? (
+                    <div className="flex flex-wrap items-center gap-2 border-t border-border bg-surface-muted/50 px-3 py-2.5">
+                      <p className="mr-auto text-sm">
+                        {t('environment.snapshot.deleteConfirm', { name: item.name })}
+                      </p>
+                      <button
+                        type="button"
+                        className="ui-button ui-button-ghost"
+                        onClick={() => setDiscarding(null)}
+                      >
+                        {t('environment.cancel')}
+                      </button>
+                      <button
+                        type="button"
+                        className="ui-button bg-status-error text-white hover:bg-status-error/90"
+                        disabled={busy}
+                        onClick={() =>
+                          void perform(async () => {
+                            await deleteEnvironmentSnapshot(item.id!);
+                            setDiscarding(null);
+                          })
+                        }
+                      >
+                        {t('environment.snapshot.delete')}
+                      </button>
+                    </div>
+                  ) : null}
                   {removing === item.id ? (
                     <div className="flex flex-wrap items-center gap-2 border-t border-border bg-surface-muted/50 px-3 py-2.5">
                       <p className="mr-auto text-sm">

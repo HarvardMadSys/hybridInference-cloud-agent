@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
 import { useT } from '@/components/providers';
 import { SettingsPage } from '@/components/features/settings/SettingsPage';
 import {
@@ -231,6 +231,13 @@ export function IntegrationsView({
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [disconnecting, setDisconnecting] = useState<string | null>(null);
+  // The disconnect waiting to be confirmed under its provider's row; `id` is
+  // `GITHUB_ACCOUNT` for the whole GitHub connection.
+  const [confirming, setConfirming] = useState<{
+    provider: AgentIntegrationProvider;
+    id: string;
+    label: string;
+  } | null>(null);
   const connectedNoticeChecked = useRef(false);
   // Which request the page is waiting for. Only the most recently *sent*
   // answer may land: a re-check sent before a disconnect can arrive after the
@@ -297,6 +304,7 @@ export function IntegrationsView({
     try {
       const response = await disconnectGitHubAccount();
       if (request === latestLoad.current) setProviders(response.providers);
+      setConfirming((current) => (current?.id === GITHUB_ACCOUNT ? null : current));
       setNotice('GitHub disconnected.');
     } catch (cause: unknown) {
       setError(cause instanceof Error ? cause.message : 'Could not disconnect GitHub.');
@@ -315,6 +323,7 @@ export function IntegrationsView({
     setNotice(null);
     try {
       await disconnectAgentIntegration(provider, connectionId);
+      setConfirming((current) => (current?.id === connectionId ? null : current));
       setNotice(`${label} disconnected.`);
       await load();
     } catch (cause: unknown) {
@@ -372,49 +381,78 @@ export function IntegrationsView({
             const statusUnavailable = Boolean(error && !foundIntegration);
             const copy = PROVIDER_COPY[provider];
             return (
-              <div
-                key={provider}
-                className={`flex flex-col justify-center gap-3 py-3 lg:flex-row lg:items-center ${
-                  index > 0 ? 'border-t border-border' : ''
-                }`}
-              >
-                <div className="flex min-w-0 flex-1 items-start gap-3 sm:gap-4">
-                  <ProviderIcon provider={provider} />
-                  <div className="min-w-0">
-                    <h3 className="text-sm font-semibold text-foreground">{copy.name}</h3>
-                    <p className="mt-1 break-words text-sm leading-6 text-muted">
-                      {loading
-                        ? 'Loading connection status…'
-                        : statusUnavailable
-                          ? 'Connection status is unavailable'
-                          : integration.error
-                            ? integration.error
-                            : integration.connected
-                              ? connectedDescription(integration)
-                              : copy.description}
-                    </p>
+              <Fragment key={provider}>
+                <div
+                  className={`flex flex-col justify-center gap-3 py-3 lg:flex-row lg:items-center ${
+                    index > 0 ? 'border-t border-border' : ''
+                  }`}
+                >
+                  <div className="flex min-w-0 flex-1 items-start gap-3 sm:gap-4">
+                    <ProviderIcon provider={provider} />
+                    <div className="min-w-0">
+                      <h3 className="text-sm font-semibold text-foreground">{copy.name}</h3>
+                      <p className="mt-1 break-words text-sm leading-6 text-muted">
+                        {loading
+                          ? 'Loading connection status…'
+                          : statusUnavailable
+                            ? 'Connection status is unavailable'
+                            : integration.error
+                              ? integration.error
+                              : integration.connected
+                                ? connectedDescription(integration)
+                                : copy.description}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex min-w-0 shrink-0 flex-wrap items-center gap-2 lg:justify-end">
+                    {loading ? (
+                      <span
+                        className="h-11 w-24 animate-pulse rounded-lg bg-surface-muted"
+                        aria-label={`Loading ${copy.name}`}
+                      />
+                    ) : statusUnavailable ? (
+                      <span className="text-sm text-gray-400 dark:text-gray-500">Unavailable</span>
+                    ) : (
+                      <ProviderActions
+                        integration={integration}
+                        disconnecting={disconnecting}
+                        onDisconnect={(connectionId, label) =>
+                          setConfirming({ provider, id: connectionId, label })
+                        }
+                        onDisconnectAll={() =>
+                          setConfirming({ provider, id: GITHUB_ACCOUNT, label: copy.name })
+                        }
+                      />
+                    )}
                   </div>
                 </div>
-                <div className="flex min-w-0 shrink-0 flex-wrap items-center gap-2 lg:justify-end">
-                  {loading ? (
-                    <span
-                      className="h-11 w-24 animate-pulse rounded-lg bg-surface-muted"
-                      aria-label={`Loading ${copy.name}`}
-                    />
-                  ) : statusUnavailable ? (
-                    <span className="text-sm text-gray-400 dark:text-gray-500">Unavailable</span>
-                  ) : (
-                    <ProviderActions
-                      integration={integration}
-                      disconnecting={disconnecting}
-                      onDisconnect={(connectionId, label) =>
-                        void disconnect(provider, connectionId, label)
+                {confirming?.provider === provider ? (
+                  <div className="mb-3 flex flex-wrap items-center gap-2 rounded-lg bg-surface-muted/50 px-3 py-2.5">
+                    <p className="mr-auto text-sm">
+                      {t('integrations.disconnectConfirm', { name: confirming.label })}
+                    </p>
+                    <button
+                      type="button"
+                      className="ui-button ui-button-ghost min-h-11"
+                      onClick={() => setConfirming(null)}
+                    >
+                      {t('integrations.cancel')}
+                    </button>
+                    <button
+                      type="button"
+                      className="ui-button min-h-11 bg-status-error text-white hover:bg-status-error/90"
+                      disabled={disconnecting !== null}
+                      onClick={() =>
+                        void (confirming.id === GITHUB_ACCOUNT
+                          ? disconnectGitHub()
+                          : disconnect(provider, confirming.id, confirming.label))
                       }
-                      onDisconnectAll={() => void disconnectGitHub()}
-                    />
-                  )}
-                </div>
-              </div>
+                    >
+                      {t('integrations.disconnect')}
+                    </button>
+                  </div>
+                ) : null}
+              </Fragment>
             );
           })}
         </div>

@@ -159,6 +159,35 @@ it('asks before removing an environment', async () => {
   await waitFor(() => expect(deleteEnvironment).toHaveBeenCalledWith('ci', 1));
 });
 
+it('asks before deleting a saved installation', async () => {
+  vi.mocked(listEnvironments).mockResolvedValue({
+    globals: environment({ id: 'global', repo: null, name: 'Global', revision: 2 }),
+    snapshots_enabled: true,
+    environments: [
+      environment({
+        setup_script: 'npm ci',
+        snapshot: { id: 's', state: 'ready', created_at: '2026-10-15T00:00:00Z' },
+      }),
+    ],
+  });
+  vi.mocked(deleteEnvironmentSnapshot).mockResolvedValue(undefined);
+  render(<EnvironmentManager />);
+  await screen.findByText('org/web');
+  const manage = () => screen.getAllByRole('button', { name: 'environment.manageItem' })[0];
+  fireEvent.click(manage());
+  fireEvent.click(screen.getByRole('menuitem', { name: 'environment.snapshot.delete' }));
+  expect(screen.getByText('environment.snapshot.deleteConfirm')).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'environment.cancel' }));
+  expect(screen.queryByText('environment.snapshot.deleteConfirm')).toBeNull();
+  expect(deleteEnvironmentSnapshot).not.toHaveBeenCalled();
+
+  fireEvent.click(manage());
+  fireEvent.click(screen.getByRole('menuitem', { name: 'environment.snapshot.delete' }));
+  fireEvent.click(screen.getByRole('button', { name: 'environment.snapshot.delete' }));
+  await waitFor(() => expect(deleteEnvironmentSnapshot).toHaveBeenCalledExactlyOnceWith('env'));
+  await waitFor(() => expect(screen.queryByText('environment.snapshot.deleteConfirm')).toBeNull());
+});
+
 it('offers Make default only for an environment that is not already the default', async () => {
   vi.mocked(setEnvironmentDefault).mockResolvedValue({});
   render(<EnvironmentManager />);
@@ -211,6 +240,7 @@ it('shows which environments skip installation and lets the owner rebuild or del
   expect(within(web).getAllByText(/environment.snapshot/)).toHaveLength(2);
   fireEvent.click(screen.getAllByRole('button', { name: 'environment.manageItem' })[0]);
   fireEvent.click(screen.getByRole('menuitem', { name: 'environment.snapshot.delete' }));
+  fireEvent.click(screen.getByRole('button', { name: 'environment.snapshot.delete' }));
   await waitFor(() => expect(deleteEnvironmentSnapshot).toHaveBeenCalledWith('env'));
   fireEvent.click(screen.getAllByRole('button', { name: 'environment.manageItem' })[1]);
   expect(screen.queryByRole('menuitem', { name: 'environment.snapshot.delete' })).toBeNull();

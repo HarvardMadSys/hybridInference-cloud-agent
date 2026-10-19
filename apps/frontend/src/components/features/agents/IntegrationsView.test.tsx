@@ -518,8 +518,9 @@ describe('IntegrationsView', () => {
       await act(async () => {
         await vi.advanceTimersByTimeAsync(30_000); // the re-check goes out, unanswered
       });
+      fireEvent.click(screen.getByRole('button', { name: 'Disconnect GitHub' }));
       await act(async () => {
-        fireEvent.click(screen.getByRole('button', { name: 'Disconnect GitHub' }));
+        fireEvent.click(screen.getByRole('button', { name: 'Disconnect' }));
         await vi.advanceTimersByTimeAsync(0);
       });
       expect(screen.queryByText('HarvardMadSys · Temporarily unavailable')).not.toBeInTheDocument();
@@ -674,12 +675,44 @@ describe('IntegrationsView', () => {
     await screen.findByText('Connected as HarvardMadSys · 2 repositories');
     fireEvent.click(screen.getByText('Manage'));
     fireEvent.click(screen.getByRole('button', { name: 'Disconnect GitHub' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Disconnect' }));
 
     expect(await screen.findByRole('status')).toHaveTextContent('GitHub disconnected.');
     expect(screen.queryByText(/Connected as/)).not.toBeInTheDocument();
     expect(mockedDisconnect).not.toHaveBeenCalled();
     // One request: the answer is the page's state, not a reason to reload it.
     expect(mockedGetIntegrations).toHaveBeenCalledTimes(1);
+  });
+
+  it('asks before disconnecting GitHub or a GitLab account', async () => {
+    const gitlab = {
+      ...integrations.providers[1],
+      connected: true,
+      accounts: [{ id: 'gl-7', label: 'murphy' }],
+    };
+    mockedGetIntegrations.mockResolvedValue({ providers: [integrations.providers[0], gitlab] });
+    mockedDisconnect.mockResolvedValue(undefined);
+
+    render(<IntegrationsView />);
+    await screen.findByText('Connected as HarvardMadSys · 2 repositories');
+    const [githubMenu, gitlabMenu] = screen.getAllByText('Manage');
+    fireEvent.click(githubMenu);
+    fireEvent.click(screen.getByRole('button', { name: 'Disconnect GitHub' }));
+    expect(screen.getByText(/^Disconnect GitHub\?/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByText(/^Disconnect GitHub\?/)).not.toBeInTheDocument();
+    expect(disconnectGitHubAccount).not.toHaveBeenCalled();
+
+    fireEvent.click(gitlabMenu);
+    fireEvent.click(screen.getByRole('button', { name: 'Disconnect murphy' }));
+    expect(screen.getByText(/^Disconnect murphy\?/)).toBeInTheDocument();
+    expect(mockedDisconnect).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Disconnect' }));
+
+    expect(await screen.findByRole('status')).toHaveTextContent('murphy disconnected.');
+    expect(mockedDisconnect).toHaveBeenCalledExactlyOnceWith('gitlab', 'gl-7');
+    expect(disconnectGitHubAccount).not.toHaveBeenCalled();
+    expect(screen.queryByText(/^Disconnect murphy\?/)).not.toBeInTheDocument();
   });
 
   it('keeps a connected GitLab account manageable', async () => {

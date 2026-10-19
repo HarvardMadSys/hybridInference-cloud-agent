@@ -179,6 +179,8 @@ export const zhCN: Record<TranslationKey, string> = {
   'environment.snapshot.failed': '预构建失败',
   'environment.snapshot.rebuild': '重新预构建',
   'environment.snapshot.delete': '删除安装快照',
+  'environment.snapshot.deleteConfirm':
+    '删除「{name}」的安装快照？重新预构建之前，新任务会从头安装。',
   'environment.snapshot.prebuildAfterTest':
     '测试通过后会为这份安装排一次预构建。锁文件不变时，新任务会直接从它开始。',
   'environment.choose': '选择环境',
@@ -520,6 +522,9 @@ export const zhCN: Record<TranslationKey, string> = {
   'settings.integrations': '集成',
   'settings.ssh': 'SSH 连接',
   'settings.integrationsDescription': '连接代码托管账号，管理仓库访问权限。',
+  'integrations.disconnectConfirm': '断开 {name}？重新连接之前，Agent 将无法使用它。',
+  'integrations.disconnect': '断开连接',
+  'integrations.cancel': '取消',
   'settings.environments': '环境',
   'settings.environmentsDescription': '管理仓库环境、初始化脚本和个人变量。',
   'settings.helpDescription': '连接仓库、准备环境，然后开始你的第一个对话。',

@@ -189,6 +189,8 @@ export const en = {
   'environment.snapshot.failed': 'Prebuild failed',
   'environment.snapshot.rebuild': 'Prebuild again',
   'environment.snapshot.delete': 'Delete saved installation',
+  'environment.snapshot.deleteConfirm':
+    'Delete the saved installation of {name}? New tasks install from scratch until it is prebuilt again.',
   'environment.snapshot.prebuildAfterTest':
     'A passing test queues a prebuild of this installation. New tasks start from it while the lockfiles are unchanged.',
   'environment.choose': 'Choose environment',
@@ -548,6 +550,10 @@ export const en = {
   'settings.ssh': 'SSH connections',
   'settings.integrationsDescription':
     'Connect your source control accounts and manage repository access.',
+  'integrations.disconnectConfirm':
+    'Disconnect {name}? Agents can no longer use it until you connect it again.',
+  'integrations.disconnect': 'Disconnect',
+  'integrations.cancel': 'Cancel',
   'settings.environments': 'Environments',
   'settings.environmentsDescription':
     'Manage repository environments, setup scripts, and personal variables.',
