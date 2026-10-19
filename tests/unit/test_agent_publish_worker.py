@@ -9,6 +9,7 @@ opening a PR that is not a draft.
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import json
 from typing import Any
@@ -445,6 +446,129 @@ async def test_publishing_asks_for_a_token_that_outlives_the_publish(monkeypatch
     await publish_one(store, app_credentials=App())
 
     assert asked["min_ttl_s"] >= 900
+
+
+@contextlib.asynccontextmanager
+async def _minting_app(monkeypatch, minted: list[str]):
+    """The App's own credentials, where every mint is a new token that lives until 2099."""
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/installation"):
+            return httpx.Response(200, json={"id": 1})
+        minted.append(f"ghs_{len(minted) + 1}")
+        return httpx.Response(201, json={"token": minted[-1], "expires_at": "2099-01-01T00:00:00Z"})
+
+    monkeypatch.setattr(github_app, "build_app_jwt", lambda config, **kwargs: "app-jwt")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        yield github_app.GitHubAppCredentials(
+            github_app.AppConfig(app_id="1", private_key="k", api_base="https://api.test"),
+            client=client,
+        )
+
+
+def _git_token(auth_env: dict[str, str]) -> str:
+    """The token a git command run with ``auth_env`` sends."""
+    basic = auth_env["GIT_CONFIG_VALUE_0"].removeprefix("Authorization: Basic ")
+    return base64.b64decode(basic).decode().removeprefix("x-access-token:")
+
+
+#: What git says when the remote answers its credential with a 401.
+_GIT_REFUSED = (
+    "git ls-remote failed: fatal: Authentication failed for 'https://github.com/o/n.git/'"
+)
+
+
+def _refusing(monkeypatch, refused_by: str, refused: set[str]) -> list[str]:
+    """Publish with git and the PR API refusing ``refused`` tokens at one of them."""
+    used: list[str] = []
+
+    def publish(**kwargs):
+        used.append(_git_token(kwargs["auth_env"]))
+        if refused_by == "git" and used[-1] in refused:
+            raise TransientPublishError(_GIT_REFUSED)
+        return PublishResult(branch="agent/athr_1", commit_sha="s", changed_files=["x"])
+
+    async def open_pr(**kwargs):
+        if refused_by == "pr_api" and kwargs["credential"].token in refused:
+            raise publish_worker._github_api_error("the PR lookup", httpx.Response(401))
+        return "https://github.com/o/n/pull/7"
+
+    monkeypatch.setattr(publish_worker, "publish_patch", publish)
+    monkeypatch.setattr(publish_worker, "ensure_draft_pull_request", open_pr)
+    return used
+
+
+@pytest.mark.parametrize("refused_by", ["git", "pr_api"])
+async def test_a_token_github_refuses_is_dropped_and_replaced_once(monkeypatch, refused_by):
+    """A cached token revoked before it expired is replaced, not served until it lapses.
+
+    Whoever holds an installation token can revoke it. The cache went on
+    serving the publisher's while it had half an hour to live, and every
+    publication to the repository failed on it meanwhile.
+    """
+    store = FakeStore(dict(_JOB))
+    minted: list[str] = []
+    used = _refusing(monkeypatch, refused_by, {"ghs_1"})
+    async with _minting_app(monkeypatch, minted) as app:
+        assert await publish_one(store, app_credentials=app) == "https://github.com/o/n/pull/7"
+        # The replacement is what the next publication is handed.
+        assert (
+            await app.token_for(
+                "o/n",
+                permissions=publish_worker._PUBLISH_SCOPE,
+                repository_scoped=True,
+                min_ttl_s=publish_worker._PUBLISH_TOKEN_MIN_TTL_S,
+            )
+            == "ghs_2"
+        )
+
+    assert minted == used == ["ghs_1", "ghs_2"]
+    assert store.snapshot_recorded == (9, "https://github.com/o/n/pull/7", "s")
+
+
+@pytest.mark.parametrize(("refused_by", "deferred"), [("git", True), ("pr_api", False)])
+async def test_a_replacement_github_refuses_too_is_not_replaced_again(
+    monkeypatch, refused_by, deferred
+):
+    """One replacement per publication; then the refusal is handled as it always was."""
+    store = FakeStore(dict(_JOB))
+    minted: list[str] = []
+    _refusing(monkeypatch, refused_by, {"ghs_1", "ghs_2", "ghs_3"})
+    async with _minting_app(monkeypatch, minted) as app:
+        assert await publish_one(store, app_credentials=app) is None
+
+    assert minted == ["ghs_1", "ghs_2"]
+    assert (store.snapshot_deferred is not None) is deferred
+    assert (store.snapshot_failed is not None) is not deferred
+
+
+async def test_a_base_import_replaces_a_token_github_refuses(monkeypatch):
+    store = FakeStore()
+    minted: list[str] = []
+    fetched_with: list[str] = []
+
+    def fetch(**kwargs: Any) -> bytes:
+        fetched_with.append(_git_token(kwargs["auth_env"]))
+        if fetched_with[-1] == "ghs_1":
+            raise TransientPublishError(_GIT_REFUSED.replace("ls-remote", "fetch"))
+        return b"bundle"
+
+    monkeypatch.setattr(publish_worker, "fetch_base_bundle", fetch)
+    monkeypatch.setattr(publish_worker, "_import_snapshot_base", AsyncMock(return_value=True))
+    pending = {
+        "snapshot_id": 9,
+        "repo": "o/n",
+        "user_id": "u1",
+        "published_commit_sha": "c" * 40,
+        "origin_base_sha": "a" * 40,
+    }
+    async with _minting_app(monkeypatch, minted) as app:
+        assert await publish_worker._retry_base_import(
+            store, pending, credential=None, app_credentials=app
+        )
+
+    assert minted == fetched_with == ["ghs_1", "ghs_2"]
+    assert store.import_failed is None
 
 
 async def test_cancelling_a_publish_while_its_heartbeat_stops_is_not_swallowed(monkeypatch):

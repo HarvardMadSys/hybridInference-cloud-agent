@@ -429,6 +429,91 @@ async def test_a_narrowed_token_is_not_served_from_the_full_token_cache(config):
     assert len(minted) == 2, "the second read should have come from cache"
 
 
+_WRITE = {"contents": "write", "pull_requests": "write"}
+
+
+def _minting(minted: list[str]):
+    """Answer every mint with a new token that lives until 2099."""
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/installation"):
+            return httpx.Response(200, json={"id": 1})
+        minted.append(f"ghs_{len(minted) + 1}")
+        return httpx.Response(201, json={"token": minted[-1], "expires_at": "2099-01-01T00:00:00Z"})
+
+    return httpx.MockTransport(respond)
+
+
+async def test_a_token_handed_to_a_holder_is_its_own(config):
+    """A sandbox's token is neither the publisher's nor another conversation's.
+
+    Whoever holds an installation token can revoke it, with no permission at
+    all. Served from one slot, a token one sandbox revoked was refused for the
+    publisher and every other sandbox while the slot went on serving it.
+    """
+    minted: list[str] = []
+    async with httpx.AsyncClient(transport=_minting(minted)) as client:
+        credentials = GitHubAppCredentials(config, client=client)
+
+        async def token(holder: str | None = None) -> str:
+            return await credentials.token_for(
+                "o/n", permissions=_WRITE, repository_scoped=True, holder=holder
+            )
+
+        publisher, first, second = await token(), await token("athr_1"), await token("athr_2")
+        # Each stays cached for its own holder, so a follow-up keeps its token.
+        assert [await token(), await token("athr_1"), await token("athr_2")] == minted
+
+    assert minted == [publisher, first, second] == ["ghs_1", "ghs_2", "ghs_3"]
+
+
+async def test_a_token_github_refused_is_not_served_again(config):
+    """Dropped by value: a replacement another caller already minted stays."""
+    minted: list[str] = []
+    async with httpx.AsyncClient(transport=_minting(minted)) as client:
+        credentials = GitHubAppCredentials(config, client=client)
+        refused = await credentials.token_for("o/n", permissions=_WRITE, repository_scoped=True)
+        held = await credentials.token_for(
+            "o/n", permissions=_WRITE, repository_scoped=True, holder="athr_1"
+        )
+        credentials.forget_token(refused)
+        replacement = await credentials.token_for("o/n", permissions=_WRITE, repository_scoped=True)
+        credentials.forget_token(refused)
+        assert (
+            await credentials.token_for("o/n", permissions=_WRITE, repository_scoped=True)
+            == replacement
+        )
+        assert (
+            await credentials.token_for(
+                "o/n", permissions=_WRITE, repository_scoped=True, holder="athr_1"
+            )
+            == held
+        )
+
+    assert minted == [refused, held, replacement]
+
+
+async def test_an_expired_holder_s_token_is_not_kept(config, monkeypatch):
+    """A slot per conversation must not grow with every conversation ever held."""
+    import cloud_agent.github_app as github_app
+
+    now = [1_000_000.0]
+    monkeypatch.setattr(github_app.time, "time", lambda: now[0])
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/installation"):
+            return httpx.Response(200, json={"id": 1})
+        return httpx.Response(201, json={"token": "ghs_x"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        credentials = GitHubAppCredentials(config, client=client)
+        await credentials.token_for("o/n", holder="athr_1")
+        now[0] += 3601
+        await credentials.token_for("o/n", holder="athr_2")
+
+    assert len(credentials._tokens) == 1
+
+
 async def test_an_uninstalled_repository_is_distinguishable_from_an_outage(config):
     """404 is a settled answer; 503 is GitHub having a bad minute.
 

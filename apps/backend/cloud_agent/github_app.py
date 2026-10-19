@@ -472,6 +472,7 @@ class GitHubAppCredentials:
         permissions: dict[str, str] | None = None,
         repository_scoped: bool = False,
         min_ttl_s: float = 0.0,
+        holder: str | None = None,
     ) -> str:
         """Return a live installation token for one repository.
 
@@ -481,6 +482,12 @@ class GitHubAppCredentials:
         ``repository_scoped``, which limits the token to this repository alone,
         that is how one App serves checkout (read), sandbox branch/PR writes,
         and the trusted publisher without sharing broader installation scope.
+
+        ``holder`` names who outside this process the token is for, such as one
+        conversation's sandbox, which then gets a token of its own. Whoever
+        holds an installation token can revoke it, with no permission at all,
+        and a token shared with the publisher or another conversation would be
+        refused for all of them while this cache went on serving it.
 
         An installation that refuses to mint is looked up afresh once: the App
         may have been installed again under a new id. If the installation
@@ -495,7 +502,11 @@ class GitHubAppCredentials:
         scope = repo if repository_scoped else None
         try:
             token, minted = await self._token_in_scope(
-                installation_id, permissions=permissions, repository=scope, min_ttl_s=min_ttl_s
+                installation_id,
+                permissions=permissions,
+                repository=scope,
+                min_ttl_s=min_ttl_s,
+                holder=holder,
             )
         except GitHubAppError as exc:
             if exc.status not in _STALE_INSTALLATION_STATUSES:
@@ -508,6 +519,7 @@ class GitHubAppCredentials:
                     permissions=permissions,
                     repository=scope,
                     min_ttl_s=min_ttl_s,
+                    holder=holder,
                 )
             except GitHubAppError as retry_exc:
                 if retry_exc.status == 404:
@@ -534,6 +546,7 @@ class GitHubAppCredentials:
         permissions: dict[str, str] | None = None,
         repository: str | None = None,
         min_ttl_s: float = 0.0,
+        holder: str | None = None,
     ) -> tuple[str, bool]:
         """Return a token for one installation and scope, and whether it is new.
 
@@ -546,8 +559,12 @@ class GitHubAppCredentials:
         narrowing that parameter exists for. The scope key is what keeps them
         apart, and it is derived from the same two values that shape the
         request — so a slot cannot describe a scope the token does not have.
+        It also names the token's holder, if it has one, which keeps that
+        holder's token apart from everyone else's in the same scope.
         """
-        scope_key = json_module.dumps({"p": permissions, "r": repository}, sort_keys=True)
+        scope_key = json_module.dumps(
+            {"h": holder, "p": permissions, "r": repository}, sort_keys=True
+        )
         cached = self._tokens.get((installation_id, scope_key))
         margin = max(_TOKEN_REFRESH_MARGIN_S, min_ttl_s)
         if cached and cached.expires_at - margin > time.time():
@@ -569,9 +586,14 @@ class GitHubAppCredentials:
             raise GitHubAppError("GitHub returned no installation token")
         # GitHub reports expiry; fall back to the documented hour if absent so
         # a missing field cannot produce a token cached forever.
-        expires_at = time.time() + 3600
+        now = time.time()
+        expires_at = now + 3600
         if raw_expiry := body.get("expires_at"):
             expires_at = _parse_expiry(raw_expiry, default=expires_at)
+        # Holders come and go with conversations, and so do their slots. One
+        # whose token has expired is never served again.
+        for key in [key for key, held in self._tokens.items() if held.expires_at <= now]:
+            del self._tokens[key]
         self._tokens[installation_id, scope_key] = _CachedToken(token=token, expires_at=expires_at)
         return token, True
 
@@ -1119,6 +1141,16 @@ class GitHubAppCredentials:
             installation_id = cached[1]
             for key in [k for k in self._tokens if k[0] == installation_id]:
                 self._tokens.pop(key, None)
+
+    def forget_token(self, token: str) -> None:
+        """Stop serving a token GitHub refused before it expired.
+
+        Whoever holds an installation token can revoke it, and the cache would
+        otherwise serve it until it neared expiry. Matched by value, so a
+        replacement another caller has already minted stays.
+        """
+        for key in [key for key, cached in self._tokens.items() if cached.token == token]:
+            del self._tokens[key]
 
 
 def _parse_expiry(raw: str, *, default: float) -> float:

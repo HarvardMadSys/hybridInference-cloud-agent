@@ -302,7 +302,10 @@ def _require_store(store: _WorkerStorage | None) -> _WorkerStorage:
 # convention: the App also holds `contents: write` for the publisher, and an
 # installation token inherits every permission the App has unless it is asked
 # for less. Keep checkout authority separate from the token explicitly
-# delivered to the sandbox for branch and pull-request publication.
+# delivered to the sandbox for branch and pull-request publication. That one
+# has the publisher's scope, and is minted for its conversation alone: code in
+# a sandbox can revoke the token it holds, which must not be the publisher's
+# or another conversation's.
 _CLONE_SCOPE = {"contents": "read"}
 _SANDBOX_GITHUB_SCOPE = {"contents": "write", "pull_requests": "write"}
 
@@ -1122,8 +1125,14 @@ async def _hand_over_claim(
             clone_token = await app_credentials.token_for(
                 claim["repo"], permissions=_CLONE_SCOPE, repository_scoped=True
             )
+            # Cached per conversation rather than minted per claim: the CLI
+            # fixes GH_TOKEN when it starts, so a new token on every follow-up
+            # would replace the live process each turn.
             github_token = await app_credentials.token_for(
-                claim["repo"], permissions=_SANDBOX_GITHUB_SCOPE, repository_scoped=True
+                claim["repo"],
+                permissions=_SANDBOX_GITHUB_SCOPE,
+                repository_scoped=True,
+                holder=str(claim["thread_id"]),
             )
         except AppNotInstalled:
             # A settled answer: the App does not cover this repository. Hand

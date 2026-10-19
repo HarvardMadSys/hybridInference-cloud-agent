@@ -5635,7 +5635,7 @@ async def test_the_claim_carries_a_read_only_clone_credential(store: FakeStorage
     app.dependency_overrides[get_agent_app_credentials] = lambda: FakeApp()
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        await _create_job(client)
+        job_id = await _create_job(client)
         claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
 
     assert claim.json()["clone_token"] == "ghs_clone_only"
@@ -5646,8 +5646,60 @@ async def test_the_claim_carries_a_read_only_clone_credential(store: FakeStorage
         "repo": claim.json()["repo"],
         "permissions": {"contents": "write", "pull_requests": "write"},
         "repository_scoped": True,
+        "holder": _thread_of(store, job_id),
     }
     assert len(asked) == 2
+
+
+async def test_a_sandbox_never_holds_the_publisher_s_or_another_conversation_s_token(
+    store: FakeStorage, monkeypatch
+):
+    """Whoever holds an installation token can revoke it, with no permission at all.
+
+    The claim's write token came out of the publisher's own cache slot, so code
+    in one sandbox could revoke the token publishing to its repository, and
+    every other conversation's there, while the cache went on serving it.
+    """
+    import httpx
+
+    from cloud_agent import github_app
+    from cloud_agent.api.deps import get_agent_app_credentials
+    from cloud_agent.publish_worker import _PUBLISH_SCOPE, _PUBLISH_TOKEN_MIN_TTL_S
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/repos/owner/name/installation":
+            return httpx.Response(200, json={"id": 1})
+        if request.url.path == "/app/installations/1/access_tokens":
+            token = f"ghs_{len(minted) + 1}"
+            minted.append(token)
+            return httpx.Response(201, json={"token": token, "expires_at": "2099-01-01T00:00:00Z"})
+        return httpx.Response(404, json={})
+
+    minted: list[str] = []
+    monkeypatch.setattr(github_app, "build_app_jwt", lambda config, **kwargs: "app-jwt")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as github:
+        credentials = github_app.GitHubAppCredentials(
+            github_app.AppConfig(app_id="1", private_key="unused", api_base="https://api.test"),
+            client=github,
+        )
+        app = _build_app(store)
+        app.dependency_overrides[get_agent_app_credentials] = lambda: credentials
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            await _create_job(client)
+            await _create_job(client)
+            first = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
+            second = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w2"})).json()
+        publisher = await credentials.token_for(
+            "owner/name",
+            permissions=_PUBLISH_SCOPE,
+            repository_scoped=True,
+            min_ttl_s=_PUBLISH_TOKEN_MIN_TTL_S,
+        )
+
+    assert first["thread_id"] != second["thread_id"]
+    assert len({first["github_token"], second["github_token"], publisher}) == 3
+    # The read-only clone token is still shared: it never enters a sandbox.
+    assert first["clone_token"] == second["clone_token"]
 
 
 async def test_a_deployment_without_a_github_app_still_claims_jobs(client: AsyncClient):

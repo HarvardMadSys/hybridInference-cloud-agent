@@ -45,7 +45,7 @@ import re
 import unicodedata
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 from urllib.parse import urlsplit
 
 import httpx
@@ -70,6 +70,8 @@ from cloud_agent.workers.background_wake import PUBLISH
 from cloud_agent_shared.git.patch_gate import branch_name_for
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from cloud_agent.grants import GrantClient
     from cloud_agent.ports import (
         HostPoolRepository,
@@ -77,6 +79,7 @@ if TYPE_CHECKING:
         SourceControlRepository,
     )
     from cloud_agent.ports.environments import EnvironmentRepository
+    from cloud_agent.publisher import PublishResult
     from cloud_agent.source_control_runtime import GitHubAppSource
     from cloud_agent.workers.background_wake import BackgroundWake
 
@@ -131,6 +134,10 @@ _GIT_DISCONNECT = re.compile(
     r"connection closed|broken pipe",
     re.IGNORECASE,
 )
+#: What any remote git command says when GitHub refuses the token it sent (401).
+_GIT_CREDENTIAL_REFUSED = re.compile(r"authentication failed for ", re.IGNORECASE)
+
+_T = TypeVar("_T")
 
 # A PR base has to be a branch. `base_ref` is normally one (the composer offers
 # a branch picker), but the API accepts any ref it can resolve, and a caller
@@ -645,23 +652,22 @@ async def _retry_base_import(
             app_credentials=app_credentials,
         )
         if app_credentials is not None:
-            credential = GitHubCredential(
-                await app_credentials.token_for(
-                    snapshot["repo"],
-                    permissions=_PUBLISH_SCOPE,
-                    repository_scoped=True,
-                    min_ttl_s=_PUBLISH_TOKEN_MIN_TTL_S,
-                )
-            )
+            credential = await _publishing_credential(app_credentials, snapshot["repo"])
         if credential is None:
             raise PublishError("no GitHub credential is configured for base import")
         commit_sha = str(snapshot["published_commit_sha"])
-        bundle = await asyncio.to_thread(
-            fetch_base_bundle,
-            clone_url=credential.clone_url(snapshot["repo"]),
-            commit_sha=commit_sha,
-            auth_env=credential.git_auth_env(),
-            base_sha=snapshot.get("origin_base_sha") or snapshot.get("base_sha") or None,
+
+        async def fetch(credential: GitHubCredential) -> bytes:
+            return await asyncio.to_thread(
+                fetch_base_bundle,
+                clone_url=credential.clone_url(snapshot["repo"]),
+                commit_sha=commit_sha,
+                auth_env=credential.git_auth_env(),
+                base_sha=snapshot.get("origin_base_sha") or snapshot.get("base_sha") or None,
+            )
+
+        bundle = await _replacing_a_refused_token(
+            app_credentials, snapshot["repo"], credential, fetch
         )
         return await _import_snapshot_base(
             store,
@@ -761,6 +767,54 @@ def _is_retryable_publication_failure(exc: BaseException) -> bool:
     ):
         return True
     return isinstance(exc, PublishError) and _GIT_DISCONNECT.search(str(exc)) is not None
+
+
+def _credential_refused(exc: BaseException) -> bool:
+    """Whether GitHub refused the token itself (401), to git or to its API."""
+    if not isinstance(exc, PublishError) or isinstance(exc, PatchRejected):
+        return False
+    return _http_status(exc) == 401 or _GIT_CREDENTIAL_REFUSED.search(str(exc)) is not None
+
+
+async def _publishing_credential(app_credentials: Any, repo: str) -> GitHubCredential:
+    """The App's token for publishing to ``repo``, with life enough for one publish.
+
+    Scoped twice: to this one repository, and to the two permissions publishing
+    actually uses. An installation token inherits every permission the App
+    holds unless it asks for less, so omitting ``permissions`` here handed the
+    publisher whatever the App could ever do — against a repository the *user*
+    named.
+    """
+    return GitHubCredential(
+        await app_credentials.token_for(
+            repo,
+            permissions=_PUBLISH_SCOPE,
+            repository_scoped=True,
+            min_ttl_s=_PUBLISH_TOKEN_MIN_TTL_S,
+        )
+    )
+
+
+async def _replacing_a_refused_token(
+    app_credentials: Any | None,
+    repo: str,
+    credential: GitHubCredential,
+    use: Callable[[GitHubCredential], Awaitable[_T]],
+) -> _T:
+    """Run ``use``, and once more with a new token if GitHub refuses the App's.
+
+    Whoever holds an installation token can revoke it before it expires, and
+    the App's cache would go on serving it to every publication to the
+    repository until it neared expiry. So the refused token is dropped and
+    another minted, once: a fresh token refused too fails as any refusal does.
+    """
+    try:
+        return await use(credential)
+    except PublishError as exc:
+        if app_credentials is None or not _credential_refused(exc):
+            raise
+        app_credentials.forget_token(credential.token)
+    return await use(await _publishing_credential(app_credentials, repo))
 
 
 async def _publish_due(
@@ -966,19 +1020,7 @@ async def _publish_claimed_owned(
     # deployment that has not set the App up.
     if app_credentials is not None:
         try:
-            # Scoped twice: to this one repository, and to the two permissions
-            # publishing actually uses. An installation token inherits every
-            # permission the App holds unless it asks for less, so omitting
-            # `permissions` here handed the publisher whatever the App could
-            # ever do — against a repository the *user* named.
-            credential = GitHubCredential(
-                await app_credentials.token_for(
-                    job["repo"],
-                    permissions=_PUBLISH_SCOPE,
-                    repository_scoped=True,
-                    min_ttl_s=_PUBLISH_TOKEN_MIN_TTL_S,
-                )
-            )
+            credential = await _publishing_credential(app_credentials, job["repo"])
         except Exception as exc:
             detail = f"could not obtain a GitHub credential: {exc}"
             if _is_retryable_publication_failure(exc):
@@ -1023,29 +1065,36 @@ async def _publish_claimed_owned(
             if not recorded:
                 raise TransientPublishError("the publication claim was lost before the push")
 
-        result = await asyncio.to_thread(
-            publish_patch,
-            own_pushes=tuple(job.get("own_pushes") or ()),
-            before_push=record_push,
-            job_id=job_id,
-            branch_id=job.get("branch_id") or job.get("thread_id") or job_id,
-            patch=job["patch"],
-            clone_url=credential.clone_url(job["repo"]),
-            base_sha=base_sha,
-            commit_message=f"agent: {job['task_prompt'][:60]}".strip(),
-            allow_workflow_changes=allow_workflow_changes,
-            include_base_bundle=True,
-            auth_env=credential.git_auth_env(),
-            **({"known_secrets": environment.secrets()} if environment else {}),
-        )
-        title = await generate_pr_title(job, result.changed_files, grants=grants)
-        pr_url = await ensure_draft_pull_request(
-            repo=job["repo"],
-            head_branch=result.branch,
-            base_branch=pr_base,
-            title=title or _pr_title(job, result.changed_files),
-            body=_pr_body(job, result.changed_files),
-            credential=credential,
+        async def publish(credential: GitHubCredential) -> tuple[PublishResult, str]:
+            # Safe to run again however far it got: see `_publish_claimed`.
+            result = await asyncio.to_thread(
+                publish_patch,
+                own_pushes=tuple(job.get("own_pushes") or ()),
+                before_push=record_push,
+                job_id=job_id,
+                branch_id=job.get("branch_id") or job.get("thread_id") or job_id,
+                patch=job["patch"],
+                clone_url=credential.clone_url(job["repo"]),
+                base_sha=base_sha,
+                commit_message=f"agent: {job['task_prompt'][:60]}".strip(),
+                allow_workflow_changes=allow_workflow_changes,
+                include_base_bundle=True,
+                auth_env=credential.git_auth_env(),
+                **({"known_secrets": environment.secrets()} if environment else {}),
+            )
+            title = await generate_pr_title(job, result.changed_files, grants=grants)
+            pr_url = await ensure_draft_pull_request(
+                repo=job["repo"],
+                head_branch=result.branch,
+                base_branch=pr_base,
+                title=title or _pr_title(job, result.changed_files),
+                body=_pr_body(job, result.changed_files),
+                credential=credential,
+            )
+            return result, pr_url
+
+        result, pr_url = await _replacing_a_refused_token(
+            app_credentials, job["repo"], credential, publish
         )
     except Exception as exc:
         detail = str(exc) if isinstance(exc, PublishError) else f"publish failed: {exc}"
