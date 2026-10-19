@@ -73,7 +73,6 @@ operations-compute
 releases
 deployment-reliability
 disaster-recovery
-automatic-pr-archiving
 runtime-settings
 host-execution-limits
 runner-lease-troubleshooting

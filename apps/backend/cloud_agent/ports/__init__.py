@@ -33,7 +33,6 @@ from cloud_agent.ports.operation_measurements import (
 )
 from cloud_agent.ports.owner_usage import OwnerUsageQueries
 from cloud_agent.ports.pending_messages import PendingMessageRepository
-from cloud_agent.ports.pr_archive import PrArchiveRepository
 from cloud_agent.ports.profiling_control import ProfilingControl
 from cloud_agent.ports.residency import ResidencyRepository
 from cloud_agent.ports.sandbox import SandboxRepository
@@ -73,7 +72,6 @@ __all__ = [
     "OperationMeasurements",
     "OwnerUsageQueries",
     "PendingMessageRepository",
-    "PrArchiveRepository",
     "ProfilingControl",
     "ResidencyRepository",
     "SandboxRepository",

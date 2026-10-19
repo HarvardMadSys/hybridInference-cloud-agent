@@ -191,21 +191,6 @@ it before deployment; it needs no model API key or deployed-service setting.
 | `AGENT_POSTGRES_USER` / `AGENT_POSTGRES_DB` / `AGENT_POSTGRES_PASSWORD` | Supported control-plane Compose database initialization. User and database default to `cloudagent`; password is required. Keep the DSN consistent with these values. PostgreSQL applies initialization settings only to an empty data directory. |
 | `TEST_DB_HOST` / `TEST_DB_PORT` / `TEST_DB_NAME` / `TEST_DB_USER` / `TEST_DB_PASSWORD` | Read by `make test-db` and the CI `dbtest` tier as five separate values, not a DSN. Defaults: `localhost` / `5432` / `hybridinference_test_db` / `postgres` / `postgres`. The database name must contain `_test_`; fixtures refuse other names. With xdist, each worker appends its ID and needs a pre-created database. CI creates `<TEST_DB_NAME>_gw0`…`_gw3` for `-n 4`. |
 
-### Automatic PR merge archiving
-
-These environment values are imported when the Admin Settings row is first
-created. After that, edit the saved **Publication** settings. See
-[the archiving runbook](docs/developer/automatic-pr-archiving.md).
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `AGENT_PR_ARCHIVE_ENABLED` | `true` | Enable automatic archival after verifying that the current published PR merged. |
-| `AGENT_PR_ARCHIVE_POLL_S` | `30` | Seconds between GitHub merge checks; saved setting accepts 5–3600 seconds. |
-
-API timeout, batch size, retry delay limit, and repeated integration-failure
-threshold are saved settings. The worker uses existing GitHub App credentials
-or the configured publication token, and never passes them to the sandbox.
-
 ### pgAdmin database administration
 
 The optional `pgadmin` Compose profile adds **Admin → Database → Open pgAdmin**.

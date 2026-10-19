@@ -126,11 +126,6 @@ shows the value in effect; save a valid value or confirm **Restore default**
 to clear the warning. Undecryptable or unencrypted stored credentials still
 stop the listener.
 
-Automatic session archiving after a verified GitHub PR merge is enabled by
-default. Configure it under **Publication**; see
-[automatic PR archiving](automatic-pr-archiving.md) for its session selection,
-retry ledger, verification, and rollout steps.
-
 For a new installation, provision the database, a stable
 `AGENT_SETTINGS_ENCRYPTION_KEY` of at least 32 bytes and a separate random
 `ADMIN_TOKEN`, plus the infrastructure/build fields in the minimal
