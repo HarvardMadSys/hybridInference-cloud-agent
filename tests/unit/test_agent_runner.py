@@ -1040,6 +1040,32 @@ def test_a_stop_during_the_resident_start_is_honoured_right_before_admission(mon
     assert finish.call_args.args[:2] == ("cancelled", "cancelled by owner")
 
 
+def test_a_follow_up_claimed_while_its_sandbox_is_busy_goes_back_to_the_queue(monkeypatch):
+    """A snapshot capture can outlast the sandbox manager's wait; nothing has run yet.
+
+    The control plane claims a follow-up whatever the group is doing, and the
+    turn used to fail with the capture's busy refusal although the chat was
+    untouched and the next try would have run it.
+    """
+
+    def configure(_control, supervisor, _finish):
+        supervisor.acquire_shared.side_effect = SessionSupervisorError(
+            409, "shared workspace snapshot is in progress"
+        )
+
+    result, control, supervisor, finish = _run_shared_boundary_case(
+        monkeypatch, 0, None, "claude-code", configure=configure
+    )
+
+    assert result == 0
+    control.release_turn.assert_called_once_with("sandbox_busy")
+    finish.assert_not_called()
+    assert control.abandon_chat_sandbox.call_args.kwargs["lost"] is False
+    supervisor.abandon_shared.assert_not_called()
+    control.admit_chat_turn.assert_not_called()
+    assert all(call.args[0].event_type != "error" for call in control.append_event.call_args_list)
+
+
 @pytest.mark.parametrize(
     ("error", "expected_code"),
     [(httpx.ReadTimeout("completion notice unavailable"), 0), (LeaseLost("expired"), 3)],

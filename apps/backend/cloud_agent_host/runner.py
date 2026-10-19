@@ -2243,8 +2243,16 @@ def _stage(measurement: operation_profiling.Measurement | None, name: str) -> st
     return name
 
 
-class _RestoreHandBack(Exception):
-    """The sandbox manager could not recreate a moved group; the turn goes back."""
+class _HandBack(Exception):
+    """The sandbox manager refused the turn before anything ran; the turn goes back.
+
+    It could not recreate a moved group, or the group stayed busy past its
+    wait. ``reason`` is the release reason the control plane records.
+    """
+
+    def __init__(self, reason: str, detail: str) -> None:
+        super().__init__(detail)
+        self.reason = reason
 
 
 def _run_shared_live_attempt(
@@ -2581,7 +2589,14 @@ def _run_shared_live_attempt(
             )
         except SessionSupervisorError as exc:
             if restore is not None and exc.status_code == 424:
-                raise _RestoreHandBack(str(exc)) from exc
+                raise _HandBack(
+                    RESTORE_FAILED_RELEASE_REASON, f"sandbox restore failed: {exc}"
+                ) from exc
+            if exc.status_code == 409:
+                # The group stayed busy past the sandbox manager's wait: a
+                # snapshot capture can take longer, and the control plane
+                # claims a follow-up whatever the group is doing.
+                raise _HandBack("sandbox_busy", f"sandbox busy: {exc}") from exc
             context_invalid = has_context and exc.status_code == 410
             raise
         lease_token = str(lease["token"])
@@ -3194,12 +3209,14 @@ def _run_shared_live_attempt(
         failure_detail = "attempt lease lost during shared live execution"
         operation_profiling.finish(measurement, outcome="lease_lost", failure_stage=stage)
         return 3
-    except _RestoreHandBack as exc:
-        # Nothing ran and the checkpoint is unchanged: give the group back to
-        # it and the turn back to the queue, for this host or another to try
-        # again. Once the control plane has run out of attempts it marks the
-        # group lost instead, and this turn fails with it.
-        failure_detail = f"sandbox restore failed: {exc}"
+    except _HandBack as exc:
+        # Nothing ran and the chat is unchanged: release the activation, which
+        # gives a group being restored back to its checkpoint, and the turn
+        # back to the queue, for this host or another to try again once the
+        # control plane's retry delay has passed. Once the control plane has
+        # run out of restore attempts it marks the group lost instead, and this
+        # turn fails with it.
+        failure_detail = str(exc)
         _log_control_failure(stage, job.job_id, exc)
         abandoned = True
         try:
@@ -3216,7 +3233,7 @@ def _run_shared_live_attempt(
         if isinstance(group, dict) and group.get("state") == "lost":
             report_failure()
             return 2
-        return 0 if control.release_turn(RESTORE_FAILED_RELEASE_REASON) else 2
+        return 0 if control.release_turn(exc.reason) else 2
     except (DriverError, SandboxError, SessionSupervisorError, WorktreeError) as exc:
         failure_detail = str(exc)
         _log_control_failure(stage, job.job_id, exc)
