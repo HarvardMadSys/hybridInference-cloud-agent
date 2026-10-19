@@ -92,8 +92,20 @@ _NEW_MODE = re.compile(r"^(?:new|new file) mode (?P<mode>\d{6})$")
 _INDEX_MODE = re.compile(r"^index [0-9a-fA-F]+\.\.[0-9a-fA-F]+ (?P<mode>\d{6})$")
 # Traditional hunk name lines. git omits the `diff --git` header in some diff
 # formats, and a patch that carries only these still applies perfectly well —
-# so a parser that keys solely off the header sees an empty change set.
+# so a parser that keys solely off the header sees an empty change set. They
+# are read only outside hunk bodies; see `_split_hunks`.
 _NAME_LINE = re.compile(r"^(?:---|\+\+\+) (?P<path>.+?)(?:\t.*)?$")
+# `@@ -<start>[,<count>] +<start>[,<count>] @@`, as `git apply` reads it. An
+# omitted count means one line. A count of ten digits or more is no hunk a
+# patch under the byte limit can hold, and `int` refuses one of thousands, so
+# such a header is not counted and the lines after it are read as headers.
+_HUNK_HEADER = re.compile(
+    r"^@@ -[0-9]+(?:,(?P<old>[0-9]{1,9}))? \+[0-9]+(?:,(?P<new>[0-9]{1,9}))? @@"
+)
+# How much of a hunk's old and new counts one body line uses, by its first
+# character. Git reads an empty line as empty context, and the
+# `\ No newline at end of file` marker as neither side.
+_BODY_LINE_COUNTS = {" ": (1, 1), "": (1, 1), "-": (1, 0), "+": (0, 1), "\\": (0, 0)}
 _SYMLINK_MODE = "120000"
 _GITLINK_MODE = "160000"
 _BINARY_BLOCK = re.compile(r"^(literal|delta) ([0-9]+)$")
@@ -284,6 +296,47 @@ class PatchGateResult:
         return "; ".join(self.violations) if self.violations else "ok"
 
 
+def _split_hunks(patch: str) -> tuple[str, list[str]]:
+    r"""Return the patch without its hunk bodies, and the lines those bodies add.
+
+    A hunk header declares how many old and new lines follow it, and ``git
+    apply`` reads exactly that many as content before it looks for a header
+    again. Removing the comment ``-- note`` puts ``--- note`` in the patch: a
+    removed line, not a file name.
+
+    Lines split at ``\n`` alone, as git splits them. ``str.splitlines`` also
+    splits at a form feed, and a hunk counted that way can end early and start
+    a second one whose counts cover the real headers after it.
+
+    A hunk whose lines run out before its counts do is corrupt, and git refuses
+    the patch. Its lines are not trusted as content: they stay in the returned
+    text and are read as headers, as every line was before hunks were counted.
+    """
+    outside: list[str] = []
+    added: list[str] = []
+    body: list[str] = []
+    old = new = 0
+    for line in patch.split("\n"):
+        if old or new:
+            uses = _BODY_LINE_COUNTS.get(line[:1])
+            if uses is not None and uses[0] <= old and uses[1] <= new:
+                old, new = old - uses[0], new - uses[1]
+                body.append(line)
+                if not (old or new):
+                    added.extend(entry for entry in body if entry.startswith("+"))
+                    body = []
+                continue
+            # The lines ran out before the counts did: read them as headers.
+            outside.extend(body)
+            body, old, new = [], 0, 0
+        header = _HUNK_HEADER.match(line)
+        if header:
+            old, new = int(header.group("old") or 1), int(header.group("new") or 1)
+        outside.append(line)
+    outside.extend(body)
+    return "\n".join(outside), added
+
+
 def _collect_paths(patch: str) -> tuple[list[str], list[str], list[str]]:
     """Return (changed paths, paths given a symlink mode, paths given a gitlink mode)."""
     changed: list[str] = []
@@ -295,7 +348,8 @@ def _collect_paths(patch: str) -> tuple[list[str], list[str], list[str]]:
         if path and path not in changed:
             changed.append(path)
 
-    for line in patch.splitlines():
+    headers, _ = _split_hunks(patch)
+    for line in headers.splitlines():
         header = _DIFF_HEADER.match(line)
         if header:
             # A new header ends the previous file, so mode lines can no longer
@@ -366,11 +420,17 @@ def _scan_secrets(patch: str, paths: list[str]) -> list[str]:
     Paths are scanned too, and separately, because a filename is never an
     added-content line — a patch adding ``ghp_<token>.txt`` would otherwise
     sail through the gate and get the credential pushed as part of the tree.
+
+    Every line a hunk adds is scanned whole as well: one can itself begin
+    with ``++``, and its hunk's counts, not that prefix, make it content.
     """
     added = "\n".join(
-        line[1:]
-        for line in patch.splitlines()
-        if line.startswith("+") and not line.startswith("+++")
+        [
+            line[1:]
+            for line in patch.splitlines()
+            if line.startswith("+") and not line.startswith("+++")
+        ]
+        + [line[1:] for line in _split_hunks(patch)[1]]
     )
     haystack = added + "\n" + "\n".join(paths)
     return [name for name, pattern in SECRET_PATTERNS if pattern.search(haystack)]

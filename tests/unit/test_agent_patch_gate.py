@@ -637,3 +637,145 @@ def test_actual_staged_paths_are_also_scanned_for_credentials():
     assert not result.ok
     assert "github_token" in result.reason
     assert credential not in result.reason
+
+
+# ── hunk bodies are content ────────────────────────────────────────────
+#
+# A hunk header declares how many old and new lines follow it, and `git apply`
+# reads exactly that many as content. Removing the SQL, Lua or Haskell comment
+# `-- note` puts `--- note` in the patch: a removed line, not a file name.
+
+
+def test_a_removed_comment_is_not_read_as_a_file_name():
+    """Deleting a Lua comment that names a home-directory path is an ordinary edit."""
+    patch = (
+        "diff --git a/init.lua b/init.lua\n"
+        "--- a/init.lua\n+++ b/init.lua\n@@ -1,2 +1 @@\n"
+        "--- ~/.config/nvim/init.lua\n vim.opt.number = true\n"
+    )
+
+    result = validate_patch(patch)
+
+    assert result.ok, result.reason
+    assert result.changed_files == ["init.lua"]
+
+
+def test_removed_comments_do_not_count_toward_the_file_limit():
+    """A pg_dump has a `-- Name:` comment per object; deleting one is one file."""
+    count = MAX_CHANGED_FILES + 50
+    comments = "".join(
+        f"--- Name: table_{index}; Type: TABLE; Schema: public; Owner: app\n"
+        for index in range(count)
+    )
+    patch = (
+        "diff --git a/schema.sql b/schema.sql\ndeleted file mode 100644\n"
+        f"--- a/schema.sql\n+++ /dev/null\n@@ -1,{count} +0,0 @@\n{comments}"
+    )
+
+    result = validate_patch(patch)
+
+    assert result.ok, result.reason
+    assert result.changed_files == ["schema.sql"]
+
+
+def test_a_removed_comment_quoting_a_key_is_not_a_credential_path():
+    """Removing a comment that quotes AWS's documented example key adds no credential."""
+    patch = (
+        "diff --git a/setup.sql b/setup.sql\n"
+        "--- a/setup.sql\n+++ b/setup.sql\n@@ -1,2 +1 @@\n"
+        "--- aws_access_key_id = AKIAIOSFODNN7EXAMPLE\n SELECT 1;\n"
+    )
+
+    result = validate_patch(patch)
+
+    assert result.ok, result.reason
+    assert result.changed_files == ["setup.sql"]
+
+
+def test_a_no_newline_marker_counts_toward_neither_side():
+    """`git diff` writes the marker mid-hunk when the old last line had no newline."""
+    patch = (
+        "diff --git a/notes.txt b/notes.txt\n"
+        "--- a/notes.txt\n+++ b/notes.txt\n@@ -1,2 +1,2 @@\n"
+        "--- ~/a\n-x\n\\ No newline at end of file\n+x\n+++ ~/b\n"
+    )
+
+    result = validate_patch(patch)
+
+    assert result.ok, result.reason
+    assert result.changed_files == ["notes.txt"]
+
+
+def test_a_binary_patch_after_a_hunk_is_still_read():
+    """A hunk ends at its counts, so the binary entry after it keeps its gates."""
+    patch = (
+        "diff --git a/schema.sql b/schema.sql\n"
+        "--- a/schema.sql\n+++ b/schema.sql\n@@ -1,2 +1 @@\n--- old note\n SELECT 1;\n"
+    ) + _binary_patch(_binary_patch_block("literal", b"\x89PNG"))
+
+    result = validate_patch(patch)
+    oversized = validate_patch(patch, max_blob_bytes=3)
+
+    assert result.ok, result.reason
+    assert result.changed_files == ["asset.bin", "schema.sql"]
+    assert not oversized.ok
+    assert "3 decoded blob byte limit" in oversized.reason
+
+
+def test_a_hunk_that_claims_more_lines_than_it_has_hides_no_header():
+    """Git refuses a hunk whose lines run out first; its lines are still read as headers.
+
+    Counting alone would take the next file's traditional headers for the rest
+    of this hunk's body.
+    """
+    patch = (
+        "--- a/README.md\n+++ b/README.md\n@@ -1,3 +1,3 @@\n-hello\n+world\n"
+        "--- /dev/null\n+++ b/.github/workflows/evil.yml\n@@ -0,0 +1 @@\n+on: push\n"
+    )
+
+    result = validate_patch(patch)
+
+    assert not result.ok
+    assert ".github/workflows/evil.yml" in result.changed_files
+    assert result.requires_human_release
+
+
+def test_a_hunk_count_of_thousands_of_digits_is_not_a_crash():
+    """`int` refuses a string of over 4300 digits; the gate must still answer."""
+    patch = (
+        f"diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1,{'9' * 5000} +1 @@\n-x\n+y\n"
+    )
+
+    result = validate_patch(patch)
+
+    assert result.changed_files == ["a.txt"]
+
+
+def test_a_form_feed_does_not_end_a_hunk_line():
+    """Git splits lines only at newlines, so the count must too.
+
+    `str.splitlines` also splits at a form feed. Counted that way, the removed
+    line below ends its hunk early and starts a second one, whose counts then
+    cover the real headers that follow. Git applies both files.
+    """
+    patch = (
+        "diff --git a/README.md b/README.md\n"
+        "--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n"
+        "-hello\x0c@@ -1,1 +1,2 @@\n+world\n"
+        "--- /dev/null\n+++ b/.github/workflows/evil.yml\n@@ -0,0 +1 @@\n+on: push\n"
+    )
+
+    result = validate_patch(patch)
+
+    assert not result.ok
+    assert ".github/workflows/evil.yml" in result.changed_files
+
+
+def test_an_added_line_that_starts_with_plus_signs_is_still_scanned():
+    """A line a hunk adds is content, whatever it starts with."""
+    credential = "gh" + "p_" + "a" * 36
+
+    result = validate_patch(_patch_for("notes.txt", added_line=f"++ {credential}"))
+
+    assert not result.ok
+    assert "credential-shaped content: github_token" in result.reason
