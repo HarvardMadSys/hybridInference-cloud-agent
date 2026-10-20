@@ -508,7 +508,14 @@ class HostHeartbeatResponse(_SandboxManagerWireNames):
             "override returns the next level's value, never a legacy environment value."
         ),
     )
-    sandbox_archive_settings: HostSandboxArchiveSettings
+    sandbox_archive_settings: HostSandboxArchiveSettings | None = Field(
+        None,
+        description=(
+            "The archive policy this host should apply. Null for a host that cannot "
+            "apply it: a destination outside the default bucket goes only to a host "
+            "advertising sandbox-archive-destination-v1."
+        ),
+    )
     runtime_downloads: list[dict[str, str]] = Field(
         default_factory=list,
         description=(

@@ -221,13 +221,30 @@ def _upload(
     )
 
 
-def test_enabled_policy_builds_config_for_the_exact_fixed_destination() -> None:
+def test_enabled_policy_builds_config_for_the_default_destination() -> None:
     config = SandboxArchiveS3Config.from_policy(_policy())
 
     assert config.uri == SANDBOX_ARCHIVE_S3_URI
     assert config.bucket == "freeinference"
     assert config.prefix == "cloud-agent/sandbox"
     assert config.max_archive_bytes == 2 * 1024 * 1024 * 1024
+
+
+def test_a_policy_with_another_bucket_sends_every_request_there() -> None:
+    """Same keys, same prefix: only the bucket the policy names changes."""
+    config = SandboxArchiveS3Config.from_policy(_policy(bucket="example-archives"))
+    assert config.uri == "s3://example-archives/cloud-agent/sandbox"
+    assert config.prefix == "cloud-agent/sandbox"
+
+    client = RecordingS3Client()
+    uploader = SandboxArchiveS3Uploader(config, client=client)
+    payload = b"compressed sandbox bytes"
+    receipt = _upload(uploader, phase="initial", body=io.BytesIO(payload), size=len(payload))
+
+    assert receipt.bucket == "example-archives"
+    assert receipt.key == _key("initial")
+    buckets = {kwargs.get("Bucket") for _, kwargs in client.calls}
+    assert buckets == {"example-archives"}
 
 
 def test_disabled_policy_cannot_create_an_s3_service_config() -> None:

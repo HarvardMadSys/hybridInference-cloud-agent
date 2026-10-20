@@ -1475,6 +1475,33 @@ async def test_archive_policy_cas_is_noop_and_lost_response_idempotent(
     assert future is None
 
 
+async def test_archive_policy_keeps_another_bucket_and_stores_no_default(
+    db, hosts: PostgresHostPoolRepository
+):
+    """A configured bucket survives the round trip; the default is never stored.
+
+    So a row saved before the bucket was a setting reads the same as one saved
+    after it.
+    """
+    uri = "s3://example-archives/cloud-agent/sandbox"
+    changed = await hosts.set_sandbox_archive_settings(
+        expected_revision=0, settings=_archive_settings(s3_uri=uri)
+    )
+    assert changed is not None and changed["s3_uri"] == uri
+    assert (await hosts.sandbox_archive_settings())["s3_uri"] == uri
+
+    back = await hosts.set_sandbox_archive_settings(
+        expected_revision=1, settings=_archive_settings(s3_uri=SANDBOX_ARCHIVE_S3_URI)
+    )
+    assert back is not None and back["revision"] == 2
+    assert back["s3_uri"] == SANDBOX_ARCHIVE_S3_URI
+    async with db.acquire() as conn:
+        stored = await conn.fetchval(
+            "SELECT sandbox_archive_settings ? 's3_uri' FROM agent_runner_policy WHERE id"
+        )
+    assert stored is False
+
+
 async def test_concurrent_identical_archive_policy_writes_increment_once(
     hosts: PostgresHostPoolRepository,
 ):

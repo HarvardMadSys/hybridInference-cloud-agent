@@ -28,13 +28,52 @@ def _enabled(**changes) -> dict:
     return values
 
 
-def test_policy_has_one_fixed_destination_and_storage_omits_wire_metadata() -> None:
+def test_policy_defaults_to_one_destination_and_storage_omits_wire_metadata() -> None:
     policy = SandboxArchivePolicy.from_mapping(_enabled())
 
+    assert policy.bucket == "freeinference"
     assert policy.as_dict()["s3_uri"] == SANDBOX_ARCHIVE_S3_URI
     assert policy.as_dict()["revision"] == 3
     assert "s3_uri" not in policy.as_storage_dict()
     assert "revision" not in policy.as_storage_dict()
+
+
+def test_the_bucket_is_a_setting_and_the_prefix_is_not() -> None:
+    """Another deployment's bucket, under the same prefix every key is built from."""
+    uri = "s3://example-archives.eu/cloud-agent/sandbox"
+    policy = SandboxArchivePolicy.from_mapping(_enabled(s3_uri=uri))
+
+    assert policy.bucket == "example-archives.eu"
+    assert policy.s3_uri == uri
+    # Stored, sent to hosts and written into markers, and read back the same.
+    assert policy.as_storage_dict()["s3_uri"] == uri
+    assert policy.as_sandbox_manager_dict()["s3_uri"] == uri
+    assert SandboxArchivePolicy.from_mapping(policy.as_dict()) == policy
+    # A different bucket is a different policy, so a marker records which one.
+    assert policy != SandboxArchivePolicy.from_mapping(_enabled())
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "s3://example-archives/elsewhere",
+        "s3://example-archives/cloud-agent/sandbox/deeper",
+        "s3://example-archives/other/cloud-agent/sandbox",
+        "https://example-archives/cloud-agent/sandbox",
+        "s3:///cloud-agent/sandbox",
+        "s3://Example/cloud-agent/sandbox",
+        "s3://ab/cloud-agent/sandbox",
+        "s3://" + "a" * 64 + "/cloud-agent/sandbox",
+        "s3://-archives/cloud-agent/sandbox",
+        "s3://archives-/cloud-agent/sandbox",
+        "s3://example..archives/cloud-agent/sandbox",
+        "s3://192.168.5.4/cloud-agent/sandbox",
+        "s3://example_archives/cloud-agent/sandbox",
+    ],
+)
+def test_a_destination_must_be_a_valid_bucket_under_the_fixed_prefix(uri: str) -> None:
+    with pytest.raises(SandboxArchivePolicyError):
+        SandboxArchivePolicy.from_mapping(_enabled(s3_uri=uri))
 
 
 @pytest.mark.parametrize(

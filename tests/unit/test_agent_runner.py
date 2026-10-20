@@ -86,6 +86,7 @@ def test_shared_live_is_the_only_capability_without_feature_switches(monkeypatch
         "mid-turn-input-v1:codex",
         "sandbox-archive-settings-v1",
         "sandbox-checkpoints-v1",
+        "sandbox-archive-destination-v1",
         "sandbox-restore-v1",
     ]
 
@@ -105,6 +106,7 @@ def test_exact_deployment_capability_requires_the_completed_marker(monkeypatch, 
         "mid-turn-input-v1:codex",
         "sandbox-archive-settings-v1",
         "sandbox-checkpoints-v1",
+        "sandbox-archive-destination-v1",
         "sandbox-restore-v1",
     ]
 
@@ -117,6 +119,7 @@ def test_exact_deployment_capability_requires_the_completed_marker(monkeypatch, 
         "mid-turn-input-v1:codex",
         "sandbox-archive-settings-v1",
         "sandbox-checkpoints-v1",
+        "sandbox-archive-destination-v1",
         "sandbox-restore-v1",
     ]
 
@@ -129,6 +132,7 @@ def test_exact_deployment_capability_requires_the_completed_marker(monkeypatch, 
         "mid-turn-input-v1:codex",
         "sandbox-archive-settings-v1",
         "sandbox-checkpoints-v1",
+        "sandbox-archive-destination-v1",
         "sandbox-restore-v1",
         "shared-sandbox-deployment:target-sha",
     ]
@@ -473,6 +477,7 @@ def test_a_claim_attests_the_shared_live_capabilities(monkeypatch):
         "mid-turn-input-v1:codex",
         "sandbox-archive-settings-v1",
         "sandbox-checkpoints-v1",
+        "sandbox-archive-destination-v1",
         "sandbox-restore-v1",
         "environment-v1",
         "environment-inference-v1",

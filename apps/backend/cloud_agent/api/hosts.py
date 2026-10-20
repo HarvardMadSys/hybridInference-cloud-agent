@@ -49,7 +49,11 @@ from cloud_agent.schemas import (
 )
 from cloud_agent.tokens import InvalidHostToken, mint_host_token, parse_host_token
 from cloud_agent_shared.host_settings import merge_admin_values, reported_values
-from cloud_agent_shared.sandbox_archive_settings import SANDBOX_CHECKPOINT_CAPABILITY
+from cloud_agent_shared.sandbox_archive_settings import (
+    SANDBOX_ARCHIVE_DESTINATION_CAPABILITY,
+    SANDBOX_ARCHIVE_S3_URI,
+    SANDBOX_CHECKPOINT_CAPABILITY,
+)
 
 if TYPE_CHECKING:
     from cloud_agent.ports import (
@@ -528,14 +532,24 @@ async def _renew_residency_grants(grants: Any, grant_ids: list[str]) -> None:
 def _host_archive_settings(
     values: dict[str, Any],
     capabilities: list[str],
-) -> HostSandboxArchiveSettings:
-    """Return the policy one host can apply.
+) -> HostSandboxArchiveSettings | None:
+    """Return the policy one host can apply, or ``None`` for one that cannot.
 
     A host whose sandbox manager predates checkpoints rejects the unknown key,
     so an opt-out is reduced to the default (which serializes to nothing) for
     it. It receives the same revision and keeps archiving without checkpoints.
+
+    A destination outside the default bucket has no such reduction: archiving
+    to the default instead would write somewhere the policy does not say. A
+    host that predates the setting gets no policy, so it confirms no revision
+    and is given no work that needs archives until it is upgraded.
     """
     settings = HostSandboxArchiveSettings.model_validate(values)
+    if (
+        settings.s3_uri != SANDBOX_ARCHIVE_S3_URI
+        and SANDBOX_ARCHIVE_DESTINATION_CAPABILITY not in capabilities
+    ):
+        return None
     if SANDBOX_CHECKPOINT_CAPABILITY not in capabilities:
         settings = settings.model_copy(update={"checkpoints_enabled": settings.enabled})
     return settings

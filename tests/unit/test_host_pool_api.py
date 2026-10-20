@@ -3354,6 +3354,35 @@ async def test_only_a_capable_host_is_sent_a_checkpoint_opt_out(client, capable,
         assert "checkpoints_enabled" not in delivered
 
 
+@pytest.mark.parametrize("capable", [True, False])
+async def test_only_a_capable_host_is_sent_another_bucket(client, capable):
+    """An older manager refuses any other bucket; archiving to the default would be wrong.
+
+    So it is sent no policy at all. It confirms no revision, and the claim gives
+    it no work that needs archives until it is upgraded.
+    """
+    async_client, store = client
+    credential = await _enroll(async_client, store)
+    _enabled_archive(store, s3_uri="s3://example-archives/cloud-agent/sandbox")
+    capabilities = ["sandbox-archive-settings-v1", "sandbox-checkpoints-v1"]
+    if capable:
+        capabilities.append("sandbox-archive-destination-v1")
+
+    response = await async_client.post(
+        "/v1/agent/host/heartbeat",
+        json={"capabilities": capabilities},
+        headers={"Authorization": f"Bearer {credential}"},
+    )
+
+    assert response.status_code == 200
+    delivered = response.json()["sandbox_archive_settings"]
+    if capable:
+        assert delivered["s3_uri"] == "s3://example-archives/cloud-agent/sandbox"
+        assert delivered["revision"] == 5
+    else:
+        assert delivered is None
+
+
 def _retained_with_checkpoint(checkpoint: Any) -> dict[str, Any]:
     return {
         "thread_id": "athr_source",

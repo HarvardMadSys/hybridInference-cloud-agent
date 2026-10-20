@@ -30,9 +30,7 @@ from cloud_agent_shared.environment_snapshots import snapshot_object_key
 from cloud_agent_shared.sandbox_archive_settings import (
     DEFAULT_MULTIPART_PART_BYTES,
     MAX_MULTIPART_PARTS,
-    SANDBOX_ARCHIVE_BUCKET,
     SANDBOX_ARCHIVE_PREFIX,
-    SANDBOX_ARCHIVE_S3_URI,
     SandboxArchivePolicy,
 )
 
@@ -87,7 +85,7 @@ class S3ArchiveClient(Protocol):
     """The narrow subset of the boto3 S3 client used by the uploader."""
 
     def get_bucket_versioning(self, **kwargs: Any) -> Mapping[str, Any]:
-        """Read versioning state for the one fixed archive bucket."""
+        """Read versioning state for the policy's archive bucket."""
 
     def head_object(self, **kwargs: Any) -> Mapping[str, Any]:
         """Read metadata for one exact immutable-initial key."""
@@ -167,13 +165,13 @@ class SandboxArchiveS3Config:
 
     @property
     def uri(self) -> str:
-        """Return the fixed destination; it is never caller-selected."""
-        return SANDBOX_ARCHIVE_S3_URI
+        """Return the policy's destination; it is never caller-selected."""
+        return self.policy.s3_uri
 
     @property
     def bucket(self) -> str:
-        """Return the fixed bucket; it is never caller-selected."""
-        return SANDBOX_ARCHIVE_BUCKET
+        """Return the policy's bucket; it is never caller-selected."""
+        return self.policy.bucket
 
     @property
     def prefix(self) -> str:
