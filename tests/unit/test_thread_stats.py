@@ -12,8 +12,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from cloud_agent.session_statistics import summarize_session_statistics
-from cloud_agent.thread_stats import summarize_thread
+from cloud_agent.thread_stats import summarize_session_statistics, summarize_thread
 
 _T0 = datetime(2026, 8, 19, 12, 0, 0, tzinfo=UTC)
 
