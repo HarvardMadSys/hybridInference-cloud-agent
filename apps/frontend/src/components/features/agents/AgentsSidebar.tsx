@@ -9,6 +9,7 @@ import {
 } from '@/components/features/settings/keyboardShortcutPreferences';
 import { matchesShortcut, shortcutAriaLabel, shortcutLabel } from '@/lib/keyboardShortcuts';
 import { SettingsSidebar } from '@/components/features/settings/SettingsSidebar';
+import { useSidebarRefresh } from './useSidebarRefresh';
 import { useSidebarScroll } from './useSidebarScroll';
 import { AccountMenu } from './AccountMenu';
 import { archiveAgentJob, deleteAgentSessions, pinAgentJob, unpinAgentJob } from '@/lib/api/agents';
@@ -17,11 +18,8 @@ import { useAgentReads } from './AgentReadProvider';
 import { ArchiveDeleteDialog, SESSION_ERROR_KEYS } from './ArchiveControls';
 import { latestJob } from './conversationJob';
 import { onAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
-import { onAgentRecordsChanged, PUSH_FALLBACK_POLL_MS, useAgentPushLive } from './agentPush';
-import { changesSidebarRows, SIDEBAR_ACTIVITY_REFRESH_MS } from './sidebarRecordChanges';
 import { GettingStarted } from './GettingStarted';
 import { PaneResizer } from './PaneResizer';
-import { useAgentProjects } from './useAgentJobs';
 import { announcePaneResize, useResizablePane } from './useResizablePane';
 import { useSidebarPreferences, manualOrder, moveBefore } from './sidebarPreferences';
 import { SidebarViewMenu } from './SidebarViewMenu';
@@ -77,43 +75,8 @@ export function AgentsSidebar({
     () => ({ userId, updates: new Map<string, SidebarPinUpdate>() }),
     [userId],
   ).updates;
-  const pushedRecords = useMemo(
-    () => ({ userId, shown: new Map<string, string>() }),
-    [userId],
-  ).shown;
-  const [refresh, setRefresh] = useState(0);
-  const refreshRef = useRef(refresh);
-  refreshRef.current = refresh;
-  const reload = useCallback(() => {
-    refreshRef.current += 1;
-    setRefresh(refreshRef.current);
-  }, []);
-  const {
-    projects,
-    loading: projectsLoading,
-    error: projectsError,
-    reload: reloadProjects,
-  } = useAgentProjects(false, active);
-  const backgroundRefreshPending = useRef(false);
-  const refreshInBackground = useCallback(() => {
-    if (!active || document.visibilityState === 'hidden') {
-      backgroundRefreshPending.current = true;
-      return;
-    }
-    backgroundRefreshPending.current = false;
-    reload();
-    reloadProjects();
-  }, [active, reload, reloadProjects]);
-
-  useEffect(() => {
-    const onVisible = () => {
-      if (document.visibilityState !== 'hidden' && backgroundRefreshPending.current)
-        refreshInBackground();
-    };
-    document.addEventListener('visibilitychange', onVisible);
-    return () => document.removeEventListener('visibilitychange', onVisible);
-  }, [refreshInBackground]);
-
+  const { refresh, refreshRef, reload, projects, projectsLoading, projectsError, reloadProjects } =
+    useSidebarRefresh(userId, active);
   const [selected, setSelected] = useState<{
     path: string;
     userId?: string;
@@ -258,7 +221,9 @@ export function AgentsSidebar({
     return () => {
       cancelled = true;
     };
-  }, [active, pathname, userId, updatePreferences, knownRows, sessionRefresh, reads]);
+    // refreshRef comes from useSidebarRefresh, so the rule cannot see that it
+    // is a ref; it never changes, and listing it changes nothing.
+  }, [active, pathname, userId, updatePreferences, knownRows, sessionRefresh, reads, refreshRef]);
   const mountPath = useRef(pathname);
   useEffect(() => {
     if (!active || mountPath.current === pathname) return;
@@ -266,41 +231,6 @@ export function AgentsSidebar({
     reload();
     reloadProjects();
   }, [active, pathname, reload, reloadProjects]);
-  // The owner's change stream says when a conversation or turn changed; the
-  // clock below is the backstop for when it is not flowing.
-  const activityRefresh = useRef<ReturnType<typeof setTimeout> | null>(null);
-  useEffect(() => {
-    if (!active) return;
-    const unsubscribe = onAgentRecordsChanged((change) => {
-      // Tool approvals, usage, queues and publication hints belong to detail
-      // panes. Only changed records or a stream gap can affect these lists.
-      if (!change.resync && change.jobs.length === 0 && change.threads.length === 0) return;
-      if (changesSidebarRows(change, pushedRecords)) {
-        if (activityRefresh.current) clearTimeout(activityRefresh.current);
-        activityRefresh.current = null;
-        refreshInBackground();
-        return;
-      }
-      // Only activity moved, which can only reorder rows: read it at most
-      // once per window, however many replies land in it.
-      activityRefresh.current ??= setTimeout(() => {
-        activityRefresh.current = null;
-        refreshInBackground();
-      }, SIDEBAR_ACTIVITY_REFRESH_MS);
-    });
-    return () => {
-      unsubscribe();
-      if (activityRefresh.current) clearTimeout(activityRefresh.current);
-      activityRefresh.current = null;
-    };
-  }, [active, pushedRecords, refreshInBackground]);
-  const pushLive = useAgentPushLive();
-  const hasActiveProjects = projects.some((project) => project.active_count > 0);
-  useEffect(() => {
-    if (!active || !hasActiveProjects) return;
-    const timer = setInterval(refreshInBackground, pushLive ? PUSH_FALLBACK_POLL_MS : 10000);
-    return () => clearInterval(timer);
-  }, [active, hasActiveProjects, pushLive, refreshInBackground]);
   const closeSearch = useCallback(() => {
     setSearchOpen(false);
     setQuery('');
