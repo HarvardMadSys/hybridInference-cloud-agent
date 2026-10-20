@@ -454,10 +454,6 @@ class _Member:
     #: The newest checkpoint the sampler produced and the turn has not
     #: forwarded yet.
     window_pending_checkpoint: dict[str, Any] | None = None
-    #: How far the window's journal has been read. Only the offset is kept:
-    #: the accumulator carries identity between slices, so retaining every byte
-    #: read would grow without bound and re-parse it all on each tick.
-    window_journal_offset: int = 0
     turn_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
 
@@ -2577,16 +2573,19 @@ class SharedChatSessionSupervisor:
                 member.window = window
                 member.window_sampler = window_sampler
                 member.window_sequence = 0
-                member.window_accumulator = (
-                    WindowAccumulator(
+                member.window_accumulator = None
+                if window is not None:
+                    accumulator = WindowAccumulator(
                         uid=window.uid,
                         measurement_id=window.measurement_id,
                         opened_guest_mono_ns=(getattr(observer_cursor, "guest_mono_ns", 0) or 0),
                         boot_id=self._window_boot_id(group.spec, observer_cursor),
                     )
-                    if window is not None
-                    else None
-                )
+                    # This window's journal starts at its own observation
+                    # fence, as the final report's does; not at offset 0, nor
+                    # wherever an earlier window of this member stopped.
+                    accumulator.at(getattr(observer_cursor, "offset", 0) or 0)
+                    member.window_accumulator = accumulator
                 member.window_next_sample_mono = 0.0
                 member.window_checkpoints = (
                     CheckpointSchedule(interval_s=self._checkpoint_interval_s)
@@ -3003,10 +3002,9 @@ class SharedChatSessionSupervisor:
         read = getattr(self._manager, "member_window_journal_delta", None)
         if read is None:
             return 0
-        member = self._member_with_accumulator(accumulator)
-        if member is None:
+        if self._member_with_accumulator(accumulator) is None:
             return 0
-        scoped = replace(cursor, offset=member.window_journal_offset)
+        scoped = replace(cursor, offset=accumulator.offset)
         payload, new_offset = read(self._group_spec_for(accumulator), scoped)
         # A journal read can catch the observer mid-write, and the tail of such
         # a read is half a record. Advancing past it would lose that cycle for
@@ -3014,11 +3012,10 @@ class SharedChatSessionSupervisor:
         # stops at the last complete line and the partial tail is read again
         # once the writer has finished it.
         complete = payload.rfind(b"\n") + 1
-        member.window_journal_offset = new_offset - (len(payload) - complete)
         return accumulator.consume(
             payload[:complete],
             boot_id=cursor.guest_boot_id,
-            upto_offset=member.window_journal_offset,
+            upto_offset=new_offset - (len(payload) - complete),
         )
 
     def _member_with_accumulator(self, accumulator: WindowAccumulator) -> Any | None:

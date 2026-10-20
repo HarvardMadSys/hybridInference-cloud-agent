@@ -7195,6 +7195,66 @@ def test_a_member_without_an_open_window_is_never_censused():
     assert [event for event in manager.events if event[0] == "member-window"] == []
 
 
+def test_each_window_reads_its_journal_from_its_own_fence():
+    """A live checkpoint reads the journal from where its window's observation began.
+
+    Not from offset 0, and not from wherever an earlier window of the same
+    member stopped: the guest's journal can rotate between turns, and an offset
+    into the previous journal is behind every read of the new one.
+    """
+    fences = iter([(1, 500), (2, 40)])  # (journal inode, offset) of each window
+    reads: list[tuple[int, int]] = []
+
+    class JournalManager(_Manager):
+        def begin_guest_observation(self, spec, *, user_uid, measurement_id=None):
+            cursor = super().begin_guest_observation(
+                spec, user_uid=user_uid, measurement_id=measurement_id
+            )
+            journal_ino, offset = next(fences)
+            return replace(cursor, journal_dev=1, journal_ino=journal_ino, offset=offset)
+
+        def member_window_journal_delta(self, spec, cursor):
+            reads.append((cursor.journal_ino, cursor.offset))
+            return b"", cursor.offset
+
+    manager = JournalManager()
+    manager.backend.runtime = KATA_RUNTIME
+    supervisor = SharedChatSessionSupervisor(
+        manager,
+        transport_factory=_TransportFactory(),
+        window_sample_interval_s=10.0,
+    )
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+    supervisor.ensure_resident(
+        "athr_source",
+        lease.token,
+        _launch("athr_source", native_session_id="native-source", slot=0),
+    )
+    supervisor._stop.set()
+    if supervisor._sampler_thread is not None:
+        supervisor._sampler_thread.join(timeout=2)
+
+    first = supervisor.start_turn(
+        "athr_source", lease.token, prompt="work", model="glm-5.1", reasoning_effort=None
+    )
+    supervisor.sample_open_windows()
+    supervisor.complete_turn("athr_source", lease.token, first)
+    supervisor.start_turn(
+        "athr_source", lease.token, prompt="more", model="glm-5.1", reasoning_effort=None
+    )
+    supervisor.sample_open_windows()
+
+    # The census and the checkpoint each read; every read starts at its own fence.
+    assert sorted(set(reads)) == [(1, 500), (2, 40)]
+
+
 def test_a_checkpoint_is_produced_without_any_turn_event():
     """Uploads must not wait for the agent to say something.
 
