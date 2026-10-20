@@ -7,8 +7,9 @@ they were; only the class holding them changed.
 
 from __future__ import annotations
 
-import json
 from typing import TYPE_CHECKING
+
+from cloud_agent.storage._sql.audit import insert_admin_audit
 
 if TYPE_CHECKING:
     from typing import Any
@@ -51,17 +52,12 @@ class PostgresAuditRepository:
             The new row's id.
         """
         async with self._pool.acquire() as conn:
-            return await conn.fetchval(
-                """
-                INSERT INTO agent_admin_audit_log
-                    (action, actor_id, admin_ip, target_user_id, details, success)
-                VALUES ($1, $6, $2, $3, $4::jsonb, $5)
-                RETURNING id
-                """,
-                action,
-                admin_ip,
-                target_user_id,
-                json.dumps(details) if details is not None else None,
-                success,
-                actor_id,
+            return await insert_admin_audit(
+                conn,
+                action=action,
+                actor_id=actor_id,
+                admin_ip=admin_ip,
+                target_user_id=target_user_id,
+                details=details,
+                success=success,
             )

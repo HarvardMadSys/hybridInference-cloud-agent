@@ -19,6 +19,7 @@ from cloud_agent.domain.execution import TERMINAL_STATES
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.owner_usage import measured_interval, utc_day_shares
 from cloud_agent.ports.sandbox import DeletionFailureDecision
+from cloud_agent.storage._sql.audit import insert_admin_audit
 from cloud_agent.storage._sql.compute_admission import lock_compute_entry
 from cloud_agent.storage._sql.hosts import (
     DELETED_GROUP_STATES,
@@ -231,23 +232,19 @@ class PostgresSandboxRepository:
             )
             # Visibility and its audit receipt commit together. Never delete
             # the container, native membership or immutable execution ledger.
-            await conn.execute(
-                "INSERT INTO agent_admin_audit_log "
-                "(action, actor_id, admin_ip, target_user_id, details, success) "
-                "VALUES ($1, $2, $3, $4, $5::jsonb, TRUE)",
-                "agent.sandbox.archive" if archived else "agent.sandbox.restore",
-                actor_id,
-                admin_ip,
-                group["user_id"],
-                json.dumps(
-                    {
-                        "sandbox_id": sandbox_id,
-                        "host": group["host"],
-                        "generation": generation,
-                        "container_id": container_id,
-                    }
-                    | ({"stale_host_removal": True} if stale_host_removal else {})
-                ),
+            await insert_admin_audit(
+                conn,
+                action="agent.sandbox.archive" if archived else "agent.sandbox.restore",
+                actor_id=actor_id,
+                admin_ip=admin_ip,
+                target_user_id=group["user_id"],
+                details={
+                    "sandbox_id": sandbox_id,
+                    "host": group["host"],
+                    "generation": generation,
+                    "container_id": container_id,
+                }
+                | ({"stale_host_removal": True} if stale_host_removal else {}),
             )
         return "accepted"
 
@@ -1381,38 +1378,34 @@ class PostgresSandboxRepository:
         host_reclaimed: bool = False,
     ) -> None:
         """Keep each deletion transition and content-free audit atomic."""
-        await conn.execute(
-            "INSERT INTO agent_admin_audit_log "
-            "(action, actor_id, admin_ip, target_user_id, details, success) "
-            "VALUES ($1, $2, $3, $4, $5::jsonb, $6)",
-            action,
-            actor_id,
-            admin_ip,
-            group["user_id"],
-            json.dumps(
+        await insert_admin_audit(
+            conn,
+            action=action,
+            actor_id=actor_id,
+            admin_ip=admin_ip,
+            target_user_id=group["user_id"],
+            details={
+                "sandbox_id": group["id"],
+                "request_id": request_id,
+                "host": group["host"],
+                "generation": group["generation"],
+                "container_id": group["container_id"],
+                "archive_key": archive_key,
+                "archive_version_id": archive_version_id,
+                "sha256": sha256,
+                "size_bytes": size_bytes,
+            }
+            | (
                 {
-                    "sandbox_id": group["id"],
-                    "request_id": request_id,
-                    "host": group["host"],
-                    "generation": group["generation"],
-                    "container_id": group["container_id"],
-                    "archive_key": archive_key,
-                    "archive_version_id": archive_version_id,
-                    "sha256": sha256,
-                    "size_bytes": size_bytes,
+                    "force": True,
+                    "sandbox_manager_confirmed_stopped": True,
+                    "docker_status": confirmed_docker_status,
                 }
-                | (
-                    {
-                        "force": True,
-                        "sandbox_manager_confirmed_stopped": True,
-                        "docker_status": confirmed_docker_status,
-                    }
-                    if sandbox_manager_confirmed_stopped
-                    else {}
-                )
-                | ({"host_reclaimed": True} if host_reclaimed else {})
-            ),
-            action != "agent.sandbox.delete.failed",
+                if sandbox_manager_confirmed_stopped
+                else {}
+            )
+            | ({"host_reclaimed": True} if host_reclaimed else {}),
+            success=action != "agent.sandbox.delete.failed",
         )
 
     @staticmethod
@@ -1506,21 +1499,18 @@ class PostgresSandboxRepository:
         async def audit(conn: Any, group: Any) -> None:
             # Stop and its audit receipt commit together. An unavailable audit
             # table must never leave an unrecorded cross-owner mutation.
-            await conn.execute(
-                "INSERT INTO agent_admin_audit_log "
-                "(action, actor_id, admin_ip, target_user_id, details, success) "
-                "VALUES ('agent.sandbox.stop', $1, $2, $3, $4::jsonb, TRUE)",
-                actor_id,
-                admin_ip,
-                group["user_id"],
-                json.dumps(
-                    {
-                        "sandbox_id": sandbox_id,
-                        "host": group["host"],
-                        "generation": generation,
-                        "container_id": container_id,
-                    }
-                ),
+            await insert_admin_audit(
+                conn,
+                action="agent.sandbox.stop",
+                actor_id=actor_id,
+                admin_ip=admin_ip,
+                target_user_id=group["user_id"],
+                details={
+                    "sandbox_id": sandbox_id,
+                    "host": group["host"],
+                    "generation": generation,
+                    "container_id": container_id,
+                },
             )
 
         return await self._request_stop(
