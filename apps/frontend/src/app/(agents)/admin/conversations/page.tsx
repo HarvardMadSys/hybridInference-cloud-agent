@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
-import { Suspense, useCallback, useEffect, useRef, useState } from 'react';
+import { Suspense, useCallback, useState } from 'react';
 
 import { useAuth } from '@/components/providers';
 import { hasAgentPermission } from '@/components/providers/AuthProvider';
@@ -14,7 +14,6 @@ import {
   type AdminConversationsPage,
 } from '@/lib/api/adminConversations';
 import { conversationLink } from './filters';
-import { getErrorMessage } from '@/lib/utils/errors';
 
 import { AdminNavigation } from '../AdminNavigation';
 import { ADMIN_PAGE, AdminPageHeader } from '../AdminPageHeader';
@@ -23,17 +22,17 @@ import { StepResults } from '../runs/StepResults';
 import { SandboxResults } from '../sandboxes/SandboxResults';
 import { presetKey } from '../usage/present';
 import {
-  accessDenied,
   AdminRequired,
   ago,
-  BUTTON,
   CARD,
   dateTime,
   ErrorNotice,
   ICON_BUTTON,
+  LoadMore,
   RunState,
   TOOLBAR_SELECT,
 } from '../runs/shared';
+import { useCursorPages } from '../runs/useCursorPages';
 
 const STATES: AgentJobApiState[] = ['queued', 'running', 'succeeded', 'failed', 'cancelled'];
 
@@ -351,68 +350,12 @@ function SessionResults({
   onLoading: (loading: boolean) => void;
   onDenied: () => void;
 }) {
-  const [page, setPage] = useState<AdminConversationsPage | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [moreLoading, setMoreLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [revision, setRevision] = useState(0);
-  const moreRequest = useRef<AbortController | null>(null);
-
-  useEffect(() => onLoading(loading), [loading, onLoading]);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    moreRequest.current?.abort();
-    setMoreLoading(false);
-    setPage(null);
-    setLoading(true);
-    setError(null);
-    getAdminConversations(filters, controller.signal)
-      .then((next) => {
-        if (!controller.signal.aborted) setPage(next);
-      })
-      .catch((e: unknown) => {
-        if (!controller.signal.aborted) {
-          if (accessDenied(e)) onDenied();
-          else setError(getErrorMessage(e));
-        }
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setLoading(false);
-      });
-    return () => {
-      controller.abort();
-      moreRequest.current?.abort();
-    };
-  }, [filters, revision, onDenied]);
-
-  async function loadMore() {
-    if (!page?.next_cursor || moreLoading) return;
-    moreRequest.current?.abort();
-    const controller = new AbortController();
-    moreRequest.current = controller;
-    setMoreLoading(true);
-    setError(null);
-    try {
-      const next = await getAdminConversations(
-        { ...filters, since: page.since, until: page.until, cursor: page.next_cursor },
-        controller.signal,
-      );
-      if (!controller.signal.aborted)
-        setPage((previous) =>
-          previous
-            ? { ...next, conversations: [...previous.conversations, ...next.conversations] }
-            : next,
-        );
-    } catch (e) {
-      if (!controller.signal.aborted) {
-        if (accessDenied(e)) onDenied();
-        else setError(getErrorMessage(e));
-      }
-    } finally {
-      if (!controller.signal.aborted) setMoreLoading(false);
-    }
-  }
+  const { page, loading, moreLoading, error, retry, loadMore } = useCursorPages(
+    getAdminConversations,
+    filters,
+    appendConversations,
+    { onLoading, onDenied },
+  );
 
   return (
     <>
@@ -420,11 +363,7 @@ function SessionResults({
         <ErrorNotice>
           {error}
           {!page && (
-            <button
-              type="button"
-              className="ml-3 underline"
-              onClick={() => setRevision((value) => value + 1)}
-            >
+            <button type="button" className="ml-3 underline" onClick={retry}>
               Retry
             </button>
           )}
@@ -445,16 +384,9 @@ function SessionResults({
               <ConversationsTable page={page} filters={filters} />
             )}
             {page.next_cursor && (
-              <div className="mt-5 flex justify-center">
-                <button
-                  type="button"
-                  className={BUTTON}
-                  disabled={moreLoading}
-                  onClick={() => void loadMore()}
-                >
-                  {moreLoading ? 'Loading…' : 'Load more sessions'}
-                </button>
-              </div>
+              <LoadMore loading={moreLoading} onLoad={() => void loadMore()}>
+                Load more sessions
+              </LoadMore>
             )}
           </>
         )
@@ -582,4 +514,11 @@ function ConversationsTable({
       </table>
     </div>
   );
+}
+
+function appendConversations(
+  previous: AdminConversationsPage,
+  next: AdminConversationsPage,
+): AdminConversationsPage {
+  return { ...next, conversations: [...previous.conversations, ...next.conversations] };
 }

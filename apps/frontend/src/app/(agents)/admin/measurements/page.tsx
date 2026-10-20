@@ -30,6 +30,7 @@ import {
   accessDenied,
   AdminRequired,
   BUTTON,
+  LoadMore,
   CARD,
   dateTime,
   ErrorNotice,
@@ -719,16 +720,9 @@ function SamplesPanel({
             </div>
             {moreError && <ErrorNotice>{moreError}</ErrorNotice>}
             {next && (
-              <div className="mt-5 flex justify-center">
-                <button
-                  type="button"
-                  className={BUTTON}
-                  disabled={moreLoading}
-                  onClick={() => void loadMore()}
-                >
-                  {moreLoading ? 'Loading…' : 'Load more samples'}
-                </button>
-              </div>
+              <LoadMore loading={moreLoading} onLoad={() => void loadMore()}>
+                Load more samples
+              </LoadMore>
             )}
           </>
         )

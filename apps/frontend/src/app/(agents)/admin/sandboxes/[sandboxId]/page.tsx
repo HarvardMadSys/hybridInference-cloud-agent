@@ -23,6 +23,7 @@ import {
   accessDenied,
   AdminRequired,
   BUTTON,
+  LoadMore,
   CARD,
   dateTime,
   ErrorNotice,
@@ -554,16 +555,9 @@ function SandboxTrajectory({ sandboxId }: { sandboxId: string }) {
                 </p>
               )}
               {trajectory.next_cursor && (
-                <div className="mt-5 flex justify-center">
-                  <button
-                    type="button"
-                    className={BUTTON}
-                    disabled={loadingMore}
-                    onClick={() => void loadMore()}
-                  >
-                    {loadingMore ? 'Loading…' : 'Load more events'}
-                  </button>
-                </div>
+                <LoadMore loading={loadingMore} onLoad={() => void loadMore()}>
+                  Load more events
+                </LoadMore>
               )}
             </section>
           </>

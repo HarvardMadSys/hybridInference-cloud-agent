@@ -1,7 +1,6 @@
 'use client';
 
 import Link from 'next/link';
-import { useEffect, useRef, useState } from 'react';
 
 import {
   getAdminSteps,
@@ -9,10 +8,10 @@ import {
   type AdminStepsPage,
   type AdminStepTurn,
 } from '@/lib/api/adminRuns';
-import { getErrorMessage } from '@/lib/utils/errors';
 
 import { cacheHitRate, durationLabel, modelLabel } from './LLMRequests';
-import { accessDenied, BUTTON, dateTime, ErrorNotice, money, number } from './shared';
+import { dateTime, ErrorNotice, LoadMore, money, number } from './shared';
+import { useCursorPages } from './useCursorPages';
 
 const UNAVAILABLE = '—';
 
@@ -53,64 +52,12 @@ export function StepResults({
   onLoading: (loading: boolean) => void;
   onDenied: () => void;
 }) {
-  const [page, setPage] = useState<AdminStepsPage | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [moreLoading, setMoreLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [revision, setRevision] = useState(0);
-  const moreRequest = useRef<AbortController | null>(null);
-
-  useEffect(() => onLoading(loading), [loading, onLoading]);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    moreRequest.current?.abort();
-    setMoreLoading(false);
-    setPage(null);
-    setLoading(true);
-    setError(null);
-    getAdminSteps(filters, controller.signal)
-      .then((next) => {
-        if (!controller.signal.aborted) setPage(next);
-      })
-      .catch((e: unknown) => {
-        if (!controller.signal.aborted) {
-          if (accessDenied(e)) onDenied();
-          else setError(getErrorMessage(e));
-        }
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setLoading(false);
-      });
-    return () => {
-      controller.abort();
-      moreRequest.current?.abort();
-    };
-  }, [filters, revision, onDenied]);
-
-  async function loadMore() {
-    if (!page?.next_cursor || moreLoading) return;
-    moreRequest.current?.abort();
-    const controller = new AbortController();
-    moreRequest.current = controller;
-    setMoreLoading(true);
-    setError(null);
-    try {
-      const next = await getAdminSteps(
-        { ...filters, since: page.since, until: page.until, cursor: page.next_cursor },
-        controller.signal,
-      );
-      if (!controller.signal.aborted)
-        setPage((previous) => (previous ? appendPage(previous, next) : next));
-    } catch (e) {
-      if (!controller.signal.aborted) {
-        if (accessDenied(e)) onDenied();
-        else setError(getErrorMessage(e));
-      }
-    } finally {
-      if (!controller.signal.aborted) setMoreLoading(false);
-    }
-  }
+  const { page, loading, moreLoading, error, retry, loadMore } = useCursorPages(
+    getAdminSteps,
+    filters,
+    appendPage,
+    { onLoading, onDenied },
+  );
 
   const turns = new Map((page?.turns ?? []).map((turn) => [turn.job_id, turn]));
   const unread = (page?.turns ?? []).filter(
@@ -122,11 +69,7 @@ export function StepResults({
         <ErrorNotice>
           {error}
           {!page && (
-            <button
-              type="button"
-              className="ml-3 underline"
-              onClick={() => setRevision((value) => value + 1)}
-            >
+            <button type="button" className="ml-3 underline" onClick={retry}>
               Retry
             </button>
           )}
@@ -167,16 +110,9 @@ export function StepResults({
               <StepsTable page={page} turns={turns} />
             )}
             {page.next_cursor && (
-              <div className="mt-5 flex justify-center">
-                <button
-                  type="button"
-                  className={BUTTON}
-                  disabled={moreLoading}
-                  onClick={() => void loadMore()}
-                >
-                  {moreLoading ? 'Loading…' : 'Load more steps'}
-                </button>
-              </div>
+              <LoadMore loading={moreLoading} onLoad={() => void loadMore()}>
+                Load more steps
+              </LoadMore>
             )}
           </>
         )

@@ -27,6 +27,25 @@ export function AdminRequired() {
   );
 }
 
+/** The button under a paged list that reads its next page. */
+export function LoadMore({
+  loading,
+  onLoad,
+  children,
+}: {
+  loading: boolean;
+  onLoad: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <div className="mt-5 flex justify-center">
+      <button type="button" className={BUTTON} disabled={loading} onClick={onLoad}>
+        {loading ? 'Loading…' : children}
+      </button>
+    </div>
+  );
+}
+
 export function ErrorNotice({ children }: { children: ReactNode }) {
   return (
     <div
