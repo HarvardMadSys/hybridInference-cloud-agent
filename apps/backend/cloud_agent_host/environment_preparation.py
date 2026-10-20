@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import hashlib
 import json
 import os
 import threading
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from cloud_agent_host.enrollment import credential_path
 from cloud_agent_host.sandbox import SandboxError
@@ -36,6 +37,50 @@ def step_state(result: SetupResult, cancel: threading.Event | None) -> str:
     if result.exit_code == 130 and cancel is not None and cancel.is_set():
         return "cancelled"
     return "failed"
+
+
+def run_step(
+    backend: RetainedChatBackend,
+    environment: BoundEnvironment,
+    step: dict[str, Any],
+    *,
+    script: str,
+    values: Literal["setup", "runtime"],
+    timeout_s: float,
+    on_output: Callable[[dict[str, Any]], None],
+    cancel: threading.Event | None,
+    cleanup_background: bool = False,
+) -> SetupResult:
+    """Run one environment script in ``/workspace`` as ``step``.
+
+    The step keeps the last 64 KiB of the script's output, and ``on_output``
+    is called with it after each chunk. Once the script ends, the step holds
+    its state, exit code and duration.
+    """
+
+    def output(chunk: str) -> None:
+        step["output"] = (step["output"] + chunk)[-65536:]
+        on_output(step)
+
+    started = time.monotonic()
+    result = run_setup(
+        script=script,
+        workdir="/workspace",
+        backend=backend,
+        timeout_s=timeout_s,
+        env=environment.values(values),
+        secrets=environment.secrets(),
+        on_output=output,
+        cancel=cancel,
+        cleanup_background=cleanup_background,
+        phase=step["phase"],
+    )
+    step.update(
+        state=step_state(result, cancel),
+        exit_code=result.exit_code,
+        duration_seconds=time.monotonic() - started,
+    )
+    return result
 
 
 def write_setup_marker(
@@ -93,10 +138,8 @@ class EnvironmentPreparation:
         boot_id = inspection.started_at
         if not boot_id:
             raise SandboxError("Container boot identity is unavailable")
-        key = hashlib.sha256(container_id.encode()).hexdigest()
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        path = self.root / f"{key}.json"
-        lock_path = self.root / f"{key}.lock"
+        path, lock_path = self._receipt(container_id)
         with lock_path.open("a+") as lock:
             os.chmod(lock_path, 0o600)
             fcntl.flock(lock, fcntl.LOCK_EX)
@@ -148,36 +191,25 @@ class EnvironmentPreparation:
                 self._save(path, receipt)
                 last_saved = [0.0]
 
-                def output(
-                    chunk: str, step: dict[str, Any] = step, last_saved: list[float] = last_saved
-                ) -> None:
-                    step["output"] = (step["output"] + chunk)[-65536:]
+                def output(step: dict[str, Any], last_saved: list[float] = last_saved) -> None:
                     if time.monotonic() - last_saved[0] > 0.5:
                         self._save(path, receipt)
                         last_saved[0] = time.monotonic()
                     if callback:
                         callback(dict(step))
 
-                started = time.monotonic()
-                result = run_setup(
+                result = run_step(
+                    backend,
+                    environment,
+                    step,
                     script=script,
-                    workdir="/workspace",
-                    backend=backend,
+                    values="runtime" if phase == "start" else "setup",
                     timeout_s=timeout,
-                    env=environment.values("runtime" if phase == "start" else "setup"),
-                    secrets=environment.secrets(),
                     on_output=output,
                     cancel=cancel,
                     cleanup_background=phase != "start",
-                    phase=phase,
                 )
-                step.update(
-                    state=step_state(result, cancel),
-                    exit_code=result.exit_code,
-                    duration_seconds=time.monotonic() - started,
-                    ran=result.ran,
-                    detail=redactor.text(result.detail),
-                )
+                step.update(ran=result.ran, detail=redactor.text(result.detail))
                 receipt[phase + "_done"] = result.exit_code == 0
                 receipt["boot_id"] = boot_id
                 if phase == "update" and result.exit_code == 0:
@@ -277,8 +309,7 @@ class EnvironmentPreparation:
                 self._inspections[name] = (time.monotonic() + 15, inspection)
         if inspection is None:
             raise SandboxError("Environment container is unavailable")
-        key = hashlib.sha256(inspection.container_id.encode()).hexdigest()
-        path = self.root / f"{key}.json"
+        path, _ = self._receipt(inspection.container_id)
         receipt = json.loads(path.read_text()) if path.exists() else {}
         if receipt and receipt.get("binding_id") != binding_id:
             raise SandboxError("Workspace binding does not match preparation")
@@ -291,6 +322,17 @@ class EnvironmentPreparation:
                 and receipt.get("boot_id") == inspection.started_at
             ),
         }
+
+    def forget(self, container_id: str) -> None:
+        """Drop the receipt of a container that has been removed."""
+        for path in self._receipt(container_id):
+            with contextlib.suppress(FileNotFoundError):
+                path.unlink()
+
+    def _receipt(self, container_id: str) -> tuple[Path, Path]:
+        """The receipt of one exact container, and the lock that serializes it."""
+        key = hashlib.sha256(container_id.encode()).hexdigest()
+        return self.root / f"{key}.json", self.root / f"{key}.lock"
 
     @staticmethod
     def _save(path: Path, receipt: dict[str, Any]) -> None:

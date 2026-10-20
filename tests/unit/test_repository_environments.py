@@ -217,6 +217,21 @@ def test_preparation_is_fixed_across_member_and_broker_restarts(tmp_path):
         prepare.prepare(backend, environment.model_copy(update={"binding_id": "another"}))
 
 
+def test_forgetting_a_removed_container_drops_only_its_receipt(tmp_path):
+    backend = _Backend()
+    prepare = EnvironmentPreparation(tmp_path)
+    prepare.prepare(backend, BoundEnvironment(binding_id="bound", setup_script="install"))
+    held = sorted(tmp_path.iterdir())
+    assert [path.suffix for path in held] == [".json", ".lock"]
+
+    prepare.forget("another-container")
+    assert sorted(tmp_path.iterdir()) == held
+    prepare.forget("exact-container")
+    assert list(tmp_path.iterdir()) == []
+    assert prepare.status(backend, "bound") == {"ready": False}
+    prepare.forget("exact-container")
+
+
 def test_failed_installation_does_not_start_services_or_record_success(tmp_path):
     backend = _Backend()
     backend.fail = True

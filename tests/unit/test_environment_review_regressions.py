@@ -442,8 +442,9 @@ def _environment_worker(monkeypatch, tmp_path, prepare, status, *, environment=N
         def discard(self):
             pass
 
-    class _Preparation:
-        root = tmp_path
+    class _Preparation(EnvironmentPreparation):
+        def __init__(self):
+            super().__init__(tmp_path)
 
         def prepare(self, backend, environment, *, callback, cancel):
             prepare(callback, cancel)
