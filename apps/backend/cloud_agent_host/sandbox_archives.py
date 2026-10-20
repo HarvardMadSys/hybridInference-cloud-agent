@@ -16,6 +16,7 @@ import re
 import tempfile
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, BinaryIO, Final, cast
 
@@ -32,7 +33,7 @@ from cloud_agent_shared.errors import SandboxError
 from cloud_agent_shared.sandbox_archive_settings import SandboxArchivePolicy
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Iterator, Sequence
 
     from cloud_agent_host.chat_sandbox import (
         ChatSandboxInspection,
@@ -152,6 +153,18 @@ class _BuiltArchive:
         self.stream.close()
 
 
+@dataclass
+class _Capture:
+    """One admitted operation: its deadline, and how it is counted when it ends.
+
+    ``outcome`` is True once stored and None when the operation stores
+    nothing; otherwise it counts as failed.
+    """
+
+    deadline: float
+    outcome: bool | None = False
+
+
 def encode_marker(payload: dict[str, object]) -> bytes:
     """Return a marker's canonical bytes: sorted, compact ASCII JSON and a newline."""
     return (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
@@ -260,6 +273,25 @@ class SandboxInitialArchiveMarker:
             }
         )
 
+    def matches(
+        self,
+        *,
+        namespace_sha256: str,
+        spec: ChatSandboxSpec,
+        container_id: str,
+        preparation_id: str,
+        policy: SandboxArchivePolicy,
+    ) -> bool:
+        """Whether this container prepared this marker, for this preparation, under ``policy``."""
+        return (
+            self.namespace_sha256 == namespace_sha256
+            and self.sandbox_id == spec.sandbox_id
+            and self.generation == spec.generation
+            and self.container_id == container_id
+            and self.preparation_id == preparation_id
+            and self.policy == policy
+        )
+
     @classmethod
     def decode(cls, payload: bytes) -> SandboxInitialArchiveMarker:
         """Decode and validate one canonical initial-archive marker."""
@@ -354,6 +386,7 @@ class SandboxArchiveService:
             )
         self._manager = manager
         self._namespace = namespace
+        self._namespace_sha256 = hashlib.sha256(namespace.encode("utf-8")).hexdigest()
         self._uploader = uploader
         self._config = config
         self._policy = config.as_policy()
@@ -418,6 +451,26 @@ class SandboxArchiveService:
                 "phases": phases,
             }
 
+    @contextmanager
+    def _capture(self, phase: str | None) -> Iterator[_Capture]:
+        """Admit one operation, hold a capture slot while it runs, then count it.
+
+        Restores and loads pass no phase: they take a slot but are not counted.
+        """
+        operation = _Capture(self._new_deadline())
+        if phase is not None:
+            self._admit_capture(phase)
+        acquired = False
+        try:
+            self._acquire_capture_slot(operation.deadline)
+            acquired = True
+            yield operation
+        finally:
+            if acquired:
+                self._capture_slots.release()
+            if phase is not None:
+                self._finish_capture(phase, uploaded=operation.outcome)
+
     def _admit_capture(self, phase: str) -> None:
         """Count an operation before it can wait for scarce capture capacity."""
         with self._lock:
@@ -444,13 +497,8 @@ class SandboxArchiveService:
     ) -> dict[str, object]:
         """Build and synchronously store the one pre-prompt workspace baseline."""
         _validate_preparation_id(preparation_id)
-        deadline = self._new_deadline()
-        self._admit_capture("initial")
-        acquired = False
-        uploaded = False
-        try:
-            self._acquire_capture_slot(deadline)
-            acquired = True
+        with self._capture("initial") as operation:
+            deadline = operation.deadline
             if backend.manager is not self._manager:
                 raise SandboxError("initial archive uses a different retained sandbox manager")
             inspection = self._exact_inspection(
@@ -480,14 +528,14 @@ class SandboxArchiveService:
                 existing = None
             if existing is not None:
                 if (
-                    existing.namespace_sha256
-                    != hashlib.sha256(self._namespace.encode("utf-8")).hexdigest()
-                    or existing.sandbox_id != backend.spec.sandbox_id
-                    or existing.generation != backend.spec.generation
-                    or existing.container_id != inspection.container_id
-                    or existing.preparation_id != preparation_id
+                    not existing.matches(
+                        namespace_sha256=self._namespace_sha256,
+                        spec=backend.spec,
+                        container_id=inspection.container_id,
+                        preparation_id=preparation_id,
+                        policy=self._policy,
+                    )
                     or existing.base_sha != base_sha
-                    or existing.policy != self._policy
                 ):
                     raise SandboxError(
                         "existing initial archive marker does not match this preparation"
@@ -503,7 +551,7 @@ class SandboxArchiveService:
             )
             try:
                 marker = SandboxInitialArchiveMarker(
-                    namespace_sha256=hashlib.sha256(self._namespace.encode("utf-8")).hexdigest(),
+                    namespace_sha256=self._namespace_sha256,
                     sandbox_id=backend.spec.sandbox_id,
                     generation=backend.spec.generation,
                     container_id=inspection.container_id,
@@ -525,14 +573,10 @@ class SandboxArchiveService:
                     archive=archive,
                     deadline=deadline,
                 )
-                uploaded = True
+                operation.outcome = True
                 return receipt
             finally:
                 archive.close()
-        finally:
-            if acquired:
-                self._capture_slots.release()
-            self._finish_capture("initial", uploaded=uploaded)
 
     def probe_initial(
         self,
@@ -550,13 +594,8 @@ class SandboxArchiveService:
         before the runner can reset the existing workspace.
         """
         _validate_preparation_id(preparation_id)
-        deadline = self._new_deadline()
-        self._admit_capture("initial")
-        acquired = False
-        outcome: bool | None = False
-        try:
-            self._acquire_capture_slot(deadline)
-            acquired = True
+        with self._capture("initial") as operation:
+            deadline = operation.deadline
             if backend.manager is not self._manager:
                 raise SandboxError("initial archive probe uses a different retained manager")
             inspection = self._exact_inspection(
@@ -571,7 +610,7 @@ class SandboxArchiveService:
             )
             self._check_deadline(deadline)
             if payload is None:
-                outcome = None
+                operation.outcome = None
                 return {
                     "enabled": True,
                     "prepared": False,
@@ -580,20 +619,20 @@ class SandboxArchiveService:
             marker = SandboxInitialArchiveMarker.decode(payload)
             if self._carried_by_checkpoint(marker, backend.spec):
                 # The earlier generation's baseline, not one this container prepared.
-                outcome = None
+                operation.outcome = None
                 return {
                     "enabled": True,
                     "prepared": False,
                     "stored": False,
                 }
-            expected_namespace = hashlib.sha256(self._namespace.encode("utf-8")).hexdigest()
             if (
-                marker.namespace_sha256 != expected_namespace
-                or marker.sandbox_id != backend.spec.sandbox_id
-                or marker.generation != backend.spec.generation
-                or marker.container_id != inspection.container_id
-                or marker.preparation_id != preparation_id
-                or marker.policy != self._policy
+                not marker.matches(
+                    namespace_sha256=self._namespace_sha256,
+                    spec=backend.spec,
+                    container_id=inspection.container_id,
+                    preparation_id=preparation_id,
+                    policy=self._policy,
+                )
                 or marker.bundle_size_bytes > self._config.max_archive_bytes
             ):
                 raise SandboxError("initial archive marker does not match this preparation")
@@ -616,7 +655,7 @@ class SandboxArchiveService:
                     raise SandboxError("initial sandbox archive probe timed out") from exc
                 raise SandboxError("initial sandbox archive status could not be verified") from exc
             if stored:
-                outcome = None
+                operation.outcome = None
                 return {
                     "enabled": True,
                     "prepared": True,
@@ -653,7 +692,7 @@ class SandboxArchiveService:
                     archive=archive,
                     deadline=deadline,
                 )
-                outcome = True
+                operation.outcome = True
                 return {
                     **receipt,
                     "prepared": True,
@@ -664,10 +703,6 @@ class SandboxArchiveService:
                 }
             finally:
                 archive.close()
-        finally:
-            if acquired:
-                self._capture_slots.release()
-            self._finish_capture("initial", uploaded=outcome)
 
     def queue_final(
         self,
@@ -676,19 +711,12 @@ class SandboxArchiveService:
         members: tuple[SharedMemberManifest, ...],
     ) -> SandboxArchiveReceipt:
         """Spool and store a stopped container before its clean stop succeeds."""
-        deadline = self._new_deadline()
-        self._admit_capture("final")
-        acquired = False
-        uploaded = False
-        archive: _BuiltArchive | None = None
-        try:
-            self._acquire_capture_slot(deadline)
-            acquired = True
+        with self._capture("final") as operation:
             exact = self._exact_inspection(
                 spec,
                 expected_container_id=inspection.container_id,
                 running=False,
-                deadline=deadline,
+                deadline=operation.deadline,
             )
             archive = self._build(
                 spec,
@@ -696,22 +724,19 @@ class SandboxArchiveService:
                 phase="final",
                 members=members,
                 base_sha=None,
-                deadline=deadline,
+                deadline=operation.deadline,
             )
-            receipt = self._upload_final(
-                sandbox_id=spec.sandbox_id,
-                generation=spec.generation,
-                archive=archive,
-                deadline=deadline,
-            )
-            uploaded = True
-            return receipt
-        finally:
-            if archive is not None:
+            try:
+                receipt = self._upload_final(
+                    sandbox_id=spec.sandbox_id,
+                    generation=spec.generation,
+                    archive=archive,
+                    deadline=operation.deadline,
+                )
+                operation.outcome = True
+                return receipt
+            finally:
                 archive.close()
-            if acquired:
-                self._capture_slots.release()
-            self._finish_capture("final", uploaded=uploaded)
 
     def capture_checkpoint(
         self,
@@ -727,18 +752,12 @@ class SandboxArchiveService:
         capture = self._checkpoint_capture
         if capture is None:
             raise SandboxError("sandbox checkpoints are not configured on this sandbox manager")
-        deadline = self._new_deadline()
-        self._admit_capture("checkpoint")
-        acquired = False
-        uploaded = False
-        try:
-            self._acquire_capture_slot(deadline)
-            acquired = True
+        with self._capture("checkpoint") as operation:
             exact = self._exact_inspection(
                 spec,
                 expected_container_id=inspection.container_id,
                 running=False,
-                deadline=deadline,
+                deadline=operation.deadline,
             )
             receipt = capture.capture(
                 spec,
@@ -746,14 +765,10 @@ class SandboxArchiveService:
                 members,
                 upload=self._uploader.upload_checkpoint,
                 max_bytes=self._config.max_archive_bytes,
-                deadline=deadline,
+                deadline=operation.deadline,
             )
-            uploaded = True
+            operation.outcome = True
             return receipt
-        finally:
-            if acquired:
-                self._capture_slots.release()
-            self._finish_capture("checkpoint", uploaded=uploaded)
 
     def restore_checkpoint(self, sandbox_id: str, restore: CheckpointRestore) -> str:
         """Load the image a moved group is recreated from, under the capture budget.
@@ -764,18 +779,14 @@ class SandboxArchiveService:
         capture = self._checkpoint_capture
         if capture is None:
             raise SandboxError("sandbox checkpoints are not configured on this sandbox manager")
-        deadline = self._new_deadline()
-        self._acquire_capture_slot(deadline)
-        try:
+        with self._capture(None) as operation:
             return capture.restore(
                 sandbox_id,
                 restore,
                 download=self._uploader.download_checkpoint,
                 max_bytes=self._config.max_archive_bytes,
-                deadline=deadline,
+                deadline=operation.deadline,
             )
-        finally:
-            self._capture_slots.release()
 
     def capture_environment_snapshot(
         self,
@@ -793,18 +804,12 @@ class SandboxArchiveService:
         capture = self._checkpoint_capture
         if capture is None:
             raise SandboxError("sandbox checkpoints are not configured on this sandbox manager")
-        deadline = self._new_deadline()
-        self._admit_capture("checkpoint")
-        acquired = False
-        uploaded = False
-        try:
-            self._acquire_capture_slot(deadline)
-            acquired = True
+        with self._capture("checkpoint") as operation:
             exact = self._exact_inspection(
                 spec,
                 expected_container_id=inspection.container_id,
                 running=False,
-                deadline=deadline,
+                deadline=operation.deadline,
             )
             receipt = capture.capture_environment(
                 spec,
@@ -813,31 +818,23 @@ class SandboxArchiveService:
                 snapshot_id=snapshot_id,
                 upload=self._uploader.upload_environment_snapshot,
                 max_bytes=self._config.max_archive_bytes,
-                deadline=deadline,
+                deadline=operation.deadline,
             )
-            uploaded = True
+            operation.outcome = True
             return receipt
-        finally:
-            if acquired:
-                self._capture_slots.release()
-            self._finish_capture("checkpoint", uploaded=uploaded)
 
     def load_environment_snapshot(self, snapshot: EnvironmentSnapshotRef) -> str:
         """Load an installation snapshot's image under the capture budget."""
         capture = self._checkpoint_capture
         if capture is None:
             raise SandboxError("sandbox checkpoints are not configured on this sandbox manager")
-        deadline = self._new_deadline()
-        self._acquire_capture_slot(deadline)
-        try:
+        with self._capture(None) as operation:
             return capture.load_environment(
                 snapshot,
                 download=self._uploader.download_environment_snapshot,
                 max_bytes=self._config.max_archive_bytes,
-                deadline=deadline,
+                deadline=operation.deadline,
             )
-        finally:
-            self._capture_slots.release()
 
     def delete_environment_snapshot(
         self, *, owner: str, snapshot_id: str, key: str, version_id: str | None
