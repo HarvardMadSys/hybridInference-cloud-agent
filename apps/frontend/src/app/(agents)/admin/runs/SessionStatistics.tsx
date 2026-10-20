@@ -1,4 +1,4 @@
-import { formatDuration } from '@/components/features/agents/TurnFooter';
+import { formatDuration } from '@/lib/format';
 import type { AdminSessionStatistics } from '@/lib/api/adminRuns';
 
 import { CARD, number } from './shared';

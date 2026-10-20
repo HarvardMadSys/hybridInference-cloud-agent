@@ -8,6 +8,7 @@ import { useAuth } from '@/components/providers';
 import { hasAgentPermission } from '@/components/providers/AuthProvider';
 import type { AgentJobApiState } from '@/lib/api/agents';
 import type { AdminRunFilters } from '@/lib/api/adminRuns';
+import { shortDay } from '@/lib/format';
 import {
   getAdminConversations,
   conversationHref,
@@ -63,17 +64,6 @@ function windowOfLength(
     until: now.toISOString(),
     limit: 50,
   };
-}
-
-/** A UTC calendar day as a toolbar can afford it: `Sep 21`. */
-function shortDay(value: string | undefined): string {
-  const time = Date.parse(value ?? '');
-  if (!Number.isFinite(time)) return '—';
-  return new Date(time).toLocaleDateString('en-US', {
-    month: 'short',
-    day: 'numeric',
-    timeZone: 'UTC',
-  });
 }
 
 function windowFilters(

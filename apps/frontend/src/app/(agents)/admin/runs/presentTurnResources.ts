@@ -27,6 +27,7 @@ import type {
   TurnResourceSummaryApi,
   TurnStorageIoResourcesApi,
 } from '@/lib/api/adminRuns';
+import { formatDuration, rounded, trim } from '@/lib/format';
 
 //: The display state of a turn's resource accounting. `unavailable` is a lack
 //: of measurement, which is a different statement from a measured zero.
@@ -151,34 +152,6 @@ export function formatCpuSeconds(usec: number | null | undefined): string | null
   return `${seconds.toFixed(places)} CPU-s`;
 }
 
-/** Round as the reader will see it, so "1023.6 MiB" climbs to GiB rather than printing as 1024. */
-function rounded(value: number): number {
-  return value >= 100 ? Math.round(value) : Math.round(value * 10) / 10;
-}
-
-function trim(value: number): string {
-  const shown = rounded(value);
-  return Number.isInteger(shown) ? String(shown) : shown.toFixed(1);
-}
-
-/**
- * A span of time as a reader would say it.
- *
- * Kept local to this module: it is only ever used for windows and sampling
- * periods, and a page must not reach into a client component for a formatter.
- * A missing span returns null rather than a zero, so "no cut-off was reported"
- * never renders as "reached 0ms".
- */
-export function formatSpan(ms: number | null | undefined): string | null {
-  if (typeof ms !== 'number' || !Number.isFinite(ms) || ms < 0) return null;
-  if (ms < 1000) return `${Math.round(ms)}ms`;
-  const seconds = rounded(ms / 1000);
-  if (seconds < 60) return `${trim(seconds)}s`;
-  const minutes = Math.floor(seconds / 60);
-  const rest = Math.round(seconds - minutes * 60);
-  return rest ? `${minutes}m ${rest}s` : `${minutes}m`;
-}
-
 /**
  * The legible form of a memory quantity, in binary units.
  *
@@ -200,7 +173,7 @@ export function formatMemoryBytes(bytes: number | null | undefined): string | nu
 
 /** The sampling period a memory peak was measured at, as its method sentence. */
 export function memoryMethod(intervalMs: number): string {
-  const period = formatSpan(intervalMs) ?? `${intervalMs}ms`;
+  const period = formatDuration(intervalMs) ?? `${intervalMs}ms`;
   return `sampled every ${period}`;
 }
 
@@ -341,7 +314,7 @@ export function completenessLabel(completeness: ResourceCompleteness): string {
  * turn and a truncated measurement.
  */
 export function interruptedSentence(observedThroughMs: number | null): string {
-  const reached = formatSpan(observedThroughMs);
+  const reached = formatDuration(observedThroughMs);
   if (reached === null) {
     return 'Collection was interrupted before the turn ended; the cut-off is not reported, and this is not the turn\u2019s total.';
   }
@@ -350,7 +323,7 @@ export function interruptedSentence(observedThroughMs: number | null): string {
 
 /** The sentence a still-running collection must always be read with. */
 export function collectingSentence(observedThroughMs: number | null): string {
-  const reached = formatSpan(observedThroughMs);
+  const reached = formatDuration(observedThroughMs);
   if (reached === null) {
     return 'Collection is still running, so these numbers are a snapshot, not the turn\u2019s total.';
   }

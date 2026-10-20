@@ -2,7 +2,8 @@
 
 import { useEffect, useState } from 'react';
 
-import { formatBytes, formatCpu, formatDuration } from '@/components/features/agents/TurnFooter';
+import { formatBytes, formatCpu } from '@/components/features/agents/TurnFooter';
+import { formatDuration } from '@/lib/format';
 import type { AgentAttemptTelemetryApi, AttemptResourcesApi } from '@/lib/api/agents';
 import { getAdminAttemptResources } from '@/lib/api/adminRuns';
 import { getErrorMessage } from '@/lib/utils/errors';

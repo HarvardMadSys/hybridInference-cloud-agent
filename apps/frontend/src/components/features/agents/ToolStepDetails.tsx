@@ -19,7 +19,7 @@ import {
   ValueBlock,
   recordedAt,
 } from './StepDetailParts';
-import { formatDuration } from './TurnFooter';
+import { formatDuration } from '@/lib/format';
 import { isTruncatedPayload, STATUS_LABEL, type TrajectoryStep } from './trajectorySteps';
 import { parseToolActivity, recordedDelegationReply } from './toolActivity';
 import { DelegationReplyDetails, ToolActivityDetails } from './ToolActivityDetails';

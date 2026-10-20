@@ -14,6 +14,7 @@ import {
   type AdminUsageDay,
   type AdminUsageFilters,
 } from '@/lib/api/adminUsage';
+import { shortDay } from '@/lib/format';
 import { getErrorMessage } from '@/lib/utils/errors';
 
 import { AdminNavigation } from '../AdminNavigation';
@@ -40,7 +41,6 @@ import {
   previousLabel,
   previousWindow,
   share,
-  shortDay,
   tickIndexes,
   type UsageMetric,
 } from './dashboard';

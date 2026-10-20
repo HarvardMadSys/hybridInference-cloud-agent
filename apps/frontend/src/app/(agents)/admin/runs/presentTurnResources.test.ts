@@ -14,7 +14,6 @@ import {
   cpuCell,
   formatCpuSeconds,
   formatMemoryBytes,
-  formatSpan,
   interruptedSentence,
   memoryCell,
   memoryMethod,
@@ -134,13 +133,6 @@ describe('turn resource magnitudes', () => {
     expect(memoryMethod(1000)).toBe('sampled every 1s');
     expect(memoryMethod(500)).toBe('sampled every 500ms');
     expect(memoryMethod(1500)).toBe('sampled every 1.5s');
-  });
-
-  it('formats a window span and reports a missing cut-off as null', () => {
-    expect(formatSpan(130_000)).toBe('2m 10s');
-    expect(formatSpan(30_000)).toBe('30s');
-    expect(formatSpan(200)).toBe('200ms');
-    expect(formatSpan(null)).toBeNull();
   });
 });
 

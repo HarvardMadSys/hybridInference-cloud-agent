@@ -15,7 +15,6 @@ import {
   previousLabel,
   previousWindow,
   share,
-  shortDay,
   tickIndexes,
 } from './dashboard';
 
@@ -217,12 +216,6 @@ describe('share', () => {
 });
 
 describe('days', () => {
-  it('names a UTC day briefly', () => {
-    expect(shortDay('2026-09-23')).toBe('Sep 23');
-    expect(shortDay('2026-09-23T23:30:00Z')).toBe('Sep 23');
-    expect(shortDay('soon')).toBe('—');
-  });
-
   it('tells a day cut by the window from a whole one', () => {
     const usage = aggregate();
     expect(

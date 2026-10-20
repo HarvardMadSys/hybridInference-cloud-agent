@@ -20,7 +20,7 @@
 
 import { useEffect, useState } from 'react';
 
-import { formatDuration } from './TurnFooter';
+import { formatDuration } from '@/lib/format';
 import type { AgentJob } from './types';
 import { getAgentThreadStats, type AgentThreadStatsApi } from '@/lib/api/agents';
 

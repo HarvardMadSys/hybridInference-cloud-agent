@@ -21,7 +21,7 @@ import {
   recordedAt,
   recordedCount,
 } from './StepDetailParts';
-import { formatDuration } from './TurnFooter';
+import { formatDuration } from '@/lib/format';
 import { STATUS_LABEL, type TrajectoryStep } from './trajectorySteps';
 
 import type { AssistantTab } from './trajectoryInspectorTabs';

@@ -37,7 +37,7 @@ import {
   recordedAt,
   recordedCount,
 } from './StepDetailParts';
-import { formatDuration } from './TurnFooter';
+import { formatDuration } from '@/lib/format';
 import type { AgentJob } from './types';
 import { isOlderUsage, onAgentRecordsChanged } from './agentPush';
 import { isRepositoryTooLarge, ownerFailureMessage } from './adapt';

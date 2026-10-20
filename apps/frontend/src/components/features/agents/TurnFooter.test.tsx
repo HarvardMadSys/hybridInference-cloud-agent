@@ -6,7 +6,7 @@ import { cleanup, fireEvent, render, screen, within } from '@testing-library/rea
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { toDisplayJob, toTurnResources } from './adapt';
-import { TurnFooter, formatBytes, formatCpu, formatDuration, toolTimings } from './TurnFooter';
+import { TurnFooter, formatBytes, formatCpu, toolTimings } from './TurnFooter';
 import type { AgentEvent, AgentJob, TurnResources } from './types';
 
 afterEach(cleanup);
@@ -50,16 +50,7 @@ function job(overrides: Partial<AgentJob> = {}): AgentJob {
 }
 
 describe('formatters', () => {
-  it('reads durations the way a person would say them', () => {
-    expect(formatDuration(420)).toBe('420ms');
-    expect(formatDuration(4_200)).toBe('4.2s');
-    expect(formatDuration(42_000)).toBe('42s');
-    expect(formatDuration(125_000)).toBe('2m 5s');
-  });
-
   it('refuses to render a number it was not given', () => {
-    expect(formatDuration(null)).toBeNull();
-    expect(formatDuration(undefined)).toBeNull();
     expect(formatBytes(null)).toBeNull();
     expect(formatCpu(null)).toBeNull();
   });
@@ -73,9 +64,6 @@ describe('formatters', () => {
   it('carries rounding across the unit boundary rather than printing past it', () => {
     // Just under a gigabyte, which rounds to 1024MB before it climbs.
     expect(formatBytes(1_073_741_823)).toBe('1GB');
-    // Just under a minute, which rounds to 60 seconds before it becomes one.
-    expect(formatDuration(59_960)).toBe('1m');
-    expect(formatDuration(119_600)).toBe('2m');
   });
 });
 

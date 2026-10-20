@@ -6,7 +6,7 @@ import {
   type AgentAttemptTelemetryApi,
   type AgentJobApi,
 } from '@/lib/api/agents';
-import { formatDuration } from './TurnFooter';
+import { formatDuration } from '@/lib/format';
 
 interface AttemptTiming {
   key: string;

@@ -6,7 +6,7 @@ import { EventList, EventRow, UserMessage, type InspectTranscriptEvent } from '.
 import type { DelegationReply } from './toolActivity';
 import { DelegationReplyDetails, Status } from './ToolActivityDetails';
 import type { TranscriptPresentation } from './transcriptPresentation';
-import { formatDuration } from './TurnFooter';
+import { formatDuration } from '@/lib/format';
 import type { AgentEvent } from './types';
 
 /** The recorded state of a delegated agent; never inferred from its transcript. */

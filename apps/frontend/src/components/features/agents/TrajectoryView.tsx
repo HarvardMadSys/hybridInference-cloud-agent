@@ -28,7 +28,7 @@ import {
 import type { AgentJobApi, AgentJobEventApi, AgentThreadEventApi } from '@/lib/api/agents';
 import { filterSteps, type TrajectoryStep } from './trajectorySteps';
 import { preview, toSessionLog, type TrajectoryLane } from './trajectory';
-import { formatDuration } from './TurnFooter';
+import { formatDuration } from '@/lib/format';
 import { TrajectoryTimeBreakdown } from './TrajectoryTimeBreakdown';
 import {
   deriveTimeline,

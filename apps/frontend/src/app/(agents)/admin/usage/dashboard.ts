@@ -193,17 +193,6 @@ export function share(group: AdminUsageAggregate, whole: AdminUsageAggregate): n
   return 0;
 }
 
-/** `Sep 23`, for a UTC calendar date or an instant. */
-export function shortDay(value: string | null | undefined): string {
-  const time = Date.parse(value ?? '');
-  if (!Number.isFinite(time)) return '—';
-  return new Date(time).toLocaleDateString('en-US', {
-    month: 'short',
-    day: 'numeric',
-    timeZone: 'UTC',
-  });
-}
-
 /** True when the window covers only part of this UTC day, as its first and last days can. */
 export function isPartialDay(day: AdminUsageDay): boolean {
   return Date.parse(day.until) - Date.parse(day.since) < DAY_MS;
