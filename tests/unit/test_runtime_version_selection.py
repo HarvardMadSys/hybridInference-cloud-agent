@@ -17,8 +17,6 @@ pinned here rather than left to the end-to-end run:
 
 from __future__ import annotations
 
-import inspect
-import re
 from typing import Any
 
 from cloud_agent.domain.runtimes import resolve_runtime_version
@@ -261,6 +259,22 @@ def test_the_menu_survives_validation() -> None:
     assert attestation.model_dump()["runner_capabilities"] == ["shared-sandbox-v1"]
 
 
+class _ReadKeys(dict[str, Any]):
+    """A claim body that records each key read from it, whether or not it is there."""
+
+    def __init__(self, body: dict[str, Any]) -> None:
+        super().__init__(body)
+        self.read: set[str] = set()
+
+    def __getitem__(self, key: str) -> Any:
+        self.read.add(key)
+        return super().__getitem__(key)
+
+    def get(self, key: str, default: Any = None) -> Any:  # type: ignore[override]
+        self.read.add(key)
+        return super().get(key, default)
+
+
 def test_the_claim_response_declares_everything_the_runner_reads() -> None:
     """The other direction of the same wire, and the same failure.
 
@@ -272,14 +286,28 @@ def test_the_claim_response_declares_everything_the_runner_reads() -> None:
     with the row.
 
     Asserted as a join rather than a field list: this fails for whatever is
-    threaded through next and forgotten in the middle.
+    threaded through next and forgotten in the middle. The body is one the
+    response model produced, and it remembers every key the runner asks it
+    for, present or not.
     """
-    source = inspect.getsource(ClaimedJob.from_response)
-    read = set(re.findall(r'body\.get\("([a-z_]+)"\)', source))
-    read |= set(re.findall(r'body\["([a-z_]+)"\]', source))
+    body = _ReadKeys(
+        WorkerClaimResponse(
+            job_id="ajob_1",
+            thread_id="athr_1",
+            attempt_id=1,
+            attempt_no=1,
+            repo="owner/name",
+            task_prompt="hi",
+            runtime="claude-code",
+            model="m",
+            worker_token="w",
+        ).model_dump(mode="json")
+    )
+    ClaimedJob.from_response(body)
     declared = set(WorkerClaimResponse.model_fields)
 
-    unsendable = read - declared
+    assert "runtime_version" in body.read
+    unsendable = body.read - declared
     assert not unsendable, (
         f"ClaimedJob reads {sorted(unsendable)} from the claim body, which "
         "WorkerClaimResponse does not declare — the endpoint cannot send them "

@@ -588,9 +588,11 @@ async def test_the_lifespan_hands_the_loops_the_provider_not_a_snapshot(
         "cloud_agent.source_control_runtime.SourceControlRuntime.from_env",
         relay_runtime_builder,
     )
+    started.clear()
     relay = FastAPI()
     async with lifespan(relay, background=False):
         await asyncio.sleep(0)
+        assert not started, f"the relay listener started {sorted(started)}"
         assert relay.state.source_control is None
         assert relay.state.compute_commands is None
         assert relay.state.compute_resource_task is None
