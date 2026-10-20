@@ -23,11 +23,27 @@ publishing = threading.Event()
 exiting = threading.Event()
 
 
+class NoOpLock:
+    # The events synchronize this handler. A do-nothing lock keeps
+    # logging.shutdown from draining it independently of the collector's exit
+    # callback, and works on every supported interpreter: 3.13's Handler.handle
+    # uses `with self.lock:`, which `lock = None` used to break.
+    def acquire(self):
+        return True
+
+    def release(self):
+        return None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return None
+
+
 class WaitForExit(logging.Handler):
     def createLock(self):
-        # The events synchronize this handler. Keep logging.shutdown from
-        # draining it independently of the collector's exit callback.
-        self.lock = None
+        self.lock = NoOpLock()
 
     def emit(self, record):
         publishing.set()
