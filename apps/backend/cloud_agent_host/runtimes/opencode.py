@@ -160,5 +160,5 @@ class OpencodeRuntime(GenericRuntime):
         self._wrapper_mcp_env(config, gateway_base_url=gateway_base_url, env=env)
 
     def capabilities(self) -> RuntimeCapabilities:
-        """Tier 2 mechanics, but this one control is verified and wired."""
-        return RuntimeCapabilities(tier=2, reasoning_efforts=self.EFFORT_LEVELS, mcp=OPENCODE.mcp)
+        """Take the platform's MCP relay and a verified effort level."""
+        return RuntimeCapabilities(reasoning_efforts=self.EFFORT_LEVELS, mcp=OPENCODE.mcp)

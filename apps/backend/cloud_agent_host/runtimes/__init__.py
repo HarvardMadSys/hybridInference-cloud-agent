@@ -43,12 +43,7 @@ from .kilo import KiloRuntime
 from .opencode import OpencodeRuntime
 from .pi import PI_MCP_BRIDGE, PiRuntime
 from .preview import REPLY_PREVIEW, ReplyPreview
-from .registry import (
-    get_runtime,
-    registered_runtimes,
-    runtime_reasoning_efforts,
-    runtimes_supporting_mcp,
-)
+from .registry import get_runtime, registered_runtimes
 
 __all__ = [
     "DIFF",
@@ -83,6 +78,4 @@ __all__ = [
     "get_runtime",
     "merged_mcp_server",
     "registered_runtimes",
-    "runtime_reasoning_efforts",
-    "runtimes_supporting_mcp",
 ]

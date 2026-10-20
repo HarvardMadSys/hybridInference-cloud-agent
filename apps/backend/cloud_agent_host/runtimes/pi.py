@@ -514,19 +514,11 @@ class PiRuntime(GenericRuntime):
         self._wrapper_mcp_env(config, gateway_base_url=gateway_base_url, env=env)
 
     def capabilities(self) -> RuntimeCapabilities:
-        """Tier 1 events and no trusted cost attribution.
+        """Take the platform's MCP relay, through the image's bridge, and an effort level.
 
-        pi reports a per-turn ``cost`` block, but it is computed from a price
-        table the gateway does not populate — every field came back zero in
-        the recorded runs. ``api_logs`` is the billing authority regardless,
-        so this claims no cost report rather than surfacing a confident zero.
-        Native resume is declared by :class:`drivers.PiDriver`, not by this
-        event/cost capability row.
+        Native resume is declared by :class:`drivers.PiDriver`, not here.
         """
         return RuntimeCapabilities(
-            cost_report=False,
-            normalized_events=True,
-            tier=1,
             mcp=PI.mcp,
             reasoning_efforts=self.EFFORT_LEVELS,
         )

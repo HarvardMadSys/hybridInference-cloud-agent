@@ -1102,45 +1102,6 @@ def exit_events_from_journal(
     return tracker.consume(payload)
 
 
-def exit_events_from_processes(
-    processes: Iterable[Any],
-    *,
-    boot_id: str,
-    counter_bits: int = EXIT_COUNTER_CPU | EXIT_COUNTER_IO,
-) -> list[ThreadExit]:
-    """Turn observed exit rows into window exit events.
-
-    Only rows the kernel actually settled are used. A row for a process that
-    outlived the turn carries no consumption by construction, and a row whose
-    start time the observer never learned cannot become a stable instance key,
-    so it is skipped rather than keyed by PID.
-    """
-    events: list[ThreadExit] = []
-    for process in processes:
-        if not getattr(process, "observed_exit", False):
-            continue
-        started = getattr(process, "started_guest_mono_ns", None)
-        pid = getattr(process, "pid", None)
-        if not isinstance(started, int) or not isinstance(pid, int) or started <= 0:
-            continue
-        cpu_usec = getattr(process, "cpu_usec", None)
-        events.append(
-            ThreadExit(
-                instance=instance_key(
-                    boot_id=boot_id,
-                    starttime_ticks=started // NS_PER_TICK,
-                    tid=pid,
-                ),
-                guest_mono_ns=getattr(process, "exited_guest_mono_ns", 0) or 0,
-                cpu_ns=None if cpu_usec is None else int(cpu_usec) * 1_000,
-                read_bytes=getattr(process, "io_read_bytes", None),
-                write_bytes=getattr(process, "io_write_bytes", None),
-                counter_bits=counter_bits,
-            )
-        )
-    return events
-
-
 def _int_or_none(value: Any) -> int | None:
     """Coerce a JSON number to a non-negative int, or None."""
     if isinstance(value, bool) or not isinstance(value, int):

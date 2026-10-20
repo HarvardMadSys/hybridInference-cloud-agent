@@ -65,9 +65,6 @@ class RuntimeCapabilities:
     consults when picking a turn's continuity path.
     """
 
-    cost_report: bool = False
-    normalized_events: bool = False
-    tier: int = 2
     #: The reasoning-effort levels this adapter can actually put on the wire,
     #: in the CLI's own vocabulary. Empty means "cannot express effort", which
     #: is what every runtime whose flag nobody has verified declares — the

@@ -399,11 +399,6 @@ class HarnessEvent:
     payload: dict[str, Any] = field(default_factory=dict)
     raw_line: str | None = None
 
-    @property
-    def is_floor(self) -> bool:
-        """Whether this is driver control flow rather than a stream row."""
-        return self.event_type in FLOOR_EVENT_TYPES
-
 
 @dataclass(frozen=True)
 class LaunchContext:
@@ -548,20 +543,12 @@ class HarnessTurn(Generic[_RuntimeT]):
             return InputOutcome(True)
 
     def iter_events(self) -> Iterator[HarnessEvent]:
-        """Yield floor and dialect events as the harness produces them.
-
-        Blocking, line-driven iteration. The caller that must interleave
-        deadline/lease checks reads the process on its own thread exactly as
-        before — this iterator is the single place a line becomes an event.
-        """
-        yield HarnessEvent(TURN_STARTED)
-        for line in self._process.lines():
-            yield from self.events_for_line(line)
-        yield self.finish_event()
+        """Yield floor and dialect events as the harness produces them."""
+        raise NotImplementedError
 
     def events_for_line(self, line: str) -> list[HarnessEvent]:
         """Every event one stdout line stands for; usually exactly one."""
-        return [self.event_for_line(line)]
+        raise NotImplementedError
 
     def flush_events(self) -> list[HarnessEvent]:
         """Rows still gathered from earlier lines; none unless a driver batches."""
@@ -579,41 +566,27 @@ class HarnessTurn(Generic[_RuntimeT]):
         return HarnessEvent(event.event_type, dict(event.payload or {}), raw_line=line)
 
     def raw_lines(self) -> Iterator[str]:
-        """The transport's line stream, for callers that pump on their own thread.
-
-        The runner reads stdout on a dedicated thread so deadline, lease and
-        cancel checks keep running while the agent is silent; it feeds each
-        line back through :meth:`event_for_line`. Iterating :meth:`iter_events`
-        directly is the single-threaded equivalent.
-        """
-        return self._process.lines()
+        """The transport's line stream, for callers that pump on their own thread."""
+        raise NotImplementedError
 
     def stderr_text(self) -> str:
         """Whatever the harness wrote to stderr, once it has exited."""
         return self._process.stderr_text()
 
     def cancel(self) -> None:
-        """Stop this turn now. The kill is the platform's backstop, kept here."""
-        self._cancelled = True
-        self._clear_questions()
-        self._process.kill()
+        """Stop this turn now."""
+        raise NotImplementedError
 
     def inject(self, text: str, *, message_id: str) -> InputOutcome:
         """Hand ``text`` to this running turn, as the owner's next message in it.
 
-        A driver that declares ``steering="mid_turn"`` overrides this. Called
-        from a thread other than the one reading the turn's stream.
+        Called from a thread other than the one reading the turn's stream.
         """
-        return InputOutcome(False, INPUT_UNSUPPORTED)
+        raise NotImplementedError
 
     def wait(self) -> TurnResult:
         """Wait for exit and return the contract-checked result."""
-        if self._result is None:
-            exit_code = self._process.wait()
-            self._result = self._build_result(exit_code)
-            self._clear_questions()
-            self._session.turn_finished()
-        return self._result
+        raise NotImplementedError
 
     def finish_event(self) -> HarnessEvent:
         """The floor event describing how this turn ended."""
@@ -1341,10 +1314,7 @@ class _JsonResidentSession(HarnessSession[_LiveRuntimeT], Generic[_LiveRuntimeT]
     def event_for_protocol_line(
         self, line: str, turn: _JsonResidentTurn[_LiveRuntimeT]
     ) -> HarnessEvent:
-        event = self.runtime.parse_event(line)
-        if event is None:
-            return HarnessEvent(LINE, raw_line=line)
-        return HarnessEvent(event.event_type, dict(event.payload or {}), raw_line=line)
+        raise NotImplementedError
 
     def stream_delta(self, line: str, turn: _JsonResidentTurn[_LiveRuntimeT]) -> StreamDelta | None:
         """The per-token delta ``line`` is, if it is one to merge; see :class:`DeltaBatcher`."""

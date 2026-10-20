@@ -148,4 +148,4 @@ class KiloRuntime(GenericRuntime):
 
     def capabilities(self) -> RuntimeCapabilities:
         """Kilo supports the same platform MCP surface as every other runtime."""
-        return RuntimeCapabilities(tier=2, reasoning_efforts=self.EFFORT_LEVELS, mcp=KILO.mcp)
+        return RuntimeCapabilities(reasoning_efforts=self.EFFORT_LEVELS, mcp=KILO.mcp)

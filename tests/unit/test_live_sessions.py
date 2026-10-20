@@ -14,6 +14,7 @@ import json
 import pytest
 
 from cloud_agent_host.drivers import (
+    FLOOR_EVENT_TYPES,
     TURN_COMPLETED,
     TURN_FAILED,
     TURN_STARTED,
@@ -811,7 +812,7 @@ def test_codex_subagent_thread_events_belong_to_the_call_that_spawned_it(tmp_pat
         on("thread-a", "item/completed", {"type": "agentMessage", "id": "main", "text": "DONE"}),
         on("thread-a", "turn/completed", turn={"id": "turn-a", "status": "completed"}),
     )
-    events = [event for event in turn.iter_events() if not event.is_floor]
+    events = [event for event in turn.iter_events() if event.event_type not in FLOOR_EVENT_TYPES]
     owner = {"agent_thread_id": "child-t", "parent_tool_use_id": "call-spawn"}
 
     def owned(event):

@@ -289,11 +289,5 @@ class CodexRuntime(AgentRuntime):
         return ["-c", f'model_reasoning_effort="{effort}"']
 
     def capabilities(self) -> RuntimeCapabilities:
-        """Codex is Tier 1 for events; cost comes from the gateway ledger."""
-        return RuntimeCapabilities(
-            cost_report=False,
-            normalized_events=True,
-            tier=1,
-            reasoning_efforts=self.EFFORT_LEVELS,
-            mcp=CODEX.mcp,
-        )
+        """Codex takes the platform's MCP relay and an effort level."""
+        return RuntimeCapabilities(reasoning_efforts=self.EFFORT_LEVELS, mcp=CODEX.mcp)

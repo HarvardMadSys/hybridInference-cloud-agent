@@ -28,10 +28,9 @@ from cloud_agent_host.runtimes import (
     RuntimeMCPConfig,
     RuntimeMCPUnavailableError,
     get_runtime,
-    runtime_reasoning_efforts,
-    runtimes_supporting_mcp,
 )
 from cloud_agent_shared.event_payloads import MAX_EVENT_PAYLOAD_BYTES, TRUNCATION_NOTICE
+from cloud_agent_shared.runtime_catalog import runtime_reasoning_efforts, runtimes_supporting_mcp
 
 _FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "agent_runtime_streams"
 
@@ -702,7 +701,6 @@ def test_pi_usage_reports_tokens_without_claiming_a_cost():
     assert usage.payload["output_tokens"] == 8
     assert usage.payload["cache_read_tokens"] == 4
     assert "cost" not in usage.payload
-    assert runtime.capabilities().cost_report is False
 
 
 def test_pi_names_each_response_so_its_gateway_request_can_be_found():
@@ -1113,9 +1111,6 @@ def test_pi_runtime_targets_the_gateway_through_its_wrapper():
     assert env["OPENAI_BASE_URL"] == "http://backend:8080/v1"
     assert env["OPENAI_API_KEY"] == "ajt.a.b"
     assert env["PI_GATEWAY_MODEL"] == "glm-5.1"
-    # Tier 1 since the recorded staging runs pinned the format.
-    assert runtime.capabilities().tier == 1
-    assert runtime.capabilities().normalized_events is True
 
 
 def test_pi_native_session_is_persisted_and_resumed_explicitly():
@@ -1280,7 +1275,6 @@ def test_opencode_runtime_targets_the_gateway_through_its_wrapper():
     assert env["OPENAI_API_KEY"] == "ajt.a.b"
     assert env["OPENCODE_GATEWAY_MODEL"] == "glm-5.1"
     assert runtime.parse_event('{"type":"text"}').event_type == "raw"
-    assert runtime.capabilities().tier == 2
 
 
 def test_opencode_native_session_id_and_xdg_state_are_explicit():
@@ -1331,7 +1325,6 @@ def test_kilo_runtime_targets_the_gateway_through_its_wrapper():
     assert env["OPENAI_API_KEY"] == "ajt.a.b"
     assert env["KILO_GATEWAY_MODEL"] == "glm-5.1"
     assert runtime.parse_event('{"type":"text"}').event_type == "raw"
-    assert runtime.capabilities().tier == 2
 
 
 def test_kilo_native_session_id_and_xdg_state_are_explicit():
@@ -1350,13 +1343,6 @@ def test_kilo_native_session_id_and_xdg_state_are_explicit():
     assert argv[argv.index("--session") + 1] == "ses_kilo_123"
     assert env["XDG_DATA_HOME"] == "/agent-state/kilo/data"
     assert env["KILO_FREEINFERENCE_CONFIG_DIR"] == "/run/agent-activation/kilo"
-
-
-def test_capabilities_declare_tiers():
-    """Tiering is explicit so the platform never assumes support."""
-    assert ClaudeCodeRuntime().capabilities().tier == 1
-    assert GenericRuntime("x").capabilities().tier == 2
-    assert GenericRuntime("x").capabilities().normalized_events is False
 
 
 def test_system_telemetry_does_not_become_408_milestones():

@@ -506,11 +506,5 @@ class ClaudeCodeRuntime(AgentRuntime):
         return ["--effort", str(effort)]
 
     def capabilities(self) -> RuntimeCapabilities:
-        """Claude Code is Tier 1: normalized events, a cost report, and MCP."""
-        return RuntimeCapabilities(
-            cost_report=True,
-            normalized_events=True,
-            tier=1,
-            mcp=CLAUDE_CODE.mcp,
-            reasoning_efforts=self.EFFORT_LEVELS,
-        )
+        """Claude Code takes the platform's MCP relay and an effort level."""
+        return RuntimeCapabilities(mcp=CLAUDE_CODE.mcp, reasoning_efforts=self.EFFORT_LEVELS)
