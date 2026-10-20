@@ -556,6 +556,18 @@ def test_sandbox_manager_requires_a_container_backend_without_an_injected_superv
         create_app(backend=ProcessBackend(acknowledged_unsafe=True), token="x")
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/openapi.json", "/docs", "/redoc"])
+async def test_sandbox_manager_serves_no_schema_or_docs_route(path):
+    """Every route requires the manager token; these would answer without it."""
+    async with AsyncClient(
+        transport=ASGITransport(app=_app(_SharedSupervisor())), base_url="http://sandbox_manager"
+    ) as client:
+        response = await client.get(path)
+
+    assert response.status_code == 404
+
+
 class _ArchiveService:
     def __init__(self, events: list[str]) -> None:
         self.events = events
