@@ -541,20 +541,22 @@ async def superseded_containers(
 async def authorize_superseded_removals(
     conn: Any, host: str, containers: list[dict[str, Any]], operation_id: str | None
 ) -> list[dict[str, Any]]:
-    """Record which of the containers ``host`` reports may be removed; return them all.
+    """Record which of the containers ``host`` reports may be removed; return what to remove.
 
     Each is decided under its group's row lock, which every transition to
     ``lost`` also takes: either the group became ``lost`` first and nothing is
     authorized, or the authorization is recorded first and stands. From then
     on the group counts on its checkpoint alone; a later ``lost`` does not
     take the authorization back, since the removal may already have run.
-    Returned are the containers authorized now and those authorized before
-    that the host still reports, each with the ``request_id`` it is removed
-    under, so a retry resends the same request whatever the group did since.
-    The caller holds a transaction.
+    Returned are the containers authorized now, those authorized before that
+    the host still reports, and every removal on ``host`` not yet confirmed,
+    reported or not: one the host carried out whose answer was lost no
+    longer shows, and only its receipt completes it. Each comes with the
+    ``request_id`` it is removed under, so a retry resends the same request
+    whatever the group did since. The caller holds a transaction.
     """
     if not containers:
-        return []
+        return await _authorized_removals(conn, host, [])
     await conn.execute(
         "SELECT id FROM agent_sandboxes WHERE id = ANY($1::text[]) ORDER BY id FOR SHARE",
         sorted({str(item["sandbox_id"]) for item in containers}),
@@ -580,14 +582,28 @@ async def authorize_superseded_removals(
             [item["container_id"] for item in eligible],
             operation_id,
         )
+    return await _authorized_removals(conn, host, containers)
+
+
+async def _authorized_removals(
+    conn: Any, host: str, containers: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """The recorded removals on ``host`` of ``containers``, and those not yet confirmed."""
     rows = await conn.fetch(
         """
         SELECT r.request_id, r.sandbox_id, r.generation, r.container_id, r.origin_thread_id
-        FROM unnest($2::text[], $3::bigint[], $4::text[], $5::text[])
-            AS x(sandbox_id, generation, container_id, origin_thread_id)
-        JOIN agent_superseded_container_removals r
-            ON r.host = $1 AND r.sandbox_id = x.sandbox_id AND r.generation = x.generation
-           AND r.container_id = x.container_id AND r.origin_thread_id = x.origin_thread_id
+        FROM agent_superseded_container_removals r
+        WHERE r.host = $1 AND (
+            r.removed_at IS NULL
+            OR EXISTS (
+                SELECT 1
+                FROM unnest($2::text[], $3::bigint[], $4::text[], $5::text[])
+                    AS x(sandbox_id, generation, container_id, origin_thread_id)
+                WHERE r.sandbox_id = x.sandbox_id AND r.generation = x.generation
+                  AND r.container_id = x.container_id
+                  AND r.origin_thread_id = x.origin_thread_id
+            )
+        )
         ORDER BY r.sandbox_id, r.container_id
         """,
         host,

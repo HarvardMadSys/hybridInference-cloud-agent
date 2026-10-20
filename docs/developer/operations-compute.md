@@ -517,7 +517,8 @@ Each removal is authorized in the database first, under the group's lock: a
 group lost before that keeps its container, and an authorization made before
 the group was lost still stands. The operation's result counts the removed
 containers in `superseded_removed`. A removal the Host does not answer is
-retried as the same request. A release that stopped for attention runs again
+retried as the same request, even once the Host no longer lists the container,
+until the Host confirms it. A release that stopped for attention runs again
 once the provider confirms the machine is gone, and settles.
 
 ## Moving sandboxes out before a lease ends

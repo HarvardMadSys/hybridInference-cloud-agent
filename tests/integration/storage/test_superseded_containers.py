@@ -24,6 +24,7 @@ from tests.integration.storage.test_sandbox_restore_store import (
 )
 
 from cloud_agent.ports.external.compute_provider import ProviderReceipt
+from cloud_agent.sandbox_manager_client import SandboxManagerError
 from cloud_agent.storage._sql.hosts import (
     authorize_superseded_removals,
     superseded_containers,
@@ -289,9 +290,15 @@ async def test_an_authorization_recorded_first_stands_once_the_group_is_lost(poo
     assert await _superseded(pool, "runner-a", old) == []
     # A retry sends the same request for what was authorized, and only that.
     assert await _authorize(store, "runner-a", old) == authorized
-    assert await _authorize(store, "runner-a", _held(job, container_id="container-x")) == []
+    # Another container of the group is not authorized with it.
+    assert await _authorize(store, "runner-a", _held(job, container_id="container-x")) == (
+        authorized
+    )
     assert await _authorize(store, "runner-b", old) == []
+    # Unconfirmed, it is resent even once the host no longer lists it.
+    assert await _authorize(store, "runner-a") == authorized
     await store.compute_resources.record_superseded_removal(request_id=request_id)
+    assert await _authorize(store, "runner-a") == []
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT host, sandbox_id, generation, container_id, removed_at "
@@ -368,10 +375,15 @@ async def test_a_handed_over_group_without_a_restore_point_still_holds_its_machi
     assert [g["id"] for g in impact["retained_groups"]] == ["asbx_restore"]
 
 
+@pytest.mark.parametrize("answer_lost", [False, True])
 async def test_a_release_removes_what_a_group_never_resumed_left_behind(
-    pool, store: Storage, monkeypatch
+    pool, store: Storage, monkeypatch, answer_lost: bool
 ):
-    """From the hand-over to the released machine, with no chat ever written to again."""
+    """From the hand-over to the released machine, with no chat ever written to again.
+
+    With ``answer_lost`` the Host removes the container but its answer never
+    arrives: the next pass lists nothing, and confirms the removal anyway.
+    """
     job, _ = await _covered(pool, store)
     assert await store.host_pool.remove_host(host="runner-a") == "ok"
     assert (await _state(pool))["state"] == "cold"
@@ -385,9 +397,13 @@ async def test_a_release_removes_what_a_group_never_resumed_left_behind(
     def listed(host: str) -> list[dict]:
         return list(held.get(host, []))
 
+    lost = [answer_lost]
+
     async def discard(thread_id: str, payload: dict) -> dict:
         assert thread_id == job["thread_id"]
         held["runner-a"] = []
+        if lost and lost.pop():
+            raise SandboxManagerError(0, "no answer")
         return {
             "request_id": payload["request_id"],
             "container_id": payload["expected_container_id"],
@@ -425,18 +441,31 @@ async def test_a_release_removes_what_a_group_never_resumed_left_behind(
         requested_by="admin",
     )
     retired = await run_next(r)
+    if answer_lost:
+        assert retired["state"] == "waiting", retired
+        async with pool.acquire() as conn:
+            assert await conn.fetchval(
+                "SELECT removed_at IS NULL FROM agent_superseded_container_removals"
+            )
+            await conn.execute(
+                "UPDATE agent_compute_operations SET next_attempt_at = NOW() WHERE id = $1",
+                retired["id"],
+            )
+        retired = await run_next(r)
 
     assert retired["state"] == "succeeded", retired
     assert retired["result"]["superseded_removed"] == 1
     assert (await r.repo.get_allocation(allocation["id"]))["release_committed_at"]
     r.provider.release.assert_awaited_once()
-    payload = managers["runner-a"].discard_sandbox_deletion.await_args.args[1]
-    assert payload == {
-        "request_id": superseded_removal_request_id("runner-a", old),
-        "generation": 1,
-        "expected_container_id": "container-a",
-        "sandbox_id": "asbx_restore",
-    }
+    sent = [call.args[1] for call in managers["runner-a"].discard_sandbox_deletion.await_args_list]
+    assert sent == [
+        {
+            "request_id": superseded_removal_request_id("runner-a", old),
+            "generation": 1,
+            "expected_container_id": "container-a",
+            "sandbox_id": "asbx_restore",
+        }
+    ] * (2 if answer_lost else 1)
     async with pool.acquire() as conn:
         assert await conn.fetchval(
             "SELECT removed_at IS NOT NULL FROM agent_superseded_container_removals"

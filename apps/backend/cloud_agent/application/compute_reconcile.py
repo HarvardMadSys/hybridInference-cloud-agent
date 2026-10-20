@@ -1956,7 +1956,9 @@ class ComputeReconciler:
         Sandbox Manager's discard, which requires it stopped and idle under
         the reported generation, and records the request before Docker
         removes it. A retry sends what was authorized under the same request
-        id, and one that finds the container gone completes.
+        id, and one that finds the container gone completes. So does a removal
+        the Host carried out but whose answer was lost: the container no
+        longer shows, and its receipt is fetched again before release goes on.
         """
         held = await sandbox_manager.list_sandboxes()
         stopped = [
@@ -1969,8 +1971,6 @@ class ComputeReconciler:
                 for key in ("sandbox_id", "container_id", "origin_thread_id")
             )
         ]
-        if not stopped:
-            return held
         superseded = await self.repository.authorize_superseded_removals(
             host=str(host["host"]), containers=stopped, operation_id=str(operation["id"])
         )

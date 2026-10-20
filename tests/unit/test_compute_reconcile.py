@@ -173,6 +173,8 @@ def harness(monkeypatch, *, kind="acquire", identified=False):
         retirement_impact=AsyncMock(return_value={"blocked_reasons": []}),
         commit_release=AsyncMock(return_value={"blocked_reasons": []}),
         record_inventory=AsyncMock(return_value=True),
+        authorize_superseded_removals=AsyncMock(return_value=[]),
+        record_superseded_removal=AsyncMock(),
     )
     provider = SimpleNamespace(
         capabilities=Mock(
@@ -790,7 +792,9 @@ async def test_release_never_offers_a_running_container_for_removal(monkeypatch)
 
     await h.reconciler.execute(h.operation)
 
-    h.repository.authorize_superseded_removals.assert_not_awaited()
+    h.repository.authorize_superseded_removals.assert_awaited_once_with(
+        host="compute-nodeid", containers=[], operation_id=h.operation["id"]
+    )
     h.sandbox_manager.discard_sandbox_deletion.assert_not_awaited()
     assert h.operation["state"] == "blocked"
 
@@ -817,6 +821,38 @@ async def test_a_removal_that_does_not_answer_is_retried_as_the_same_request(mon
     h.sandbox_manager.list_sandboxes.return_value = [_left_behind_container()]
     await h.reconciler.execute(h.operation)
     assert h.sandbox_manager.discard_sandbox_deletion.await_args.args[1]["request_id"] == first
+
+
+@pytest.mark.asyncio
+async def test_a_removal_whose_answer_was_lost_is_confirmed_before_release(monkeypatch):
+    """The Host removed it, but the answer never arrived: nothing lists it any more."""
+    h = harness(monkeypatch, kind="retire", identified=True)
+    _left_behind(h, removal=SandboxManagerError(0, "unavailable"))
+
+    await h.reconciler.execute(h.operation)
+    assert h.operation["state"] == "waiting"
+
+    def receipt(_thread_id, payload):
+        return {
+            "request_id": payload["request_id"],
+            "container_id": payload["expected_container_id"],
+            "deleted": True,
+        }
+
+    h.operation.update(state="running", step="pending")
+    h.sandbox_manager.list_sandboxes.side_effect = None
+    h.sandbox_manager.list_sandboxes.return_value = []
+    h.sandbox_manager.discard_sandbox_deletion.side_effect = receipt
+    await h.reconciler.execute(h.operation)
+
+    assert h.operation["state"] == "succeeded"
+    assert h.operation["result"]["superseded_removed"] == 1
+    assert h.repository.authorize_superseded_removals.await_args.kwargs["containers"] == []
+    first, second = h.sandbox_manager.discard_sandbox_deletion.await_args_list
+    assert first.args[1]["request_id"] == second.args[1]["request_id"] == "superseded-recorded"
+    h.repository.record_superseded_removal.assert_awaited_once_with(
+        request_id="superseded-recorded"
+    )
 
 
 @pytest.mark.asyncio
