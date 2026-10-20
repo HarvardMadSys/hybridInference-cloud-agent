@@ -231,7 +231,7 @@ def _surface_cleanup_errors(primary: BaseException | None, errors: list[BaseExce
     raise errors[0]
 
 
-async def _shutdown_lifespan(
+async def _shutdown_lifespan(  # noqa: PLR0912 complexity baseline, #771
     app: FastAPI,
     *,
     pool: Any,
@@ -325,7 +325,7 @@ async def _shutdown_lifespan(
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[None]:
+async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[None]:  # noqa: PLR0915 complexity baseline, #771
     """Open the store, optionally start the reaper and publisher, tear down.
 
     Args:

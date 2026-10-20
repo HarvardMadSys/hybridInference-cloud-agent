@@ -206,7 +206,7 @@ class CodexRuntime(AgentRuntime):
             )
         return ["-c", "mcp_servers = { " + ", ".join(entries) + " }"]
 
-    def parse_event(self, line: str) -> NormalizedEvent | None:
+    def parse_event(self, line: str) -> NormalizedEvent | None:  # noqa: PLR0912 complexity baseline, #771
         """Normalize one ``codex exec --json`` line."""
         line = line.strip()
         if not line:

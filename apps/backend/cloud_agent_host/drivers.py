@@ -1531,7 +1531,7 @@ class CodexAppServerSession(_JsonResidentSession[CodexRuntime]):
             lambda merged, merged_line: _codex_raw_row(merged, merged_line, owner),
         )
 
-    def event_for_protocol_line(
+    def event_for_protocol_line(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         self, line: str, turn: _JsonResidentTurn[CodexRuntime]
     ) -> HarnessEvent:
         """Normalize one Codex app-server notification for the active turn."""
@@ -2121,7 +2121,7 @@ class HttpAgentLiveSession(_JsonResidentSession[ResidentLiveRuntime]):
             value, ("event", "properties", "delta"), properties["delta"], line, _bridge_raw_row
         )
 
-    def event_for_protocol_line(
+    def event_for_protocol_line(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         self, line: str, turn: _JsonResidentTurn[ResidentLiveRuntime]
     ) -> HarnessEvent:
         """Normalize one OpenCode/Kilo bridge event for the active turn."""

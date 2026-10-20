@@ -79,7 +79,7 @@ class Setting:
         """Keep existing saved secrets readable across the service rename."""
         return STORED_SETTING_KEYS.get(self.key, self.key)
 
-    def validate(self, value: Any, *, saved: bool = False) -> SettingValue:
+    def validate(self, value: Any, *, saved: bool = False) -> SettingValue:  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         """Return a checked value, raising a message that contains no supplied data.
 
         ``saved`` marks a value already stored or imported from the
@@ -1252,7 +1252,7 @@ def validate_settings_update(previous: Mapping[str, Any], encoded: Mapping[str, 
         )
 
 
-def initial_settings(*, keys: set[str] | None = None) -> dict[str, Any]:
+def initial_settings(*, keys: set[str] | None = None) -> dict[str, Any]:  # noqa: PLR0912 complexity baseline, #771
     """Import only registered environment variables into the initial settings row."""
     result: dict[str, Any] = {}
     values: dict[str, SettingValue] = {setting.key: setting.default for setting in SETTINGS}

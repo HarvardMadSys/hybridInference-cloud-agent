@@ -669,7 +669,7 @@ class PostgresEnvironmentRepository:
         row = {**row, "revision": revision}
         return await self._environment_public(conn, row)
 
-    async def save_environment(
+    async def save_environment(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         self,
         user_id: str,
         *,

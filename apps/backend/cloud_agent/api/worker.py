@@ -929,7 +929,7 @@ async def worker_claim(
         ) from exc
 
 
-async def _hand_over_claim(
+async def _hand_over_claim(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     job_store: _WorkerStorage,
     claim: dict[str, Any],
     *,

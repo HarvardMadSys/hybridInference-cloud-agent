@@ -382,7 +382,7 @@ class ResidentTransportFactory:
     def __init__(self, manager: ChatSandboxManager) -> None:
         self._manager = manager
 
-    def open(
+    def open(  # noqa: PLR0912 complexity baseline, #771
         self, spec: ChatSandboxSpec, launch: ResidentLaunch
     ) -> ResidentTransport[DialectRuntime]:
         """Start and probe a runtime's persistent transport."""
@@ -891,7 +891,7 @@ class ResidentTransportFactory:
             ),
         )
 
-    def fork_native(
+    def fork_native(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         self,
         spec: ChatSandboxSpec,
         source: ResidentTransport[DialectRuntime],

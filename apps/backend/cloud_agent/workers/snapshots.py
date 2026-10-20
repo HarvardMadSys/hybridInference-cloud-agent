@@ -60,7 +60,7 @@ _BASE_LOST = (
 )
 
 
-async def _capture_due_shared_snapshot(store: _SnapshotCapture) -> bool:
+async def _capture_due_shared_snapshot(store: _SnapshotCapture) -> bool:  # noqa: PLR0912 complexity baseline, #771
     """Capture at most one quiescent shared workspace without blocking turns.
 
     Reports whether one was due, captured or deferred.

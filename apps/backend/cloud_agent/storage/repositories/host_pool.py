@@ -116,7 +116,7 @@ def _job_matches_host(job: _JobDemand, host: _HostShape) -> bool:
     )
 
 
-def _maximum_compatible_jobs(jobs: Sequence[_JobDemand], hosts: Sequence[_HostCapacity]) -> int:
+def _maximum_compatible_jobs(jobs: Sequence[_JobDemand], hosts: Sequence[_HostCapacity]) -> int:  # noqa: C901, PLR0912 complexity baseline, #771
     """Return the exact maximum cardinality of the job/host-capacity matching.
 
     Equal jobs and equal host shapes are aggregated before a small Dinic flow.
@@ -1279,7 +1279,7 @@ class PostgresHostPoolRepository:
             {str(row["host"]) for row in owner_rows},
         )
 
-    async def autoscaling_observation(self, *, expected_deployment_sha: str) -> dict[str, Any]:
+    async def autoscaling_observation(self, *, expected_deployment_sha: str) -> dict[str, Any]:  # noqa: PLR0915 complexity baseline, #771
         """Read the durable, content-free signal used by compute autoscaling.
 
         A retained turn is tied to its existing Host and therefore cannot be
