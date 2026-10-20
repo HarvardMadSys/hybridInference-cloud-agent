@@ -14,6 +14,7 @@ import os
 import threading
 from typing import TYPE_CHECKING, Any
 
+from cloud_agent.domain_cipher import settings_root_key
 from cloud_agent.setting_definition import (
     MINIMUM_CREDENTIAL_BYTES as MINIMUM_CREDENTIAL_BYTES,
     Setting,
@@ -856,11 +857,7 @@ _revision = -1
 def _cipher(key: str) -> Any:
     from cloud_agent.source_control import SourceControlCipher, SourceControlError
 
-    secret = (
-        os.environ.get("AGENT_SETTINGS_ENCRYPTION_KEY")
-        or os.environ.get("AGENT_SESSION_SECRET")
-        or ""
-    )
+    secret = settings_root_key()
     if len(secret.encode()) < 32:
         raise SourceControlError(
             "A settings encryption key of at least 32 bytes is required to store secret settings"
@@ -1206,11 +1203,7 @@ def setup_status(values: Mapping[str, SettingValue]) -> dict[str, Any]:
                 "missing": missing,
             }
         )
-    root_key = (
-        os.environ.get("AGENT_SETTINGS_ENCRYPTION_KEY")
-        or os.environ.get("AGENT_SESSION_SECRET")
-        or ""
-    )
+    root_key = settings_root_key()
     bootstrap_missing = []
     if len(root_key.encode()) < 32:
         bootstrap_missing.append(
