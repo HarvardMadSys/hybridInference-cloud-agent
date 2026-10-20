@@ -695,6 +695,171 @@ def test_remote_inventory_only_exempts_exact_current_host_enrollment_files(
     assert ("orphan_state_present" in result["blocked_reasons"]) is (extra is not None)
 
 
+def _run_inventory(tmp_path, monkeypatch, capsys, recorded=None) -> dict:
+    """Run the shipped inventory script over ``tmp_path / "machine"`` with empty Docker."""
+    import pathlib
+
+    filesystem = tmp_path / "machine"
+    original_path = pathlib.Path
+
+    def isolated_path(value):
+        value = str(value)
+        return (
+            filesystem / value.lstrip("/")
+            if value.startswith("/var/lib/")
+            else original_path(value)
+        )
+
+    params = {
+        "root": str(tmp_path / "no-deploy-yet"),
+        "identity": {"host": INTENT.host, "node_id": INTENT.node_id},
+        "recorded": recorded or {"checkpoints": {}, "removals": []},
+    }
+    monkeypatch.setattr("sys.argv", ["remote", json.dumps(params)])
+    monkeypatch.setattr("shutil.which", lambda command: "/usr/bin/docker")
+    monkeypatch.setattr("subprocess.check_output", lambda args, **kwargs: "")
+    with monkeypatch.context() as local:
+        local.setattr("pathlib.Path", isolated_path)
+        exec(_INVENTORY, {})
+    result = json.loads(capsys.readouterr().out)
+    assert result["complete"] is True
+    return result
+
+
+def _host_archives(tmp_path) -> Path:
+    """The Sandbox Manager's archive state, as this Host's Compose file mounts it."""
+    state = tmp_path / "machine/var/lib/cloud-agent" / INTENT.host
+    state.mkdir(parents=True)
+    (state / "credential").write_text("persisted enrollment")
+    return state / "sandbox-archives"
+
+
+def _discarded(archives: Path, request_id: str, *, finish: bool = True) -> None:
+    """Remove one stopped container through the Host's own discard, leaving its receipts."""
+    from tests.unit.test_sandbox_archive import _Manager
+
+    from cloud_agent_host.chat_sandbox import ChatSandboxSpec
+    from cloud_agent_host.sandbox_archive import ArchiveIdentity, SandboxArchiveService
+    from cloud_agent_host.shared_session_supervisor import (
+        SharedChatSessionSupervisor,
+        SharedMemberManifest,
+    )
+
+    spec = ChatSandboxSpec(
+        thread_id="thread-origin", sandbox_id="sandbox-1", generation=2, runtime_id="claude-code"
+    )
+    manager = _Manager(spec)
+    supervisor = SharedChatSessionSupervisor(manager)
+    supervisor.register_manifest(
+        spec,
+        [
+            SharedMemberManifest(
+                thread_id="thread-origin", native_session_id="native", resident_slot_id=0
+            )
+        ],
+        expected_container_id="container-1",
+    )
+    service = SandboxArchiveService(supervisor, state_dir=archives)
+    identity = ArchiveIdentity("thread-origin", request_id, 2, "container-1", "")
+    service.discard(identity)
+    assert manager.removals == 1
+    if not finish:
+        (service._directory(identity) / "discarded.json").unlink()
+
+
+@pytest.mark.parametrize(
+    ("recorded", "retained"),
+    [
+        ({"asbx_one": "c" * 32}, False),
+        ({}, True),
+        ({"asbx_one": "f" * 32}, True),
+        ({"asbx_two": "c" * 32}, True),
+    ],
+)
+def test_inventory_excuses_only_the_checkpoint_receipt_the_control_plane_recorded(
+    tmp_path, monkeypatch, capsys, recorded, retained
+):
+    """A Host keeps each sandbox's latest checkpoint receipt; its data is in object storage."""
+    from tests.unit.test_sandbox_checkpoints import _receipt
+
+    from cloud_agent_host.sandbox_checkpoints import SandboxCheckpointStore
+
+    archives = _host_archives(tmp_path)
+    SandboxCheckpointStore(archives / "checkpoints").save(_receipt("asbx_one"))
+
+    result = _run_inventory(
+        tmp_path, monkeypatch, capsys, {"checkpoints": recorded, "removals": []}
+    )
+    assert result["orphan_state"] is retained
+
+
+def test_inventory_never_excuses_a_receipt_filed_under_another_sandbox(
+    tmp_path, monkeypatch, capsys
+):
+    from tests.unit.test_sandbox_checkpoints import _receipt
+
+    from cloud_agent_host.sandbox_checkpoints import SandboxCheckpointStore
+
+    archives = _host_archives(tmp_path)
+    SandboxCheckpointStore(archives / "checkpoints").save(_receipt("asbx_one"))
+    one = archives / "checkpoints" / (hashlib.sha256(b"asbx_one").hexdigest() + ".json")
+    one.rename(one.with_name(hashlib.sha256(b"asbx_two").hexdigest() + ".json"))
+
+    recorded = {"checkpoints": {"asbx_two": "c" * 32}, "removals": []}
+    assert _run_inventory(tmp_path, monkeypatch, capsys, recorded)["orphan_state"] is True
+
+
+@pytest.mark.parametrize(
+    ("removals", "finish", "extra", "retained"),
+    [
+        (["superseded-1"], True, None, False),
+        ([], True, None, True),
+        (["superseded-2"], True, None, True),
+        # The Host recorded the request but never finished it.
+        (["superseded-1"], False, None, True),
+        (["superseded-1"], True, "archive.tar", True),
+    ],
+)
+def test_inventory_excuses_only_a_confirmed_removals_finished_receipts(
+    tmp_path, monkeypatch, capsys, removals, finish, extra, retained
+):
+    archives = _host_archives(tmp_path)
+    _discarded(archives, "superseded-1", finish=finish)
+    if extra:
+        directory = archives / hashlib.sha256(b"superseded-1").hexdigest()
+        (directory / extra).write_text("retained data")
+
+    result = _run_inventory(
+        tmp_path, monkeypatch, capsys, {"checkpoints": {}, "removals": removals}
+    )
+    assert result["orphan_state"] is retained
+
+
+def test_inventory_never_excuses_receipts_filed_under_another_request(
+    tmp_path, monkeypatch, capsys
+):
+    archives = _host_archives(tmp_path)
+    _discarded(archives, "superseded-other")
+    (archives / hashlib.sha256(b"superseded-other").hexdigest()).rename(
+        archives / hashlib.sha256(b"superseded-1").hexdigest()
+    )
+
+    recorded = {"checkpoints": {}, "removals": ["superseded-1"]}
+    assert _run_inventory(tmp_path, monkeypatch, capsys, recorded)["orphan_state"] is True
+
+
+def test_inventory_still_counts_an_administrators_archive_request(tmp_path, monkeypatch, capsys):
+    """Archive-before-delete receipts are not a confirmed removal, whatever their id."""
+    archives = _host_archives(tmp_path)
+    directory = archives / hashlib.sha256(b"delete-1").hexdigest()
+    directory.mkdir(parents=True)
+    for name in ("prepare.json", "upload.json", "commit.json", "deleted.json"):
+        (directory / name).write_text(json.dumps({"receipt": {}}))
+
+    recorded = {"checkpoints": {}, "removals": ["delete-1"]}
+    assert _run_inventory(tmp_path, monkeypatch, capsys, recorded)["orphan_state"] is True
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "name",

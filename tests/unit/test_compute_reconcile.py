@@ -175,6 +175,8 @@ def harness(monkeypatch, *, kind="acquire", identified=False):
         record_inventory=AsyncMock(return_value=True),
         authorize_superseded_removals=AsyncMock(return_value=[]),
         record_superseded_removal=AsyncMock(),
+        superseded_removals=AsyncMock(return_value=0),
+        recorded_host_state=AsyncMock(return_value={"checkpoints": {}, "removals": []}),
     )
     provider = SimpleNamespace(
         capabilities=Mock(
@@ -719,6 +721,10 @@ def _left_behind(h, *, removal=None):
         return_value=[{**authorized, "request_id": "superseded-recorded"}]
     )
     h.repository.record_superseded_removal = AsyncMock()
+    # The durable count follows what was confirmed.
+    h.repository.superseded_removals = AsyncMock(
+        side_effect=lambda **_: h.repository.record_superseded_removal.await_count
+    )
     h.bootstrap.inventory.return_value = HostInventory(complete=True)
 
     def receipt(_thread_id, payload):
@@ -853,6 +859,50 @@ async def test_a_removal_whose_answer_was_lost_is_confirmed_before_release(monke
     h.repository.record_superseded_removal.assert_awaited_once_with(
         request_id="superseded-recorded"
     )
+
+
+@pytest.mark.asyncio
+async def test_removals_confirmed_before_another_fails_still_count(monkeypatch):
+    """A of two is confirmed, B gets no answer; once B goes too, both count."""
+    h = harness(monkeypatch, kind="retire", identified=True)
+    first = _left_behind_container()
+    second = {**first, "sandbox_id": "asbx_other", "container_id": "container-other"}
+    _left_behind(h)
+    h.repository.authorize_superseded_removals.return_value = [
+        {
+            **{k: v for k, v in c.items() if k != "running"},
+            "request_id": "superseded-" + c["sandbox_id"],
+        }
+        for c in (first, second)
+    ]
+    answers = iter([None, SandboxManagerError(503, "busy")])
+
+    def removal(_thread_id, payload):
+        answer = next(answers, None)
+        if answer is not None:
+            raise answer
+        return {
+            "request_id": payload["request_id"],
+            "container_id": payload["expected_container_id"],
+            "deleted": True,
+        }
+
+    h.sandbox_manager.list_sandboxes = AsyncMock(return_value=[first, second])
+    h.sandbox_manager.discard_sandbox_deletion = AsyncMock(side_effect=removal)
+
+    await h.reconciler.execute(h.operation)
+    assert h.operation["state"] == "waiting"
+    assert h.operation["result"]["superseded_removed"] == 1
+
+    h.operation.update(state="running", step="pending")
+    h.repository.authorize_superseded_removals.return_value = [
+        h.repository.authorize_superseded_removals.return_value[1]
+    ]
+    h.sandbox_manager.list_sandboxes = AsyncMock(side_effect=[[second], []])
+    await h.reconciler.execute(h.operation)
+
+    assert h.operation["state"] == "succeeded"
+    assert h.operation["result"]["superseded_removed"] == 2
 
 
 @pytest.mark.asyncio

@@ -506,6 +506,18 @@ and incomplete inventory block it. There is no force bypass. The only machine
 without an inventory is a CloudLab node whose host-key registration never
 completed: this control plane never connected to it.
 
+The machine inventory also counts every file under the Host's state directory
+as retained state, with three exceptions, each checked against what the control
+plane recorded:
+- the Host's enrollment credential;
+- each sandbox's latest checkpoint receipt from that Host, whose data is in
+  object storage;
+- the finished receipts of each removal described below that the Host
+  confirmed.
+
+Anything else still blocks release, including the request directories that
+administrator sandbox deletions leave on a Host.
+
 Before taking inventory, release removes the stopped containers that groups
 which moved away left behind: a group handed over through its checkpoint, even
 one nobody has used since, one restored on another Host, or one whose deletion
@@ -515,11 +527,11 @@ its group's own, one whose group has no recorded checkpoint left, one whose
 group is being deleted, and one whose group was lost after its restores failed.
 Each removal is authorized in the database first, under the group's lock: a
 group lost before that keeps its container, and an authorization made before
-the group was lost still stands. The operation's result counts the removed
-containers in `superseded_removed`. A removal the Host does not answer is
-retried as the same request, even once the Host no longer lists the container,
-until the Host confirms it. A release that stopped for attention runs again
-once the provider confirms the machine is gone, and settles.
+the group was lost still stands. The operation's result counts the removals
+the machine's Hosts confirmed in `superseded_removed`. A removal the Host does
+not answer is retried as the same request, even once the Host no longer lists
+the container, until the Host confirms it. A release that stopped for attention
+runs again once the provider confirms the machine is gone, and settles.
 
 ## Moving sandboxes out before a lease ends
 

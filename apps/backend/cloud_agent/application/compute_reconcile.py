@@ -46,6 +46,7 @@ from cloud_agent.ports.external.host_bootstrap import (
     BootstrapIntent,
     BootstrapResult,
     DeploymentProfile,
+    RecordedHostState,
 )
 from cloud_agent.sandbox_manager_client import SandboxManagerError
 from cloud_agent.sandbox_manager_routing import sandbox_manager_for_host
@@ -2020,11 +2021,20 @@ class ComputeReconciler:
                     "generation": container["generation"],
                 },
             )
-        removed = int(operation.get("result", {}).get("superseded_removed") or 0)
-        await self._checkpoint(
-            operation, "checking_retention", {"superseded_removed": removed + len(superseded)}
-        )
         return await sandbox_manager.list_sandboxes()
+
+    async def _count_superseded(
+        self, operation: dict[str, Any], allocation: dict[str, Any]
+    ) -> None:
+        """Report how many left-behind containers this machine's Hosts confirmed removed.
+
+        Read from the durable record, so a pass that stopped after some
+        removals were confirmed loses none of them.
+        """
+        hosts = [str(host["host"]) for host in allocation.get("hosts", [])]
+        removed = await self.repository.superseded_removals(hosts=hosts)
+        if removed and operation.get("result", {}).get("superseded_removed") != removed:
+            await self._checkpoint(operation, "checking_retention", {"superseded_removed": removed})
 
     async def _verify_empty_inventory(
         self, operation: dict[str, Any], allocation: dict[str, Any]
@@ -2043,6 +2053,8 @@ class ComputeReconciler:
                 retained = await self._remove_superseded(operation, host, sandbox_manager)
             except SandboxManagerError:
                 continue  # Never infer emptiness; require the full-node scan below.
+            finally:
+                await self._count_superseded(operation, allocation)
             if retained:
                 raise ProviderError(
                     "retained_groups_present",
@@ -2064,9 +2076,13 @@ class ComputeReconciler:
                 and node["id"] not in bound
             ):
                 continue
-            proof = await self.bootstrap.inventory(
-                self._node(node), profile, self._bootstrap_intent(operation, allocation, node)
+            intent = self._bootstrap_intent(operation, allocation, node)
+            # Receipts the Host keeps of what the control plane recorded, and
+            # nothing else, are not retained state.
+            receipts = RecordedHostState.model_validate(
+                await self.repository.recorded_host_state(host=intent.host)
             )
+            proof = await self.bootstrap.inventory(self._node(node), profile, intent, receipts)
             if (
                 not proof.complete
                 or proof.retained_containers

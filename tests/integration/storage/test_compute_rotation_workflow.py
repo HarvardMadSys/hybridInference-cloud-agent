@@ -178,7 +178,7 @@ class FakeNodes:
             deployment_sha=profile.deployment_sha,
         )
 
-    async def inventory(self, node, profile, intent):
+    async def inventory(self, node, profile, intent, recorded=None):
         self.calls.append(("inventory", node.display_name))
         return HostInventory(complete=True)
 

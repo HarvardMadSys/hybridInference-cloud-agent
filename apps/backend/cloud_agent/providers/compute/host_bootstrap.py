@@ -27,6 +27,7 @@ from cloud_agent.ports.external.host_bootstrap import (
     BootstrapResult,
     HostInventory,
     PreflightResult,
+    RecordedHostState,
     TransferResult,
 )
 from cloud_agent.providers.compute.ssh import known_hosts_line
@@ -1057,10 +1058,21 @@ class SshHostBootstrap:
         )
 
     async def inventory(
-        self, node: NodeObservation, profile: DeploymentProfile, intent: BootstrapIntent
+        self,
+        node: NodeObservation,
+        profile: DeploymentProfile,
+        intent: BootstrapIntent,
+        recorded: RecordedHostState | None = None,
     ) -> HostInventory:
         """Read complete Docker and retained state without deleting or adopting it."""
-        params = self._params(profile, intent)
+        recorded = recorded or RecordedHostState()
+        params = {
+            **self._params(profile, intent),
+            "recorded": {
+                "checkpoints": dict(recorded.checkpoints),
+                "removals": list(recorded.removals),
+            },
+        }
         script = (
             "sudo -n python3 -c " + shlex.quote(_INVENTORY) + " " + shlex.quote(json.dumps(params))
         )
@@ -1466,7 +1478,7 @@ print(json.dumps({'wiped': removed and started}))
 
 
 _INVENTORY = r"""
-import json, shutil, subprocess, sys
+import hashlib, json, shutil, subprocess, sys
 from pathlib import Path
 params = json.loads(sys.argv[1])
 root = Path(params['root'])
@@ -1498,8 +1510,45 @@ else:
         # are inert. Another host, nested same-named file, or a symlink can
         # hide retained state and must never be excused by its basename.
         inert = {state / 'credential', state / '.enroll.lock'}
+        # Besides them, only receipts the control plane recorded exactly: the
+        # latest checkpoint of each sandbox (its data is in object storage),
+        # and each confirmed removal of a container a moved group left behind.
+        # Anything else in the archive state, finished or not, still counts.
+        archives = state / 'sandbox-archives'
+        recorded = params.get('recorded') or {}
+        def digest(value):
+            return hashlib.sha256(str(value).encode()).hexdigest()
+        checkpoints = {digest(sandbox): checkpoint for sandbox, checkpoint in (recorded.get('checkpoints') or {}).items()}
+        removals = {digest(request): request for request in recorded.get('removals') or ()}
+        def receipt(path):
+            try:
+                value = json.loads(path.read_text())
+            except (OSError, ValueError):
+                return None
+            return value if isinstance(value, dict) else None
+        def accounted(path):
+            if path.parent == archives / 'checkpoints' and path.suffix == '.json':
+                value = receipt(path)
+                return (
+                    path.stem in checkpoints and value is not None
+                    and digest(value.get('sandbox_id')) == path.stem
+                    and value.get('checkpoint_id') == checkpoints[path.stem]
+                )
+            if path.parent.parent == archives and path.parent.name in removals:
+                directory = path.parent
+                if directory.is_symlink() or sorted(p.name for p in directory.iterdir()) != ['discard.json', 'discarded.json']:
+                    return False
+                started, finished = receipt(directory / 'discard.json'), receipt(directory / 'discarded.json')
+                identity = (finished or {}).get('identity')
+                return (
+                    started is not None and isinstance(identity, dict)
+                    and started.get('identity') == identity
+                    and identity.get('request_id') == removals[directory.name]
+                    and not identity.get('archive_key')
+                )
+            return False
         paths = list(state_root.rglob('*')) if state_root.exists() else []
-        unexpected = state_root.is_symlink() or any(p.is_symlink() or (not p.is_dir() and p not in inert) for p in paths)
+        unexpected = state_root.is_symlink() or any(p.is_symlink() or (not p.is_dir() and p not in inert and not accounted(p)) for p in paths)
         legacy = Path('/var/lib/hybridinference')
         result['orphan_state'] = bool(networks or volumes or unexpected or (legacy.exists() and any(legacy.iterdir())))
         result['complete'] = True

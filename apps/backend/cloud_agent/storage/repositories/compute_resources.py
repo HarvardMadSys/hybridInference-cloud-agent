@@ -2801,6 +2801,40 @@ class PostgresComputeResourceRepository:
                 request_id,
             )
 
+    async def superseded_removals(self, *, hosts: list[str]) -> int:
+        """Count the confirmed removals of containers left behind on ``hosts``."""
+        async with self._pool.acquire() as conn:
+            return int(
+                await conn.fetchval(
+                    "SELECT count(*) FROM agent_superseded_container_removals "
+                    "WHERE host = ANY($1::text[]) AND removed_at IS NOT NULL",
+                    hosts,
+                )
+            )
+
+    async def recorded_host_state(self, *, host: str) -> dict[str, Any]:
+        """The receipts ``host`` keeps on disk that the control plane recorded.
+
+        Each sandbox's latest checkpoint captured there, and each confirmed
+        removal of a container left behind there. See ``RecordedHostState``.
+        """
+        async with self._pool.acquire() as conn:
+            checkpoints = await conn.fetch(
+                """SELECT DISTINCT ON (sandbox_id) sandbox_id, id
+                   FROM agent_sandbox_checkpoints WHERE host = $1
+                   ORDER BY sandbox_id, captured_at DESC, recorded_at DESC""",
+                host,
+            )
+            removals = await conn.fetch(
+                "SELECT request_id FROM agent_superseded_container_removals "
+                "WHERE host = $1 AND removed_at IS NOT NULL ORDER BY request_id",
+                host,
+            )
+        return {
+            "checkpoints": {str(row["sandbox_id"]): str(row["id"]) for row in checkpoints},
+            "removals": [str(row["request_id"]) for row in removals],
+        }
+
     async def move_out_report(self, *, allocation_id: str) -> dict[str, Any]:
         """Whether this allocation's groups are moving out, why not, and what stays.
 

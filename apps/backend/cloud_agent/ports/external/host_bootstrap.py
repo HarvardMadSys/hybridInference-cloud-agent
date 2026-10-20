@@ -190,6 +190,19 @@ class HostInventory(ComputeValue):
     blocked_reasons: tuple[str, ...] = ()
 
 
+class RecordedHostState(ComputeValue):
+    """What the control plane recorded of the receipts a Host keeps on disk.
+
+    A release's machine inventory excuses a receipt only when it matches one
+    of these exactly. ``checkpoints`` maps each sandbox id to the latest
+    checkpoint this Host captured of it; ``removals`` names each removal of
+    a container left behind there that the Host confirmed.
+    """
+
+    checkpoints: dict[str, str] = Field(default_factory=dict)
+    removals: tuple[str, ...] = ()
+
+
 class SshTransport(Protocol):
     """Execute trusted scripts using the connection's explicit host-key policy."""
 
@@ -237,9 +250,16 @@ class HostBootstrap(Protocol):
         ...
 
     async def inventory(
-        self, node: NodeObservation, profile: DeploymentProfile, intent: BootstrapIntent
+        self,
+        node: NodeObservation,
+        profile: DeploymentProfile,
+        intent: BootstrapIntent,
+        recorded: RecordedHostState | None = None,
     ) -> HostInventory:
-        """Observe stopped containers and orphan state for resource release guards."""
+        """Observe stopped containers and orphan state for resource release guards.
+
+        Host state on disk counts as orphaned unless ``recorded`` accounts for it.
+        """
         ...
 
     async def stage(

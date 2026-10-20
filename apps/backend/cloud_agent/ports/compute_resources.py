@@ -476,6 +476,14 @@ class ComputeResourceRepository(Protocol):
         """Record that the Host confirmed an authorized removal."""
         ...
 
+    async def superseded_removals(self, *, hosts: list[str]) -> int:
+        """Count the confirmed removals of containers left behind on ``hosts``."""
+        ...
+
+    async def recorded_host_state(self, *, host: str) -> dict[str, Any]:
+        """The receipts ``host`` keeps on disk that the control plane recorded."""
+        ...
+
     async def running_attempts(self, *, host: str) -> int:
         """Count the turns a Host is executing now."""
         ...

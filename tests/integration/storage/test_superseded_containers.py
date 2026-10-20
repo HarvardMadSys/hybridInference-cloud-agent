@@ -3,6 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import hashlib
+import io
+import pathlib
+import shlex
+from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
@@ -22,13 +29,23 @@ from tests.integration.storage.test_sandbox_restore_store import (
     pool as pool,
     store as store,
 )
+from tests.unit.test_sandbox_archive import _Manager
+from tests.unit.test_sandbox_checkpoints import _receipt as _checkpoint_receipt
 
 from cloud_agent.ports.external.compute_provider import ProviderReceipt
+from cloud_agent.providers.compute.host_bootstrap import SshHostBootstrap
 from cloud_agent.sandbox_manager_client import SandboxManagerError
 from cloud_agent.storage._sql.hosts import (
     authorize_superseded_removals,
     superseded_containers,
     superseded_removal_request_id,
+)
+from cloud_agent_host.chat_sandbox import ChatSandboxSpec
+from cloud_agent_host.sandbox_archive import ArchiveIdentity, SandboxArchiveService
+from cloud_agent_host.sandbox_checkpoints import SandboxCheckpointStore
+from cloud_agent_host.shared_session_supervisor import (
+    SharedChatSessionSupervisor,
+    SharedMemberManifest,
 )
 from cloud_agent_shared.sandbox_restore import MAX_RESTORE_ATTEMPTS, RESTORE_RETRY_DELAYS_S
 
@@ -297,8 +314,22 @@ async def test_an_authorization_recorded_first_stands_once_the_group_is_lost(poo
     assert await _authorize(store, "runner-b", old) == []
     # Unconfirmed, it is resent even once the host no longer lists it.
     assert await _authorize(store, "runner-a") == authorized
+    assert await store.compute_resources.superseded_removals(hosts=["runner-a"]) == 0
+    assert (await store.compute_resources.recorded_host_state(host="runner-a"))["removals"] == []
     await store.compute_resources.record_superseded_removal(request_id=request_id)
     assert await _authorize(store, "runner-a") == []
+    assert await store.compute_resources.superseded_removals(hosts=["runner-a"]) == 1
+    assert await store.compute_resources.superseded_removals(hosts=["runner-b"]) == 0
+    # What runner-a keeps on disk and the control plane recorded: the checkpoint
+    # the group moved by, and the confirmed removal.
+    assert await store.compute_resources.recorded_host_state(host="runner-a") == {
+        "checkpoints": {"asbx_restore": "c" * 32},
+        "removals": [request_id],
+    }
+    assert await store.compute_resources.recorded_host_state(host="runner-c") == {
+        "checkpoints": {},
+        "removals": [],
+    }
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT host, sandbox_id, generation, container_id, removed_at "
@@ -358,7 +389,16 @@ async def _machine_of_runner_a(pool, store: Storage, monkeypatch):
             "UPDATE agent_runner_hosts SET compute_node_id = $1 WHERE host = 'runner-a'",
             allocation["hosts"][0]["compute_node_id"],
         )
-    return r, allocation
+        await conn.execute(
+            "UPDATE agent_runner_hosts SET compute_node_id = NULL WHERE host = $1",
+            allocation["hosts"][0]["host"],
+        )
+        # The node deploys the Host by that name, as a rotated node keeps its slot's.
+        await conn.execute(
+            "UPDATE agent_compute_allocations SET slot_host = 'runner-a' WHERE id = $1",
+            allocation["id"],
+        )
+    return r, await r.repo.get_allocation(allocation["id"])
 
 
 async def test_a_handed_over_group_without_a_restore_point_still_holds_its_machine(
@@ -375,14 +415,73 @@ async def test_a_handed_over_group_without_a_restore_point_still_holds_its_machi
     assert [g["id"] for g in impact["retained_groups"]] == ["asbx_restore"]
 
 
+class _Machine:
+    """Runs the shipped remote scripts as the node would: its files, no containers.
+
+    Only ``/var/lib`` maps to ``root``; Docker answers with nothing running.
+    """
+
+    def __init__(self, root: Path, monkeypatch) -> None:
+        self.root = root
+        self.monkeypatch = monkeypatch
+
+    async def run(self, connection, script: str, *, stdin=None, timeout: float = 30) -> str:
+        argv = shlex.split(script)
+        assert argv[:4] == ["sudo", "-n", "python3", "-c"]
+        original_path = pathlib.Path
+
+        def isolated_path(value):
+            value = str(value)
+            if value.startswith("/var/lib/"):
+                return self.root / value.lstrip("/")
+            return original_path(value)
+
+        output = io.StringIO()
+        with self.monkeypatch.context() as local, contextlib.redirect_stdout(output):
+            local.setattr("sys.argv", ["remote", argv[5]])
+            local.setattr("shutil.which", lambda command: "/usr/bin/docker")
+            local.setattr("subprocess.check_output", lambda args, **kwargs: "")
+            local.setattr("pathlib.Path", isolated_path)
+            exec(argv[4], {})
+        return output.getvalue()
+
+
+def _host_manager(group: dict, archives: Path) -> tuple[_Manager, SandboxArchiveService]:
+    """``runner-a``'s Sandbox Manager, still holding the group's stopped container."""
+    spec = ChatSandboxSpec(
+        thread_id=group["origin_thread_id"],
+        sandbox_id=group["sandbox_id"],
+        generation=group["generation"],
+        runtime_id="claude-code",
+    )
+    manager = _Manager(spec)
+    manager.current = replace(manager.current, container_id=group["container_id"])
+    supervisor = SharedChatSessionSupervisor(manager)
+    supervisor.register_manifest(
+        spec,
+        [
+            SharedMemberManifest(
+                thread_id=group["origin_thread_id"],
+                native_session_id="native-restore",
+                resident_slot_id=0,
+            )
+        ],
+        expected_container_id=group["container_id"],
+    )
+    return manager, SandboxArchiveService(supervisor, state_dir=archives)
+
+
 @pytest.mark.parametrize("answer_lost", [False, True])
 async def test_a_release_removes_what_a_group_never_resumed_left_behind(
-    pool, store: Storage, monkeypatch, answer_lost: bool
+    pool, store: Storage, monkeypatch, tmp_path, answer_lost: bool
 ):
     """From the hand-over to the released machine, with no chat ever written to again.
 
-    With ``answer_lost`` the Host removes the container but its answer never
-    arrives: the next pass lists nothing, and confirms the removal anyway.
+    The Host's own discard removes the container and writes its receipts, next
+    to the receipt of the checkpoint the group moved by; the shipped machine
+    inventory then reads that state. With ``answer_lost`` the Host removes the
+    container but its answer never arrives: the next pass lists nothing, and
+    confirms the removal anyway.
     """
     job, _ = await _covered(pool, store)
     assert await store.host_pool.remove_host(host="runner-a") == "ok"
@@ -393,6 +492,14 @@ async def test_a_release_removes_what_a_group_never_resumed_left_behind(
 
     old = {**_held(job), "running": False}
     held = {"runner-a": [old]}
+    archives = tmp_path / "machine/var/lib/cloud-agent/runner-a/sandbox-archives"
+    (archives.parent / "credential").parent.mkdir(parents=True)
+    (archives.parent / "credential").write_text("persisted enrollment")
+    SandboxCheckpointStore(archives / "checkpoints").save(_checkpoint_receipt("asbx_restore"))
+    manager, service = _host_manager(old, archives)
+    r.bootstrap.inventory = SshHostBootstrap(
+        transport=_Machine(tmp_path / "machine", monkeypatch), resolver=AsyncMock()
+    ).inventory
 
     def listed(host: str) -> list[dict]:
         return list(held.get(host, []))
@@ -400,15 +507,20 @@ async def test_a_release_removes_what_a_group_never_resumed_left_behind(
     lost = [answer_lost]
 
     async def discard(thread_id: str, payload: dict) -> dict:
-        assert thread_id == job["thread_id"]
+        receipt = service.discard(
+            ArchiveIdentity(
+                thread_id,
+                payload["request_id"],
+                payload["generation"],
+                payload["expected_container_id"],
+                "",
+            ),
+            sandbox_id=payload["sandbox_id"],
+        )
         held["runner-a"] = []
         if lost and lost.pop():
             raise SandboxManagerError(0, "no answer")
-        return {
-            "request_id": payload["request_id"],
-            "container_id": payload["expected_container_id"],
-            "deleted": True,
-        }
+        return receipt
 
     managers = {}
 
@@ -466,6 +578,12 @@ async def test_a_release_removes_what_a_group_never_resumed_left_behind(
             "sandbox_id": "asbx_restore",
         }
     ] * (2 if answer_lost else 1)
+    assert manager.removals == 1
+    assert sorted(path.name for path in archives.rglob("*.json")) == [
+        hashlib.sha256(b"asbx_restore").hexdigest() + ".json",
+        "discard.json",
+        "discarded.json",
+    ]
     async with pool.acquire() as conn:
         assert await conn.fetchval(
             "SELECT removed_at IS NOT NULL FROM agent_superseded_container_removals"
