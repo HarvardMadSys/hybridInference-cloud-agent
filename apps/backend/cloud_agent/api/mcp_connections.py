@@ -41,6 +41,8 @@ from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api.deps import get_current_user, get_storage
 from cloud_agent.api.mcp_connections_shared import (
     _bad_request,
+    _capability_payload,
+    _capability_view,
     _conflict,
     _McpConnectionsStorage,
     _not_found,
@@ -538,17 +540,6 @@ async def _view(store: _McpConnectionsStorage, row: Mapping[str, Any]) -> Connec
     )
 
 
-def _capability_view(entry: Mapping[str, Any], kind: CapabilityKind) -> dict[str, Any]:
-    """Render one discovered capability for the selection dialog."""
-    return {
-        "kind": kind.value,
-        "name": str(entry.get("name") or ""),
-        "description": str(entry.get("description") or ""),
-        "input_schema": entry.get("input_schema"),
-        "annotations": entry.get("annotations") or {},
-    }
-
-
 #: Where each capability kind is kept in a stored snapshot, in display order.
 _SNAPSHOT_SURFACES: tuple[tuple[str, CapabilityKind], ...] = (
     ("tools", CapabilityKind.TOOL),
@@ -1021,16 +1012,6 @@ async def _diagnose(
             for item in snapshot.all_capabilities()
         ],
     )
-
-
-def _capability_payload(capability: Any) -> dict[str, Any]:
-    """The stored form of one capability."""
-    return {
-        "name": capability.name,
-        "description": capability.description,
-        "input_schema": capability.input_schema,
-        "annotations": dict(capability.annotations),
-    }
 
 
 # --------------------------------------------------------------------------
