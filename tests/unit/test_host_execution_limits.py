@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 
-from cloud_agent_host import bounded_output, chat_sandbox, sandbox
+from cloud_agent_host import bounded_output, chat_sandbox, chat_sandbox_members as members, sandbox
 from cloud_agent_host.bounded_output import (
     OUTPUT_CHUNK_BYTES,
     OUTPUT_QUEUE_ITEMS,
@@ -30,7 +30,9 @@ from cloud_agent_host.sandbox_manager import _run_sandbox
 @pytest.mark.parametrize("failure", ["timeout", "output"])
 def test_bounded_command_cleanup_preserves_a_running_sibling(monkeypatch, tmp_path, failure):
     """Run the actual fenced wrapper/reaper locally, with no Docker operation."""
+    # The backend names the command's receipt; the members module checks it.
     monkeypatch.setattr(chat_sandbox, "ACTIVATION_TMPFS", str(tmp_path))
+    monkeypatch.setattr(members, "ACTIVATION_TMPFS", str(tmp_path))
     spec = ChatSandboxSpec(
         thread_id="athr_test", sandbox_id="asbx_test", generation=1, runtime_id="codex"
     )
@@ -83,7 +85,7 @@ def test_newline_free_stdout_is_read_in_bounded_chunks():
 
 def _local_receipt_manager(monkeypatch, tmp_path):
     """A manager that runs the real launcher and reaper here, with no Docker operation."""
-    monkeypatch.setattr(chat_sandbox, "ACTIVATION_TMPFS", str(tmp_path))
+    monkeypatch.setattr(members, "ACTIVATION_TMPFS", str(tmp_path))
     spec = ChatSandboxSpec(
         thread_id="athr_test", sandbox_id="asbx_test", generation=1, runtime_id="codex"
     )
@@ -159,13 +161,13 @@ def test_a_missing_receipt_while_the_command_still_runs_is_a_failed_kill(monkeyp
 
 
 def test_only_the_reapers_silent_exit_means_the_receipt_is_missing():
-    missing = chat_sandbox._member_kill_failure(125, "")
+    missing = members.kill_failure(125, "")
     assert isinstance(missing, chat_sandbox.MemberProcessReceiptMissing)
     # Docker's own failures share the code and always explain themselves.
-    explained = chat_sandbox._member_kill_failure(125, "Error response from daemon: gone")
+    explained = members.kill_failure(125, "Error response from daemon: gone")
     assert not isinstance(explained, chat_sandbox.MemberProcessReceiptMissing)
     assert "Error response from daemon" in str(explained)
-    stale = chat_sandbox._member_kill_failure(126, "")
+    stale = members.kill_failure(126, "")
     assert not isinstance(stale, chat_sandbox.MemberProcessReceiptMissing)
 
 
@@ -181,7 +183,7 @@ def test_command_reaper_refuses_a_stale_start_receipt(tmp_path):
             [
                 "/bin/sh",
                 "-c",
-                ChatSandboxManager._member_reaper_script('"$2"'),
+                members.reaper_script('"$2"'),
                 "sh",
                 str(os.getuid()),
                 str(pidfile),

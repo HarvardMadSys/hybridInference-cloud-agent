@@ -39,7 +39,11 @@ import time
 import tty
 from typing import TYPE_CHECKING, Any
 
-from cloud_agent_host import chat_sandbox_markers as markers, chat_sandbox_writers as writers
+from cloud_agent_host import (
+    chat_sandbox_markers as markers,
+    chat_sandbox_members as members,
+    chat_sandbox_writers as writers,
+)
 from cloud_agent_host.bounded_output import OutputPump, TextTail, protocol_lines, text_chunks
 from cloud_agent_host.chat_sandbox_markers import (
     FINAL_ARCHIVE_MARKER_MAX_BYTES,
@@ -48,6 +52,10 @@ from cloud_agent_host.chat_sandbox_markers import (
     INITIAL_ARCHIVE_MARKER_MAX_BYTES,
     INITIAL_ARCHIVE_MARKER_NAME,
     SETUP_MARKER_MAX_BYTES,
+)
+from cloud_agent_host.chat_sandbox_members import (
+    MEMBER_REAPER_TARGET as MEMBER_REAPER_TARGET,
+    inference_env_path as member_inference_env_path,
 )
 from cloud_agent_host.chat_sandbox_models import (
     ACTIVATION_TMPFS as ACTIVATION_TMPFS,
@@ -228,8 +236,6 @@ class _ObserverProbeRace(SandboxError):
     """
 
 
-MEMBER_REAPER_TARGET = "/usr/local/bin/member-process-reaper"
-MEMBER_REAPER_SOURCE = "/usr/local/libexec/member-process-reaper"
 # Kata exec cannot acquire capabilities outside the container's bounding set.
 # Only the fixed guest-root helpers use these: tracing, self-test UID drops,
 # socket ownership, and reading/signalling member process receipts.
@@ -1448,7 +1454,7 @@ class ChatSandboxManager:
             raise SandboxError("chat sandbox must be started before exec")
         exec_argv = argv
         if process_pidfile is not None:
-            self._validate_member_pidfile(spec, process_pidfile, user_uid=user_uid)
+            members.validate_pidfile(self, spec, process_pidfile, user_uid=user_uid)
             # The CLI is a session leader, so its complete child tree can be
             # interrupted without stopping sibling sessions in this container.
             # Persist both PID and Linux start time: a stale numeric PID must
@@ -1497,35 +1503,6 @@ class ChatSandboxManager:
             user_gid=user_gid,
         )
 
-    def _validate_member_pidfile(
-        self,
-        spec: ChatSandboxSpec,
-        pidfile: str,
-        *,
-        user_uid: int | None,
-    ) -> int:
-        """Validate one member resident or bounded retained-command PID path."""
-        command_match = re.fullmatch(
-            rf"{re.escape(ACTIVATION_TMPFS)}/command-[0-9a-f]{{32}}\.pid",
-            pidfile,
-        )
-        if command_match is not None:
-            if user_uid != self.backend.uid:
-                raise ValueError("command PID file does not match the sandbox uid")
-            return -1
-        member_match = re.fullmatch(
-            rf"{re.escape(MEMBER_TMPFS_ROOT)}/([0-9]+)/resident-[0-9a-f]{{32}}\.pid",
-            pidfile,
-        )
-        if member_match is None:
-            raise ValueError("process-scoped kill requires a shared member PID file")
-        slot_id = int(member_match.group(1))
-        if slot_id >= spec.resident_slot_capacity:
-            raise ValueError("resident PID file is outside sandbox capacity")
-        if user_uid != MEMBER_UID_BASE + slot_id:
-            raise ValueError("resident PID file does not match its member uid")
-        return slot_id
-
     def write_member_inference_env(
         self,
         spec: ChatSandboxSpec,
@@ -1541,105 +1518,13 @@ class ChatSandboxManager:
         values travel over stdin, never argv. Returns the path to point
         ``BASH_ENV`` at.
         """
-        if not 0 <= slot_id < spec.resident_slot_capacity:
-            raise ValueError("resident slot is outside this shared sandbox")
-        if user_uid != MEMBER_UID_BASE + slot_id:
-            raise ValueError("resident slot does not match its member uid")
-        path = member_inference_env_path(slot_id)
-        write_script = (
-            'set -eu; target="$1"; temporary="$target.tmp.$$"; umask 077; '
-            "trap 'rm -f -- \"$temporary\"' EXIT HUP INT TERM; "
-            'cat > "$temporary"; mv "$temporary" "$target"; '
-            "trap - EXIT HUP INT TERM"
+        return members.write_inference_env(
+            self, spec, script, slot_id=slot_id, user_uid=user_uid, user_gid=user_gid
         )
-        result = self.exec_capture(
-            spec,
-            ["/bin/sh", "-c", write_script, "sh", path],
-            workdir="/",
-            timeout_s=20,
-            input_bytes=script.encode("utf-8"),
-            user_uid=user_uid,
-            user_gid=user_gid,
-        )
-        if result.returncode != 0:
-            raise SandboxError(
-                "member inference environment could not be written: "
-                + result.stderr.decode("utf-8", "replace")[:300]
-            )
-        return path
 
     def ensure_member_process_reaper(self, spec: ChatSandboxSpec) -> None:
         """Install the immutable helper into retained pre-upgrade containers."""
-        with self._member_reaper_lock:
-            probe = self.exec_capture(
-                spec,
-                [
-                    "/bin/sh",
-                    "-c",
-                    'test "$(stat -c %u:%g:%a "$1" 2>/dev/null)" = 0:0:555',
-                    "sh",
-                    MEMBER_REAPER_TARGET,
-                ],
-                workdir="/",
-                timeout_s=20,
-                user_uid=0,
-                user_gid=0,
-            )
-            if probe.returncode == 0:
-                return
-            current = self._require(spec)
-            if not current.running:
-                raise SandboxError("chat sandbox must be started before helper installation")
-            source = os.environ.get("AGENT_MEMBER_PROCESS_REAPER_SOURCE", MEMBER_REAPER_SOURCE)
-            if not os.path.isfile(source):
-                raise SandboxError(
-                    "retained sandbox lacks member-process-reaper and the trusted "
-                    f"runner source {source!r} is unavailable"
-                )
-            temporary = f"{MEMBER_REAPER_TARGET}.install-{secrets.token_hex(8)}"
-            copied = self._run(
-                [
-                    self.backend.docker_binary,
-                    "cp",
-                    source,
-                    f"{current.container_id}:{temporary}",
-                ],
-                timeout=30,
-            )
-            if copied.returncode != 0:
-                raise SandboxError(
-                    "member-process-reaper compatibility install failed: "
-                    + copied.stderr.strip()[:300]
-                )
-            installed = self.exec_capture(
-                spec,
-                [
-                    "/bin/sh",
-                    "-c",
-                    'chown 0:0 "$1" && chmod 0555 "$1" && mv -f "$1" "$2"',
-                    "sh",
-                    temporary,
-                    MEMBER_REAPER_TARGET,
-                ],
-                workdir="/",
-                timeout_s=20,
-                user_uid=0,
-                user_gid=0,
-            )
-            if installed.returncode != 0:
-                with contextlib.suppress(Exception):
-                    self.exec_capture(
-                        spec,
-                        ["/bin/rm", "-f", temporary],
-                        workdir="/",
-                        timeout_s=10,
-                        user_uid=0,
-                        user_gid=0,
-                    )
-                raise SandboxError(
-                    "member-process-reaper compatibility activation failed: "
-                    + installed.stderr.decode("utf-8", "replace")[:300]
-                )
+        members.ensure_reaper(self, spec)
 
     def ensure_codex_mcp_policy(self, spec: ChatSandboxSpec, base_url: str) -> None:
         """Allow only this deployment's relay before starting a Codex member."""
@@ -1692,35 +1577,7 @@ class ChatSandboxManager:
         credentials an earlier launch left for its bash: a launch with them
         writes them again, and one whose owner removed them must not find them.
         """
-        if not 0 <= slot_id < spec.resident_slot_capacity:
-            raise ValueError("resident slot is outside this shared sandbox")
-        if user_uid != MEMBER_UID_BASE + slot_id:
-            raise ValueError("resident slot does not match its member uid")
-        directory = f"{MEMBER_TMPFS_ROOT}/{slot_id}"
-        self.reap_member_processes_except(
-            spec,
-            slot_id=slot_id,
-            user_uid=user_uid,
-            user_gid=user_gid,
-            baseline=(),
-        )
-        result = self.exec_capture(
-            spec,
-            [
-                "/bin/sh",
-                "-c",
-                f"rm -f -- {directory}/resident-*.pid {member_inference_env_path(slot_id)}",
-            ],
-            workdir="/",
-            timeout_s=20,
-            user_uid=user_uid,
-            user_gid=user_gid,
-        )
-        if result.returncode != 0:
-            raise SandboxError(
-                "stale resident process cleanup failed: "
-                + result.stderr.decode("utf-8", "replace")[:300]
-            )
+        members.reap(self, spec, slot_id=slot_id, user_uid=user_uid, user_gid=user_gid)
 
     def capture_member_processes(
         self,
@@ -1731,21 +1588,7 @@ class ChatSandboxManager:
         user_gid: int,
     ) -> tuple[tuple[int, int], ...]:
         """Capture the reviewed resident PID/start-time set before one turn."""
-        self._validate_member_identity(spec, slot_id=slot_id, user_uid=user_uid)
-        self.ensure_member_process_reaper(spec)
-        result = self.exec_capture(
-            spec,
-            [MEMBER_REAPER_TARGET, "capture", str(user_uid)],
-            workdir="/",
-            timeout_s=20,
-            user_uid=user_uid,
-            user_gid=user_gid,
-        )
-        if result.returncode != 0:
-            raise SandboxError(
-                "member process census failed: " + result.stderr.decode("utf-8", "replace")[:300]
-            )
-        return self._parse_member_processes(result.stdout)
+        return members.capture(self, spec, slot_id=slot_id, user_uid=user_uid, user_gid=user_gid)
 
     def reap_member_processes_except(
         self,
@@ -1763,63 +1606,14 @@ class ChatSandboxManager:
         to defeat PID reuse, and repeats through SIGKILL so a process cannot
         escape merely by changing process groups or forking during cleanup.
         """
-        self._validate_member_identity(spec, slot_id=slot_id, user_uid=user_uid)
-        self.ensure_member_process_reaper(spec)
-        payload = self._encode_member_processes(baseline)
-        result = self.exec_capture(
+        members.reap_except(
+            self,
             spec,
-            [MEMBER_REAPER_TARGET, "reap", str(user_uid)],
-            workdir="/",
-            timeout_s=30,
-            input_bytes=payload,
+            slot_id=slot_id,
             user_uid=user_uid,
             user_gid=user_gid,
+            baseline=baseline,
         )
-        if result.returncode != 0:
-            raise SandboxError(
-                "member activation process cleanup failed: "
-                + result.stderr.decode("utf-8", "replace")[:300]
-            )
-
-    @staticmethod
-    def _validate_member_identity(
-        spec: ChatSandboxSpec,
-        *,
-        slot_id: int,
-        user_uid: int,
-    ) -> None:
-        if not 0 <= slot_id < spec.resident_slot_capacity:
-            raise ValueError("resident slot is outside this shared sandbox")
-        if user_uid != MEMBER_UID_BASE + slot_id:
-            raise ValueError("resident slot does not match its member uid")
-
-    @staticmethod
-    def _parse_member_processes(payload: bytes) -> tuple[tuple[int, int], ...]:
-        try:
-            text = payload.decode("ascii")
-        except UnicodeDecodeError as exc:
-            raise SandboxError("member process census is not ASCII") from exc
-        found: builtins.list[tuple[int, int]] = []
-        seen: set[int] = set()
-        for line in text.splitlines():
-            fields = line.split()
-            if len(fields) != 2 or any(
-                not field.isascii() or not field.isdigit() for field in fields
-            ):
-                raise SandboxError("member process census is malformed")
-            pid, started = (int(field) for field in fields)
-            if pid <= 1 or started <= 0 or pid in seen or len(found) >= 4096:
-                raise SandboxError("member process census is outside its identity fence")
-            seen.add(pid)
-            found.append((pid, started))
-        return tuple(sorted(found))
-
-    @staticmethod
-    def _encode_member_processes(processes: tuple[tuple[int, int], ...]) -> bytes:
-        canonical = ChatSandboxManager._parse_member_processes(
-            "".join(f"{pid} {started}\n" for pid, started in processes).encode("ascii")
-        )
-        return "".join(f"{pid} {started}\n" for pid, started in canonical).encode("ascii")
 
     def prepare_shared_workspace(self, spec: ChatSandboxSpec) -> None:
         """Make the imported owner tree writable through the shared group."""
@@ -1999,73 +1793,7 @@ class ChatSandboxManager:
         user_gid: int,
     ) -> None:
         """Signal one verified resident or command process group, never the container."""
-        self._validate_member_pidfile(spec, pidfile, user_uid=user_uid)
-        argv = [
-            "/bin/sh",
-            "-c",
-            self._member_reaper_script('"$2"'),
-            "sh",
-            str(user_uid),
-            pidfile,
-        ]
-        result = (
-            self._kata_privileged_exec(spec, argv, timeout_s=20)
-            if self.backend.runtime == KATA_RUNTIME
-            else self.exec_capture(
-                spec,
-                argv,
-                workdir="/",
-                timeout_s=20,
-                user_uid=user_uid,
-                user_gid=user_gid,
-            )
-        )
-        if result.returncode != 0:
-            stderr = (
-                result.stderr.decode("utf-8", "replace")
-                if isinstance(result.stderr, bytes)
-                else str(result.stderr or "")
-            )
-            raise _member_kill_failure(result.returncode, stderr)
-
-    @staticmethod
-    def _member_reaper_script(pidfile_expression: str) -> str:
-        """Build an exact PID/start receipt wait, verification, and group kill."""
-        return (
-            'set -eu; expected_uid="$1"; '
-            # kill -0 sees zombies too. Docker's init normally reaps them,
-            # but a delayed reap is not a surviving command. Examine state
-            # before declaring cleanup failed, without requiring procps.
-            'group_alive() { kill -0 "-$pid" 2>/dev/null || return 1; '
-            "for task in /proc/[0-9]*/stat; do "
-            'read -r raw < "$task" 2>/dev/null || continue; '
-            'set -- ${raw##*) }; [ "${3:-}" = "$pid" ] || continue; '
-            'case "${1:-}" in Z|X) continue;; esac; return 0; '
-            "done; return 1; }; "
-            f"for pidfile in {pidfile_expression}; do "
-            'attempt=0; ready=0; pid=""; started=""; '
-            'while [ "$attempt" -lt 40 ]; do '
-            'receipt=$(cat -- "$pidfile" 2>/dev/null || :); set -- $receipt; '
-            'if [ "$#" -eq 2 ]; then pid="$1"; started="$2"; '
-            'case "$pid" in ""|*[!0-9]*) ;; *) case "$started" in '
-            '""|*[!0-9]*) ;; *) ready=1; break;; esac;; esac; fi; '
-            "attempt=$((attempt + 1)); sleep 0.05; done; "
-            '[ "$ready" = 1 ] || exit 125; '
-            '[ "$(stat -c %u "/proc/$pid" 2>/dev/null || :)" = "$expected_uid" ] '
-            '|| { rm -f -- "$pidfile"; continue; }; '
-            'fields=$(sed "s/^[^)]*) //" "/proc/$pid/stat" 2>/dev/null || :); '
-            "set -- $fields; current_pgid=${3:-}; current_started=${20:-}; "
-            '[ "$current_pgid" = "$pid" ] && [ "$current_started" = "$started" ] '
-            '|| { rm -f -- "$pidfile"; exit 126; }; '
-            'kill -TERM "-$pid" 2>/dev/null || :; attempt=0; '
-            "while group_alive; do attempt=$((attempt + 1)); "
-            '[ "$attempt" -lt 40 ] || { kill -KILL "-$pid" 2>/dev/null || :; '
-            "attempt=0; while group_alive; do "
-            'attempt=$((attempt + 1)); [ "$attempt" -lt 100 ] || exit 124; '
-            "sleep 0.05; done; break; }; "
-            'sleep 0.05; done; rm -f -- "$pidfile"; '
-            "done"
-        )
+        members.kill(self, spec, pidfile=pidfile, user_uid=user_uid, user_gid=user_gid)
 
     def spawn_terminal(
         self,
@@ -2971,7 +2699,7 @@ class ChatSandboxManager:
         development; Kata accepts only its guest-root observer journal.
         """
         uid = MEMBER_UID_BASE + slot_id
-        self._validate_member_identity(spec, slot_id=slot_id, user_uid=uid)
+        members.validate_identity(spec, slot_id=slot_id, user_uid=uid)
         payload = json.dumps(update, separators=(",", ":")).encode()
         if len(payload) > 64 * 1024:
             raise SandboxError("tool hook settings exceed their trusted bound")
@@ -3688,22 +3416,8 @@ class ChatSandboxManager:
             raise SandboxError(f"Docker archive command failed: {exc}") from exc
 
 
-#: The member reaper's exit when no process receipt appeared in its wait.
-_REAPER_NO_RECEIPT = 125
-
 #: How long a killed command whose receipt is gone may take to finish exiting.
 _RECEIPT_EXIT_GRACE_S = 5.0
-
-
-def _member_kill_failure(returncode: int, stderr: str) -> SandboxError:
-    """Name a failed member reaper run.
-
-    Only the reaper's own silent exit means the receipt is missing: a Docker
-    exec failure that shares the code always explains itself on stderr.
-    """
-    if returncode == _REAPER_NO_RECEIPT and not stderr.strip():
-        return MemberProcessReceiptMissing("resident process receipt is missing")
-    return SandboxError("resident process cleanup failed: " + stderr[:300])
 
 
 class _RetainedExecProcess(SandboxProcess):
@@ -4157,11 +3871,6 @@ class RetainedChatBackend(SandboxBackend):
     def check_gateway_reachable(self, base_url: str) -> None:
         """Delegate the backend's isolated gateway reachability probe."""
         self.manager.backend.check_gateway_reachable(base_url)
-
-
-def member_inference_env_path(slot_id: int) -> str:
-    """Where one member's owner inference credentials wait for its bash."""
-    return f"{MEMBER_TMPFS_ROOT}/{slot_id}/inference-env.sh"
 
 
 __all__ = [

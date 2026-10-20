@@ -17,7 +17,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from cloud_agent_host import chat_sandbox as chat_sandbox_mod, chat_sandbox_writers as writers
+from cloud_agent_host import (
+    chat_sandbox as chat_sandbox_mod,
+    chat_sandbox_members as members,
+    chat_sandbox_writers as writers,
+)
 from cloud_agent_host.chat_sandbox import (
     ACTIVATION_TMPFS,
     ARCHIVE_IMPORT_TIMEOUT_PER_GIB_S,
@@ -1876,7 +1880,7 @@ def test_member_turn_census_is_pid_reuse_fenced_and_canonical(monkeypatch):
     ]
 
     with pytest.raises(SandboxError, match="malformed"):
-        manager._parse_member_processes(b"41 nope\n")
+        members.parse_processes(b"41 nope\n")
 
 
 def test_pre_upgrade_container_receives_the_root_owned_process_reaper(monkeypatch, tmp_path):

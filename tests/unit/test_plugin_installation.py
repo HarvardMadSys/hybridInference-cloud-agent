@@ -14,11 +14,10 @@ from unittest.mock import Mock
 import httpx
 import pytest
 
-from cloud_agent_host import resident_transport
+from cloud_agent_host import chat_sandbox_members as members, resident_transport
 from cloud_agent_host.bounded_output import text_chunks
 from cloud_agent_host.chat_sandbox import (
     CHAT_WORKDIR,
-    ChatSandboxManager,
     ChatSandboxSpec,
     claude_member_config_dir,
 )
@@ -93,7 +92,7 @@ class _LocalManager:
 
     def spawn(self, _spec, argv, **kwargs):
         assert (
-            ChatSandboxManager._validate_member_pidfile(
+            members.validate_pidfile(
                 self,  # type: ignore[arg-type]
                 _spec,
                 kwargs["process_pidfile"],
