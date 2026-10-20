@@ -22,9 +22,7 @@ from cloud_agent.goals.models import GOAL_REPORT_PROTOCOL
 from cloud_agent.storage._sql.attachments import claim_attachments
 from cloud_agent.storage._sql.goals import (
     CANCEL_QUEUED_GOAL_ROUNDS_SQL,
-    EDITED_WHILE_PAUSED_DETAIL,
     PAUSE_GOALS_SQL,
-    SET_GOAL_SQL,
     arm_goal_wakeup,
 )
 from cloud_agent.storage._sql.jobs import JOB_SELECT, SESSION_DELETE_BLOCK_SQL
@@ -850,17 +848,11 @@ async def insert_follow_up(
     parent_job_id: str,
     user_id: str,
     prompt: str,
-    runtime: str | None = None,
     model: str | None = None,
     reasoning_effort: str | None = None,
     reset_reasoning_effort: bool = False,
     skills: list[dict[str, Any]] | None = None,
     attachments: list[dict[str, Any]] | None = None,
-    goal: GoalInput | None = None,
-    turn_source: str = "human",
-    goal_round: int | None = None,
-    goal_round_kind: str | None = None,
-    goal_revision: int | None = None,
     yield_to_queued: bool = False,
     client_request_id: str | None = None,
     client_request_fingerprint: str | None = None,
@@ -888,12 +880,6 @@ async def insert_follow_up(
     ``{"error": "yielded"}``. It is asked under this transaction's thread lock,
     which is the only place the answer cannot go stale.
 
-    ``goal`` sets or replaces the conversation's completion condition in the
-    same transaction that appends this turn. ``turn_source``, ``goal_round``,
-    ``goal_round_kind`` and ``goal_revision`` describe an automatic round the
-    platform is running toward that goal; a person's message never sets them,
-    and nothing here can change the objective an automatic round runs for.
-
     ``reasoning_effort`` overrides the inherited depth; omitting it keeps the
     parent's, as an omitted model does. ``reset_reasoning_effort`` clears it
     back to Auto — the one thing a null override cannot express, since null is
@@ -916,8 +902,7 @@ async def insert_follow_up(
     if requested is None:
         return None
     thread = await conn.fetchrow(
-        "SELECT id, title, title_source, pinned_at, archived_at, "
-        "goal_id, goal_objective, goal_state FROM agent_threads "
+        "SELECT id, title, title_source, pinned_at, archived_at, goal_id FROM agent_threads "
         "WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL FOR UPDATE",
         requested["thread_id"],
         user_id,
@@ -943,36 +928,6 @@ async def insert_follow_up(
         )
         if waiting:
             return {"error": "yielded"}
-    if goal is not None:
-        # The objective and the message are one commit. A turn that
-        # carried a new goal into a transaction that then failed would
-        # otherwise leave a goal nothing had been asked to work on.
-        # A goal that had already finished is being authorized
-        # again even when its words are identical: the previous
-        # authorization was spent, and its identity must not be reused.
-        # A paused goal stays paused however it is edited — the owner
-        # stopped it, and only the owner starts it again.
-        await conn.execute(
-            SET_GOAL_SQL,
-            thread_id,
-            goal.objective,
-            goal.max_rounds,
-            new_goal_id(),
-            "paused" if thread["goal_state"] == "paused" else "active",
-            thread["goal_state"] == "complete",
-            EDITED_WHILE_PAUSED_DETAIL,
-            # The same tri-state the goal repository's own ``set_goal``
-            # applies, and for the same reason: a message that carries a
-            # new objective and says nothing about a bound must not
-            # delete one the owner stated earlier.
-            goal.states_max_rounds,
-        )
-        # The same rule the goal repository's own ``set_goal`` applies,
-        # and it has to be applied here too: a round queued for the old
-        # objective carries a `<goal_round>` body saying what *it* was
-        # for, so leaving it queued runs a turn toward an objective its
-        # owner just replaced — and pays for it.
-        await conn.execute(CANCEL_QUEUED_GOAL_ROUNDS_SQL, [thread_id])
     parent = await conn.fetchrow(
         f"{JOB_SELECT} WHERE j.thread_id = $1 ORDER BY j.turn_no DESC LIMIT 1 FOR UPDATE OF j",
         thread_id,
@@ -1032,10 +987,9 @@ async def insert_follow_up(
             (id, thread_id, parent_job_id, turn_no, user_id, base_sha,
              task_prompt, runtime, model, reasoning_effort, state, metadata,
              client_request_id, client_request_fingerprint, skills, attachments,
-             turn_source, goal_round, goal_round_kind, goal_revision, goal_id,
-             input_seq_at_create)
+             turn_source, goal_id, input_seq_at_create)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13, $14,
-                $15::jsonb, $16::jsonb, $17, $18, $19, $20, $21, $22)
+                $15::jsonb, $16::jsonb, 'human', $17, $18)
         """,
         job_id,
         thread_id,
@@ -1044,7 +998,7 @@ async def insert_follow_up(
         user_id,
         parent["published_commit_sha"] or parent["base_sha"],
         prompt,
-        runtime or parent["runtime"],
+        parent["runtime"],
         model or parent["model"],
         None if reset_reasoning_effort else (reasoning_effort or parent["reasoning_effort"]),
         QUEUED,
@@ -1056,10 +1010,6 @@ async def insert_follow_up(
         # and are re-imported whenever the sandbox is rebuilt, so this
         # column records only what this turn added.
         json.dumps(attachments) if attachments else None,
-        turn_source,
-        goal_round,
-        goal_round_kind,
-        goal_revision,
         thread["goal_id"],
         # A person's turn is what "the owner has moved on" is measured
         # against: the sequence it lands on is stamped below, after the
@@ -1085,39 +1035,35 @@ async def insert_follow_up(
         job_id,
         prompt,
     )
-    if turn_source != "goal":
-        # The bump and the turn are one commit. A completion claim is
-        # honored only while the thread's counter still equals the one
-        # its turn was created at, so the message that would make an
-        # in-flight claim stale is stamped by the same transaction that
-        # accepts it.
-        stamped = await conn.fetchval(
-            """
-            UPDATE agent_threads
-            SET user_input_seq = user_input_seq + 1, updated_at = NOW()
-            WHERE id = $1
-            RETURNING user_input_seq
-            """,
-            thread_id,
-        )
-        await conn.execute(
-            "UPDATE agent_jobs SET input_seq_at_create = $2 WHERE id = $1",
-            job_id,
-            stamped,
-        )
-        # The same commit records that this conversation's active goal
-        # has to be looked at again. Without it, a goal whose one
-        # obligation was consumed before the message arrived — which is
-        # exactly what a message racing a decision looks like — would
-        # wait for a finish that no longer owes it anything.
-        await arm_goal_wakeup(
-            conn,
-            thread_id=thread_id,
-            trigger="finish",
-            trigger_ref=f"input:{stamped}",
-        )
-    else:
-        await conn.execute("UPDATE agent_threads SET updated_at = NOW() WHERE id = $1", thread_id)
+    # The bump and the turn are one commit. A completion claim is honored only
+    # while the thread's counter still equals the one its turn was created at,
+    # so the message that would make an in-flight claim stale is stamped by the
+    # same transaction that accepts it.
+    stamped = await conn.fetchval(
+        """
+        UPDATE agent_threads
+        SET user_input_seq = user_input_seq + 1, updated_at = NOW()
+        WHERE id = $1
+        RETURNING user_input_seq
+        """,
+        thread_id,
+    )
+    await conn.execute(
+        "UPDATE agent_jobs SET input_seq_at_create = $2 WHERE id = $1",
+        job_id,
+        stamped,
+    )
+    # The same commit records that this conversation's active goal has to be
+    # looked at again. Without it, a goal whose one obligation was consumed
+    # before the message arrived — which is exactly what a message racing a
+    # decision looks like — would wait for a finish that no longer owes it
+    # anything.
+    await arm_goal_wakeup(
+        conn,
+        thread_id=thread_id,
+        trigger="finish",
+        trigger_ref=f"input:{stamped}",
+    )
     result = job_row_to_dict(row)
     result["title"] = thread["title"]
     result["title_source"] = thread["title_source"]
