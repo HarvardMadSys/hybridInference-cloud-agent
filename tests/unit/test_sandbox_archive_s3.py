@@ -26,6 +26,7 @@ from cloud_agent_shared.sandbox_archive_settings import (
     MIN_MULTIPART_PART_BYTES,
     SANDBOX_ARCHIVE_S3_URI,
     SandboxArchivePolicy,
+    SandboxArchivePolicyError,
 )
 
 _ACCOUNT = "123456789012"
@@ -163,13 +164,7 @@ class RecordingS3Client:
 
 
 def _config(**overrides: Any) -> SandboxArchiveS3Config:
-    values: dict[str, Any] = {
-        "region": _REGION,
-        "kms_key_arn": _KMS_KEY,
-        "expected_bucket_owner": _ACCOUNT,
-    }
-    values.update(overrides)
-    return SandboxArchiveS3Config(**values)
+    return SandboxArchiveS3Config.from_policy(_policy(**{"revision": 0, **overrides}))
 
 
 def _policy(**overrides: Any) -> SandboxArchivePolicy:
@@ -243,8 +238,6 @@ def test_disabled_policy_cannot_create_an_s3_service_config() -> None:
 @pytest.mark.parametrize(
     "updates, message",
     [
-        ({"uri": "s3://other/cloud-agent/sandbox"}, "exactly"),
-        ({"uri": f"{SANDBOX_ARCHIVE_S3_URI}/"}, "exactly"),
         ({"expected_bucket_owner": "123"}, "12-digit"),
         (
             {"kms_key_arn": "arn:aws:kms:us-west-2:123456789012:key/12345678"},
@@ -261,14 +254,26 @@ def test_disabled_policy_cannot_create_an_s3_service_config() -> None:
 def test_config_rejects_destination_and_bound_weakening(
     updates: dict[str, Any], message: str
 ) -> None:
-    values: dict[str, Any] = {
-        "region": _REGION,
-        "kms_key_arn": _KMS_KEY,
-        "expected_bucket_owner": _ACCOUNT,
-    }
-    values.update(updates)
-    with pytest.raises(SandboxArchiveConfigError, match=message):
-        SandboxArchiveS3Config(**values)
+    """A config holds a parsed policy, so weakening it is refused while parsing.
+
+    The destination is no field of either: a config always writes to the fixed
+    bucket, and a policy naming any other ``s3_uri`` does not parse.
+    """
+    with pytest.raises(SandboxArchivePolicyError, match=message):
+        SandboxArchiveS3Config.from_policy(_policy(**updates))
+
+
+@pytest.mark.parametrize("missing", ["expected_bucket_owner", "kms_key_arn"])
+def test_workload_identity_needs_the_kms_key_and_bucket_owner(missing: str) -> None:
+    """Credentials resolved for a pinned policy can leave an access-key policy without a key."""
+    policy = _policy(
+        **{missing: ""},
+        aws_access_key_id=_ACCESS_KEY_ID,
+        aws_secret_access_key=_SECRET_ACCESS_KEY,
+    )
+    assert SandboxArchiveS3Config.from_policy(policy).aws_access_key_id == _ACCESS_KEY_ID
+    with pytest.raises(SandboxArchiveConfigError):
+        SandboxArchiveS3Config.from_policy(policy, aws_access_key_id="", aws_secret_access_key="")
 
 
 def test_single_upload_uses_opaque_key_sha256_kms_and_expected_owner() -> None:

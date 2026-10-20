@@ -31,6 +31,7 @@ from cloud_agent_host.sandbox_archive_s3 import (
 from cloud_agent_host.sandbox_archives import SandboxArchiveService, SandboxInitialArchiveMarker
 from cloud_agent_host.shared_session_supervisor import SharedMemberManifest
 from cloud_agent_shared.errors import SandboxError
+from cloud_agent_shared.sandbox_archive_settings import SandboxArchivePolicy
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -45,10 +46,13 @@ _PREPARATION_ID = "ajob_initial"
 
 
 def _config() -> SandboxArchiveS3Config:
-    return SandboxArchiveS3Config(
-        region=_REGION,
-        kms_key_arn=_KMS_KEY,
-        expected_bucket_owner=_ACCOUNT,
+    return SandboxArchiveS3Config.from_policy(
+        SandboxArchivePolicy(
+            enabled=True,
+            region=_REGION,
+            kms_key_arn=_KMS_KEY,
+            expected_bucket_owner=_ACCOUNT,
+        )
     )
 
 
