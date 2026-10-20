@@ -20,7 +20,10 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, BinaryIO, Final, cast
 
-from cloud_agent_host.sandbox_archive_bundle import build_sandbox_archive_bundle
+from cloud_agent_host.sandbox_archive_bundle import (
+    BoundedDigestWriter,
+    build_sandbox_archive_bundle,
+)
 from cloud_agent_host.sandbox_archive_s3 import (
     SandboxArchiveAlreadyExists,
     SandboxArchiveDeadlineExceeded,
@@ -95,52 +98,6 @@ def safe_archive_error_type(error: BaseException) -> str:
     """Return a bounded class name without copying provider-controlled text."""
     name = type(error).__name__
     return name if _ERROR_TYPE.fullmatch(name) else "Error"
-
-
-class _BoundedBundleWriter:
-    """Keep the compressed outer object inside the configured S3 ceiling."""
-
-    def __init__(
-        self,
-        stream: BinaryIO,
-        maximum: int,
-        *,
-        check_deadline: Callable[[], None],
-    ) -> None:
-        self._stream = stream
-        self._maximum = maximum
-        self._check_deadline = check_deadline
-        self._digest = hashlib.sha256()
-        self.size = 0
-
-    def write(self, chunk: bytes | bytearray | memoryview) -> int:
-        self._check_deadline()
-        projected = self.size + len(chunk)
-        if projected > self._maximum:
-            raise SandboxError(
-                f"compressed sandbox archive exceeds the {self._maximum}-byte object limit"
-            )
-        written = self._stream.write(chunk)
-        self._check_deadline()
-        if written != len(chunk):
-            raise OSError("short write while spooling a compressed sandbox archive")
-        self._digest.update(chunk)
-        self.size = projected
-        return written
-
-    def flush(self) -> None:
-        self._check_deadline()
-        self._stream.flush()
-        self._check_deadline()
-
-    def tell(self) -> int:
-        self._check_deadline()
-        return self._stream.tell()
-
-    @property
-    def sha256(self) -> str:
-        """Return the digest of every compressed byte written so far."""
-        return self._digest.hexdigest()
 
 
 @dataclass
@@ -943,10 +900,14 @@ class SandboxArchiveService:
                 prefix=f"sandbox-{phase}-archive-"
             ),
         )
-        bounded = _BoundedBundleWriter(
+        maximum = self._config.max_archive_bytes
+        bounded = BoundedDigestWriter(
             stream,
-            self._config.max_archive_bytes,
-            check_deadline=lambda: self._check_deadline(deadline),
+            limits=(
+                (maximum, f"compressed sandbox archive exceeds the {maximum}-byte object limit"),
+            ),
+            what="a compressed sandbox archive",
+            check=lambda: self._check_deadline(deadline),
         )
         metadata: dict[str, object] = {
             "sandbox_namespace": self._namespace,

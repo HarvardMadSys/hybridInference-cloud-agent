@@ -19,7 +19,7 @@ import json
 import math
 import tarfile
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass
 from typing import BinaryIO, Literal, Protocol, cast
@@ -81,48 +81,64 @@ def _validate_limit(name: str, value: int) -> None:
         raise ValueError(f"{name} must be a positive integer")
 
 
-class _BoundedDigestWriter:
-    """A write-only sink that enforces both archive limits as bytes arrive."""
+def _no_check() -> None:
+    return None
+
+
+class BoundedDigestWriter:
+    """A write-only sink that hashes every byte and refuses a write past its limits.
+
+    ``limits`` pairs a byte ceiling with the message a write past it is
+    refused with; they are checked in order. ``check`` runs around every
+    call, so an elapsed deadline stops a long copy between writes.
+    """
 
     def __init__(
         self,
         stream: BinaryIO,
         *,
-        container_path: str,
-        prior_total: int,
-        max_member_bytes: int,
-        max_total_bytes: int,
+        limits: Sequence[tuple[int, str]],
+        what: str,
+        check: Callable[[], None] = _no_check,
     ) -> None:
         self._stream = stream
-        self._container_path = container_path
-        self._prior_total = prior_total
-        self._max_member_bytes = max_member_bytes
-        self._max_total_bytes = max_total_bytes
+        self._limits = tuple(limits)
+        self._what = what
+        self._check = check
         self._digest = hashlib.sha256()
-        self.size_bytes = 0
+        self.size = 0
 
     def write(self, chunk: bytes | bytearray | memoryview) -> int:
+        """Write and hash ``chunk``, unless it would take the total past a limit."""
+        self._check()
         if not isinstance(chunk, (bytes, bytearray, memoryview)):
             raise SandboxError("sandbox archive fetch callback wrote non-bytes data")
-        projected_size = self.size_bytes + len(chunk)
-        if projected_size > self._max_member_bytes:
-            raise SandboxError(
-                f"sandbox path archive {self._container_path!r} exceeds the "
-                f"{self._max_member_bytes}-byte member limit"
-            )
-        if self._prior_total + projected_size > self._max_total_bytes:
-            raise SandboxError(
-                f"sandbox path archives exceed the {self._max_total_bytes}-byte total limit"
-            )
+        projected = self.size + len(chunk)
+        for maximum, message in self._limits:
+            if projected > maximum:
+                raise SandboxError(message)
         written = self._stream.write(chunk)
+        self._check()
         if written != len(chunk):
-            raise OSError("short write while spooling a sandbox path archive")
+            raise OSError(f"short write while spooling {self._what}")
         self._digest.update(chunk)
-        self.size_bytes = projected_size
+        self.size = projected
         return written
+
+    def flush(self) -> None:
+        """Flush the underlying stream."""
+        self._check()
+        self._stream.flush()
+        self._check()
+
+    def tell(self) -> int:
+        """Return the underlying stream's position."""
+        self._check()
+        return self._stream.tell()
 
     @property
     def sha256(self) -> str:
+        """Return the digest of every byte written so far."""
         return self._digest.hexdigest()
 
 
@@ -135,12 +151,20 @@ def _fetch_archive(
     max_member_bytes: int,
     max_total_bytes: int,
 ) -> tuple[int, str] | None:
-    writer = _BoundedDigestWriter(
+    writer = BoundedDigestWriter(
         stream,
-        container_path=spec.container_path,
-        prior_total=prior_total,
-        max_member_bytes=max_member_bytes,
-        max_total_bytes=max_total_bytes,
+        limits=(
+            (
+                max_member_bytes,
+                f"sandbox path archive {spec.container_path!r} exceeds the "
+                f"{max_member_bytes}-byte member limit",
+            ),
+            (
+                max_total_bytes - prior_total,
+                f"sandbox path archives exceed the {max_total_bytes}-byte total limit",
+            ),
+        ),
+        what="a sandbox path archive",
     )
     try:
         reported_size = fetch_archive(
@@ -149,7 +173,7 @@ def _fetch_archive(
             max_bytes=max_member_bytes,
         )
     except FileNotFoundError as exc:
-        if spec.optional and writer.size_bytes == 0:
+        if spec.optional and writer.size == 0:
             return None
         if spec.optional:
             raise SandboxError(
@@ -169,15 +193,15 @@ def _fetch_archive(
         raise SandboxError(
             f"sandbox path archive {spec.container_path!r} reported a non-integer size"
         )
-    if reported_size != writer.size_bytes:
+    if reported_size != writer.size:
         raise SandboxError(
             f"sandbox path archive {spec.container_path!r} reported {reported_size} bytes "
-            f"after writing {writer.size_bytes}"
+            f"after writing {writer.size}"
         )
-    if writer.size_bytes == 0:
+    if writer.size == 0:
         raise SandboxError(f"sandbox path archive {spec.container_path!r} is empty")
     stream.seek(0)
-    return writer.size_bytes, writer.sha256
+    return writer.size, writer.sha256
 
 
 def _tar_info(name: str, size: int, *, mode: int) -> tarfile.TarInfo:
@@ -395,5 +419,6 @@ __all__ = [
     "DEFAULT_MAX_ARCHIVE_TOTAL_BYTES",
     "ArchiveFetcher",
     "ArchivePhase",
+    "BoundedDigestWriter",
     "build_sandbox_archive_bundle",
 ]
