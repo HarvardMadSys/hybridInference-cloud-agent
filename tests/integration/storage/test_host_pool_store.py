@@ -36,14 +36,14 @@ from cloud_agent.host_pool import (
 from cloud_agent.storage._sql.hosts import release_host_slot
 from cloud_agent.storage.assembly import Storage
 from cloud_agent.storage.repositories.host_pool import PostgresHostPoolRepository
-from cloud_agent_host.shared_protocol import (
+from cloud_agent_shared.runtime_downloads import MAX_TARGETS_PER_RUNTIME
+from cloud_agent_shared.sandbox_archive_settings import SANDBOX_ARCHIVE_S3_URI
+from cloud_agent_shared.shared_protocol import (
     NATIVE_FORK_AT_ANCHOR_CAPABILITY,
     SHARED_SANDBOX_HELPER_PINS,
     SHARED_SANDBOX_RUNTIME_PINS,
     shared_deployment_capability,
 )
-from cloud_agent_shared.runtime_downloads import MAX_TARGETS_PER_RUNTIME
-from cloud_agent_shared.sandbox_archive_settings import SANDBOX_ARCHIVE_S3_URI
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 

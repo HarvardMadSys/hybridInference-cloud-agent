@@ -39,7 +39,7 @@ from cloud_agent.api.worker import verify_claiming_host
 from cloud_agent.storage.assembly import Storage
 from cloud_agent.workers.attempts import reap_expired_attempts
 from cloud_agent.workers.environment_maintenance import run_environment_maintenance
-from cloud_agent_host.shared_protocol import (
+from cloud_agent_shared.shared_protocol import (
     NATIVE_FORK_AT_ANCHOR_CAPABILITY,
     SHARED_SANDBOX_CAPABILITY,
     SHARED_SANDBOX_HELPER_PINS,

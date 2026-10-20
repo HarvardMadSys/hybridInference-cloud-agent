@@ -11,7 +11,7 @@ import tempfile
 import pytest
 
 from cloud_agent_host.sandbox import SandboxError
-from cloud_agent_host.source_archive import build_base_bundle, build_source_archive
+from cloud_agent_shared.git.source_archive import build_base_bundle, build_source_archive
 
 
 def _archive(root, **kwargs) -> bytes:

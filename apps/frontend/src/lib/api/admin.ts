@@ -462,7 +462,7 @@ export async function undrainAgentRunnerHost(host: string): Promise<AgentRunnerH
 /**
  * Advertised on the heartbeat by a runner that takes its limit from
  * `slots_desired`. Mirrors `HOST_CONCURRENCY_CAPABILITY` in
- * `cloud_agent_host/shared_protocol.py`; a host without it keeps the number it
+ * `cloud_agent_shared/shared_protocol.py`; a host without it keeps the number it
  * was deployed with until it is redeployed.
  */
 export const HOST_CONCURRENCY_CAPABILITY = 'host-concurrency-v1';

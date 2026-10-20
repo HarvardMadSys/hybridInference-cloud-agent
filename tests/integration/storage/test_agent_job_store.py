@@ -25,19 +25,17 @@ from cloud_agent.mcp.registry import binding_from_row
 from cloud_agent.schemas import WorkerEventRequest
 from cloud_agent.storage.assembly import Storage
 from cloud_agent.thread_stats import summarize_thread
-from cloud_agent_host.shared_protocol import (
+from cloud_agent_shared.sandbox_archive_settings import SANDBOX_ARCHIVE_CAPABILITY
+from cloud_agent_shared.shared_protocol import (
+    FORK_HELPER,
     GOAL_REPORT_CAPABILITY,
     NATIVE_FORK_AT_ANCHOR_CAPABILITY,
     SHARED_SANDBOX_CAPABILITY,
     SHARED_SANDBOX_HELPER_PINS,
     SHARED_SANDBOX_RUNTIME_PINS,
-    shared_deployment_capability,
-)
-from cloud_agent_shared.sandbox_archive_settings import SANDBOX_ARCHIVE_CAPABILITY
-from cloud_agent_shared.shared_protocol import (
-    FORK_HELPER,
     USER_MESSAGE_EVENT,
     mid_turn_input_capability,
+    shared_deployment_capability,
 )
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]

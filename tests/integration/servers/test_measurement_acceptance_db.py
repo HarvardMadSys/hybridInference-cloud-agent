@@ -67,14 +67,14 @@ from cloud_agent_host.measurement_delivery import (
     DELIVERY_HANDOFF_DRAIN_S,
 )
 from cloud_agent_host.runner import ClaimedJob, ControlPlane
-from cloud_agent_host.shared_protocol import (
+from cloud_agent_shared import operation_profiling
+from cloud_agent_shared.shared_protocol import (
     NATIVE_FORK_AT_ANCHOR_CAPABILITY,
     SHARED_SANDBOX_CAPABILITY,
     SHARED_SANDBOX_HELPER_PINS,
     SHARED_SANDBOX_RUNTIME_PINS,
     shared_deployment_capability,
 )
-from cloud_agent_shared import operation_profiling
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Mapping
