@@ -38,7 +38,9 @@ def _method_names(path: Path, *, protocols: bool = False) -> set[str]:
         ]
         assert classes, f"{path}: expected at least one protocol"
     else:
-        assert len(classes) == 1, f"{path}: expected one class, found {len(classes)}"
+        # A private class is a helper of the repository beside it, never a port.
+        classes = [node for node in classes if not node.name.startswith("_")]
+        assert len(classes) == 1, f"{path}: expected one public class, found {len(classes)}"
     return {
         node.name
         for class_node in classes

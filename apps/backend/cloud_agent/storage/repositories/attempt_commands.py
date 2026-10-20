@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import math
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
 import asyncpg
@@ -91,6 +92,524 @@ logger = get_logger(__name__)
 #: the write either succeeds (``stored``) or the row moved under it
 #: (``conflict``), and the caller only ever sees the port's four outcomes.
 TurnSummaryDecision = Literal["accept", "duplicate", "conflict"]
+
+
+@dataclass(frozen=True)
+class _ClaimAttestation:
+    """What the claiming replica says about itself, read once from its attestation."""
+
+    sandbox_runtime: Any
+    sandbox_image_digest: Any
+    runtime_versions: dict[str, Any]
+    runtime_versions_available: dict[str, Any]
+    runner_capabilities: list[Any]
+    archive_revision: Any
+    host_kernel: Any
+    guest_kernel: Any
+    shared: bool
+    followup: bool
+
+    @classmethod
+    def parse(
+        cls, attestation: dict[str, Any] | None, *, expected_deployment_sha: str | None
+    ) -> _ClaimAttestation:
+        """Read an attestation, treating a malformed field as absent."""
+        attestation = attestation or {}
+        runtime_versions = attestation.get("runtime_versions")
+        # The menu, from the same place and for the same reason as the default
+        # beside it: the attestation is *this replica's* image, and the
+        # heartbeat row is not evidence about it during a rolling deployment.
+        # A selection is only honoured when the machine about to run it says it
+        # can.
+        runtime_versions_available = attestation.get("runtime_versions_available")
+        runner_capabilities = attestation.get("runner_capabilities")
+        return cls(
+            sandbox_runtime=attestation.get("sandbox_runtime"),
+            sandbox_image_digest=attestation.get("sandbox_image_digest"),
+            runtime_versions=runtime_versions if isinstance(runtime_versions, dict) else {},
+            runtime_versions_available=(
+                runtime_versions_available if isinstance(runtime_versions_available, dict) else {}
+            ),
+            runner_capabilities=(
+                runner_capabilities if isinstance(runner_capabilities, list) else []
+            ),
+            archive_revision=attestation.get("sandbox_archive_settings_applied_revision"),
+            host_kernel=attestation.get("host_kernel"),
+            guest_kernel=attestation.get("guest_kernel"),
+            shared=shared_sandbox_claim_attested(
+                attestation, expected_deployment_sha=expected_deployment_sha
+            ),
+            followup=compatible_shared_sandbox_followup_attested(attestation),
+        )
+
+    def secure(self, credential_matches: bool) -> bool:
+        """Whether this replica, with this credential, may run the untrusted Kata profile."""
+        return bool(
+            credential_matches
+            and self.sandbox_runtime == KATA_RUNTIME
+            and isinstance(self.host_kernel, str)
+            and bool(self.host_kernel.strip())
+            and isinstance(self.guest_kernel, str)
+            and bool(self.guest_kernel.strip())
+            and self.host_kernel.strip() != self.guest_kernel.strip()
+        )
+
+    def applied_archive(self, revision: int) -> bool:
+        """Whether this replica says it applied archive policy ``revision``."""
+        return not (
+            SANDBOX_ARCHIVE_CAPABILITY not in self.runner_capabilities
+            or isinstance(self.archive_revision, bool)
+            or not isinstance(self.archive_revision, int)
+            or self.archive_revision != revision
+        )
+
+
+@dataclass(frozen=True)
+class _ClaimGate:
+    """What the policy and the host row allow this claim, before any job is read."""
+
+    selected_versions: dict[str, Any]
+    pin_allows_new_sandbox: bool
+    capabilities: list[Any]
+    archive_required: bool
+    archive_revision: int
+    restore_capable: bool
+    secure_attestation: bool
+
+
+@dataclass(frozen=True)
+class _ClaimedGroup:
+    """The claimed turn's retained group, locked; ``handover`` is open until the slot is taken."""
+
+    thread_sandbox: Any
+    restore: bool
+    handover: Any
+
+
+async def _claim_gate(
+    conn: Any, *, host: str, host_credential_hash: str, attested: _ClaimAttestation
+) -> _ClaimGate | None:
+    """Read the runner policy and the host row; ``None`` when this host may claim nothing."""
+    policy = await conn.fetchrow(
+        """
+        SELECT active_host, runtime_versions, sandbox_archive_settings,
+               sandbox_archive_revision
+        FROM agent_runner_policy WHERE id FOR SHARE
+        """
+    )
+    await lock_compute_topology(conn)
+    resource_new, resource_claims = await host_compute_admission(conn, host)
+    if not resource_claims:
+        return None
+    active_host = None if policy is None else policy["active_host"]
+    selected_versions = {} if policy is None else load_json(policy["runtime_versions"]) or {}
+    pin_allows_new_sandbox = resource_new and (active_host is None or host == active_host)
+    host_row = await conn.fetchrow(
+        "SELECT status, capabilities, slots_total, slots_used, slots_desired, "
+        "sandbox_archive_settings_applied_revision, "
+        "(credential_hash IS NOT NULL AND credential_hash = $2) "
+        "AS credential_matches "
+        "FROM agent_runner_hosts WHERE host = $1",
+        host,
+        host_credential_hash,
+    )
+    # This read only chooses which profile may be considered, so it locks
+    # nothing: the row is locked after the turn's group, below. The slot
+    # UPDATE there is the decision point and closes concurrent drain,
+    # revocation, and re-enrollment races.
+    if host_row is None or host_row["status"] not in CLAIMABLE_STATUSES:
+        return None
+    if host_slots_exhausted(host_row):
+        return None
+    capabilities = load_json(host_row["capabilities"]) or []
+    try:
+        archive_policy = load_stored_archive_policy(stored_archive_settings(policy))
+    except SandboxArchivePolicyError:
+        return None
+    archive_required = archive_policy.enabled
+    archive_revision = archive_policy.revision
+    if archive_required and (
+        SANDBOX_ARCHIVE_CAPABILITY not in capabilities
+        or host_row["sandbox_archive_settings_applied_revision"] != archive_revision
+        or not attested.applied_archive(archive_revision)
+    ):
+        return None
+    # A cold group lives only in its checkpoint, which this replica's sandbox
+    # manager must be able to download (archives on) and turn back into the
+    # group (it attests restore). The host row and the replica both say so:
+    # during a rolling deploy the row describes whichever replica beat last.
+    # Restoring creates the group's only container here, so the machine must
+    # also still take new groups: not one whose lease is about to end, or that
+    # a hold keeps empty.
+    restore_capable = bool(
+        resource_new
+        and archive_required
+        and SANDBOX_RESTORE_CAPABILITY in capabilities
+        and SANDBOX_RESTORE_CAPABILITY in attested.runner_capabilities
+    )
+    return _ClaimGate(
+        selected_versions=selected_versions,
+        pin_allows_new_sandbox=pin_allows_new_sandbox,
+        capabilities=capabilities,
+        archive_required=archive_required,
+        archive_revision=archive_revision,
+        restore_capable=restore_capable,
+        secure_attestation=attested.secure(bool(host_row["credential_matches"])),
+    )
+
+
+async def _claimable_job(
+    conn: Any, *, host: str, attested: _ClaimAttestation, gate: _ClaimGate
+) -> Any:
+    """Lock the oldest queued turn this host may run now, or return ``None``."""
+    return await conn.fetchrow(
+        f"""
+        SELECT {QUALIFIED_JOB_COLUMNS},
+               -- Read for the turn this hands out, once every condition
+               -- below has passed, not for each queued turn before it.
+               (
+                   SELECT to_jsonb(s) FROM {THREAD_SANDBOX_SOURCE}
+                   WHERE s.thread_id = j.thread_id
+               ) AS thread_sandbox,
+               t.title_source, t.title
+        FROM agent_jobs j
+        JOIN agent_threads t ON t.id = j.thread_id
+        LEFT JOIN {THREAD_SANDBOX_CLAIM_SOURCE} ON s.thread_id = j.thread_id
+        -- An automatic round is re-checked against the goal it was
+        -- created for here, immediately before it is handed out.
+        WHERE {runnable_queued_turn("j")}
+          AND COALESCE(j.metadata->'requires', '[]'::jsonb) <@ $1::jsonb
+          AND (
+                t.execution_profile = '{ExecutionProfile.TRUSTED_V1.value}'
+                OR (
+                    t.execution_profile = '{ExecutionProfile.UNTRUSTED_KATA_V1.value}'
+                    AND $3::boolean
+                )
+          )
+          AND (
+                (
+                    s.thread_id IS NULL AND $5::boolean AND $4::boolean
+                    AND NOT EXISTS (
+                        SELECT 1 FROM agent_jobs parent
+                        WHERE parent.id = j.parent_job_id
+                          AND parent.state = 'succeeded'
+                    )
+                )
+                OR (
+                    s.host = $2
+                    AND $6::boolean
+                    AND NOT EXISTS (
+                        SELECT 1 FROM agent_sandboxes deleting
+                        WHERE deleting.id = s.sandbox_id
+                          AND deleting.deletion_state IN {DELETED_GROUP_STATES_SQL}
+                    )
+                    AND s.fork_operation_id IS NULL
+                    AND s.context_status <> 'lost'
+                    AND s.native_state <> 'lost'
+                    AND s.state IN (
+                        'provisioning', 'starting', 'running', 'stopped'
+                    )
+                    AND s.shared_live
+                )
+                OR (
+                    -- A group whose host is gone, held by its
+                    -- checkpoint: any restore-capable host may take
+                    -- it, and the claim below rehomes it. Never the
+                    -- host it left while that one still names its
+                    -- container: a Host moving out, or the same name
+                    -- enrolled again, holds it under the group's
+                    -- stable name. A failed restore has no container
+                    -- and may be retried where it ran, after the wait
+                    -- that follows each failed try.
+                    s.state = 'cold'
+                    AND (s.container_id IS NULL OR s.host IS DISTINCT FROM $2)
+                    AND $7::boolean
+                    AND $6::boolean
+                    AND s.restore_attempts < {MAX_RESTORE_ATTEMPTS}
+                    AND {restore_claim_due("s.restore_attempts", "s.group_last_activity_at")}
+                    AND NOT EXISTS (
+                        SELECT 1 FROM agent_sandboxes deleting
+                        WHERE deleting.id = s.sandbox_id
+                          AND deleting.deletion_state IN {DELETED_GROUP_STATES_SQL}
+                    )
+                    AND s.fork_operation_id IS NULL
+                    AND s.context_status <> 'lost'
+                    AND s.native_state <> 'lost'
+                    AND s.shared_live
+                )
+                OR (
+                    -- A stopped group of a Host silent for a long
+                    -- time, held by its checkpoint: a restore-capable
+                    -- host may take it, and the claim below hands it
+                    -- over and rehomes it. Until then it stays, so a
+                    -- Host that returns continues with it.
+                    s.state = 'stopped'
+                    AND s.host IS DISTINCT FROM $2
+                    AND $7::boolean
+                    AND $6::boolean
+                    AND s.fork_operation_id IS NULL
+                    AND s.context_status <> 'lost'
+                    AND s.native_state <> 'lost'
+                    AND s.shared_live
+                    AND EXISTS (
+                        SELECT 1 FROM agent_sandboxes g
+                        WHERE g.id = s.sandbox_id AND {SILENT_HOST_GROUP_SQL}
+                    )
+                )
+          )
+        ORDER BY j.created_at
+        LIMIT 1
+        FOR UPDATE OF j SKIP LOCKED
+        """,
+        json.dumps(gate.capabilities),
+        host,
+        gate.secure_attestation,
+        attested.shared,
+        gate.pin_allows_new_sandbox,
+        attested.followup,
+        gate.restore_capable,
+    )
+
+
+async def _lock_claimed_group(conn: Any, *, job_row: Any, host: str) -> _ClaimedGroup | None:
+    """Lock the claimed turn's retained group, if it has one; ``None`` refuses the claim.
+
+    A group taken from a silent host is taken in a savepoint, ``handover``,
+    which the caller commits once the slot is taken or rolls back if it is not.
+    """
+    thread_sandbox = load_json(job_row["thread_sandbox"])
+    restore = isinstance(thread_sandbox, dict) and thread_sandbox.get("state") == "cold"
+    # Only the silent-Host branch admits a stopped group on another host.
+    take_silent = (
+        isinstance(thread_sandbox, dict)
+        and thread_sandbox.get("state") == "stopped"
+        and thread_sandbox.get("host") != host
+    )
+    handover = None
+    if isinstance(thread_sandbox, dict):
+        # Serialize a retained claim with an administrative stop. A claim
+        # committed first is visible to the stop's busy check; a stop committed
+        # first leaves this job queued. A cold group is locked for the rehome
+        # below, so of two siblings claiming it only the first moves it.
+        claimable = await conn.fetchval(
+            "SELECT (state IN ('provisioning', 'starting', 'running', 'stopped') "
+            "OR ($2 AND state = 'cold' AND restore_checkpoint_id IS NOT NULL AND "
+            f"{restore_claim_due('restore_attempts', 'last_activity_at')})) "
+            "AND stop_requested_at IS NULL "
+            f"AND deletion_state NOT IN {DELETED_GROUP_STATES_SQL} "
+            "FROM agent_sandboxes "
+            "WHERE id = $1 " + ("FOR UPDATE" if restore or take_silent else "FOR SHARE"),
+            thread_sandbox["sandbox_id"],
+            restore,
+        )
+        if not claimable:
+            return None
+        if take_silent:
+            # A savepoint, so a claim that then finds no slot leaves the group
+            # with its silent Host instead of cold.
+            handover = conn.transaction()
+            await handover.start()
+            if not await take_silent_host_group(
+                conn, sandbox_id=thread_sandbox["sandbox_id"], claimant=host
+            ):
+                await handover.rollback()
+                return None
+            restore = True
+    return _ClaimedGroup(thread_sandbox=thread_sandbox, restore=restore, handover=handover)
+
+
+async def _take_host_slot(
+    conn: Any, *, host: str, host_credential_hash: str, gate: _ClaimGate
+) -> bool:
+    """Take one of the host's slots, re-checking its status, capacity and credential."""
+    # The host row after the group, as finishing or reaping a member takes
+    # them: that writes the group and then gives its slot back, so a claim
+    # holding the row while it waited for the group deadlocked with it. Locked
+    # in a statement of its own, before the slot UPDATE counts this host's
+    # environment runs: claiming one locks this row without writing it, and a
+    # count that began while it waited would miss the run.
+    await conn.execute("SELECT host FROM agent_runner_hosts WHERE host = $1 FOR UPDATE", host)
+    # The atomic half of the slot claim. Under READ COMMITTED two claims
+    # hitting the same host row serialize and the loser re-evaluates capacity
+    # against the winner's committed value.
+    took_slot = await conn.fetchval(
+        f"""
+        UPDATE agent_runner_hosts
+        SET slots_used = slots_used + 1
+        WHERE host = $1
+          AND status = '{HOST_ONLINE}'
+          AND (slots_total IS NULL OR slots_used + {env_runs_holding_slots("$1")} < slots_total)
+          AND (slots_desired IS NULL OR slots_used + {env_runs_holding_slots("$1")} < slots_desired)
+          AND NOT EXISTS (SELECT 1 FROM agent_environment_runs er
+              WHERE er.host=$1 AND {env_run_blocks_host("er")})
+          AND credential_hash = $2
+          AND (
+                $3::boolean
+                OR (
+                    sandbox_archive_settings_applied_revision = $4
+                    AND capabilities @> $5::jsonb
+                )
+          )
+        RETURNING slots_used
+        """,
+        host,
+        host_credential_hash,
+        not gate.archive_required,
+        gate.archive_revision,
+        json.dumps([SANDBOX_ARCHIVE_CAPABILITY]),
+    )
+    return took_slot is not None
+
+
+async def _start_attempt(
+    conn: Any,
+    *,
+    job_row: Any,
+    group: _ClaimedGroup,
+    host: str,
+    worker_id: str,
+    lease_ttl_seconds: float,
+    attested: _ClaimAttestation,
+    gate: _ClaimGate,
+) -> tuple[Any, Any]:
+    """Rehome a restored group, insert the attempt and mark the turn running.
+
+    Returns the attempt row and the retained group as the runner receives it.
+    """
+    job_id = job_row["id"]
+    thread_sandbox = group.thread_sandbox
+    if group.restore:
+        # The fence that makes this host the group's only owner: a new
+        # generation, no container yet, and the checkpoint kept as the source.
+        # Anything the previous host still holds names the old generation and
+        # is refused from here on.
+        await conn.execute(
+            """
+            UPDATE agent_sandboxes
+            SET state = 'restoring', host = $2, generation = generation + 1,
+                container_id = NULL, restore_attempts = restore_attempts + 1,
+                idle_deadline = NULL, last_error = NULL, updated_at = NOW()
+            WHERE id = $1 AND state = 'cold'
+            """,
+            thread_sandbox["sandbox_id"],
+            host,
+        )
+    next_no = await conn.fetchval(
+        "SELECT COALESCE(MAX(attempt_no), 0) + 1 FROM agent_attempts WHERE job_id = $1",
+        job_id,
+    )
+    # A thread keeps the version it started on; see ``resolve_runtime_version``.
+    # Read here, inside the claim, because the answer must be the one the
+    # attempt is stamped with — the TOCTOU that stamping exists to close.
+    thread_version = None
+    if job_row["thread_id"]:
+        thread_version = await conn.fetchval(
+            """
+            SELECT a.runtime_version
+            FROM agent_attempts a
+            JOIN agent_jobs j ON j.id = a.job_id
+            WHERE j.thread_id = $1 AND a.runtime_version IS NOT NULL
+            ORDER BY a.started_at DESC
+            LIMIT 1
+            """,
+            job_row["thread_id"],
+        )
+    runtime_version = resolve_runtime_version(
+        runtime=job_row["runtime"],
+        thread_version=thread_version,
+        selected=gate.selected_versions,
+        available=attested.runtime_versions_available,
+        host_default=attested.runtime_versions,
+    )
+    attempt_image_digest = attested.sandbox_image_digest
+    if isinstance(thread_sandbox, dict):
+        # A retained chat executes in the already-created container, not in
+        # the runner replica's current image. A rolling image upgrade must
+        # therefore keep stamping the immutable image and CLI version that
+        # this exact writable layer actually uses. This also preserves an
+        # explicit NULL version: it means the old container's image default,
+        # not today's selected version.
+        runtime_version = thread_sandbox.get("runtime_version")
+        attempt_image_digest = thread_sandbox.get("sandbox_image_digest")
+    attempt = await conn.fetchrow(
+        """
+        INSERT INTO agent_attempts
+            (job_id, thread_id, attempt_no, lease_owner, lease_generation,
+             lease_expires_at, base_sha, host_id,
+             sandbox_runtime, sandbox_image_digest, runtime_version,
+             host_kernel, guest_kernel)
+        VALUES ($1, $13, $2, $3, $4, clock_timestamp() + make_interval(secs => $5), $6, $7,
+                $8, $9, $10, $11, $12)
+        RETURNING id, attempt_no, lease_generation,
+                  sandbox_runtime, sandbox_image_digest, runtime_version
+        """,
+        job_id,
+        next_no,
+        worker_id,
+        next_no,
+        lease_ttl_seconds,
+        job_row["base_sha"],
+        host,
+        attested.sandbox_runtime,
+        attempt_image_digest,
+        runtime_version,
+        attested.host_kernel,
+        attested.guest_kernel,
+        job_row["thread_id"],
+    )
+    await conn.execute(
+        "UPDATE agent_jobs SET state = 'running', current_attempt_id = $2, "
+        "claim_retry_at = NULL, "
+        "updated_at = NOW() WHERE id = $1",
+        job_id,
+        attempt["id"],
+    )
+    if group.restore:
+        # However this attempt ends before the recreated container is
+        # confirmed, ``release_restore`` finds the group by it.
+        await conn.execute(
+            "UPDATE agent_sandboxes SET restore_attempt_id = $2 WHERE id = $1",
+            thread_sandbox["sandbox_id"],
+            attempt["id"],
+        )
+        thread_sandbox = load_json(
+            await conn.fetchval(
+                f"SELECT to_jsonb(s) FROM {THREAD_SANDBOX_SOURCE} WHERE s.thread_id = $1",
+                job_row["thread_id"],
+            )
+        )
+    # Nothing is charged here. What this goal has spent is *derived*
+    # from the rounds that have actually started — see
+    # ``storage._sql.goals.ROUNDS_USED_SQL`` — so a round costs
+    # nothing until this INSERT runs and costs once however often it is
+    # retried. Keeping a counter here meant this statement also had to
+    # update ``agent_threads`` while already holding this job's row
+    # lock, which is the reverse of the thread-before-job order the
+    # rest of the repository takes and deadlocked against pausing or
+    # messaging at exactly the moment a runner claimed a round.
+    return attempt, thread_sandbox
+
+
+def _claim_payload(job_row: Any, attempt: Any, thread_sandbox: Any) -> dict[str, Any]:
+    """The claimed turn as the runner receives it."""
+    claim = job_row_to_dict(job_row)
+    claim["state"] = RUNNING
+    claim["current_attempt_id"] = attempt["id"]
+    claim["attempt_id"] = attempt["id"]
+    claim["attempt_no"] = attempt["attempt_no"]
+    claim["title_generation_pending"] = thread_title_needs_generation(
+        job_row["title_source"], job_row["title"]
+    )
+    claim["lease_generation"] = attempt["lease_generation"]
+    # The stamp as written, not as the host row reads later: a rolling upgrade
+    # heartbeat can move that row after this attempt starts.
+    claim["sandbox_runtime"] = attempt["sandbox_runtime"]
+    claim["sandbox_image_digest"] = attempt["sandbox_image_digest"]
+    claim["runtime_version"] = attempt["runtime_version"]
+    # The runner receives the exact retained ownership row so it can ask this
+    # host's supervisor to start the recorded container.
+    claim["thread_sandbox"] = thread_sandbox
+    return claim
 
 
 class PostgresAttemptCommands:
@@ -184,428 +703,42 @@ class PostgresAttemptCommands:
         heartbeat row is not evidence for a particular replica during a
         rolling deploy.
         """
-        attestation = claim_attestation or {}
-        sandbox_runtime = attestation.get("sandbox_runtime")
-        sandbox_image_digest = attestation.get("sandbox_image_digest")
-        runtime_versions = attestation.get("runtime_versions")
-        if not isinstance(runtime_versions, dict):
-            runtime_versions = {}
-        # The menu, from the same place and for the same reason as the default
-        # beside it: the attestation is *this replica's* image, and the
-        # heartbeat row is not evidence about it during a rolling deployment.
-        # A selection is only honoured when the machine about to run it says it
-        # can.
-        runtime_versions_available = attestation.get("runtime_versions_available")
-        if not isinstance(runtime_versions_available, dict):
-            runtime_versions_available = {}
-        runner_capabilities = attestation.get("runner_capabilities")
-        if not isinstance(runner_capabilities, list):
-            runner_capabilities = []
-        attested_archive_revision = attestation.get("sandbox_archive_settings_applied_revision")
-        host_kernel = attestation.get("host_kernel")
-        guest_kernel = attestation.get("guest_kernel")
-        shared_attestation = shared_sandbox_claim_attested(
-            attestation,
-            expected_deployment_sha=expected_deployment_sha,
+        attested = _ClaimAttestation.parse(
+            claim_attestation, expected_deployment_sha=expected_deployment_sha
         )
-        followup_attestation = compatible_shared_sandbox_followup_attested(attestation)
-        if not host or not host_credential_hash or not followup_attestation:
+        if not host or not host_credential_hash or not attested.followup:
             return None
         async with self._pool.acquire() as conn, conn.transaction():
-            policy = await conn.fetchrow(
-                """
-                SELECT active_host, runtime_versions, sandbox_archive_settings,
-                       sandbox_archive_revision
-                FROM agent_runner_policy WHERE id FOR SHARE
-                """
+            gate = await _claim_gate(
+                conn, host=host, host_credential_hash=host_credential_hash, attested=attested
             )
-            await lock_compute_topology(conn)
-            resource_new, resource_claims = await host_compute_admission(conn, host)
-            if not resource_claims:
+            if gate is None:
                 return None
-            active_host = None if policy is None else policy["active_host"]
-            selected_versions = (
-                {} if policy is None else load_json(policy["runtime_versions"]) or {}
-            )
-            pin_allows_new_sandbox = resource_new and (active_host is None or host == active_host)
-            host_row = await conn.fetchrow(
-                "SELECT status, capabilities, slots_total, slots_used, slots_desired, "
-                "sandbox_archive_settings_applied_revision, "
-                "(credential_hash IS NOT NULL AND credential_hash = $2) "
-                "AS credential_matches "
-                "FROM agent_runner_hosts WHERE host = $1",
-                host,
-                host_credential_hash,
-            )
-            # This read only chooses which profile may be considered, so it
-            # locks nothing: the row is locked after the turn's group, below.
-            # The slot UPDATE there is the decision point and closes concurrent
-            # drain, revocation, and re-enrollment races.
-            if host_row is None or host_row["status"] not in CLAIMABLE_STATUSES:
-                return None
-            if host_slots_exhausted(host_row):
-                return None
-            capabilities = load_json(host_row["capabilities"]) or []
-            try:
-                archive_policy = load_stored_archive_policy(stored_archive_settings(policy))
-            except SandboxArchivePolicyError:
-                return None
-            archive_required = archive_policy.enabled
-            archive_revision = archive_policy.revision
-            if archive_required and (
-                SANDBOX_ARCHIVE_CAPABILITY not in capabilities
-                or host_row["sandbox_archive_settings_applied_revision"] != archive_revision
-                or SANDBOX_ARCHIVE_CAPABILITY not in runner_capabilities
-                or isinstance(attested_archive_revision, bool)
-                or not isinstance(attested_archive_revision, int)
-                or attested_archive_revision != archive_revision
-            ):
-                return None
-            # A cold group lives only in its checkpoint, which this replica's
-            # sandbox manager must be able to download (archives on) and turn
-            # back into the group (it attests restore). The host row and the
-            # replica both say so: during a rolling deploy the row describes
-            # whichever replica beat last. Restoring creates the group's only
-            # container here, so the machine must also still take new groups:
-            # not one whose lease is about to end, or that a hold keeps empty.
-            restore_capable = bool(
-                resource_new
-                and archive_required
-                and SANDBOX_RESTORE_CAPABILITY in capabilities
-                and SANDBOX_RESTORE_CAPABILITY in runner_capabilities
-            )
-            credential_matches = bool(host_row["credential_matches"])
-            secure_attestation = bool(
-                credential_matches
-                and sandbox_runtime == KATA_RUNTIME
-                and isinstance(host_kernel, str)
-                and bool(host_kernel.strip())
-                and isinstance(guest_kernel, str)
-                and bool(guest_kernel.strip())
-                and host_kernel.strip() != guest_kernel.strip()
-            )
-            job_row = await conn.fetchrow(
-                f"""
-                SELECT {QUALIFIED_JOB_COLUMNS},
-                       -- Read for the turn this hands out, once every condition
-                       -- below has passed, not for each queued turn before it.
-                       (
-                           SELECT to_jsonb(s) FROM {THREAD_SANDBOX_SOURCE}
-                           WHERE s.thread_id = j.thread_id
-                       ) AS thread_sandbox,
-                       t.title_source, t.title
-                FROM agent_jobs j
-                JOIN agent_threads t ON t.id = j.thread_id
-                LEFT JOIN {THREAD_SANDBOX_CLAIM_SOURCE} ON s.thread_id = j.thread_id
-                -- An automatic round is re-checked against the goal it was
-                -- created for here, immediately before it is handed out.
-                WHERE {runnable_queued_turn("j")}
-                  AND COALESCE(j.metadata->'requires', '[]'::jsonb) <@ $1::jsonb
-                  AND (
-                        t.execution_profile = '{ExecutionProfile.TRUSTED_V1.value}'
-                        OR (
-                            t.execution_profile = '{ExecutionProfile.UNTRUSTED_KATA_V1.value}'
-                            AND $3::boolean
-                        )
-                  )
-                  AND (
-                        (
-                            s.thread_id IS NULL AND $5::boolean AND $4::boolean
-                            AND NOT EXISTS (
-                                SELECT 1 FROM agent_jobs parent
-                                WHERE parent.id = j.parent_job_id
-                                  AND parent.state = 'succeeded'
-                            )
-                        )
-                        OR (
-                            s.host = $2
-                            AND $6::boolean
-                            AND NOT EXISTS (
-                                SELECT 1 FROM agent_sandboxes deleting
-                                WHERE deleting.id = s.sandbox_id
-                                  AND deleting.deletion_state IN {DELETED_GROUP_STATES_SQL}
-                            )
-                            AND s.fork_operation_id IS NULL
-                            AND s.context_status <> 'lost'
-                            AND s.native_state <> 'lost'
-                            AND s.state IN (
-                                'provisioning', 'starting', 'running', 'stopped'
-                            )
-                            AND s.shared_live
-                        )
-                        OR (
-                            -- A group whose host is gone, held by its
-                            -- checkpoint: any restore-capable host may take
-                            -- it, and the claim below rehomes it. Never the
-                            -- host it left while that one still names its
-                            -- container: a Host moving out, or the same name
-                            -- enrolled again, holds it under the group's
-                            -- stable name. A failed restore has no container
-                            -- and may be retried where it ran, after the wait
-                            -- that follows each failed try.
-                            s.state = 'cold'
-                            AND (s.container_id IS NULL OR s.host IS DISTINCT FROM $2)
-                            AND $7::boolean
-                            AND $6::boolean
-                            AND s.restore_attempts < {MAX_RESTORE_ATTEMPTS}
-                            AND {restore_claim_due("s.restore_attempts", "s.group_last_activity_at")}
-                            AND NOT EXISTS (
-                                SELECT 1 FROM agent_sandboxes deleting
-                                WHERE deleting.id = s.sandbox_id
-                                  AND deleting.deletion_state IN {DELETED_GROUP_STATES_SQL}
-                            )
-                            AND s.fork_operation_id IS NULL
-                            AND s.context_status <> 'lost'
-                            AND s.native_state <> 'lost'
-                            AND s.shared_live
-                        )
-                        OR (
-                            -- A stopped group of a Host silent for a long
-                            -- time, held by its checkpoint: a restore-capable
-                            -- host may take it, and the claim below hands it
-                            -- over and rehomes it. Until then it stays, so a
-                            -- Host that returns continues with it.
-                            s.state = 'stopped'
-                            AND s.host IS DISTINCT FROM $2
-                            AND $7::boolean
-                            AND $6::boolean
-                            AND s.fork_operation_id IS NULL
-                            AND s.context_status <> 'lost'
-                            AND s.native_state <> 'lost'
-                            AND s.shared_live
-                            AND EXISTS (
-                                SELECT 1 FROM agent_sandboxes g
-                                WHERE g.id = s.sandbox_id AND {SILENT_HOST_GROUP_SQL}
-                            )
-                        )
-                  )
-                ORDER BY j.created_at
-                LIMIT 1
-                FOR UPDATE OF j SKIP LOCKED
-                """,
-                json.dumps(capabilities),
-                host,
-                secure_attestation,
-                shared_attestation,
-                pin_allows_new_sandbox,
-                followup_attestation,
-                restore_capable,
-            )
+            job_row = await _claimable_job(conn, host=host, attested=attested, gate=gate)
             if job_row is None:
                 return None
-            job_id = job_row["id"]
-            thread_sandbox = load_json(job_row["thread_sandbox"])
-            restore = isinstance(thread_sandbox, dict) and thread_sandbox.get("state") == "cold"
-            # Only the silent-Host branch admits a stopped group on another host.
-            take_silent = (
-                isinstance(thread_sandbox, dict)
-                and thread_sandbox.get("state") == "stopped"
-                and thread_sandbox.get("host") != host
-            )
-            handover = None
-            if isinstance(thread_sandbox, dict):
-                # Serialize a retained claim with an administrative stop. A
-                # claim committed first is visible to the stop's busy check;
-                # a stop committed first leaves this job queued. A cold group
-                # is locked for the rehome below, so of two siblings claiming
-                # it only the first moves it.
-                claimable = await conn.fetchval(
-                    "SELECT (state IN ('provisioning', 'starting', 'running', 'stopped') "
-                    "OR ($2 AND state = 'cold' AND restore_checkpoint_id IS NOT NULL AND "
-                    f"{restore_claim_due('restore_attempts', 'last_activity_at')})) "
-                    "AND stop_requested_at IS NULL "
-                    f"AND deletion_state NOT IN {DELETED_GROUP_STATES_SQL} "
-                    "FROM agent_sandboxes "
-                    "WHERE id = $1 " + ("FOR UPDATE" if restore or take_silent else "FOR SHARE"),
-                    thread_sandbox["sandbox_id"],
-                    restore,
-                )
-                if not claimable:
-                    return None
-                if take_silent:
-                    # A savepoint, so a claim that then finds no slot leaves
-                    # the group with its silent Host instead of cold.
-                    handover = conn.transaction()
-                    await handover.start()
-                    if not await take_silent_host_group(
-                        conn, sandbox_id=thread_sandbox["sandbox_id"], claimant=host
-                    ):
-                        await handover.rollback()
-                        return None
-                    restore = True
-            # The host row after the group, as finishing or reaping a member
-            # takes them: that writes the group and then gives its slot back,
-            # so a claim holding the row while it waited for the group
-            # deadlocked with it. Locked in a statement of its own, before the
-            # slot UPDATE counts this host's environment runs: claiming one
-            # locks this row without writing it, and a count that began while
-            # it waited would miss the run.
-            await conn.execute(
-                "SELECT host FROM agent_runner_hosts WHERE host = $1 FOR UPDATE", host
-            )
-            # The atomic half of the slot claim. Under READ COMMITTED two
-            # claims hitting the same host row serialize and the loser
-            # re-evaluates capacity against the winner's committed value.
-            took_slot = await conn.fetchval(
-                f"""
-                UPDATE agent_runner_hosts
-                SET slots_used = slots_used + 1
-                WHERE host = $1
-                  AND status = '{HOST_ONLINE}'
-                  AND (slots_total IS NULL OR slots_used + {env_runs_holding_slots("$1")} < slots_total)
-                  AND (slots_desired IS NULL OR slots_used + {env_runs_holding_slots("$1")} < slots_desired)
-                  AND NOT EXISTS (SELECT 1 FROM agent_environment_runs er
-                      WHERE er.host=$1 AND {env_run_blocks_host("er")})
-                  AND credential_hash = $2
-                  AND (
-                        $3::boolean
-                        OR (
-                            sandbox_archive_settings_applied_revision = $4
-                            AND capabilities @> $5::jsonb
-                        )
-                  )
-                RETURNING slots_used
-                """,
-                host,
-                host_credential_hash,
-                not archive_required,
-                archive_revision,
-                json.dumps([SANDBOX_ARCHIVE_CAPABILITY]),
-            )
-            if took_slot is None:
-                if handover is not None:
-                    await handover.rollback()
+            group = await _lock_claimed_group(conn, job_row=job_row, host=host)
+            if group is None:
                 return None
-            if handover is not None:
-                await handover.commit()
-            if restore:
-                # The fence that makes this host the group's only owner: a new
-                # generation, no container yet, and the checkpoint kept as the
-                # source. Anything the previous host still holds names the old
-                # generation and is refused from here on.
-                await conn.execute(
-                    """
-                    UPDATE agent_sandboxes
-                    SET state = 'restoring', host = $2, generation = generation + 1,
-                        container_id = NULL, restore_attempts = restore_attempts + 1,
-                        idle_deadline = NULL, last_error = NULL, updated_at = NOW()
-                    WHERE id = $1 AND state = 'cold'
-                    """,
-                    thread_sandbox["sandbox_id"],
-                    host,
-                )
-            next_no = await conn.fetchval(
-                "SELECT COALESCE(MAX(attempt_no), 0) + 1 FROM agent_attempts WHERE job_id = $1",
-                job_id,
+            if not await _take_host_slot(
+                conn, host=host, host_credential_hash=host_credential_hash, gate=gate
+            ):
+                if group.handover is not None:
+                    await group.handover.rollback()
+                return None
+            if group.handover is not None:
+                await group.handover.commit()
+            attempt, thread_sandbox = await _start_attempt(
+                conn,
+                job_row=job_row,
+                group=group,
+                host=host,
+                worker_id=worker_id,
+                lease_ttl_seconds=lease_ttl_seconds,
+                attested=attested,
+                gate=gate,
             )
-            # A thread keeps the version it started on; see
-            # ``resolve_runtime_version``. Read here, inside the claim, because
-            # the answer must be the one the attempt is stamped with — the
-            # TOCTOU that stamping exists to close.
-            thread_version = None
-            if job_row["thread_id"]:
-                thread_version = await conn.fetchval(
-                    """
-                    SELECT a.runtime_version
-                    FROM agent_attempts a
-                    JOIN agent_jobs j ON j.id = a.job_id
-                    WHERE j.thread_id = $1 AND a.runtime_version IS NOT NULL
-                    ORDER BY a.started_at DESC
-                    LIMIT 1
-                    """,
-                    job_row["thread_id"],
-                )
-            runtime_version = resolve_runtime_version(
-                runtime=job_row["runtime"],
-                thread_version=thread_version,
-                selected=selected_versions,
-                available=runtime_versions_available,
-                host_default=runtime_versions,
-            )
-            attempt_image_digest = sandbox_image_digest
-            if isinstance(thread_sandbox, dict):
-                # A retained chat executes in the already-created container,
-                # not in the runner replica's current image. A rolling image
-                # upgrade must therefore keep stamping the immutable image and
-                # CLI version that this exact writable layer actually uses.
-                # This also preserves an explicit NULL version: it means the
-                # old container's image default, not today's selected version.
-                runtime_version = thread_sandbox.get("runtime_version")
-                attempt_image_digest = thread_sandbox.get("sandbox_image_digest")
-            attempt = await conn.fetchrow(
-                """
-                INSERT INTO agent_attempts
-                    (job_id, thread_id, attempt_no, lease_owner, lease_generation,
-                     lease_expires_at, base_sha, host_id,
-                     sandbox_runtime, sandbox_image_digest, runtime_version,
-                     host_kernel, guest_kernel)
-                VALUES ($1, $13, $2, $3, $4, clock_timestamp() + make_interval(secs => $5), $6, $7,
-                        $8, $9, $10, $11, $12)
-                RETURNING id, attempt_no, lease_generation,
-                          sandbox_runtime, sandbox_image_digest, runtime_version
-                """,
-                job_id,
-                next_no,
-                worker_id,
-                next_no,
-                lease_ttl_seconds,
-                job_row["base_sha"],
-                host,
-                sandbox_runtime,
-                attempt_image_digest,
-                runtime_version,
-                host_kernel,
-                guest_kernel,
-                job_row["thread_id"],
-            )
-            await conn.execute(
-                "UPDATE agent_jobs SET state = 'running', current_attempt_id = $2, "
-                "claim_retry_at = NULL, "
-                "updated_at = NOW() WHERE id = $1",
-                job_id,
-                attempt["id"],
-            )
-            if restore:
-                # However this attempt ends before the recreated container is
-                # confirmed, ``release_restore`` finds the group by it.
-                await conn.execute(
-                    "UPDATE agent_sandboxes SET restore_attempt_id = $2 WHERE id = $1",
-                    thread_sandbox["sandbox_id"],
-                    attempt["id"],
-                )
-                thread_sandbox = load_json(
-                    await conn.fetchval(
-                        f"SELECT to_jsonb(s) FROM {THREAD_SANDBOX_SOURCE} WHERE s.thread_id = $1",
-                        job_row["thread_id"],
-                    )
-                )
-            # Nothing is charged here. What this goal has spent is *derived*
-            # from the rounds that have actually started — see
-            # ``storage._sql.goals.ROUNDS_USED_SQL`` — so a round costs
-            # nothing until this INSERT runs and costs once however often it is
-            # retried. Keeping a counter here meant this statement also had to
-            # update ``agent_threads`` while already holding this job's row
-            # lock, which is the reverse of the thread-before-job order the
-            # rest of the repository takes and deadlocked against pausing or
-            # messaging at exactly the moment a runner claimed a round.
-        claim = job_row_to_dict(job_row)
-        claim["state"] = RUNNING
-        claim["current_attempt_id"] = attempt["id"]
-        claim["attempt_id"] = attempt["id"]
-        claim["attempt_no"] = attempt["attempt_no"]
-        claim["title_generation_pending"] = thread_title_needs_generation(
-            job_row["title_source"], job_row["title"]
-        )
-        claim["lease_generation"] = attempt["lease_generation"]
-        # The stamp as written, not as the host row reads later: a rolling
-        # upgrade heartbeat can move that row after this attempt starts.
-        claim["sandbox_runtime"] = attempt["sandbox_runtime"]
-        claim["sandbox_image_digest"] = attempt["sandbox_image_digest"]
-        claim["runtime_version"] = attempt["runtime_version"]
-        # The runner receives the exact retained ownership row so it can ask
-        # this host's supervisor to start the recorded container.
-        claim["thread_sandbox"] = thread_sandbox
-        return claim
+        return _claim_payload(job_row, attempt, thread_sandbox)
 
     async def release_claim(
         self,
