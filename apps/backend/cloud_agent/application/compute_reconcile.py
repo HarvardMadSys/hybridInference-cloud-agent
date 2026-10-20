@@ -19,7 +19,7 @@ from cloud_agent.application.compute_rotation import ComputeRotation
 from cloud_agent.application.compute_setup import HostRelease, load_control_plane_host_release
 from cloud_agent.application.compute_steps import OperationSteps, moment as _moment, now as _now
 from cloud_agent.application.host_commands import HostCommands
-from cloud_agent.compute_config import current_observation_seconds, current_registration_url
+from cloud_agent.compute_config import current_observation_seconds, registration_url
 from cloud_agent.compute_secrets import ComputeSecretError
 from cloud_agent.domain.compute import (
     MOVE_OUT_RENEWAL_LEAD_SECONDS,
@@ -1263,7 +1263,7 @@ class ComputeReconciler:
         Each submission gets a fresh token; only the newest one of an
         allocation can register, and only its hash is stored.
         """
-        url = current_registration_url(self.commands.configuration)
+        url = registration_url()
         if not url:
             raise ProviderError(
                 "registration_unavailable",

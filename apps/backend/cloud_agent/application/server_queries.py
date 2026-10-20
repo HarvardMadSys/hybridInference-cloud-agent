@@ -25,7 +25,7 @@ class ServerQueries:
         registry: ComputeProviderRegistry,
         secrets: ComputeSecretStore,
         *,
-        observation_seconds: int | Callable[[], int],
+        observation_seconds: Callable[[], int],
     ) -> None:
         self.repository = repository
         self.registry = registry
@@ -150,11 +150,7 @@ class ServerQueries:
             "expiration_known": row.get("expiration_known", False),
             "observed_at": row.get("observed_at"),
             "check_interval_seconds": (
-                (
-                    self.observation_seconds()
-                    if callable(self.observation_seconds)
-                    else self.observation_seconds
-                )
+                self.observation_seconds()
                 if not terminal and row.get("external_id") and entry and self.secrets.configured
                 else None
             ),

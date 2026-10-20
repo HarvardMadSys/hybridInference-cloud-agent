@@ -234,145 +234,138 @@ def build_registry(
             ),
         )
     ]
-    if configuration.admin_settings or configuration.cloudlab_api_url:
-        endpoint = (
-            (lambda: current_cloudlab_api_url(configuration))
-            if configuration.admin_settings
-            else configuration.cloudlab_api_url
+    cloudlab = CloudLabProvider(
+        api_url=lambda: current_cloudlab_api_url(configuration), resolver=resolver
+    )
+    entries.append(
+        ComputeProviderRegistration(
+            id="cloudlab",
+            label="CloudLab",
+            provider=cloudlab,
+            # Listed once an endpoint is saved, without a restart.
+            available=lambda: bool(current_cloudlab_api_url(configuration)),
+            connection_probe=cloudlab.validate_connection,
+            can_import=True,
+            ssh_credential_fields=("ssh_credential_ref", "ssh_known_hosts_ref"),
+            fields=(
+                {
+                    "key": "project",
+                    "label": "CloudLab project",
+                    "type": "text",
+                    "required": True,
+                    "description": "Project that will own this experiment.",
+                },
+                {
+                    "key": "external_id",
+                    "label": "Experiment UUID",
+                    "type": "text",
+                    "required": True,
+                    "modes": ["attach"],
+                },
+                {
+                    "key": "name",
+                    "label": "CloudLab experiment name",
+                    "description": "Up to 16 characters. Generated automatically if left blank.",
+                    "max_length": 16,
+                    "type": "text",
+                    "advanced": True,
+                    "modes": ["provision"],
+                },
+                {
+                    "key": "profile_project",
+                    "label": "Template project",
+                    "section": "template",
+                    "description": "Project that publishes the CloudLab profile.",
+                    "type": "text",
+                    "required": True,
+                    "modes": ["provision"],
+                },
+                {
+                    "key": "profile_name",
+                    "label": "Template name",
+                    "section": "template",
+                    "description": "Name of the CloudLab profile to use.",
+                    "type": "text",
+                    "required": True,
+                    "modes": ["provision"],
+                },
+                {
+                    "key": "duration",
+                    "label": "Initial duration (hours)",
+                    "type": "number",
+                    "default": 4,
+                    "min": 1,
+                    "max": 168,
+                    "modes": ["provision"],
+                },
+                {
+                    "key": "bindings",
+                    "label": "Profile parameters",
+                    "type": "json",
+                    "advanced": True,
+                    "default": {},
+                    "modes": ["provision"],
+                },
+                {
+                    "key": "node_types",
+                    "label": "Preferred node types",
+                    "type": "string_list",
+                    "description": "Try these types from top to bottom when capacity is unavailable. An explicit node type in profile parameters takes precedence. Leave empty to use the profile's choice.",
+                    "modes": ["provision"],
+                },
+                {
+                    "key": "node_type_binding",
+                    "label": "Node type parameter",
+                    "type": "text",
+                    "default": "phystype",
+                    "max_length": 64,
+                    "advanced": True,
+                    "modes": ["provision"],
+                },
+                {"key": "group", "label": "Project group", "type": "text", "advanced": True},
+                {
+                    "key": "ssh_username",
+                    "label": "CloudLab SSH user",
+                    "section": "access",
+                    "type": "text",
+                    "required": True,
+                    "deployment_only": True,
+                },
+                {
+                    "key": "ssh_public_key",
+                    "label": "SSH public key",
+                    "section": "access",
+                    "type": "textarea",
+                    "description": (
+                        "Installed for the CloudLab SSH user on new experiments. "
+                        "Leave blank to use keys already on the CloudLab account."
+                    ),
+                    "deployment_only": True,
+                    "modes": ["provision"],
+                    "max_length": 8192,
+                },
+                {
+                    "key": "host_key_source",
+                    "label": "SSH host-key checking",
+                    "section": "access",
+                    "type": "select",
+                    "default": "none",
+                    "options": [
+                        {
+                            "value": "none",
+                            "label": "Do not verify the CloudLab host",
+                        },
+                        {
+                            "value": "registration",
+                            "label": "Registered by the node at first boot",
+                        },
+                    ],
+                    "description": "Skipping verification permits automatic SSH but cannot detect an impersonated host. Registration needs the Cloud Agent profile (deploy/cloudlab/cloud-agent-node.py) and pins each new node's key.",
+                    "advanced": True,
+                    "deployment_only": True,
+                    "modes": ["provision"],
+                },
+            ),
         )
-        cloudlab = CloudLabProvider(api_url=endpoint, resolver=resolver)
-        entries.append(
-            ComputeProviderRegistration(
-                id="cloudlab",
-                label="CloudLab",
-                provider=cloudlab,
-                available=(
-                    (lambda: bool(current_cloudlab_api_url(configuration)))
-                    if configuration.admin_settings
-                    else None
-                ),
-                connection_probe=cloudlab.validate_connection,
-                can_import=True,
-                ssh_credential_fields=("ssh_credential_ref", "ssh_known_hosts_ref"),
-                fields=(
-                    {
-                        "key": "project",
-                        "label": "CloudLab project",
-                        "type": "text",
-                        "required": True,
-                        "description": "Project that will own this experiment.",
-                    },
-                    {
-                        "key": "external_id",
-                        "label": "Experiment UUID",
-                        "type": "text",
-                        "required": True,
-                        "modes": ["attach"],
-                    },
-                    {
-                        "key": "name",
-                        "label": "CloudLab experiment name",
-                        "description": "Up to 16 characters. Generated automatically if left blank.",
-                        "max_length": 16,
-                        "type": "text",
-                        "advanced": True,
-                        "modes": ["provision"],
-                    },
-                    {
-                        "key": "profile_project",
-                        "label": "Template project",
-                        "section": "template",
-                        "description": "Project that publishes the CloudLab profile.",
-                        "type": "text",
-                        "required": True,
-                        "modes": ["provision"],
-                    },
-                    {
-                        "key": "profile_name",
-                        "label": "Template name",
-                        "section": "template",
-                        "description": "Name of the CloudLab profile to use.",
-                        "type": "text",
-                        "required": True,
-                        "modes": ["provision"],
-                    },
-                    {
-                        "key": "duration",
-                        "label": "Initial duration (hours)",
-                        "type": "number",
-                        "default": 4,
-                        "min": 1,
-                        "max": 168,
-                        "modes": ["provision"],
-                    },
-                    {
-                        "key": "bindings",
-                        "label": "Profile parameters",
-                        "type": "json",
-                        "advanced": True,
-                        "default": {},
-                        "modes": ["provision"],
-                    },
-                    {
-                        "key": "node_types",
-                        "label": "Preferred node types",
-                        "type": "string_list",
-                        "description": "Try these types from top to bottom when capacity is unavailable. An explicit node type in profile parameters takes precedence. Leave empty to use the profile's choice.",
-                        "modes": ["provision"],
-                    },
-                    {
-                        "key": "node_type_binding",
-                        "label": "Node type parameter",
-                        "type": "text",
-                        "default": "phystype",
-                        "max_length": 64,
-                        "advanced": True,
-                        "modes": ["provision"],
-                    },
-                    {"key": "group", "label": "Project group", "type": "text", "advanced": True},
-                    {
-                        "key": "ssh_username",
-                        "label": "CloudLab SSH user",
-                        "section": "access",
-                        "type": "text",
-                        "required": True,
-                        "deployment_only": True,
-                    },
-                    {
-                        "key": "ssh_public_key",
-                        "label": "SSH public key",
-                        "section": "access",
-                        "type": "textarea",
-                        "description": (
-                            "Installed for the CloudLab SSH user on new experiments. "
-                            "Leave blank to use keys already on the CloudLab account."
-                        ),
-                        "deployment_only": True,
-                        "modes": ["provision"],
-                        "max_length": 8192,
-                    },
-                    {
-                        "key": "host_key_source",
-                        "label": "SSH host-key checking",
-                        "section": "access",
-                        "type": "select",
-                        "default": "none",
-                        "options": [
-                            {
-                                "value": "none",
-                                "label": "Do not verify the CloudLab host",
-                            },
-                            {
-                                "value": "registration",
-                                "label": "Registered by the node at first boot",
-                            },
-                        ],
-                        "description": "Skipping verification permits automatic SSH but cannot detect an impersonated host. Registration needs the Cloud Agent profile (deploy/cloudlab/cloud-agent-node.py) and pins each new node's key.",
-                        "advanced": True,
-                        "deployment_only": True,
-                        "modes": ["provision"],
-                    },
-                ),
-            )
-        )
+    )
     return ComputeProviderRegistry(entries)

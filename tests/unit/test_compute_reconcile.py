@@ -1256,7 +1256,9 @@ def registering(monkeypatch):
     # The adapter echoes the full validated configuration in each observation.
     ref = REF.model_copy(update={"config": {**REF.config, "host_key_source": "registration"}})
     h.allocation["configuration"] = ref.config
-    h.commands.configuration.registration_url = "https://example.org/v1/compute/node-registrations"
+    monkeypatch.setenv(
+        "AGENT_COMPUTE_REGISTRATION_URL", "https://example.org/v1/compute/node-registrations"
+    )
     connection = SshConnection(address="node.example.org", username="agent", credential_ref="ssh-1")
     node = NODE.model_copy(update={"connection": connection})
     ready = observed().model_copy(update={"ref": ref, "nodes": (node,)})
@@ -1415,7 +1417,8 @@ async def test_a_registering_node_this_control_plane_reached_is_still_scanned(mo
 @pytest.mark.asyncio
 async def test_without_a_public_address_no_registering_node_is_created(monkeypatch):
     h = registering(monkeypatch)
-    h.commands.configuration.registration_url = ""
+    monkeypatch.delenv("AGENT_COMPUTE_REGISTRATION_URL")
+    monkeypatch.delenv("AGENT_SESSION_REDIRECT_URI", raising=False)
     await h.reconciler.execute(h.operation)
     h.provider.acquire.assert_not_awaited()
     assert h.operation["state"] == "blocked"

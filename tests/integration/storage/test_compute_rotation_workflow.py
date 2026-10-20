@@ -218,9 +218,12 @@ async def rig(store, hosts, monkeypatch):
         registry=registry,
         secrets=ComputeSecretStore(repository, key="x" * 32),
         configuration=ComputeConfiguration(
-            profiles={name: _profile(name) for name in ("slot-a", "slot-b")},
-            registration_url="https://control.example.org/v1/compute/node-registrations",
+            profiles={name: _profile(name) for name in ("slot-a", "slot-b")}
         ),
+    )
+    monkeypatch.setenv(
+        "AGENT_COMPUTE_REGISTRATION_URL",
+        "https://control.example.org/v1/compute/node-registrations",
     )
     nodes = FakeNodes(hosts)
     sandbox_manager = SimpleNamespace(

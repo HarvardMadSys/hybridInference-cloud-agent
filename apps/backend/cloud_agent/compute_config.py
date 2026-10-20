@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit, urlunsplit
@@ -62,29 +62,24 @@ def registration_url() -> str:
 
 @dataclass(frozen=True)
 class ComputeConfiguration:
-    """Operator-supplied configuration, never accepted through the Admin API."""
+    """Operator-supplied configuration, never accepted through the Admin API.
+
+    The endpoint and the two intervals are what the saved settings start
+    from; once settings have loaded, the saved values apply.
+    """
 
     profiles: dict[str, DeploymentProfile] = field(default_factory=dict)
     deployment_secrets: dict[str, str] = field(default_factory=dict)
     cloudlab_api_url: str = ""
-    registration_url: str = ""
     poll_seconds: int = 30
     observation_seconds: int = 120
-    admin_settings: bool = field(default=False, repr=False, compare=False)
-
-    def with_runtime_settings(self) -> ComputeConfiguration:
-        """Keep trusted profiles fixed while adopting administrator operational settings."""
-        return replace(self, admin_settings=True)
 
     @classmethod
     def from_env(cls) -> ComputeConfiguration:
         """Load the optional mounted configuration with no secret-value fallback."""
         location = os.environ.get(ENV_COMPUTE_CONFIG, "")
         if not location:
-            return cls(
-                cloudlab_api_url=os.environ.get(ENV_CLOUDLAB_API_URL, ""),
-                registration_url=registration_url(),
-            )
+            return cls(cloudlab_api_url=os.environ.get(ENV_CLOUDLAB_API_URL, ""))
         try:
             path = Path(location)
             if not path.is_absolute() or path.stat().st_size > 1024 * 1024:
@@ -128,38 +123,24 @@ class ComputeConfiguration:
             profiles=profiles,
             deployment_secrets=secrets,
             cloudlab_api_url=os.environ.get(ENV_CLOUDLAB_API_URL, ""),
-            registration_url=registration_url(),
             poll_seconds=poll,
             observation_seconds=observation,
         )
 
 
 def current_cloudlab_api_url(configuration: ComputeConfiguration) -> str:
-    """Resolve the endpoint at request time for the production compute runtime."""
-    if configuration.admin_settings:
-        return text_setting("compute.cloudlab_api_url", configuration.cloudlab_api_url).strip()
-    return configuration.cloudlab_api_url
-
-
-def current_registration_url(configuration: ComputeConfiguration) -> str:
-    """Use the saved callback setting, including its sign-in-derived default."""
-    if getattr(configuration, "admin_settings", False):
-        return registration_url()
-    return configuration.registration_url
+    """Resolve the endpoint at request time, so a saved change applies at once."""
+    return text_setting("compute.cloudlab_api_url", configuration.cloudlab_api_url).strip()
 
 
 def current_poll_seconds(configuration: ComputeConfiguration) -> int:
-    """Read the scheduler cadence; explicit injected configurations stay fixed."""
-    if getattr(configuration, "admin_settings", False):
-        return integer_setting("compute.poll_seconds", configuration.poll_seconds)
-    return configuration.poll_seconds
+    """Read the scheduler cadence at each pass."""
+    return integer_setting("compute.poll_seconds", configuration.poll_seconds)
 
 
 def current_observation_seconds(configuration: ComputeConfiguration) -> int:
-    """Read the inspection cadence; explicit injected configurations stay fixed."""
-    if getattr(configuration, "admin_settings", False):
-        return integer_setting("compute.observation_seconds", configuration.observation_seconds)
-    return configuration.observation_seconds
+    """Read the inspection cadence at each pass."""
+    return integer_setting("compute.observation_seconds", configuration.observation_seconds)
 
 
 class ComputeSecretResolver:

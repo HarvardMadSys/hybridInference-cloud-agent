@@ -31,7 +31,7 @@ def build_compute_runtime(
     http: httpx.AsyncClient,
 ) -> tuple[ComputeCommands, ComputeResourceWorker]:
     """Compose adapters outside the Host and HTTP layers."""
-    configuration = ComputeConfiguration.from_env().with_runtime_settings()
+    configuration = ComputeConfiguration.from_env()
     secrets = ComputeSecretStore(repository)
     resolver = ComputeSecretResolver(secrets, configuration)
     transport = OpenSshTransport(resolver)

@@ -14,7 +14,7 @@ from cloud_agent.compute_config import (
     ComputeConfiguration,
     current_observation_seconds,
     current_poll_seconds,
-    current_registration_url,
+    registration_url,
 )
 from cloud_agent.compute_registry import build_registry
 from cloud_agent.domain.compute import ComputeRefusal
@@ -34,7 +34,7 @@ def clean_settings():
 
 def test_provider_can_be_enabled_changed_and_disabled_without_rebuilding_registry():
     settings.apply_settings(1, {})
-    configuration = ComputeConfiguration().with_runtime_settings()
+    configuration = ComputeConfiguration()
     registry = build_registry(configuration, resolver=AsyncMock(), transport=AsyncMock())
     assert set(registry.entries) == {"existing_ssh"}
 
@@ -147,13 +147,10 @@ async def test_endpoint_rotation_affects_next_request_and_preserves_request_in_p
     ]
 
 
-def test_explicit_configuration_stays_fixed_while_runtime_reads_current_saved_values():
-    fixed = ComputeConfiguration(
-        poll_seconds=17,
-        observation_seconds=75,
-        registration_url="https://fixed.example/v1/compute/node-registrations",
-    )
-    live = fixed.with_runtime_settings()
+def test_the_configuration_applies_until_settings_load_then_the_saved_values_do():
+    configuration = ComputeConfiguration(poll_seconds=17, observation_seconds=75)
+    assert current_poll_seconds(configuration) == 17
+    assert current_observation_seconds(configuration) == 75
     settings.apply_settings(
         1,
         {
@@ -162,24 +159,19 @@ def test_explicit_configuration_stays_fixed_while_runtime_reads_current_saved_va
             "session_redirect_uri": "https://agents.example/api/v1/session/callback",
         },
     )
-    assert current_poll_seconds(fixed) == 17
-    assert current_observation_seconds(fixed) == 75
-    assert current_registration_url(fixed) == fixed.registration_url
-    assert current_poll_seconds(live) == 35
-    assert current_observation_seconds(live) == 90
-    assert (
-        current_registration_url(live) == "https://agents.example/api/v1/compute/node-registrations"
-    )
+    assert current_poll_seconds(configuration) == 35
+    assert current_observation_seconds(configuration) == 90
+    assert registration_url() == "https://agents.example/api/v1/compute/node-registrations"
     settings.apply_settings(
         2,
         {"compute.registration_url": "https://public.example/v1/compute/node-registrations"},
     )
-    assert current_registration_url(live) == "https://public.example/v1/compute/node-registrations"
+    assert registration_url() == "https://public.example/v1/compute/node-registrations"
 
 
 async def test_scheduler_reloads_poll_interval_between_passes(monkeypatch):
     settings.apply_settings(1, {"compute.poll_seconds": 10})
-    configuration = ComputeConfiguration().with_runtime_settings()
+    configuration = ComputeConfiguration()
     reconciler = SimpleNamespace(
         repository=SimpleNamespace(),
         commands=SimpleNamespace(configuration=configuration),
