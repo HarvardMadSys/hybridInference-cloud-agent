@@ -1,26 +1,4 @@
 export const ERROR_MESSAGES: Record<string, string> = {
-  // Authentication errors
-  USER_ALREADY_EXISTS: 'This email is already registered',
-  WEAK_PASSWORD: 'Password must be at least 8 characters with uppercase, lowercase, and numbers',
-  INVALID_CREDENTIALS: 'Invalid email or password',
-  EMAIL_NOT_VERIFIED: 'Please verify your email first',
-  ACCOUNT_SUSPENDED: 'Account has been suspended. Please contact support',
-  TOKEN_EXPIRED: 'Session has expired. Please login again',
-  INVALID_TOKEN: 'Invalid or expired token',
-  TOKEN_ALREADY_USED: 'This verification link has already been used',
-  RESET_TOKEN_EXPIRED: 'This password reset link has expired. Please request a new one',
-  RESET_TOKEN_INVALID: 'This password reset link is invalid. Please request a new one',
-  RESET_TOKEN_USED: 'This password reset link has already been used. Please request a new one',
-  SESSION_NOT_FOUND: 'Session not found. Please login again',
-  SESSION_REVOKED: 'Session has been revoked',
-
-  // API Key errors
-  DUPLICATE_API_KEY: 'You already have an active API key',
-  API_KEY_NOT_FOUND: 'API key not found',
-
-  // Quota errors
-  QUOTA_EXCEEDED: 'Daily usage quota exceeded',
-
   // Rate limiting
   RATE_LIMIT_EXCEEDED: 'Too many requests. Please try again later',
 

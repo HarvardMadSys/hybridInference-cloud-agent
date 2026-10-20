@@ -1,10 +1,22 @@
-import { getAgentJob, getAgentJobThread, type AgentJobApi, type AgentThreadApi } from './agents';
+import {
+  getAgentJob,
+  getAgentJobThread,
+  type AgentJobApi,
+  type AgentJobUsageApi,
+  type AgentThreadApi,
+} from './agents';
 
 export interface AgentReadScope {
   getAgentJob: (jobId: string) => Promise<AgentJobApi>;
   getAgentJobThread: (jobId: string) => Promise<AgentThreadApi | null>;
   /** Drop pending reads before a mutation, forced reload, or stream resync. */
   invalidate: (jobId?: string) => void;
+  /**
+   * The last usage snapshot read or pushed for each job. Unlike the pending
+   * reads it outlives an invalidation: the panel decides from the snapshot's
+   * own ledger whether to read again.
+   */
+  usage: Map<string, AgentJobUsageApi | null>;
 }
 
 /** Share concurrent readers only; every read after settlement goes to the API. */
@@ -32,6 +44,7 @@ export function createAgentReadScope(): AgentReadScope {
   return {
     getAgentJob: (jobId) => pendingRead(jobs, jobId, getAgentJob),
     getAgentJobThread: (jobId) => pendingRead(threads, jobId, getAgentJobThread),
+    usage: new Map(),
     invalidate: (jobId) => {
       if (jobId === undefined) {
         jobs.clear();

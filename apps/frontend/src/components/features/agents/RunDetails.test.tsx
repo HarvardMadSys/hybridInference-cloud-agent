@@ -13,6 +13,7 @@ import {
   type AgentThreadEventApi,
 } from '@/lib/api/agents';
 
+import { AgentReadProvider } from './AgentReadProvider';
 import { RunDetails } from './RunDetails';
 import { PUSH_BATCH_MS, receiveHint, resetAgentPush } from './agentPush';
 import type { AgentJob } from './types';
@@ -663,6 +664,31 @@ describe('RunDetails', () => {
     }
     expect(reads).toHaveLength(2);
     expect(reads[1]).toBeGreaterThanOrEqual(due);
+  });
+
+  it('never shows one account the usage it read for another', async () => {
+    vi.mocked(getAgentJobUsage).mockResolvedValue(usage());
+    const panel = (userId: string) => (
+      <AgentReadProvider userId={userId}>
+        <RunDetails
+          jobId="ajob_switched"
+          turnNo={2}
+          tab="usage"
+          job={HISTORY_JOB}
+          events={[]}
+          onOpenGitDiff={vi.fn()}
+        />
+      </AgentReadProvider>
+    );
+    const view = render(panel('user-a'));
+    await waitFor(() => expect(screen.getByText('1,000')).toBeInTheDocument());
+
+    // Another tab switched the account; this one stays mounted.
+    vi.mocked(getAgentJobUsage).mockReturnValue(new Promise(() => {}));
+    view.rerender(panel('user-b'));
+
+    await waitFor(() => expect(getAgentJobUsage).toHaveBeenCalledTimes(2));
+    expect(screen.queryByText('1,000')).toBeNull();
   });
 
   it('revalidates an unfinished cached ledger when the panel is reopened', async () => {

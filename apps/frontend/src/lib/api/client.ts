@@ -14,13 +14,13 @@
 //   * the refresh-and-retry dance. A 401 here means the session is over, and
 //     the caller is sent back through the gateway's `/authorize` flow.
 //
-// `jsonOrThrow` below was carried over verbatim from the source client, and
-// its plain-`detail` and legacy `error_code` branches still are. Several of
-// their patterns (password reset, email verification, duplicate signup) can
-// only match gateway endpoints this service does not call. The structured
-// `{ error: { type, message } }` branch is this service's own shape, and it
-// now classifies by `type` alone: the source's message patterns ran first
-// there and replaced typed reasons callers recover on.
+// `jsonOrThrow` below classifies an error by its machine-readable reason only:
+// the structured `{ error: { type, message } }` shape's `type`, or a typed
+// resource error's `code`. A plain `{ detail: "..." }` keeps the server's text
+// and no code. The source client also matched message text and a legacy
+// `error_code` field for the gateway's password, email and suspension flows,
+// which this service does not have; that turned "This sign-in has expired"
+// into "Session has expired", so it was removed.
 
 import { APIError, httpStatusToErrorCode } from '@/lib/utils/errors';
 
@@ -105,7 +105,6 @@ export async function jsonOrThrow<T>(resp: Response): Promise<T> {
   // { detail: "..." } for plain HTTPException/validation errors.
   let errorCode = 'UNKNOWN_ERROR';
   let errorMessage = '';
-  let errorDetails: Record<string, unknown> | undefined;
 
   if (errorData && typeof errorData === 'object') {
     const data = errorData as Record<string, unknown>;
@@ -140,54 +139,11 @@ export async function jsonOrThrow<T>(resp: Response): Promise<T> {
       errorCode = detail.code;
       errorMessage = detail.message;
     } else if (data.detail) {
-      // FastAPI validation error format: { detail: "..." }
+      // A plain HTTPException or validation error: { detail: "..." }. Its text
+      // is shown as sent, with no code to replace it.
       errorMessage = typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail);
-      const lowerMessage = errorMessage.toLowerCase();
-
-      // Try to extract more specific error from detail message
-      if (lowerMessage.includes('already registered')) {
-        errorCode = 'USER_ALREADY_EXISTS';
-      } else if (
-        (lowerMessage.includes('email') && lowerMessage.includes('not verified')) ||
-        lowerMessage.includes('verify your email')
-      ) {
-        // Login raises a plain HTTPException ({ detail: "Email not verified..." }),
-        // not the typed { error: {...} } shape, so match on the message here so the
-        // login page can offer a "resend verification email" action.
-        errorCode = 'EMAIL_NOT_VERIFIED';
-      } else if (
-        lowerMessage.includes('reset link has already been used') ||
-        (lowerMessage.includes('reset token') && lowerMessage.includes('used'))
-      ) {
-        errorCode = 'RESET_TOKEN_USED';
-      } else if (lowerMessage.includes('reset link has expired')) {
-        errorCode = 'RESET_TOKEN_EXPIRED';
-      } else if (lowerMessage.includes('invalid or expired reset token')) {
-        errorCode = 'RESET_TOKEN_INVALID';
-      } else if (lowerMessage.includes('already been used')) {
-        errorCode = 'TOKEN_ALREADY_USED';
-      } else if (lowerMessage.includes('expired')) {
-        errorCode = 'TOKEN_EXPIRED';
-      } else if (lowerMessage.includes('invalid') && lowerMessage.includes('token')) {
-        errorCode = 'INVALID_TOKEN';
-      } else if (lowerMessage.includes('password') && lowerMessage.includes('characters')) {
-        errorCode = 'WEAK_PASSWORD';
-      } else if (lowerMessage.includes('invalid email or password')) {
-        errorCode = 'INVALID_CREDENTIALS';
-      }
-      // If no specific pattern matched, use the detail message directly
-      // Don't force it into a predefined error code
-    } else if (data.error_code && typeof data.error_code === 'string') {
-      // Legacy format
-      errorCode = data.error_code;
-      errorMessage = (data.message as string) || errorMessage;
-      // Carry the admin-authored suspension message (ACCOUNT_SUSPENDED) so the
-      // login page can show it in place of the generic suspended text.
-      if (typeof data.suspension_message === 'string' && data.suspension_message) {
-        errorDetails = { suspension_message: data.suspension_message };
-      }
     }
   }
 
-  throw new APIError(errorCode, errorMessage, resp.status, errorDetails);
+  throw new APIError(errorCode, errorMessage, resp.status);
 }

@@ -12,6 +12,7 @@ const AgentReadContext = createContext<AgentReadScope>({
   getAgentJob: (jobId) => getAgentJob(jobId),
   getAgentJobThread: (jobId) => getAgentJobThread(jobId),
   invalidate: () => {},
+  usage: new Map(),
 });
 const QuestionReadContext = createContext<QuestionReadScope>({
   listThreadQuestions: (threadId, signal) => listThreadQuestions(threadId, signal),

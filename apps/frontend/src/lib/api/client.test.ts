@@ -150,6 +150,21 @@ describe('jsonOrThrow', () => {
     expect(getErrorMessage(error)).toBe(message);
   });
 
+  // A plain HTTPException's text is the server's own explanation. Its wording
+  // must not be read as a gateway session or account code.
+  it.each([
+    [400, 'This sign-in has expired. Please start again.'],
+    [403, 'This invitation token is invalid or has already been used.'],
+    [400, 'The password field must be at least 12 characters.'],
+  ])('shows a plain %i detail as sent: %s', async (status, detail) => {
+    const error = await jsonOrThrow(jsonResponse(status, { detail })).catch(
+      (caught: unknown) => caught,
+    );
+
+    expect(error).toMatchObject({ code: 'UNKNOWN_ERROR', message: detail, statusCode: status });
+    expect(getErrorMessage(error)).toBe(detail);
+  });
+
   it('does not report an untyped 401 as a wrong password', async () => {
     const error = await jsonOrThrow(
       jsonResponse(401, { error: { message: 'Sign in again to continue.' } }),
