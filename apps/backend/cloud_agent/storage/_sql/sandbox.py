@@ -206,6 +206,58 @@ THREAD_SANDBOX_CLAIM_SOURCE = """
 ) AS s
 """
 
+
+def member_turn_running(group: str) -> str:
+    """SQL: whether a member of ``group`` is running a turn.
+
+    ``group`` names an ``agent_sandboxes`` row. A member holds its attempt
+    from admission until the turn settles, and while one does the group is
+    busy: it neither idles out nor stops.
+    """
+    return f"""EXISTS (
+        SELECT 1 FROM agent_thread_sandbox_memberships peer
+        WHERE peer.sandbox_id = {group}.id AND peer.active_attempt_id IS NOT NULL
+    )"""
+
+
+def group_has_live_peer(group: str, *, excluding: str | None = None) -> str:
+    """SQL: whether ``group`` still has a member whose context is not lost.
+
+    ``excluding`` names the member a statement is settling, which does not
+    count. A group with no such member has nothing left to run and stops.
+    """
+    excluded = "" if excluding is None else f" AND peer.thread_id <> {excluding}"
+    return f"""EXISTS (
+        SELECT 1 FROM agent_thread_sandbox_memberships peer
+        WHERE peer.sandbox_id = {group}.id{excluded}
+          AND peer.context_status <> 'lost'
+          AND peer.native_state <> 'lost'
+    )"""
+
+
+def group_is_quiet(group: str, *, operations: int = 0) -> str:
+    """SQL: whether ``group`` has no operation open and no member turn running.
+
+    ``operations`` is the count of open operations that still counts as none:
+    a statement that closes one in the same ``SET`` reads the count before it
+    drops, so it passes ``1``.
+    """
+    return f"{group}.active_operation_count = {operations} AND NOT {member_turn_running(group)}"
+
+
+def quiet_idle_deadline(group: str, timeout: str, *, operations: int = 0) -> str:
+    """SQL: ``group``'s idle deadline once quiet, or ``NULL`` while busy.
+
+    A quiet group (:func:`group_is_quiet`) idles out ``timeout`` seconds from
+    now; a busy one has no deadline until its last operation or turn ends.
+    """
+    return f"""CASE
+        WHEN {group_is_quiet(group, operations=operations)}
+        THEN clock_timestamp() + make_interval(secs => {timeout})
+        ELSE NULL
+    END"""
+
+
 # SET-clause fragment for ``agent_sandboxes``: count one more start the
 # control plane let through and drop the restore point a start would make
 # stale. A checkpoint receipt covers the group only while the sequence it

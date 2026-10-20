@@ -23,6 +23,12 @@ from cloud_agent.environments import (
 )
 from cloud_agent.execution_profiles import default_execution_profile, shared_sandbox_claim_attested
 from cloud_agent.storage._sql.compute_admission import host_compute_admission, lock_compute_topology
+from cloud_agent.storage._sql.environment_runs import (
+    env_run_blocks_host,
+    env_run_holds_slot,
+    env_run_live,
+    env_run_stale,
+)
 from cloud_agent_shared.environment import (
     MAX_VARIABLES,
     BoundEnvironment,
@@ -1683,7 +1689,7 @@ class PostgresEnvironmentRepository:
         """Expire execution leases and collect only unreferenced archived values."""
         async with self._pool.acquire() as conn:
             await conn.execute(
-                "UPDATE agent_environment_runs SET state='failed',detail='Environment test host lease expired',finished_at=NOW(),updated_at=NOW() WHERE state='running' AND (lease_expires_at<NOW() OR started_at<NOW()-INTERVAL '30 minutes')"
+                f"UPDATE agent_environment_runs SET state='failed',detail='Environment test host lease expired',finished_at=NOW(),updated_at=NOW() WHERE state='running' AND {env_run_stale()}"
             )
             if time.monotonic() < self._next_gc:
                 return
@@ -1750,14 +1756,13 @@ class PostgresEnvironmentRepository:
             ):
                 return None
             if await conn.fetchval(
-                "SELECT EXISTS(SELECT 1 FROM agent_environment_runs WHERE host=$1 AND NOT cleanup_complete "
-                "AND (lease_expires_at<=NOW() OR started_at<=NOW()-INTERVAL '30 minutes'))",
+                f"SELECT EXISTS(SELECT 1 FROM agent_environment_runs WHERE host=$1 AND {env_run_blocks_host()})",
                 host,
             ):
                 return None
             tests = int(
                 await conn.fetchval(
-                    "SELECT COUNT(*) FROM agent_environment_runs WHERE host=$1 AND NOT cleanup_complete AND lease_expires_at>NOW() AND started_at>NOW()-INTERVAL '30 minutes'",
+                    f"SELECT COUNT(*) FROM agent_environment_runs WHERE host=$1 AND {env_run_holds_slot()}",
                     host,
                 )
             )
@@ -1831,7 +1836,7 @@ class PostgresEnvironmentRepository:
                 "lease_expires_at=NOW()+INTERVAL '120 seconds',updated_at=NOW(),cleanup_complete=$8,"
                 "finished_at=CASE WHEN $5='running' THEN NULL ELSE NOW() END "
                 "WHERE id=$1 AND host=$2 AND lease_generation=$3 AND NOT cleanup_complete "
-                "AND (($8 AND $5 IN ('failed','cancelled')) OR (state='running' AND NOT cancel_requested AND lease_expires_at>NOW() AND started_at>NOW()-INTERVAL '30 minutes'))",
+                f"AND (($8 AND $5 IN ('failed','cancelled')) OR (state='running' AND NOT cancel_requested AND {env_run_live()}))",
                 run_id,
                 host,
                 generation,
