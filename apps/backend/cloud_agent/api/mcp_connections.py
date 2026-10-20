@@ -1108,9 +1108,12 @@ async def authorize_connection(  # noqa: C901, PLR0912, PLR0915 complexity basel
         if managed_client:
             # Never send the shared secret to an endpoint supplied by discovery.
             if (
-                metadata.issuer != "https://github.com/login/oauth"
-                or metadata.authorization_endpoint != "https://github.com/login/oauth/authorize"
-                or metadata.token_endpoint != "https://github.com/login/oauth/access_token"
+                not github_oauth.is_managed(
+                    issuer=metadata.issuer,
+                    token_endpoint=metadata.token_endpoint,
+                    resource=connection.config.url,
+                )
+                or metadata.authorization_endpoint != github_oauth.AUTHORIZATION_ENDPOINT
             ):
                 raise oauth.OAuthError("GitHub returned unexpected sign-in endpoints.")
             client_id, secret = managed_client
@@ -1411,12 +1414,11 @@ async def oauth_callback(  # noqa: PLR0912 complexity baseline, #771
                 "this authorization expired, was already used, or was started by another account"
             ),
         )
-    uses_github_client = (
-        flow["issuer"] == github_oauth.ISSUER
-        and flow["token_endpoint"] == github_oauth.TOKEN_ENDPOINT
-        and urlsplit(str(flow["redirect_uri"])).path.endswith("/v1/agent/mcp/oauth/callback/github")
-        and github_oauth.is_endpoint(str(flow["resource"]))
-    )
+    uses_github_client = github_oauth.is_managed(
+        issuer=flow["issuer"],
+        token_endpoint=flow["token_endpoint"],
+        resource=str(flow["resource"]),
+    ) and urlsplit(str(flow["redirect_uri"])).path.endswith("/v1/agent/mcp/oauth/callback/github")
     managed_github = provider == "github" and uses_github_client
     if str(flow["connection_id"]) != str(provider) and not managed_github:
         # A state minted for one connection cannot complete another's flow.
