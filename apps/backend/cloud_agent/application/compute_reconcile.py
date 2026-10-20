@@ -56,6 +56,7 @@ from cloud_agent_shared.shared_protocol import shared_deployment_capability
 
 if TYPE_CHECKING:
     from cloud_agent.application.compute_resources import ComputeCommands
+    from cloud_agent.ports.external.compute_provider import ComputeProvider
     from cloud_agent.ports.external.host_bootstrap import HostBootstrap
     from cloud_agent.ports.host_pool import HostPoolRepository
 
@@ -296,6 +297,27 @@ def _cloudlab_observation_diagnostics(
             if isinstance(value, str) and _safe_diagnostic_label(value):
                 details[target] = value
     return details
+
+
+def _observation_diagnostics(
+    allocation: dict[str, Any], observation: ResourceObservation, *, reason_code: str
+) -> dict[str, str | int | bool]:
+    """The provider facts a refusal of ``observation`` records, for CloudLab only."""
+    if allocation.get("provider_id") != "cloudlab":
+        return {}
+    return _cloudlab_observation_diagnostics(observation, reason_code=reason_code)
+
+
+def _require_one_node(allocation: dict[str, Any], observation: ResourceObservation) -> None:
+    """Refuse an allocation of other than one node, which no deployment profile handles."""
+    if len(observation.nodes) != 1:
+        raise ProviderError(
+            "unsupported_node_count",
+            "This deployment profile supports one node; the full allocation remains visible for review",
+            diagnostics=_observation_diagnostics(
+                allocation, observation, reason_code="unsupported_node_count"
+            ),
+        )
 
 
 def _provider_diagnostic_result(
@@ -759,50 +781,9 @@ class ComputeReconciler:
 
     async def _acquire(self, operation: dict[str, Any], allocation: dict[str, Any]) -> None:  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         provider = self.commands.registry.get(allocation["provider_id"]).provider
-        observation: ResourceObservation | None
-        if allocation.get("external_id"):
-            observation = await provider.inspect(self._ref(allocation))
-        elif operation.get("result", {}).get("resource_ref"):
-            observation = await provider.inspect(
-                ResourceRef.model_validate(operation["result"]["resource_ref"])
-            )
-        elif operation.get("step") != "pending":
-            resolution = await provider.recover_acquire(self._intent(operation, allocation))
-            if resolution.outcome == "not_created":
-                await self.steps.checkpoint(operation, "acquiring")
-                receipt = await self._submit_acquisition(operation, allocation)
-            elif resolution.receipt is not None:
-                receipt = resolution.receipt
-            else:
-                raise ProviderError(
-                    "result_unknown", "The provider cannot identify the previous acquisition"
-                )
-            observation = await self._receipt_observation(operation, allocation, receipt)
-        else:
-            await self.steps.checkpoint(operation, "acquiring")
-            receipt = await self._submit_acquisition(operation, allocation)
-            observation = await self._receipt_observation(operation, allocation, receipt)
-        if observation is None:
-            raise ProviderError(
-                "result_unknown", "The provider did not return an identifiable resource"
-            )
+        observation = await self._acquired_resource(operation, allocation, provider)
         await self.save_observation(operation, allocation, observation)
-        if observation.state == "terminated":
-            raise ProviderError("resource_terminated", "The allocated resource has terminated")
-        if observation.state == "failed":
-            await self._release_failed_acquisition(operation, allocation)
-            diagnostics = (
-                _cloudlab_observation_diagnostics(
-                    observation, reason_code="experiment_failed_no_provider_reason"
-                )
-                if allocation.get("provider_id") == "cloudlab"
-                else {}
-            )
-            raise ProviderError(
-                "resource_failed",
-                "The provider could not set up this resource; it was released",
-                diagnostics=diagnostics,
-            )
+        await self._raise_if_ended(operation, allocation, observation)
         if observation.state != "ready":
             await self.steps.wait(
                 operation,
@@ -821,30 +802,17 @@ class ComputeReconciler:
             )
             return
         if not observation.scope_complete:
-            diagnostics = (
-                _cloudlab_observation_diagnostics(
-                    observation, reason_code="incomplete_resource_scope"
-                )
-                if allocation.get("provider_id") == "cloudlab"
-                else {}
-            )
+            # The second read below waits for a complete scope instead; this
+            # first one stops for an administrator.
             raise ProviderError(
                 "resource_scope_incomplete",
                 "The provider has not reported the complete resource inventory.",
-                diagnostics=diagnostics,
+                diagnostics=_observation_diagnostics(
+                    allocation, observation, reason_code="incomplete_resource_scope"
+                ),
             )
         await self.steps.checkpoint(operation, "resource_ready", {"external_pending": False})
-        if len(observation.nodes) != 1:
-            diagnostics = (
-                _cloudlab_observation_diagnostics(observation, reason_code="unsupported_node_count")
-                if allocation.get("provider_id") == "cloudlab"
-                else {}
-            )
-            raise ProviderError(
-                "unsupported_node_count",
-                "This deployment profile supports one node; the full allocation remains visible for review",
-                diagnostics=diagnostics,
-            )
+        _require_one_node(allocation, observation)
         allocation = await self.steps.allocation(allocation["id"])
         # The original ready observation only admitted node registration. Read
         # CloudLab again immediately before creating the Host binding, then
@@ -860,22 +828,7 @@ class ComputeReconciler:
             )
             return
         await self.save_observation(operation, allocation, latest)
-        if latest.state == "terminated":
-            raise ProviderError("resource_terminated", "The allocated resource has terminated")
-        if latest.state == "failed":
-            await self._release_failed_acquisition(operation, allocation)
-            diagnostics = (
-                _cloudlab_observation_diagnostics(
-                    latest, reason_code="experiment_failed_no_provider_reason"
-                )
-                if allocation.get("provider_id") == "cloudlab"
-                else {}
-            )
-            raise ProviderError(
-                "resource_failed",
-                "The provider could not set up this resource; it was released",
-                diagnostics=diagnostics,
-            )
+        await self._raise_if_ended(operation, allocation, latest)
         if latest.state != "ready" or not latest.scope_complete:
             await self.steps.wait(
                 operation,
@@ -884,17 +837,7 @@ class ComputeReconciler:
                 result={"external_pending": True},
             )
             return
-        if len(latest.nodes) != 1:
-            diagnostics = (
-                _cloudlab_observation_diagnostics(latest, reason_code="unsupported_node_count")
-                if allocation.get("provider_id") == "cloudlab"
-                else {}
-            )
-            raise ProviderError(
-                "unsupported_node_count",
-                "This deployment profile supports one node; the full allocation remains visible for review",
-                diagnostics=diagnostics,
-            )
+        _require_one_node(allocation, latest)
         allocation = await self.steps.allocation(allocation["id"])
         if (
             not allocation.get("scope_complete")
@@ -967,24 +910,7 @@ class ComputeReconciler:
                 retry=15,
             )
             return
-        last = _moment(host.get("last_heartbeat_at"))
-        if last is None or _now() - last > timedelta(seconds=90):
-            raise ProviderError("host_stale", "The Host heartbeat is stale", retryable=True)
-        sandbox_manager = sandbox_manager_for_host(host)
-        if sandbox_manager is None:
-            raise ProviderError(
-                "sandbox_manager_unreachable",
-                "The control plane cannot reach the Host sandbox manager",
-                retryable=True,
-            )
-        try:
-            await sandbox_manager.health()
-        except SandboxManagerError:
-            raise ProviderError(
-                "sandbox_manager_unreachable",
-                "The control plane cannot reach the Host sandbox manager",
-                retryable=True,
-            ) from None
+        await self._require_fresh_host(host)
         if not await self.repository.clear_bootstrap_hold(
             node_id=node["id"], host=intent.host, **self.steps.fence(operation)
         ):
@@ -996,6 +922,62 @@ class ComputeReconciler:
             "Server is ready. It can now be selected as the global sandbox location.",
             result={"nodes_ready": 1, "external_pending": False, "blocked_reasons": []},
         )
+
+    async def _acquired_resource(
+        self, operation: dict[str, Any], allocation: dict[str, Any], provider: ComputeProvider
+    ) -> ResourceObservation:
+        """Observe the resource this acquisition created, submitting it the first time.
+
+        A resource already identified is read again, and an acquisition that
+        stopped after its submission is recovered rather than repeated.
+        """
+        observation: ResourceObservation | None
+        if allocation.get("external_id"):
+            observation = await provider.inspect(self._ref(allocation))
+        elif operation.get("result", {}).get("resource_ref"):
+            observation = await provider.inspect(
+                ResourceRef.model_validate(operation["result"]["resource_ref"])
+            )
+        elif operation.get("step") != "pending":
+            resolution = await provider.recover_acquire(self._intent(operation, allocation))
+            if resolution.outcome == "not_created":
+                await self.steps.checkpoint(operation, "acquiring")
+                receipt = await self._submit_acquisition(operation, allocation)
+            elif resolution.receipt is not None:
+                receipt = resolution.receipt
+            else:
+                raise ProviderError(
+                    "result_unknown", "The provider cannot identify the previous acquisition"
+                )
+            observation = await self._receipt_observation(operation, allocation, receipt)
+        else:
+            await self.steps.checkpoint(operation, "acquiring")
+            receipt = await self._submit_acquisition(operation, allocation)
+            observation = await self._receipt_observation(operation, allocation, receipt)
+        if observation is None:
+            raise ProviderError(
+                "result_unknown", "The provider did not return an identifiable resource"
+            )
+        return observation
+
+    async def _raise_if_ended(
+        self,
+        operation: dict[str, Any],
+        allocation: dict[str, Any],
+        observation: ResourceObservation,
+    ) -> None:
+        """Raise when the provider ended the resource; release a failed one first."""
+        if observation.state == "terminated":
+            raise ProviderError("resource_terminated", "The allocated resource has terminated")
+        if observation.state == "failed":
+            await self._release_failed_acquisition(operation, allocation)
+            raise ProviderError(
+                "resource_failed",
+                "The provider could not set up this resource; it was released",
+                diagnostics=_observation_diagnostics(
+                    allocation, observation, reason_code="experiment_failed_no_provider_reason"
+                ),
+            )
 
     async def bootstrap_blocked(
         self,
@@ -1316,7 +1298,7 @@ class ComputeReconciler:
         )
 
     async def _require_fresh_host(self, host: dict[str, Any] | None) -> None:
-        """Refuse to record a release the control plane cannot currently reach."""
+        """Refuse to admit a Host, or record its release, while it cannot be reached."""
         last = None if host is None else _moment(host.get("last_heartbeat_at"))
         if host is None or last is None or _now() - last > timedelta(seconds=90):
             raise ProviderError("host_stale", "The Host heartbeat is stale", retryable=True)
