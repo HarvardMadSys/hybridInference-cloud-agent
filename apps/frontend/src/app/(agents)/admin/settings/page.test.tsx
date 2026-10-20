@@ -59,10 +59,10 @@ vi.mock('@/lib/api/adminRuntimeUpgrades', () => ({
   getRuntimeVersions: vi.fn(),
   requestRuntimeUpgrade: vi.fn(),
 }));
-vi.mock('@/lib/api/adminArchiveSettings', () => ({
+vi.mock('@/lib/api/adminArchiveSettings', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/api/adminArchiveSettings')>()),
   getSandboxArchiveSettings: vi.fn(),
   updateSandboxArchiveSettings: vi.fn(),
-  SANDBOX_ARCHIVE_SETTINGS_CAPABILITY: 'sandbox-archive-settings-v1',
 }));
 
 import { getAgentRunnerHosts, setAgentHostSettings, setAgentRuntimeVersion } from '@/lib/api/admin';
@@ -752,7 +752,7 @@ describe('application category tabs', () => {
       input,
     );
     expect(await screen.findByLabelText('Enable sandbox archives')).toBeVisible();
-    expect(screen.getByLabelText('S3 destination')).toHaveValue(archiveSettings.s3_uri);
+    expect(screen.getByLabelText('S3 bucket')).toHaveValue('freeinference');
     fireEvent.change(input, { target: { value: 'deletion-archive-bucket' } });
     submit(input);
     await waitFor(() =>
@@ -1531,6 +1531,7 @@ describe('global limits', () => {
     await waitFor(() =>
       expect(updateArchiveSettings).toHaveBeenCalledWith({
         enabled: true,
+        s3_uri: archiveSettings.s3_uri,
         checkpoints_enabled: true,
         region: archiveSettings.region,
         kms_key_arn: archiveSettings.kms_key_arn,
