@@ -14,7 +14,8 @@ from cloud_agent.execution_profiles import KATA_RUNTIME, ExecutionProfile
 from cloud_agent.sandbox_archive_credentials import load_stored_archive_policy
 from cloud_agent.storage._sql.compute_admission import host_compute_admission
 from cloud_agent.storage._sql.hosts import COVERED_GROUP_SQL, UNDELETED_GROUP_SQL
-from cloud_agent.storage._sql.rows import load_json
+from cloud_agent.storage._sql.rows import load_json, stored_archive_settings
+from cloud_agent.storage._sql.sandbox import member_turn_running
 from cloud_agent_shared.sandbox_archive_settings import (
     SANDBOX_ARCHIVE_CAPABILITY,
     SANDBOX_CHECKPOINT_CAPABILITY,
@@ -54,12 +55,7 @@ async def move_out_blocker(conn: Any, leaving: list[str], *, need_target: bool) 
     if policy is None:
         return "archives_disabled"
     try:
-        archive = load_stored_archive_policy(
-            {
-                **(load_json(policy["sandbox_archive_settings"]) or {}),
-                "revision": policy["sandbox_archive_revision"],
-            }
-        )
+        archive = load_stored_archive_policy(stored_archive_settings(policy))
     except ValueError:
         return "archives_disabled"
     if not archive.enabled:
@@ -137,10 +133,7 @@ MOVABLE_GROUP_SQL = f"""({UNMOVED_GROUP_SQL} AND (
         AND g.sandbox_image_digest ~ '{PULLABLE_IMAGE_PATTERN}'
         AND (
             g.container_id IS NOT NULL
-            OR EXISTS (
-                SELECT 1 FROM agent_thread_sandbox_memberships creating
-                WHERE creating.sandbox_id = g.id AND creating.active_attempt_id IS NOT NULL
-            )
+            OR {member_turn_running("g")}
         )
     )
 ))"""

@@ -16,6 +16,7 @@ from tests.integration.storage.test_agent_job_store import (
     store as store,
 )
 
+from cloud_agent.goals.models import GoalInput
 from cloud_agent.storage.repositories.host_pool import PostgresHostPoolRepository
 from cloud_agent_host.sandbox import KATA_RUNTIME
 from cloud_agent_shared.sandbox_archive_settings import SANDBOX_ARCHIVE_CAPABILITY
@@ -345,6 +346,45 @@ async def test_retained_queue_never_creates_autoscaling_pressure(pool, store):
 
     assert snapshot["runnable_new_group_jobs"] == 0
     assert snapshot["unmatched_new_group_jobs"] == 0
+
+
+async def test_autoscaling_demand_is_only_what_a_claim_would_hand_out(pool, store):
+    """A turn waiting out its claim backoff, or a goal round in a deleted chat, is no demand.
+
+    No claim hands either one out, so a new Host would only sit idle beside it.
+    """
+    backoff = await _create_job(store, execution_profile="trusted-v1")
+    await pool.execute(
+        "UPDATE agent_jobs SET claim_retry_at = clock_timestamp() + INTERVAL '1 hour' "
+        "WHERE id = $1",
+        backoff["id"],
+    )
+    deleted = await _create_job(store, execution_profile="trusted-v1")
+    assert await store.goals.set_goal(
+        thread_id=deleted["thread_id"],
+        user_id=deleted["user_id"],
+        goal=GoalInput(objective="ship it", max_rounds=5),
+    )
+    await pool.execute(
+        """UPDATE agent_jobs j
+           SET turn_source = 'goal', goal_id = t.goal_id, goal_revision = t.goal_revision
+           FROM agent_threads t WHERE j.id = $1 AND t.id = j.thread_id""",
+        deleted["id"],
+    )
+    await pool.execute(
+        "UPDATE agent_threads SET deleted_at = NOW() WHERE id = $1", deleted["thread_id"]
+    )
+
+    snapshot = await store.host_pool.autoscaling_observation(
+        expected_deployment_sha="test-deployment"
+    )
+    assert snapshot["runnable_new_group_jobs"] == 0
+
+    await pool.execute("UPDATE agent_jobs SET claim_retry_at = NULL WHERE id = $1", backoff["id"])
+    snapshot = await store.host_pool.autoscaling_observation(
+        expected_deployment_sha="test-deployment"
+    )
+    assert snapshot["runnable_new_group_jobs"] == 1
 
 
 async def test_autoscaling_does_not_treat_incompatible_manual_slots_as_capacity(store):
