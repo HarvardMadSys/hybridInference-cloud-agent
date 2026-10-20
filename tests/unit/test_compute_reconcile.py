@@ -697,20 +697,26 @@ async def test_retry_settles_retirement_already_observed_terminal(monkeypatch):
     h.provider.release.assert_not_awaited()
 
 
-def _left_behind(h, *, removal=None):
-    """A Host holding one stopped container its moved group left behind."""
-    container = {
+def _left_behind_container():
+    return {
         "sandbox_id": "asbx_moved",
         "generation": 1,
         "container_id": "container-old",
         "origin_thread_id": "athr_moved",
         "running": False,
     }
+
+
+def _left_behind(h, *, removal=None):
+    """A Host holding one stopped container its moved group left behind."""
+    container = _left_behind_container()
     h.sandbox_manager.list_sandboxes = AsyncMock(side_effect=[[container], []])
     h.sandbox_manager.discard_sandbox_deletion = AsyncMock(side_effect=removal)
-    h.repository.superseded_containers = AsyncMock(
-        return_value=[{key: container[key] for key in container if key != "running"}]
+    authorized = {key: container[key] for key in container if key != "running"}
+    h.repository.authorize_superseded_removals = AsyncMock(
+        return_value=[{**authorized, "request_id": "superseded-recorded"}]
     )
+    h.repository.record_superseded_removal = AsyncMock()
     h.bootstrap.inventory.return_value = HostInventory(complete=True)
 
     def receipt(_thread_id, payload):
@@ -740,18 +746,21 @@ async def test_release_removes_what_moved_groups_left_behind_then_releases(monke
     assert h.operation["state"] == "succeeded"
     assert h.operation["step"] == "released"
     assert h.operation["result"]["superseded_removed"] == 1
-    h.repository.superseded_containers.assert_awaited_once_with(
-        host="compute-nodeid", containers=[container]
+    h.repository.authorize_superseded_removals.assert_awaited_once_with(
+        host="compute-nodeid", containers=[container], operation_id=h.operation["id"]
     )
     thread_id, payload = h.sandbox_manager.discard_sandbox_deletion.await_args.args
     assert thread_id == "athr_moved"
+    # Sent under the request id the authorization recorded.
     assert payload == {
-        "request_id": payload["request_id"],
+        "request_id": "superseded-recorded",
         "generation": 1,
         "expected_container_id": "container-old",
         "sandbox_id": "asbx_moved",
     }
-    assert payload["request_id"].startswith("superseded-")
+    h.repository.record_superseded_removal.assert_awaited_once_with(
+        request_id="superseded-recorded"
+    )
     h.bootstrap.inventory.assert_awaited_once()
     h.repository.commit_release.assert_awaited_once()
     h.provider.release.assert_awaited_once()
@@ -761,7 +770,7 @@ async def test_release_removes_what_moved_groups_left_behind_then_releases(monke
 async def test_release_keeps_a_container_still_needed_and_stops_for_attention(monkeypatch):
     h = harness(monkeypatch, kind="retire", identified=True)
     _left_behind(h)
-    h.repository.superseded_containers.return_value = []
+    h.repository.authorize_superseded_removals.return_value = []
 
     await h.reconciler.execute(h.operation)
 
@@ -777,11 +786,11 @@ async def test_release_never_offers_a_running_container_for_removal(monkeypatch)
     h = harness(monkeypatch, kind="retire", identified=True)
     container = _left_behind(h)
     container["running"] = True
-    h.repository.superseded_containers.return_value = []
+    h.repository.authorize_superseded_removals.return_value = []
 
     await h.reconciler.execute(h.operation)
 
-    h.repository.superseded_containers.assert_not_awaited()
+    h.repository.authorize_superseded_removals.assert_not_awaited()
     h.sandbox_manager.discard_sandbox_deletion.assert_not_awaited()
     assert h.operation["state"] == "blocked"
 
@@ -799,13 +808,13 @@ async def test_a_removal_that_does_not_answer_is_retried_as_the_same_request(mon
         "superseded_container_not_removed"
     )
     h.repository.commit_release.assert_not_awaited()
+    h.repository.record_superseded_removal.assert_not_awaited()
     first = h.sandbox_manager.discard_sandbox_deletion.await_args.args[1]["request_id"]
+    assert first == "superseded-recorded"
 
     h.operation.update(state="running", step="pending")
     h.sandbox_manager.list_sandboxes.side_effect = None
-    h.sandbox_manager.list_sandboxes.return_value = [
-        {**h.repository.superseded_containers.return_value[0], "running": False}
-    ]
+    h.sandbox_manager.list_sandboxes.return_value = [_left_behind_container()]
     await h.reconciler.execute(h.operation)
     assert h.sandbox_manager.discard_sandbox_deletion.await_args.args[1]["request_id"] == first
 
@@ -846,6 +855,7 @@ async def test_an_unconfirmed_removal_does_not_count_as_one(monkeypatch, receipt
     await h.reconciler.execute(h.operation)
 
     assert h.operation["state"] == "blocked"
+    h.repository.record_superseded_removal.assert_not_awaited()
     h.repository.commit_release.assert_not_awaited()
 
 

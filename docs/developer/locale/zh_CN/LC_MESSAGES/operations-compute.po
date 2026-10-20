@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: HybridInference Cloud Agent \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-19 11:57-0400\n"
+"POT-Creation-Date: 2026-10-19 23:10-0400\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: The HybridInference contributors\n"
 "Language: zh_CN\n"
@@ -1416,24 +1416,30 @@ msgstr ""
 msgid ""
 "Before taking inventory, release removes the stopped containers that "
 "groups which moved away left behind: a group handed over through its "
-"checkpoint, even one nobody has used since, or one restored on another "
-"Host. A container still needed stays and blocks release: its group's own,"
-" one whose group has no recorded checkpoint left, one whose group is "
-"being deleted, and one whose group was lost after its restores failed. "
-"The operation's result counts the removed containers in "
-"`superseded_removed`. A removal the Host does not answer is retried as "
-"the same request. A release that stopped for attention runs again once "
-"the provider confirms the machine is gone, and settles."
+"checkpoint, even one nobody has used since, one restored on another Host,"
+" or one whose deletion completed. A group handed over with a recorded "
+"checkpoint no longer counts as retained by its old Host. A container "
+"still needed stays and blocks release: its group's own, one whose group "
+"has no recorded checkpoint left, one whose group is being deleted, and "
+"one whose group was lost after its restores failed. Each removal is "
+"authorized in the database first, under the group's lock: a group lost "
+"before that keeps its container, and an authorization made before the "
+"group was lost still stands. The operation's result counts the removed "
+"containers in `superseded_removed`. A removal the Host does not answer is"
+" retried as the same request. A release that stopped for attention runs "
+"again once the provider confirms the machine is gone, and settles."
 msgstr ""
-"清点之前，释放会先删掉已经搬走的沙箱组留下的已停容器：靠检查点交出去的组（哪怕之后再也没人用过），或者已经在别的 Host "
-"上恢复的组。还用得着的容器会留下来，并拦住释放：组自己正在用的容器、组已经没有可用检查点的、组正在被删除的，以及组恢复一再失败、已经丢失的。操作结果里的"
-" `superseded_removed` 记着删掉了几个容器。Host 没回应的删除，下次会用同一个请求重试。因为需要人处理而停下的释放，会在服务商确认机器已经没了之后重新跑一遍，然后结束。"
+"清点之前，释放会先删掉已经搬走的沙箱组留下的已停容器：靠检查点交出去的组（哪怕之后再也没人用过）、已经在别的 Host "
+"上恢复的组，以及已经删除完成的组。交出时有可用检查点记录的组，不再算作旧 Host "
+"还留着的组。还用得着的容器会留下来，并拦住释放：组自己正在用的容器、组已经没有可用检查点的、组正在被删除的，以及组恢复一再失败、已经丢失的。每次删除前，先锁住这个组，在数据库里记下删除授权：在这之前组已经丢失，容器就留下；授权在组丢失之前记下，就照样有效。操作结果里的"
+" `superseded_removed` 记着删掉了几个容器。Host "
+"没回应的删除，下次会用同一个请求重试。因为需要人处理而停下的释放，会在服务商确认机器已经没了之后重新跑一遍，然后结束。"
 
-#: ../developer/operations-compute.md:519
+#: ../developer/operations-compute.md:523
 msgid "Moving sandboxes out before a lease ends"
 msgstr "租期结束前把沙箱迁出去"
 
-#: ../developer/operations-compute.md:521
+#: ../developer/operations-compute.md:525
 msgid ""
 "A Host whose allocation does not use automatic replacement moves its "
 "sandbox groups to other Hosts one at a time before its lease ends, "
@@ -1456,20 +1462,20 @@ msgstr ""
 "分钟先尝试续期。服务商既不执行也不拒绝的续期请求，等待时间比这还短，所以到窗口打开时，续期要么已经批下来，要么已经放弃，只有续不上的租约才会开始迁出。窗口最长只到续期目标时长减"
 " 25 分钟，这样续期成功只会让迁出结束，而不会刚续完又开始迁出。"
 
-#: ../developer/operations-compute.md:533
+#: ../developer/operations-compute.md:537
 msgid ""
 "Inside the window the Host gets a `move_out` admission hold only when its"
 " groups can really move:"
 msgstr "进入窗口之后，只有沙箱组确实能迁走时，这台 Host 才会被加上 `move_out` 准入限制："
 
-#: ../developer/operations-compute.md:536
+#: ../developer/operations-compute.md:540
 msgid ""
 "lifecycle archives and checkpoints are enabled, and every Host of the "
 "allocation advertises `sandbox-checkpoints-v1` and has applied the "
 "current archive revision;"
 msgstr "生命周期归档和检查点都已开启，并且这个分配里的每台 Host 都声明了 `sandbox-checkpoints-v1`、已应用当前的归档配置；"
 
-#: ../developer/operations-compute.md:539
+#: ../developer/operations-compute.md:543
 msgid ""
 "another online, enrolled Host that advertises restore and archives on the"
 " current archive revision would pass claim admission for new groups now. "
@@ -1485,7 +1491,7 @@ msgstr ""
 "`untrusted-kata-v1` 沙箱组，那台 Host 还必须运行 Kata 运行时：这类对话绝不会交给不带 Kata 的 "
 "Host，所以没有这样的 Host 的话，这个组会永远停在检查点里等。"
 
-#: ../developer/operations-compute.md:547
+#: ../developer/operations-compute.md:551
 msgid ""
 "Without a target nothing changes, and the Host serves until its lease "
 "ends as before. A move that has started continues if its target goes "
@@ -1494,7 +1500,7 @@ msgstr ""
 "找不到能接手的 Host，就什么都不变，这台 Host 照旧服务到租期结束。迁出一旦开始，即使接手的 Host "
 "后来没了也会继续；但检查点一停，迁出也就停了。"
 
-#: ../developer/operations-compute.md:551
+#: ../developer/operations-compute.md:555
 msgid ""
 "While the hold is in place the Host claims nothing. Every 15 seconds the "
 "control plane asks it to stop each idle group, as an administrator's stop"
@@ -1516,7 +1522,7 @@ msgstr ""
 "认领，并在那里恢复；在用户看来，只是这条消息比平时多等了一会儿。如果一个沙箱的删除在归档之前就失败了，它仍在为它的对话服务，所以会和其他沙箱一样被计数、被迁走，机器被回收时也一样会丢失；删除正在进行或已经核实的沙箱，交给那次删除去处理。没有归档的待删除操作，在机器被回收之后，不需要这台"
 " Host 也能完成，见下文。"
 
-#: ../developer/operations-compute.md:564
+#: ../developer/operations-compute.md:568
 msgid ""
 "In an autoscaled CloudLab pool a moving-out member stops counting toward "
 "`min_hosts`, so its replacement is acquired while it still serves. It "
@@ -1534,7 +1540,7 @@ msgstr ""
 "out_，它仍然照旧在租期结束时释放。如果到了租期结束前五分钟（如果停止认领的提前量更长，就以那个为准），还有沙箱组没迁走，比如还有轮次在跑、缺检查点，或者没有"
 " Host 能接手，`compute_move_out_unfinished` 会告警一次。"
 
-#: ../developer/operations-compute.md:573
+#: ../developer/operations-compute.md:577
 msgid ""
 "So that there is still time to act, `compute_move_out_blocked` alerts "
 "once when the window opens and groups would stay. Its reason is either "
@@ -1552,7 +1558,7 @@ msgstr ""
 " Host 跑的是还没有检查点功能的旧版本）、`archive_settings_not_applied` 和 "
 "`no_restore_target`。"
 
-#: ../developer/operations-compute.md:581
+#: ../developer/operations-compute.md:585
 msgid ""
 "When the provider confirms the machine is gone (`terminated`), covered "
 "stopped groups become `cold` as above. Every other group its Host still "
@@ -1571,11 +1577,11 @@ msgstr ""
 "会报告有多少个。如果管理员本来就在不归档地删除某个组，这个组会改为直接删除：在那 10 分钟之后，由删除 worker "
 "的下一次尝试完成，不需要问这台 Host。Host 那一行会保留下来，等你点 **Remove from pool**。"
 
-#: ../developer/operations-compute.md:591
+#: ../developer/operations-compute.md:595
 msgid "Automatic CloudLab node replacement"
 msgstr "CloudLab 节点自动替换"
 
-#: ../developer/operations-compute.md:593
+#: ../developer/operations-compute.md:597
 msgid ""
 "Replacement transfers one entire Host, including stopped sandboxes and "
 "native sessions. It preserves the Host name and sandbox namespace and "
@@ -1586,11 +1592,11 @@ msgstr ""
 "替换是把一整台 Host 搬过去，包括已停止的沙箱和原生会话。Host 名称和沙箱命名空间保持不变，并注册一个新的 Host "
 "凭据。它不会用对话记录去重建上下文；控制平面和数据库一直留在稳定的基础设施上。"
 
-#: ../developer/operations-compute.md:598
+#: ../developer/operations-compute.md:602
 msgid "Before enabling replacement:"
 msgstr "开启替换之前："
 
-#: ../developer/operations-compute.md:600
+#: ../developer/operations-compute.md:604
 msgid ""
 "Use a **provisioned, managed** single-Host CloudLab allocation with "
 "`host_key_source=registration` and the private Cloud Agent profile."
@@ -1598,7 +1604,7 @@ msgstr ""
 "使用一个**新建的、受托管的**单 Host CloudLab 分配，设置 "
 "`host_key_source=registration`，并使用私有的 Cloud Agent profile。"
 
-#: ../developer/operations-compute.md:602
+#: ../developer/operations-compute.md:606
 msgid ""
 "Prepare two alternating deployment profiles with distinct tunnel keys and"
 " reverse sandbox manager ports. Both must pin the same `deployment_sha` "
@@ -1617,7 +1623,7 @@ msgstr ""
 "profile，会留到它自己那次升级时再处理。Docker 和 containerd 的版本要保持兼容。把 `data_mount` 设成这个 "
 "profile 的本地磁盘，例如 `/mydata`；两个守护进程都通过绑定挂载使用它。"
 
-#: ../developer/operations-compute.md:612
+#: ../developer/operations-compute.md:616
 msgid ""
 "Enable renewal and replacement in Servers → renewal settings. Supply the "
 "renewal reason and candidate hardware types in preference order. UI "
@@ -1628,13 +1634,13 @@ msgstr ""
 "里开启续期和替换。填写续期理由，以及按优先顺序排列的候选硬件类型。界面上的默认值是**提前 180 分钟替换**，**节点最长使用 7 "
 "天**。保存策略并不会立刻触发一次迁移。"
 
-#: ../developer/operations-compute.md:616
+#: ../developer/operations-compute.md:620
 msgid ""
 "Set `AGENT_ALERT_WEBHOOK_URL` for external operational alerts. Without "
 "it, events remain in structured logs and operation status."
 msgstr "想收到外部的运维告警，就设置 `AGENT_ALERT_WEBHOOK_URL`。不设的话，事件只会留在结构化日志和操作状态里。"
 
-#: ../developer/operations-compute.md:619
+#: ../developer/operations-compute.md:623
 msgid ""
 "Within the renewal window, extension is tried first. Refusal or "
 "unconfirmed extension starts replacement; maximum-age nodes move instead "
@@ -1646,7 +1652,7 @@ msgid ""
 "an alert. Retry resumes the saved operation."
 msgstr "进入续期窗口后，先尝试延期。延期被拒或无法确认，就开始替换；节点到了最长使用期限时，只要迁移还来得及，就直接迁移而不再延期。如果到排空截止时间迁移还没完成，或者迁移被阻塞、失败或被取消，就让旧节点继续延期，保证迁移不会拖过它的租期。失败的候选节点会先释放，再去试下一个类型。遇到配置或凭据错误会立即停止；同一类错误在三个类型上都出现，也会停止并告警。重试会从已保存的操作接着做。"
 
-#: ../developer/operations-compute.md:628
+#: ../developer/operations-compute.md:632
 msgid ""
 "The candidate installs the host recipe and receives a live pre-copy "
 "without enrolling or claiming. Once it is prepared, the source waits for "
@@ -1659,7 +1665,7 @@ msgstr ""
 "recipe，并在不注册、不认领的情况下，先接收一次在线的预复制。准备好之后，源节点会等一个空闲的时机。到了排空截止时间，即使候选节点还没准备好，也会暂停新的认领。正在跑的轮次照常跑完，新消息先排队；就算迁移很急，也绝不会杀掉正在进行的轮次。按默认一小时的轮次时限，这个截止时间是到期前"
 " 100 分钟。"
 
-#: ../developer/operations-compute.md:635
+#: ../developer/operations-compute.md:639
 msgid ""
 "The worker stops the source Host and container daemons, copies final "
 "changes, transfers the database binding, starts the replacement and "
@@ -1679,7 +1685,7 @@ msgstr ""
 "直接停掉、没经过 sandbox manager "
 "的沙箱，这次停止就没有最终归档，但它的对话仍会在替换节点上继续。只有成功接管这件事被持久记录下来之后，才会恢复认领。过了这个节点之后的恢复，可以清理源节点，但不能拿源节点上过时的副本去覆盖新的工作。"
 
-#: ../developer/operations-compute.md:646
+#: ../developer/operations-compute.md:650
 msgid ""
 "Before confirmed takeover, failures restore the source. If the "
 "replacement cannot be confirmed stopped, claims stay paused and the "
@@ -1697,11 +1703,11 @@ msgstr ""
 "或超时，会重试十分钟；重启还是失败，或者源节点开始停止之后出现任何意外错误，都会发出紧急的 `compute_rotation_failed` "
 "告警并阻塞，认领继续暂停。如果意外错误发生在停止之前，操作会阻塞，但认领会恢复。停止开始之前可以取消；之后再出错，就走恢复或重试。清理失败会自动重试，不会打断替换，但仍会作为失败显示出来。释放源节点时，仍然要通过保留状态和分配相关的检查。"
 
-#: ../developer/operations-compute.md:657
+#: ../developer/operations-compute.md:661
 msgid "Acceptance before enabling production traffic"
 msgstr "对生产流量开放之前的验收"
 
-#: ../developer/operations-compute.md:659
+#: ../developer/operations-compute.md:663
 msgid ""
 "Use disposable staging conversations and dedicated profiles. Record "
 "operation IDs, source/replacement node identities, release revision and "
@@ -1710,14 +1716,14 @@ msgstr ""
 "使用用完即弃的 staging 对话和专用的 profile。记录操作 "
 "ID、源节点和替换节点的身份、发布修订号，以及实际观察到的暂停时长，不要记录凭据。"
 
-#: ../developer/operations-compute.md:663
+#: ../developer/operations-compute.md:667
 msgid ""
 "Create a node through the deployed registration endpoint and verify its "
 "pinned key is used for SSH. A boot-script-only probe does not cover this "
 "path."
 msgstr "通过已部署的登记接口新建一个节点，确认 SSH 用的是它被锁定的那把密钥。只测启动脚本的探测，覆盖不到这条路径。"
 
-#: ../developer/operations-compute.md:665
+#: ../developer/operations-compute.md:669
 msgid ""
 "Run Claude Code, its Fork and Codex with files and distinct context "
 "markers. Use **Replace node now** and verify native continuation, Fork "
@@ -1726,14 +1732,14 @@ msgstr ""
 "分别在 Claude Code、它的 Fork 和 Codex 里跑带文件、带不同上下文标记的任务。点 **Replace node "
 "now**，然后确认：原生会话能接上，Fork 之间互不影响，文件都在，容器 ID 也对得上。在不同的 CloudLab 站点上各做一遍。"
 
-#: ../developer/operations-compute.md:668
+#: ../developer/operations-compute.md:672
 msgid ""
 "Submit a message during paused claims; it must queue and run once after "
 "takeover. Verify the source can no longer authenticate after re-"
 "enrollment."
 msgstr "在认领暂停期间发一条消息，它必须先排队，接管之后恰好运行一次。确认重新注册之后，源节点已经无法再通过认证。"
 
-#: ../developer/operations-compute.md:670
+#: ../developer/operations-compute.md:674
 msgid ""
 "Exercise refused renewal, an unavailable first hardware type, failed "
 "final copy, failed target startup and a control-plane restart. Verify "
@@ -1741,14 +1747,14 @@ msgid ""
 "of duplicate allocations or simultaneous serving copies."
 msgstr "实际演练这些情况：续期被拒、首选硬件类型没有容量、最终复制失败、目标节点启动失败，以及控制平面重启。确认能按已保存的步骤回滚或继续、失败的候选节点会被释放，并且不会出现重复的分配，也不会有两份副本同时对外服务。"
 
-#: ../developer/operations-compute.md:674
+#: ../developer/operations-compute.md:678
 msgid ""
 "Run policy for **two weeks with at least two automatic moves**, checking "
 "alerts, cleanup and retained chats. Unit tests and a manual migration do "
 "not replace elapsed-time acceptance."
 msgstr "让策略连续跑**两周，期间至少自动迁移两次**，检查告警、清理和保留的对话。单元测试和一次手动迁移，都代替不了这种需要时间积累的验收。"
 
-#: ../developer/operations-compute.md:678
+#: ../developer/operations-compute.md:682
 msgid ""
 "The [2026-10-10 manual staging drill](../agents/specs/2026-10-10"
 "-cloudlab-node-rotation-design.zh-CN.md#验证二结果2026-10-10staging) moved "
@@ -1762,7 +1768,7 @@ msgstr ""
 "Utah，中间暂停了 161 "
 "秒。那次演练是在自动流程上线之前做的。如果唯一的源磁盘突然坏掉，或者到期前找不到可用的替换容量，会话仍然可能丢失；有需要的话，请另外在节点之外做备份。"
 
-#: ../developer/operations-compute.md:684
+#: ../developer/operations-compute.md:688
 msgid ""
 "Before live traffic, verify the intended CloudLab profile through "
 "deployment, a real task, retained continuation and Fork on the same Host."

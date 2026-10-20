@@ -7,6 +7,8 @@ that reads these can import them without importing everything else.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import TYPE_CHECKING
 
 from cloud_agent_shared.sandbox_restore import PULLABLE_IMAGE_PATTERN
@@ -433,9 +435,26 @@ async def release_late_covered_sandboxes(conn: Any) -> list[str]:
     return await release_covered_sandboxes(conn, hosts) if hosts else []
 
 
+#: Whether group ``g`` waits for a restore from a checkpoint still recorded:
+#: its data lives in that checkpoint, not in any container. ``COVERED_GROUP_SQL``
+#: checked the checkpoint against the group's exact container when it handed
+#: the group over.
+RESTORE_POINT_SQL = """EXISTS (
+    SELECT 1 FROM agent_sandbox_checkpoints c
+    WHERE c.id = g.restore_checkpoint_id AND c.sandbox_id = g.id
+      AND c.state IN ('reported', 'verified')
+)"""
+
+#: Whether group ``g`` was handed over and lives in its checkpoint: ``cold``,
+#: so nothing starts it on the host it still names, with a restore point.
+#: Release counts on no container for it (``_retirement_impact``); the
+#: container it left behind is removed before the inventory is taken
+#: (``SUPERSEDED_CONTAINER_SQL``).
+HANDED_OVER_GROUP_SQL = f"(g.state = 'cold' AND {RESTORE_POINT_SQL})"
+
 #: Whether the container that host ``$1`` holds for group ``g`` under
-#: generation ``x.generation`` and Docker id ``x.container_id`` is left behind
-#: for good: nothing will ever start it again, and the group's data no longer
+#: generation ``x.generation`` and Docker id ``x.container_id`` may be removed
+#: now: nothing will ever start it again, and the group's data no longer
 #: depends on it.
 #:
 #: It never starts again once the group is past its generation (generations
@@ -444,48 +463,51 @@ async def release_late_covered_sandboxes(conn: Any) -> list[str]:
 #: ``cold`` group is refused every start, and the claim that ends it raises
 #: the generation (and refuses this host while it still names the
 #: container). A restore that failed here leaves the group ``cold`` with no
-#: container. Neither condition can become false again, so a removal acting on
-#: an earlier read removes nothing that is still needed.
+#: container. That condition cannot become false again.
 #:
 #: The data lives elsewhere once a newer generation has a container, or while
 #: the group waits for a restore from a checkpoint that is still recorded.
-#: A ``lost`` group is never matched: its restores failed, and the container
-#: may be the only good copy. A group being deleted belongs to its deletion;
-#: one already deleted needs nothing kept.
-SUPERSEDED_CONTAINER_SQL = """(
-    g.state <> 'lost'
-    AND g.deletion_state NOT IN ('pending', 'archived')
-    AND (
-        g.generation > x.generation
-        OR (
-            g.state = 'cold' AND g.host = $1 AND g.generation = x.generation
-            AND (g.container_id IS NULL OR g.container_id = x.container_id)
-        )
-    )
-    AND (
-        g.deletion_state = 'deleted'
-        OR (g.state NOT IN ('cold', 'restoring') AND g.container_id IS NOT NULL)
-        OR (
-            g.state IN ('cold', 'restoring')
-            AND EXISTS (
-                SELECT 1 FROM agent_sandbox_checkpoints c
-                WHERE c.id = g.restore_checkpoint_id AND c.sandbox_id = g.id
-                  AND c.state IN ('reported', 'verified')
+#: That condition can: a group whose last restore fails becomes ``lost``, and
+#: a ``lost`` group is never matched, since the container may be the only
+#: good copy. So a removal acts only on what :func:`authorize_superseded_removals`
+#: recorded, under the group's row lock, before the group became ``lost``.
+#: A group being deleted belongs to its deletion. One whose deletion
+#: completed (``lost`` and ``deleted``) keeps nothing.
+SUPERSEDED_CONTAINER_SQL = f"""(
+    g.deletion_state = 'deleted'
+    OR (
+        g.state <> 'lost'
+        AND g.deletion_state NOT IN ('pending', 'archived')
+        AND (
+            g.generation > x.generation
+            OR (
+                g.state = 'cold' AND g.host = $1 AND g.generation = x.generation
+                AND (g.container_id IS NULL OR g.container_id = x.container_id)
             )
+        )
+        AND (
+            (g.state NOT IN ('cold', 'restoring') AND g.container_id IS NOT NULL)
+            OR (g.state IN ('cold', 'restoring') AND {RESTORE_POINT_SQL})
         )
     )
 )"""
 
 
+def superseded_removal_request_id(host: str, container: dict[str, Any]) -> str:
+    """The one request id a removal of ``container`` from ``host`` is ever sent under."""
+    identity = [host, container["sandbox_id"], container["generation"], container["container_id"]]
+    return "superseded-" + hashlib.sha256(json.dumps(identity).encode()).hexdigest()
+
+
 async def superseded_containers(
     conn: Any, host: str, containers: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
-    """Of the chat containers ``host`` reports, the ones its groups left behind.
+    """Of the chat containers ``host`` reports, those :data:`SUPERSEDED_CONTAINER_SQL` matches.
 
     ``containers`` carries each container's ``sandbox_id``, ``generation``,
     ``container_id`` and ``origin_thread_id`` as the host's Sandbox Manager
-    reported them. Returned are those :data:`SUPERSEDED_CONTAINER_SQL`
-    matches; the group's own origin thread must be the one reported.
+    reported them; the group's own origin thread must be the one reported.
+    A read only: a removal acts on :func:`authorize_superseded_removals`.
     """
     if not containers:
         return []
@@ -507,6 +529,76 @@ async def superseded_containers(
     )
     return [
         {
+            "sandbox_id": str(row["sandbox_id"]),
+            "generation": int(row["generation"]),
+            "container_id": str(row["container_id"]),
+            "origin_thread_id": str(row["origin_thread_id"]),
+        }
+        for row in rows
+    ]
+
+
+async def authorize_superseded_removals(
+    conn: Any, host: str, containers: list[dict[str, Any]], operation_id: str | None
+) -> list[dict[str, Any]]:
+    """Record which of the containers ``host`` reports may be removed; return them all.
+
+    Each is decided under its group's row lock, which every transition to
+    ``lost`` also takes: either the group became ``lost`` first and nothing is
+    authorized, or the authorization is recorded first and stands. From then
+    on the group counts on its checkpoint alone; a later ``lost`` does not
+    take the authorization back, since the removal may already have run.
+    Returned are the containers authorized now and those authorized before
+    that the host still reports, each with the ``request_id`` it is removed
+    under, so a retry resends the same request whatever the group did since.
+    The caller holds a transaction.
+    """
+    if not containers:
+        return []
+    await conn.execute(
+        "SELECT id FROM agent_sandboxes WHERE id = ANY($1::text[]) ORDER BY id FOR SHARE",
+        sorted({str(item["sandbox_id"]) for item in containers}),
+    )
+    eligible = await superseded_containers(conn, host, containers)
+    if eligible:
+        await conn.execute(
+            """
+            INSERT INTO agent_superseded_container_removals
+                (request_id, host, sandbox_id, origin_thread_id, generation, container_id,
+                 operation_id)
+            SELECT x.request_id, $1, x.sandbox_id, x.origin_thread_id, x.generation,
+                   x.container_id, $7
+            FROM unnest($2::text[], $3::text[], $4::text[], $5::bigint[], $6::text[])
+                AS x(request_id, sandbox_id, origin_thread_id, generation, container_id)
+            ON CONFLICT DO NOTHING
+            """,
+            host,
+            [superseded_removal_request_id(host, item) for item in eligible],
+            [item["sandbox_id"] for item in eligible],
+            [item["origin_thread_id"] for item in eligible],
+            [item["generation"] for item in eligible],
+            [item["container_id"] for item in eligible],
+            operation_id,
+        )
+    rows = await conn.fetch(
+        """
+        SELECT r.request_id, r.sandbox_id, r.generation, r.container_id, r.origin_thread_id
+        FROM unnest($2::text[], $3::bigint[], $4::text[], $5::text[])
+            AS x(sandbox_id, generation, container_id, origin_thread_id)
+        JOIN agent_superseded_container_removals r
+            ON r.host = $1 AND r.sandbox_id = x.sandbox_id AND r.generation = x.generation
+           AND r.container_id = x.container_id AND r.origin_thread_id = x.origin_thread_id
+        ORDER BY r.sandbox_id, r.container_id
+        """,
+        host,
+        [str(item["sandbox_id"]) for item in containers],
+        [int(item["generation"]) for item in containers],
+        [str(item["container_id"]) for item in containers],
+        [str(item["origin_thread_id"]) for item in containers],
+    )
+    return [
+        {
+            "request_id": str(row["request_id"]),
             "sandbox_id": str(row["sandbox_id"]),
             "generation": int(row["generation"]),
             "container_id": str(row["container_id"]),

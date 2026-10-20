@@ -968,7 +968,7 @@ async def test_retry_budget_migrations_upgrade_previous_release_request(db, stor
         assert old_request["deletion_request_id"] == request_id
         assert old_request["deletion_requested_at"] == requested_at
 
-        apply_migrations(config)
+        apply_migrations(config, "0088_sandbox_retry_budget")
 
         async with db.acquire() as conn:
             versions = {

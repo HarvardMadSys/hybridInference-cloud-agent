@@ -9,7 +9,7 @@ this page. The deployment order itself, and how to roll back, are in
 ## Before starting this release
 
 Before starting this release, run `alembic upgrade head` through
-`0088_sandbox_retry_budget`. The supported deployment scripts run migrations
+`0089_superseded_removals`. The supported deployment scripts run migrations
 before replacing the API; every migration listed here is additive and safe
 under the running previous release unless it says otherwise. The few
 transitions that need stopped writers are listed in
@@ -25,6 +25,7 @@ Newest first.
 
 | Migration | What it changes |
 |---|---|
+| `0089_superseded_removals` | Adds an empty table recording each authorization to remove a container that a moved sandbox group left behind on a Host being released, and when the Host confirmed the removal. It changes no existing rows. A downgrade drops the records; containers already removed stay removed. |
 | `0088_sandbox_retry_budget` | Adds the automatic deletion retry window and attempt count. Existing pending requests begin their 24-hour window at their request time; retries stop after eight claims with bounded backoff. An administrator resumes an archived terminal request under its existing request ID and verified receipt. A terminal prearchive request is atomically replaced through the authorized deletion path, giving the host a fresh archive identity after an acknowledged abort. |
 | `0087_sandbox_deletion_attempts` | Adds the admin-only, secret-free attempt history for sandbox deletion. |
 | `0086_conversation_read_receipts` | Adds an empty table for each owner's latest read completion per conversation, with revision and job/attempt indexes for incremental polling and foreign-key cleanup. It changes no existing rows and takes brief foreign-key definition locks on the referenced tables. Existing browser receipts import when that browser next opens the updated UI; a downgrade drops cloud receipts but leaves browser caches intact. |

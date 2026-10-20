@@ -27,11 +27,12 @@ from cloud_agent.domain.compute import (
 from cloud_agent.storage._sql.compute_admission import host_compute_admission, lock_compute_entry
 from cloud_agent.storage._sql.hosts import (
     GROUP_TURN_CLAIMED_SQL,
+    HANDED_OVER_GROUP_SQL,
     HOST_RETAINED_GROUP,
+    authorize_superseded_removals,
     lock_hosts_for_revocation,
     release_covered_sandboxes,
     revoke_host_credentials,
-    superseded_containers,
 )
 from cloud_agent.storage._sql.jobs import fail_unrunnable_follow_ups
 from cloud_agent.storage._sql.move_out import (
@@ -2781,15 +2782,24 @@ class PostgresComputeResourceRepository:
                 )
             )
 
-    async def superseded_containers(
-        self, *, host: str, containers: list[dict[str, Any]]
+    async def authorize_superseded_removals(
+        self, *, host: str, containers: list[dict[str, Any]], operation_id: str
     ) -> list[dict[str, Any]]:
-        """Of the chat containers ``host`` reports, the ones its groups left behind.
+        """Record which containers ``host`` reports its moved groups left behind.
 
-        See :data:`~cloud_agent.storage._sql.hosts.SUPERSEDED_CONTAINER_SQL`.
+        See :func:`~cloud_agent.storage._sql.hosts.authorize_superseded_removals`.
         """
+        async with self._pool.acquire() as conn, conn.transaction():
+            return await authorize_superseded_removals(conn, host, containers, operation_id)
+
+    async def record_superseded_removal(self, *, request_id: str) -> None:
+        """Record that the Host confirmed an authorized removal."""
         async with self._pool.acquire() as conn:
-            return await superseded_containers(conn, host, containers)
+            await conn.execute(
+                "UPDATE agent_superseded_container_removals SET removed_at = NOW() "
+                "WHERE request_id = $1 AND removed_at IS NULL",
+                request_id,
+            )
 
     async def move_out_report(self, *, allocation_id: str) -> dict[str, Any]:
         """Whether this allocation's groups are moving out, why not, and what stays.
@@ -3277,12 +3287,17 @@ class PostgresComputeResourceRepository:
             reasons.append("placement_pinned")
         if any(host["drain_fence_active"] for host in allocation["hosts"]):
             reasons.append("deployment_drain_active")
+        # A group handed over lives in its checkpoint, whatever host it still
+        # names; the container it left here goes before the inventory below.
         groups = await conn.fetch(
-            "SELECT id,host,state,active_operation_count FROM agent_sandboxes "
-            "WHERE host=ANY($1::text[]) AND deletion_state<>'deleted'",
+            f"""SELECT g.id,g.host,g.state,g.active_operation_count,
+                       {HANDED_OVER_GROUP_SQL} AS handed_over
+                FROM agent_sandboxes g
+                WHERE g.host=ANY($1::text[]) AND g.deletion_state<>'deleted'""",
             hosts,
         )
-        if groups:
+        retained = [g for g in groups if not g["handed_over"]]
+        if retained:
             reasons.append("retained_groups_present")
         if any(g["active_operation_count"] for g in groups):
             reasons.append("workspace_operations_present")
@@ -3336,7 +3351,10 @@ class PostgresComputeResourceRepository:
             "deployment_profile_configured": bool(allocation["deployment_profile"]),
             "nodes": allocation["nodes"],
             "hosts": allocation["hosts"],
-            "retained_groups": [dict(g) for g in groups],
+            "retained_groups": [
+                {key: g[key] for key in ("id", "host", "state", "active_operation_count")}
+                for g in retained
+            ],
             "active_attempts": attempts,
             "active_forks": forks,
             "blocked_reasons": list(dict.fromkeys(reasons)),

@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: HybridInference Cloud Agent \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-19 06:39-0400\n"
+"POT-Creation-Date: 2026-10-19 23:10-0400\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: The HybridInference contributors\n"
 "Language: zh_CN\n"
@@ -38,7 +38,7 @@ msgstr "启动本次发布之前"
 #: ../developer/upgrade-notes.md:11
 msgid ""
 "Before starting this release, run `alembic upgrade head` through "
-"`0088_sandbox_retry_budget`. The supported deployment scripts run "
+"`0089_superseded_removals`. The supported deployment scripts run "
 "migrations before replacing the API; every migration listed here is "
 "additive and safe under the running previous release unless it says "
 "otherwise. The few transitions that need stopped writers are listed in "
@@ -46,7 +46,7 @@ msgid ""
 "#applying-migrations-that-are-not-backwards-compatible)."
 msgstr ""
 "启动本次发布之前，先运行 `alembic upgrade head`，升级到 "
-"`0088_sandbox_retry_budget`。官方支持的部署脚本会在替换 API "
+"`0089_superseded_removals`。官方支持的部署脚本会在替换 API "
 "之前执行迁移；除非下面特别说明，这里列出的每个迁移都只做增量修改，上一个发布还在运行时执行也是安全的。少数几个需要先停掉所有写入的迁移，列在[执行不向后兼容的迁移](operations.md"
 "#applying-migrations-that-are-not-backwards-compatible)里。"
 
@@ -74,6 +74,20 @@ msgstr "迁移"
 #: ../developer/upgrade-notes.md
 msgid "What it changes"
 msgstr "改了什么"
+
+#: ../developer/upgrade-notes.md
+msgid "`0089_superseded_removals`"
+msgstr "`0089_superseded_removals`"
+
+#: ../developer/upgrade-notes.md
+msgid ""
+"Adds an empty table recording each authorization to remove a container "
+"that a moved sandbox group left behind on a Host being released, and when"
+" the Host confirmed the removal. It changes no existing rows. A downgrade"
+" drops the records; containers already removed stay removed."
+msgstr ""
+"新增一张空表：要释放某台 Host 时，已搬走的沙箱组在这台 Host "
+"上留下的容器，每一次被授权删除都记在这里，Host 确认删掉的时间也记在这里。不改动任何已有的行。降级会删掉这些记录，但已经删掉的容器不会回来。"
 
 #: ../developer/upgrade-notes.md
 msgid "`0088_sandbox_retry_budget`"
@@ -392,7 +406,7 @@ msgid ""
 "Existing queued jobs remain immediately eligible."
 msgstr "新增 `agent_jobs.claim_retry_at`，worker 的认领查询要用到它。已经在排队的任务仍可立即被认领。"
 
-#: ../developer/upgrade-notes.md:55
+#: ../developer/upgrade-notes.md:56
 msgid ""
 "Older revisions that need a maintenance window are listed in [applying "
 "migrations that are not backwards-compatible](operations.md#applying-"
@@ -406,11 +420,11 @@ msgstr ""
 "之前已退役的旧迁移链，就无法直接升级；见[保留旧迁移链的数据库](operations.md#preserving-an-old-chain-"
 "database)。"
 
-#: ../developer/upgrade-notes.md:61
+#: ../developer/upgrade-notes.md:62
 msgid "When you add a migration"
 msgstr "新增迁移时"
 
-#: ../developer/upgrade-notes.md:63
+#: ../developer/upgrade-notes.md:64
 msgid ""
 "Add a row to the table above in the same pull request, saying what an "
 "operator upgrading a live deployment needs to know: what existing rows it"

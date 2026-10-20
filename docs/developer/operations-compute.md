@@ -508,10 +508,14 @@ completed: this control plane never connected to it.
 
 Before taking inventory, release removes the stopped containers that groups
 which moved away left behind: a group handed over through its checkpoint, even
-one nobody has used since, or one restored on another Host. A container still
-needed stays and blocks release: its group's own, one whose group has no
-recorded checkpoint left, one whose group is being deleted, and one whose group
-was lost after its restores failed. The operation's result counts the removed
+one nobody has used since, one restored on another Host, or one whose deletion
+completed. A group handed over with a recorded checkpoint no longer counts as
+retained by its old Host. A container still needed stays and blocks release:
+its group's own, one whose group has no recorded checkpoint left, one whose
+group is being deleted, and one whose group was lost after its restores failed.
+Each removal is authorized in the database first, under the group's lock: a
+group lost before that keeps its container, and an authorization made before
+the group was lost still stands. The operation's result counts the removed
 containers in `superseded_removed`. A removal the Host does not answer is
 retried as the same request. A release that stopped for attention runs again
 once the provider confirms the machine is gone, and settles.

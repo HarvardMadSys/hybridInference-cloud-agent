@@ -7,8 +7,6 @@ fixed resource identity and request parameters bound the external effects.
 
 from __future__ import annotations
 
-import hashlib
-import json
 import re
 import secrets
 from contextlib import suppress
@@ -1952,11 +1950,13 @@ class ComputeReconciler:
         leaves its stopped container here, and release refuses a Host that
         holds one. Only those the control plane proves superseded go
         (``SUPERSEDED_CONTAINER_SQL``), whether or not the group's chats ever
-        run again. Each goes by its exact id through the Sandbox Manager's
-        discard, which requires it stopped and idle under the reported
-        generation, and records the request before Docker removes it. The
-        request id is derived from the container, so a retry after a lost
-        answer is the same request, and one that finds it gone completes.
+        run again, and only once that proof is recorded under the group's row
+        lock (``authorize_superseded_removals``): a group that became ``lost``
+        first keeps its container. Each goes by its exact id through the
+        Sandbox Manager's discard, which requires it stopped and idle under
+        the reported generation, and records the request before Docker
+        removes it. A retry sends what was authorized under the same request
+        id, and one that finds the container gone completes.
         """
         held = await sandbox_manager.list_sandboxes()
         stopped = [
@@ -1971,19 +1971,13 @@ class ComputeReconciler:
         ]
         if not stopped:
             return held
-        superseded = await self.repository.superseded_containers(
-            host=str(host["host"]), containers=stopped
+        superseded = await self.repository.authorize_superseded_removals(
+            host=str(host["host"]), containers=stopped, operation_id=str(operation["id"])
         )
         if not superseded:
             return held
         for container in superseded:
-            identity = [
-                host["host"],
-                container["sandbox_id"],
-                container["generation"],
-                container["container_id"],
-            ]
-            request_id = "superseded-" + hashlib.sha256(json.dumps(identity).encode()).hexdigest()
+            request_id = container["request_id"]
             try:
                 receipt = await sandbox_manager.discard_sandbox_deletion(
                     container["origin_thread_id"],
@@ -2016,6 +2010,7 @@ class ComputeReconciler:
                     "superseded_container_not_removed",
                     "The Host did not confirm removing a container its groups left behind",
                 )
+            await self.repository.record_superseded_removal(request_id=request_id)
             logger.info(
                 "superseded_container_removed",
                 extra={

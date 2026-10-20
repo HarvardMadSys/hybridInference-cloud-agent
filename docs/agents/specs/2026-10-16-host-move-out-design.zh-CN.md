@@ -160,19 +160,32 @@ group 交出去以后，它的停止容器还留在旧 Host 上：交出只改�
 释放时，控制面按 Sandbox Manager 报上来的每个已停容器（group、generation、Docker ID、原始对话）查数据库，`SUPERSEDED_CONTAINER_SQL` 同时满足下面两点才删：
 
 1. **不会再启动。** group 的 generation 已经比容器的大；或者 group 在这台 Host 上处于 `cold`，generation 相同，记的是这个容器或者没有容器（恢复失败留下的）。generation 只增不减，每次启动都要过 generation 的栅栏；`cold` group 拒绝任何启动（Files、Git 等工作区请求也一样），结束 `cold` 的领取会把 generation 加 1，并且只要 group 还记着旧 Host 上的容器，旧 Host 就领不到（3.5）。
-2. **数据不靠它。** 新的 generation 已经有了容器（恢复成功过）；或者 group 在 `cold`/`restoring` 中，要从一个仍有记录的检查点（`reported` 或 `verified`）恢复。检查点在交出时已经核对过完整覆盖这个容器（`COVERED_GROUP_SQL`）。已删除的 group 不需要保留任何东西。
+2. **数据不靠它。** 新的 generation 已经有了容器（恢复成功过）；或者 group 在 `cold`/`restoring` 中，要从一个仍有记录的检查点（`reported` 或 `verified`）恢复（`RESTORE_POINT_SQL`）。检查点在交出时已经核对过完整覆盖这个容器（`COVERED_GROUP_SQL`）。
+
+删除已经完成的 group（`deletion_state = deleted`）不需要保留任何东西，它留在各台机器上的容器都可以删。两条正式删除路径都会把 group 同时设成 `lost` 和 `deleted`，所以这一条要先于下面对 `lost` 的排除单独判断。
 
 一律不删：
 
-- `lost` 的 group：恢复一再失败，留下的容器可能是唯一完好的副本，由管理员决定；
+- 没删除的 `lost` group：恢复一再失败，留下的容器可能是唯一完好的副本，由管理员决定；
 - 正在删除的 group（`pending`、`archived`），交给删除流程；
 - group 自己的当前容器、运行中的容器、数据库认不出来的容器、原始对话对不上的容器。
 
 这些都会留下并照旧拦住释放，没有强制绕过。
 
-### 8.3 为什么检查完不会出错
+释放前的依赖检查（`_retirement_impact`，先在释放开始时查一次，提交释放时在锁内再查一次）对已交出的 group 用同一个标准：`cold` 并且有上面那样的恢复点（`HANDED_OVER_GROUP_SQL`），就不算"这台机器还留着 group"。它的旧容器由 8.4 删掉，删没删掉由随后的清点确认。没有可用恢复点的 `cold` group、没交出的 group 照旧拦住释放。之前依赖检查把所有 `cold` group 都算进去，从没人再发消息的 group 永远走不到清理那一步。
 
-8.2 的两个条件一旦成立就不会再变回去：generation 只会变大；`cold` 只会被别的 Host 领走（generation 加 1）或删除；续期、取消移除、Host 重新上线都不会把已交出的 group 还给旧容器。所以控制面查完数据库不需要锁住 group 再去调用 Host。
+### 8.3 删除授权先写进数据库
+
+8.2 的第一个条件一旦成立就不会再变回去：generation 只会变大；`cold` 只会被别的 Host 领走（generation 加 1）或删除；续期、取消移除、Host 重新上线都不会把已交出的 group 还给旧容器。
+
+第二个条件会变：group 最后一次恢复失败就变成 `lost`，旧容器可能又成了唯一完好的副本。查完数据库、调用 Host 之前，group 可能正好变成 `lost`，而 Host 只核对自己的容器、generation 和是否空闲，不知道数据库里的变化。所以不能拿一次普通查询的结果直接去删。
+
+现在每次删除前先记一条授权（`agent_superseded_container_removals`，迁移 `0089_superseded_removals`）：哪台 Host、哪个 group、哪个 generation、哪个容器、原始对话、请求 ID、哪个释放操作、授权时间，Host 确认删掉后再记删除时间。授权在一个事务里完成：先按 group ID 顺序给这些 group 的行加共享锁（`FOR SHARE`），再按 8.2 判断，符合的写入授权。group 变成 `lost` 要改这一行，所以两者只能一先一后：
+
+- 先变成 `lost`：授权时看到 `lost`，不批准，容器留下；
+- 先授权：变成 `lost` 要等授权提交。授权一旦提交就算数，删除照常进行。从这一刻起 group 只靠它的检查点；之后再变成 `lost`，也不撤回已授权的删除，因为删除可能已经执行了。授权表里留着记录，管理员可以查到旧容器是什么时候、被哪个释放操作授权删除的。
+
+重试时，Host 还列着的、之前已授权的容器，照原来的请求 ID 继续删，不再重新判断；新出现的容器才重新判断。
 
 Host 端用管理员删除已有的 `admin-delete/discard`：按 generation 和确切的容器 ID，要求容器已停、group 空闲，删除前把授权记录写盘。请求 ID 由 Host、group、generation 和容器 ID 算出，重试一定是同一个请求；Host 已经删掉但响应丢了，重试会认出它；容器已经不在了，Host 证明它确实不在之后照样完成。Host 端不需要改代码。
 
@@ -180,8 +193,8 @@ Host 端用管理员删除已有的 `admin-delete/discard`：按 generation 和�
 
 只在释放流程的 `checking_retention` 这一步，清点之前：
 
-1. 对每台 Host 要 Sandbox Manager 的清单，选出已停的容器，查 8.2；
-2. 逐个删除，操作结果累计 `superseded_removed`，日志记 `superseded_container_removed`；
+1. 对每台 Host 要 Sandbox Manager 的清单，选出已停的容器，按 8.3 授权；
+2. 逐个删除已授权的容器，Host 确认后记删除时间，操作结果累计 `superseded_removed`，日志记 `superseded_container_removed`；
 3. 删完重新要清单；还剩任何容器就照旧以 `retained_groups_present` 停下，再做 SSH 全机扫描。
 
 Sandbox Manager 用的是控制面自己的令牌，不受 Host 凭证吊销影响，所以已移除、已吊销的 Host 也能清理。Host 没回应、正忙或过载（408、409、425、429、5xx、连不上）时，释放进入等待，30 秒后用同一个请求重试；Host 拒绝请求本身（其他 4xx）或回执对不上时，释放停下等管理员。清单要不到时保持原来的做法：不推断为空，交给 SSH 扫描。
@@ -198,9 +211,12 @@ Sandbox Manager 用的是控制面自己的令牌，不受 Host 凭证吊销影�
 
 ### 8.7 验证
 
-- PostgreSQL（`tests/integration/storage/test_superseded_containers.py`）：交出后一直没人发消息可以删；只认确切的 group、generation、容器和原始对话；仍在原 Host 的 group、没有可用检查点、正在删除、`lost`、新 generation 还没有容器的都不删；恢复中、恢复后答案不变；恢复失败留下的容器可以删，直到 group `lost`。终止观测让停下的释放重新排队，其他操作不动。
+- PostgreSQL（`tests/integration/storage/test_superseded_containers.py`）：交出后一直没人发消息可以删；只认确切的 group、generation、容器和原始对话；仍在原 Host 的 group、没有可用检查点、正在删除、`lost`、新 generation 还没有容器的都不删；恢复中、恢复后答案不变；恢复失败留下的容器可以删，直到 group `lost`；走正式删除流程完成的 group 可以删。终止观测让停下的释放重新排队，其他操作不动。
+- PostgreSQL，授权：先 `lost` 不批准；先授权的在 `lost` 之后仍然有效、按同一个请求 ID 重发；授权进行中时最后一次恢复失败要等它提交；`lost` 进行中时授权要等它提交，然后不批准。
+- PostgreSQL，完整流程：用真实的 worker 申请机器，group 正式交出，从此不创建任何后续聊天任务，主动释放删掉旧容器并成功；没有可用恢复点的 `cold` group 仍然拦住释放。
 - 单元（`tests/unit/test_compute_reconcile.py`）：删完继续释放；还用得着的不删并停下；运行中的容器不送去删；不回应时等待并用同一个请求重试；拒绝或回执不符时停下；删完仍在则停下。
 - 改动前，核心用例（删完继续释放、不回应时等待重试、终止后重新排队）失败，改动后通过。
+- 复查（2026-10-20）指出三处问题：依赖检查挡住从没人再发消息的 group、查完后变成 `lost` 的 group 仍会被删、正式删除完成的 group 删不掉。上面的修正逐一撤回时，都有对应的测试失败；8.2 每个条件逐一去掉时也是如此。
 - 真机：第三轮验收的机器已经到期，需要在下一轮里移除机器、交出 group，然后主动释放，确认旧容器被删、释放成功。
 
 ## 附：长时间失联的 Host
