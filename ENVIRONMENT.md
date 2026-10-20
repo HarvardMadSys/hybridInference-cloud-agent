@@ -102,9 +102,11 @@ also apply to newly enrolled hosts. Later environment changes are ignored.
 Clearing an override falls through to the global value or built-in default; it
 never reactivates an old environment value.
 
-Configure sandbox archives only in **Admin → Settings → Sandbox**. Cloud
-Agent stores them as one revisioned policy in the Agent database. There is no
-`AGENT_SANDBOX_ARCHIVE_*` environment surface. The destination is fixed at
+Configure automatic lifecycle archives only in **Admin → Settings → Sandbox**.
+Cloud Agent stores them as one revisioned policy in the Agent database, and no
+environment variable configures them: the `AGENT_SANDBOX_ARCHIVE_S3_*` variables
+under *Sandbox deletion archives* configure the separate archive the **Archive to
+S3 and delete** control takes. The lifecycle archive destination is fixed at
 `s3://freeinference/cloud-agent/sandbox`. The saved policy contains enablement,
 region, bounded upload sizes, and either an AWS access key or the workload
 identity fields (customer-managed KMS key ARN and expected bucket owner). The
