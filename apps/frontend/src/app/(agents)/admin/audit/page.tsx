@@ -11,7 +11,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { useAuth } from '@/components/providers';
-import { hasAgentPermission } from '@/components/providers/AuthProvider';
 import type {
   AdminAuditCategory,
   AdminAuditLogEntry,
@@ -22,7 +21,7 @@ import { APIError, getErrorMessage } from '@/lib/utils/errors';
 
 import { AdminNavigation } from '../AdminNavigation';
 import { ADMIN_PAGE, AdminPageHeader } from '../AdminPageHeader';
-import { dateTime } from '../runs/shared';
+import { AdminRequired, dateTime } from '../runs/shared';
 import { auditOutcome, describeActor, describeAuditEntry, describeWhen } from './describe';
 
 const FILTERS: { key: AdminAuditCategory | null; label: string }[] = [
@@ -36,23 +35,7 @@ const FILTERS: { key: AdminAuditCategory | null; label: string }[] = [
 
 export default function AdminAuditLogPage() {
   const { state } = useAuth();
-  if (!hasAgentPermission(state.user?.agent_access, 'agent.admin')) {
-    return <AccessDenied />;
-  }
   return <AuditLogView key={state.user?.id ?? 'admin'} userId={state.user?.id ?? null} />;
-}
-
-function AccessDenied() {
-  return (
-    <div className="flex flex-1 flex-col items-center justify-center gap-3 p-8">
-      <h1 className="text-xl font-semibold text-gray-900 dark:text-gray-50">
-        Admin access required
-      </h1>
-      <p className="text-sm text-gray-500 dark:text-gray-400">
-        The audit log is visible to admins only.
-      </p>
-    </div>
-  );
 }
 
 function AuditLogView({ userId }: { userId: string | null }) {
@@ -123,7 +106,7 @@ function AuditLogView({ userId }: { userId: string | null }) {
     return () => controller.abort();
   }, []);
 
-  if (denied) return <AccessDenied />;
+  if (denied) return <AdminRequired>The audit log is visible to admins only.</AdminRequired>;
 
   return (
     <div className="min-w-0 flex-1 overflow-y-auto">

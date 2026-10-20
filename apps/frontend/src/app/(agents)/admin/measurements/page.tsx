@@ -5,7 +5,6 @@ import { useSearchParams } from 'next/navigation';
 import { Suspense, useCallback, useEffect, useRef, useState } from 'react';
 
 import { useAuth } from '@/components/providers';
-import { hasAgentPermission } from '@/components/providers/AuthProvider';
 import {
   getMeasurement,
   getMeasurementWriterStatus,
@@ -75,7 +74,6 @@ const SEVERAL = '\u0000several';
 
 export default function AdminMeasurementsPage() {
   const { state } = useAuth();
-  if (!hasAgentPermission(state.user?.agent_access, 'agent.admin')) return <AdminRequired />;
   return (
     <Suspense fallback={<MeasurementsSkeleton />}>
       <MeasurementsView key={state.user?.id ?? 'admin'} />

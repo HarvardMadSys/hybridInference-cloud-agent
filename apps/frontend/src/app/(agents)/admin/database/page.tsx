@@ -2,24 +2,15 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useAuth } from '@/components/providers';
-import { hasAgentPermission } from '@/components/providers/AuthProvider';
 import { AdminNavigation } from '../AdminNavigation';
 import { ADMIN_PAGE, AdminPageHeader } from '../AdminPageHeader';
+import { AdminRequired } from '../runs/shared';
 import { DatabaseExplorer } from './DatabaseExplorer';
 import { PgAdminTools } from './PgAdminTools';
 
 export default function AdminDatabasePage() {
   const { state } = useAuth();
-  if (!hasAgentPermission(state.user?.agent_access, 'agent.admin')) return <AccessDenied />;
   return <DatabaseView key={state.user?.id ?? 'admin'} />;
-}
-
-function AccessDenied() {
-  return (
-    <div className="flex flex-1 items-center justify-center p-6 text-sm text-gray-500 dark:text-gray-400">
-      Admin access required.
-    </div>
-  );
 }
 
 function DatabaseView() {
@@ -41,7 +32,7 @@ function DatabaseView() {
     };
   }, []);
 
-  if (denied) return <AccessDenied />;
+  if (denied) return <AdminRequired>The database is visible to admins only.</AdminRequired>;
 
   return (
     <div className="min-w-0 flex-1 overflow-y-auto">

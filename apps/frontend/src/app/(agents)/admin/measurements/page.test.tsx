@@ -95,7 +95,17 @@ import {
   stopProfilingRun,
   summarizeProfilingRun,
 } from '@/lib/api/adminMeasurements';
-import AdminMeasurementsPage from './page';
+import AdminLayout from '../layout';
+import AdminMeasurementsPageUnwrapped from './page';
+
+// Admin pages render inside the admin layout, which holds the permission gate.
+function AdminMeasurementsPage() {
+  return (
+    <AdminLayout>
+      <AdminMeasurementsPageUnwrapped />
+    </AdminLayout>
+  );
+}
 
 function run(overrides: Partial<ProfilingRun> = {}): ProfilingRun {
   return {

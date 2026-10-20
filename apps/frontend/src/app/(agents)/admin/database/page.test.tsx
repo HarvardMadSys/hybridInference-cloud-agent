@@ -38,7 +38,17 @@ import {
   queryDatabase,
   type DatabaseQueryResult,
 } from '@/lib/api/adminDatabase';
-import AdminDatabasePage from './page';
+import AdminLayout from '../layout';
+import AdminDatabasePageUnwrapped from './page';
+
+// Admin pages render inside the admin layout, which holds the permission gate.
+function AdminDatabasePage() {
+  return (
+    <AdminLayout>
+      <AdminDatabasePageUnwrapped />
+    </AdminLayout>
+  );
+}
 
 const load = vi.mocked(getDatabaseTools);
 const setup = vi.mocked(setupPgAdmin);
@@ -110,7 +120,7 @@ describe('Admin Database', () => {
   it('does not contact or expose pgAdmin to a non-admin', () => {
     auth.access = { allowed: true, permissions: ['agent.use'] };
     render(<AdminDatabasePage />);
-    expect(screen.getByText('Admin access required.')).toBeInTheDocument();
+    expect(screen.getByText('Admin access required')).toBeInTheDocument();
     expect(load).not.toHaveBeenCalled();
     expect(loadTables).not.toHaveBeenCalled();
     expect(query).not.toHaveBeenCalled();
@@ -277,7 +287,7 @@ describe('Admin Database', () => {
     render(<AdminDatabasePage />);
     await screen.findByLabelText('Table');
     fireEvent.click(screen.getByRole('button', { name: 'Run query' }));
-    await screen.findByText('Admin access required.');
+    await screen.findByText('Admin access required');
     expect(screen.queryByLabelText('Table')).not.toBeInTheDocument();
     expect(screen.queryByRole('link', { name: /Open pgAdmin/ })).not.toBeInTheDocument();
   });
@@ -300,7 +310,7 @@ describe('Admin Database', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Run query' }));
     const rowSignal = query.mock.calls[0][1];
     await act(async () => rejectTools(new APIError('FORBIDDEN', 'Permission revoked', 403)));
-    await screen.findByText('Admin access required.');
+    await screen.findByText('Admin access required');
     expect(rowSignal?.aborted).toBe(true);
     await act(async () => resolveRows(result));
     expect(screen.queryByText('job-one')).not.toBeInTheDocument();
@@ -334,7 +344,7 @@ describe('Admin Database', () => {
     const oldSignal = query.mock.calls[0][1];
     auth.access = { allowed: true, permissions: ['agent.use'] };
     view.rerender(<AdminDatabasePage />);
-    expect(screen.getByText('Admin access required.')).toBeInTheDocument();
+    expect(screen.getByText('Admin access required')).toBeInTheDocument();
     expect(oldSignal?.aborted).toBe(true);
   });
 
@@ -370,7 +380,7 @@ describe('Admin Database', () => {
   it('removes access when the server rejects the current permission', async () => {
     load.mockRejectedValue(new APIError('FORBIDDEN', 'Permission revoked', 403));
     render(<AdminDatabasePage />);
-    await screen.findByText('Admin access required.');
+    await screen.findByText('Admin access required');
     expect(screen.queryByRole('link', { name: /Open pgAdmin/ })).not.toBeInTheDocument();
   });
 
@@ -441,7 +451,7 @@ describe('Admin Database', () => {
     render(<AdminDatabasePage />);
     await screen.findByLabelText('Administrator email');
     fillSetup();
-    await screen.findByText('Admin access required.');
+    await screen.findByText('Admin access required');
     expect(screen.queryByLabelText('Administrator email')).not.toBeInTheDocument();
   });
 

@@ -73,7 +73,17 @@ import {
 
 import { reasonLabel } from './capacity';
 import { formatAge, runtimeMenu } from './format';
-import AdminHostsPage from './page';
+import AdminLayout from '../layout';
+import AdminHostsPageUnwrapped from './page';
+
+// Admin pages render inside the admin layout, which holds the permission gate.
+function AdminHostsPage() {
+  return (
+    <AdminLayout>
+      <AdminHostsPageUnwrapped />
+    </AdminLayout>
+  );
+}
 
 // Exercise the parent's Host commands and polling through its scoped render contract.
 // ComputeResources.test verifies the real drawer selection and navigation.

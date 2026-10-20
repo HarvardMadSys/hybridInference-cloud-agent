@@ -5,7 +5,6 @@ import { useSearchParams } from 'next/navigation';
 import { Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 
 import { useAuth } from '@/components/providers';
-import { hasAgentPermission } from '@/components/providers/AuthProvider';
 import type { AgentRunnerHostPool } from '@/lib/api/admin';
 import { getAgentRunnerHosts, setAgentHostSettings, setAgentRuntimeVersion } from '@/lib/api/admin';
 import type { SandboxArchiveSettings } from '@/lib/api/adminArchiveSettings';
@@ -35,6 +34,7 @@ import { AdminNavigation } from '../AdminNavigation';
 import { ADMIN_PAGE, AdminPageHeader } from '../AdminPageHeader';
 import { GlobalSettingsCard, type NamedHost } from '../hosts/HostSettings';
 import { runtimeMenu, serverInventory } from '../hosts/format';
+import { AdminRequired } from '../runs/shared';
 
 const OTHER_SETTINGS_TABS = [
   { id: 'versions', label: 'Agent versions' },
@@ -44,26 +44,10 @@ const OTHER_SETTINGS_TABS = [
 
 export default function AdminSettingsPage() {
   const { state } = useAuth();
-  if (!hasAgentPermission(state.user?.agent_access, 'agent.admin')) {
-    return <AccessDenied />;
-  }
   return (
     <Suspense>
       <SettingsView key={state.user?.id ?? 'admin'} />
     </Suspense>
-  );
-}
-
-function AccessDenied() {
-  return (
-    <div className="flex flex-1 flex-col items-center justify-center gap-3 p-8">
-      <h1 className="text-xl font-semibold text-gray-900 dark:text-gray-50">
-        Admin access required
-      </h1>
-      <p className="text-sm text-gray-500 dark:text-gray-400">
-        Settings are visible to admins only.
-      </p>
-    </div>
   );
 }
 
@@ -310,7 +294,7 @@ function SettingsView() {
     return () => observer.disconnect();
   }, [searchTarget, selectedTab, denied]);
 
-  if (denied) return <AccessDenied />;
+  if (denied) return <AdminRequired>Settings are visible to admins only.</AdminRequired>;
 
   return (
     <div ref={content} className="min-w-0 flex-1 overflow-y-auto">

@@ -73,13 +73,23 @@ vi.mock('@/lib/api/adminConversations', async (importOriginal) => ({
 
 import { getAdminRuns } from '@/lib/api/adminRuns';
 import { getAdminConversations } from '@/lib/api/adminConversations';
-import SessionsPage from './page';
+import AdminLayout from '../layout';
+import SessionsPageUnwrapped from './page';
 import {
   collectingSentence,
   formatCpuSeconds,
   formatMemoryBytes,
   UNKNOWN_REASON_SENTENCE,
 } from '../runs/presentTurnResources';
+
+// Admin pages render inside the admin layout, which holds the permission gate.
+function SessionsPage() {
+  return (
+    <AdminLayout>
+      <SessionsPageUnwrapped />
+    </AdminLayout>
+  );
+}
 
 function run(overrides: Partial<AdminRun> = {}): AdminRun {
   return {

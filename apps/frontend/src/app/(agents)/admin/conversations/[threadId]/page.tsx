@@ -5,7 +5,6 @@ import { useParams, useSearchParams } from 'next/navigation';
 import { Suspense, useEffect, useRef, useState } from 'react';
 
 import { useAuth } from '@/components/providers';
-import { hasAgentPermission } from '@/components/providers/AuthProvider';
 import {
   getAdminConversation,
   conversationQuery,
@@ -28,7 +27,6 @@ import { conversationLink } from '../filters';
 
 export default function AdminConversationPage() {
   const { state } = useAuth();
-  if (!hasAgentPermission(state.user?.agent_access, 'agent.admin')) return <AdminRequired />;
   return (
     <Suspense>
       <LinkedConversation key={state.user?.id ?? 'admin'} />

@@ -3,7 +3,6 @@
 import { useCallback, useEffect, useState } from 'react';
 
 import { useAuth } from '@/components/providers';
-import { hasAgentPermission } from '@/components/providers/AuthProvider';
 import {
   getCloudLabDefaults,
   saveCloudLabDefaults,
@@ -12,6 +11,7 @@ import {
 import { APIError, getErrorMessage } from '@/lib/utils/errors';
 
 import { parseStringList } from '../hosts/compute-ui';
+import { AdminRequired } from '../runs/shared';
 import { SettingsSection } from '../SettingsSection';
 
 const SSH_PUBLIC_KEY_ALGORITHM =
@@ -34,28 +34,12 @@ function sshPublicKeyError(value: string): string | null {
   return null;
 }
 
-function AccessDenied() {
-  return (
-    <div className="flex flex-1 flex-col items-center justify-center gap-3 p-8">
-      <h1 className="text-xl font-semibold text-gray-900 dark:text-gray-50">
-        Admin access required
-      </h1>
-      <p className="text-sm text-gray-500 dark:text-gray-400">
-        CloudLab settings are visible to admins only.
-      </p>
-    </div>
-  );
-}
-
 export default function CloudLabSettings({
   onAccessDenied,
 }: {
   onAccessDenied?: (cause: unknown) => void;
 }) {
   const { state } = useAuth();
-  if (!hasAgentPermission(state.user?.agent_access, 'agent.admin')) {
-    return <AccessDenied />;
-  }
   return <CloudLabSettingsForm key={state.user?.id ?? 'admin'} onAccessDenied={onAccessDenied} />;
 }
 
@@ -146,7 +130,7 @@ function CloudLabSettingsForm({ onAccessDenied }: { onAccessDenied?: (cause: unk
     }
   }
 
-  if (denied) return <AccessDenied />;
+  if (denied) return <AdminRequired>CloudLab settings are visible to admins only.</AdminRequired>;
 
   const changed = draft !== null && JSON.stringify(draft) !== JSON.stringify(saved);
   const inputClass = 'ui-input min-h-11 w-full';

@@ -71,8 +71,18 @@ import {
   getAdminLlmRequests,
 } from '@/lib/api/adminRuns';
 import { listMeasurements } from '@/lib/api/adminMeasurements';
-import AdminRunPage from './[jobId]/page';
+import AdminLayout from '../layout';
+import AdminRunPageUnwrapped from './[jobId]/page';
 import { RunState } from './shared';
+
+// Admin pages render inside the admin layout, which holds the permission gate.
+function AdminRunPage() {
+  return (
+    <AdminLayout>
+      <AdminRunPageUnwrapped />
+    </AdminLayout>
+  );
+}
 
 function run(overrides: Partial<AdminRun> = {}): AdminRun {
   return {

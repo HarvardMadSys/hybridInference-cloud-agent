@@ -45,7 +45,17 @@ vi.mock('@/lib/api/adminSandboxes', () => ({
   getAdminSandboxTrajectory: vi.fn(),
 }));
 
-import AdminSandboxTrajectoryPage from './page';
+import AdminLayout from '../../layout';
+import AdminSandboxTrajectoryPageUnwrapped from './page';
+
+// Admin pages render inside the admin layout, which holds the permission gate.
+function AdminSandboxTrajectoryPage() {
+  return (
+    <AdminLayout>
+      <AdminSandboxTrajectoryPageUnwrapped />
+    </AdminLayout>
+  );
+}
 
 const observedAt = '2026-10-10T10:00:00Z';
 

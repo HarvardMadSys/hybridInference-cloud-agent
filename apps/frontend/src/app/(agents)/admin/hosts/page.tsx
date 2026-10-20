@@ -34,7 +34,6 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { useAuth } from '@/components/providers';
-import { hasAgentPermission } from '@/components/providers/AuthProvider';
 import type {
   AgentHostCapacityHistory,
   AgentRunnerHost,
@@ -84,6 +83,7 @@ import {
 } from './format';
 import { AdminNavigation } from '../AdminNavigation';
 import { ADMIN_PAGE, AdminPageHeader } from '../AdminPageHeader';
+import { AdminRequired } from '../runs/shared';
 
 // A runner polls only between jobs, so silence can mean "busy for an hour" as
 // easily as "gone". Carried over from the gateway's section along with the
@@ -251,18 +251,6 @@ export default function AdminHostsPage() {
   // Keyed on the account: switching users remounts the view, which aborts
   // every request and drops the pool rather than showing one account the
   // other's fleet.
-  if (!hasAgentPermission(state.user?.agent_access, 'agent.admin')) {
-    return (
-      <div className="flex flex-1 flex-col items-center justify-center gap-3 p-8">
-        <h1 className="text-xl font-semibold text-gray-900 dark:text-gray-50">
-          Admin access required
-        </h1>
-        <p className="text-sm text-gray-500 dark:text-gray-400">
-          The runner host pool is visible to admins only.
-        </p>
-      </div>
-    );
-  }
   return <HostsView key={state.user?.id ?? 'admin'} />;
 }
 
@@ -1126,16 +1114,7 @@ function HostsView() {
   };
 
   if (denied) {
-    return (
-      <div className="flex flex-1 flex-col items-center justify-center gap-3 p-8">
-        <h1 className="text-xl font-semibold text-gray-900 dark:text-gray-50">
-          Admin access required
-        </h1>
-        <p className="text-sm text-gray-500 dark:text-gray-400">
-          Your access to the runner host pool was revoked.
-        </p>
-      </div>
-    );
+    return <AdminRequired>Your access to the runner host pool was revoked.</AdminRequired>;
   }
 
   // Silence blocks new-chat placement on the selected host. Existing retained

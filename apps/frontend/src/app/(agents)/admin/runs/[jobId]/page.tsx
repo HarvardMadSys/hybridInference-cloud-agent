@@ -5,7 +5,6 @@ import { useParams, useSearchParams } from 'next/navigation';
 import { Suspense, useCallback, useEffect, useState, type ReactNode } from 'react';
 
 import { useAuth } from '@/components/providers';
-import { hasAgentPermission } from '@/components/providers/AuthProvider';
 import { listMeasurements, type MeasurementSummary } from '@/lib/api/adminMeasurements';
 import { getAdminRun, type AdminAttempt, type AdminRunDetail } from '@/lib/api/adminRuns';
 import { conversationHref } from '@/lib/api/adminConversations';
@@ -122,7 +121,6 @@ function startupValue(sample: MeasurementSummary): ReactNode {
 export default function AdminRunPage() {
   const params = useParams<{ jobId: string }>();
   const { state } = useAuth();
-  if (!hasAgentPermission(state.user?.agent_access, 'agent.admin')) return <AdminRequired />;
   return (
     <Suspense>
       <RunDetails key={`${state.user?.id}:${params?.jobId}`} jobId={params?.jobId ?? ''} />

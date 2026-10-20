@@ -24,7 +24,18 @@ vi.mock('@/lib/api/compute', () => ({
 import { getCloudLabDefaults, saveCloudLabDefaults } from '@/lib/api/compute';
 import { APIError } from '@/lib/utils/errors';
 
-import CloudLabSettings from './CloudLabSettings';
+import type { ComponentProps } from 'react';
+import AdminLayout from '../layout';
+import CloudLabSettingsUnwrapped from './CloudLabSettings';
+
+// Admin pages render inside the admin layout, which holds the permission gate.
+function CloudLabSettings(props: ComponentProps<typeof CloudLabSettingsUnwrapped>) {
+  return (
+    <AdminLayout>
+      <CloudLabSettingsUnwrapped {...props} />
+    </AdminLayout>
+  );
+}
 
 const getDefaults = vi.mocked(getCloudLabDefaults);
 const saveDefaults = vi.mocked(saveCloudLabDefaults);

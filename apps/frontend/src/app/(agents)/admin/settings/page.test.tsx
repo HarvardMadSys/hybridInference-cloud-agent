@@ -79,7 +79,17 @@ import { getAgentAdminSettings, setAgentAdminSettings } from '@/lib/api/adminSet
 import { getCloudLabDefaults, saveCloudLabDefaults } from '@/lib/api/compute';
 
 import { categoryTabId } from './ApplicationSettings';
-import AdminSettingsPage from './page';
+import AdminLayout from '../layout';
+import AdminSettingsPageUnwrapped from './page';
+
+// Admin pages render inside the admin layout, which holds the permission gate.
+function AdminSettingsPage() {
+  return (
+    <AdminLayout>
+      <AdminSettingsPageUnwrapped />
+    </AdminLayout>
+  );
+}
 
 const list = vi.mocked(getAgentRunnerHosts);
 const setLimit = vi.mocked(setAgentHostSettings);

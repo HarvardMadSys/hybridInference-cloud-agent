@@ -5,7 +5,6 @@ import { useParams } from 'next/navigation';
 import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { useAuth } from '@/components/providers';
-import { hasAgentPermission } from '@/components/providers/AuthProvider';
 import { conversationHref } from '@/lib/api/adminConversations';
 import {
   deleteAdminSandbox,
@@ -90,7 +89,6 @@ function detailValue(value: unknown): string {
 export default function AdminSandboxTrajectoryPage() {
   const { state } = useAuth();
   const params = useParams<{ sandboxId: string }>();
-  if (!hasAgentPermission(state.user?.agent_access, 'agent.admin')) return <AdminRequired />;
   const sandboxId = params?.sandboxId ?? '';
   return (
     <SandboxTrajectory key={`${state.user?.id ?? 'admin'}:${sandboxId}`} sandboxId={sandboxId} />

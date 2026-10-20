@@ -14,15 +14,18 @@ export const TOOLBAR_SELECT = 'ui-input min-h-11 pl-3 pr-8 transition-colors hov
 export const ICON_BUTTON = 'ui-icon-button ui-button-ghost h-11 w-11 shrink-0';
 export const INPUT = 'ui-input min-h-11 w-full placeholder:text-muted';
 
-export function AdminRequired() {
+/** The screen an admin page shows an account that may not see it. */
+export function AdminRequired({
+  children = 'Sessions and turns across users are visible to admins only.',
+}: {
+  children?: ReactNode;
+}) {
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-3 p-8">
       <h1 className="text-xl font-semibold text-gray-900 dark:text-gray-50">
         Admin access required
       </h1>
-      <p className="text-sm text-gray-500 dark:text-gray-400">
-        Sessions and turns across users are visible to admins only.
-      </p>
+      <p className="text-sm text-gray-500 dark:text-gray-400">{children}</p>
     </div>
   );
 }

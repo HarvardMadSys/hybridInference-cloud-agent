@@ -5,7 +5,6 @@ import { useSearchParams } from 'next/navigation';
 import { Suspense, useCallback, useState } from 'react';
 
 import { useAuth } from '@/components/providers';
-import { hasAgentPermission } from '@/components/providers/AuthProvider';
 import type { AgentJobApiState } from '@/lib/api/agents';
 import type { AdminRunFilters } from '@/lib/api/adminRuns';
 import {
@@ -118,7 +117,6 @@ type Level = (typeof LEVELS)[number]['key'];
 
 export default function AdminConversationsPage() {
   const { state } = useAuth();
-  if (!hasAgentPermission(state.user?.agent_access, 'agent.admin')) return <AdminRequired />;
   return (
     <Suspense fallback={<ConversationsSkeleton />}>
       <LinkedConversationsList key={state.user?.id ?? 'admin'} />

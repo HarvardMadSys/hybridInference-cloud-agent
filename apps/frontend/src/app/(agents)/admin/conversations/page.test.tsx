@@ -53,12 +53,30 @@ vi.mock('@/lib/api/adminRuns', async (importOriginal) => ({
   getAdminRuns: vi.fn(),
 }));
 
-import List from './page';
-import Detail from './[threadId]/page';
+import AdminLayout from '../layout';
+import ListUnwrapped from './page';
+import DetailUnwrapped from './[threadId]/page';
 import PreviousEntry from '../runs/page';
 import ActivityList from '../activity/page';
 import SessionList from '../sessions/page';
 import SessionDetail from '../sessions/[threadId]/page';
+
+// Admin pages render inside the admin layout, which holds the permission gate.
+function List() {
+  return (
+    <AdminLayout>
+      <ListUnwrapped />
+    </AdminLayout>
+  );
+}
+
+function Detail() {
+  return (
+    <AdminLayout>
+      <DetailUnwrapped />
+    </AdminLayout>
+  );
+}
 
 const since = '2026-09-10T08:00:00Z';
 const until = '2026-09-17T08:00:00Z';

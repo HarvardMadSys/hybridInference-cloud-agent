@@ -59,7 +59,17 @@ vi.mock('next/navigation', () => ({
 vi.mock('@/lib/api/adminUsage', () => ({ getAdminUsage: vi.fn() }));
 
 import { getAdminUsage } from '@/lib/api/adminUsage';
-import AdminUsagePageComponent from './page';
+import AdminLayout from '../layout';
+import AdminUsagePageComponentUnwrapped from './page';
+
+// Admin pages render inside the admin layout, which holds the permission gate.
+function AdminUsagePageComponent() {
+  return (
+    <AdminLayout>
+      <AdminUsagePageComponentUnwrapped />
+    </AdminLayout>
+  );
+}
 
 const DAY_MS = 86_400_000;
 

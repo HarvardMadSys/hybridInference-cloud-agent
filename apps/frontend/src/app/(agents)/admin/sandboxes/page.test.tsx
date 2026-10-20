@@ -44,7 +44,17 @@ vi.mock('@/lib/api/adminSandboxes', () => ({
   stopAdminSandbox: vi.fn(),
 }));
 
-import AdminSandboxesPage from './page';
+import AdminLayout from '../layout';
+import AdminSandboxesPageUnwrapped from './page';
+
+// Admin pages render inside the admin layout, which holds the permission gate.
+function AdminSandboxesPage() {
+  return (
+    <AdminLayout>
+      <AdminSandboxesPageUnwrapped />
+    </AdminLayout>
+  );
+}
 
 type InventoryPage = Awaited<ReturnType<typeof getAdminSandboxes>>;
 const observedAt = '2026-10-10T10:00:00Z';

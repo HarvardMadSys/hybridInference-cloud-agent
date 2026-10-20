@@ -5,7 +5,6 @@ import { useSearchParams } from 'next/navigation';
 import { Suspense, useCallback, useEffect, useRef, useState } from 'react';
 
 import { useAuth } from '@/components/providers';
-import { hasAgentPermission } from '@/components/providers/AuthProvider';
 import {
   getAdminUsage,
   type AdminUsage,
@@ -107,7 +106,6 @@ export default function AdminUsagePage() {
   const onWrite = useCallback((next: string) => {
     written.current = next;
   }, []);
-  if (!hasAgentPermission(state.user?.agent_access, 'agent.admin')) return <AdminRequired />;
   return (
     <Suspense fallback={<UsageSkeleton />}>
       <UsageView

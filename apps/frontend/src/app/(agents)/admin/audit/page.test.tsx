@@ -36,7 +36,17 @@ vi.mock('@/lib/api/admin', () => ({
 
 import { getAgentRunnerHosts, listAdminAuditLog } from '@/lib/api/admin';
 
-import AdminAuditLogPage from './page';
+import AdminLayout from '../layout';
+import AdminAuditLogPageUnwrapped from './page';
+
+// Admin pages render inside the admin layout, which holds the permission gate.
+function AdminAuditLogPage() {
+  return (
+    <AdminLayout>
+      <AdminAuditLogPageUnwrapped />
+    </AdminLayout>
+  );
+}
 
 const list = vi.mocked(listAdminAuditLog);
 const pool = vi.mocked(getAgentRunnerHosts);
