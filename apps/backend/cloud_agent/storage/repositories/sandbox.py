@@ -43,6 +43,8 @@ from cloud_agent_shared.sandbox_resources import parse_sandbox_resource_sample
 from cloud_agent_shared.sandbox_restore import MAX_RESTORE_ATTEMPTS
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     import asyncpg
 
 logger = get_logger(__name__)
@@ -71,6 +73,25 @@ SELECT EXISTS (
       AND s.state IN ('pending', 'capturing', 'captured', 'publishing')
 )
 """
+
+
+def _terminals_quiet(group: Any) -> str | None:
+    """Why an administrator's stop waits on the group's terminals, or ``None``.
+
+    An open terminal refuses it, and so does a terminal count the host has
+    not reported in the last 90 seconds.
+    """
+    if group["terminal_count"]:
+        return "terminals_open"
+    terminal_observed = group["terminal_count_observed_at"]
+    if (
+        group["terminal_count"] is None
+        or terminal_observed is None
+        or (group["observed_at"] - terminal_observed).total_seconds() > 90
+    ):
+        return "activity_unknown"
+    return None
+
 
 #: True when sandbox ``g`` has members and its owner deleted every one of
 #: their chats. A failed Fork's placeholder is tombstoned the same way.
@@ -1474,65 +1495,15 @@ class PostgresSandboxRepository:
         The database marker survives observations and excludes new admission
         until Docker confirms the stop. No container or workspace is deleted.
         """
-        async with self._pool.acquire() as conn, conn.transaction():
-            await conn.execute("SET LOCAL statement_timeout = '5s'")
-            # The same membership -> group order as reservation, Fork and
-            # reconciliation. Claims hold a shared group lock until committed.
-            await conn.fetch(
-                "SELECT thread_id FROM agent_thread_sandbox_memberships "
-                "WHERE sandbox_id = $1 ORDER BY thread_id FOR UPDATE",
-                sandbox_id,
+
+        def current(group: Any) -> bool:
+            return (
+                group["generation"] == generation
+                and group["container_id"] == container_id
+                and group["last_activity_at"] == last_activity_at
             )
-            group = await conn.fetchrow(
-                "SELECT id, user_id, host, generation, container_id, last_activity_at, state, "
-                "stop_requested_at, active_operation_count, snapshot_state, "
-                "terminal_count, terminal_count_observed_at, NOW() AS observed_at "
-                "FROM agent_sandboxes WHERE id = $1 FOR UPDATE",
-                sandbox_id,
-            )
-            if group is None:
-                return "not_found"
-            if (
-                group["generation"] != generation
-                or group["container_id"] != container_id
-                or group["last_activity_at"] != last_activity_at
-            ):
-                return "stale"
-            if group["state"] == "stopping" and group["stop_requested_at"] is not None:
-                return "accepted"
-            if group["state"] != "running":
-                return "not_running"
-            busy = await conn.fetchval(_GROUP_WORK_PENDING_SQL, sandbox_id)
-            if (
-                busy
-                or group["active_operation_count"]
-                or group["snapshot_state"] in {"pending", "snapshotting", "importing"}
-            ):
-                return "busy"
-            if group["terminal_count"]:
-                return "terminals_open"
-            terminal_observed = group["terminal_count_observed_at"]
-            if (
-                group["terminal_count"] is None
-                or terminal_observed is None
-                or (group["observed_at"] - terminal_observed).total_seconds() > 90
-            ):
-                return "activity_unknown"
-            await self._record_trajectory_event(
-                conn,
-                group=group,
-                event_type="admin_stop_requested",
-                source="admin",
-                actor_id=actor_id,
-                from_state="running",
-                to_state="stopping",
-                details={"container_present": True},
-            )
-            await conn.execute(
-                "UPDATE agent_sandboxes SET state = 'stopping', "
-                "stop_requested_at = NOW(), idle_deadline = NULL, updated_at = NOW() WHERE id = $1",
-                sandbox_id,
-            )
+
+        async def audit(conn: Any, group: Any) -> None:
             # Stop and its audit receipt commit together. An unavailable audit
             # table must never leave an unrecorded cross-owner mutation.
             await conn.execute(
@@ -1551,7 +1522,23 @@ class PostgresSandboxRepository:
                     }
                 ),
             )
-        return "accepted"
+
+        return await self._request_stop(
+            sandbox_id=sandbox_id,
+            group_sql=(
+                "SELECT id, user_id, host, generation, container_id, last_activity_at, state, "
+                "stop_requested_at, active_operation_count, snapshot_state, "
+                "terminal_count, terminal_count_observed_at, NOW() AS observed_at "
+                "FROM agent_sandboxes WHERE id = $1 FOR UPDATE"
+            ),
+            current=current,
+            quiet=_terminals_quiet,
+            event_type="admin_stop_requested",
+            source="admin",
+            actor_id=actor_id,
+            details={"container_present": True},
+            audit=audit,
+        )
 
     async def sandboxes_of_deleted_sessions(self, *, limit: int = 20) -> list[dict[str, Any]]:
         """List live sandboxes on online hosts whose every chat was deleted.
@@ -1590,52 +1577,22 @@ class PostgresSandboxRepository:
         heartbeat retries. Nothing is deleted here: once the stop is observed,
         the sandbox deletion request takes over.
         """
-        async with self._pool.acquire() as conn, conn.transaction():
-            await conn.execute("SET LOCAL statement_timeout = '5s'")
-            await conn.fetch(
-                "SELECT thread_id FROM agent_thread_sandbox_memberships "
-                "WHERE sandbox_id = $1 ORDER BY thread_id FOR UPDATE",
-                sandbox_id,
-            )
-            group = await conn.fetchrow(
-                f"""
+        return await self._request_stop(
+            sandbox_id=sandbox_id,
+            group_sql=f"""
                 SELECT g.*, ({_EVERY_CHAT_DELETED_SQL}) AS every_chat_deleted
                 FROM agent_sandboxes g WHERE g.id = $1 FOR UPDATE
                 """,
-                sandbox_id,
-            )
-            if group is None:
-                return "not_found"
-            if group["generation"] != generation or group["container_id"] != container_id:
-                return "stale"
-            if not group["every_chat_deleted"] or group["deletion_state"] != "none":
-                return "stale"
-            if group["state"] == "stopping" and group["stop_requested_at"] is not None:
-                return "accepted"
-            if group["state"] != "running":
-                return "not_running"
-            busy = await conn.fetchval(_GROUP_WORK_PENDING_SQL, sandbox_id)
-            if (
-                busy
-                or group["active_operation_count"]
-                or group["snapshot_state"] in {"pending", "snapshotting", "importing"}
-            ):
-                return "busy"
-            await self._record_trajectory_event(
-                conn,
-                group=group,
-                event_type="deleted_sessions_stop_requested",
-                source="system",
-                actor_id=actor_id,
-                from_state="running",
-                to_state="stopping",
-            )
-            await conn.execute(
-                "UPDATE agent_sandboxes SET state = 'stopping', "
-                "stop_requested_at = NOW(), idle_deadline = NULL, updated_at = NOW() WHERE id = $1",
-                sandbox_id,
-            )
-        return "accepted"
+            current=lambda group: (
+                group["generation"] == generation
+                and group["container_id"] == container_id
+                and bool(group["every_chat_deleted"])
+                and group["deletion_state"] == "none"
+            ),
+            event_type="deleted_sessions_stop_requested",
+            source="system",
+            actor_id=actor_id,
+        )
 
     async def sandboxes_moving_out(self, *, limit: int = 50) -> list[dict[str, Any]]:
         """List running groups on Hosts moving out, oldest activity first.
@@ -1668,26 +1625,56 @@ class PostgresSandboxRepository:
         group to a later pass; nothing running is ever interrupted, and the
         Host refuses while a terminal is open there.
         """
+        return await self._request_stop(
+            sandbox_id=sandbox_id,
+            group_sql=f"""
+                SELECT g.*, {MOVING_OUT_HOST_SQL.format(host="g.host")} AS moving_out,
+                       {UNDELETED_GROUP_SQL} AS undeleted
+                FROM agent_sandboxes g WHERE g.id = $1 FOR UPDATE
+                """,
+            current=lambda group: (
+                group["generation"] == generation
+                and group["container_id"] == container_id
+                and bool(group["moving_out"])
+                and bool(group["undeleted"])
+            ),
+            event_type="move_out_stop_requested",
+            source="system",
+            actor_id=actor_id,
+        )
+
+    async def _request_stop(
+        self,
+        *,
+        sandbox_id: str,
+        group_sql: str,
+        current: Callable[[Any], bool],
+        event_type: str,
+        source: str,
+        actor_id: str,
+        quiet: Callable[[Any], str | None] = lambda _group: None,
+        details: dict[str, Any] | None = None,
+        audit: Callable[[Any, Any], Awaitable[None]] | None = None,
+    ) -> str:
+        """Mark one running, idle group for its host to stop.
+
+        ``group_sql`` reads and locks the group by ``$1``; ``current`` is the
+        request's own fence on that row, ``quiet`` any refusal of its own once
+        the group is idle, and ``audit`` a write that commits with the stop.
+        """
         async with self._pool.acquire() as conn, conn.transaction():
             await conn.execute("SET LOCAL statement_timeout = '5s'")
+            # The same membership -> group order as reservation, Fork and
+            # reconciliation. Claims hold a shared group lock until committed.
             await conn.fetch(
                 "SELECT thread_id FROM agent_thread_sandbox_memberships "
                 "WHERE sandbox_id = $1 ORDER BY thread_id FOR UPDATE",
                 sandbox_id,
             )
-            group = await conn.fetchrow(
-                f"""
-                SELECT g.*, {MOVING_OUT_HOST_SQL.format(host="g.host")} AS moving_out,
-                       {UNDELETED_GROUP_SQL} AS undeleted
-                FROM agent_sandboxes g WHERE g.id = $1 FOR UPDATE
-                """,
-                sandbox_id,
-            )
+            group = await conn.fetchrow(group_sql, sandbox_id)
             if group is None:
                 return "not_found"
-            if group["generation"] != generation or group["container_id"] != container_id:
-                return "stale"
-            if not group["moving_out"] or not group["undeleted"]:
+            if not current(group):
                 return "stale"
             if group["state"] == "stopping" and group["stop_requested_at"] is not None:
                 return "accepted"
@@ -1700,20 +1687,26 @@ class PostgresSandboxRepository:
                 or group["snapshot_state"] in {"pending", "snapshotting", "importing"}
             ):
                 return "busy"
+            refusal = quiet(group)
+            if refusal is not None:
+                return refusal
             await self._record_trajectory_event(
                 conn,
                 group=group,
-                event_type="move_out_stop_requested",
-                source="system",
+                event_type=event_type,
+                source=source,
                 actor_id=actor_id,
                 from_state="running",
                 to_state="stopping",
+                details=details,
             )
             await conn.execute(
                 "UPDATE agent_sandboxes SET state = 'stopping', "
                 "stop_requested_at = NOW(), idle_deadline = NULL, updated_at = NOW() WHERE id = $1",
                 sandbox_id,
             )
+            if audit is not None:
+                await audit(conn, group)
         return "accepted"
 
     async def release_moving_out_groups(self) -> list[str]:
