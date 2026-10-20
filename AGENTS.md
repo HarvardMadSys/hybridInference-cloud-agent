@@ -96,12 +96,13 @@ locked dependencies with `npm ci`, then checks lint, formatting, types, tests,
 and build guards. `make setup-dev` installs backend dependencies only.
 
 The developer documentation site is published in English and Simplified
-Chinese, and CI fails while any English string lacks a current translation.
-When a change edits a page under `docs/developer/` or a root guide the site
-includes (`ENVIRONMENT.md`, `CONTRIBUTING.md`, `SECURITY.md`,
+Chinese. When a change edits a page under `docs/developer/` or a root guide the
+site includes (`ENVIRONMENT.md`, `CONTRIBUTING.md`, `SECURITY.md`,
 `deploy/local/README.md`, `deploy/release/README.md`,
 `gateway_contracts/README.md`), run `make docs-translate`, translate the
-entries it adds or marks fuzzy, and run `make docs-verify`.
+entries it adds or marks fuzzy, and run `make docs-verify`. CI fails while a
+string on a stable page (the home page, Development, Code structure, Security,
+Contributing) lacks a current translation, and warns for the other pages.
 [Translating the docs](docs/developer/translations.md) has the workflow and
 terminology.
 

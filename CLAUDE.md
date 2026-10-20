@@ -24,8 +24,9 @@ detailed local-development commands.
 3. Run every additional check required by the changed area. In particular,
    frontend changes need the checks in `apps/frontend`, database changes
    need `make test-db-local` (Docker; never `make test-db-local-down`), and changes to a
-   page of the documentation site need its Chinese translation updated and
-   `make docs-verify` (see `AGENTS.md` § Quality gates). See
+   page of the documentation site need `make docs-verify` and its Chinese
+   translation updated, which CI requires of the stable pages (see `AGENTS.md`
+   § Quality gates). See
    `docs/developer/development.md#run-the-relevant-checks` for the full selection guide.
 4. Do not create, request, or claim readiness for a pull request while a
    required check is failing or was not run. Record the commands and results in
