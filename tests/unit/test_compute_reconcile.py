@@ -37,6 +37,7 @@ from cloud_agent.ports.external.host_bootstrap import (
     HostInventory,
     PreflightResult,
 )
+from cloud_agent.providers.compute.cloudlab import CloudLabProvider
 from cloud_agent.sandbox_manager_client import SandboxManagerError
 from cloud_agent.schemas_compute import RenewalPolicy
 from cloud_agent.workers.compute_resources import ComputeResourceWorker
@@ -198,6 +199,8 @@ def harness(monkeypatch, *, kind="acquire", identified=False):
                 outcome="confirmed", resource=REF, observation=observed(state="terminated")
             )
         ),
+        # The allocations here are CloudLab's, and so are their diagnostics.
+        observation_diagnostics=CloudLabProvider.observation_diagnostics,
     )
     commands = SimpleNamespace(
         repository=repository,

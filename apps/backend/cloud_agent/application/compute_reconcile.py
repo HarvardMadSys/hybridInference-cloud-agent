@@ -7,7 +7,6 @@ fixed resource identity and request parameters bound the external effects.
 
 from __future__ import annotations
 
-import re
 import secrets
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
@@ -33,6 +32,8 @@ from cloud_agent.domain.compute import (
 from cloud_agent.host_pool import hash_secret
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.ports.external.compute_provider import (
+    DIAGNOSTIC_OPERATIONS,
+    DIAGNOSTIC_REASONS,
     AcquireRequest,
     ExtendRequest,
     NodeObservation,
@@ -42,6 +43,7 @@ from cloud_agent.ports.external.compute_provider import (
     ProviderReceipt,
     ResourceObservation,
     ResourceRef,
+    safe_diagnostic_label,
 )
 from cloud_agent.ports.external.host_bootstrap import (
     BootstrapIntent,
@@ -152,70 +154,17 @@ def _provider_observation_is_fresh(observation: ResourceObservation) -> bool:
     return -30 <= age <= 300
 
 
-_SAFE_DIAGNOSTIC_LABEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
-_SENSITIVE_DIAGNOSTIC_LABEL = re.compile(
-    r"token|secret|password|credential|bearer|api[_-]?key|jwt", re.IGNORECASE
-)
-_SAFE_PROVIDER_OPERATIONS = {
-    "experiments.create",
-    "experiments.delete",
-    "experiments.list",
-    "experiments.manifests.read",
-    "experiments.read",
-    "experiments.update",
-    "profiles.read",
-    "profiles.request",
-    "provider.request",
-}
-_SAFE_PROVIDER_REASONS = {
-    "authorization_denied",
-    "capacity_unavailable",
-    "connect_failed",
-    "experiment_failed_no_provider_reason",
-    "experiment_ready",
-    "http_rejected",
-    "invalid_create_response",
-    "invalid_expiry_timestamp",
-    "invalid_json_response",
-    "invalid_manifest",
-    "invalid_parameter",
-    "invalid_profile_binding",
-    "invalid_request",
-    "invalid_response_shape",
-    "invalid_ssh_destination",
-    "invalid_ssh_manifest",
-    "incomplete_resource_scope",
-    "missing_or_invalid_experiment_id",
-    "permission_denied",
-    "profile_not_found",
-    "profile_rejected",
-    "project_access_denied",
-    "provider_server_error",
-    "rate_limited",
-    "rate_limited_or_capacity",
-    "request_accepted",
-    "request_failed",
-    "request_outcome_unknown",
-    "reservation_conflict",
-    "resource_identity_mismatch",
-    "resource_not_found",
-    "response_too_large",
-    "tls_verification_failed",
-    "unsupported_node_count",
-}
-
-
-def _safe_provider_fields(source: dict[str, Any]) -> dict[str, str | int | bool]:  # noqa: PLR0912 complexity baseline, #771
+def _safe_provider_fields(source: dict[str, Any]) -> dict[str, str | int | bool]:
     """Validate provider diagnostic values as well as their field names."""
     details: dict[str, str | int | bool] = {}
     operation = source.get("provider_operation")
-    if isinstance(operation, str) and operation in _SAFE_PROVIDER_OPERATIONS:
+    if isinstance(operation, str) and operation in DIAGNOSTIC_OPERATIONS:
         details["provider_operation"] = operation
     status = source.get("http_status")
     if isinstance(status, int) and not isinstance(status, bool) and 100 <= status <= 599:
         details["http_status"] = status
     reason = source.get("provider_reason_code")
-    if isinstance(reason, str) and reason in _SAFE_PROVIDER_REASONS:
+    if isinstance(reason, str) and reason in DIAGNOSTIC_REASONS:
         details["provider_reason_code"] = reason
     for key in ("provider_request_id", "external_id", "submission_request_id"):
         value = source.get(key)
@@ -236,7 +185,7 @@ def _safe_provider_fields(source: dict[str, Any]) -> dict[str, str | int | bool]
         "provider_state",
     ):
         value = source.get(key)
-        if isinstance(value, str) and _safe_diagnostic_label(value):
+        if isinstance(value, str) and safe_diagnostic_label(value):
             details[key] = value
     observed_at = source.get("provider_observed_at")
     if isinstance(observed_at, str):
@@ -250,72 +199,14 @@ def _safe_provider_fields(source: dict[str, Any]) -> dict[str, str | int | bool]
     return details
 
 
-def _safe_diagnostic_label(value: str) -> bool:
-    """Reject label-shaped values that look like credentials or opaque tokens."""
-    return bool(
-        _SAFE_DIAGNOSTIC_LABEL.fullmatch(value)
-        and not _SENSITIVE_DIAGNOSTIC_LABEL.search(value)
-        and not (len(value) >= 32 and re.fullmatch(r"[A-Za-z0-9_-]+", value))
-    )
-
-
-def _cloudlab_observation_diagnostics(
-    observation: ResourceObservation, *, reason_code: str
-) -> dict[str, str | int | bool]:
-    """Summarize a successful CloudLab read without retaining provider text."""
-    config = observation.ref.config
-    details: dict[str, str | int | bool] = {
-        "provider_operation": "experiments.read",
-        "provider_reason_code": reason_code,
-        "external_id": observation.ref.external_id,
-        "provider_state": observation.state,
-        "provider_observed_at": observation.observed_at.isoformat(),
-    }
-    project = config.get("project")
-    if isinstance(project, str) and _safe_diagnostic_label(project):
-        details["requested_project"] = project
-    if observation.provider_http_status is not None:
-        details["http_status"] = observation.provider_http_status
-    if observation.provider_request_id is not None:
-        details["provider_request_id"] = observation.provider_request_id
-    for source, target in (
-        ("profile_name", "requested_profile"),
-        ("profile_project", "requested_profile_project"),
-    ):
-        value = config.get(source)
-        if isinstance(value, str) and _safe_diagnostic_label(value):
-            details[target] = value
-    bindings = config.get("bindings")
-    if isinstance(bindings, dict):
-        for keys, target in (
-            (("site", "cluster"), "requested_site"),
-            (("phystype", "hardware", "node_type"), "requested_hardware"),
-        ):
-            value = next(
-                (bindings[key] for key in keys if isinstance(bindings.get(key), str)), None
-            )
-            if isinstance(value, str) and _safe_diagnostic_label(value):
-                details[target] = value
-    return details
-
-
-def _observation_diagnostics(
-    allocation: dict[str, Any], observation: ResourceObservation, *, reason_code: str
-) -> dict[str, str | int | bool]:
-    """The provider facts a refusal of ``observation`` records, for CloudLab only."""
-    if allocation.get("provider_id") != "cloudlab":
-        return {}
-    return _cloudlab_observation_diagnostics(observation, reason_code=reason_code)
-
-
-def _require_one_node(allocation: dict[str, Any], observation: ResourceObservation) -> None:
+def _require_one_node(provider: ComputeProvider, observation: ResourceObservation) -> None:
     """Refuse an allocation of other than one node, which no deployment profile handles."""
     if len(observation.nodes) != 1:
         raise ProviderError(
             "unsupported_node_count",
             "This deployment profile supports one node; the full allocation remains visible for review",
-            diagnostics=_observation_diagnostics(
-                allocation, observation, reason_code="unsupported_node_count"
+            diagnostics=provider.observation_diagnostics(
+                observation, reason_code="unsupported_node_count"
             ),
         )
 
@@ -783,7 +674,7 @@ class ComputeReconciler:
         provider = self.commands.registry.get(allocation["provider_id"]).provider
         observation = await self._acquired_resource(operation, allocation, provider)
         await self.save_observation(operation, allocation, observation)
-        await self._raise_if_ended(operation, allocation, observation)
+        await self._raise_if_ended(operation, allocation, observation, provider)
         if observation.state != "ready":
             await self.steps.wait(
                 operation,
@@ -807,15 +698,15 @@ class ComputeReconciler:
             raise ProviderError(
                 "resource_scope_incomplete",
                 "The provider has not reported the complete resource inventory.",
-                diagnostics=_observation_diagnostics(
-                    allocation, observation, reason_code="incomplete_resource_scope"
+                diagnostics=provider.observation_diagnostics(
+                    observation, reason_code="incomplete_resource_scope"
                 ),
             )
         await self.steps.checkpoint(operation, "resource_ready", {"external_pending": False})
-        _require_one_node(allocation, observation)
+        _require_one_node(provider, observation)
         allocation = await self.steps.allocation(allocation["id"])
         # The original ready observation only admitted node registration. Read
-        # CloudLab again immediately before creating the Host binding, then
+        # the provider again immediately before creating the Host binding, then
         # persist that full snapshot so the repository can guard the commit
         # against current allocation state under its compute-entry lock.
         latest = await provider.inspect(self._ref(allocation))
@@ -828,7 +719,7 @@ class ComputeReconciler:
             )
             return
         await self.save_observation(operation, allocation, latest)
-        await self._raise_if_ended(operation, allocation, latest)
+        await self._raise_if_ended(operation, allocation, latest, provider)
         if latest.state != "ready" or not latest.scope_complete:
             await self.steps.wait(
                 operation,
@@ -837,7 +728,7 @@ class ComputeReconciler:
                 result={"external_pending": True},
             )
             return
-        _require_one_node(allocation, latest)
+        _require_one_node(provider, latest)
         allocation = await self.steps.allocation(allocation["id"])
         if (
             not allocation.get("scope_complete")
@@ -888,7 +779,7 @@ class ComputeReconciler:
                     operation,
                     deployed.blocked_reasons,
                     observation=observation,
-                    provider_id=allocation.get("provider_id"),
+                    provider=provider,
                 )
                 return
             await self.steps.checkpoint(operation, "verifying_host", {"deployed": True})
@@ -898,7 +789,7 @@ class ComputeReconciler:
                 operation,
                 readiness.blocked_reasons,
                 observation=observation,
-                provider_id=allocation.get("provider_id"),
+                provider=provider,
             )
             return
         host = await self.host_pool.get_host(host=intent.host)
@@ -965,6 +856,7 @@ class ComputeReconciler:
         operation: dict[str, Any],
         allocation: dict[str, Any],
         observation: ResourceObservation,
+        provider: ComputeProvider,
     ) -> None:
         """Raise when the provider ended the resource; release a failed one first."""
         if observation.state == "terminated":
@@ -974,8 +866,8 @@ class ComputeReconciler:
             raise ProviderError(
                 "resource_failed",
                 "The provider could not set up this resource; it was released",
-                diagnostics=_observation_diagnostics(
-                    allocation, observation, reason_code="experiment_failed_no_provider_reason"
+                diagnostics=provider.observation_diagnostics(
+                    observation, reason_code="experiment_failed_no_provider_reason"
                 ),
             )
 
@@ -985,7 +877,7 @@ class ComputeReconciler:
         reasons: tuple[str, ...],
         *,
         observation: ResourceObservation | None = None,
-        provider_id: str | None = None,
+        provider: ComputeProvider | None = None,
     ) -> None:
         """Stop the operation for an administrator, with the reasons in our own words.
 
@@ -1005,11 +897,11 @@ class ComputeReconciler:
                 }
             ]
         result: dict[str, Any] = {"blocked_reasons": blocked}
-        if observation is not None and provider_id == "cloudlab":
+        if observation is not None and provider is not None:
             error = ProviderError(
                 "host_initialization_failed",
-                "CloudLab resource is ready but host initialization did not pass.",
-                diagnostics=_cloudlab_observation_diagnostics(
+                "The resource is ready but host initialization did not pass.",
+                diagnostics=provider.observation_diagnostics(
                     observation, reason_code="experiment_ready"
                 ),
             )

@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import re
 from abc import ABC, abstractmethod
 from datetime import datetime  # noqa: TC003 - Pydantic resolves this annotation at runtime
-from typing import Any, Literal, Protocol
+from typing import Any, Final, Literal, Protocol, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
@@ -13,6 +14,73 @@ HOST_KEY_PATTERN = r"^(ssh-ed25519|ecdsa-sha2-nistp(256|384|521)|ssh-rsa) [A-Za-
 
 # An old-model-valid, fail-closed reference used only for explicit CloudLab SSH.
 UNCHECKED_CLOUDLAB_HOST_KEY_REF = "cloudlab:unchecked-host-key-v1"
+
+#: The provider calls a diagnostic may name: CloudLab's Portal API today.
+DiagnosticOperation = Literal[
+    "experiments.create",
+    "experiments.delete",
+    "experiments.list",
+    "experiments.manifests.read",
+    "experiments.read",
+    "experiments.request",
+    "experiments.update",
+    "profiles.read",
+    "profiles.request",
+    "provider.request",
+]
+#: Why a provider call or observation was reported. Typed, so that mypy holds
+#: every reason a provider or the reconciler emits to this one list.
+DiagnosticReason = Literal[
+    "authorization_denied",
+    "capacity_unavailable",
+    "connect_failed",
+    "experiment_failed_no_provider_reason",
+    "experiment_ready",
+    "http_rejected",
+    "invalid_expiry_timestamp",
+    "invalid_json_response",
+    "invalid_manifest",
+    "invalid_parameter",
+    "invalid_profile_binding",
+    "invalid_request",
+    "invalid_response_shape",
+    "invalid_ssh_manifest",
+    "incomplete_resource_scope",
+    "missing_or_invalid_experiment_id",
+    "permission_denied",
+    "profile_not_found",
+    "profile_rejected",
+    "project_access_denied",
+    "provider_server_error",
+    "rate_limited",
+    "rate_limited_or_capacity",
+    "request_accepted",
+    "request_failed",
+    "request_outcome_unknown",
+    "reservation_conflict",
+    "resource_identity_mismatch",
+    "resource_not_found",
+    "response_too_large",
+    "tls_verification_failed",
+    "unsupported_node_count",
+]
+#: What a stored diagnostic may contain; anything else is dropped before it is saved.
+DIAGNOSTIC_OPERATIONS: Final[frozenset[str]] = frozenset(get_args(DiagnosticOperation))
+DIAGNOSTIC_REASONS: Final[frozenset[str]] = frozenset(get_args(DiagnosticReason))
+
+_SAFE_DIAGNOSTIC_LABEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+_SENSITIVE_DIAGNOSTIC_LABEL = re.compile(
+    r"token|secret|password|credential|bearer|api[_-]?key|jwt", re.IGNORECASE
+)
+
+
+def safe_diagnostic_label(value: str) -> bool:
+    """A short label, rejecting obvious and opaque credential values."""
+    return bool(
+        _SAFE_DIAGNOSTIC_LABEL.fullmatch(value)
+        and not _SENSITIVE_DIAGNOSTIC_LABEL.search(value)
+        and not (len(value) >= 32 and re.fullmatch(r"[A-Za-z0-9_-]+", value))
+    )
 
 
 class ComputeValue(BaseModel):
@@ -219,6 +287,16 @@ class ComputeProvider(ABC):
     async def extend(self, ref: ResourceRef, request: ExtendRequest) -> ProviderReceipt:
         """Request the fixed expiration target and preserve its actual observed result."""
         raise UnsupportedCapability("extend")
+
+    def observation_diagnostics(
+        self, observation: ResourceObservation, *, reason_code: DiagnosticReason
+    ) -> dict[str, str | int | bool]:
+        """Describe a successful read the reconciler refused, without provider text.
+
+        The reconciler keeps the fields of this it allows with the refused
+        operation. A provider with nothing to add keeps this default.
+        """
+        return {}
 
     async def release(self, ref: ResourceRef, intent: OperationIntent) -> ProviderReceipt:
         """Release the exact resource after orchestration commits its safety checks.

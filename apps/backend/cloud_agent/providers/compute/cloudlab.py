@@ -13,7 +13,7 @@ import socket
 import ssl
 from contextlib import suppress
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Annotated, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 from urllib.parse import urlencode, urlsplit
 from uuid import UUID
 from xml.etree import ElementTree
@@ -28,6 +28,8 @@ from cloud_agent.ports.external.compute_provider import (
     AcquisitionResolution,
     ComputeProvider,
     ComputeValue,
+    DiagnosticOperation,
+    DiagnosticReason,
     ExtendRequest,
     NodeObservation,
     OperationIntent,
@@ -38,6 +40,7 @@ from cloud_agent.ports.external.compute_provider import (
     ResourceRef,
     SshConnection,
     UnsupportedCapability,
+    safe_diagnostic_label,
 )
 
 if TYPE_CHECKING:
@@ -114,10 +117,6 @@ _CERTIFICATE_EXPIRED = 10
 _CERTIFICATE_NAME_MISMATCH = {62, 64}
 #: Points a failure the administrator can correct at the setting that causes it.
 _CHECK_URL = "Check the CloudLab API URL setting."
-_SAFE_DIAGNOSTIC_VALUE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
-_SENSITIVE_DIAGNOSTIC_VALUE = re.compile(
-    r"token|secret|password|credential|bearer|api[_-]?key|jwt", re.IGNORECASE
-)
 
 
 # Parameters of deploy/cloudlab/cloud-agent-node.py the boot script reads.
@@ -168,16 +167,7 @@ def _capacity_rejection(diagnostic: str) -> bool:
     )
 
 
-def _safe_diagnostic_value(value: str) -> bool:
-    """Accept short labels while rejecting obvious and opaque credential values."""
-    return bool(
-        _SAFE_DIAGNOSTIC_VALUE.fullmatch(value)
-        and not _SENSITIVE_DIAGNOSTIC_VALUE.search(value)
-        and not (len(value) >= 32 and re.fullmatch(r"[A-Za-z0-9_-]+", value))
-    )
-
-
-def _operation_name(method: str, path: str) -> str:
+def _operation_name(method: str, path: str) -> DiagnosticOperation:
     """Name the Portal operation without retaining its URL or query values."""
     parts = [part for part in path.split("?", 1)[0].strip("/").split("/") if part]
     method = method.upper()
@@ -186,17 +176,30 @@ def _operation_name(method: str, path: str) -> str:
             return "experiments.create" if method == "POST" else "experiments.list"
         if len(parts) >= 3 and parts[2] == "manifests":
             return "experiments.manifests.read"
-        return {
+        by_method: dict[str, DiagnosticOperation] = {
             "GET": "experiments.read",
             "PUT": "experiments.update",
             "DELETE": "experiments.delete",
-        }.get(method, "experiments.request")
+        }
+        return by_method.get(method, "experiments.request")
     if parts and parts[0] == "profiles":
         return "profiles.read" if method == "GET" else "profiles.request"
     return "provider.request"
 
 
-def _error_reason_code(response: httpx.Response) -> str:  # noqa: C901, PLR0912 complexity baseline, #771
+#: Reason codes the Portal API names itself, which are reported as given.
+_PORTAL_REASON_CODES: tuple[DiagnosticReason, ...] = (
+    "capacity_unavailable",
+    "invalid_parameter",
+    "invalid_profile_binding",
+    "permission_denied",
+    "profile_not_found",
+    "rate_limited",
+    "reservation_conflict",
+)
+
+
+def _error_reason_code(response: httpx.Response) -> DiagnosticReason:
     """Map bounded provider text to a stable reason code; never return that text."""
     status = response.status_code
     if status in {401, 403}:
@@ -209,16 +212,8 @@ def _error_reason_code(response: httpx.Response) -> str:  # noqa: C901, PLR0912 
         body = None
     if isinstance(body, dict):
         code = body.get("code")
-        if isinstance(code, str) and code in {
-            "capacity_unavailable",
-            "invalid_parameter",
-            "invalid_profile_binding",
-            "permission_denied",
-            "profile_not_found",
-            "rate_limited",
-            "reservation_conflict",
-        }:
-            return code
+        if code in _PORTAL_REASON_CODES:
+            return cast("DiagnosticReason", code)
         error_parts: list[str] = []
         for key in ("error", "message", "detail"):
             value = body.get(key)
@@ -282,9 +277,9 @@ def _safe_diagnostic_context(context: dict[str, Any] | None) -> dict[str, str]:
             try:
                 safe[key] = str(UUID(value))
             except ValueError:
-                if key != "external_id" and _safe_diagnostic_value(value):
+                if key != "external_id" and safe_diagnostic_label(value):
                     safe[key] = value
-        elif _safe_diagnostic_value(value):
+        elif safe_diagnostic_label(value):
             safe[key] = value
     return safe
 
@@ -309,7 +304,7 @@ def _causes(error: BaseException) -> list[BaseException]:
     return found
 
 
-def _connection_failure(error: BaseException, url: SplitResult) -> tuple[str, str]:
+def _connection_failure(error: BaseException, url: SplitResult) -> tuple[DiagnosticReason, str]:
     """Name why no byte reached CloudLab: a fixed reason code and message.
 
     The message names the configured endpoint, never provider exception text,
@@ -579,18 +574,16 @@ class CloudLabProvider(ComputeProvider):
             )
         if status == 429:
             capacity = _capacity_rejection(_error_text(response))
+            limited: DiagnosticReason = (
+                "capacity_unavailable" if capacity else _error_reason_code(response)
+            )
             raise ProviderError(
                 "capacity_unavailable" if capacity else "rate_limited",
                 "CloudLab has no matching node capacity"
                 if capacity
                 else "CloudLab request limit reached",
                 retryable=True,
-                diagnostics={
-                    **diagnostics,
-                    "provider_reason_code": (
-                        "capacity_unavailable" if capacity else _error_reason_code(response)
-                    ),
-                },
+                diagnostics={**diagnostics, "provider_reason_code": limited},
             )
         if status >= 500:
             # A server error after a mutation may follow a committed create.
@@ -663,13 +656,53 @@ class CloudLabProvider(ComputeProvider):
             return response
 
     @staticmethod
+    def observation_diagnostics(
+        observation: ResourceObservation, *, reason_code: DiagnosticReason
+    ) -> dict[str, str | int | bool]:
+        """Summarize a successful experiment read without retaining provider text."""
+        config = observation.ref.config
+        details: dict[str, str | int | bool] = {
+            "provider_operation": "experiments.read",
+            "provider_reason_code": reason_code,
+            "external_id": observation.ref.external_id,
+            "provider_state": observation.state,
+            "provider_observed_at": observation.observed_at.isoformat(),
+        }
+        project = config.get("project")
+        if isinstance(project, str) and safe_diagnostic_label(project):
+            details["requested_project"] = project
+        if observation.provider_http_status is not None:
+            details["http_status"] = observation.provider_http_status
+        if observation.provider_request_id is not None:
+            details["provider_request_id"] = observation.provider_request_id
+        for source, target in (
+            ("profile_name", "requested_profile"),
+            ("profile_project", "requested_profile_project"),
+        ):
+            value = config.get(source)
+            if isinstance(value, str) and safe_diagnostic_label(value):
+                details[target] = value
+        bindings = config.get("bindings")
+        if isinstance(bindings, dict):
+            for keys, target in (
+                (("site", "cluster"), "requested_site"),
+                (("phystype", "hardware", "node_type"), "requested_hardware"),
+            ):
+                value = next(
+                    (bindings[key] for key in keys if isinstance(bindings.get(key), str)), None
+                )
+                if isinstance(value, str) and safe_diagnostic_label(value):
+                    details[target] = value
+        return details
+
+    @staticmethod
     def _response_diagnostics(
         response: httpx.Response,
         method: str,
         path: str,
         context: dict[str, Any] | None,
         *,
-        reason_code: str | None = None,
+        reason_code: DiagnosticReason | None = None,
     ) -> dict[str, str | int | bool]:
         diagnostics: dict[str, str | int | bool] = {
             "provider_operation": _operation_name(method, path),
@@ -688,7 +721,7 @@ class CloudLabProvider(ComputeProvider):
         method: str,
         path: str,
         context: dict[str, Any] | None,
-        reason_code: str,
+        reason_code: DiagnosticReason,
     ) -> dict[str, str | int | bool]:
         diagnostics: dict[str, str | int | bool] = {
             "provider_operation": _operation_name(method, path),
@@ -706,6 +739,7 @@ class CloudLabProvider(ComputeProvider):
         path: str = "/",
         diagnostic_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        reason_code: DiagnosticReason
         if (
             response.extensions.get("cloudlab_response_too_large") is True
             or len(response.content) > _MAX_RESPONSE_BYTES

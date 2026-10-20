@@ -24,6 +24,7 @@ from cloud_agent.compute_secrets import ComputeSecretStore
 from cloud_agent.domain.compute import ComputeRefusal
 from cloud_agent.host_pool import hash_secret
 from cloud_agent.ports.external.compute_provider import (
+    ComputeProvider,
     NodeObservation,
     ProviderCapabilities,
     ProviderError,
@@ -59,7 +60,7 @@ def _profile(name: str) -> DeploymentProfile:
     )
 
 
-class FakeCloud:
+class FakeCloud(ComputeProvider):
     """Experiments keyed by ID; the node registers its key the moment it is created."""
 
     def __init__(self, repository) -> None:
