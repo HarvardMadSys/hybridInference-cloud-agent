@@ -3609,9 +3609,9 @@ async def test_shared_chat_fork_creates_two_native_sessions_in_one_container(
 
         async def fork_shared_session(self, source_thread_id: str, **kwargs: Any):
             self.calls.append((source_thread_id, kwargs))
-            assert kwargs["expected_container_id"] == "container-shared"
-            assert kwargs["disk_limit_mib"] == 16384
-            assert kwargs["origin_thread_id"] == source_thread_id
+            assert kwargs["identity"]["expected_container_id"] == "container-shared"
+            assert kwargs["identity"]["disk_limit_mib"] == 16384
+            assert kwargs["identity"]["origin_thread_id"] == source_thread_id
             assert kwargs["source_native_session_id"] == "native-session-source"
             assert kwargs["source_native_turn_no"] == 1
             assert kwargs["target_thread_id"] != source_thread_id
@@ -3619,11 +3619,11 @@ async def test_shared_chat_fork_creates_two_native_sessions_in_one_container(
             assert kwargs["target_launch"]["plugins"] == plugins
             return {
                 "operation_id": kwargs["operation_id"],
-                "sandbox_id": kwargs["sandbox_id"],
-                "sandbox_generation": kwargs["generation"],
-                "container_id": kwargs["expected_container_id"],
-                "runtime_id": kwargs["runtime_id"],
-                "runtime_version": kwargs["runtime_version"],
+                "sandbox_id": kwargs["identity"]["sandbox_id"],
+                "sandbox_generation": kwargs["identity"]["generation"],
+                "container_id": kwargs["identity"]["expected_container_id"],
+                "runtime_id": kwargs["identity"]["runtime_id"],
+                "runtime_version": kwargs["identity"]["runtime_version"],
                 "source_thread_id": source_thread_id,
                 "source_native_session_id": kwargs["source_native_session_id"],
                 "target_thread_id": kwargs["target_thread_id"],
@@ -3695,11 +3695,11 @@ async def test_shared_chat_can_fork_from_a_specific_historical_turn(
             self.native_turns.append(kwargs["source_native_turn_no"])
             return {
                 "operation_id": kwargs["operation_id"],
-                "sandbox_id": kwargs["sandbox_id"],
-                "sandbox_generation": kwargs["generation"],
-                "container_id": kwargs["expected_container_id"],
-                "runtime_id": kwargs["runtime_id"],
-                "runtime_version": kwargs["runtime_version"],
+                "sandbox_id": kwargs["identity"]["sandbox_id"],
+                "sandbox_generation": kwargs["identity"]["generation"],
+                "container_id": kwargs["identity"]["expected_container_id"],
+                "runtime_id": kwargs["identity"]["runtime_id"],
+                "runtime_version": kwargs["identity"]["runtime_version"],
                 "source_thread_id": source_thread_id,
                 "source_native_session_id": kwargs["source_native_session_id"],
                 "target_thread_id": kwargs["target_thread_id"],
@@ -3773,11 +3773,11 @@ async def test_same_native_fork_request_has_one_external_coordinator(
             await finish.wait()
             return {
                 "operation_id": kwargs["operation_id"],
-                "sandbox_id": kwargs["sandbox_id"],
-                "sandbox_generation": kwargs["generation"],
-                "container_id": kwargs["expected_container_id"],
-                "runtime_id": kwargs["runtime_id"],
-                "runtime_version": kwargs["runtime_version"],
+                "sandbox_id": kwargs["identity"]["sandbox_id"],
+                "sandbox_generation": kwargs["identity"]["generation"],
+                "container_id": kwargs["identity"]["expected_container_id"],
+                "runtime_id": kwargs["identity"]["runtime_id"],
+                "runtime_version": kwargs["identity"]["runtime_version"],
                 "source_thread_id": source_thread_id,
                 "source_native_session_id": kwargs["source_native_session_id"],
                 "target_thread_id": kwargs["target_thread_id"],
@@ -3834,11 +3834,11 @@ async def test_ready_native_fork_retry_does_not_need_the_host(store: FakeStorage
             self.calls += 1
             return {
                 "operation_id": kwargs["operation_id"],
-                "sandbox_id": kwargs["sandbox_id"],
-                "sandbox_generation": kwargs["generation"],
-                "container_id": kwargs["expected_container_id"],
-                "runtime_id": kwargs["runtime_id"],
-                "runtime_version": kwargs["runtime_version"],
+                "sandbox_id": kwargs["identity"]["sandbox_id"],
+                "sandbox_generation": kwargs["identity"]["generation"],
+                "container_id": kwargs["identity"]["expected_container_id"],
+                "runtime_id": kwargs["identity"]["runtime_id"],
+                "runtime_version": kwargs["identity"]["runtime_version"],
                 "source_thread_id": source_thread_id,
                 "source_native_session_id": kwargs["source_native_session_id"],
                 "target_thread_id": kwargs["target_thread_id"],

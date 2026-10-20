@@ -84,9 +84,7 @@ if TYPE_CHECKING:
     import builtins
 
     from cloud_agent_host.tool_windows import ToolMark, ToolMarkReader
-
-ContextStatus = Literal["new", "live", "restored", "lost"]
-ResidentState = Literal["stopped", "starting", "live", "restarting", "lost"]
+    from cloud_agent_shared.sandbox_manager_wire import ContextStatus, ResidentState
 
 #: One window the census loop is about to sample, as it leaves the lock: the
 #: handle, its sampler, the census number, and the cursor and accumulator the
@@ -223,7 +221,12 @@ def archive_failure_http_detail(error: BaseException) -> str | None:
 
 @dataclass(frozen=True)
 class SharedMemberManifest:
-    """Durable fields needed to reconstruct one group membership."""
+    """Durable fields needed to reconstruct one group membership.
+
+    The fields of the wire's
+    :class:`~cloud_agent_shared.sandbox_manager_wire.SharedMember`, which a
+    request's manifest is validated as before it becomes one of these.
+    """
 
     thread_id: str
     native_session_id: str | None = None

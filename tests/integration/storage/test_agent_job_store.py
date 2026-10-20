@@ -1289,7 +1289,7 @@ async def test_reaped_fork_does_not_poison_the_surviving_member_manifest(
 ):
     """A failed hidden child remains history but cannot occupy the host manifest."""
     from cloud_agent_host.runner import _shared_group_manifest
-    from cloud_agent_host.sandbox_manager import SharedSandboxMemberRequest
+    from cloud_agent_shared.sandbox_manager_wire import SharedMember
 
     job, claim, sandbox = await _reserve_shared_chat(store)
     fence = {
@@ -1421,7 +1421,7 @@ async def test_reaped_fork_does_not_poison_the_surviving_member_manifest(
         if next_action in {"capture", "publish", "base_import"}
         else _shared_group_manifest(observed, thread_id=job["thread_id"])
     )
-    wire_members = [SharedSandboxMemberRequest.model_validate(member) for member in manifest]
+    wire_members = [SharedMember.model_validate(member) for member in manifest]
     assert {member.thread_id for member in wire_members} == expected_members
     assert all(member.resident_slot_id is not None for member in wire_members)
 

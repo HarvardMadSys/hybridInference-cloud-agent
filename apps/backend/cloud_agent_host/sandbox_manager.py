@@ -122,6 +122,11 @@ from cloud_agent_shared.operation_profiling import PROFILING_CONTEXT_HEADER
 from cloud_agent_shared.plugins import MAX_SANDBOX_PLUGINS, SandboxPlugin
 from cloud_agent_shared.sandbox_archive_settings import SandboxArchivePolicyError
 from cloud_agent_shared.sandbox_manager_compat import manager_env
+from cloud_agent_shared.sandbox_manager_wire import (
+    SharedGroupIdentity,
+    SharedMember,
+    member_manifest,
+)
 from cloud_agent_shared.sandbox_restore import START_FENCE_HEADER, parse_start_fence
 from cloud_agent_shared.shared_protocol import SNAPSHOT_BASE_MISSING
 from cloud_agent_shared.workspace_browser import (
@@ -542,20 +547,6 @@ class SandboxArchiveUploadRequest(SandboxArchiveCommitRequest):
     ] = Field(..., min_length=4, max_length=4)
 
 
-class SharedSandboxMemberRequest(BaseModel):
-    """Authoritative durable identity for one member alias."""
-
-    thread_id: str = Field(..., min_length=1, max_length=256)
-    native_session_id: str | None = Field(None, max_length=512)
-    context_status: Literal["new", "live", "restored", "lost"] = "new"
-    activation_generation: int = Field(0, ge=0)
-    process_generation: int = Field(0, ge=0)
-    residency_generation: int = Field(0, ge=0)
-    resident_state: Literal["stopped", "starting", "live", "restarting", "lost"] = "stopped"
-    resident_slot_id: int = Field(..., ge=0, le=127)
-    last_settled_job_id: str | None = Field(None, max_length=256)
-
-
 class SharedSandboxRestoreRequest(BaseModel):
     """The control plane's record of a moved group's checkpoint."""
 
@@ -574,24 +565,9 @@ class SharedSandboxRestoreRequest(BaseModel):
             raise ValueError(str(exc)) from exc
 
 
-class SharedSandboxIdentityRequest(BaseModel):
+class SharedSandboxIdentityRequest(SharedGroupIdentity):
     """Immutable group identity plus its current member manifest."""
 
-    sandbox_id: str = Field(..., min_length=1, max_length=256)
-    generation: int = Field(..., ge=1)
-    origin_thread_id: str = Field(..., min_length=1, max_length=256)
-    runtime_id: str = Field(..., min_length=1, max_length=128)
-    runtime_version: str | None = Field(None, max_length=128)
-    sandbox_image_digest: str | None = Field(None, max_length=512)
-    expected_container_id: str | None = Field(None, min_length=1, max_length=256)
-    resident_slot_capacity: int = Field(8, ge=2, le=128)
-    memory_limit: str = Field("4g", min_length=1, max_length=32)
-    cpu_limit: str = Field("2", min_length=1, max_length=32)
-    disk_limit_mib: int = Field(0, ge=0, le=16777216, strict=True)
-    stop_timeout_s: int = Field(10, ge=1, le=300)
-    members: list[SharedSandboxMemberRequest] = Field(..., min_length=1, max_length=128)
-    #: The control plane's start fence for the request; see ``_Group.start_seq``.
-    start_seq: int | None = Field(None, ge=0)
     #: The checkpoint a moved group is recreated from, only while it is restoring.
     restore: SharedSandboxRestoreRequest | None = None
 
@@ -2835,9 +2811,7 @@ def create_app(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
             resident_slot_capacity=body.resident_slot_capacity,
         )
 
-    def shared_manifest(
-        members: list[SharedSandboxMemberRequest],
-    ) -> list[SharedMemberManifest]:
+    def shared_manifest(members: list[SharedMember]) -> list[SharedMemberManifest]:
         return [SharedMemberManifest(**member.model_dump()) for member in members]
 
     def resident_launch(
@@ -3760,20 +3734,7 @@ def create_app(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
             # whole shared container, including terminals opened by a fork.
             origin["terminal_count"] = sum(row["terminal_count"] for row in members)
             origin["shared_live"] = True
-            origin["members"] = [
-                {
-                    "thread_id": row["thread_id"],
-                    "native_session_id": row["native_session_id"],
-                    "context_status": row["context_status"],
-                    "activation_generation": row["activation_generation"],
-                    "process_generation": row["process_generation"],
-                    "residency_generation": row["residency_generation"],
-                    "resident_state": row["resident_state"],
-                    "resident_slot_id": row["resident_slot_id"],
-                    "last_settled_job_id": row["last_settled_job_id"],
-                }
-                for row in members
-            ]
+            origin["members"] = member_manifest(members)
             rows.append(origin)
         resource_collector = app.state.sandbox_resource_collector
         if resource_collector is not None and thread_id is None:
