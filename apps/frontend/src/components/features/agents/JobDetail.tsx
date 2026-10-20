@@ -9,8 +9,9 @@ import { JobTranscript } from './job-detail/JobTranscript';
 import { TrajectoryView } from './job-detail/LazyPanels';
 import { useJobComposerSettings } from './job-detail/useJobComposerSettings';
 import { useJobConversation } from './job-detail/useJobConversation';
-import { useJobDetailPanels, type SubagentTarget } from './job-detail/useJobDetailPanels';
+import { useJobDetailPanels } from './job-detail/useJobDetailPanels';
 import { useJobRunActions } from './job-detail/useJobRunActions';
+import { useSubagentFocus } from './job-detail/useSubagentFocus';
 
 import { useT } from '@/components/providers';
 import { WorkspaceLinkProvider } from '@/components/ui/Markdown';
@@ -23,20 +24,14 @@ import { APIError } from '@/lib/utils/errors';
 import type { AgentJobApi, AgentJobEventApi, AgentThreadEventApi } from '@/lib/api/agents';
 import type { SelectedSkillApi } from '@/lib/api/skills';
 import { ActivityWindow } from './ActivityWindow';
-import { ownedBySubagent, subagentDisplayEvents } from './adapt';
-import { SubagentLinks, type SubagentOfCall } from './ChatMessages';
+import { SubagentLinks } from './ChatMessages';
 import { composerOverrides } from './ConversationComposer';
 import { FloatingActivityWindow } from './FloatingActivityWindow';
 import { LedgerUsage, useLedgerUsage } from './LedgerUsage';
 import { notDeliveredText } from './PendingMessageQueue';
 import { SubagentConversation } from './SubagentConversation';
 import { BackToBottom, TurnRail } from './TurnNavigator';
-import {
-  hasActivityOverview,
-  subagentStartedBy,
-  turnActivityOverview,
-  type OverviewSubagent,
-} from './activityOverview';
+import { hasActivityOverview, turnActivityOverview } from './activityOverview';
 import { useAttachments } from './attachments/useAttachments';
 import { codeReviewPrompt } from './codeReview';
 import { hasLostContext, isActiveConversationState, isBusyJob, latestJob } from './conversationJob';
@@ -108,7 +103,6 @@ export function JobDetail({
     setFocusJobId,
     trajectoryQuery,
     setTrajectoryQuery,
-    trajectorySteps,
     layoutContainerRef,
     openWorkspaceFile,
     selectStep,
@@ -436,88 +430,15 @@ export function JobDetail({
     setFocusJobId,
     setInspector,
   ]);
-  // A subagent is named by the turn that started it, so any turn's can be
-  // opened. One that is no longer shown — another attempt was selected —
-  // returns to the Chat it replaced.
-  const turnOf = useCallback(
-    (jobId: string) =>
-      jobId === currentTurn.jobId ? currentTurn : historyTurns.find((turn) => turn.jobId === jobId),
-    [currentTurn, historyTurns],
-  );
-  const subagentAt = useCallback(
-    (target: SubagentTarget | null) => {
-      const turn = target === null ? undefined : turnOf(target.jobId);
-      return turn === undefined
-        ? undefined
-        : turnActivityOverview(turn.events).subagents.find((agent) => agent.key === target?.key);
-    },
-    [turnOf],
-  );
-  // Codex threads outlive a turn; read only the turn and attempt that started one.
-  const subagentScope = useCallback(
-    (jobId: string, agent: OverviewSubagent) => {
-      const source = events.find((event) => event.id === agent.sourceEvent.sourceEventId);
-      return {
-        inScope: (event: AgentJobEventApi | AgentThreadEventApi) =>
-          (!('job_id' in event) || event.job_id === jobId) &&
-          (!source || event.attempt_id === source.attempt_id),
-        owner: { callId: agent.sourceEvent.id, threads: agent.activity.targets },
-      };
-    },
-    [events],
-  );
-  const openSubagent = subagentAt(subagent);
-  const openSubagentJobId = openSubagent ? subagent?.jobId : undefined;
-  useEffect(() => {
-    if (subagent !== null && !openSubagent) setSubagent(null);
-  }, [openSubagent, setSubagent, subagent]);
-  const subagentEvents = useMemo(() => {
-    if (!openSubagent || !openSubagentJobId) return [];
-    const { inScope, owner } = subagentScope(openSubagentJobId, openSubagent);
-    return subagentDisplayEvents(
-      events.filter(inScope),
-      owner,
-      threadJobs.find((turn) => turn.id === openSubagentJobId),
-    );
-  }, [events, openSubagent, openSubagentJobId, subagentScope, threadJobs]);
-  const showingSubagent = tab === 'chat' && openSubagent !== undefined;
-  const subagentOfCall = useCallback<SubagentOfCall>(
-    (jobId, event) => {
-      const turn = turnOf(jobId);
-      const agent = turn && subagentStartedBy(turnActivityOverview(turn.events), event);
-      if (!agent) return undefined;
-      return {
-        title: agent.activity.description ?? agent.activity.title,
-        open: () => {
-          setTab('chat');
-          setSubagent({ jobId, key: agent.key });
-        },
-      };
-    },
-    [setSubagent, setTab, turnOf],
-  );
-  // Every turn's subagents, for narrowing the trajectory to one of them.
-  const trajectorySubagents = useMemo(() => {
-    if (tab !== 'trajectory') return [];
-    return [...historyTurns, currentTurn].flatMap((turn) =>
-      turnActivityOverview(turn.events).subagents.map((agent) => ({
-        value: JSON.stringify([turn.jobId, agent.key]),
-        label: `Turn ${turn.displayNo} · ${agent.activity.description ?? agent.activity.title}`,
-      })),
-    );
-  }, [currentTurn, historyTurns, tab]);
-  // The subagent being read narrows the trajectory to its own steps.
-  const shownTrajectorySteps = useMemo(() => {
-    if (!openSubagent || !openSubagentJobId) return trajectorySteps;
-    const { inScope, owner } = subagentScope(openSubagentJobId, openSubagent);
-    // The call that started the subagent, then what the subagent recorded.
-    return trajectorySteps.filter(
-      (step) =>
-        step.sourceEvents.some(inScope) &&
-        ((step.callId !== undefined && step.callId === owner.callId) ||
-          step.sourceEvents.some((event) => ownedBySubagent(event.payload, owner))),
-    );
-  }, [openSubagent, openSubagentJobId, subagentScope, trajectorySteps]);
+  const {
+    openSubagent,
+    openSubagentJobId,
+    subagentEvents,
+    showingSubagent,
+    subagentOfCall,
+    trajectorySubagents,
+    shownTrajectorySteps,
+  } = useSubagentFocus({ panels, currentTurn, historyTurns, events, threadJobs });
   useEffect(() => {
     if (!activityVisible) return;
     const onKeyDown = (event: KeyboardEvent) => {
