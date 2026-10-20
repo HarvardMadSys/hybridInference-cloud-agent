@@ -83,13 +83,11 @@ class ComputeResourceWorker:
                 "compute_operation_failed",
                 extra={"operation_id": operation["id"], "error_type": type(exc).__name__},
             )
-            await self.repository.finish_operation(
-                operation_id=operation["id"],
-                generation=operation["generation"],
-                worker_id=operation["worker_id"],
-                state="unknown",
-                step=operation["step"],
-                message="An internal error interrupted the operation. Its checkpoint is preserved for recovery.",
+            await self.reconciler.steps.finish(
+                operation,
+                "unknown",
+                operation["step"],
+                "An internal error interrupted the operation. Its checkpoint is preserved for recovery.",
             )
         finally:
             execution.cancel()

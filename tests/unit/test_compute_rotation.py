@@ -15,6 +15,7 @@ from cloud_agent.application.compute_rotation import (
     classify_candidate_failure,
     next_node_type,
 )
+from cloud_agent.application.compute_steps import OperationSteps
 from cloud_agent.ports.external.host_bootstrap import DeploymentProfile
 from cloud_agent.schemas_compute import RenewalPolicy
 
@@ -59,8 +60,13 @@ def renewal(state: str) -> dict:
 
 
 def rotation() -> ComputeRotation:
+    repository = SimpleNamespace()
     reconciler = SimpleNamespace(
-        repository=SimpleNamespace(), host_pool=SimpleNamespace(), bootstrap=None, commands=None
+        repository=repository,
+        host_pool=SimpleNamespace(),
+        bootstrap=None,
+        commands=None,
+        steps=OperationSteps(repository),
     )
     return ComputeRotation(reconciler)  # type: ignore[arg-type]
 
@@ -339,7 +345,7 @@ async def test_an_unfinished_move_alerts_once_in_the_final_hour(monkeypatch):
     async def deliver(event, details):
         delivered.append((event, details))
 
-    monkeypatch.setattr("cloud_agent.application.compute_rotation.deliver_event", deliver)
+    monkeypatch.setattr("cloud_agent.application.compute_steps.deliver_event", deliver)
     active = {"id": "rotate-1", "kind": "rotate", "state": "waiting", "step": "draining"}
     mover = rotation()
     late = NOW + timedelta(minutes=50)
@@ -429,9 +435,9 @@ async def test_a_rolled_back_move_withdraws_the_transfer_key_from_the_replacemen
 
     mover.bootstrap = SimpleNamespace(revoke_transfer=revoke_transfer)
     mover.repository.set_rotation_hold = AsyncMock()
-    mover.reconciler._allocation = AsyncMock(return_value=candidate)
-    mover.reconciler._checkpoint = checkpoint
-    mover.reconciler._fence = lambda operation: {}
+    mover.steps.allocation = AsyncMock(return_value=candidate)
+    mover.steps.checkpoint = checkpoint
+    mover.steps.fence = lambda operation: {}
     monkeypatch.setattr(mover, "_source", lambda *args: (source, None, None))
     monkeypatch.setattr(mover, "_target", lambda *args: (target, None, None))
     monkeypatch.setattr(mover, "_fail_candidate", fail_candidate)

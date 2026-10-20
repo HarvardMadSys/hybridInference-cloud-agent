@@ -1798,7 +1798,7 @@ def _recorded_events(monkeypatch, h) -> list:
     async def notify(event, *, host, reason):
         events.append((event, host, reason))
 
-    monkeypatch.setattr(h.reconciler.rotation, "_notify", notify)
+    monkeypatch.setattr(h.reconciler.steps, "notify", notify)
     return events
 
 
@@ -2165,7 +2165,7 @@ async def test_groups_still_unmoved_near_the_lease_end_alert_once(monkeypatch):
     async def notify(event, *, host, reason):
         events.append((event, host, reason))
 
-    monkeypatch.setattr(h.reconciler.rotation, "_notify", notify)
+    monkeypatch.setattr(h.reconciler.steps, "notify", notify)
 
     await h.reconciler.schedule()
     await h.reconciler.schedule()

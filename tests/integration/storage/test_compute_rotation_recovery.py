@@ -163,7 +163,7 @@ async def test_an_original_node_that_cannot_restart_alerts_and_keeps_claims_paus
     db, store, hosts, monkeypatch, code
 ):
     """With the Host down on both nodes, the move stops for an administrator, urgently."""
-    from cloud_agent.application import compute_rotation
+    from cloud_agent.application import compute_rotation, compute_steps
 
     r = await rig(store, hosts, monkeypatch)
     source, host = await ready_slot(r, db)
@@ -173,7 +173,7 @@ async def test_an_original_node_that_cannot_restart_alerts_and_keeps_claims_paus
     async def deliver(event, details):
         alerts.append((event, details["reason"]))
 
-    monkeypatch.setattr(compute_rotation, "deliver_event", deliver)
+    monkeypatch.setattr(compute_steps, "deliver_event", deliver)
     real_now = compute_rotation._now
     attempts = 0
 

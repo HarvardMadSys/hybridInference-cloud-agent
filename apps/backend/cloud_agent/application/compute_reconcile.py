@@ -18,6 +18,7 @@ from pydantic import SecretStr
 
 from cloud_agent.application.compute_rotation import ComputeRotation
 from cloud_agent.application.compute_setup import HostRelease, load_control_plane_host_release
+from cloud_agent.application.compute_steps import OperationSteps, moment as _moment, now as _now
 from cloud_agent.application.host_commands import HostCommands
 from cloud_agent.compute_config import current_observation_seconds, current_registration_url
 from cloud_agent.compute_secrets import ComputeSecretError
@@ -139,10 +140,6 @@ def _preferred_host_key(keys: list[str]) -> str:
     if not ranked or ranked[0].split()[0] not in _HOST_KEY_PREFERENCE:
         raise ProviderError("registration_invalid", "The node registered no supported host key")
     return ranked[0]
-
-
-def _now() -> datetime:
-    return datetime.now(UTC)
 
 
 def _provider_observation_is_fresh(observation: ResourceObservation) -> bool:
@@ -380,12 +377,6 @@ def _provider_receipt_diagnostic_result(
     return {"provider_diagnostic": details}
 
 
-def _moment(value: Any) -> datetime | None:
-    if value is None:
-        return None
-    return value if isinstance(value, datetime) else datetime.fromisoformat(str(value))
-
-
 class ComputeReconciler:
     """Explicit workflows over narrow ports, without a generic workflow engine."""
 
@@ -396,6 +387,7 @@ class ComputeReconciler:
         self.repository = commands.repository
         self.host_pool = host_pool
         self.bootstrap = bootstrap
+        self.steps = OperationSteps(self.repository)
         self.rotation = ComputeRotation(self)
         self._move_out_reminded: set[str] = set()
         self._move_out_blocked_reported: set[str] = set()
@@ -517,7 +509,7 @@ class ComputeReconciler:
             return
         self._move_out_blocked_reported.add(key)
         hosts = row.get("hosts") or []
-        await self.rotation._notify(
+        await self.steps.notify(
             "compute_move_out_blocked",
             host=hosts[0]["host"] if hosts else row["name"],
             reason=reason,
@@ -531,7 +523,7 @@ class ComputeReconciler:
         if not lost:
             return
         hosts = row.get("hosts") or []
-        await self.rotation._notify(
+        await self.steps.notify(
             "compute_groups_lost_with_server",
             host=hosts[0]["host"] if hosts else row["name"],
             reason=f"{len(lost)} groups lost",
@@ -559,7 +551,7 @@ class ComputeReconciler:
             return
         self._move_out_reminded.add(key)
         hosts = row.get("hosts") or []
-        await self.rotation._notify(
+        await self.steps.notify(
             "compute_move_out_unfinished",
             host=hosts[0]["host"] if hosts else row["name"],
             reason=f"{remaining} groups not moved",
@@ -579,7 +571,9 @@ class ComputeReconciler:
                 await self._acquire(operation, allocation)
             elif kind == "inspect":
                 await self._inspect(operation, allocation)
-                await self._finish(operation, "succeeded", "observed", "Resource state refreshed.")
+                await self.steps.finish(
+                    operation, "succeeded", "observed", "Resource state refreshed."
+                )
             elif kind == "extend":
                 await self._extend(operation, allocation)
             elif kind == "retire":
@@ -599,7 +593,9 @@ class ComputeReconciler:
                 # A failed move says nothing about the old node's lease; recording
                 # it would stop new chats there until the next observation.
                 await self.repository.record_observation_error(
-                    allocation_id=operation["allocation_id"], message=code, **self._fence(operation)
+                    allocation_id=operation["allocation_id"],
+                    message=code,
+                    **self.steps.fence(operation),
                 )
                 if code in {"resource_identity_changed", "machine_identity_changed"}:
                     await self.repository.set_admission_hold(
@@ -607,35 +603,31 @@ class ComputeReconciler:
                         purpose="lease_deadline",
                         source_id=f"identity:{operation['allocation_id']}",
                         scope="all_claims",
-                        **self._fence(operation),
+                        **self.steps.fence(operation),
                     )
             if code == "result_unknown" and operation["kind"] in {"extend", "retire"}:
-                await self._finish(
+                await self.steps.wait(
                     operation,
-                    "waiting",
                     "confirming",
                     "The provider outcome is being checked.",
                     result={
                         "external_pending": True,
                         **_provider_diagnostic_result(exc, operation, outcome="waiting"),
                     },
-                    retry=30,
                 )
             elif code == "result_unknown" and (
                 operation["kind"] == "preflight"
                 or operation.get("result", {}).get("resource_ref")
                 or operation.get("step") in {"deploying", "verifying_host", "waiting_for_heartbeat"}
             ):
-                await self._finish(
+                await self.steps.wait(
                     operation,
-                    "waiting",
                     operation["step"],
                     "Connection and deployment readiness will be checked again.",
                     result=_provider_diagnostic_result(exc, operation, outcome="waiting"),
-                    retry=30,
                 )
             elif code == "result_unknown":
-                await self._finish(
+                await self.steps.finish(
                     operation,
                     "unknown",
                     operation["step"],
@@ -650,7 +642,7 @@ class ComputeReconciler:
                         and operation.get("step") == "failed_resource_released"
                     )
                 )
-                await self._finish(
+                await self.steps.finish(
                     operation,
                     "failed" if terminal_acquire else "waiting" if retryable else "blocked",
                     operation["step"],
@@ -688,13 +680,13 @@ class ComputeReconciler:
                     purpose="lease_deadline",
                     source_id=f"identity:{operation['allocation_id']}",
                     scope="all_claims",
-                    **self._fence(operation),
+                    **self.steps.fence(operation),
                 )
             pre_submit = code in {
                 "autoscaling_connection_unverified",
                 "registration_unavailable",
             }
-            await self._finish(
+            await self.steps.finish(
                 operation,
                 "blocked",
                 operation["step"],
@@ -722,10 +714,10 @@ class ComputeReconciler:
         parameters = operation["parameters"]
         entry = self.commands.registry.get(parameters["provider_id"])
         config = parameters["validated_configuration"]
-        await self._checkpoint(operation, "checking_configuration")
+        await self.steps.checkpoint(operation, "checking_configuration")
         if parameters["mode"] == "provision":
             await entry.validate_connection(config["credential_ref"], {})
-            await self._finish(
+            await self.steps.finish(
                 operation,
                 "succeeded",
                 "preflight_complete",
@@ -751,9 +743,9 @@ class ComputeReconciler:
             observation.nodes[0], DeploymentProfile.model_validate(parameters["profile"])
         )
         if not checked.ready:
-            await self._bootstrap_blocked(operation, checked.blocked_reasons)
+            await self.bootstrap_blocked(operation, checked.blocked_reasons)
             return
-        await self._finish(
+        await self.steps.finish(
             operation,
             "succeeded",
             "preflight_complete",
@@ -777,7 +769,7 @@ class ComputeReconciler:
         elif operation.get("step") != "pending":
             resolution = await provider.recover_acquire(self._intent(operation, allocation))
             if resolution.outcome == "not_created":
-                await self._checkpoint(operation, "acquiring")
+                await self.steps.checkpoint(operation, "acquiring")
                 receipt = await self._submit_acquisition(operation, allocation)
             elif resolution.receipt is not None:
                 receipt = resolution.receipt
@@ -787,14 +779,14 @@ class ComputeReconciler:
                 )
             observation = await self._receipt_observation(operation, allocation, receipt)
         else:
-            await self._checkpoint(operation, "acquiring")
+            await self.steps.checkpoint(operation, "acquiring")
             receipt = await self._submit_acquisition(operation, allocation)
             observation = await self._receipt_observation(operation, allocation, receipt)
         if observation is None:
             raise ProviderError(
                 "result_unknown", "The provider did not return an identifiable resource"
             )
-        await self._save_observation(operation, allocation, observation)
+        await self.save_observation(operation, allocation, observation)
         if observation.state == "terminated":
             raise ProviderError("resource_terminated", "The allocated resource has terminated")
         if observation.state == "failed":
@@ -812,18 +804,16 @@ class ComputeReconciler:
                 diagnostics=diagnostics,
             )
         if observation.state != "ready":
-            await self._finish(
+            await self.steps.wait(
                 operation,
-                "waiting",
                 "waiting_for_resource",
                 "Waiting for the provider to make the resource ready.",
                 result={"external_pending": True},
-                retry=30,
             )
             return
         if operation["kind"] == "import":
-            await self._checkpoint(operation, "resource_ready", {"external_pending": False})
-            await self._finish(
+            await self.steps.checkpoint(operation, "resource_ready", {"external_pending": False})
+            await self.steps.finish(
                 operation,
                 "succeeded",
                 "observed",
@@ -843,7 +833,7 @@ class ComputeReconciler:
                 "The provider has not reported the complete resource inventory.",
                 diagnostics=diagnostics,
             )
-        await self._checkpoint(operation, "resource_ready", {"external_pending": False})
+        await self.steps.checkpoint(operation, "resource_ready", {"external_pending": False})
         if len(observation.nodes) != 1:
             diagnostics = (
                 _cloudlab_observation_diagnostics(observation, reason_code="unsupported_node_count")
@@ -855,23 +845,21 @@ class ComputeReconciler:
                 "This deployment profile supports one node; the full allocation remains visible for review",
                 diagnostics=diagnostics,
             )
-        allocation = await self._allocation(allocation["id"])
+        allocation = await self.steps.allocation(allocation["id"])
         # The original ready observation only admitted node registration. Read
         # CloudLab again immediately before creating the Host binding, then
         # persist that full snapshot so the repository can guard the commit
         # against current allocation state under its compute-entry lock.
         latest = await provider.inspect(self._ref(allocation))
         if not _provider_observation_is_fresh(latest):
-            await self._finish(
+            await self.steps.wait(
                 operation,
-                "waiting",
                 "waiting_for_resource",
                 "Waiting for a fresh provider observation before bootstrapping the host.",
                 result={"external_pending": True},
-                retry=30,
             )
             return
-        await self._save_observation(operation, allocation, latest)
+        await self.save_observation(operation, allocation, latest)
         if latest.state == "terminated":
             raise ProviderError("resource_terminated", "The allocated resource has terminated")
         if latest.state == "failed":
@@ -889,13 +877,11 @@ class ComputeReconciler:
                 diagnostics=diagnostics,
             )
         if latest.state != "ready" or not latest.scope_complete:
-            await self._finish(
+            await self.steps.wait(
                 operation,
-                "waiting",
                 "waiting_for_resource",
                 "Waiting for the provider to report one complete ready node before bootstrapping.",
                 result={"external_pending": True},
-                retry=30,
             )
             return
         if len(latest.nodes) != 1:
@@ -909,7 +895,7 @@ class ComputeReconciler:
                 "This deployment profile supports one node; the full allocation remains visible for review",
                 diagnostics=diagnostics,
             )
-        allocation = await self._allocation(allocation["id"])
+        allocation = await self.steps.allocation(allocation["id"])
         if (
             not allocation.get("scope_complete")
             or allocation.get("observed_state") not in {"ready", "active", "running"}
@@ -918,13 +904,11 @@ class ComputeReconciler:
             or allocation.get("observed_at") is None
             or (_now() - allocation["observed_at"]).total_seconds() > 300
         ):
-            await self._finish(
+            await self.steps.wait(
                 operation,
-                "waiting",
                 "waiting_for_resource",
                 "Waiting for the current allocation snapshot to become complete and ready.",
                 result={"external_pending": True},
-                retry=30,
             )
             return
         observation = latest
@@ -934,7 +918,7 @@ class ComputeReconciler:
             return
         observed_node = registered
         profile = DeploymentProfile.model_validate(allocation["deployment_profile"])
-        intent = self._bootstrap_intent(operation, allocation, node)
+        intent = self.bootstrap_intent(operation, allocation, node)
         if operation.get("parameters", {}).get("rotation_operation_id"):
             # A replacement node: staged and filled with a copy, never started here.
             await self.rotation.stage_candidate(
@@ -942,11 +926,11 @@ class ComputeReconciler:
             )
             return
         await self.repository.prepare_bootstrap_binding(
-            node_id=node["id"], host=intent.host, **self._fence(operation)
+            node_id=node["id"], host=intent.host, **self.steps.fence(operation)
         )
         host = await self.host_pool.get_host(host=intent.host)
         if not operation.get("result", {}).get("deployed"):
-            await self._checkpoint(operation, "deploying")
+            await self.steps.checkpoint(operation, "deploying")
             enrollment: SecretStr | None = None
             if host is None or not host.get("enrolled"):
                 token, _ = await HostCommands(self.host_pool).enroll_token(
@@ -957,17 +941,17 @@ class ComputeReconciler:
                 enrollment = SecretStr(token)
             deployed = await self.bootstrap.deploy(observed_node, profile, intent, enrollment)
             if not deployed.ready:
-                await self._bootstrap_blocked(
+                await self.bootstrap_blocked(
                     operation,
                     deployed.blocked_reasons,
                     observation=observation,
                     provider_id=allocation.get("provider_id"),
                 )
                 return
-            await self._checkpoint(operation, "verifying_host", {"deployed": True})
+            await self.steps.checkpoint(operation, "verifying_host", {"deployed": True})
         readiness = await self.bootstrap.readiness(observed_node, profile, intent)
         if not readiness.ready:
-            await self._bootstrap_blocked(
+            await self.bootstrap_blocked(
                 operation,
                 readiness.blocked_reasons,
                 observation=observation,
@@ -976,9 +960,8 @@ class ComputeReconciler:
             return
         host = await self.host_pool.get_host(host=intent.host)
         if host is None or host.get("status") != "online" or not host.get("enrolled"):
-            await self._finish(
+            await self.steps.wait(
                 operation,
-                "waiting",
                 "waiting_for_heartbeat",
                 "Waiting for the deployed Host to register and heartbeat.",
                 retry=15,
@@ -1003,10 +986,10 @@ class ComputeReconciler:
                 retryable=True,
             ) from None
         if not await self.repository.clear_bootstrap_hold(
-            node_id=node["id"], host=intent.host, **self._fence(operation)
+            node_id=node["id"], host=intent.host, **self.steps.fence(operation)
         ):
             raise ValueError("bootstrap_binding_changed")
-        await self._finish(
+        await self.steps.finish(
             operation,
             "succeeded",
             "ready",
@@ -1014,7 +997,7 @@ class ComputeReconciler:
             result={"nodes_ready": 1, "external_pending": False, "blocked_reasons": []},
         )
 
-    async def _bootstrap_blocked(
+    async def bootstrap_blocked(
         self,
         operation: dict[str, Any],
         reasons: tuple[str, ...],
@@ -1022,7 +1005,11 @@ class ComputeReconciler:
         observation: ResourceObservation | None = None,
         provider_id: str | None = None,
     ) -> None:
-        # Public diagnostics use our vocabulary, never remote exception/output text.
+        """Stop the operation for an administrator, with the reasons in our own words.
+
+        Public diagnostics use our vocabulary, never remote exception or output
+        text.
+        """
         blocked = [
             {"code": code, "message": _BOOTSTRAP_REASONS[code]}
             for code in reasons
@@ -1045,7 +1032,7 @@ class ComputeReconciler:
                 ),
             )
             result.update(_provider_diagnostic_result(error, operation, outcome="blocked"))
-        await self._finish(
+        await self.steps.finish(
             operation,
             "blocked",
             operation["step"],
@@ -1134,7 +1121,7 @@ class ComputeReconciler:
         if now - since < _RELEASE_FENCE_ALERT_AFTER or key in self._release_fence_reported:
             return
         self._release_fence_reported.add(key)
-        await self.rotation._notify(
+        await self.steps.notify(
             "compute_host_release_blocked",
             host=hosts[0]["host"],
             reason="deployment drain fence active",
@@ -1170,7 +1157,7 @@ class ComputeReconciler:
                 "The Host bundle does not match the running control-plane release.",
             )
         if allocation.get("desired_state") != "present" or allocation.get("release_committed_at"):
-            await self._finish(
+            await self.steps.finish(
                 operation, "succeeded", "skipped", "This server is no longer managed."
             )
             return
@@ -1182,34 +1169,29 @@ class ComputeReconciler:
         profile = DeploymentProfile.model_validate(allocation["deployment_profile"])
         observation = await self._inspect(operation, allocation)
         if observation.state != "ready" or len(observation.nodes) != 1:
-            await self._finish(
+            await self.steps.wait(
                 operation,
-                "waiting",
                 "waiting_for_resource",
                 "Waiting for the server to be ready before updating its host.",
-                retry=30,
             )
             return
-        allocation = await self._allocation(allocation["id"])
+        allocation = await self.steps.allocation(allocation["id"])
         node = allocation["nodes"][0]
         registered = await self._registered_node(operation, allocation, node, observation.nodes[0])
         if registered is None:
             return
-        intent = self._bootstrap_intent(operation, allocation, node)
+        intent = self.bootstrap_intent(operation, allocation, node)
         host = await self.host_pool.get_host(host=intent.host)
         if host is None or not host.get("enrolled"):
-            await self._finish(
+            await self.steps.wait(
                 operation,
-                "waiting",
                 "waiting_for_heartbeat",
                 "Waiting for the Host to register before updating it.",
-                retry=30,
             )
             return
         if host.get("drain_fence_active"):
-            await self._finish(
+            await self.steps.wait(
                 operation,
-                "waiting",
                 "waiting_for_drain",
                 "Waiting for the current deployment drain to finish.",
                 retry=60,
@@ -1225,16 +1207,14 @@ class ComputeReconciler:
         advertises = shared_deployment_capability(release.sha) in (host.get("capabilities") or [])
         if not advertises:
             if host.get("status") != "online":
-                await self._finish(
+                await self.steps.wait(
                     operation,
-                    "waiting",
                     "waiting_for_heartbeat",
                     "Waiting for the Host to be online before updating it.",
-                    retry=30,
                 )
                 return
             if not operation.get("result", {}).get("deployed"):
-                await self._checkpoint(operation, "deploying")
+                await self.steps.checkpoint(operation, "deploying")
                 deployed = await self.bootstrap.deploy(
                     registered,
                     release_profile,
@@ -1248,7 +1228,7 @@ class ComputeReconciler:
                         operation, registered, profile, intent, deployed
                     )
                     return
-                await self._checkpoint(operation, "verifying_host", {"deployed": True})
+                await self.steps.checkpoint(operation, "verifying_host", {"deployed": True})
             readiness = await self.bootstrap.readiness(registered, release_profile, intent)
             if not readiness.ready:
                 await self._recover_failed_release(
@@ -1262,9 +1242,8 @@ class ComputeReconciler:
                 or not host.get("enrolled")
                 or shared_deployment_capability(release.sha) not in (host.get("capabilities") or [])
             ):
-                await self._finish(
+                await self.steps.wait(
                     operation,
-                    "waiting",
                     "waiting_for_heartbeat",
                     "Waiting for the Host to advertise the control-plane release.",
                     retry=15,
@@ -1279,9 +1258,9 @@ class ComputeReconciler:
             source_sha256=release.digest,
             source_bundle=release.bundle,
             release_bundle_path=str(release.path),
-            **self._fence(operation),
+            **self.steps.fence(operation),
         )
-        await self._finish(
+        await self.steps.finish(
             operation,
             "succeeded",
             "ready",
@@ -1306,30 +1285,29 @@ class ComputeReconciler:
             if deployed.advertising is True:
                 attempts = int(operation.get("result", {}).get("release_attempts") or 0) + 1
                 if attempts < _RELEASE_ATTEMPTS:
-                    await self._finish(
+                    await self.steps.wait(
                         operation,
-                        "waiting",
                         "deploying",
                         "The rollout stopped before replacing the running generation.",
                         result={"release_attempts": attempts},
                         retry=300,
                     )
                     return
-            await self._bootstrap_blocked(operation, reasons)
+            await self.bootstrap_blocked(operation, reasons)
             return
         if operation.get("result", {}).get("restore_attempted"):
-            await self._bootstrap_blocked(operation, reasons)
+            await self.bootstrap_blocked(operation, reasons)
             return
-        await self._checkpoint(
+        await self.steps.checkpoint(
             operation, "restoring", {"restore_attempted": True, "deployed": False}
         )
         restored = await self.bootstrap.deploy(
             node, profile, intent, None, prerequisites=False, reenroll=False
         )
         if not restored.ready:
-            await self._bootstrap_blocked(operation, restored.blocked_reasons or reasons)
+            await self.bootstrap_blocked(operation, restored.blocked_reasons or reasons)
             return
-        await self._finish(
+        await self.steps.finish(
             operation,
             "blocked",
             "restored",
@@ -1369,7 +1347,7 @@ class ComputeReconciler:
             if expired is None:
                 raise
             observation = expired
-        await self._save_observation(operation, allocation, observation)
+        await self.save_observation(operation, allocation, observation)
         return observation
 
     def _expired_absence(
@@ -1422,7 +1400,7 @@ class ComputeReconciler:
             allocation_id=allocation["id"],
             token_hash=hash_secret(token),
             ttl_seconds=_REGISTRATION_TTL_SECONDS,
-            **self._fence(operation),
+            **self.steps.fence(operation),
         )
         return NodeRegistration(url=url, token=SecretStr(token))
 
@@ -1462,7 +1440,7 @@ class ComputeReconciler:
                 and await self.repository.reopen_node_registration(
                     allocation_id=allocation["id"],
                     ttl_seconds=_REGISTRATION_TTL_SECONDS,
-                    **self._fence(operation),
+                    **self.steps.fence(operation),
                 )
             ):
                 registration = {**(registration or {}), "expired": False}
@@ -1475,9 +1453,8 @@ class ComputeReconciler:
                     "two more hours, then restart the node; or release the server.",
                 )
             if not registration.get("registered_at"):
-                await self._finish(
+                await self.steps.wait(
                     operation,
-                    "waiting",
                     "waiting_for_registration",
                     "Waiting for the node to register its SSH host keys.",
                     result={"blocked_reasons": []},
@@ -1486,7 +1463,7 @@ class ComputeReconciler:
                 return None
             pinned = _preferred_host_key(registration["host_keys"])
             await self.repository.record_host_key(
-                node_id=node["id"], host_key=pinned, **self._fence(operation)
+                node_id=node["id"], host_key=pinned, **self.steps.fence(operation)
             )
         return observed.model_copy(
             update={"connection": connection.model_copy(update={"host_key": pinned})}
@@ -1507,18 +1484,20 @@ class ComputeReconciler:
         if not provider.capabilities().can_release:
             return
         # The caller's copy predates the identity this acquisition just saved.
-        allocation = await self._allocation(allocation["id"])
-        await self._checkpoint(operation, "releasing_failed", {"external_pending": True})
+        allocation = await self.steps.allocation(allocation["id"])
+        await self.steps.checkpoint(operation, "releasing_failed", {"external_pending": True})
         receipt = await provider.release(self._ref(allocation), self._intent(operation, allocation))
         observation = receipt.observation or await provider.inspect(self._ref(allocation))
-        await self._save_observation(operation, allocation, observation)
+        await self.save_observation(operation, allocation, observation)
         if observation.state != "terminated":
             raise ProviderError(
                 "release_pending",
                 "Waiting for the provider to remove the failed resource",
                 retryable=True,
             )
-        await self._checkpoint(operation, "failed_resource_released", {"external_pending": False})
+        await self.steps.checkpoint(
+            operation, "failed_resource_released", {"external_pending": False}
+        )
 
     async def _submit_acquisition(
         self, operation: dict[str, Any], allocation: dict[str, Any]
@@ -1531,14 +1510,14 @@ class ComputeReconciler:
                     update={"registration": await self._open_registration(operation, allocation)}
                 )
             await self.repository.assert_autoscale_acquire_connections_verified(
-                allocation_id=allocation["id"], **self._fence(operation)
+                allocation_id=allocation["id"], **self.steps.fence(operation)
             )
         except (ProviderError, ComputeSecretError, ValueError) as exc:
             if isinstance(exc, ValueError) and str(exc) == "operation_lease_lost":
                 raise
             # Nothing has reached the provider yet, so every failure here is
             # a definite refusal and can safely release an autoscaling slot.
-            await self._checkpoint(operation, "pending", {"external_pending": False})
+            await self.steps.checkpoint(operation, "pending", {"external_pending": False})
             raise
         try:
             return await provider.acquire(request, self._intent(operation, allocation))
@@ -1551,14 +1530,14 @@ class ComputeReconciler:
             if getattr(exc, "code", "credential_unavailable") != "result_unknown":
                 # A definite rejection is safe to retry after credentials or
                 # capacity are repaired. Ambiguous submissions keep the fence.
-                await self._checkpoint(operation, "pending", {"external_pending": False})
+                await self.steps.checkpoint(operation, "pending", {"external_pending": False})
             raise
 
     async def _receipt_observation(
         self, operation: dict[str, Any], allocation: dict[str, Any], receipt: ProviderReceipt
     ) -> ResourceObservation | None:
         if receipt.resource is not None:
-            await self._checkpoint(
+            await self.steps.checkpoint(
                 operation,
                 "resource_identified",
                 {
@@ -1587,7 +1566,7 @@ class ComputeReconciler:
         )
         observation = await self._inspect(operation, allocation)
         if observation.expires_at is not None and request.granted_by(observation.expires_at):
-            await self._finish(
+            await self.steps.finish(
                 operation,
                 "succeeded",
                 "extended",
@@ -1616,7 +1595,7 @@ class ComputeReconciler:
                 _moment(operation.get("result", {}).get("extension_requested_at")) or _now()
             )
             if operation.get("result", {}).get("extension_response_received") or progressed:
-                await self._finish(
+                await self.steps.finish(
                     operation,
                     "blocked",
                     "partial_extension",
@@ -1638,7 +1617,7 @@ class ComputeReconciler:
                     "The provider neither applied nor refused the extension. "
                     "Check the provider, then retry to request the same expiration."
                 )
-                await self._finish(
+                await self.steps.finish(
                     operation,
                     "blocked",
                     "extension_unconfirmed",
@@ -1651,19 +1630,17 @@ class ComputeReconciler:
                     },
                 )
             else:
-                await self._finish(
+                await self.steps.wait(
                     operation,
-                    "waiting",
                     "confirming_extension",
                     "Waiting to confirm the previous extension request.",
                     result={
                         "external_pending": True,
                         "extension_requested_at": requested_at.isoformat(),
                     },
-                    retry=30,
                 )
             return
-        await self._checkpoint(
+        await self.steps.checkpoint(
             operation,
             "extending",
             {
@@ -1681,7 +1658,7 @@ class ComputeReconciler:
             receipt = await provider.extend(self._ref(allocation), request)
         except (ProviderError, ComputeSecretError) as exc:
             if getattr(exc, "code", "credential_unavailable") != "result_unknown":
-                await self._checkpoint(
+                await self.steps.checkpoint(
                     operation,
                     "extension_rejected",
                     {
@@ -1690,15 +1667,15 @@ class ComputeReconciler:
                     },
                 )
             raise
-        await self._checkpoint(
+        await self.steps.checkpoint(
             operation,
             "confirming_extension",
             {"extension_response_received": receipt.outcome == "confirmed"},
         )
         observed = receipt.observation or await provider.inspect(self._ref(allocation))
-        await self._save_observation(operation, allocation, observed)
+        await self.save_observation(operation, allocation, observed)
         if observed.expires_at is not None and request.granted_by(observed.expires_at):
-            await self._finish(
+            await self.steps.finish(
                 operation,
                 "succeeded",
                 "extended",
@@ -1711,13 +1688,11 @@ class ComputeReconciler:
                 },
             )
         else:
-            await self._finish(
+            await self.steps.wait(
                 operation,
-                "waiting",
                 "confirming_extension",
                 "Extension submitted; waiting for the actual expiration.",
                 result={"external_pending": True},
-                retry=30,
             )
 
     async def _settle_terminal_retirement(
@@ -1725,9 +1700,9 @@ class ComputeReconciler:
     ) -> None:
         """Commit local fencing after the provider is already terminal."""
         await self.repository.commit_release(
-            allocation_id=allocation["id"], **self._fence(operation)
+            allocation_id=allocation["id"], **self.steps.fence(operation)
         )
-        await self._finish(
+        await self.steps.finish(
             operation,
             "succeeded",
             "released",
@@ -1745,16 +1720,18 @@ class ComputeReconciler:
                 return
             self.commands._require_managed(allocation, "release")
             await self.repository.begin_retirement(
-                allocation_id=allocation["id"], **self._fence(operation)
+                allocation_id=allocation["id"], **self.steps.fence(operation)
             )
-            allocation = await self._allocation(allocation["id"])
-            await self._checkpoint(operation, "checking_retention", {"external_pending": False})
+            allocation = await self.steps.allocation(allocation["id"])
+            await self.steps.checkpoint(
+                operation, "checking_retention", {"external_pending": False}
+            )
             if allocation.get("external_id"):
                 observation = await self._inspect(operation, allocation)
                 if observation.state == "terminated":
                     await self._settle_terminal_retirement(operation, allocation)
                     return
-                allocation = await self._allocation(allocation["id"])
+                allocation = await self.steps.allocation(allocation["id"])
             impact = await self.repository.retirement_impact(allocation["id"])
             meaningful = [
                 {"code": code, "message": code.replace("_", " ")}
@@ -1762,13 +1739,11 @@ class ComputeReconciler:
                 if code not in {"inventory_unverified", "host_observation_stale"}
             ]
             if meaningful:
-                await self._finish(
+                await self.steps.wait(
                     operation,
-                    "waiting",
                     "waiting_for_retention",
                     "Resource release is waiting for its dependencies to be cleared.",
                     result={"blocked_reasons": meaningful, "external_pending": False},
-                    retry=30,
                 )
                 return
             # An empty node list cannot pass the inventory scan: that scan
@@ -1776,30 +1751,28 @@ class ComputeReconciler:
             if not provider_resource_absent(allocation):
                 await self._verify_empty_inventory(operation, allocation)
             committed = await self.repository.commit_release(
-                allocation_id=allocation["id"], **self._fence(operation)
+                allocation_id=allocation["id"], **self.steps.fence(operation)
             )
             if committed.get("blocked_reasons"):
                 reasons = [
                     {"code": code, "message": code.replace("_", " ")}
                     for code in committed["blocked_reasons"]
                 ]
-                await self._finish(
+                await self.steps.wait(
                     operation,
-                    "waiting",
                     "waiting_for_retention",
                     "Resource dependencies changed during the release checks.",
                     result={"blocked_reasons": reasons, "external_pending": False},
-                    retry=30,
                 )
                 return
-            allocation = await self._allocation(allocation["id"])
+            allocation = await self.steps.allocation(allocation["id"])
         if provider_resource_absent(allocation):
             await self._release_absent_provider_resource(operation, allocation)
             return
         provider = self.commands.registry.get(allocation["provider_id"]).provider
         observation = await self._inspect(operation, allocation)
         if observation.state == "terminated":
-            await self._finish(
+            await self.steps.finish(
                 operation,
                 "succeeded",
                 "released",
@@ -1808,16 +1781,14 @@ class ComputeReconciler:
             )
             return
         if operation.get("result", {}).get("release_requested") and observation.state != "ready":
-            await self._finish(
+            await self.steps.wait(
                 operation,
-                "waiting",
                 "confirming_release",
                 "Release was submitted; checking provider state before declaring success.",
                 result={"external_pending": True},
-                retry=30,
             )
             return
-        await self._checkpoint(
+        await self.steps.checkpoint(
             operation, "releasing", {"release_requested": True, "external_pending": True}
         )
         try:
@@ -1826,7 +1797,7 @@ class ComputeReconciler:
             )
         except (ProviderError, ComputeSecretError) as exc:
             if getattr(exc, "code", "credential_unavailable") != "result_unknown":
-                await self._checkpoint(
+                await self.steps.checkpoint(
                     operation,
                     "release_rejected",
                     {
@@ -1836,9 +1807,9 @@ class ComputeReconciler:
                 )
             raise
         observation = receipt.observation or await provider.inspect(self._ref(allocation))
-        await self._save_observation(operation, allocation, observation)
+        await self.save_observation(operation, allocation, observation)
         if observation.state == "terminated":
-            await self._finish(
+            await self.steps.finish(
                 operation,
                 "succeeded",
                 "released",
@@ -1846,13 +1817,11 @@ class ComputeReconciler:
                 result={"external_pending": False, "blocked_reasons": []},
             )
         else:
-            await self._finish(
+            await self.steps.wait(
                 operation,
-                "waiting",
                 "confirming_release",
                 "Waiting for provider termination confirmation.",
                 result={"external_pending": True},
-                retry=30,
             )
 
     async def _release_absent_provider_resource(
@@ -1866,21 +1835,19 @@ class ComputeReconciler:
         id with the acquisition, and that experiment is deleted. No Host ran
         there: deployment starts only on a node an observation recorded.
         """
-        ref = await self._provider_resource(allocation)
+        ref = await self.provider_resource(allocation)
         if ref is not None:
-            observation = await self._delete_by_identity(operation, allocation, ref)
+            observation = await self.delete_by_identity(operation, allocation, ref)
             if observation.state != "terminated":
-                await self._finish(
+                await self.steps.wait(
                     operation,
-                    "waiting",
                     "confirming_release",
                     "Waiting for provider termination confirmation.",
                     result={"external_pending": True},
-                    retry=30,
                 )
                 return
-            await self._save_observation(operation, allocation, observation)
-            await self._finish(
+            await self.save_observation(operation, allocation, observation)
+            await self.steps.finish(
                 operation,
                 "succeeded",
                 "released",
@@ -1896,9 +1863,9 @@ class ComputeReconciler:
                 "scope_complete": True,
                 "expiration_known": False,
             },
-            **self._fence(operation),
+            **self.steps.fence(operation),
         )
-        await self._finish(
+        await self.steps.finish(
             operation,
             "succeeded",
             "released",
@@ -1906,7 +1873,7 @@ class ComputeReconciler:
             result={"external_pending": False, "blocked_reasons": []},
         )
 
-    async def _provider_resource(self, allocation: dict[str, Any]) -> ResourceRef | None:
+    async def provider_resource(self, allocation: dict[str, Any]) -> ResourceRef | None:
         """The provider resource of this allocation, or None if none was ever named.
 
         Its identity is the allocation's once an observation recorded it. Until
@@ -1925,7 +1892,7 @@ class ComputeReconciler:
                 return ResourceRef(external_id=named, config=allocation["configuration"])
         return None
 
-    async def _delete_by_identity(
+    async def delete_by_identity(
         self, operation: dict[str, Any], allocation: dict[str, Any], ref: ResourceRef
     ) -> ResourceObservation:
         """Delete one resource by its exact identity and return what the provider reports.
@@ -1935,7 +1902,7 @@ class ComputeReconciler:
         provider = self.commands.registry.get(allocation["provider_id"]).provider
         observation = await provider.inspect(ref)
         if observation.state != "terminated":
-            await self._checkpoint(
+            await self.steps.checkpoint(
                 operation, "releasing", {"release_requested": True, "external_pending": True}
             )
             receipt = await provider.release(ref, self._intent(operation, allocation))
@@ -2034,7 +2001,9 @@ class ComputeReconciler:
         hosts = [str(host["host"]) for host in allocation.get("hosts", [])]
         removed = await self.repository.superseded_removals(hosts=hosts)
         if removed and operation.get("result", {}).get("superseded_removed") != removed:
-            await self._checkpoint(operation, "checking_retention", {"superseded_removed": removed})
+            await self.steps.checkpoint(
+                operation, "checking_retention", {"superseded_removed": removed}
+            )
 
     async def _verify_empty_inventory(
         self, operation: dict[str, Any], allocation: dict[str, Any]
@@ -2076,13 +2045,15 @@ class ComputeReconciler:
                 and node["id"] not in bound
             ):
                 continue
-            intent = self._bootstrap_intent(operation, allocation, node)
+            intent = self.bootstrap_intent(operation, allocation, node)
             # Receipts the Host keeps of what the control plane recorded, and
             # nothing else, are not retained state.
             receipts = RecordedHostState.model_validate(
                 await self.repository.recorded_host_state(host=intent.host)
             )
-            proof = await self.bootstrap.inventory(self._node(node), profile, intent, receipts)
+            proof = await self.bootstrap.inventory(
+                self.node_observation(node), profile, intent, receipts
+            )
             if (
                 not proof.complete
                 or proof.retained_containers
@@ -2098,17 +2069,22 @@ class ComputeReconciler:
             hosts=[h["host"] for h in allocation.get("hosts", [])],
             verified_node_ids=[node["id"] for node in allocation["nodes"]],
             empty=True,
-            **self._fence(operation),
+            **self.steps.fence(operation),
         )
         if not recorded:
             raise ValueError("inventory_changed")
 
-    async def _save_observation(
+    async def save_observation(
         self,
         operation: dict[str, Any],
         allocation: dict[str, Any],
         observation: ResourceObservation,
     ) -> None:
+        """Store an observation, and the admission and move-out holds its lease implies.
+
+        A resource being released must still show exactly the nodes recorded
+        for it; any other scope is refused as a changed identity.
+        """
         if allocation.get("desired_state") != "present" and observation.state != "terminated":
             expected = {
                 (node["provider_node_id"], node["instance_identity"])
@@ -2147,7 +2123,7 @@ class ComputeReconciler:
                     for node in observation.nodes
                 ],
             },
-            **self._fence(operation),
+            **self.steps.fence(operation),
         )
         policy = RenewalPolicy.model_validate(allocation.get("policy") or {})
         scope = None
@@ -2162,7 +2138,7 @@ class ComputeReconciler:
             purpose="lease_deadline",
             source_id=allocation["id"],
             scope=scope,
-            **self._fence(operation),
+            **self.steps.fence(operation),
         )
         # Within the move-out window every claim stops here, so each chat's
         # next turn is taken by another Host from its group's checkpoint, and
@@ -2175,14 +2151,8 @@ class ComputeReconciler:
                 and observation.expires_at is not None
                 and (observation.expires_at - _now()).total_seconds() <= window
             ),
-            **self._fence(operation),
+            **self.steps.fence(operation),
         )
-
-    async def _allocation(self, allocation_id: str) -> dict[str, Any]:
-        row = await self.repository.get_allocation(allocation_id)
-        if row is None:
-            raise ValueError("allocation_not_found")
-        return row
 
     @staticmethod
     def _ref(allocation: dict[str, Any]) -> ResourceRef:
@@ -2205,7 +2175,8 @@ class ComputeReconciler:
         )
 
     @staticmethod
-    def _node(node: dict[str, Any]) -> NodeObservation:
+    def node_observation(node: dict[str, Any]) -> NodeObservation:
+        """A stored node as the provider observed it."""
         return NodeObservation(
             provider_node_id=node["provider_node_id"],
             instance_identity=node["instance_identity"],
@@ -2214,51 +2185,14 @@ class ComputeReconciler:
         )
 
     @staticmethod
-    def _bootstrap_intent(
+    def bootstrap_intent(
         operation: dict[str, Any], allocation: dict[str, Any], node: dict[str, Any]
     ) -> BootstrapIntent:
-        # A node that took a Host over keeps that Host's name and namespace.
+        """The Host a node deploys as; one that took a Host over keeps its name and namespace."""
         return BootstrapIntent(
             operation_id=operation["id"],
             allocation_id=allocation["id"],
             node_id=node["id"],
             host=allocation.get("slot_host") or "compute-" + node["id"].replace("-", ""),
             namespace=allocation.get("slot_namespace"),
-        )
-
-    @staticmethod
-    def _fence(operation: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "operation_id": operation["id"],
-            "generation": operation["generation"],
-            "worker_id": operation["worker_id"],
-        }
-
-    async def _checkpoint(
-        self, operation: dict[str, Any], step: str, result: dict[str, Any] | None = None
-    ) -> None:
-        if not await self.repository.checkpoint_operation(
-            **self._fence(operation), step=step, result=result
-        ):
-            raise ValueError("operation_lease_lost")
-        operation["step"] = step
-        operation["result"] = {**operation.get("result", {}), **(result or {})}
-
-    async def _finish(
-        self,
-        operation: dict[str, Any],
-        state: str,
-        step: str,
-        message: str,
-        *,
-        result: dict[str, Any] | None = None,
-        retry: float | None = None,
-    ) -> None:
-        await self.repository.finish_operation(
-            **self._fence(operation),
-            state=state,
-            step=step,
-            message=message,
-            result=result,
-            retry_after_seconds=retry,
         )

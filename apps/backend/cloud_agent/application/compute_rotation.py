@@ -17,16 +17,16 @@ retained-state inventory because the node never ran its Host.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from pydantic import SecretStr
 
+from cloud_agent.application.compute_steps import moment as _moment, now as _now
 from cloud_agent.application.host_commands import HostCommands
 from cloud_agent.compute_secrets import ComputeSecretError
 from cloud_agent.domain.compute import ComputeRefusal, discard_request_id, fingerprint
 from cloud_agent.logging_utils import get_logger
-from cloud_agent.operational_health import deliver_event
 from cloud_agent.ports.external.compute_provider import NodeObservation, ProviderError
 from cloud_agent.ports.external.host_bootstrap import (
     BootstrapIntent,
@@ -78,16 +78,6 @@ _CONFIGURATION_CODES = {
 }
 # Failures no other node type can fix: stop at the first one.
 _STOPPING_CLASSES = {"configuration", "credentials"}
-
-
-def _now() -> datetime:
-    return datetime.now(UTC)
-
-
-def _moment(value: Any) -> datetime | None:
-    if value is None:
-        return None
-    return value if isinstance(value, datetime) else datetime.fromisoformat(str(value))
 
 
 def classify_candidate_failure(
@@ -154,6 +144,7 @@ class ComputeRotation:
         self.host_pool = reconciler.host_pool
         self.bootstrap = reconciler.bootstrap
         self.commands = reconciler.commands
+        self.steps = reconciler.steps
         self._reminded: set[str] = set()
 
     # ---- scheduling ------------------------------------------------------
@@ -274,7 +265,7 @@ class ComputeRotation:
             ):
                 self._reminded.add(operation["id"])
                 hosts = row.get("hosts") or []
-                await self._notify(
+                await self.steps.notify(
                     "compute_rotation_unfinished",
                     host=hosts[0]["host"] if hosts else row["name"],
                     reason=str(operation.get("step") or operation["state"]),
@@ -365,14 +356,12 @@ class ComputeRotation:
                 # A failed SSH acknowledgement does not mean the node stayed
                 # running. Recovery and cancellation must treat it as stopped
                 # from the moment we send the stop, until it is restarted.
-                await self.reconciler._checkpoint(
-                    operation, "stopping_source", {"source_stopping": True}
-                )
+                await self.steps.checkpoint(operation, "stopping_source", {"source_stopping": True})
                 await self.bootstrap.stop(*self._source(operation, allocation, slot))
             except ProviderError as exc:
                 await self._start_rollback(operation, allocation, "switch_failed", exc.code)
                 return
-            await self.reconciler._checkpoint(
+            await self.steps.checkpoint(
                 operation,
                 "copying_final",
                 {"source_stopped": True, "stopped_at": _now().isoformat()},
@@ -420,7 +409,7 @@ class ComputeRotation:
             "namespace": allocation.get("slot_namespace") or default_namespace(node["id"]),
             "node_id": node["id"],
         }
-        await self.reconciler._checkpoint(
+        await self.steps.checkpoint(
             operation,
             "selecting_candidate",
             {"slot": slot, "attempts": [], "started_at": _now().isoformat()},
@@ -446,21 +435,19 @@ class ComputeRotation:
                 )
                 return None
             if discard["state"] != "succeeded":
-                await self.reconciler._finish(
+                await self.steps.wait(
                     operation,
-                    "waiting",
                     "releasing_candidate",
                     "Releasing a replacement node that could not be used.",
-                    retry=30,
                 )
                 return None
-            await self.reconciler._checkpoint(operation, "selecting_candidate", {"candidate": None})
+            await self.steps.checkpoint(operation, "selecting_candidate", {"candidate": None})
             current = None
         if not current:
             current = await self._open_candidate(operation, allocation, slot)
             if current is None:
                 return None
-        candidate = await self.reconciler._allocation(current["id"])
+        candidate = await self.steps.allocation(current["id"])
         acquire = await self.repository.get_operation(current["operation_id"])
         state = acquire["state"] if acquire else "missing"
         if state == "succeeded" and acquire is not None and acquire.get("step") == "staged":
@@ -483,12 +470,10 @@ class ComputeRotation:
         elif _now() - (_moment(current["created_at"]) or _now()) > _CANDIDATE_TIMEOUT:
             failure = ("setup_failed", "candidate_timeout")
         else:
-            await self.reconciler._finish(
+            await self.steps.wait(
                 operation,
-                "waiting",
                 "preparing_candidate",
                 f"Preparing a replacement node ({current['node_type']}).",
-                retry=30,
             )
             return None
         await self._fail_candidate(operation, slot, current, *failure)
@@ -507,7 +492,7 @@ class ComputeRotation:
         existing = await self.repository.list_operations(request_id=request_id)
         if existing:
             acquire = existing[0]
-            candidate = await self.reconciler._allocation(acquire["allocation_id"])
+            candidate = await self.steps.allocation(acquire["allocation_id"])
             current = {
                 "id": candidate["id"],
                 "operation_id": acquire["id"],
@@ -515,9 +500,7 @@ class ComputeRotation:
                 "profile": candidate["deployment_profile"]["id"],
                 "created_at": candidate["created_at"].isoformat(),
             }
-            await self.reconciler._checkpoint(
-                operation, "preparing_candidate", {"candidate": current}
-            )
+            await self.steps.checkpoint(operation, "preparing_candidate", {"candidate": current})
             return current
         # An administrator's retry of a blocked move starts the list afresh.
         node_type, stop = next_node_type(policy, attempts[result.get("attempt_floor", 0) :])
@@ -566,17 +549,13 @@ class ComputeRotation:
                 request_id=request_id,
                 fingerprint=fingerprint("acquire", parameters),
                 parameters=parameters,
-                **self.reconciler._fence(operation),
+                **self.steps.fence(operation),
             )
         except ValueError as exc:
             if str(exc) != "deployment_profile_in_use":
                 raise
-            await self.reconciler._finish(
-                operation,
-                "waiting",
-                "selecting_candidate",
-                "Waiting for a free deployment profile.",
-                retry=30,
+            await self.steps.wait(
+                operation, "selecting_candidate", "Waiting for a free deployment profile."
             )
             return None
         current = {
@@ -586,7 +565,7 @@ class ComputeRotation:
             "profile": profile.id,
             "created_at": _now().isoformat(),
         }
-        await self.reconciler._checkpoint(operation, "preparing_candidate", {"candidate": current})
+        await self.steps.checkpoint(operation, "preparing_candidate", {"candidate": current})
         return current
 
     async def _free_profile(self, *, exclude: dict[str, Any]) -> DeploymentProfile | None:
@@ -633,10 +612,8 @@ class ComputeRotation:
                     "at": _now().isoformat(),
                 }
             )
-            await self.reconciler._checkpoint(
-                operation, "releasing_candidate", {"attempts": attempts}
-            )
-            await self._alert(
+            await self.steps.checkpoint(operation, "releasing_candidate", {"attempts": attempts})
+            await self.steps.alert(
                 operation, "compute_rotation_attempt_failed", host=slot["host"], reason=code
             )
         parameters = {"allocation_id": current["id"]}
@@ -644,20 +621,16 @@ class ComputeRotation:
             allocation_id=current["id"],
             request_id=discard_request_id(current["id"]),
             fingerprint=fingerprint("discard", parameters),
-            **self.reconciler._fence(operation),
+            **self.steps.fence(operation),
         )
         if discard is not None:
-            await self.reconciler._checkpoint(
+            await self.steps.checkpoint(
                 operation,
                 "releasing_candidate",
                 {"candidate": {**current, "discard_id": discard["id"]}},
             )
-        await self.reconciler._finish(
-            operation,
-            "waiting",
-            "releasing_candidate",
-            "Releasing a replacement node that could not be used.",
-            retry=30,
+        await self.steps.wait(
+            operation, "releasing_candidate", "Releasing a replacement node that could not be used."
         )
 
     async def stage_candidate(
@@ -675,25 +648,25 @@ class ComputeRotation:
         """
         result = operation.setdefault("result", {})
         if not result.get("staged"):
-            await self.reconciler._checkpoint(operation, "staging")
+            await self.steps.checkpoint(operation, "staging")
             staged = await self.bootstrap.stage(node, profile, intent)
             if not staged.ready:
-                await self.reconciler._bootstrap_blocked(operation, staged.blocked_reasons)
+                await self.reconciler.bootstrap_blocked(operation, staged.blocked_reasons)
                 return
-            await self.reconciler._checkpoint(operation, "copying", {"staged": True})
-        source = await self.reconciler._allocation(allocation["predecessor_id"])
+            await self.steps.checkpoint(operation, "copying", {"staged": True})
+        source = await self.steps.allocation(allocation["predecessor_id"])
         first = not result.get("copy_started")
         if first:
-            await self.reconciler._checkpoint(operation, "copying", {"copy_started": True})
+            await self.steps.checkpoint(operation, "copying", {"copy_started": True})
         copied = await self.bootstrap.transfer(
-            self.reconciler._node(source["nodes"][0]),
+            self.reconciler.node_observation(source["nodes"][0]),
             node,
             profile,
             intent,
             final=False,
             first=first,
         )
-        await self.reconciler._finish(
+        await self.steps.finish(
             operation,
             "succeeded",
             "staged",
@@ -736,9 +709,8 @@ class ComputeRotation:
         running = await self.repository.running_attempts(host=host)
         if not result.get("hold_set"):
             if running and now < deadline:
-                await self.reconciler._finish(
+                await self.steps.wait(
                     operation,
-                    "waiting",
                     "waiting_for_idle",
                     f"Waiting for a moment with no running turn (until {deadline:%H:%M} UTC).",
                     retry=15,
@@ -748,15 +720,14 @@ class ComputeRotation:
             running = await self.repository.running_attempts(host=host)
         if running:
             if expires is not None and expires - now <= _LATE_DRAIN:
-                await self._alert(
+                await self.steps.alert(
                     operation,
                     "compute_rotation_drain_overdue",
                     host=host,
                     reason=f"{running}_running",
                 )
-            await self.reconciler._finish(
+            await self.steps.wait(
                 operation,
-                "waiting",
                 "draining",
                 f"New work is paused; waiting for {running} running turn(s) to finish.",
                 retry=15,
@@ -776,7 +747,7 @@ class ComputeRotation:
         expires = _moment(allocation.get("expires_at"))
         started = _moment(operation["result"].get("started_at")) or now
         if expires is not None and await self._drain_deadline(slot["host"], expires) <= started:
-            await self._alert(
+            await self.steps.alert(
                 operation,
                 "compute_rotation_lead_time_short",
                 host=slot["host"],
@@ -787,9 +758,9 @@ class ComputeRotation:
             allocation_id=allocation["id"],
             source_id=operation["id"],
             scope="all_claims",
-            **self.reconciler._fence(operation),
+            **self.steps.fence(operation),
         )
-        await self.reconciler._checkpoint(
+        await self.steps.checkpoint(
             operation, "draining", {"hold_set": True, "hold_set_at": now.isoformat()}
         )
 
@@ -808,11 +779,11 @@ class ComputeRotation:
         )
         if copied_at is not None and _now() - copied_at <= _PRECOPY_FRESHNESS:
             return
-        await self.reconciler._checkpoint(operation, "refreshing_copy")
+        await self.steps.checkpoint(operation, "refreshing_copy")
         source, _, _ = self._source(operation, allocation, slot)
         target, profile, intent = self._target(operation, candidate)
         await self.bootstrap.transfer(source, target, profile, intent, final=False)
-        await self.reconciler._checkpoint(
+        await self.steps.checkpoint(
             operation, "refreshing_copy", {"refreshed_at": _now().isoformat()}
         )
 
@@ -821,12 +792,12 @@ class ComputeRotation:
     ) -> None:
         """Copy the stopped Host's last changes and give its name to the replacement."""
         result = operation["result"]
-        candidate = await self.reconciler._allocation(result["candidate"]["id"])
+        candidate = await self.steps.allocation(result["candidate"]["id"])
         target, profile, intent = self._target(operation, candidate)
         if not result.get("final_copied"):
             source, _, _ = self._source(operation, allocation, slot)
             copied = await self.bootstrap.transfer(source, target, profile, intent, final=True)
-            await self.reconciler._checkpoint(
+            await self.steps.checkpoint(
                 operation,
                 "handing_over",
                 {
@@ -839,15 +810,15 @@ class ComputeRotation:
             host=slot["host"],
             from_node_id=slot["node_id"],
             to_node_id=candidate["nodes"][0]["id"],
-            **self.reconciler._fence(operation),
+            **self.steps.fence(operation),
         )
-        await self.reconciler._checkpoint(operation, "starting_target", {"rebound": True})
+        await self.steps.checkpoint(operation, "starting_target", {"rebound": True})
 
     async def _take_over(self, operation: dict[str, Any], allocation: dict[str, Any]) -> None:
         """Start the Host on the replacement node and resume claims once it is verified."""
         result = operation["result"]
         slot = result["slot"]
-        candidate = await self.reconciler._allocation(result["candidate"]["id"])
+        candidate = await self.steps.allocation(result["candidate"]["id"])
         target, profile, intent = self._target(operation, candidate)
         if not result.get("target_started"):
             token, _ = await HostCommands(self.host_pool).enroll_token(
@@ -856,7 +827,7 @@ class ComputeRotation:
                 actor="compute-rotation",
             )
             issued = _now()
-            await self.reconciler._checkpoint(
+            await self.steps.checkpoint(
                 operation, "starting_target", {"token_issued_at": issued.isoformat()}
             )
             try:
@@ -870,17 +841,14 @@ class ComputeRotation:
                 code = deployed.blocked_reasons[0] if deployed.blocked_reasons else "not_ready"
                 await self._start_rollback(operation, allocation, "takeover_failed", code)
                 return
-            await self.reconciler._checkpoint(
-                operation, "verifying_target", {"target_started": True}
-            )
+            await self.steps.checkpoint(operation, "verifying_target", {"target_started": True})
         issued = _moment(result.get("token_issued_at")) or _now()
         if not await self._serving(slot["host"], target, profile, intent, since=issued):
             if _now() - issued > _VERIFY_TIMEOUT:
                 await self._start_rollback(operation, allocation, "takeover_failed", "not_verified")
                 return
-            await self.reconciler._finish(
+            await self.steps.wait(
                 operation,
-                "waiting",
                 "verifying_target",
                 "Waiting for the moved Host to come online.",
                 retry=15,
@@ -889,7 +857,7 @@ class ComputeRotation:
         # Persist the point of no return before claims resume: the new node
         # may write state as soon as the hold is lifted. A restarted worker
         # must only finish cleanup from then on, never roll back to the old copy.
-        await self.reconciler._checkpoint(
+        await self.steps.checkpoint(
             operation, "cleaning_up", {"verified": True, "verified_at": _now().isoformat()}
         )
         await self._clean_up(operation, allocation)
@@ -933,13 +901,13 @@ class ComputeRotation:
         """Remove the transfer key and the old copy, then release the old node."""
         result = operation["result"]
         slot = result["slot"]
-        candidate = await self.reconciler._allocation(result["candidate"]["id"])
+        candidate = await self.steps.allocation(result["candidate"]["id"])
         await self.repository.set_rotation_hold(
             host=slot["host"],
             allocation_id=candidate["id"],
             source_id=operation["id"],
             scope=None,
-            **self.reconciler._fence(operation),
+            **self.steps.fence(operation),
         )
         source, profile, intent = self._source(operation, allocation, slot)
         target, _, _ = self._target(operation, candidate)
@@ -949,16 +917,14 @@ class ComputeRotation:
             except ProviderError as exc:
                 await self._defer_cleanup(operation, slot["host"], exc.code)
                 return
-            await self.reconciler._checkpoint(operation, "cleaning_up", {"transfer_revoked": True})
+            await self.steps.checkpoint(operation, "cleaning_up", {"transfer_revoked": True})
         released = "The old server is being released."
         if not result.get("retire_requested"):
             try:
                 if not result.get("source_wiped"):
                     await self.bootstrap.wipe(source, profile, intent)
-                    await self.reconciler._checkpoint(
-                        operation, "cleaning_up", {"source_wiped": True}
-                    )
-                current = await self.reconciler._allocation(allocation["id"])
+                    await self.steps.checkpoint(operation, "cleaning_up", {"source_wiped": True})
+                current = await self.steps.allocation(allocation["id"])
                 request_id = f"retire:{operation['id']}"
                 existing = await self.repository.list_operations(request_id=request_id)
                 # A crash may lose the acknowledgement after retirement was
@@ -977,9 +943,7 @@ class ComputeRotation:
                     ),
                     actor="compute-rotation",
                 )
-                await self.reconciler._checkpoint(
-                    operation, "cleaning_up", {"retire_requested": True}
-                )
+                await self.steps.checkpoint(operation, "cleaning_up", {"retire_requested": True})
             except (ProviderError, ComputeRefusal, ValueError) as exc:
                 if isinstance(exc, ValueError) and str(exc) == "operation_lease_lost":
                     raise
@@ -988,7 +952,7 @@ class ComputeRotation:
                 code = getattr(exc, "code", None) or str(exc)
                 await self._defer_cleanup(operation, slot["host"], code)
                 return
-        await self.reconciler._finish(
+        await self.steps.finish(
             operation,
             "succeeded",
             "rotated",
@@ -1002,14 +966,12 @@ class ComputeRotation:
 
     async def _defer_cleanup(self, operation: dict[str, Any], host: str, code: str) -> None:
         """Keep serving on the new node while cleanup retries from its checkpoint."""
-        await self._alert(operation, "compute_rotation_cleanup_failed", host=host, reason=code)
-        await self.reconciler._finish(
+        await self.steps.alert(operation, "compute_rotation_cleanup_failed", host=host, reason=code)
+        await self.steps.wait(
             operation,
-            "waiting",
             "cleaning_up",
             "The Host is serving on its new node; retrying cleanup of the old node.",
             result={"blocked_reasons": [{"code": code, "message": "Cleanup needs a retry."}]},
-            retry=30,
         )
 
     # ---- rolling back ----------------------------------------------------
@@ -1017,12 +979,12 @@ class ComputeRotation:
     async def _start_rollback(
         self, operation: dict[str, Any], allocation: dict[str, Any], failure_class: str, code: str
     ) -> None:
-        await self.reconciler._checkpoint(
+        await self.steps.checkpoint(
             operation,
             "rolling_back",
             {"rollback": {"class": failure_class, "code": code, "at": _now().isoformat()}},
         )
-        await self._alert(
+        await self.steps.alert(
             operation,
             "compute_rotation_attempt_failed",
             host=operation["result"]["slot"]["host"],
@@ -1040,7 +1002,7 @@ class ComputeRotation:
         result = operation["result"]
         rollback = dict(result["rollback"])
         slot = result["slot"]
-        candidate = await self.reconciler._allocation(result["candidate"]["id"])
+        candidate = await self.steps.allocation(result["candidate"]["id"])
         source, source_profile, source_intent = self._source(operation, allocation, slot)
         if result.get("rebound"):
             target, profile, intent = self._target(operation, candidate)
@@ -1060,10 +1022,10 @@ class ComputeRotation:
                 host=slot["host"],
                 from_node_id=candidate["nodes"][0]["id"],
                 to_node_id=slot["node_id"],
-                **self.reconciler._fence(operation),
+                **self.steps.fence(operation),
             )
             rollback["reenroll"] = True
-            await self.reconciler._checkpoint(
+            await self.steps.checkpoint(
                 operation, "rolling_back", {"rebound": False, "rollback": rollback}
             )
         if result.get("source_stopping") or result.get("source_stopped"):
@@ -1080,7 +1042,7 @@ class ComputeRotation:
                 rollback["restart_since"] = (
                     rollback.get("restart_since") or rollback["restarted_at"]
                 )
-                await self.reconciler._checkpoint(operation, "rolling_back", {"rollback": rollback})
+                await self.steps.checkpoint(operation, "rolling_back", {"rollback": rollback})
                 deployed = None
                 try:
                     deployed = await self.bootstrap.deploy(
@@ -1099,20 +1061,16 @@ class ComputeRotation:
                     if (exc.retryable or exc.code in _TRANSIENT_SSH) and (
                         _now() - since <= _VERIFY_TIMEOUT
                     ):
-                        await self.reconciler._finish(
+                        await self.steps.wait(
                             operation,
-                            "waiting",
                             "rolling_back",
                             "Retrying the restart of the Host on its original node.",
-                            retry=30,
                         )
                         return
                 if deployed is None or not deployed.ready:
                     # A retry by an administrator gets a fresh window.
                     rollback["restart_since"] = None
-                    await self.reconciler._checkpoint(
-                        operation, "rolling_back", {"rollback": rollback}
-                    )
+                    await self.steps.checkpoint(operation, "rolling_back", {"rollback": rollback})
                     await self._block(
                         operation,
                         slot,
@@ -1122,7 +1080,7 @@ class ComputeRotation:
                     )
                     return
                 rollback["restart_completed"] = True
-                await self.reconciler._checkpoint(operation, "rolling_back", {"rollback": rollback})
+                await self.steps.checkpoint(operation, "rolling_back", {"rollback": rollback})
             restarted = _moment(rollback["restarted_at"]) or _now()
             if not await self._serving(
                 slot["host"], source, source_profile, source_intent, since=restarted
@@ -1136,9 +1094,8 @@ class ComputeRotation:
                         critical=True,
                     )
                     return
-                await self.reconciler._finish(
+                await self.steps.wait(
                     operation,
-                    "waiting",
                     "rolling_back",
                     "Waiting for the Host to come back on its original node.",
                     retry=15,
@@ -1149,10 +1106,10 @@ class ComputeRotation:
             allocation_id=allocation["id"],
             source_id=operation["id"],
             scope=None,
-            **self.reconciler._fence(operation),
+            **self.steps.fence(operation),
         )
         await self._revoke_after_rollback(operation, source, candidate)
-        await self.reconciler._checkpoint(
+        await self.steps.checkpoint(
             operation,
             "releasing_candidate",
             {
@@ -1198,21 +1155,19 @@ class ComputeRotation:
         """Release a replacement node that never took its Host over."""
         if not allocation.get("release_committed_at"):
             committed = await self.repository.commit_candidate_release(
-                allocation_id=allocation["id"], **self.reconciler._fence(operation)
+                allocation_id=allocation["id"], **self.steps.fence(operation)
             )
             if not committed["release_committed"]:
-                await self.reconciler._finish(
+                await self.steps.wait(
                     operation,
-                    "waiting",
                     "waiting_for_candidate",
                     "Waiting for the replacement node's own work to stop.",
-                    retry=30,
                 )
                 return
-            allocation = await self.reconciler._allocation(allocation["id"])
+            allocation = await self.steps.allocation(allocation["id"])
         # Abandoning the node cancelled its acquisition, which may hold the
         # only record of the experiment the provider created for it.
-        ref = await self.reconciler._provider_resource(allocation)
+        ref = await self.reconciler.provider_resource(allocation)
         if ref is None:
             # The provider never created it, or definitely refused to.
             await self.repository.observe_allocation(
@@ -1222,9 +1177,9 @@ class ComputeRotation:
                     "expiration_known": False,
                     "scope_complete": True,
                 },
-                **self.reconciler._fence(operation),
+                **self.steps.fence(operation),
             )
-            await self.reconciler._finish(
+            await self.steps.finish(
                 operation,
                 "succeeded",
                 "released",
@@ -1234,19 +1189,17 @@ class ComputeRotation:
             return
         # It never ran its Host, so its node scope needs no review: a failed
         # experiment has no nodes at all. Delete by its exact identity.
-        observation = await self.reconciler._delete_by_identity(operation, allocation, ref)
+        observation = await self.reconciler.delete_by_identity(operation, allocation, ref)
         if observation.state != "terminated":
-            await self.reconciler._finish(
+            await self.steps.wait(
                 operation,
-                "waiting",
                 "confirming_release",
                 "Waiting for the provider to confirm the replacement node ended.",
                 result={"external_pending": True},
-                retry=30,
             )
             return
-        await self.reconciler._save_observation(operation, allocation, observation)
-        await self.reconciler._finish(
+        await self.reconciler.save_observation(operation, allocation, observation)
+        await self.steps.finish(
             operation,
             "succeeded",
             "released",
@@ -1261,9 +1214,9 @@ class ComputeRotation:
     ) -> tuple[NodeObservation, DeploymentProfile, BootstrapIntent]:
         node = next(n for n in allocation["nodes"] if n["id"] == slot["node_id"])
         return (
-            self.reconciler._node(node),
+            self.reconciler.node_observation(node),
             DeploymentProfile.model_validate(allocation["deployment_profile"]),
-            self.reconciler._bootstrap_intent(operation, allocation, node),
+            self.reconciler.bootstrap_intent(operation, allocation, node),
         )
 
     def _target(
@@ -1271,9 +1224,9 @@ class ComputeRotation:
     ) -> tuple[NodeObservation, DeploymentProfile, BootstrapIntent]:
         node = candidate["nodes"][0]
         return (
-            self.reconciler._node(node),
+            self.reconciler.node_observation(node),
             DeploymentProfile.model_validate(candidate["deployment_profile"]),
-            self.reconciler._bootstrap_intent(operation, candidate, node),
+            self.reconciler.bootstrap_intent(operation, candidate, node),
         )
 
     async def _block(
@@ -1298,16 +1251,16 @@ class ComputeRotation:
                 allocation_id=operation["allocation_id"],
                 source_id=operation["id"],
                 scope=None,
-                **self.reconciler._fence(operation),
+                **self.steps.fence(operation),
             )
-            await self.reconciler._checkpoint(operation, operation["step"], {"hold_set": False})
-        await self._alert(
+            await self.steps.checkpoint(operation, operation["step"], {"hold_set": False})
+        await self.steps.alert(
             operation,
             "compute_rotation_failed" if critical else "compute_rotation_blocked",
             host=slot["host"] if slot else operation["allocation_id"],
             reason=code,
         )
-        await self.reconciler._checkpoint(
+        await self.steps.checkpoint(
             operation,
             operation["step"],
             {
@@ -1316,31 +1269,10 @@ class ComputeRotation:
                 "alerts": [],
             },
         )
-        await self.reconciler._finish(
+        await self.steps.finish(
             operation,
             "blocked",
             operation["step"],
             message,
             result={"blocked_reasons": [{"code": code, "message": message}]},
         )
-
-    async def _alert(
-        self, operation: dict[str, Any], event: str, *, host: str, reason: str
-    ) -> None:
-        """Alert once per operation and event; delivery failures never stop the work."""
-        sent = list((operation.get("result") or {}).get("alerts") or [])
-        if event in sent:
-            return
-        await self._notify(event, host=host, reason=reason)
-        await self.reconciler._checkpoint(operation, operation["step"], {"alerts": [*sent, event]})
-
-    @staticmethod
-    async def _notify(event: str, *, host: str, reason: str) -> None:
-        logger.warning(event, extra={"host": host, "reason": reason})
-        try:
-            await deliver_event(event, {"host": host, "reason": reason})
-        except Exception as exc:
-            logger.warning(
-                "compute_alert_delivery_failed",
-                extra={"event": event, "error_type": type(exc).__name__},
-            )
