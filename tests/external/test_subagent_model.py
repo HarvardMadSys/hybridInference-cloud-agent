@@ -219,9 +219,8 @@ def _run_delegation(tmp_path, monkeypatch, model, setting, tool_model=None):
     config = tmp_path / "config"
     workdir.mkdir()
     config.mkdir()
-    _argv, runtime_env = ClaudeCodeRuntime().prepare(
+    _argv, runtime_env = ClaudeCodeRuntime().prepare_live(
         workdir=str(workdir),
-        task_prompt="delegate once",
         model=model,
         gateway_base_url=f"http://127.0.0.1:{gateway.port}",
         credential="one-model-grant",

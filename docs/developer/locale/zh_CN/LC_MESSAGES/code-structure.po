@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: HybridInference Cloud Agent \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-19 03:26-0400\n"
+"POT-Creation-Date: 2026-10-20 16:29+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: The HybridInference contributors\n"
 "Language: zh_CN\n"
@@ -438,16 +438,16 @@ msgid "`claude.py`, `codex.py`, `pi.py`, `opencode.py`, `kilo.py`"
 msgstr ""
 
 #: ../developer/code-structure.md
-msgid "One CLI dialect's commands and event parsing"
-msgstr "某一种 CLI 的命令格式和事件解析"
+msgid "One CLI's live launch; Claude's and pi's event parsing"
+msgstr "某一种 CLI 的常驻进程启动方式；Claude 和 pi 的事件解析"
 
 #: ../developer/code-structure.md
-msgid "`generic.py`"
+msgid "`http_bridge.py`"
 msgstr ""
 
 #: ../developer/code-structure.md
-msgid "The generic line-oriented adapter"
-msgstr "通用的按行解析的适配器"
+msgid "The live launch OpenCode and Kilo share, behind the HTTP bridge"
+msgstr "OpenCode 和 Kilo 共用的常驻进程启动方式，经由 HTTP 桥接"
 
 #: ../developer/code-structure.md
 msgid "`registry.py`"

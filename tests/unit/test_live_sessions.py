@@ -9,6 +9,7 @@ a mid-session model switch.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 
 import pytest
@@ -726,6 +727,31 @@ def test_codex_app_server_two_turns_and_prompt_free_fork(tmp_path):
     assert fork["params"]["lastTurnId"] == "turn-a"
     assert fork["params"]["excludeTurns"] is True
     assert all("one" not in json.dumps(line) for line in sent if line is fork)
+
+
+@pytest.mark.parametrize(
+    ("isolated", "sandbox"), [(True, "danger-full-access"), (False, "workspace-write")]
+)
+def test_codex_sandbox_mode_follows_the_backend_boundary(tmp_path, isolated, sandbox):
+    """Only an outer sandbox may replace Codex's own workspace sandbox.
+
+    The owner's model reaches the CLI the same way: with the thread, not on argv.
+    """
+    process = _LiveProcess()
+    context, _spawned = _protocol_context(process, tmp_path)
+    context = dataclasses.replace(context, provides_isolation=isolated)
+    process.feed = _turn_lines(
+        {"id": "initialize-1", "result": {"userAgent": "codex"}},
+        {"id": "thread-2", "result": {"thread": {"id": "thread-a"}}},
+    )
+    session = driver_for(CodexRuntime()).launch_live(context)
+    session.ensure_started(model="glm-5.1", reasoning_effort=None)
+
+    sent = [json.loads(line) for line in process.sent]
+    start = next(line for line in sent if line.get("method") == "thread/start")
+    assert start["params"]["sandbox"] == sandbox
+    assert start["params"]["model"] == "glm-5.1"
+    assert start["params"]["modelProvider"] == "hybridinference"
 
 
 def test_codex_mutable_tool_updates_emit_one_tool_use(tmp_path):

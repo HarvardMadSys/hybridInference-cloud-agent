@@ -1,14 +1,17 @@
 """Agent CLI dialect adapters, exposed through a stable package API.
 
-Each CLI module owns command construction and event normalization. ``base``
-defines adapter and MCP contracts, ``events`` bounds normalized payloads, and
-``preview`` batches partial replies. ``registry`` creates one adapter per run.
-Shared discovery metadata lives in :mod:`cloud_agent_shared.runtime_catalog`
-so the control plane can advertise capabilities without loading host code.
+Each CLI module builds its CLI's resident live process. Claude's and pi's
+also normalize the events their process writes; Codex, OpenCode and Kilo speak
+protocols their sessions in :mod:`cloud_agent_host.drivers` read. ``base``
+defines adapter and MCP contracts, ``http_bridge`` the OpenCode family's
+shared launch, ``events`` bounds normalized payloads, and ``preview`` batches
+partial replies. ``registry`` creates one adapter per run. Shared discovery
+metadata lives in :mod:`cloud_agent_shared.runtime_catalog` so the control
+plane can advertise capabilities without loading host code.
 
-The five adapters preserve unrecognized output as ``raw`` events. Contract
-fixtures under ``tests/fixtures/agent_runtime_streams/`` pin their observed CLI
-formats; version pins and image wrappers live alongside ``deploy/sandbox/``.
+The adapters preserve unrecognized output as ``raw`` events. Contract fixtures
+under ``tests/fixtures/agent_runtime_streams/`` pin their observed CLI formats;
+version pins and image wrappers live alongside ``deploy/sandbox/``.
 """
 
 from .base import (
@@ -38,7 +41,6 @@ from .events import (
     USAGE,
     NormalizedEvent,
 )
-from .generic import GenericRuntime
 from .kilo import KiloRuntime
 from .opencode import OpencodeRuntime
 from .pi import PI_MCP_BRIDGE, PiRuntime
@@ -65,7 +67,6 @@ __all__ = [
     "AgentRuntime",
     "ClaudeCodeRuntime",
     "CodexRuntime",
-    "GenericRuntime",
     "KiloRuntime",
     "NormalizedEvent",
     "OpencodeRuntime",

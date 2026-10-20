@@ -1181,10 +1181,7 @@ class _JsonResidentSession(HarnessSession[_LiveRuntimeT], Generic[_LiveRuntimeT]
     def _prepare_live(
         self, *, model: str, reasoning_effort: str | None
     ) -> tuple[list[str], dict[str, str]]:
-        prepare_live = getattr(self.runtime, "prepare_live", None)
-        if prepare_live is None:
-            raise DriverError(f"runtime {self.runtime.name!r} has no live invocation")
-        return prepare_live(
+        return self.runtime.prepare_live(
             workdir=self._context.workdir,
             model=model,
             gateway_base_url=self._context.gateway_base_url,
@@ -1791,34 +1788,6 @@ class PiRpcSession(_JsonResidentSession[PiRuntime]):
     moved to, ``@earendil-works/pi-coding-agent``: the commands this uses, a
     turn, a fork, a clone, a resume, an abort and an automatic retry.
     """
-
-    def __init__(
-        self,
-        driver: LiveDriver[PiRuntime],
-        context: LaunchContext,
-        *,
-        resume_session_id: str | None = None,
-    ) -> None:
-        super().__init__(driver, context, resume_session_id=resume_session_id)
-
-    def _prepare_live(
-        self, *, model: str, reasoning_effort: str | None
-    ) -> tuple[list[str], dict[str, str]]:
-        prepare_live = getattr(self.runtime, "prepare_live", None)
-        if prepare_live is None:
-            raise DriverError("pi has no live invocation")
-        return prepare_live(
-            workdir=self._context.workdir,
-            model=model,
-            gateway_base_url=self._context.gateway_base_url,
-            credential=self._context.credential,
-            provides_isolation=self._context.provides_isolation,
-            mcp_config=self._context.mcp_config,
-            reasoning_effort=reasoning_effort,
-            session_state_dir=self._context.session_state_dir,
-            resume_session_id=self._resume_session_id,
-            activation_dir=self._context.activation_dir,
-        )
 
     def _initialize_protocol(self) -> None:
         request_id = self._request_id("state")
