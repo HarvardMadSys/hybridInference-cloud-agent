@@ -8,7 +8,7 @@ import pytest
 from fastapi import FastAPI, Request
 from httpx import ASGITransport, AsyncClient
 
-from cloud_agent.api import host_profiling, hosts, worker
+from cloud_agent.api import environments, host_profiling, hosts, worker
 from cloud_agent.api._body_limits import MAX_HOST_REQUEST_BODY_BYTES
 from cloud_agent.api.deps import get_storage
 
@@ -105,6 +105,7 @@ def _host_app():
     app.include_router(worker.router)
     app.include_router(hosts.router)
     app.include_router(host_profiling.router)
+    app.include_router(environments.router)
     app.dependency_overrides[get_storage] = lambda: SimpleNamespace()
     return app
 
@@ -112,6 +113,10 @@ def _host_app():
 @pytest.mark.parametrize(
     "path",
     [
+        "/v1/agent/worker/environment-runs/claim",
+        "/v1/agent/worker/environment-runs/run-body-limit",
+        "/v1/agent/worker/environment-snapshots/retired",
+        "/v1/agent/worker/environment-snapshots/snapshot-body-limit/deleted",
         "/v1/agent/worker/jobs/job-body-limit/events",
         "/v1/agent/worker/jobs/job-body-limit/finish",
         "/v1/agent/worker/claim",

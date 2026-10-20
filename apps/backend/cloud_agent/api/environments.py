@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from cloud_agent.api._body_limits import HostBodyLimitRoute
 from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api._workspace_access import fence_workspace_start
 from cloud_agent.api.deps import (
@@ -125,7 +126,16 @@ class CredentialSafeRoute(APIRoute):
         return safe
 
 
+class _HostRoute(CredentialSafeRoute, HostBodyLimitRoute):
+    """A route hosts call: the host body ceiling first, then the safe error answers.
+
+    Hosts reach these through their tunnel, where no edge limit applies.
+    """
+
+
 router = APIRouter(prefix="/v1/agent", tags=["environments"], route_class=CredentialSafeRoute)
+# Included into ``router``, and so under its prefix, at the end of this module.
+_host_router = APIRouter(route_class=_HostRoute)
 
 
 class RevisionInput(BaseModel):
@@ -693,7 +703,7 @@ async def cancel_test(
     return await require_store(store).environments.cancel_environment_run(user["user_id"], run_id)
 
 
-@router.get("/worker/environment-runs/orphans")
+@_host_router.get("/worker/environment-runs/orphans")
 async def orphan_tests(
     host: dict[str, str] = Depends(verify_claiming_host), store: Any = Depends(get_storage)
 ) -> dict[str, Any]:
@@ -701,7 +711,7 @@ async def orphan_tests(
     return {"runs": await require_store(store).environments.list_environment_orphans(host["host"])}
 
 
-@router.post("/worker/environment-runs/claim")
+@_host_router.post("/worker/environment-runs/claim")
 async def claim_environment_test(
     body: ClaimTestInput,
     host: dict[str, str] = Depends(verify_claiming_host),
@@ -760,7 +770,7 @@ async def claim_environment_test(
     }
 
 
-@router.post("/worker/environment-runs/{run_id}")
+@_host_router.post("/worker/environment-runs/{run_id}")
 async def report_test(
     run_id: str,
     body: TestUpdate,
@@ -792,7 +802,7 @@ async def report_test(
     return {"accepted": True}
 
 
-@router.get("/worker/environment-snapshots/deletions")
+@_host_router.get("/worker/environment-snapshots/deletions")
 async def snapshot_deletions(
     host: dict[str, str] = Depends(verify_claiming_host), store: Any = Depends(get_storage)
 ) -> dict[str, Any]:
@@ -809,7 +819,7 @@ class LocalSnapshotImages(BaseModel):
     snapshot_ids: list[Annotated[str, Field(pattern=r"^[0-9a-f]{32}$")]] = Field(max_length=500)
 
 
-@router.post("/worker/environment-snapshots/retired")
+@_host_router.post("/worker/environment-snapshots/retired")
 async def retired_snapshot_images(
     body: LocalSnapshotImages,
     host: dict[str, str] = Depends(verify_claiming_host),
@@ -823,7 +833,7 @@ async def retired_snapshot_images(
     return {"snapshots": await snapshots.retired_images(body.snapshot_ids)}
 
 
-@router.post("/worker/environment-snapshots/{snapshot_id}/deleted", status_code=204)
+@_host_router.post("/worker/environment-snapshots/{snapshot_id}/deleted", status_code=204)
 async def snapshot_deleted(
     snapshot_id: str,
     host: dict[str, str] = Depends(verify_claiming_host),
@@ -1144,3 +1154,6 @@ async def skip_environment_start(
         user["user_id"], job["environment_binding_id"], job_id
     )
     return {"skip_start_next_turn": True}
+
+
+router.include_router(_host_router)
