@@ -563,6 +563,7 @@ class SandboxArchiveS3Uploader:
             existing = self._get_client().head_object(
                 Bucket=self.config.bucket, Key=key, **self._owner_arguments()
             )
+            self._check_deadline(deadline)
             if not self._matching_initial_head(
                 existing, size=size, digest=digest, phase="checkpoint"
             ):

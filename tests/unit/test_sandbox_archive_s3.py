@@ -1099,6 +1099,55 @@ def test_checkpoint_retry_refuses_different_existing_bytes() -> None:
         _upload_checkpoint(uploader, payload)
 
 
+@pytest.mark.parametrize("kind", ["checkpoint", "environment snapshot"])
+def test_an_existing_object_found_after_the_deadline_is_not_accepted(kind: str) -> None:
+    """A retry that finds its own earlier write still answers within its deadline.
+
+    The refused put is followed by two HEADs of the existing object: one that
+    proves it is this upload's, then the one the receipt is read from. Only
+    the second is slow here.
+    """
+    payload = b"oci-archive"
+    now = 0.0
+
+    class SlowHeadClient(RecordingS3Client):
+        def head_object(self, **kwargs: Any) -> dict[str, Any]:
+            nonlocal now
+            response = super().head_object(**kwargs)
+            if [call[0] for call in self.calls].count("head_object") == 2:
+                now = 2.0
+            return response
+
+    head = _matching_head(payload) | {
+        "ContentType": "application/x-tar",
+        "Metadata": {
+            "archive-phase": "checkpoint",
+            "archive-format": "oci-layer-archive-v1",
+            "archive-size-bytes": str(len(payload)),
+            "archive-sha256": hashlib.sha256(payload).hexdigest(),
+        },
+    }
+    client = SlowHeadClient(put_error=PreconditionFailure(), head_response=head)
+    uploader = SandboxArchiveS3Uploader(_config(), client=client, clock=lambda: now)
+    upload = {
+        "body": io.BytesIO(payload),
+        "size": len(payload),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "deadline": 1.0,
+    }
+
+    with pytest.raises(SandboxArchiveDeadlineExceeded, match="deadline exceeded"):
+        if kind == "checkpoint":
+            uploader.upload_checkpoint(
+                sandbox_id=_SANDBOX_ID,
+                generation=_GENERATION,
+                checkpoint_id=_CHECKPOINT_ID,
+                **upload,
+            )
+        else:
+            uploader.upload_environment_snapshot(owner="a" * 64, snapshot_id="b" * 32, **upload)
+
+
 @pytest.mark.parametrize("checkpoint_id", ["", "F" * 32, "f" * 31, "../" + "f" * 29])
 def test_checkpoint_key_refuses_a_malformed_id(checkpoint_id: str) -> None:
     with pytest.raises(SandboxArchiveUploadError, match="checkpoint id"):
