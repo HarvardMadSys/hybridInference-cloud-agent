@@ -90,7 +90,6 @@ import { SkillDialog } from './skills/SkillDialog';
 import { AgentReadProvider } from './AgentReadProvider';
 import { useAgentJob } from './useAgentJobs';
 import { ArchivedTasksView } from './ArchivedTasksView';
-import { announceConversationRestored } from './conversationEvents';
 import { DEFAULT_PREFERENCES, sidebarPreferencesKey } from './sidebarPreferences';
 import { SIDEBAR_ACTIVITY_REFRESH_MS } from './sidebarRecordChanges';
 import {
@@ -1325,20 +1324,5 @@ describe('sidebar navigation interactions', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Close search' }));
     expect(await screen.findByRole('link', { name: 'Task old' })).toHaveAttribute('href', '/old');
     expect(old.last_activity_at).toBe('2025-01-01T00:00:00Z');
-  });
-  it('ignores restore invalidation from a different signed-in account', async () => {
-    render(<AgentsSidebar />);
-    await screen.findByText('Task a');
-    api.list.mockClear();
-    api.projects.mockClear();
-    act(() => announceConversationRestored({ threadId: 'thread-a', userId: 'bob' }));
-    expect(api.list).not.toHaveBeenCalled();
-    expect(api.projects).not.toHaveBeenCalled();
-    act(() => announceConversationRestored({ threadId: 'thread-a', userId: 'alice' }));
-    await waitFor(() => expect(api.projects).toHaveBeenCalledOnce());
-    expect(api.list).toHaveBeenCalledWith(
-      expect.objectContaining({ repo: 'owner/repo' }),
-      expect.any(AbortSignal),
-    );
   });
 });

@@ -8,7 +8,7 @@ import { forkAgentJob, getAgentJob, getAgentJobThread, type AgentJobApi } from '
 import { submitThreadMessage } from '@/lib/api/pendingMessages';
 import { APIError } from '@/lib/utils/errors';
 import type { AgentJob } from './types';
-import { sideChatStorageKey, useSideChatSession } from './useSideChatSession';
+import { useSideChatSession } from './useSideChatSession';
 import { sideChatKeys } from './sideChatStorage';
 
 vi.mock('@/lib/api/agents', () => ({
@@ -97,7 +97,7 @@ describe('native side chat session', () => {
     expect(localStorage.getItem(sideChatKeys(userId, 'main', 'side-chat-new').session)).toContain(
       'side-copy',
     );
-    expect(localStorage.getItem(sideChatStorageKey(userId, 'main'))).toBeNull();
+    expect(localStorage.getItem(sideChatKeys(userId, 'main').session)).toBeNull();
   });
 
   it('does nothing until selected and coalesces StrictMode creation', async () => {
@@ -265,7 +265,7 @@ describe('native side chat session', () => {
     'rejects a saved child with the wrong %s',
     async (mismatch) => {
       localStorage.setItem(
-        sideChatStorageKey(userId, 'main'),
+        sideChatKeys(userId, 'main').session,
         JSON.stringify({
           anchorJobId: anchor.id,
           sandboxId: 'sandbox',
@@ -302,7 +302,7 @@ describe('side chat durable recovery', () => {
     operation: { id: 'durable-id', state: 'unknown' },
   });
   it('restores a valid localStorage receipt without any in-memory state', async () => {
-    localStorage.setItem(sideChatStorageKey(userId, 'main'), JSON.stringify(record()));
+    localStorage.setItem(sideChatKeys(userId, 'main').session, JSON.stringify(record()));
     const { result } = renderHook(() => useSideChatSession(source, userId, true));
     await waitFor(() => expect(result.current.status).toBe('ready'));
     expect(result.current.session?.jobId).toBe(copied.id);
@@ -319,7 +319,7 @@ describe('side chat durable recovery', () => {
     vi.mocked(forkAgentJob).mockResolvedValueOnce({ ...copied, sandbox_id: 'wrong' });
     const { result } = renderHook(() => useSideChatSession(source, userId, true));
     await waitFor(() => expect(result.current.error).toBe('sideChat.invalidChild'));
-    expect(JSON.parse(localStorage.getItem(sideChatStorageKey(userId, 'main'))!).jobId).toBe(
+    expect(JSON.parse(localStorage.getItem(sideChatKeys(userId, 'main').session)!).jobId).toBe(
       copied.id,
     );
     act(() => result.current.retry());
@@ -374,16 +374,16 @@ describe('side chat durable recovery', () => {
     expect(result.current.status).toBe('ready');
   });
   it('recovers a deleted child on retry instead of keeping a dead locator', async () => {
-    localStorage.setItem(sideChatStorageKey(userId, 'main'), JSON.stringify(record()));
+    localStorage.setItem(sideChatKeys(userId, 'main').session, JSON.stringify(record()));
     vi.mocked(getAgentJobThread).mockResolvedValueOnce(null);
     const { result } = renderHook(() => useSideChatSession(source, userId, true));
     await waitFor(() => expect(result.current.error).toBe('sideChat.deleted'));
-    expect(localStorage.getItem(sideChatStorageKey(userId, 'main'))).toBeNull();
+    expect(localStorage.getItem(sideChatKeys(userId, 'main').session)).toBeNull();
     act(() => result.current.retry());
     await waitFor(() => expect(result.current.status).toBe('ready'));
   });
   it('offers explicit recovery for corrupt storage and does not leak JSON parser errors', async () => {
-    localStorage.setItem(sideChatStorageKey(userId, 'main'), '{bad');
+    localStorage.setItem(sideChatKeys(userId, 'main').session, '{bad');
     const { result } = renderHook(() => useSideChatSession(source, userId, true));
     await waitFor(() => expect(result.current.error).toBe('sideChat.invalidRecord'));
     expect(result.current.recoverable).toBe(true);

@@ -130,20 +130,3 @@ describe('safeReturnTo', () => {
     expect(safeReturnTo('')).toBe('/');
   });
 });
-
-describe('beginSignIn', () => {
-  it('navigates rather than routing, because the trip leaves this origin', async () => {
-    const { beginSignIn } = await loadSignin('', 'https://agents.example/api');
-    const assign = vi.fn();
-    Object.defineProperty(window, 'location', {
-      configurable: true,
-      value: { ...window.location, assign, origin: 'https://agents.example' },
-    });
-
-    await beginSignIn('/archived');
-
-    expect(assign).toHaveBeenCalledWith(
-      'https://agents.example/api/v1/session/login?return_to=%2Farchived',
-    );
-  });
-});

@@ -35,7 +35,6 @@ import { codeReviewFixPrompt } from './codeReview';
 import { sideChatKeys } from './sideChatStorage';
 import { SideChat } from './SideChat';
 import { conversationReadStorageKey } from './useConversationReadState';
-import { sideChatStorageKey } from './useSideChatSession';
 import { answerThreadQuestion, listThreadQuestions } from '@/lib/api/questions';
 import type { SideChatTab } from './useWorkspaceTabs';
 import { deleteAttachment, uploadAttachment, type AttachmentApi } from '@/lib/api/attachments';
@@ -511,7 +510,7 @@ describe('Side Chat', () => {
     expect(screen.getByRole('textbox')).toHaveValue('Why keep the files?');
     expect(screen.queryByText('Later main question')).not.toBeInTheDocument();
     expect(forkAgentJob).toHaveBeenCalledTimes(1);
-    expect(JSON.parse(localStorage.getItem(sideChatStorageKey(userId, 'main'))!)).toMatchObject({
+    expect(JSON.parse(localStorage.getItem(sideChatKeys(userId, 'main').session)!)).toMatchObject({
       anchorJobId: 'main-2',
       jobId: 'side-copy',
     });

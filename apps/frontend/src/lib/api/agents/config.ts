@@ -16,8 +16,6 @@ export interface AgentConfigApi {
   runtimes: string[];
   /** Models an agent job can actually call — the create endpoint's own list. */
   models: string[];
-  /** MCP servers this deployment offers. Never carries a URL or a credential. */
-  mcp_servers?: AgentMcpServerApi[];
   /** Runtimes that can be given MCP servers; others refuse such a job. */
   mcp_runtimes?: string[];
   /** Runtimes that install task-selected plugins when a sandbox is initialized. */
@@ -47,15 +45,6 @@ export interface AgentConfigApi {
    * Absent on a control plane that predates it, which then reads as before.
    */
   github_load_status?: SourceControlLoadStatus;
-}
-
-export interface AgentMcpServerApi {
-  name: string;
-  description: string;
-  /** Tools exposed. Empty means every tool the server offers. */
-  tools: string[];
-  /** Applied when a job does not choose its servers explicitly. */
-  default: boolean;
 }
 
 /**

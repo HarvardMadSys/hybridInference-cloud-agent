@@ -26,7 +26,6 @@ vi.mock('@/lib/api/compute', () => ({
   removeComputeServer: vi.fn(),
   getComputeOperations: vi.fn(),
   createComputeServer: vi.fn(),
-  preflightComputeServer: vi.fn(),
   importComputeResource: vi.fn(),
   saveComputeDeploymentProfile: vi.fn(),
   getComputeAutomaticSetup: vi.fn(),
@@ -818,7 +817,6 @@ describe('server acquisition UI', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Add server' }));
     await waitFor(() => expect(received).toHaveBeenCalledWith(next, true));
     expect(api.createComputeServer).toHaveBeenCalledOnce();
-    expect(api.preflightComputeServer).not.toHaveBeenCalled();
   });
 });
 

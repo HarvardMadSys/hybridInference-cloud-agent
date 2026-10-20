@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { AgentJobApi, AgentJobEventApi, AgentThreadEventApi } from '@/lib/api/agents';
-import { createRecordedOutputsSelector, recordedTurnOutputs } from './recordedTurnOutputs';
+import { createRecordedOutputsSelector } from './recordedTurnOutputs';
 
 const JOB: Pick<AgentJobApi, 'id' | 'state' | 'published_pr_url' | 'current_attempt_id'> = {
   id: 'old-turn',
@@ -21,6 +21,14 @@ function patch(path = 'src/app.tsx'): string {
     '+new',
     '',
   ].join('\n');
+}
+
+/** One turn's outputs, read the way the job page reads them. */
+function recordedTurnOutputs(
+  job: typeof JOB,
+  events: readonly (AgentJobEventApi | AgentThreadEventApi)[],
+) {
+  return createRecordedOutputsSelector().select([job], events).get(job.id) ?? null;
 }
 
 function event(text: string, seq = 1): AgentJobEventApi {

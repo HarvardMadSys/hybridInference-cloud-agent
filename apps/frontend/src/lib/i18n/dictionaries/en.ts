@@ -480,7 +480,6 @@ export const en = {
   'sidebar.archived': 'Archived',
   'sidebar.noJobs': 'No jobs yet.',
   'sidebar.resize': 'Resize task list',
-  'sidebar.showMore': 'Show {count} more',
   'sidebar.newTaskIn': 'New task in {project}',
   'sidebar.runningOrQueued': '{count} running or queued',
   'sidebar.pin': 'Pin {title}',
@@ -563,8 +562,6 @@ export const en = {
   'settings.helpEnvironment': '2. Set up a repository environment (optional)',
   'settings.helpChat': '3. Start a chat',
   'settings.title': 'My Settings',
-  'settings.description':
-    'Manage your profile, connections, skills, memory, notifications, and keyboard shortcuts.',
   'settings.shortcuts.title': 'Keyboard shortcuts',
   'settings.shortcuts.description':
     'Customize navigation shortcuts. Changes apply immediately and are saved for your account in this browser.',
@@ -636,7 +633,6 @@ export const en = {
   'settings.memory.addLabel': 'New memory',
   'settings.memory.addPlaceholder': 'A rule to follow from now on, such as: Reply in Chinese.',
   'settings.memory.add': 'Add',
-  'settings.memory.adding': 'Adding…',
   'settings.memory.memories': 'Saved memories',
   'settings.memory.count': '{count}/30',
   'settings.memory.empty':
@@ -789,13 +785,11 @@ export const en = {
     'Unarchive this session to use its terminal. Git and files remain available for viewing.',
 
   'settings.appearance.title': 'Appearance',
-  'settings.appearance.theme': 'Theme',
   'settings.appearance.light': 'Light',
   'settings.appearance.dark': 'Dark',
   'settings.appearance.system': 'System',
 
   'settings.language.title': 'Language',
-  'settings.language.label': 'Display language',
 
   'settings.gettingStarted.about': 'What is getting started?',
   'settings.gettingStarted.help': 'Takes you from connecting GitHub to your first task.',
