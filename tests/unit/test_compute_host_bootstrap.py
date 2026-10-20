@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import io
 import json
+import os
 import shlex
 import tarfile
 import threading
@@ -682,6 +683,7 @@ def test_remote_inventory_only_exempts_exact_current_host_enrollment_files(
         "identity": {"host": INTENT.host, "node_id": INTENT.node_id},
     }
     monkeypatch.setattr("sys.argv", ["remote", json.dumps(params)])
+    monkeypatch.setattr("sys.stdin", io.StringIO(""))
     monkeypatch.setattr("shutil.which", lambda command: "/usr/bin/docker")
     # The complete Docker inventory is empty; only on-disk state distinguishes
     # the safe fresh Host from another Host's unobserved retained files.
@@ -696,7 +698,10 @@ def test_remote_inventory_only_exempts_exact_current_host_enrollment_files(
 
 
 def _run_inventory(tmp_path, monkeypatch, capsys, recorded=None) -> dict:
-    """Run the shipped inventory script over ``tmp_path / "machine"`` with empty Docker."""
+    """Run the shipped inventory script over ``tmp_path / "machine"`` with empty Docker.
+
+    ``recorded`` arrives on standard input, as ``SshHostBootstrap.inventory`` sends it.
+    """
     import pathlib
 
     filesystem = tmp_path / "machine"
@@ -713,9 +718,11 @@ def _run_inventory(tmp_path, monkeypatch, capsys, recorded=None) -> dict:
     params = {
         "root": str(tmp_path / "no-deploy-yet"),
         "identity": {"host": INTENT.host, "node_id": INTENT.node_id},
-        "recorded": recorded or {"checkpoints": {}, "removals": []},
     }
     monkeypatch.setattr("sys.argv", ["remote", json.dumps(params)])
+    monkeypatch.setattr(
+        "sys.stdin", io.StringIO(json.dumps(recorded or {"checkpoints": {}, "removals": {}}))
+    )
     monkeypatch.setattr("shutil.which", lambda command: "/usr/bin/docker")
     monkeypatch.setattr("subprocess.check_output", lambda args, **kwargs: "")
     with monkeypatch.context() as local:
@@ -734,8 +741,52 @@ def _host_archives(tmp_path) -> Path:
     return state / "sandbox-archives"
 
 
-def _discarded(archives: Path, request_id: str, *, finish: bool = True) -> None:
-    """Remove one stopped container through the Host's own discard, leaving its receipts."""
+#: The checkpoint fields the control plane records, as ``recorded_host_state`` returns them.
+_CHECKPOINT_FIELDS = (
+    "checkpoint_id",
+    "sandbox_id",
+    "generation",
+    "container_id",
+    "base_image",
+    "runtime_id",
+    "runtime_version",
+    "object_key",
+    "version_id",
+    "sha256",
+    "size_bytes",
+    "new_layer_bytes",
+    "layer_count",
+    "format_version",
+    "start_seq",
+)
+
+#: What the control plane recorded of the removal ``_discarded`` carries out.
+_REMOVAL = {
+    "thread_id": "thread-origin",
+    "sandbox_id": "sandbox-1",
+    "generation": 2,
+    "container_id": "container-1",
+}
+
+
+def _saved_checkpoint(archives: Path, sandbox_id: str = "asbx_one") -> dict:
+    """Have the Host's checkpoint store keep a receipt; return what the control plane recorded."""
+    from tests.unit.test_sandbox_checkpoints import _receipt
+
+    from cloud_agent_host.sandbox_checkpoints import SandboxCheckpointStore
+
+    receipt = _receipt(sandbox_id)
+    SandboxCheckpointStore(archives / "checkpoints").save(receipt)
+    return {key: receipt.as_dict()[key] for key in _CHECKPOINT_FIELDS}
+
+
+def _discarded(
+    archives: Path, request_id: str, *, finish: bool = True, absent: bool = False
+) -> None:
+    """Remove one stopped container through the Host's own discard, leaving its receipts.
+
+    With ``absent`` the container is already gone, and the discard proves it.
+    """
     from tests.unit.test_sandbox_archive import _Manager
 
     from cloud_agent_host.chat_sandbox import ChatSandboxSpec
@@ -750,78 +801,115 @@ def _discarded(archives: Path, request_id: str, *, finish: bool = True) -> None:
     )
     manager = _Manager(spec)
     supervisor = SharedChatSessionSupervisor(manager)
-    supervisor.register_manifest(
-        spec,
-        [
-            SharedMemberManifest(
-                thread_id="thread-origin", native_session_id="native", resident_slot_id=0
-            )
-        ],
-        expected_container_id="container-1",
-    )
+    if absent:
+        manager.current = None
+    else:
+        supervisor.register_manifest(
+            spec,
+            [
+                SharedMemberManifest(
+                    thread_id="thread-origin", native_session_id="native", resident_slot_id=0
+                )
+            ],
+            expected_container_id="container-1",
+        )
     service = SandboxArchiveService(supervisor, state_dir=archives)
     identity = ArchiveIdentity("thread-origin", request_id, 2, "container-1", "")
-    service.discard(identity)
-    assert manager.removals == 1
+    service.discard(identity, sandbox_id="sandbox-1")
+    assert manager.removals == (0 if absent else 1)
     if not finish:
         (service._directory(identity) / "discarded.json").unlink()
 
 
-@pytest.mark.parametrize(
-    ("recorded", "retained"),
-    [
-        ({"asbx_one": "c" * 32}, False),
-        ({}, True),
-        ({"asbx_one": "f" * 32}, True),
-        ({"asbx_two": "c" * 32}, True),
-    ],
-)
-def test_inventory_excuses_only_the_checkpoint_receipt_the_control_plane_recorded(
-    tmp_path, monkeypatch, capsys, recorded, retained
+def test_inventory_excuses_the_checkpoint_receipt_the_control_plane_recorded(
+    tmp_path, monkeypatch, capsys
 ):
     """A Host keeps each sandbox's latest checkpoint receipt; its data is in object storage."""
-    from tests.unit.test_sandbox_checkpoints import _receipt
-
-    from cloud_agent_host.sandbox_checkpoints import SandboxCheckpointStore
-
     archives = _host_archives(tmp_path)
-    SandboxCheckpointStore(archives / "checkpoints").save(_receipt("asbx_one"))
+    expected = _saved_checkpoint(archives)
 
-    result = _run_inventory(
-        tmp_path, monkeypatch, capsys, {"checkpoints": recorded, "removals": []}
-    )
-    assert result["orphan_state"] is retained
+    recorded = {"checkpoints": {"asbx_one": expected}, "removals": {}}
+    assert _run_inventory(tmp_path, monkeypatch, capsys, recorded)["orphan_state"] is False
+    assert _run_inventory(tmp_path, monkeypatch, capsys)["orphan_state"] is True
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [
+        {"checkpoint_id": "f" * 32},
+        {"generation": 4},
+        {"container_id": "container-other"},
+        {"object_key": "cloud-agent/sandbox/v2/other.oci.tar"},
+        {"version_id": "v2"},
+        {"sha256": "f" * 64},
+        {"size_bytes": 1},
+        {"start_seq": 7},
+    ],
+)
+def test_inventory_counts_a_checkpoint_receipt_that_differs_from_the_record(
+    tmp_path, monkeypatch, capsys, changed
+):
+    archives = _host_archives(tmp_path)
+    expected = _saved_checkpoint(archives)
+
+    recorded = {"checkpoints": {"asbx_one": {**expected, **changed}}, "removals": {}}
+    assert _run_inventory(tmp_path, monkeypatch, capsys, recorded)["orphan_state"] is True
+
+
+@pytest.mark.parametrize("kept", [("sandbox_id", "checkpoint_id"), ()])
+def test_inventory_counts_a_checkpoint_receipt_missing_what_was_recorded(
+    tmp_path, monkeypatch, capsys, kept
+):
+    archives = _host_archives(tmp_path)
+    expected = _saved_checkpoint(archives)
+    path = archives / "checkpoints" / (hashlib.sha256(b"asbx_one").hexdigest() + ".json")
+    stored = json.loads(path.read_text())
+    path.write_text(json.dumps({key: stored[key] for key in kept}))
+
+    recorded = {"checkpoints": {"asbx_one": expected}, "removals": {}}
+    assert _run_inventory(tmp_path, monkeypatch, capsys, recorded)["orphan_state"] is True
 
 
 def test_inventory_never_excuses_a_receipt_filed_under_another_sandbox(
     tmp_path, monkeypatch, capsys
 ):
-    from tests.unit.test_sandbox_checkpoints import _receipt
-
-    from cloud_agent_host.sandbox_checkpoints import SandboxCheckpointStore
-
     archives = _host_archives(tmp_path)
-    SandboxCheckpointStore(archives / "checkpoints").save(_receipt("asbx_one"))
+    expected = _saved_checkpoint(archives)
     one = archives / "checkpoints" / (hashlib.sha256(b"asbx_one").hexdigest() + ".json")
     one.rename(one.with_name(hashlib.sha256(b"asbx_two").hexdigest() + ".json"))
 
-    recorded = {"checkpoints": {"asbx_two": "c" * 32}, "removals": []}
+    recorded = {"checkpoints": {"asbx_two": {**expected, "sandbox_id": "asbx_two"}}, "removals": {}}
     assert _run_inventory(tmp_path, monkeypatch, capsys, recorded)["orphan_state"] is True
 
 
+@pytest.mark.parametrize("absent", [False, True])
+def test_inventory_excuses_a_confirmed_removals_finished_receipts(
+    tmp_path, monkeypatch, capsys, absent
+):
+    """Both forms the Host writes: the container it removed, or one it proved gone."""
+    archives = _host_archives(tmp_path)
+    _discarded(archives, "superseded-1", absent=absent)
+
+    recorded = {"checkpoints": {}, "removals": {"superseded-1": _REMOVAL}}
+    assert _run_inventory(tmp_path, monkeypatch, capsys, recorded)["orphan_state"] is False
+
+
 @pytest.mark.parametrize(
-    ("removals", "finish", "extra", "retained"),
+    ("removals", "finish", "extra"),
     [
-        (["superseded-1"], True, None, False),
-        ([], True, None, True),
-        (["superseded-2"], True, None, True),
+        ({}, True, None),
+        ({"superseded-2": _REMOVAL}, True, None),
         # The Host recorded the request but never finished it.
-        (["superseded-1"], False, None, True),
-        (["superseded-1"], True, "archive.tar", True),
+        ({"superseded-1": _REMOVAL}, False, None),
+        ({"superseded-1": _REMOVAL}, True, "archive.tar"),
+        ({"superseded-1": {**_REMOVAL, "thread_id": "thread-other"}}, True, None),
+        ({"superseded-1": {**_REMOVAL, "generation": 999}}, True, None),
+        ({"superseded-1": {**_REMOVAL, "container_id": "container-other"}}, True, None),
+        ({"superseded-1": {**_REMOVAL, "sandbox_id": "sandbox-other"}}, True, None),
     ],
 )
-def test_inventory_excuses_only_a_confirmed_removals_finished_receipts(
-    tmp_path, monkeypatch, capsys, removals, finish, extra, retained
+def test_inventory_counts_receipts_of_any_other_removal(
+    tmp_path, monkeypatch, capsys, removals, finish, extra
 ):
     archives = _host_archives(tmp_path)
     _discarded(archives, "superseded-1", finish=finish)
@@ -832,7 +920,48 @@ def test_inventory_excuses_only_a_confirmed_removals_finished_receipts(
     result = _run_inventory(
         tmp_path, monkeypatch, capsys, {"checkpoints": {}, "removals": removals}
     )
-    assert result["orphan_state"] is retained
+    assert result["orphan_state"] is True
+
+
+@pytest.mark.parametrize(
+    "names", [("discard.json",), ("discarded.json",), ("discard.json", "discarded.json")]
+)
+@pytest.mark.parametrize(
+    "rewrite",
+    [
+        # Another removal, the receipts agreeing with each other where both change.
+        lambda receipt: {
+            **receipt,
+            "identity": {**receipt["identity"], "generation": 999, "container_id": "other"},
+        },
+        lambda receipt: {"identity": {"request_id": receipt["identity"]["request_id"]}},
+        lambda receipt: {**receipt, "sandbox_id": "sandbox-1", "target_absent": True},
+    ],
+)
+def test_inventory_counts_receipts_that_do_not_record_the_removal(
+    tmp_path, monkeypatch, capsys, names, rewrite
+):
+    archives = _host_archives(tmp_path)
+    _discarded(archives, "superseded-1")
+    directory = archives / hashlib.sha256(b"superseded-1").hexdigest()
+    for name in names:
+        path = directory / name
+        path.write_text(json.dumps(rewrite(json.loads(path.read_text()))))
+
+    recorded = {"checkpoints": {}, "removals": {"superseded-1": _REMOVAL}}
+    assert _run_inventory(tmp_path, monkeypatch, capsys, recorded)["orphan_state"] is True
+
+
+def test_inventory_counts_a_discard_whose_spec_names_another_group(tmp_path, monkeypatch, capsys):
+    archives = _host_archives(tmp_path)
+    _discarded(archives, "superseded-1")
+    path = archives / hashlib.sha256(b"superseded-1").hexdigest() / "discard.json"
+    started = json.loads(path.read_text())
+    started["spec"]["sandbox_id"] = "sandbox-other"
+    path.write_text(json.dumps(started))
+
+    recorded = {"checkpoints": {}, "removals": {"superseded-1": _REMOVAL}}
+    assert _run_inventory(tmp_path, monkeypatch, capsys, recorded)["orphan_state"] is True
 
 
 def test_inventory_never_excuses_receipts_filed_under_another_request(
@@ -844,8 +973,59 @@ def test_inventory_never_excuses_receipts_filed_under_another_request(
         archives / hashlib.sha256(b"superseded-1").hexdigest()
     )
 
-    recorded = {"checkpoints": {}, "removals": ["superseded-1"]}
+    recorded = {"checkpoints": {}, "removals": {"superseded-1": _REMOVAL}}
     assert _run_inventory(tmp_path, monkeypatch, capsys, recorded)["orphan_state"] is True
+
+
+@pytest.mark.asyncio
+async def test_inventory_records_travel_on_stdin_through_a_real_ssh_client_process(
+    tmp_path, monkeypatch
+):
+    """A Host with a long history still gets a command line of fixed length.
+
+    Only the ``ssh`` binary is replaced: the real bootstrap and transport
+    start it as a subprocess, and it keeps what it was given.
+    """
+    from cloud_agent.ports.external.host_bootstrap import RecordedHostState
+    from cloud_agent.providers.compute.ssh import OpenSshTransport
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    seen = tmp_path / "seen"
+    ssh = bin_dir / "ssh"
+    ssh.write_text(
+        "#!/bin/sh\n"
+        f'for last; do :; done; printf "%s" "$last" > {seen}.command\n'
+        f"cat > {seen}.stdin\n"
+        """printf '{"complete": true}'\n"""
+    )
+    ssh.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+    resolver = AsyncMock()
+    resolver.resolve.side_effect = lambda ref: (
+        "PRIVATE KEY\n" if ref == "ssh-1" else "node.example.org ssh-ed25519 VERIFIED\n"
+    )
+    _, profile, _, _ = setup(tmp_path)
+    bootstrap = SshHostBootstrap(transport=OpenSshTransport(resolver), resolver=resolver)
+
+    async def command_for(groups: int) -> tuple[int, dict]:
+        recorded = RecordedHostState(
+            checkpoints={
+                f"asbx_{i}": {"checkpoint_id": f"{i:032x}", "sandbox_id": f"asbx_{i}"}
+                for i in range(groups)
+            },
+            removals={f"superseded-{i:064x}": dict(_REMOVAL) for i in range(groups)},
+        )
+        result = await bootstrap.inventory(NODE, profile, INTENT, recorded)
+        assert result.complete
+        sent = json.loads((tmp_path / "seen.stdin").read_text())
+        assert sent == recorded.model_dump(mode="json")
+        return len((tmp_path / "seen.command").read_text()), sent
+
+    small, _ = await command_for(1)
+    large, sent = await command_for(5000)
+    assert len(sent["checkpoints"]) == len(sent["removals"]) == 5000
+    assert large == small < 64 * 1024
 
 
 def test_inventory_still_counts_an_administrators_archive_request(tmp_path, monkeypatch, capsys):
@@ -856,7 +1036,7 @@ def test_inventory_still_counts_an_administrators_archive_request(tmp_path, monk
     for name in ("prepare.json", "upload.json", "commit.json", "deleted.json"):
         (directory / name).write_text(json.dumps({"receipt": {}}))
 
-    recorded = {"checkpoints": {}, "removals": ["delete-1"]}
+    recorded = {"checkpoints": {}, "removals": {"delete-1": _REMOVAL}}
     assert _run_inventory(tmp_path, monkeypatch, capsys, recorded)["orphan_state"] is True
 
 

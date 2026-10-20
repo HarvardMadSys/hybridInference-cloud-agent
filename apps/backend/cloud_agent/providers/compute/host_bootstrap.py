@@ -1065,18 +1065,15 @@ class SshHostBootstrap:
         recorded: RecordedHostState | None = None,
     ) -> HostInventory:
         """Read complete Docker and retained state without deleting or adopting it."""
-        recorded = recorded or RecordedHostState()
-        params = {
-            **self._params(profile, intent),
-            "recorded": {
-                "checkpoints": dict(recorded.checkpoints),
-                "removals": list(recorded.removals),
-            },
-        }
+        params = self._params(profile, intent)
         script = (
             "sudo -n python3 -c " + shlex.quote(_INVENTORY) + " " + shlex.quote(json.dumps(params))
         )
-        result = self._json(await self._transport.run(self._connection(node), script, timeout=60))
+        # The records grow with the Host's history; the command line must not.
+        records = (recorded or RecordedHostState()).model_dump_json().encode()
+        result = self._json(
+            await self._transport.run(self._connection(node), script, stdin=records, timeout=60)
+        )
         return HostInventory.model_validate(result)
 
     async def stop(
@@ -1515,37 +1512,54 @@ else:
         # and each confirmed removal of a container a moved group left behind.
         # Anything else in the archive state, finished or not, still counts.
         archives = state / 'sandbox-archives'
-        recorded = params.get('recorded') or {}
+        recorded = json.loads(sys.stdin.read() or '{}')
         def digest(value):
             return hashlib.sha256(str(value).encode()).hexdigest()
-        checkpoints = {digest(sandbox): checkpoint for sandbox, checkpoint in (recorded.get('checkpoints') or {}).items()}
-        removals = {digest(request): request for request in recorded.get('removals') or ()}
+        checkpoints = {digest(sandbox): expected for sandbox, expected in (recorded.get('checkpoints') or {}).items()}
+        removals = {digest(request): dict(expected, request_id=request) for request, expected in (recorded.get('removals') or {}).items()}
         def receipt(path):
             try:
                 value = json.loads(path.read_text())
             except (OSError, ValueError):
                 return None
             return value if isinstance(value, dict) else None
+        def removed(directory, expected):
+            # The two receipts the Sandbox Manager's discard leaves, exactly as
+            # it writes them for this request: the container it removed, or one
+            # it proved already absent.
+            if directory.is_symlink() or sorted(p.name for p in directory.iterdir()) != ['discard.json', 'discarded.json']:
+                return False
+            started, finished = receipt(directory / 'discard.json'), receipt(directory / 'discarded.json')
+            identity = {
+                'thread_id': expected['thread_id'], 'request_id': expected['request_id'],
+                'generation': expected['generation'], 'container_id': expected['container_id'],
+                'archive_key': '',
+            }
+            if started is None or started.get('identity') != identity:
+                return False
+            if started.get('target_absent') is True:
+                return (
+                    started == {'identity': identity, 'sandbox_id': expected['sandbox_id'], 'target_absent': True}
+                    and finished == {'identity': identity, 'sandbox_id': expected['sandbox_id']}
+                )
+            spec = started.get('spec')
+            return (
+                set(started) == {'identity', 'spec'} and isinstance(spec, dict)
+                and spec.get('sandbox_id') == expected['sandbox_id']
+                and spec.get('generation') == expected['generation']
+                and finished == {'identity': identity}
+            )
         def accounted(path):
             if path.parent == archives / 'checkpoints' and path.suffix == '.json':
-                value = receipt(path)
+                # The latest checkpoint the control plane holds for that
+                # sandbox from this Host, every recorded field the same.
+                expected, value = checkpoints.get(path.stem), receipt(path)
                 return (
-                    path.stem in checkpoints and value is not None
-                    and digest(value.get('sandbox_id')) == path.stem
-                    and value.get('checkpoint_id') == checkpoints[path.stem]
+                    expected is not None and value is not None
+                    and all(key in value and value[key] == expected[key] for key in expected)
                 )
             if path.parent.parent == archives and path.parent.name in removals:
-                directory = path.parent
-                if directory.is_symlink() or sorted(p.name for p in directory.iterdir()) != ['discard.json', 'discarded.json']:
-                    return False
-                started, finished = receipt(directory / 'discard.json'), receipt(directory / 'discarded.json')
-                identity = (finished or {}).get('identity')
-                return (
-                    started is not None and isinstance(identity, dict)
-                    and started.get('identity') == identity
-                    and identity.get('request_id') == removals[directory.name]
-                    and not identity.get('archive_key')
-                )
+                return removed(path.parent, removals[path.parent.name])
             return False
         paths = list(state_root.rglob('*')) if state_root.exists() else []
         unexpected = state_root.is_symlink() or any(p.is_symlink() or (not p.is_dir() and p not in inert and not accounted(p)) for p in paths)

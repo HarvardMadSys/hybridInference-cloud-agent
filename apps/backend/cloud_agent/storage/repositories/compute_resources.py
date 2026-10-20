@@ -2820,19 +2820,32 @@ class PostgresComputeResourceRepository:
         """
         async with self._pool.acquire() as conn:
             checkpoints = await conn.fetch(
-                """SELECT DISTINCT ON (sandbox_id) sandbox_id, id
+                """SELECT DISTINCT ON (sandbox_id)
+                          id AS checkpoint_id, sandbox_id, generation, container_id,
+                          base_image, runtime_id, runtime_version, object_key,
+                          object_version_id AS version_id, sha256, size_bytes,
+                          new_layer_bytes, layer_count, format_version, start_seq
                    FROM agent_sandbox_checkpoints WHERE host = $1
                    ORDER BY sandbox_id, captured_at DESC, recorded_at DESC""",
                 host,
             )
             removals = await conn.fetch(
-                "SELECT request_id FROM agent_superseded_container_removals "
+                "SELECT request_id, origin_thread_id, sandbox_id, generation, container_id "
+                "FROM agent_superseded_container_removals "
                 "WHERE host = $1 AND removed_at IS NOT NULL ORDER BY request_id",
                 host,
             )
         return {
-            "checkpoints": {str(row["sandbox_id"]): str(row["id"]) for row in checkpoints},
-            "removals": [str(row["request_id"]) for row in removals],
+            "checkpoints": {str(row["sandbox_id"]): dict(row) for row in checkpoints},
+            "removals": {
+                str(row["request_id"]): {
+                    "thread_id": str(row["origin_thread_id"]),
+                    "sandbox_id": str(row["sandbox_id"]),
+                    "generation": int(row["generation"]),
+                    "container_id": str(row["container_id"]),
+                }
+                for row in removals
+            },
         }
 
     async def move_out_report(self, *, allocation_id: str) -> dict[str, Any]:

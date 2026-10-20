@@ -507,8 +507,8 @@ without an inventory is a CloudLab node whose host-key registration never
 completed: this control plane never connected to it.
 
 The machine inventory also counts every file under the Host's state directory
-as retained state, with three exceptions, each checked against what the control
-plane recorded:
+as retained state, with three exceptions, each matched field by field against
+what the control plane recorded and passed on the inventory's standard input:
 - the Host's enrollment credential;
 - each sandbox's latest checkpoint receipt from that Host, whose data is in
   object storage;

@@ -176,7 +176,7 @@ def harness(monkeypatch, *, kind="acquire", identified=False):
         authorize_superseded_removals=AsyncMock(return_value=[]),
         record_superseded_removal=AsyncMock(),
         superseded_removals=AsyncMock(return_value=0),
-        recorded_host_state=AsyncMock(return_value={"checkpoints": {}, "removals": []}),
+        recorded_host_state=AsyncMock(return_value={"checkpoints": {}, "removals": {}}),
     )
     provider = SimpleNamespace(
         capabilities=Mock(

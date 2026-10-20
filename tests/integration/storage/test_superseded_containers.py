@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import hashlib
 import io
+import json
 import pathlib
 import shlex
 from dataclasses import replace
@@ -30,7 +31,6 @@ from tests.integration.storage.test_sandbox_restore_store import (
     store as store,
 )
 from tests.unit.test_sandbox_archive import _Manager
-from tests.unit.test_sandbox_checkpoints import _receipt as _checkpoint_receipt
 
 from cloud_agent.ports.external.compute_provider import ProviderReceipt
 from cloud_agent.providers.compute.host_bootstrap import SshHostBootstrap
@@ -42,7 +42,7 @@ from cloud_agent.storage._sql.hosts import (
 )
 from cloud_agent_host.chat_sandbox import ChatSandboxSpec
 from cloud_agent_host.sandbox_archive import ArchiveIdentity, SandboxArchiveService
-from cloud_agent_host.sandbox_checkpoints import SandboxCheckpointStore
+from cloud_agent_host.sandbox_checkpoints import SandboxCheckpointReceipt, SandboxCheckpointStore
 from cloud_agent_host.shared_session_supervisor import (
     SharedChatSessionSupervisor,
     SharedMemberManifest,
@@ -315,20 +315,31 @@ async def test_an_authorization_recorded_first_stands_once_the_group_is_lost(poo
     # Unconfirmed, it is resent even once the host no longer lists it.
     assert await _authorize(store, "runner-a") == authorized
     assert await store.compute_resources.superseded_removals(hosts=["runner-a"]) == 0
-    assert (await store.compute_resources.recorded_host_state(host="runner-a"))["removals"] == []
+    assert (await store.compute_resources.recorded_host_state(host="runner-a"))["removals"] == {}
     await store.compute_resources.record_superseded_removal(request_id=request_id)
     assert await _authorize(store, "runner-a") == []
     assert await store.compute_resources.superseded_removals(hosts=["runner-a"]) == 1
     assert await store.compute_resources.superseded_removals(hosts=["runner-b"]) == 0
     # What runner-a keeps on disk and the control plane recorded: the checkpoint
     # the group moved by, and the confirmed removal.
-    assert await store.compute_resources.recorded_host_state(host="runner-a") == {
-        "checkpoints": {"asbx_restore": "c" * 32},
-        "removals": [request_id],
+    recorded = await store.compute_resources.recorded_host_state(host="runner-a")
+    assert list(recorded["checkpoints"]) == ["asbx_restore"]
+    assert recorded["checkpoints"]["asbx_restore"] == {
+        key: value
+        for key, value in (await _recorded_receipt(pool)).as_dict().items()
+        if key not in ("created_at", "members", "durations_ms")
+    }
+    assert recorded["removals"] == {
+        request_id: {
+            "thread_id": job["thread_id"],
+            "sandbox_id": "asbx_restore",
+            "generation": 1,
+            "container_id": "container-a",
+        }
     }
     assert await store.compute_resources.recorded_host_state(host="runner-c") == {
         "checkpoints": {},
-        "removals": [],
+        "removals": {},
     }
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -439,6 +450,7 @@ class _Machine:
         output = io.StringIO()
         with self.monkeypatch.context() as local, contextlib.redirect_stdout(output):
             local.setattr("sys.argv", ["remote", argv[5]])
+            local.setattr("sys.stdin", io.StringIO((stdin or b"").decode()))
             local.setattr("shutil.which", lambda command: "/usr/bin/docker")
             local.setattr("subprocess.check_output", lambda args, **kwargs: "")
             local.setattr("pathlib.Path", isolated_path)
@@ -471,6 +483,25 @@ def _host_manager(group: dict, archives: Path) -> tuple[_Manager, SandboxArchive
     return manager, SandboxArchiveService(supervisor, state_dir=archives)
 
 
+async def _recorded_receipt(pool) -> SandboxCheckpointReceipt:
+    """The receipt runner-a kept of the checkpoint the control plane recorded from it."""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM agent_sandbox_checkpoints WHERE sandbox_id = 'asbx_restore'"
+        )
+    assert row is not None
+    return SandboxCheckpointReceipt.from_dict(
+        {
+            **dict(row),
+            "checkpoint_id": row["id"],
+            "version_id": row["object_version_id"],
+            "created_at": row["captured_at"].isoformat(),
+            "members": json.loads(row["members"]),
+            "durations_ms": json.loads(row["durations_ms"]),
+        }
+    )
+
+
 @pytest.mark.parametrize("answer_lost", [False, True])
 async def test_a_release_removes_what_a_group_never_resumed_left_behind(
     pool, store: Storage, monkeypatch, tmp_path, answer_lost: bool
@@ -495,7 +526,7 @@ async def test_a_release_removes_what_a_group_never_resumed_left_behind(
     archives = tmp_path / "machine/var/lib/cloud-agent/runner-a/sandbox-archives"
     (archives.parent / "credential").parent.mkdir(parents=True)
     (archives.parent / "credential").write_text("persisted enrollment")
-    SandboxCheckpointStore(archives / "checkpoints").save(_checkpoint_receipt("asbx_restore"))
+    SandboxCheckpointStore(archives / "checkpoints").save(await _recorded_receipt(pool))
     manager, service = _host_manager(old, archives)
     r.bootstrap.inventory = SshHostBootstrap(
         transport=_Machine(tmp_path / "machine", monkeypatch), resolver=AsyncMock()

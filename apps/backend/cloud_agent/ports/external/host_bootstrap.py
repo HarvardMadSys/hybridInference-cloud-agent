@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Protocol
+from typing import Any, Protocol
 
 from pydantic import Field, SecretStr, field_validator
 
@@ -194,13 +194,18 @@ class RecordedHostState(ComputeValue):
     """What the control plane recorded of the receipts a Host keeps on disk.
 
     A release's machine inventory excuses a receipt only when it matches one
-    of these exactly. ``checkpoints`` maps each sandbox id to the latest
-    checkpoint this Host captured of it; ``removals`` names each removal of
-    a container left behind there that the Host confirmed.
+    of these field for field. ``checkpoints`` maps each sandbox id to the
+    latest checkpoint this Host captured of it, as the receipt names it
+    (``checkpoint_id``, ``generation``, ``container_id``, the object and its
+    digest, ...). ``removals`` maps the request id of each removal of a
+    container left behind there that the Host confirmed to the exact
+    ``thread_id``, ``sandbox_id``, ``generation`` and ``container_id`` it
+    removed. Either can grow with the Host's history, so it travels on the
+    inventory's standard input, never in its command line.
     """
 
-    checkpoints: dict[str, str] = Field(default_factory=dict)
-    removals: tuple[str, ...] = ()
+    checkpoints: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    removals: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
 
 class SshTransport(Protocol):

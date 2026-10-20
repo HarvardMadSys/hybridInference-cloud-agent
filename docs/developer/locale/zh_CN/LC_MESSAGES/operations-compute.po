@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: HybridInference Cloud Agent \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-20 00:36-0400\n"
+"POT-Creation-Date: 2026-10-20 05:54-0400\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: The HybridInference contributors\n"
 "Language: zh_CN\n"
@@ -1415,36 +1415,32 @@ msgstr ""
 #: ../developer/operations-compute.md:509
 msgid ""
 "The machine inventory also counts every file under the Host's state "
-"directory as retained state, with three exceptions, each checked against "
-"what the control plane recorded:"
-msgstr ""
-"机器清点还会把 Host 状态目录下的每个文件都算作保留状态，只有三种例外，每一种都要和控制面记录的内容逐个核对："
+"directory as retained state, with three exceptions, each matched field by"
+" field against what the control plane recorded and passed on the "
+"inventory's standard input:"
+msgstr "机器清点还会把 Host 状态目录下的每个文件都算作保留状态，只有三种例外。控制面把它记录的内容通过清点脚本的标准输入传过去，每一种例外都要和这些记录逐个字段核对："
 
 #: ../developer/operations-compute.md:512
 msgid "the Host's enrollment credential;"
-msgstr ""
-"Host 的注册凭证；"
+msgstr "Host 的注册凭证；"
 
 #: ../developer/operations-compute.md:513
 msgid ""
 "each sandbox's latest checkpoint receipt from that Host, whose data is in"
 " object storage;"
-msgstr ""
-"这台 Host 为每个沙箱打的最新一个检查点的回执，检查点的数据本身在对象存储里；"
+msgstr "这台 Host 为每个沙箱打的最新一个检查点的回执，检查点的数据本身在对象存储里；"
 
 #: ../developer/operations-compute.md:515
 msgid ""
 "the finished receipts of each removal described below that the Host "
 "confirmed."
-msgstr ""
-"下文所说的删除中，Host 已确认完成的那些删除留下的完整回执。"
+msgstr "下文所说的删除中，Host 已确认完成的那些删除留下的完整回执。"
 
 #: ../developer/operations-compute.md:518
 msgid ""
 "Anything else still blocks release, including the request directories "
 "that administrator sandbox deletions leave on a Host."
-msgstr ""
-"其他任何文件仍会拦住释放，包括管理员删除沙箱后在 Host 上留下的请求目录。"
+msgstr "其他任何文件仍会拦住释放，包括管理员删除沙箱后在 Host 上留下的请求目录。"
 
 #: ../developer/operations-compute.md:521
 msgid ""
@@ -1468,8 +1464,9 @@ msgstr ""
 "清点之前，释放会先删掉已经搬走的沙箱组留下的已停容器：靠检查点交出去的组（哪怕之后再也没人用过）、已经在别的 Host "
 "上恢复的组，以及已经删除完成的组。交出时有可用检查点记录的组，不再算作旧 Host "
 "还留着的组。还用得着的容器会留下来，并拦住释放：组自己正在用的容器、组已经没有可用检查点的、组正在被删除的，以及组恢复一再失败、已经丢失的。每次删除前，先锁住这个组，在数据库里记下删除授权：在这之前组已经丢失，容器就留下；授权在组丢失之前记下，就照样有效。操作结果里的"
-" `superseded_removed` 记着这台机器各 Host 已确认删掉了几个容器。Host 没回应的删除，下次会用同一个请求重试，就算 Host "
-"已经不再列出那个容器也一样，直到 Host 确认删掉为止。因为需要人处理而停下的释放，会在服务商确认机器已经没了之后重新跑一遍，然后结束。"
+" `superseded_removed` 记着这台机器各 Host 已确认删掉了几个容器。Host 没回应的删除，下次会用同一个请求重试，就算 "
+"Host 已经不再列出那个容器也一样，直到 Host "
+"确认删掉为止。因为需要人处理而停下的释放，会在服务商确认机器已经没了之后重新跑一遍，然后结束。"
 
 #: ../developer/operations-compute.md:536
 msgid "Moving sandboxes out before a lease ends"
