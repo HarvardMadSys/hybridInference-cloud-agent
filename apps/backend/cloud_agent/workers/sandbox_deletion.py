@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import re
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol, TypedDict
 from urllib.parse import urlparse
@@ -281,7 +282,65 @@ async def _finish_attempt(
         )
 
 
-async def delete_one_archived_sandbox(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
+@dataclass
+class _Attempt:
+    """One claimed deletion request, and how far this attempt at it got.
+
+    The failure path reads all of it: what the host may still hold, whether
+    an archive is safe, and what to retry.
+    """
+
+    store: _DeletionStorage
+    claim: dict[str, Any]
+    fence: _DeletionFence
+    correlation_id: str | None
+    stage: str = "sandbox_manager_resolution"
+    request_phase: str = "resolve_sandbox_manager"
+    cleanup_outcome: str = "not_required"
+    sandbox_manager: Any = None
+    payload: dict[str, Any] | None = None
+    host: dict[str, Any] | None = None
+    configuration_error: str | None = None
+    prepare_started: bool = False
+    #: An archive of this request is verified in S3, by this attempt or an
+    #: earlier one.
+    archive_verified: bool = False
+
+    @classmethod
+    def claimed(cls, store: _DeletionStorage, claim: dict[str, Any]) -> _Attempt:
+        """Start an attempt at the request this worker just claimed."""
+        correlation_id = claim.get("deletion_attempt_correlation_id")
+        return cls(
+            store=store,
+            claim=claim,
+            fence={
+                "sandbox_id": str(claim["id"]),
+                "request_id": str(claim["deletion_request_id"]),
+                "claim_token": str(claim["deletion_claim_token"]),
+                "generation": int(claim["generation"]),
+                "container_id": str(claim["container_id"]),
+            },
+            correlation_id=str(correlation_id) if correlation_id is not None else None,
+            archive_verified=claim["deletion_state"] == "archived",
+        )
+
+    @property
+    def discarding(self) -> bool:
+        """Whether the request removes the container without an archive."""
+        return bool(self.claim.get("deletion_discard"))
+
+    async def reach(self, stage: str, *, cleanup_outcome: str | None = None) -> None:
+        """Note the stage this attempt has reached, in its telemetry too."""
+        self.stage = stage
+        await _record_attempt_stage(
+            self.store,
+            correlation_id=self.correlation_id,
+            stage=stage,
+            cleanup_outcome=cleanup_outcome,
+        )
+
+
+async def delete_one_archived_sandbox(
     store: _DeletionStorage,
     *,
     archive_factory: Callable[[], S3SandboxArchiveStore] = S3SandboxArchiveStore.from_settings,
@@ -300,359 +359,354 @@ async def delete_one_archived_sandbox(  # noqa: C901, PLR0912, PLR0915 complexit
     claim = await store.sandbox.claim_due_admin_sandbox_deletion(ttl_seconds=CLAIM_TTL_SECONDS)
     if claim is None:
         return False
-    fence: _DeletionFence = {
-        "sandbox_id": str(claim["id"]),
-        "request_id": str(claim["deletion_request_id"]),
-        "claim_token": str(claim["deletion_claim_token"]),
-        "generation": int(claim["generation"]),
-        "container_id": str(claim["container_id"]),
-    }
-    correlation_id = claim.get("deletion_attempt_correlation_id")
-    correlation_id = str(correlation_id) if correlation_id is not None else None
-    attempt_number = claim.get("deletion_attempt_number")
-    stage = "sandbox_manager_resolution"
-    cleanup_outcome = "not_required"
-    sandbox_manager = None
-    payload: dict[str, Any] | None = None
-    discarding = bool(claim.get("deletion_discard"))
-    prepare_started = False
-    verified = claim["deletion_state"] == "archived"
-    archive_verified = verified
-    configuration_error = None
-    host: dict[str, Any] | None = None
-    request_phase = "resolve_sandbox_manager"
-    await _record_attempt_stage(store, correlation_id=correlation_id, stage=stage)
+    attempt = _Attempt.claimed(store, claim)
+    await attempt.reach(attempt.stage)
     try:
-        if discarding:
-            host = await store.host_pool.get_host(host=str(claim["host"]))
-            if host is not None and host.get("compute_node_id") is not None:
-                request_phase = "complete_reclaimed_discard"
-                if await store.sandbox.complete_admin_sandbox_discard(
-                    **fence,
-                    attempt_correlation_id=correlation_id,
-                    reclaimed_quiet_seconds=RECLAIMED_QUIET_SECONDS,
-                ):
-                    # Its provider reclaimed the machine, and the container
-                    # with it: the host this would wait for never answers.
-                    return True
-                request_phase = "resolve_sandbox_manager"
-            sandbox_manager = sandbox_manager_for_host(host) if host is not None else None
-            if sandbox_manager is None:
-                configuration_error = sandbox_manager_configuration_error(host)
-                raise ValueError("The owning sandbox manager is unavailable.")
-            payload = {
-                "request_id": fence["request_id"],
-                "generation": fence["generation"],
-                "expected_container_id": fence["container_id"],
-                "sandbox_id": fence["sandbox_id"],
-            }
-            request_phase = "discard"
-            stage = "discard_container_removal"
-            await _record_attempt_stage(store, correlation_id=correlation_id, stage=stage)
-            deleted = await sandbox_manager.discard_sandbox_deletion(
-                str(claim["origin_thread_id"]), payload
-            )
-            request_phase = "validate_discard_receipt"
-            stage = "discard_receipt_validation"
-            await _record_attempt_stage(store, correlation_id=correlation_id, stage=stage)
-            _validate_receipt(
-                deleted,
-                {
-                    "request_id": fence["request_id"],
-                    "container_id": fence["container_id"],
-                },
-            )
-            if deleted.get("deleted") is not True:
-                raise ValueError("The host did not confirm container deletion.")
-            request_phase = "complete_discard"
-            stage = "database_finalization"
-            await _record_attempt_stage(store, correlation_id=correlation_id, stage=stage)
-            completed = await store.sandbox.complete_admin_sandbox_discard(
-                **fence, attempt_correlation_id=correlation_id
-            )
-            if not completed:
-                raise ValueError("Container deletion lost its durable request fence.")
-            return True
-        host = await store.host_pool.get_host(host=str(claim["host"]))
-        sandbox_manager = sandbox_manager_for_host(host) if host is not None else None
-        if sandbox_manager is None:
-            raise SandboxManagerError(503, "The owning sandbox manager is unavailable.")
-        thread_id = str(claim["origin_thread_id"])
-        if claim.get("deletion_cleanup_required"):
-            payload = {
-                "request_id": fence["request_id"],
-                "generation": fence["generation"],
-                "expected_container_id": fence["container_id"],
-                "archive_key": str(claim["deletion_cleanup_archive_key"]),
-            }
-            # A timed-out abort may still be running on the host. Never start
-            # another export for this request until cleanup is acknowledged.
-            stage = "cleanup_abort"
-            cleanup_outcome = "pending"
-            await _record_attempt_stage(
-                store,
-                correlation_id=correlation_id,
-                stage=stage,
-                cleanup_outcome=cleanup_outcome,
-            )
-            raise ValueError("Sandbox archive cleanup is waiting for the host.")
-        archives = archive_factory()
-        if not archives.available:
-            raise ValueError("S3 sandbox archive storage is not configured.")
-        archive_location = claim.get("deletion_archive_key") if verified else None
-        key = (
-            urlparse(str(archive_location)).path.lstrip("/")
-            if archive_location
-            else archives.key_for(fence["sandbox_id"], fence["request_id"])
-        )
-        payload = {
+        if attempt.discarding:
+            await _discard(attempt)
+        else:
+            await _archive_and_delete(attempt, archive_factory)
+    except BaseException as cause:
+        await _record_failure(attempt, cause)
+        if not isinstance(cause, Exception):
+            raise
+    return True
+
+
+async def _discard(attempt: _Attempt) -> None:
+    """Remove the container without an archive, as its request asks."""
+    store, claim, fence = attempt.store, attempt.claim, attempt.fence
+    host = attempt.host = await store.host_pool.get_host(host=str(claim["host"]))
+    if host is not None and host.get("compute_node_id") is not None:
+        attempt.request_phase = "complete_reclaimed_discard"
+        if await store.sandbox.complete_admin_sandbox_discard(
+            **fence,
+            attempt_correlation_id=attempt.correlation_id,
+            reclaimed_quiet_seconds=RECLAIMED_QUIET_SECONDS,
+        ):
+            # Its provider reclaimed the machine, and the container
+            # with it: the host this would wait for never answers.
+            return
+        attempt.request_phase = "resolve_sandbox_manager"
+    sandbox_manager = attempt.sandbox_manager = (
+        sandbox_manager_for_host(host) if host is not None else None
+    )
+    if sandbox_manager is None:
+        attempt.configuration_error = sandbox_manager_configuration_error(host)
+        raise ValueError("The owning sandbox manager is unavailable.")
+    payload = attempt.payload = {
+        "request_id": fence["request_id"],
+        "generation": fence["generation"],
+        "expected_container_id": fence["container_id"],
+        "sandbox_id": fence["sandbox_id"],
+    }
+    attempt.request_phase = "discard"
+    await attempt.reach("discard_container_removal")
+    deleted = await sandbox_manager.discard_sandbox_deletion(
+        str(claim["origin_thread_id"]), payload
+    )
+    attempt.request_phase = "validate_discard_receipt"
+    await attempt.reach("discard_receipt_validation")
+    _validate_receipt(
+        deleted,
+        {
+            "request_id": fence["request_id"],
+            "container_id": fence["container_id"],
+        },
+    )
+    if deleted.get("deleted") is not True:
+        raise ValueError("The host did not confirm container deletion.")
+    attempt.request_phase = "complete_discard"
+    await attempt.reach("database_finalization")
+    completed = await store.sandbox.complete_admin_sandbox_discard(
+        **fence, attempt_correlation_id=attempt.correlation_id
+    )
+    if not completed:
+        raise ValueError("Container deletion lost its durable request fence.")
+
+
+async def _archive_and_delete(
+    attempt: _Attempt, archive_factory: Callable[[], S3SandboxArchiveStore]
+) -> None:
+    """Archive the container to S3, verify and record the archive, then delete it."""
+    store, claim, fence = attempt.store, attempt.claim, attempt.fence
+    host = attempt.host = await store.host_pool.get_host(host=str(claim["host"]))
+    sandbox_manager = attempt.sandbox_manager = (
+        sandbox_manager_for_host(host) if host is not None else None
+    )
+    if sandbox_manager is None:
+        raise SandboxManagerError(503, "The owning sandbox manager is unavailable.")
+    thread_id = str(claim["origin_thread_id"])
+    if claim.get("deletion_cleanup_required"):
+        attempt.payload = {
             "request_id": fence["request_id"],
             "generation": fence["generation"],
             "expected_container_id": fence["container_id"],
-            "archive_key": key,
+            "archive_key": str(claim["deletion_cleanup_archive_key"]),
         }
-        expected = {
-            "request_id": fence["request_id"],
-            "container_id": fence["container_id"],
-            "archive_key": key,
-        }
-        if verified:
-            sha256 = str(claim["deletion_sha256"])
-            size_bytes = int(claim["deletion_size_bytes"])
-        else:
-            stage = "stop_verification"
-            await _record_attempt_stage(store, correlation_id=correlation_id, stage=stage)
-            status = await sandbox_manager.shared_chat_sandbox_status(thread_id, timeout=10)
-            _verify_stopped_status(
-                status,
-                {
-                    "thread_id": thread_id,
-                    "sandbox_id": fence["sandbox_id"],
-                    "generation": fence["generation"],
-                    "container_id": fence["container_id"],
-                },
-            )
-            prepare_started = True
-            stage = "archive_prepare"
-            await _record_attempt_stage(store, correlation_id=correlation_id, stage=stage)
-            prepared = await sandbox_manager.prepare_sandbox_deletion(thread_id, payload)
-            _validate_receipt(prepared, expected)
-            sha256 = str(prepared.get("sha256") or "")
-            raw_size = prepared.get("size_bytes")
-            if not re.fullmatch(r"[0-9a-f]{64}", sha256):
-                raise ValueError("Sandbox archive omitted its SHA-256 checksum.")
-            if not isinstance(raw_size, int) or isinstance(raw_size, bool) or raw_size <= 0:
-                raise ValueError("Sandbox archive omitted its byte length.")
-            size_bytes = raw_size
-            stage = "upload_authorization"
-            await _record_attempt_stage(store, correlation_id=correlation_id, stage=stage)
-            upload = await archives.prepare_upload(
-                fence["sandbox_id"], fence["request_id"], sha256, size_bytes
-            )
-            if upload.key != key:
-                raise ValueError("Sandbox archive upload destination changed.")
-            stage = "archive_upload"
-            await _record_attempt_stage(store, correlation_id=correlation_id, stage=stage)
-            uploaded = await sandbox_manager.upload_sandbox_deletion_archive(
-                thread_id,
-                {
-                    **payload,
-                    "sha256": sha256,
-                    "size_bytes": size_bytes,
-                    "upload_url": upload.upload_url,
-                    "upload_headers": upload.headers,
-                },
-            )
-            _validate_receipt(uploaded, {**expected, "sha256": sha256, "size_bytes": size_bytes})
-            if uploaded.get("uploaded") is not True:
-                raise ValueError("The host did not confirm the sandbox archive upload.")
-        stage = "archive_verification"
-        await _record_attempt_stage(store, correlation_id=correlation_id, stage=stage)
-        receipt = await archives.verify_archive(str(archive_location or key), sha256, size_bytes)
-        archive_verified = True
-        if not verified:
-            stage = "durable_receipt"
-            await _record_attempt_stage(store, correlation_id=correlation_id, stage=stage)
-            recorded = await store.sandbox.record_admin_sandbox_archive(
-                **fence,
-                archive_key=receipt.archive_uri,
-                sha256=sha256,
-                size_bytes=size_bytes,
-                archive_version_id=receipt.version_id,
-            )
-            if not recorded:
-                raise ValueError("The sandbox archive lost its durable request fence.")
-            verified = True
-        stage = "container_removal"
-        await _record_attempt_stage(store, correlation_id=correlation_id, stage=stage)
-        deleted = await sandbox_manager.commit_sandbox_deletion(
-            thread_id, {**payload, "sha256": sha256, "size_bytes": size_bytes}
+        # A timed-out abort may still be running on the host. Never start
+        # another export for this request until cleanup is acknowledged.
+        attempt.cleanup_outcome = "pending"
+        await attempt.reach("cleanup_abort", cleanup_outcome=attempt.cleanup_outcome)
+        raise ValueError("Sandbox archive cleanup is waiting for the host.")
+    archives = archive_factory()
+    if not archives.available:
+        raise ValueError("S3 sandbox archive storage is not configured.")
+    verified = claim["deletion_state"] == "archived"
+    archive_location = claim.get("deletion_archive_key") if verified else None
+    key = (
+        urlparse(str(archive_location)).path.lstrip("/")
+        if archive_location
+        else archives.key_for(fence["sandbox_id"], fence["request_id"])
+    )
+    payload = attempt.payload = {
+        "request_id": fence["request_id"],
+        "generation": fence["generation"],
+        "expected_container_id": fence["container_id"],
+        "archive_key": key,
+    }
+    expected = {
+        "request_id": fence["request_id"],
+        "container_id": fence["container_id"],
+        "archive_key": key,
+    }
+    if verified:
+        sha256 = str(claim["deletion_sha256"])
+        size_bytes = int(claim["deletion_size_bytes"])
+    else:
+        await attempt.reach("stop_verification")
+        status = await sandbox_manager.shared_chat_sandbox_status(thread_id, timeout=10)
+        _verify_stopped_status(
+            status,
+            {
+                "thread_id": thread_id,
+                "sandbox_id": fence["sandbox_id"],
+                "generation": fence["generation"],
+                "container_id": fence["container_id"],
+            },
         )
-        _validate_receipt(deleted, {**expected, "sha256": sha256, "size_bytes": size_bytes})
-        if deleted.get("deleted") is not True:
-            raise ValueError("The host did not confirm container deletion.")
-        stage = "database_finalization"
-        await _record_attempt_stage(store, correlation_id=correlation_id, stage=stage)
-        completed = await store.sandbox.complete_admin_sandbox_deletion(
-            **fence, attempt_correlation_id=correlation_id
+        attempt.prepare_started = True
+        await attempt.reach("archive_prepare")
+        prepared = await sandbox_manager.prepare_sandbox_deletion(thread_id, payload)
+        _validate_receipt(prepared, expected)
+        sha256 = str(prepared.get("sha256") or "")
+        raw_size = prepared.get("size_bytes")
+        if not re.fullmatch(r"[0-9a-f]{64}", sha256):
+            raise ValueError("Sandbox archive omitted its SHA-256 checksum.")
+        if not isinstance(raw_size, int) or isinstance(raw_size, bool) or raw_size <= 0:
+            raise ValueError("Sandbox archive omitted its byte length.")
+        size_bytes = raw_size
+        await attempt.reach("upload_authorization")
+        upload = await archives.prepare_upload(
+            fence["sandbox_id"], fence["request_id"], sha256, size_bytes
         )
-        if not completed:
-            raise ValueError("Container deletion lost its durable request fence.")
-    except BaseException as cause:
-        # Upload URLs are credentials. Never persist arbitrary SDK/HTTP errors
-        # containing request URLs in user-visible state or operational logs.
-        failure_stage = stage
-        failure_code, sandbox_manager_status, retry_class = _deletion_failure_details(
-            failure_stage, cause
+        if upload.key != key:
+            raise ValueError("Sandbox archive upload destination changed.")
+        await attempt.reach("archive_upload")
+        uploaded = await sandbox_manager.upload_sandbox_deletion_archive(
+            thread_id,
+            {
+                **payload,
+                "sha256": sha256,
+                "size_bytes": size_bytes,
+                "upload_url": upload.upload_url,
+                "upload_headers": upload.headers,
+            },
         )
+        _validate_receipt(uploaded, {**expected, "sha256": sha256, "size_bytes": size_bytes})
+        if uploaded.get("uploaded") is not True:
+            raise ValueError("The host did not confirm the sandbox archive upload.")
+    await attempt.reach("archive_verification")
+    receipt = await archives.verify_archive(str(archive_location or key), sha256, size_bytes)
+    attempt.archive_verified = True
+    if not verified:
+        await attempt.reach("durable_receipt")
+        recorded = await store.sandbox.record_admin_sandbox_archive(
+            **fence,
+            archive_key=receipt.archive_uri,
+            sha256=sha256,
+            size_bytes=size_bytes,
+            archive_version_id=receipt.version_id,
+        )
+        if not recorded:
+            raise ValueError("The sandbox archive lost its durable request fence.")
+    await attempt.reach("container_removal")
+    deleted = await sandbox_manager.commit_sandbox_deletion(
+        thread_id, {**payload, "sha256": sha256, "size_bytes": size_bytes}
+    )
+    _validate_receipt(deleted, {**expected, "sha256": sha256, "size_bytes": size_bytes})
+    if deleted.get("deleted") is not True:
+        raise ValueError("The host did not confirm container deletion.")
+    await attempt.reach("database_finalization")
+    completed = await store.sandbox.complete_admin_sandbox_deletion(
+        **fence, attempt_correlation_id=attempt.correlation_id
+    )
+    if not completed:
+        raise ValueError("Container deletion lost its durable request fence.")
+
+
+async def _record_failure(attempt: _Attempt, cause: BaseException) -> None:
+    """Abort what the host started, decide whether to retry, and record why.
+
+    Upload URLs are credentials. Never persist arbitrary SDK/HTTP errors
+    containing request URLs in user-visible state or operational logs.
+    """
+    store, claim, fence = attempt.store, attempt.claim, attempt.fence
+    correlation_id = attempt.correlation_id
+    failure_stage = attempt.stage
+    failure_code, sandbox_manager_status, retry_class = _deletion_failure_details(
+        failure_stage, cause
+    )
+    await _record_attempt_stage(
+        store,
+        correlation_id=correlation_id,
+        stage=failure_stage,
+        sandbox_manager_status=sandbox_manager_status,
+    )
+    abort_acknowledged = False
+    if (
+        not attempt.discarding
+        and not attempt.archive_verified
+        and attempt.sandbox_manager is not None
+        and attempt.payload is not None
+        and (attempt.prepare_started or claim.get("deletion_cleanup_required"))
+    ):
+        attempt.cleanup_outcome = "pending"
         await _record_attempt_stage(
             store,
             correlation_id=correlation_id,
             stage=failure_stage,
             sandbox_manager_status=sandbox_manager_status,
+            cleanup_outcome=attempt.cleanup_outcome,
         )
-        abort_acknowledged = False
-        if (
-            not discarding
-            and not archive_verified
-            and sandbox_manager is not None
-            and payload is not None
-            and (prepare_started or claim.get("deletion_cleanup_required"))
-        ):
-            cleanup_outcome = "pending"
-            await _record_attempt_stage(
-                store,
-                correlation_id=correlation_id,
-                stage=failure_stage,
-                sandbox_manager_status=sandbox_manager_status,
-                cleanup_outcome=cleanup_outcome,
-            )
-            try:
-                # Renew before touching the host barrier. An expired claimant
-                # must not abort a newer worker's operation for this request.
-                owned = await store.sandbox.renew_admin_sandbox_deletion_claim(
-                    **fence,
-                    ttl_seconds=300,
-                    for_cleanup=True,
-                    cleanup_archive_key=str(payload["archive_key"]),
-                )
-                if owned:
-                    await _record_attempt_stage(
-                        store,
-                        correlation_id=correlation_id,
-                        stage=failure_stage,
-                        sandbox_manager_status=sandbox_manager_status,
-                        cleanup_outcome=cleanup_outcome,
-                    )
-                    aborted = await sandbox_manager.abort_sandbox_deletion(
-                        str(claim["origin_thread_id"]), payload
-                    )
-                    _validate_receipt(
-                        aborted,
-                        {
-                            "request_id": fence["request_id"],
-                            "container_id": fence["container_id"],
-                            "archive_key": payload["archive_key"],
-                        },
-                    )
-                    abort_acknowledged = aborted.get("aborted") is True
-                    cleanup_outcome = "acknowledged" if abort_acknowledged else "unconfirmed"
-                else:
-                    cleanup_outcome = "unconfirmed"
-            except Exception:
-                cleanup_outcome = "unconfirmed"
-            await _record_attempt_stage(
-                store,
-                correlation_id=correlation_id,
-                stage=failure_stage,
-                sandbox_manager_status=sandbox_manager_status,
-                cleanup_outcome=cleanup_outcome,
-            )
-        elif not discarding and not prepare_started and not claim.get("deletion_cleanup_required"):
-            # Before prepare begins there is no host archive barrier to abort.
-            # A permanent precondition can be released for operator review;
-            # transient host or archive-service failures remain retryable.
-            abort_acknowledged = not _prearchive_failure_is_retryable(cause)
-        # A discard may already have removed Docker. Retry that exact request
-        # instead of aborting it or starting an archive for a missing container.
-        retain_pending = discarding or archive_verified or not abort_acknowledged
-        if discarding:
-            reason = configuration_error or _discard_failure_reason(cause, host)
-            error = (
-                "Container removal without an archive could not be confirmed. "
-                + (f"{reason} " if reason else "")
-                + "Deletion will be retried."
-            )
-        else:
-            error = "S3 archive or sandbox deletion could not complete. " + (
-                "The verified archive is retained; deletion will be retried."
-                if archive_verified
-                else (
-                    "The container is retained; the request will retry when the host is available."
-                    if retain_pending
-                    else "The container has not been deleted. Refresh details before retrying."
-                )
-            )
-        failure_decision: DeletionFailureDecision | None = None
-        # A failed database response leaves the business transition uncertain.
-        # Keep the attempt open so a later claim can classify an actually
-        # expired lease instead of reporting one speculatively.
-        with contextlib.suppress(Exception):
-            failure_decision = await store.sandbox.fail_admin_sandbox_deletion(
+        try:
+            # Renew before touching the host barrier. An expired claimant
+            # must not abort a newer worker's operation for this request.
+            owned = await store.sandbox.renew_admin_sandbox_deletion_claim(
                 **fence,
-                error=error,
-                retain_pending=retain_pending,
-                attempt_correlation_id=correlation_id,
-                failure_code=failure_code,
-                sandbox_manager_status=sandbox_manager_status,
-                retry_class=retry_class,
-                cleanup_outcome=cleanup_outcome,
+                ttl_seconds=300,
+                for_cleanup=True,
+                cleanup_archive_key=str(attempt.payload["archive_key"]),
             )
-        if failure_decision is not None and not failure_decision.recorded:
-            await _finish_attempt(
-                store,
-                correlation_id=correlation_id,
-                outcome="lease_expired",
-                failure_code=failure_code,
-                sandbox_manager_status=sandbox_manager_status,
-                retry_class=retry_class,
-                retry_scheduled=None,
-                cleanup_outcome=cleanup_outcome,
-            )
-        if isinstance(cause, asyncio.CancelledError):
-            raise
-        if not isinstance(cause, Exception):
-            raise
-        logger.warning(
-            "Sandbox archive/delete request did not complete",
-            extra={
-                "sandbox_id": fence["sandbox_id"],
-                "correlation_id": correlation_id,
-                "attempt_number": attempt_number,
-                "failure_type": type(cause).__name__,
-                "request_phase": request_phase if discarding else "archive_delete",
-                "stage": failure_stage,
-                "failure_code": failure_code,
-                "retry_class": retry_class,
-                "retry_scheduled": (
-                    failure_decision.retry_scheduled if failure_decision is not None else None
-                ),
-                "retry_at": (
-                    failure_decision.retry_at.isoformat()
-                    if failure_decision is not None and failure_decision.retry_at is not None
-                    else None
-                ),
-                "terminal_reason": (
-                    failure_decision.terminal_reason if failure_decision is not None else None
-                ),
-                "failure_transition_recorded": (
-                    failure_decision.recorded if failure_decision is not None else None
-                ),
-                "cleanup_outcome": cleanup_outcome,
-                "sandbox_manager_status": sandbox_manager_status,
-            },
+            if owned:
+                await _record_attempt_stage(
+                    store,
+                    correlation_id=correlation_id,
+                    stage=failure_stage,
+                    sandbox_manager_status=sandbox_manager_status,
+                    cleanup_outcome=attempt.cleanup_outcome,
+                )
+                aborted = await attempt.sandbox_manager.abort_sandbox_deletion(
+                    str(claim["origin_thread_id"]), attempt.payload
+                )
+                _validate_receipt(
+                    aborted,
+                    {
+                        "request_id": fence["request_id"],
+                        "container_id": fence["container_id"],
+                        "archive_key": attempt.payload["archive_key"],
+                    },
+                )
+                abort_acknowledged = aborted.get("aborted") is True
+                attempt.cleanup_outcome = "acknowledged" if abort_acknowledged else "unconfirmed"
+            else:
+                attempt.cleanup_outcome = "unconfirmed"
+        except Exception:
+            attempt.cleanup_outcome = "unconfirmed"
+        await _record_attempt_stage(
+            store,
+            correlation_id=correlation_id,
+            stage=failure_stage,
+            sandbox_manager_status=sandbox_manager_status,
+            cleanup_outcome=attempt.cleanup_outcome,
         )
-    return True
+    elif (
+        not attempt.discarding
+        and not attempt.prepare_started
+        and not claim.get("deletion_cleanup_required")
+    ):
+        # Before prepare begins there is no host archive barrier to abort.
+        # A permanent precondition can be released for operator review;
+        # transient host or archive-service failures remain retryable.
+        abort_acknowledged = not _prearchive_failure_is_retryable(cause)
+    # A discard may already have removed Docker. Retry that exact request
+    # instead of aborting it or starting an archive for a missing container.
+    retain_pending = attempt.discarding or attempt.archive_verified or not abort_acknowledged
+    if attempt.discarding:
+        reason = attempt.configuration_error or _discard_failure_reason(cause, attempt.host)
+        error = (
+            "Container removal without an archive could not be confirmed. "
+            + (f"{reason} " if reason else "")
+            + "Deletion will be retried."
+        )
+    else:
+        error = "S3 archive or sandbox deletion could not complete. " + (
+            "The verified archive is retained; deletion will be retried."
+            if attempt.archive_verified
+            else (
+                "The container is retained; the request will retry when the host is available."
+                if retain_pending
+                else "The container has not been deleted. Refresh details before retrying."
+            )
+        )
+    failure_decision: DeletionFailureDecision | None = None
+    # A failed database response leaves the business transition uncertain.
+    # Keep the attempt open so a later claim can classify an actually
+    # expired lease instead of reporting one speculatively.
+    with contextlib.suppress(Exception):
+        failure_decision = await store.sandbox.fail_admin_sandbox_deletion(
+            **fence,
+            error=error,
+            retain_pending=retain_pending,
+            attempt_correlation_id=correlation_id,
+            failure_code=failure_code,
+            sandbox_manager_status=sandbox_manager_status,
+            retry_class=retry_class,
+            cleanup_outcome=attempt.cleanup_outcome,
+        )
+    if failure_decision is not None and not failure_decision.recorded:
+        await _finish_attempt(
+            store,
+            correlation_id=correlation_id,
+            outcome="lease_expired",
+            failure_code=failure_code,
+            sandbox_manager_status=sandbox_manager_status,
+            retry_class=retry_class,
+            retry_scheduled=None,
+            cleanup_outcome=attempt.cleanup_outcome,
+        )
+    if not isinstance(cause, Exception):
+        # Cancellation, and the like, is raised again by the caller, unlogged.
+        return
+    logger.warning(
+        "Sandbox archive/delete request did not complete",
+        extra={
+            "sandbox_id": fence["sandbox_id"],
+            "correlation_id": correlation_id,
+            "attempt_number": claim.get("deletion_attempt_number"),
+            "failure_type": type(cause).__name__,
+            "request_phase": attempt.request_phase if attempt.discarding else "archive_delete",
+            "stage": failure_stage,
+            "failure_code": failure_code,
+            "retry_class": retry_class,
+            "retry_scheduled": (
+                failure_decision.retry_scheduled if failure_decision is not None else None
+            ),
+            "retry_at": (
+                failure_decision.retry_at.isoformat()
+                if failure_decision is not None and failure_decision.retry_at is not None
+                else None
+            ),
+            "terminal_reason": (
+                failure_decision.terminal_reason if failure_decision is not None else None
+            ),
+            "failure_transition_recorded": (
+                failure_decision.recorded if failure_decision is not None else None
+            ),
+            "cleanup_outcome": attempt.cleanup_outcome,
+            "sandbox_manager_status": sandbox_manager_status,
+        },
+    )
 
 
 async def retire_deleted_session_sandboxes(
