@@ -120,6 +120,8 @@ class HostRegisterRequest(BaseModel):
     )
     sandbox_manager_url: str = Field(
         ...,
+        # COMPAT(remove-after=2026-11-30): every host sends sandbox_manager_url;
+        # hosts since #773 do.
         validation_alias=AliasChoices("sandbox_manager_url", "broker_url"),
         max_length=2048,
         description=(
@@ -317,6 +319,8 @@ class HostHeartbeatRequest(BaseModel):
     sandbox_manager_url: str | None = Field(
         None,
         max_length=2048,
+        # COMPAT(remove-after=2026-11-30): every host sends sandbox_manager_url;
+        # hosts since #773 do.
         validation_alias=AliasChoices("sandbox_manager_url", "broker_url"),
     )
     capabilities: list[_HostCapability] | None = Field(None, max_length=64)
@@ -368,16 +372,6 @@ class HostHeartbeatRequest(BaseModel):
             "runner that does not collect it simply omits the field, and one "
             "whose block is unusable has the block dropped rather than the "
             "heartbeat refused."
-        ),
-    )
-    residencies: list[ResidencyBeat] | None = Field(
-        None,
-        max_length=128,
-        description=(
-            "The hot sandboxes this host still holds, generation-scoped. Each "
-            "listed residency's lease is extended; one that no longer holds "
-            "its generation comes back in residencies_lost and the host tears "
-            "that sandbox down (design §7)."
         ),
     )
     retained_sandboxes: list[RetainedSandboxBeat] | None = Field(

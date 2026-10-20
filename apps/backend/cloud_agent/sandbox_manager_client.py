@@ -550,39 +550,36 @@ class SandboxManagerClient:
         )
 
     async def suspend_terminals(
-        self, workspace_id: str, *, lease_generation: int, job_id: str | None = None
+        self, workspace_id: str, *, lease_generation: int, job_id: str
     ) -> dict[str, Any]:
         """Freeze every interactive terminal process tree in a workspace."""
         return await self._request(
             "POST",
             workspace_id,
             "terminals/suspend",
+            # COMPAT(remove-after=2026-11-30): every sandbox manager ignores
+            # lease_generation, as those since #773 do. Then stop sending it.
             json={"lease_generation": lease_generation, "job_id": job_id},
             timeout=60,
         )
 
     async def resume_terminals(
-        self, workspace_id: str, *, lease_generation: int, job_id: str | None = None
+        self, workspace_id: str, *, lease_generation: int, job_id: str
     ) -> dict[str, Any]:
         """Resume retained interactive terminals after a protected phase."""
         return await self._request(
             "POST",
             workspace_id,
             "terminals/resume",
+            # COMPAT(remove-after=2026-11-30): as in suspend_terminals.
             json={"lease_generation": lease_generation, "job_id": job_id},
             timeout=60,
         )
 
-    async def resume_settled_terminals(
-        self, workspace_id: str, *, job_id: str | None = None
-    ) -> dict[str, Any]:
+    async def resume_settled_terminals(self, workspace_id: str, *, job_id: str) -> dict[str, Any]:
         """Authoritatively resume terminals after the job can no longer retry."""
         return await self._request(
-            "POST",
-            workspace_id,
-            "terminals/resume-settled",
-            json={"job_id": job_id} if job_id is not None else None,
-            timeout=60,
+            "POST", workspace_id, "terminals/resume-settled", json={"job_id": job_id}, timeout=60
         )
 
     async def stream_terminal(

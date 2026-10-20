@@ -11580,22 +11580,6 @@
             "description": "Physical server name for admin grouping only; never a scheduling or credential identity.",
             "title": "Physical Host"
           },
-          "residencies": {
-            "anyOf": [
-              {
-                "items": {
-                  "$ref": "#/components/schemas/ResidencyBeat"
-                },
-                "maxItems": 128,
-                "type": "array"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "The hot sandboxes this host still holds, generation-scoped. Each listed residency's lease is extended; one that no longer holds its generation comes back in residencies_lost and the host tears that sandbox down (design §7).",
-            "title": "Residencies"
-          },
           "retained_sandboxes": {
             "anyOf": [
               {

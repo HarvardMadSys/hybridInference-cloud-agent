@@ -621,7 +621,6 @@ def test_a_turn_with_tools_reaches_them_through_this_hosts_own_mcp_relay(monkeyp
         {
             **_PAYLOAD,
             "runtime_version": _JOB.runtime_version,
-            "mcp_token": "mcp-token",
             "mcp_bindings": ["deepwiki"],
             "mcp_base_url": "http://stale-copy:9000",
         }
@@ -657,11 +656,7 @@ def test_a_host_without_a_relay_runs_a_turn_that_carries_only_platform_tools(mon
     platform's tools are left out of that turn instead.
     """
     monkeypatch.delenv("AGENT_SANDBOX_MCP_URL", raising=False)
-    job = replace(
-        _JOB,
-        mcp_token="mcp-token",
-        mcp_bindings=[":platform:memory", ":platform:web-search"],
-    )
+    job = replace(_JOB, mcp_bindings=[":platform:memory", ":platform:web-search"])
 
     run = _run_new_chat(monkeypatch, None, job)
 
@@ -692,7 +687,7 @@ def test_a_turn_with_tools_on_a_host_without_a_relay_says_the_site_is_misconfigu
 
     result = runner_mod._run_shared_live_attempt(
         runtime=get_runtime("claude-code"),
-        job=replace(_JOB, mcp_token="mcp-token", mcp_bindings=["deepwiki", ":platform:memory"]),
+        job=replace(_JOB, mcp_bindings=["deepwiki", ":platform:memory"]),
         control=control,
         heart=SimpleNamespace(cancel_requested=False, lease_lost=False),
         backend=backend,

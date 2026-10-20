@@ -6,6 +6,7 @@ original keys and encryption domains, and old host environments remain readable.
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import TYPE_CHECKING, TypeVar
 
@@ -14,9 +15,13 @@ if TYPE_CHECKING:
 
 _Value = TypeVar("_Value")
 
+logger = logging.getLogger(__name__)
+
 # A stable wire ID: old nodes and historical measurements use this value.
 SANDBOX_MANAGER_PRODUCER = "broker"
 
+# COMPAT(remove-after=2026-12-31): no environment sets a former name. Each use
+# logs sandbox_manager_legacy_env, once per name and process.
 LEGACY_ENV_NAMES = {
     "AGENT_SANDBOX_MANAGER_TOKEN": "AGENT_WORKSPACE_BROKER_TOKEN",
     "AGENT_SANDBOX_MANAGER_URL": "AGENT_WORKSPACE_BROKER_URL",
@@ -35,11 +40,26 @@ STORED_SETTING_KEYS = {
 }
 
 
+_REPORTED_LEGACY_NAMES: set[str] = set()
+
+
+def _report_legacy_name(legacy: str, current: str) -> None:
+    """Log, once per process, that a former name supplied a value."""
+    if legacy in _REPORTED_LEGACY_NAMES:
+        return
+    _REPORTED_LEGACY_NAMES.add(legacy)
+    logger.warning("sandbox_manager_legacy_env name=%s replacement=%s", legacy, current)
+
+
 def manager_env(name: str, default: str | None = None) -> str | None:
     """Read a canonical environment name, accepting its former spelling."""
     if name in os.environ:
         return os.environ[name]
-    return os.environ.get(LEGACY_ENV_NAMES.get(name, name), default)
+    legacy = LEGACY_ENV_NAMES.get(name)
+    if legacy is not None and legacy in os.environ:
+        _report_legacy_name(legacy, name)
+        return os.environ[legacy]
+    return default
 
 
 def manager_environment(values: Mapping[str, _Value]) -> dict[str, _Value]:
@@ -47,5 +67,6 @@ def manager_environment(values: Mapping[str, _Value]) -> dict[str, _Value]:
     result = dict(values)
     for current, legacy in LEGACY_ENV_NAMES.items():
         if current not in result and legacy in result:
+            _report_legacy_name(legacy, current)
             result[current] = result[legacy]
     return result

@@ -5,6 +5,8 @@ from __future__ import annotations
 from pydantic import BaseModel, model_validator
 
 
+# COMPAT(remove-after=2026-11-30): every host reads sandbox_manager_error, as
+# hosts since #773 do. Then drop the broker_* copies, and the admin view's.
 class _SandboxManagerWireNames(BaseModel):
     """Expose current names while keeping older host clients interoperable."""
 

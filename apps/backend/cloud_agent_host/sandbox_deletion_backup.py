@@ -361,16 +361,14 @@ class SandboxDeletionBackupService:
                 "aborted": True,
             }
 
-    def discard(  # noqa: PLR0912 complexity baseline, #771
-        self, identity: ArchiveIdentity, *, sandbox_id: str | None = None
-    ) -> dict[str, Any]:
+    def discard(self, identity: ArchiveIdentity, *, sandbox_id: str) -> dict[str, Any]:
         """Remove the exact stopped container without exporting or uploading it.
 
         The authorization record is fsynced before Docker removal, so a lost
         response retries the same request. A request that already prepared an
-        archive cannot be discarded. A caller that supplies the durable
-        sandbox id may also complete an already-absent target, but only after
-        the supervisor proves both its exact id and stable name are absent.
+        archive cannot be discarded. The durable sandbox id also lets it
+        complete an already-absent target, but only after the supervisor proves
+        both its exact id and stable name are absent.
         """
         if identity.archive_key:
             raise ValueError("sandbox discard does not upload an archive")
@@ -380,12 +378,9 @@ class SandboxDeletionBackupService:
             if finished is not None:
                 if finished.get("identity") != self._identity_dict(identity):
                     raise SessionLeaseLost("sandbox discard request identity changed")
+                # A receipt written before the sandbox id was recorded has none.
                 recorded_sandbox_id = finished.get("sandbox_id")
-                if (
-                    recorded_sandbox_id is not None
-                    and sandbox_id is not None
-                    and recorded_sandbox_id != sandbox_id
-                ):
+                if recorded_sandbox_id is not None and recorded_sandbox_id != sandbox_id:
                     raise SessionLeaseLost("sandbox discard request identity changed")
                 return self._discard_receipt(identity)
             if any(
@@ -411,7 +406,7 @@ class SandboxDeletionBackupService:
                         container_id=identity.expected_container_id,
                     )
                 except SandboxError:
-                    if sandbox_id is None or not self._supervisor.admin_deletion_target_absent(
+                    if not self._supervisor.admin_deletion_target_absent(
                         identity.thread_id,
                         sandbox_id=sandbox_id,
                         container_id=identity.expected_container_id,
@@ -433,7 +428,7 @@ class SandboxDeletionBackupService:
                 if (
                     not isinstance(recorded_sandbox_id, str)
                     or not recorded_sandbox_id
-                    or (sandbox_id is not None and recorded_sandbox_id != sandbox_id)
+                    or recorded_sandbox_id != sandbox_id
                 ):
                     raise SessionLeaseLost("sandbox discard request identity changed")
                 if not self._supervisor.admin_deletion_target_absent(
