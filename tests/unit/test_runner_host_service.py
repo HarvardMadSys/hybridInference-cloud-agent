@@ -1639,6 +1639,65 @@ def test_the_host_hands_its_selection_to_the_child(monkeypatch):
     operation_profiling.reset_cache()
 
 
+def test_a_poll_with_no_job_does_not_spend_the_only_profiling_slot(service, monkeypatch):
+    """An empty claim must leave a one-operation experiment able to measure.
+
+    Regression: the budget was consumed when the measurement was created, so a
+    single empty claim -- the normal result of polling an idle queue -- used up
+    a ``max_operations: 1`` run before it measured anything.
+    """
+    from cloud_agent_shared import operation_profiling
+
+    _identity, backend, _released = service
+    _run_descriptor(monkeypatch, max_operations=1)
+    answers: list[dict | None] = [None, _delivered_job()]
+
+    def claim(**_kwargs: Any) -> dict | None:
+        if not answers:
+            runner_mod._STOPPING.set()
+            return None
+        return answers.pop(0)
+
+    monkeypatch.setattr(runner_mod, "claim_payload", claim)
+    handed: list[dict] = []
+
+    def launch(payload: dict) -> LaunchResult:
+        handed.append(payload)
+        return LaunchResult(LAUNCH_STARTED, FakeHandle())
+
+    _serve(backend, launch=launch)
+
+    assert len(handed) == 1
+    assert "_profiling" in handed[0], "the claimed attempt was not measured"
+    operation_profiling.reset_cache()
+
+
+def test_profiling_off_hands_over_no_selection_and_writes_no_record(
+    service, monkeypatch, caplog, tmp_path
+):
+    """The default deployment must not pay for, or emit, any of this."""
+    from cloud_agent_shared import operation_profiling
+
+    _identity, backend, _released = service
+    sink = tmp_path / "startup.jsonl"
+    monkeypatch.setenv(operation_profiling.ENV_PROFILING_SINK, str(sink))
+    operation_profiling.reset_cache()
+    caplog.set_level("INFO", logger=operation_profiling.__name__)
+    monkeypatch.setattr(runner_mod, "claim_payload", _queue([_delivered_job()]))
+    handed: list[dict] = []
+
+    def launch(payload: dict) -> LaunchResult:
+        handed.append(payload)
+        return LaunchResult(LAUNCH_STARTED, FakeHandle())
+
+    _serve(backend, launch=launch)
+
+    assert len(handed) == 1
+    assert "_profiling" not in handed[0]
+    assert not sink.exists()
+    assert "agent_operation_profile" not in caplog.text
+
+
 def test_the_spawn_payload_keeps_only_the_profiling_handoff():
     """The deployed child must receive the selection the parent paid for."""
     handed = runner_mod._child_turn_payload(

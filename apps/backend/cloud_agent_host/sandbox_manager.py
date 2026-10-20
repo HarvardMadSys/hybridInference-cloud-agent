@@ -2475,9 +2475,6 @@ def create_app(
         )
 
     app.state.terminal_manager = terminals
-    app.state.shared_session_supervisor = shared_supervisor
-    app.state.sandbox_archive_service = archive_boundary
-    app.state.sandbox_archive_controller = archive_controller
     app.state.sandbox_checkpoint_store = checkpoint_store
     app.state.sandbox_deletion_archive_service = SandboxDeletionArchiveService(shared_supervisor)
     app.state.sandbox_resource_collector = None
