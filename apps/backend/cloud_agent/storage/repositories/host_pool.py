@@ -548,6 +548,11 @@ class PostgresHostPoolRepository:
             settings_applied: The runtime settings the host is applying now.
             settings_local: Legacy environment observations, imported once as
                 per-host overrides. Either ``None`` leaves the report in place.
+            sandbox_archive_settings_applied_revision: The archive-policy
+                revision the host's sandbox manager confirmed, ``None`` for none.
+            sandbox_archive_settings_revision_reported: Whether the heartbeat
+                carried that revision at all; when it did not, the stored one
+                stays.
             runtime_downloads: This host's progress on each agent version it
                 was asked to hold, already validated. ``None`` leaves it.
 

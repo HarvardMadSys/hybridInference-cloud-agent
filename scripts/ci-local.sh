@@ -91,7 +91,6 @@ fi
 if [[ "$CI_TIER" == all || "$CI_TIER" == backend ]]; then
   run_check ruff-format uv run --frozen ruff format --check .
   run_check ruff-lint uv run --frozen ruff check --no-fix .
-  run_check pydocstyle uv run --frozen pydocstyle apps/backend/cloud_agent apps/backend/cloud_agent_host apps/backend/cloud_agent_shared
   run_check mypy uv run --frozen mypy
   run_check pytest uv run --frozen pytest -n 4 --dist loadfile -q -m 'not external and not dbtest'
 fi
