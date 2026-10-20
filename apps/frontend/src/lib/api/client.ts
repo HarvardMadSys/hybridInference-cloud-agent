@@ -15,12 +15,15 @@
 //     the caller is sent back through the gateway's `/authorize` flow.
 //
 // `jsonOrThrow` below was carried over verbatim from the source client, and
-// its plain-`detail` and legacy `error_code` branches still are. Several of
-// their patterns (password reset, email verification, duplicate signup) can
-// only match gateway endpoints this service does not call. The structured
-// `{ error: { type, message } }` branch is this service's own shape, and it
-// now classifies by `type` alone: the source's message patterns ran first
-// there and replaced typed reasons callers recover on.
+// its legacy `error_code` branch still is. Its plain-`detail` branch no longer
+// infers a code from the wording: the gateway-era patterns (password reset,
+// email verification, duplicate signup, the catch-all "expired") could only
+// match endpoints this service does not call, and the catch-all replaced the
+// server's own refusal with a different instruction. A plain detail is now
+// shown as sent with UNKNOWN_ERROR. The structured `{ error: { type, message } }`
+// branch is this service's own shape, and it classifies by `type` alone: the
+// source's message patterns ran first there and replaced typed reasons callers
+// recover on.
 
 import { APIError, httpStatusToErrorCode } from '@/lib/utils/errors';
 
@@ -141,42 +144,16 @@ export async function jsonOrThrow<T>(resp: Response): Promise<T> {
       errorMessage = detail.message;
     } else if (data.detail) {
       // FastAPI validation error format: { detail: "..." }
+      //
+      // Shown as sent, with no code inferred from the wording. The gateway-era
+      // patterns that used to live here (password reset, email verification,
+      // duplicate signup, and the catch-all "expired" → TOKEN_EXPIRED) matched
+      // only endpoints this service does not call, and the catch-all replaced
+      // the server's own refusal — "This sign-in has expired. Please start
+      // again." — with "Session has expired. Please login again". Which sign-in
+      // flow a refusal belongs to is carried by the status; a 401 is announced
+      // by fetchWithAuth (AUTH_EXPIRED_EVENT), not by string matching.
       errorMessage = typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail);
-      const lowerMessage = errorMessage.toLowerCase();
-
-      // Try to extract more specific error from detail message
-      if (lowerMessage.includes('already registered')) {
-        errorCode = 'USER_ALREADY_EXISTS';
-      } else if (
-        (lowerMessage.includes('email') && lowerMessage.includes('not verified')) ||
-        lowerMessage.includes('verify your email')
-      ) {
-        // Login raises a plain HTTPException ({ detail: "Email not verified..." }),
-        // not the typed { error: {...} } shape, so match on the message here so the
-        // login page can offer a "resend verification email" action.
-        errorCode = 'EMAIL_NOT_VERIFIED';
-      } else if (
-        lowerMessage.includes('reset link has already been used') ||
-        (lowerMessage.includes('reset token') && lowerMessage.includes('used'))
-      ) {
-        errorCode = 'RESET_TOKEN_USED';
-      } else if (lowerMessage.includes('reset link has expired')) {
-        errorCode = 'RESET_TOKEN_EXPIRED';
-      } else if (lowerMessage.includes('invalid or expired reset token')) {
-        errorCode = 'RESET_TOKEN_INVALID';
-      } else if (lowerMessage.includes('already been used')) {
-        errorCode = 'TOKEN_ALREADY_USED';
-      } else if (lowerMessage.includes('expired')) {
-        errorCode = 'TOKEN_EXPIRED';
-      } else if (lowerMessage.includes('invalid') && lowerMessage.includes('token')) {
-        errorCode = 'INVALID_TOKEN';
-      } else if (lowerMessage.includes('password') && lowerMessage.includes('characters')) {
-        errorCode = 'WEAK_PASSWORD';
-      } else if (lowerMessage.includes('invalid email or password')) {
-        errorCode = 'INVALID_CREDENTIALS';
-      }
-      // If no specific pattern matched, use the detail message directly
-      // Don't force it into a predefined error code
     } else if (data.error_code && typeof data.error_code === 'string') {
       // Legacy format
       errorCode = data.error_code;

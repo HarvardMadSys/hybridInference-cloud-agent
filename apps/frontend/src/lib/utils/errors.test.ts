@@ -4,8 +4,8 @@ import { APIError, ERROR_MESSAGES, getErrorMessage, httpStatusToErrorCode } from
 
 describe('getErrorMessage', () => {
   it('maps APIError codes to product copy', () => {
-    expect(getErrorMessage(new APIError('EMAIL_NOT_VERIFIED', 'raw backend message', 403))).toBe(
-      ERROR_MESSAGES.EMAIL_NOT_VERIFIED,
+    expect(getErrorMessage(new APIError('RATE_LIMIT_EXCEEDED', 'raw backend message', 429))).toBe(
+      ERROR_MESSAGES.RATE_LIMIT_EXCEEDED,
     );
   });
 
