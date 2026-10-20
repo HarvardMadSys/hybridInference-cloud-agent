@@ -349,7 +349,7 @@ async def test_unresolvable_model_fails_fast(client):
 async def test_unregistered_runtime_is_refused(client):
     """The registry check guards this door too, not only the owner route.
 
-    It lives in the shared ``_create_job_as`` helper for exactly that reason:
+    It lives in the shared ``create_job_as`` helper for exactly that reason:
     a check only the owner route ran would let the relay queue a job that dies
     at claim time — the drift the shared helper exists to prevent.
     """
