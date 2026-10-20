@@ -108,10 +108,10 @@ environment variable sets that policy or its destination. The
 `AGENT_SANDBOX_ARCHIVE_S3_*` variables under *Sandbox deletion archives* are a
 one-time import for the separate archive the **Archive to S3 and delete**
 control takes, and `AGENT_SANDBOX_ARCHIVE_STATE_DIR` is where a Sandbox Manager
-keeps the local state of both, restorable checkpoints included. The lifecycle
-archive destination is fixed at
-`s3://freeinference/cloud-agent/sandbox`. The saved policy contains enablement,
-region, bounded upload sizes, and either an AWS access key or the workload
+keeps the local state of both, restorable checkpoints included. Lifecycle
+archives go to `s3://<bucket>/cloud-agent/sandbox`, and the bucket defaults to
+`freeinference`. The saved policy contains enablement, the bucket, region,
+bounded upload sizes, and either an AWS access key or the workload
 identity fields (customer-managed KMS key ARN and expected bucket owner). The
 secret access key is encrypted with the settings encryption key and is not
 returned by the admin API. With no access key, sandbox managers authenticate

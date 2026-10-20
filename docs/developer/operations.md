@@ -1938,13 +1938,11 @@ explicit **Archive to S3 and delete** control has its own control-plane storage
 configuration, documented in [Sandbox archive storage](#sandbox-archive-storage).
 
 Use the **Sandbox archives** card under **Admin → Settings → Sandbox** to store
-the deployment-wide archive policy in the Agent database. The destination is
-fixed at `s3://freeinference/cloud-agent/sandbox`; it is displayed read-only and
-is never accepted from the browser. The destination is a source constant
-(`SANDBOX_ARCHIVE_S3_URI` in `cloud_agent_shared/sandbox_archive_settings.py`),
-so a distribution archiving to another bucket changes it there; the IAM
-policy below names the same bucket and prefix. An administrator atomically saves the
-enabled state, AWS region, maximum compressed archive size, multipart
+the deployment-wide archive policy in the Agent database. Archives go to
+`s3://<bucket>/cloud-agent/sandbox`. The bucket is part of the policy and
+defaults to `freeinference`; the prefix is fixed, and the IAM policy below names
+both. An administrator atomically saves the
+bucket, enabled state, AWS region, maximum compressed archive size, multipart
 threshold, and part size. Authentication is either an AWS access key or the
 workload-identity pair: a customer-managed KMS key ARN and the expected
 12-digit bucket owner. An access key makes that pair optional; uploads then
@@ -1985,16 +1983,26 @@ key. The bucket must have versioning enabled. Configure lifecycle retention
 and access logging on the bucket itself.
 
 Concretely, grant the sandbox manager role `s3:GetBucketVersioning` on
-`arn:aws:s3:::freeinference`; `s3:ListBucket` on that bucket constrained to the
+`arn:aws:s3:::<bucket>`; `s3:ListBucket` on that bucket constrained to the
 `cloud-agent/sandbox/*` prefix (so an exact-key `HeadObject` can distinguish a
 missing immutable initial object from an authorization failure); and
 `s3:GetObject`, `s3:PutObject`, and `s3:AbortMultipartUpload` on
-`arn:aws:s3:::freeinference/cloud-agent/sandbox/*`. The configured KMS key
+`arn:aws:s3:::<bucket>/cloud-agent/sandbox/*`. The configured KMS key
 policy must permit `kms:GenerateDataKey` and `kms:Decrypt` for SSE-KMS
 multipart uploads. An access key needs those same S3 actions; SSE-S3 uploads
 do not call KMS. Add an `AbortIncompleteMultipartUpload` bucket lifecycle
 rule as defense in depth for a host that disappears before its bounded abort
 request completes.
+
+Changing the bucket changes where new archives go and where restores read.
+Checkpoints and environment snapshots are read back by object version, which a
+copy to another bucket does not keep, so those stored in the previous bucket
+are not restored after a change. Change it only when no retained group still
+needs a checkpoint from the previous bucket. A bucket other than
+`freeinference` is sent only to hosts that advertise
+`sandbox-archive-destination-v1`. An older host is sent no policy, so it
+confirms no revision and is given no work that needs archives until it is
+redeployed.
 
 Enabling archives requires migration `0042_sandbox_archive_settings` and a
 runner/sandbox manager advertising `sandbox-archive-settings-v1`. The settings
