@@ -1454,7 +1454,7 @@ deploy/host/sandbox_host.sh activate # drain, replace, prove
 
 Use the standalone host stack even on the gateway's machine, with tunnel
 destinations pointing to its local listeners. The old co-located
-`agent_runner.sh` overlay did not move; [MIGRATION.md](../../MIGRATION.md) records
+`agent_runner.sh` overlay did not move; [the repository extraction record](../agents/reviews/2026-08-09-repository-extraction-record.md) records
 that decision. `preflight` checks Docker, retained-session configuration, host
 isolation, and the configured image. `up` repeats those checks against the image
 it deploys.

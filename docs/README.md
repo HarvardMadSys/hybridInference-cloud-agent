@@ -10,8 +10,8 @@ quickstart. `docs/` has two folders:
 
 Repository-wide references stay at the root: [AGENTS.md](../AGENTS.md),
 [CONTRIBUTING.md](../CONTRIBUTING.md), [ENVIRONMENT.md](../ENVIRONMENT.md),
-[SECURITY.md](../SECURITY.md), and the completed split record,
-[MIGRATION.md](../MIGRATION.md).
+[SECURITY.md](../SECURITY.md), and the completed split's
+[extraction record](agents/reviews/2026-08-09-repository-extraction-record.md).
 
 ## Reading the records
 

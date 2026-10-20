@@ -5018,7 +5018,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # In the source repo, importing sandbox configured root logging as a side
     # effect; the host shim removed that on purpose. This is the sanctioned
-    # replacement (MIGRATION.md's deferred-behaviour register, the
+    # replacement (the extraction record's deferred-behaviour register, the
     # runner-logging row) — without it every INFO event a runner emits goes
     # nowhere.
     configure_process_logging()
