@@ -18,7 +18,7 @@ from typing import Any
 
 import pytest
 
-from cloud_agent_host import runtime_downloads, runtime_images, runtime_install
+from cloud_agent_host import runtime_downloads, runtime_images, runtime_install, tree_copy
 from cloud_agent_host.chat_sandbox_models import (
     CHAT_NAMESPACE_LABEL,
     CHAT_RUNTIME_LABEL,
@@ -1071,7 +1071,7 @@ def downloaded(monkeypatch):
         def wait(self, timeout=None):
             return 0
 
-    monkeypatch.setattr(runtime_install.subprocess, "Popen", Reader)
+    monkeypatch.setattr(tree_copy.subprocess, "Popen", Reader)
     return fake
 
 
