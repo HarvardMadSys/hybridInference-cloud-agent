@@ -53,8 +53,6 @@ from cloud_agent.settings import number_setting, setting_env
 
 logger = get_logger(__name__)
 
-_TIMEOUT_S = 10.0
-_CONNECT_TIMEOUT_S = 5.0
 ENV_GRANT_BASE_PATH = "GATEWAY_GRANT_BASE_PATH"
 ENV_GRANT_BINDING_ID = "GATEWAY_GRANT_BINDING_ID"
 _DEFAULT_GRANT_BASE_PATH = "/internal/agent-grants"
@@ -66,12 +64,6 @@ _DEFAULT_GRANT_BASE_PATH = "/internal/agent-grants"
 #: process limit -- and unlike a module global it cannot be bound to a loop that
 #: has already closed.
 _MAX_CONCURRENT_REQUEST_PAGES = 4
-
-#: Total budget for one request page, from waiting for a slot to the last byte
-#: of the body. ``httpx.Timeout`` cannot express this: its read timeout applies
-#: between chunks, so a gateway that trickles bytes forever never trips it, and
-#: it says nothing about how long the slot above took to free up.
-_REQUEST_PAGE_DEADLINE_S = _TIMEOUT_S
 
 
 def _validated_window(since: datetime, until: datetime) -> tuple[datetime, datetime]:
@@ -285,10 +277,10 @@ class GrantClient:
         if not self.configured:
             raise GatewayError(f"{ENV_BASE_URL} and {ENV_DISPATCH_TOKEN} must both be set")
         headers = {"Authorization": f"Bearer {self._token}"}
-        deadline_s = number_setting("gateway_request_timeout_s", _TIMEOUT_S)
+        deadline_s = number_setting("gateway_request_timeout_s")
         timeout = httpx.Timeout(
             deadline_s,
-            connect=number_setting("gateway_connect_timeout_s", _CONNECT_TIMEOUT_S),
+            connect=number_setting("gateway_connect_timeout_s"),
         )
         url = f"{self._base_url}{path}"
         try:
@@ -425,8 +417,8 @@ class GrantClient:
         params = {"since": since.isoformat(), "until": until.isoformat(), "detail": "totals"}
         headers = {"Authorization": f"Bearer {self._token}"}
         timeout = httpx.Timeout(
-            number_setting("gateway_request_timeout_s", _TIMEOUT_S),
-            connect=number_setting("gateway_connect_timeout_s", _CONNECT_TIMEOUT_S),
+            number_setting("gateway_request_timeout_s"),
+            connect=number_setting("gateway_connect_timeout_s"),
         )
         try:
             if self._client is not None:
@@ -522,8 +514,8 @@ class GrantClient:
         url = f"{self._base_url}{path}"
         headers = {"Authorization": f"Bearer {self._token}"}
         timeout = httpx.Timeout(
-            number_setting("gateway_request_timeout_s", _TIMEOUT_S),
-            connect=number_setting("gateway_connect_timeout_s", _CONNECT_TIMEOUT_S),
+            number_setting("gateway_request_timeout_s"),
+            connect=number_setting("gateway_connect_timeout_s"),
         )
         try:
             # One deadline over everything this call waits for on the wire:
@@ -531,9 +523,7 @@ class GrantClient:
             # a slow-drip response holds a slot until the gateway decides to
             # finish, whatever the per-operation timeout says.
             async with (
-                asyncio.timeout(
-                    number_setting("gateway_request_timeout_s", _REQUEST_PAGE_DEADLINE_S)
-                ),
+                asyncio.timeout(number_setting("gateway_request_timeout_s")),
                 self._request_page_slots,
             ):
                 if self._client is not None:

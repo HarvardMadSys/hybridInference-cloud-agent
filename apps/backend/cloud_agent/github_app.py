@@ -59,10 +59,6 @@ _INSTALLATION_TTL_S = 300.0
 # (404), refused for this repository (422), or the JWT refused (401). Each is
 # worth exactly one fresh look at which installation covers the repository.
 _STALE_INSTALLATION_STATUSES = frozenset({401, 404, 422})
-# How long one user's repository answer is reused. Entitlement is asked on every
-# workspace file read and terminal open; a minute keeps those off GitHub while
-# bounding how long a revoked permission still reads as granted.
-_USER_REPOSITORIES_TTL_S = 60.0
 _COMMIT_SHA = re.compile(r"^[0-9a-fA-F]{7,64}$")
 # What the token endpoint answers when the refresh token itself is finished:
 # expired, already spent, or its authorization revoked. GitHub sends its own
@@ -360,7 +356,7 @@ class GitHubAppCredentials:
     def _timeout_s(self) -> float:
         if self._timeout_override is not None:
             return self._timeout_override
-        return number_setting("github_request_timeout_s", 30.0)
+        return number_setting("github_request_timeout_s")
 
     @property
     def request_timeout_s(self) -> float:
@@ -695,7 +691,7 @@ class GitHubAppCredentials:
         """This user's repositories if read within the last minute, else ``None``."""
         cached = self._user_repositories.get((user_id, installation_ids))
         if cached is None or time.monotonic() - cached[0] > number_setting(
-            "github_repository_cache_s", _USER_REPOSITORIES_TTL_S
+            "github_repository_cache_s"
         ):
             return None
         return list(cached[1])

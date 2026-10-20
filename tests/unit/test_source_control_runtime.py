@@ -27,6 +27,7 @@ from fastapi import FastAPI
 
 from cloud_agent import github_app
 from cloud_agent.github_app import AppConfig, GitHubAppCredentials
+from cloud_agent.settings import number_setting
 from cloud_agent.source_control_runtime import (
     GitHubAppProvider,
     GitHubAppState,
@@ -426,7 +427,7 @@ def test_failed_app_reload_uses_current_interval_setting(
     monkeypatch.setattr(
         source_control_runtime,
         "number_setting",
-        lambda name, default=None: values.get(name, default),
+        lambda name: values.get(name, number_setting(name)),
     )
     path = tmp_path / "later.pem"
     clock = _Clock()
