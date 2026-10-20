@@ -2,6 +2,7 @@
 import '@testing-library/jest-dom/vitest';
 
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import type { ReactElement } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -14,6 +15,7 @@ import {
 } from '@/lib/api/agents';
 
 import { RunDetails } from './RunDetails';
+import { AgentReadProvider } from './AgentReadProvider';
 import { PUSH_BATCH_MS, receiveHint, resetAgentPush } from './agentPush';
 import type { AgentJob } from './types';
 
@@ -135,10 +137,22 @@ function pendingUsage(): AgentJobUsageApi {
   return usage({ status: 'pending', refreshing: true, totals: null });
 }
 
+/** A settled ledger whose input-token total names the snapshot, for assertions. */
+function usageWithTokens(tokensIn: number): AgentJobUsageApi {
+  const snapshot = usage();
+  snapshot.ledger.totals = { ...snapshot.ledger.totals!, tokens_in: tokensIn };
+  return snapshot;
+}
+
+/** Every panel mounts inside the shell's per-owner read scope, as the app does. */
+function renderPanel(element: ReactElement) {
+  return render(<AgentReadProvider>{element}</AgentReadProvider>);
+}
+
 describe('RunDetails', () => {
   it('describes the selected turn, not the turn the page is showing', () => {
     vi.mocked(getAgentJobUsage).mockResolvedValue(usage());
-    render(
+    renderPanel(
       <RunDetails
         jobId="ajob_0"
         turnNo={2}
@@ -162,7 +176,7 @@ describe('RunDetails', () => {
 
   it('falls back to the loaded turn when the thread row is not in hand', () => {
     vi.mocked(getAgentJobUsage).mockResolvedValue(null);
-    render(
+    renderPanel(
       <RunDetails
         jobId="ajob_1"
         turnNo={7}
@@ -178,7 +192,7 @@ describe('RunDetails', () => {
 
   it('uses a matching loaded turn for its status summary when the thread row is unavailable', () => {
     vi.mocked(getAgentJobUsage).mockResolvedValue(null);
-    render(
+    renderPanel(
       <RunDetails
         jobId="ajob_1"
         turnNo={7}
@@ -201,7 +215,7 @@ describe('RunDetails', () => {
 
   it('never borrows status, failure, or metadata from another turn when a historical row is missing', () => {
     vi.mocked(getAgentJobUsage).mockResolvedValue(null);
-    render(
+    renderPanel(
       <RunDetails
         jobId="ajob_missing"
         turnNo={2}
@@ -229,7 +243,7 @@ describe('RunDetails', () => {
 
   it('shows the selected turn’s owner-facing failure reason and retry guidance', () => {
     vi.mocked(getAgentJobUsage).mockResolvedValue(null);
-    render(
+    renderPanel(
       <RunDetails
         jobId="ajob_0"
         turnNo={2}
@@ -256,7 +270,7 @@ describe('RunDetails', () => {
 
   it('reports missing failure details without inventing a reason', () => {
     vi.mocked(getAgentJobUsage).mockResolvedValue(null);
-    render(
+    renderPanel(
       <RunDetails
         jobId="ajob_0"
         turnNo={2}
@@ -281,7 +295,7 @@ describe('RunDetails', () => {
     },
   ])('gives an actionable prerequisite instead of a retry for $detail', ({ detail, guidance }) => {
     vi.mocked(getAgentJobUsage).mockResolvedValue(null);
-    render(
+    renderPanel(
       <RunDetails
         jobId="ajob_0"
         turnNo={2}
@@ -298,7 +312,7 @@ describe('RunDetails', () => {
 
   it('explains lost context without offering to continue the same chat', () => {
     vi.mocked(getAgentJobUsage).mockResolvedValue(null);
-    render(
+    renderPanel(
       <RunDetails
         jobId="ajob_0"
         turnNo={2}
@@ -316,7 +330,7 @@ describe('RunDetails', () => {
   it('offers to restart a failed run in a new session, then navigates to it', async () => {
     vi.mocked(getAgentJobUsage).mockResolvedValue(null);
     vi.mocked(createAgentJob).mockResolvedValue({ id: 'ajob_new' } as AgentJobApi);
-    render(
+    renderPanel(
       <RunDetails
         jobId="ajob_0"
         turnNo={2}
@@ -347,7 +361,7 @@ describe('RunDetails', () => {
 
   it('does not offer to restart in a new session for a run that is not failed', () => {
     vi.mocked(getAgentJobUsage).mockResolvedValue(null);
-    render(
+    renderPanel(
       <RunDetails
         jobId="ajob_0"
         turnNo={2}
@@ -366,7 +380,7 @@ describe('RunDetails', () => {
   it('offers the workspace diff while saying it is the current workspace', () => {
     vi.mocked(getAgentJobUsage).mockResolvedValue(null);
     const onOpenGitDiff = vi.fn();
-    render(
+    renderPanel(
       <RunDetails
         jobId="ajob_0"
         turnNo={2}
@@ -396,7 +410,7 @@ describe('RunDetails', () => {
         },
       }),
     );
-    render(
+    renderPanel(
       <RunDetails
         jobId="ajob_0"
         turnNo={2}
@@ -416,7 +430,7 @@ describe('RunDetails', () => {
     vi.useFakeTimers();
     vi.mocked(getAgentJobUsage).mockResolvedValue(usage());
     await act(async () => {
-      render(
+      renderPanel(
         <RunDetails
           jobId="ajob_pushed"
           turnNo={2}
@@ -447,7 +461,7 @@ describe('RunDetails', () => {
     read.ledger.totals = { ...read.ledger.totals!, tokens_in: 5555 };
     vi.mocked(getAgentJobUsage).mockResolvedValue(read);
     await act(async () => {
-      render(
+      renderPanel(
         <RunDetails
           jobId="ajob_versions"
           turnNo={2}
@@ -481,7 +495,7 @@ describe('RunDetails', () => {
       // Later reads are slow: only the refresh's answer can change what is shown.
       .mockImplementation(() => new Promise(() => undefined));
     await act(async () => {
-      render(
+      renderPanel(
         <RunDetails
           jobId="ajob_refreshed"
           turnNo={2}
@@ -516,7 +530,7 @@ describe('RunDetails', () => {
 
   it('says the deployment has no ledger instead of showing nothing', async () => {
     vi.mocked(getAgentJobUsage).mockResolvedValue(null);
-    render(
+    renderPanel(
       <RunDetails
         jobId="ajob_without_ledger"
         turnNo={2}
@@ -532,7 +546,7 @@ describe('RunDetails', () => {
 
   it('exports only this turn and groups it by attempt', () => {
     vi.mocked(getAgentJobUsage).mockResolvedValue(usage());
-    render(
+    renderPanel(
       <RunDetails
         jobId="ajob_0"
         turnNo={2}
@@ -562,7 +576,7 @@ describe('RunDetails', () => {
     vi.mocked(getAgentJobUsage).mockResolvedValue(pendingUsage());
     vi.mocked(refreshAgentJobUsage).mockResolvedValue(pendingUsage());
     await act(async () => {
-      render(
+      renderPanel(
         <RunDetails
           jobId="ledger-refresh"
           turnNo={2}
@@ -595,7 +609,7 @@ describe('RunDetails', () => {
     vi.mocked(getAgentJobUsage).mockResolvedValue(scheduled);
     vi.mocked(refreshAgentJobUsage).mockResolvedValue(scheduled);
     await act(async () => {
-      render(
+      renderPanel(
         <RunDetails
           jobId="ledger-scheduled"
           turnNo={2}
@@ -642,7 +656,7 @@ describe('RunDetails', () => {
       return Date.now() >= due ? usage() : usage({ next_refresh_at: refreshAt });
     });
     await act(async () => {
-      render(
+      renderPanel(
         <RunDetails
           jobId="ledger-far-schedule"
           turnNo={2}
@@ -667,7 +681,7 @@ describe('RunDetails', () => {
 
   it('revalidates an unfinished cached ledger when the panel is reopened', async () => {
     vi.mocked(getAgentJobUsage).mockResolvedValue(pendingUsage());
-    const element = (
+    const panel = (
       <RunDetails
         jobId="ledger-reopen"
         turnNo={2}
@@ -676,15 +690,183 @@ describe('RunDetails', () => {
         onOpenGitDiff={vi.fn()}
       />
     );
-    const first = render(element);
+    // The shell keeps the provider mounted while the panel itself closes.
+    const view = renderPanel(panel);
     await waitFor(() => expect(screen.getByText('Pending')).toBeInTheDocument());
-    first.unmount();
 
     // A settled snapshot is worth reusing; one still waiting for the worker is
     // not, or reopening the panel would show yesterday's state for good.
     vi.mocked(getAgentJobUsage).mockResolvedValue(usage());
-    render(element);
+    view.rerender(<AgentReadProvider>{null}</AgentReadProvider>);
+    view.rerender(<AgentReadProvider>{panel}</AgentReadProvider>);
     await waitFor(() => expect(screen.getByText('Available')).toBeInTheDocument());
     expect(getAgentJobUsage).toHaveBeenCalledTimes(2);
+  });
+
+  it('reuses a settled snapshot when the same account reopens the panel', async () => {
+    vi.mocked(getAgentJobUsage).mockResolvedValue(usage());
+    const panel = (
+      <RunDetails
+        jobId="ledger-same-owner"
+        turnNo={2}
+        tab="usage"
+        events={[]}
+        onOpenGitDiff={vi.fn()}
+      />
+    );
+    const view = render(<AgentReadProvider>{panel}</AgentReadProvider>);
+    await waitFor(() => expect(screen.getByText('Available')).toBeInTheDocument());
+    expect(getAgentJobUsage).toHaveBeenCalledTimes(1);
+
+    // The shell keeps the provider mounted across one panel closing; the same
+    // account reopening the turn reads nothing new.
+    view.rerender(<AgentReadProvider>{null}</AgentReadProvider>);
+    view.rerender(<AgentReadProvider>{panel}</AgentReadProvider>);
+    await waitFor(() => expect(screen.getByText('Available')).toBeInTheDocument());
+    expect(getAgentJobUsage).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows the next account its own usage, never the previous account snapshot', async () => {
+    vi.mocked(getAgentJobUsage).mockResolvedValue(usageWithTokens(1111));
+    const first = render(
+      <AgentReadProvider userId="alice">
+        <RunDetails
+          jobId="ajob_shared"
+          turnNo={2}
+          tab="usage"
+          events={[]}
+          onOpenGitDiff={vi.fn()}
+        />
+      </AgentReadProvider>,
+    );
+    await waitFor(() => expect(screen.getByText('1,111')).toBeInTheDocument());
+    first.unmount();
+
+    vi.mocked(getAgentJobUsage).mockClear();
+    vi.mocked(getAgentJobUsage).mockResolvedValue(usageWithTokens(2222));
+    render(
+      <AgentReadProvider userId="bob">
+        <RunDetails
+          jobId="ajob_shared"
+          turnNo={2}
+          tab="usage"
+          events={[]}
+          onOpenGitDiff={vi.fn()}
+        />
+      </AgentReadProvider>,
+    );
+
+    // Bob's scope starts empty: the panel reads his usage and never shows the
+    // snapshot it kept for Alice.
+    await waitFor(() => expect(screen.getByText('2,222')).toBeInTheDocument());
+    expect(screen.queryByText('1,111')).toBeNull();
+    expect(getAgentJobUsage).toHaveBeenCalledTimes(1);
+  });
+
+  it('ignores a usage read that outlives its account', async () => {
+    let answer!: (value: AgentJobUsageApi) => void;
+    vi.mocked(getAgentJobUsage).mockImplementation(
+      () =>
+        new Promise<AgentJobUsageApi>((resolve) => {
+          answer = resolve;
+        }),
+    );
+    const first = render(
+      <AgentReadProvider userId="alice">
+        <RunDetails jobId="ajob_late" turnNo={2} tab="usage" events={[]} onOpenGitDiff={vi.fn()} />
+      </AgentReadProvider>,
+    );
+    first.unmount();
+
+    vi.mocked(getAgentJobUsage).mockResolvedValue(usageWithTokens(2222));
+    render(
+      <AgentReadProvider userId="bob">
+        <RunDetails jobId="ajob_late" turnNo={2} tab="usage" events={[]} onOpenGitDiff={vi.fn()} />
+      </AgentReadProvider>,
+    );
+    await waitFor(() => expect(screen.getByText('2,222')).toBeInTheDocument());
+
+    // Alice's read lands after the switch; it belongs to a scope that is gone.
+    answer(usageWithTokens(1111));
+    await waitFor(() => expect(screen.getByText('2,222')).toBeInTheDocument());
+    expect(screen.queryByText('1,111')).toBeNull();
+  });
+
+  it('drops a read that left under one account when the same panel joins another', async () => {
+    let aliceRead!: (value: AgentJobUsageApi) => void;
+    vi.mocked(getAgentJobUsage).mockImplementationOnce(
+      () =>
+        new Promise<AgentJobUsageApi>((resolve) => {
+          aliceRead = resolve;
+        }),
+    );
+    const view = render(
+      <AgentReadProvider userId="alice">
+        <RunDetails
+          jobId="ajob_rejoin"
+          turnNo={2}
+          tab="usage"
+          events={[]}
+          onOpenGitDiff={vi.fn()}
+        />
+      </AgentReadProvider>,
+    );
+
+    // The shell swaps the signed-in account without unmounting the panel.
+    vi.mocked(getAgentJobUsage).mockResolvedValue(usageWithTokens(2222));
+    view.rerender(
+      <AgentReadProvider userId="bob">
+        <RunDetails
+          jobId="ajob_rejoin"
+          turnNo={2}
+          tab="usage"
+          events={[]}
+          onOpenGitDiff={vi.fn()}
+        />
+      </AgentReadProvider>,
+    );
+    await waitFor(() => expect(screen.getByText('2,222')).toBeInTheDocument());
+    expect(getAgentJobUsage).toHaveBeenCalledTimes(2);
+
+    // Alice's answer then lands on the still-mounted panel; it belongs to a
+    // scope the panel has left.
+    aliceRead(usageWithTokens(1111));
+    await waitFor(() => expect(screen.getByText('2,222')).toBeInTheDocument());
+    expect(screen.queryByText('1,111')).toBeNull();
+  });
+
+  it('ignores a refresh answer that outlives its account', async () => {
+    let answer!: (value: AgentJobUsageApi) => void;
+    vi.mocked(getAgentJobUsage).mockResolvedValue(usageWithTokens(1111));
+    vi.mocked(refreshAgentJobUsage).mockImplementation(
+      () =>
+        new Promise<AgentJobUsageApi>((resolve) => {
+          answer = resolve;
+        }),
+    );
+    const panel = (userId: string) => (
+      <AgentReadProvider userId={userId}>
+        <RunDetails
+          jobId="ajob_refresh_rejoin"
+          turnNo={2}
+          tab="usage"
+          events={[]}
+          onOpenGitDiff={vi.fn()}
+        />
+      </AgentReadProvider>
+    );
+    const view = render(panel('alice'));
+    await waitFor(() => expect(screen.getByText('1,111')).toBeInTheDocument());
+    fireEvent.click(screen.getAllByRole('button', { name: 'Refresh' })[0]);
+
+    vi.mocked(getAgentJobUsage).mockResolvedValue(usageWithTokens(2222));
+    view.rerender(panel('bob'));
+    await waitFor(() => expect(screen.getByText('2,222')).toBeInTheDocument());
+
+    // The refresh Alice asked for finishes while Bob's panel is mounted. Its
+    // snapshot and its failure text are both Alice's, not Bob's.
+    answer(usageWithTokens(1111));
+    await waitFor(() => expect(screen.getByText('2,222')).toBeInTheDocument());
+    expect(screen.queryByText('1,111')).toBeNull();
   });
 });
