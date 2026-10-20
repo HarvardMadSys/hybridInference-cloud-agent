@@ -152,6 +152,55 @@ class _BuiltArchive:
         self.stream.close()
 
 
+def encode_marker(payload: dict[str, object]) -> bytes:
+    """Return a marker's canonical bytes: sorted, compact ASCII JSON and a newline."""
+    return (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
+
+
+def decode_marker(payload: bytes, *, keys: frozenset[str], what: str) -> dict[str, Any]:
+    """Parse a marker that has exactly ``keys``.
+
+    The caller builds the marker from the result and refuses it unless it
+    encodes back to ``payload``: a marker is accepted only in canonical form.
+    """
+    try:
+        value = json.loads(payload.decode("ascii"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise SandboxError(f"{what} is not canonical JSON") from exc
+    if not isinstance(value, dict) or set(value) != keys:
+        raise SandboxError(f"{what} has an invalid schema")
+    return value
+
+
+def check_marker_identity(
+    what: str, *, namespace_sha256: object, ids: dict[str, object], generation: object
+) -> None:
+    """Refuse a marker whose namespace hash, ids or generation are malformed."""
+    if not isinstance(namespace_sha256, str) or not _SHA256.fullmatch(namespace_sha256):
+        raise ValueError(f"{what} namespace identity is invalid")
+    for name, value in ids.items():
+        if not isinstance(value, str) or not value or "\x00" in value or len(value) > 256:
+            raise ValueError(f"{what} {name} is invalid")
+    if isinstance(generation, bool) or not isinstance(generation, int) or generation < 1:
+        raise ValueError(f"{what} generation is invalid")
+
+
+_INITIAL_MARKER_KEYS: Final = frozenset(
+    {
+        "base_sha",
+        "bundle_sha256",
+        "bundle_size_bytes",
+        "container_id",
+        "format_version",
+        "generation",
+        "namespace_sha256",
+        "policy",
+        "preparation_id",
+        "sandbox_id",
+    }
+)
+
+
 @dataclass(frozen=True)
 class SandboxInitialArchiveMarker:
     """Strict canonical identity for a prepared immutable baseline."""
@@ -170,21 +219,16 @@ class SandboxInitialArchiveMarker:
     def __post_init__(self) -> None:
         if self.format_version != INITIAL_ARCHIVE_MARKER_FORMAT_VERSION:
             raise ValueError("initial archive marker format version is unsupported")
-        if not _SHA256.fullmatch(self.namespace_sha256):
-            raise ValueError("initial archive marker namespace identity is invalid")
-        for name, value, maximum in (
-            ("sandbox id", self.sandbox_id, 256),
-            ("container id", self.container_id, 256),
-            ("preparation id", self.preparation_id, 256),
-        ):
-            if not isinstance(value, str) or not value or "\x00" in value or len(value) > maximum:
-                raise ValueError(f"initial archive marker {name} is invalid")
-        if (
-            isinstance(self.generation, bool)
-            or not isinstance(self.generation, int)
-            or self.generation < 1
-        ):
-            raise ValueError("initial archive marker generation is invalid")
+        check_marker_identity(
+            "initial archive marker",
+            namespace_sha256=self.namespace_sha256,
+            ids={
+                "sandbox id": self.sandbox_id,
+                "container id": self.container_id,
+                "preparation id": self.preparation_id,
+            },
+            generation=self.generation,
+        )
         if not isinstance(self.base_sha, str) or not _GIT_OBJECT_ID.fullmatch(self.base_sha):
             raise ValueError("initial archive marker base SHA is invalid")
         if not isinstance(self.policy, SandboxArchivePolicy) or not self.policy.enabled:
@@ -201,41 +245,25 @@ class SandboxInitialArchiveMarker:
 
     def encode(self) -> bytes:
         """Encode this marker as bounded canonical JSON."""
-        payload = {
-            "base_sha": self.base_sha,
-            "bundle_sha256": self.bundle_sha256,
-            "bundle_size_bytes": self.bundle_size_bytes,
-            "container_id": self.container_id,
-            "format_version": self.format_version,
-            "generation": self.generation,
-            "namespace_sha256": self.namespace_sha256,
-            "policy": self.policy.as_dict(),
-            "preparation_id": self.preparation_id,
-            "sandbox_id": self.sandbox_id,
-        }
-        return (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
+        return encode_marker(
+            {
+                "base_sha": self.base_sha,
+                "bundle_sha256": self.bundle_sha256,
+                "bundle_size_bytes": self.bundle_size_bytes,
+                "container_id": self.container_id,
+                "format_version": self.format_version,
+                "generation": self.generation,
+                "namespace_sha256": self.namespace_sha256,
+                "policy": self.policy.as_dict(),
+                "preparation_id": self.preparation_id,
+                "sandbox_id": self.sandbox_id,
+            }
+        )
 
     @classmethod
     def decode(cls, payload: bytes) -> SandboxInitialArchiveMarker:
         """Decode and validate one canonical initial-archive marker."""
-        try:
-            decoded = payload.decode("ascii")
-            value = json.loads(decoded)
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise SandboxError("initial archive marker is not canonical JSON") from exc
-        if not isinstance(value, dict) or set(value) != {
-            "base_sha",
-            "bundle_sha256",
-            "bundle_size_bytes",
-            "container_id",
-            "format_version",
-            "generation",
-            "namespace_sha256",
-            "policy",
-            "preparation_id",
-            "sandbox_id",
-        }:
-            raise SandboxError("initial archive marker has an invalid schema")
+        value = decode_marker(payload, keys=_INITIAL_MARKER_KEYS, what="initial archive marker")
         try:
             policy = value.pop("policy", None)
             if not isinstance(policy, dict):
@@ -1140,4 +1168,7 @@ __all__ = [
     "DEFAULT_ARCHIVE_OPERATION_TIMEOUT_S",
     "SandboxArchiveService",
     "SandboxInitialArchiveMarker",
+    "check_marker_identity",
+    "decode_marker",
+    "encode_marker",
 ]

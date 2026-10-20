@@ -303,9 +303,9 @@ class SandboxArchiveS3Uploader:
         sandbox_hash = _identity_hash("sandbox id", sandbox_id)
         _validate_generation(generation)
         _validate_upload_size(size, maximum=self.config.max_archive_bytes)
-        key = self._object_key(
-            namespace_hash=namespace_hash,
-            sandbox_hash=sandbox_hash,
+        key = lifecycle_object_key(
+            namespace_sha256=namespace_hash,
+            sandbox_sha256=sandbox_hash,
             generation=generation,
             phase=checked_phase,
         )
@@ -653,9 +653,9 @@ class SandboxArchiveS3Uploader:
         _validate_generation(generation)
         _validate_upload_size(size, maximum=self.config.max_archive_bytes)
         digest = _validate_sha256(sha256)
-        key = self._object_key(
-            namespace_hash=namespace_hash,
-            sandbox_hash=sandbox_hash,
+        key = lifecycle_object_key(
+            namespace_sha256=namespace_hash,
+            sandbox_sha256=sandbox_hash,
             generation=generation,
             phase="initial",
         )
@@ -677,19 +677,6 @@ class SandboxArchiveS3Uploader:
                 "existing initial sandbox archive does not match its prepared marker"
             )
         return True
-
-    @staticmethod
-    def _object_key(
-        *,
-        namespace_hash: str,
-        sandbox_hash: str,
-        generation: int,
-        phase: ArchivePhase,
-    ) -> str:
-        return (
-            f"{SANDBOX_ARCHIVE_PREFIX}/v1/{namespace_hash}/{sandbox_hash}/"
-            f"g{generation}/{phase}.tar.gz"
-        )
 
     def _check_deadline(self, deadline: float | None) -> None:
         _check_deadline(deadline, self._clock)
@@ -1122,6 +1109,16 @@ def _object_format(phase: ArchivePhase) -> tuple[str, str]:
     return "application/gzip", "tar-gzip-v1"
 
 
+def lifecycle_object_key(
+    *, namespace_sha256: str, sandbox_sha256: str, generation: int, phase: str
+) -> str:
+    """Return the key of one lifecycle point's archive: a host's sandbox, at one generation."""
+    return (
+        f"{SANDBOX_ARCHIVE_PREFIX}/v1/{namespace_sha256}/{sandbox_sha256}/"
+        f"g{generation}/{phase}.tar.gz"
+    )
+
+
 def checkpoint_object_key(*, sandbox_id: str, generation: int, checkpoint_id: str) -> str:
     """Return the per-sandbox checkpoint key; any host may later restore it.
 
@@ -1288,4 +1285,5 @@ __all__ = [
     "SandboxArchiveS3Uploader",
     "SandboxArchiveUploadError",
     "is_sandbox_archive_conditional_conflict",
+    "lifecycle_object_key",
 ]
