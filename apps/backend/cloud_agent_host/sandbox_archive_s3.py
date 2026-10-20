@@ -411,40 +411,14 @@ class SandboxArchiveS3Uploader:
             generation=generation,
             checkpoint_id=checkpoint_id,
         )
-        try:
-            return self._upload_object(
-                key=key,
-                phase="checkpoint",
-                body=body,
-                size=size,
-                sha256=digest,
-                deadline=deadline,
-            )
-        except SandboxArchiveAlreadyExists:
-            self._check_deadline(deadline)
-            existing = self._get_client().head_object(
-                Bucket=self.config.bucket,
-                Key=key,
-                **self._owner_arguments(),
-            )
-            self._check_deadline(deadline)
-            if not self._matching_initial_head(
-                existing, size=size, digest=digest, phase="checkpoint"
-            ):
-                raise SandboxArchiveUploadError(
-                    "existing sandbox checkpoint does not match this retry"
-                ) from None
-            return SandboxArchiveReceipt(
-                phase="checkpoint",
-                bucket=self.config.bucket,
-                key=key,
-                size=size,
-                sha256=digest,
-                etag=_required_response_string(existing, "ETag"),
-                version_id=_required_version_id(existing),
-                s3_checksum_sha256=_optional_response_string(existing, "ChecksumSHA256"),
-                multipart=False,
-            )
+        return self._put_once(
+            key=key,
+            body=body,
+            size=size,
+            sha256=digest,
+            deadline=deadline,
+            what="sandbox checkpoint",
+        )
 
     def download_checkpoint(
         self,
@@ -549,38 +523,14 @@ class SandboxArchiveS3Uploader:
             key = snapshot_object_key(owner, snapshot_id)
         except ValueError as exc:
             raise SandboxArchiveUploadError(str(exc)) from None
-        try:
-            return self._upload_object(
-                key=key,
-                phase="checkpoint",
-                body=body,
-                size=size,
-                sha256=digest,
-                deadline=deadline,
-            )
-        except SandboxArchiveAlreadyExists:
-            self._check_deadline(deadline)
-            existing = self._get_client().head_object(
-                Bucket=self.config.bucket, Key=key, **self._owner_arguments()
-            )
-            self._check_deadline(deadline)
-            if not self._matching_initial_head(
-                existing, size=size, digest=digest, phase="checkpoint"
-            ):
-                raise SandboxArchiveUploadError(
-                    "existing environment snapshot does not match this retry"
-                ) from None
-            return SandboxArchiveReceipt(
-                phase="checkpoint",
-                bucket=self.config.bucket,
-                key=key,
-                size=size,
-                sha256=digest,
-                etag=_required_response_string(existing, "ETag"),
-                version_id=_required_version_id(existing),
-                s3_checksum_sha256=_optional_response_string(existing, "ChecksumSHA256"),
-                multipart=False,
-            )
+        return self._put_once(
+            key=key,
+            body=body,
+            size=size,
+            sha256=digest,
+            deadline=deadline,
+            what="environment snapshot",
+        )
 
     def download_environment_snapshot(
         self,
@@ -625,6 +575,57 @@ class SandboxArchiveS3Uploader:
         if version_id:
             arguments["VersionId"] = version_id
         self._get_client().delete_object(**arguments, **self._owner_arguments())
+
+    def _put_once(
+        self,
+        *,
+        key: str,
+        body: BinaryIO,
+        size: int,
+        sha256: str,
+        deadline: float | None,
+        what: str,
+    ) -> SandboxArchiveReceipt:
+        """Write an object whose key names a fresh id, treating an identical retry as success.
+
+        An existing object under such a key can only be this capture's own
+        earlier write whose response was lost. Its bytes must match exactly;
+        the receipt then comes from that object's metadata.
+        """
+        try:
+            return self._upload_object(
+                key=key,
+                phase="checkpoint",
+                body=body,
+                size=size,
+                sha256=sha256,
+                deadline=deadline,
+            )
+        except SandboxArchiveAlreadyExists:
+            self._check_deadline(deadline)
+            existing = self._get_client().head_object(
+                Bucket=self.config.bucket,
+                Key=key,
+                **self._owner_arguments(),
+            )
+            self._check_deadline(deadline)
+            if not self._matching_initial_head(
+                existing, size=size, digest=sha256, phase="checkpoint"
+            ):
+                raise SandboxArchiveUploadError(
+                    f"existing {what} does not match this retry"
+                ) from None
+            return SandboxArchiveReceipt(
+                phase="checkpoint",
+                bucket=self.config.bucket,
+                key=key,
+                size=size,
+                sha256=sha256,
+                etag=_required_response_string(existing, "ETag"),
+                version_id=_required_version_id(existing),
+                s3_checksum_sha256=_optional_response_string(existing, "ChecksumSHA256"),
+                multipart=False,
+            )
 
     def _upload_object(
         self,
