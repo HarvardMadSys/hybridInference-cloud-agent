@@ -114,12 +114,12 @@ ignore = [
   "UP046",
   "UP047",
 ]
+fixable = ["ALL"]
+unfixable = []
 
 [tool.ruff.lint.per-file-ignores]
 # Docstrings are required of the service packages only.
 "!apps/backend/**" = ["D"]
-fixable = ["ALL"]
-unfixable = []
 
 [tool.ruff.format]
 # Design records keep the code they were written with: ruff formats Python
