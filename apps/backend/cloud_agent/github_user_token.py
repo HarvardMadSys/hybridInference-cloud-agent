@@ -21,7 +21,7 @@ from __future__ import annotations
 import asyncio
 import math
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent.github_app import UserAuthorizationRevoked
@@ -62,7 +62,7 @@ class LiveUserToken:
 
 def _aware(value: datetime | None) -> datetime | None:
     if value is not None and value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
+        return value.replace(tzinfo=UTC)
     return value
 
 
@@ -89,7 +89,7 @@ async def user_access_token(
         return None
     cipher = app_credentials.cipher
     expires = _aware(account.get("access_expires_at"))
-    if expires is None or expires - _RENEW_BEFORE > datetime.now(timezone.utc):
+    if expires is None or expires - _RENEW_BEFORE > datetime.now(UTC):
         ciphertext = account["access_token_ciphertext"]
         return LiveUserToken(cipher.decrypt(ciphertext), ciphertext)
 
@@ -149,7 +149,7 @@ async def _await_renewal(
         if not account or not account.get("access_token_ciphertext"):
             return None
         expires = _aware(account.get("access_expires_at"))
-        if expires is None or expires > datetime.now(timezone.utc):
+        if expires is None or expires > datetime.now(UTC):
             ciphertext = account["access_token_ciphertext"]
             return LiveUserToken(cipher.decrypt(ciphertext), ciphertext)
         if attempt + 1 < _WAIT_ATTEMPTS:

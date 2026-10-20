@@ -14,7 +14,7 @@ import tempfile
 import threading
 import time
 from dataclasses import asdict, replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -7537,7 +7537,7 @@ def test_sandbox_manager_sub_stages_are_reported_when_this_process_is_profiling(
             {
                 "run_id": "sandbox-manager-stages-1",
                 "operations": ["attempt.startup"],
-                "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=15)).isoformat(),
+                "expires_at": (datetime.now(UTC) + timedelta(minutes=15)).isoformat(),
                 "max_operations": 10,
             }
         ),
@@ -7583,7 +7583,7 @@ def _enable_sandbox_manager_profiling(monkeypatch) -> None:
             {
                 "run_id": "sandbox-manager-context-1",
                 "operations": ["attempt.startup"],
-                "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=15)).isoformat(),
+                "expires_at": (datetime.now(UTC) + timedelta(minutes=15)).isoformat(),
                 "max_operations": 10,
             }
         ),

@@ -24,7 +24,7 @@ service:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -140,7 +140,7 @@ async def get_profiling_control(
     404: "you cannot control this here, and here is why" is the useful reply.
     """
     mode = profile_mode()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     if mode != MODE_ADMIN:
         # Not under Admin control, so there is no configuration to read. The
         # answer still has the same *shape* as a real one -- every key present,
@@ -185,7 +185,7 @@ async def start_profiling_run(
     misspelled ``operations`` would otherwise start an experiment measuring
     nothing.
     """
-    moment = datetime.now(timezone.utc)
+    moment = datetime.now(UTC)
     if profile_mode() != MODE_ADMIN:
         raise HTTPException(
             status_code=409,
@@ -259,7 +259,7 @@ async def start_profiling_run(
             run_id=result.run_id,
         )
     _wake_policy_loop(request)
-    snapshot = await service.control_snapshot(now=datetime.now(timezone.utc))
+    snapshot = await service.control_snapshot(now=datetime.now(UTC))
     snapshot["mode"] = MODE_ADMIN
     response.headers["Cache-Control"] = "no-store"
     return {"control": snapshot, "run_id": result.run_id, "revision": result.revision}
@@ -282,7 +282,7 @@ async def stop_profiling_run(
     samples, at the latest when the bounded authorization the producers hold
     lapses.
     """
-    moment = datetime.now(timezone.utc)
+    moment = datetime.now(UTC)
     if profile_mode() != MODE_ADMIN:
         raise HTTPException(
             status_code=409,
@@ -338,7 +338,7 @@ async def stop_profiling_run(
             run_id=result.run_id,
         )
     _wake_policy_loop(request)
-    snapshot = await service.control_snapshot(now=datetime.now(timezone.utc))
+    snapshot = await service.control_snapshot(now=datetime.now(UTC))
     snapshot["mode"] = MODE_ADMIN
     response.headers["Cache-Control"] = "no-store"
     return {"control": snapshot, "run_id": run_id, "revision": result.revision}

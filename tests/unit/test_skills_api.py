@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -17,7 +17,7 @@ from cloud_agent.app import create_app, create_mcp_app
 from cloud_agent.skills.imports import SkillImportNotFound
 from cloud_agent.skills.models import SkillConflict
 
-NOW = datetime.now(timezone.utc)
+NOW = datetime.now(UTC)
 ROW = {
     "id": 1,
     "user_id": "owner",

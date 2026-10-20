@@ -17,7 +17,7 @@ retained-state inventory because the node never ran its Host.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from pydantic import SecretStr
@@ -81,7 +81,7 @@ _STOPPING_CLASSES = {"configuration", "credentials"}
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _moment(value: Any) -> datetime | None:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 from tests.integration.storage.test_agent_job_store import pool as pool
@@ -19,8 +19,8 @@ async def test_fenced_cache_migration_preserves_legacy_snapshot_both_directions(
     """Old and new processes use isolated tables without losing the last snapshot."""
     config = _db_config()
     downgrade_to(config, _PREVIOUS)
-    legacy_time = datetime(2025, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
-    fenced_time = datetime(2025, 2, 3, 4, 5, 6, tzinfo=timezone.utc)
+    legacy_time = datetime(2025, 1, 2, 3, 4, 5, tzinfo=UTC)
+    fenced_time = datetime(2025, 2, 3, 4, 5, 6, tzinfo=UTC)
     try:
         async with pool.acquire() as conn:
             await conn.execute(

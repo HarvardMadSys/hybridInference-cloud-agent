@@ -13,7 +13,7 @@ import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
@@ -539,7 +539,7 @@ class McpCatalog:
         if (
             stored is not None
             and stored.get("registry_url") == registry_url
-            and (datetime.now(timezone.utc) - stored["synced_at"]).total_seconds()
+            and (datetime.now(UTC) - stored["synced_at"]).total_seconds()
             < number_setting("mcp_catalog_sync_seconds", SYNC_INTERVAL)
         ):
             self._fetch_checkpoint = None
@@ -593,7 +593,7 @@ class McpCatalog:
             try:
                 await self.refresh()
                 age = (
-                    (datetime.now(timezone.utc) - self.snapshot["synced_at"]).total_seconds()
+                    (datetime.now(UTC) - self.snapshot["synced_at"]).total_seconds()
                     if self.snapshot
                     else 0
                 )
@@ -629,6 +629,6 @@ class McpCatalog:
             "next_offset": offset + limit if offset + limit < len(matches) else None,
             "synced_at": synced_at.isoformat() if synced_at else None,
             "stale": not synced_at
-            or (datetime.now(timezone.utc) - synced_at).total_seconds()
+            or (datetime.now(UTC) - synced_at).total_seconds()
             > 2 * number_setting("mcp_catalog_sync_seconds", SYNC_INTERVAL),
         }

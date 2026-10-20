@@ -28,7 +28,7 @@ import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 
 from cloud_agent_shared.operation_profiling import (
@@ -417,7 +417,7 @@ def _timestamp(record: Mapping[str, Any], key: str) -> datetime:
         raise MeasurementRejected(f"{key} is not an ISO-8601 timestamp") from exc
     if moment.tzinfo is None:
         raise MeasurementRejected(f"{key} has no timezone")
-    return moment.astimezone(timezone.utc)
+    return moment.astimezone(UTC)
 
 
 def sanitize_facts(facts: Any) -> dict[str, Any]:

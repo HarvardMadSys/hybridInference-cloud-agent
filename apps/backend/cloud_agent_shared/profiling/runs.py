@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import math
 from collections.abc import Mapping
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from .clock import clock
@@ -37,9 +37,9 @@ def _parse_absolute_expiry(raw: str) -> datetime:
     except ValueError as exc:
         raise ValueError(f"expires_at is not an ISO-8601 timestamp: {text!r}") from exc
     if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=timezone.utc)
-    moment = moment.astimezone(timezone.utc)
-    if (moment - datetime.now(timezone.utc)).total_seconds() <= 0:
+        moment = moment.replace(tzinfo=UTC)
+    moment = moment.astimezone(UTC)
+    if (moment - datetime.now(UTC)).total_seconds() <= 0:
         raise ValueError(f"expires_at is not in the future: {text!r}")
     return moment
 
@@ -51,7 +51,7 @@ def _parse_expiry(raw: str) -> float:
     read in exactly one place.
     """
     moment = _parse_absolute_expiry(raw)
-    return clock().monotonic() + (moment - datetime.now(timezone.utc)).total_seconds()
+    return clock().monotonic() + (moment - datetime.now(UTC)).total_seconds()
 
 
 def parse_run(raw: str, *, allow_continuous: bool = False) -> ProfilingRun:

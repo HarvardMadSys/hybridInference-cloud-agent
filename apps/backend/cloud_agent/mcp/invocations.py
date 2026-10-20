@@ -34,7 +34,7 @@ safe; only a contract the server itself documents could, and none does.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 from cloud_agent.mcp.models import Invocation, InvocationStatus
@@ -125,7 +125,7 @@ class Deadline:
 
     def remaining(self, *, now: datetime | None = None) -> timedelta:
         """How long is left, never negative."""
-        current = now or datetime.now(timezone.utc)
+        current = now or datetime.now(UTC)
         return max(self.expires_at - current, timedelta(0))
 
     @property
@@ -167,7 +167,7 @@ def deadline_for(
 
 def _ensure_aware(value: datetime) -> datetime:
     """Read a naive timestamp as UTC, matching how the store writes them."""
-    return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
 @dataclass(frozen=True)

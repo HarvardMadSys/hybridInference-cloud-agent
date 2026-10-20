@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import asyncpg
 import pytest
@@ -137,7 +137,7 @@ async def _seed_attempt(
 ) -> tuple[dict, int, int | None]:
     """Seed historical attempts to exercise refresh scheduling independently."""
     job = await _create_job(store) if job is None else job
-    started_at = started_at or datetime.now(timezone.utc) - timedelta(seconds=10)
+    started_at = started_at or datetime.now(UTC) - timedelta(seconds=10)
     async with db.acquire() as conn:
         attempt_id = await conn.fetchval(
             """
@@ -231,9 +231,7 @@ async def test_a_turn_that_never_called_a_model_leaves_no_gap_in_its_conversatio
     unattributed, and a conversation holding one read as incomplete beside the
     totals of every turn that did run.
     """
-    first, _, _ = await _seed_attempt(
-        db, store, grant_id=None, finished_at=datetime.now(timezone.utc)
-    )
+    first, _, _ = await _seed_attempt(db, store, grant_id=None, finished_at=datetime.now(UTC))
     second = await store.conversation_commands.create_follow_up(
         parent_job_id=first["id"], user_id="user-1", prompt="second turn"
     )
@@ -699,7 +697,7 @@ async def test_all_retry_attempts_visible_and_windows_do_not_overlap(
     db, store, ledger: PostgresLedgerRepository
 ):
     """A delayed finish is clamped without extending a turn through idle gaps."""
-    start = datetime.now(timezone.utc) - timedelta(minutes=5)
+    start = datetime.now(UTC) - timedelta(minutes=5)
     job, first_id, _ = await _seed_attempt(
         db, store, started_at=start, finished_at=start + timedelta(seconds=120)
     )
@@ -843,7 +841,7 @@ async def test_terminal_refresh_retries_are_bounded_and_failures_consume_attempt
     db, store, ledger: PostgresLedgerRepository
 ):
     """Terminal jobs refresh immediately, after 30 s, and at least 5 min after finish."""
-    end = datetime.now(timezone.utc)
+    end = datetime.now(UTC)
     job, attempt_id, ledger_id = await _seed_attempt(
         db, store, started_at=end - timedelta(minutes=10), finished_at=end
     )
@@ -895,7 +893,7 @@ async def test_early_manual_reads_preserve_both_terminal_reconciliations(
     db, store, ledger: PostgresLedgerRepository
 ):
     """Refresh clicks can replace cached data without spending the later stages."""
-    end = datetime.now(timezone.utc)
+    end = datetime.now(UTC)
     job, attempt_id, ledger_id = await _seed_attempt(
         db, store, started_at=end - timedelta(minutes=10), finished_at=end
     )
@@ -949,7 +947,7 @@ async def test_slow_early_read_cannot_consume_the_five_minute_reconciliation(
     db, store, failure, ledger: PostgresLedgerRepository
 ):
     """A query started at +299 seconds stays early even if it finishes after +300."""
-    end = datetime.now(timezone.utc) - timedelta(seconds=301)
+    end = datetime.now(UTC) - timedelta(seconds=301)
     job, _, ledger_id = await _seed_attempt(
         db, store, started_at=end - timedelta(minutes=10), finished_at=end
     )
@@ -1061,7 +1059,7 @@ async def test_usage_reads_fetch_only_what_their_summaries_read(db, store):
     tool returned, such as a whole edited file or a command's output, so a
     long turn's read moved megabytes to add up a few token counts.
     """
-    base = datetime.now(timezone.utc) - timedelta(minutes=10)
+    base = datetime.now(UTC) - timedelta(minutes=10)
     job, first, _ = await _seed_attempt(
         db, store, grant_id=None, started_at=base, finished_at=base + timedelta(seconds=60)
     )

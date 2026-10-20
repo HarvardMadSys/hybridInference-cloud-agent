@@ -103,7 +103,7 @@ async def _prune(store: HostCapacityRepository, *, limit: int, timeout_seconds: 
         # Shutdown, not failure. The next process resumes from whatever the
         # table already holds; nothing here is worth delaying a stop for.
         raise
-    except (TimeoutError, asyncio.TimeoutError):
+    except TimeoutError:
         logger.warning(
             "agent_host_capacity_history_prune_timeout",
             extra={"event": "agent_host_capacity_history_prune_timeout"},

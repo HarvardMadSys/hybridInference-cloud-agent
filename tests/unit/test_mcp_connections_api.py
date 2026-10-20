@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock
 from urllib.parse import parse_qs, urlsplit
@@ -145,8 +145,8 @@ class FakeStore(AllCapabilities):
             "capability_revision": 1,
             "account_label": kwargs.get("account_label"),
             "last_checked_at": None,
-            "created_at": datetime.now(timezone.utc),
-            "updated_at": datetime.now(timezone.utc),
+            "created_at": datetime.now(UTC),
+            "updated_at": datetime.now(UTC),
             "deleted_at": None,
         }
         self.connections[connection_id] = row
@@ -238,7 +238,7 @@ class FakeStore(AllCapabilities):
         row = self.connections.get(connection_id)
         if row is None or row["user_id"] != user_id or row["deleted_at"] is not None:
             return False
-        row["deleted_at"] = datetime.now(timezone.utc)
+        row["deleted_at"] = datetime.now(UTC)
         row["status"] = "disabled"
         row["access_token_ciphertext"] = None
         row["authorization_epoch"] += 1
@@ -351,7 +351,7 @@ class FakeStore(AllCapabilities):
             "status": "pending",
             "mounts": [],
             "registration_hash": registration_hash,
-            "created_at": datetime.now(timezone.utc),
+            "created_at": datetime.now(UTC),
             "last_seen_at": None,
             "revoked_at": None,
         }
@@ -380,7 +380,7 @@ class FakeStore(AllCapabilities):
         if row is None or row["user_id"] != user_id or row["status"] == "revoked":
             return False
         row["status"] = "revoked"
-        row["revoked_at"] = datetime.now(timezone.utc)
+        row["revoked_at"] = datetime.now(UTC)
         for connection in self.connections.values():
             if connection.get("connector_id") == connector_id:
                 # The real store moves both versions here; the API never reads
@@ -447,7 +447,7 @@ class FakeStore(AllCapabilities):
             "resource_templates": kwargs["resource_templates"],
             "prompts": kwargs["prompts"],
             "support": kwargs["support"],
-            "discovered_at": datetime.now(timezone.utc),
+            "discovered_at": datetime.now(UTC),
         }
         return row["capability_revision"]
 
@@ -536,7 +536,7 @@ class FakeStore(AllCapabilities):
             rows = [
                 row
                 for row in rows
-                if row["status"] != "pending" or row["expires_at"] > datetime.now(timezone.utc)
+                if row["status"] != "pending" or row["expires_at"] > datetime.now(UTC)
             ]
         if kwargs.get("before_id") is not None:
             rows = [row for row in rows if row["id"] < kwargs["before_id"]]
@@ -619,8 +619,8 @@ def _seed(store: FakeStore, **overrides: Any) -> int:
         "capability_revision": 1,
         "account_label": "octocat",
         "last_checked_at": None,
-        "created_at": datetime.now(timezone.utc),
-        "updated_at": datetime.now(timezone.utc),
+        "created_at": datetime.now(UTC),
+        "updated_at": datetime.now(UTC),
         "deleted_at": None,
     }
     row.update(overrides)
@@ -2331,7 +2331,7 @@ class TestBindings:
             "resource_templates": [],
             "prompts": [{"name": "summarize", "description": "Summarize"}],
             "support": {},
-            "discovered_at": datetime.now(timezone.utc),
+            "discovered_at": datetime.now(UTC),
         }
 
     def test_a_selection_is_stored_with_its_fingerprints(self) -> None:
@@ -2454,8 +2454,8 @@ class TestInvocationDecisions:
             "status": "pending",
             "arguments_digest": "d",
             "arguments_ciphertext": None,
-            "created_at": datetime.now(timezone.utc),
-            "expires_at": datetime.now(timezone.utc) + timedelta(minutes=5),
+            "created_at": datetime.now(UTC),
+            "expires_at": datetime.now(UTC) + timedelta(minutes=5),
             "decided_at": None,
             "result_summary": None,
         }
@@ -2598,7 +2598,7 @@ class TestInvocationDecisions:
         store.jobs["job-1"] = {
             "id": "job-1",
             "user_id": _OWNER,
-            "deleted_at": datetime.now(timezone.utc),
+            "deleted_at": datetime.now(UTC),
         }
         with _client(store) as client:
             response = client.get("/v1/agent/mcp/invocations", params={"job_id": "job-1"})
@@ -2613,7 +2613,7 @@ class TestInvocationDecisions:
         store.jobs["job-1"] = {
             "id": "job-1",
             "user_id": _OWNER,
-            "deleted_at": datetime.now(timezone.utc),
+            "deleted_at": datetime.now(UTC),
         }
         store.decide_mcp_invocation = AsyncMock(  # type: ignore[method-assign]
             wraps=store.decide_mcp_invocation
@@ -2635,7 +2635,7 @@ class TestInvocationDecisions:
         store.jobs["job-1"] = {
             "id": "job-1",
             "user_id": _OWNER,
-            "deleted_at": datetime.now(timezone.utc),
+            "deleted_at": datetime.now(UTC),
         }
         with _client(store) as client:
             params: dict[str, Any] = {"pending_only": True}
@@ -2743,7 +2743,7 @@ class TestInvocationDecisions:
         connection_id = _seed(store)
         invocation_id = self._pending(store, connection_id)
         store.invocations[invocation_id].update(
-            status=status, expires_at=datetime.now(timezone.utc) - timedelta(seconds=1)
+            status=status, expires_at=datetime.now(UTC) - timedelta(seconds=1)
         )
         with _client(store) as client:
             history = client.get("/v1/agent/mcp/invocations", params={"job_id": "job-1"}).json()

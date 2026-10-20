@@ -30,7 +30,7 @@ import base64
 import hashlib
 import json
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, ClassVar
 from unittest.mock import AsyncMock, call
@@ -457,7 +457,7 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         if row is None or row["deleted_at"] is not None:
             return False
         row.update(
-            deleted_at=datetime.now(timezone.utc),
+            deleted_at=datetime.now(UTC),
             status="disabled",
             access_token_ciphertext=None,
             refresh_token_ciphertext=None,
@@ -1571,7 +1571,7 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
             and (repo is None or job["repo"] == repo)
             and (not temporary or job["repo"] is None)
         ]
-        minimum = datetime.min.replace(tzinfo=timezone.utc)
+        minimum = datetime.min.replace(tzinfo=UTC)
         jobs.sort(
             key=lambda job: (
                 job["pinned_at"] is not None,
@@ -1620,7 +1620,7 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         for project in projects.values():
             project.pop("_threads")
             project.pop("_pinned_threads")
-        minimum = datetime.min.replace(tzinfo=timezone.utc)
+        minimum = datetime.min.replace(tzinfo=UTC)
         return sorted(
             projects.values(),
             key=lambda project: (
@@ -1639,7 +1639,7 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
             return None
         thread_id = job["thread_id"]
         if archived:
-            archived_at = self.archived_threads.setdefault(thread_id, datetime.now(timezone.utc))
+            archived_at = self.archived_threads.setdefault(thread_id, datetime.now(UTC))
             self._pause(thread_id, "archived")
         else:
             self.archived_threads.pop(thread_id, None)
@@ -1665,7 +1665,7 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
             return None
         thread_id = job["thread_id"]
         if pinned:
-            pinned_at = self.pinned_threads.setdefault(thread_id, datetime.now(timezone.utc))
+            pinned_at = self.pinned_threads.setdefault(thread_id, datetime.now(UTC))
         else:
             self.pinned_threads.pop(thread_id, None)
             pinned_at = None
@@ -2138,7 +2138,7 @@ def _browser_session(*, expires_delta=None) -> str:
     import os
 
     claims = jwt.decode(token, options={"verify_signature": False})
-    claims["exp"] = int((datetime.now(timezone.utc) + expires_delta).timestamp())
+    claims["exp"] = int((datetime.now(UTC) + expires_delta).timestamp())
     return jwt.encode(claims, os.environ["AGENT_SESSION_SECRET"], algorithm="HS256")
 
 
@@ -2320,7 +2320,7 @@ async def test_conversation_search_forwards_owner_filters_and_shapes_latest_job(
     """Search returns the canonical title separately from the latest prompt."""
     job_id = await _create_job(client)
     job = store.jobs[job_id]
-    job["updated_at"] = datetime(2026, 9, 10, tzinfo=timezone.utc)
+    job["updated_at"] = datetime(2026, 9, 10, tzinfo=UTC)
     search = AsyncMock(
         return_value={
             "conversations": [
@@ -2642,7 +2642,7 @@ async def test_rename_hides_foreign_missing_and_deleted_jobs(
     foreign_id = await _create_job(client)
     store.jobs[foreign_id]["user_id"] = _OTHER
     deleted_id = await _create_job(client)
-    store.jobs[deleted_id]["deleted_at"] = datetime.now(timezone.utc)
+    store.jobs[deleted_id]["deleted_at"] = datetime.now(UTC)
     for job_id in (foreign_id, deleted_id, "ajob_missing"):
         response = await client.patch(f"/v1/agent/jobs/{job_id}/title", json={"title": "New title"})
         assert response.status_code == 404
@@ -2665,9 +2665,9 @@ async def test_pin_and_unpin_are_thread_scoped_idempotent_and_reorder_lists(
         model="glm-5.1",
     )
     newer_id = newer["id"]
-    store.jobs[parent_id]["created_at"] = datetime(2026, 7, 1, tzinfo=timezone.utc)
-    store.jobs[child_id]["created_at"] = datetime(2026, 7, 2, tzinfo=timezone.utc)
-    store.jobs[newer_id]["created_at"] = datetime(2026, 7, 3, tzinfo=timezone.utc)
+    store.jobs[parent_id]["created_at"] = datetime(2026, 7, 1, tzinfo=UTC)
+    store.jobs[child_id]["created_at"] = datetime(2026, 7, 2, tzinfo=UTC)
+    store.jobs[newer_id]["created_at"] = datetime(2026, 7, 3, tzinfo=UTC)
     store.jobs[parent_id]["state"] = "running"
 
     pinned = await client.post(f"/v1/agent/jobs/{child_id}/pin")
@@ -6057,9 +6057,9 @@ class _FakeGitHubApp:
         self.exchanged.append(code)
         return UserTokens(
             access_token=f"user-token-for-{code}",
-            access_expires_at=datetime.now(timezone.utc) + timedelta(hours=8),
+            access_expires_at=datetime.now(UTC) + timedelta(hours=8),
             refresh_token=f"refresh-for-{code}",
-            refresh_expires_at=datetime.now(timezone.utc) + timedelta(days=180),
+            refresh_expires_at=datetime.now(UTC) + timedelta(days=180),
         )
 
     async def user_profile(self, user_token: str) -> dict[str, Any]:
@@ -7673,7 +7673,7 @@ async def test_a_connection_that_cannot_be_used_says_why_instead_of_vanishing(
     row = store.connect_mcp(
         user_id=_OWNER,
         label="GitHub",
-        expires_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+        expires_at=datetime.now(UTC) - timedelta(minutes=1),
     )
 
     config = (await client.get("/v1/agent/config")).json()
@@ -8486,7 +8486,7 @@ async def test_job_timing_does_not_invent_a_missing_attempt_finish(
 ):
     """A job update or terminal state cannot supply an unrecorded end time."""
     job_id = await _create_job(client)
-    started = datetime(2026, 9, 3, 10, 0, tzinfo=timezone.utc)
+    started = datetime(2026, 9, 3, 10, 0, tzinfo=UTC)
     store.jobs[job_id].update(
         state=state,
         created_at=started - timedelta(minutes=1),
@@ -8515,7 +8515,7 @@ async def test_job_list_and_thread_do_not_substitute_job_dates_for_execution_tim
 ):
     """Paths without a telemetry read leave the execution window unknown."""
     job_id = await _create_job(client)
-    started = datetime(2026, 9, 3, 10, 0, tzinfo=timezone.utc)
+    started = datetime(2026, 9, 3, 10, 0, tzinfo=UTC)
     store.jobs[job_id].update(
         state="succeeded",
         created_at=started - timedelta(minutes=1),
@@ -8544,7 +8544,7 @@ async def test_job_detail_keeps_each_retry_s_telemetry_on_its_attempt(
 ):
     """Selecting an old transcript must never show the retry's measurements."""
     job_id = await _create_job(client)
-    started = datetime(2026, 9, 3, 10, 0, tzinfo=timezone.utc)
+    started = datetime(2026, 9, 3, 10, 0, tzinfo=UTC)
     newest_started = started + timedelta(seconds=5)
     store.attempt_telemetry = {
         job_id: [
@@ -9382,7 +9382,7 @@ async def test_deleted_history_cannot_be_read_resumed_forked_or_used_as_workspac
 ):
     job_id = await _create_job(client)
     thread_id = _thread_of(store, job_id)
-    store.jobs[job_id]["deleted_at"] = datetime.now(timezone.utc)
+    store.jobs[job_id]["deleted_at"] = datetime.now(UTC)
     for suffix in (
         "",
         "/thread",
@@ -9810,7 +9810,7 @@ async def test_claim_loads_current_default_servers_and_skips_unavailable_ones(
     expired = store.connect_mcp(
         user_id=_OWNER,
         label="Expired",
-        expires_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+        expires_at=datetime.now(UTC) - timedelta(minutes=1),
     )
     paused = store.connect_mcp(user_id=_OWNER, label="Paused")
     store.mcp_connections[paused["id"]]["enabled"] = False

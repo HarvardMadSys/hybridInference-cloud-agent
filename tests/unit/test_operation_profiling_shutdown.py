@@ -6,7 +6,7 @@ import json
 import os
 import subprocess
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from cloud_agent_shared import operation_profiling as profiling
@@ -65,7 +65,7 @@ def test_interpreter_exit_drains_a_record_still_waiting_to_publish(tmp_path):
     descriptor = {
         "run_id": run_id,
         "operations": [profiling.STARTUP_OPERATION],
-        "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(),
+        "expires_at": (datetime.now(UTC) + timedelta(minutes=5)).isoformat(),
         "max_operations": 1,
         "target": {"host": "shutdown-host"},
     }
