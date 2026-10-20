@@ -61,7 +61,7 @@ class AdminSandboxQueries:
                 include_archived,
             )
             rows = await conn.fetch(
-                """
+                f"""
                 WITH page AS (
                     SELECT g.id, g.generation, g.stop_requested_at, g.archived_at,
                            g.deletion_state, g.deletion_discard, g.deletion_request_id, g.deletion_requested_at,
@@ -81,31 +81,7 @@ class AdminSandboxQueries:
                       AND ($1::text IS NULL OR g.id > $1)
                     ORDER BY g.id LIMIT $2
                 )
-                SELECT g.id, g.generation, g.stop_requested_at, g.archived_at, g.origin_thread_id,
-                       g.deletion_state, g.deletion_discard, g.deletion_request_id, g.deletion_requested_at,
-                       g.deletion_archive_key, g.deletion_archive_version_id,
-                       g.deletion_sha256, g.deletion_size_bytes, g.deletion_error, g.deletion_retry_exhausted_at, g.deleted_at,
-                       CASE WHEN t.title_source IN ('generated', 'manual')
-                            THEN LEFT(t.title, 160) END AS title,
-                       LEFT(t.repo, 256) AS repo, LEFT(g.user_id, 256) AS user_id,
-                       g.host, g.container_id, g.container_name,
-                       g.runtime_id, g.runtime_version, g.execution_profile,
-                       g.state, g.memory_limit, g.cpu_limit, g.disk_limit_mib,
-                       g.resident_slot_capacity, g.active_operation_count, g.snapshot_state,
-                       g.terminal_count, g.terminal_count_observed_at,
-                       g.resource_snapshot, g.resource_sampled_at, g.resource_received_at,
-                       members.member_count, members.active_attempt_count,
-                       g.created_at, g.last_activity_at, g.idle_deadline, g.updated_at,
-                       h.last_heartbeat_at AS host_last_heartbeat_at
-                FROM page g
-                JOIN agent_threads t ON t.id = g.origin_thread_id AND t.user_id = g.user_id
-                LEFT JOIN agent_runner_hosts h ON h.host = g.host
-                CROSS JOIN LATERAL (
-                    SELECT COUNT(*) FILTER (WHERE m.resident_slot_id IS NOT NULL) AS member_count,
-                           COUNT(*) FILTER (WHERE m.active_attempt_id IS NOT NULL) AS active_attempt_count
-                    FROM agent_thread_sandbox_memberships m
-                    WHERE m.sandbox_id = g.id
-                ) members
+                {_group_projection("page")}
                 ORDER BY g.id
                 """,
                 cursor.after_id if cursor else None,
@@ -146,31 +122,8 @@ class AdminSandboxQueries:
             await conn.execute("SET LOCAL statement_timeout = '5s'")
             observed_at = await conn.fetchval("SELECT NOW()")
             row = await conn.fetchrow(
-                """
-                SELECT g.id, g.generation, g.stop_requested_at, g.archived_at, g.origin_thread_id,
-                       g.deletion_state, g.deletion_discard, g.deletion_request_id, g.deletion_requested_at,
-                       g.deletion_archive_key, g.deletion_archive_version_id,
-                       g.deletion_sha256, g.deletion_size_bytes, g.deletion_error, g.deletion_retry_exhausted_at, g.deleted_at,
-                       CASE WHEN t.title_source IN ('generated', 'manual')
-                            THEN LEFT(t.title, 160) END AS title,
-                       LEFT(t.repo, 256) AS repo, LEFT(g.user_id, 256) AS user_id,
-                       g.host, g.container_id, g.container_name,
-                       g.runtime_id, g.runtime_version, g.execution_profile,
-                       g.state, g.memory_limit, g.cpu_limit, g.disk_limit_mib,
-                       g.resident_slot_capacity, g.active_operation_count, g.snapshot_state,
-                       g.terminal_count, g.terminal_count_observed_at,
-                       g.resource_snapshot, g.resource_sampled_at, g.resource_received_at,
-                       members.member_count, members.active_attempt_count,
-                       g.created_at, g.last_activity_at, g.idle_deadline, g.updated_at,
-                       h.last_heartbeat_at AS host_last_heartbeat_at
-                FROM agent_sandboxes g
-                JOIN agent_threads t ON t.id = g.origin_thread_id AND t.user_id = g.user_id
-                LEFT JOIN agent_runner_hosts h ON h.host = g.host
-                CROSS JOIN LATERAL (
-                    SELECT COUNT(*) FILTER (WHERE m.resident_slot_id IS NOT NULL) AS member_count,
-                           COUNT(*) FILTER (WHERE m.active_attempt_id IS NOT NULL) AS active_attempt_count
-                    FROM agent_thread_sandbox_memberships m WHERE m.sandbox_id = g.id
-                ) members
+                f"""
+                {_group_projection("agent_sandboxes")}
                 WHERE g.id = $1
                 """,
                 sandbox_id,
@@ -239,34 +192,8 @@ class AdminSandboxQueries:
             await conn.execute("SET LOCAL statement_timeout = '5s'")
             observed_at = await conn.fetchval("SELECT NOW()")
             row = await conn.fetchrow(
-                """
-                SELECT g.id, g.generation, g.stop_requested_at, g.archived_at, g.origin_thread_id,
-                       g.deletion_state, g.deletion_discard, g.deletion_request_id, g.deletion_requested_at,
-                       g.deletion_archive_key, g.deletion_archive_version_id,
-                       g.deletion_sha256, g.deletion_size_bytes, g.deletion_error, g.deletion_retry_exhausted_at, g.deleted_at,
-                       CASE WHEN t.title_source IN ('generated', 'manual')
-                            THEN LEFT(t.title, 160) END AS title,
-                       LEFT(t.repo, 256) AS repo, LEFT(g.user_id, 256) AS user_id,
-                       g.host, g.container_id, g.container_name,
-                       g.runtime_id, g.runtime_version, g.execution_profile,
-                       g.state, g.memory_limit, g.cpu_limit, g.disk_limit_mib,
-                       g.resident_slot_capacity, g.active_operation_count, g.snapshot_state,
-                       g.terminal_count, g.terminal_count_observed_at,
-                       g.resource_snapshot, g.resource_sampled_at, g.resource_received_at,
-                       members.member_count, members.active_attempt_count,
-                       members.member_history_count,
-                       g.created_at, g.last_activity_at, g.idle_deadline, g.updated_at,
-                       h.last_heartbeat_at AS host_last_heartbeat_at
-                FROM agent_sandboxes g
-                JOIN agent_threads t ON t.id = g.origin_thread_id AND t.user_id = g.user_id
-                LEFT JOIN agent_runner_hosts h ON h.host = g.host
-                CROSS JOIN LATERAL (
-                    SELECT COUNT(*) FILTER (WHERE m.resident_slot_id IS NOT NULL) AS member_count,
-                           COUNT(*) FILTER (WHERE m.active_attempt_id IS NOT NULL)
-                               AS active_attempt_count,
-                           COUNT(*) AS member_history_count
-                    FROM agent_thread_sandbox_memberships m WHERE m.sandbox_id = g.id
-                ) members
+                f"""
+                {_group_projection("agent_sandboxes", history=True)}
                 WHERE g.id = $1
                 """,
                 sandbox_id,
@@ -346,6 +273,42 @@ class AdminSandboxQueries:
             next_cursor=next_cursor,
             latest_checkpoint=latest_checkpoint,
         )
+
+
+def _group_projection(source: str, *, history: bool = False) -> str:
+    """SQL: the admin view of the groups in ``source``, aliased ``g``, with their counts.
+
+    The caller adds the WHERE and ORDER BY. ``history`` also counts every
+    member the group has had, current or not.
+    """
+    history_column = "members.member_history_count," if history else ""
+    history_count = ", COUNT(*) AS member_history_count" if history else ""
+    return f"""SELECT g.id, g.generation, g.stop_requested_at, g.archived_at, g.origin_thread_id,
+           g.deletion_state, g.deletion_discard, g.deletion_request_id, g.deletion_requested_at,
+           g.deletion_archive_key, g.deletion_archive_version_id,
+           g.deletion_sha256, g.deletion_size_bytes, g.deletion_error,
+           g.deletion_retry_exhausted_at, g.deleted_at,
+           CASE WHEN t.title_source IN ('generated', 'manual')
+                THEN LEFT(t.title, 160) END AS title,
+           LEFT(t.repo, 256) AS repo, LEFT(g.user_id, 256) AS user_id,
+           g.host, g.container_id, g.container_name,
+           g.runtime_id, g.runtime_version, g.execution_profile,
+           g.state, g.memory_limit, g.cpu_limit, g.disk_limit_mib,
+           g.resident_slot_capacity, g.active_operation_count, g.snapshot_state,
+           g.terminal_count, g.terminal_count_observed_at,
+           g.resource_snapshot, g.resource_sampled_at, g.resource_received_at,
+           members.member_count, members.active_attempt_count, {history_column}
+           g.created_at, g.last_activity_at, g.idle_deadline, g.updated_at,
+           h.last_heartbeat_at AS host_last_heartbeat_at
+    FROM {source} g
+    JOIN agent_threads t ON t.id = g.origin_thread_id AND t.user_id = g.user_id
+    LEFT JOIN agent_runner_hosts h ON h.host = g.host
+    CROSS JOIN LATERAL (
+        SELECT COUNT(*) FILTER (WHERE m.resident_slot_id IS NOT NULL) AS member_count,
+               COUNT(*) FILTER (WHERE m.active_attempt_id IS NOT NULL)
+                   AS active_attempt_count{history_count}
+        FROM agent_thread_sandbox_memberships m WHERE m.sandbox_id = g.id
+    ) members"""
 
 
 async def _latest_checkpoint(
