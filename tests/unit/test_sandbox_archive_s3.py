@@ -1116,3 +1116,114 @@ def test_config_carries_the_checkpoint_switch_back_into_its_policy() -> None:
     policy = _policy(checkpoints_enabled=True)
 
     assert SandboxArchiveS3Config.from_policy(policy).as_policy() == policy
+
+
+_SNAPSHOT_OWNER = "a" * 64
+_SNAPSHOT_ID = "b" * 32
+
+
+def _snapshot_key() -> str:
+    return f"cloud-agent/sandbox/env/v1/{_SNAPSHOT_OWNER}/{_SNAPSHOT_ID}.oci.tar"
+
+
+def _snapshot_head(payload: bytes) -> dict[str, Any]:
+    return _matching_head(payload) | {
+        "ContentType": "application/x-tar",
+        "ETag": '"existing"',
+        "Metadata": {
+            "archive-phase": "checkpoint",
+            "archive-format": "oci-layer-archive-v1",
+            "archive-size-bytes": str(len(payload)),
+            "archive-sha256": hashlib.sha256(payload).hexdigest(),
+        },
+    }
+
+
+def _upload_environment_snapshot(
+    uploader: SandboxArchiveS3Uploader,
+    payload: bytes,
+    *,
+    deadline: float | None = None,
+) -> SandboxArchiveReceipt:
+    return uploader.upload_environment_snapshot(
+        owner=_SNAPSHOT_OWNER,
+        snapshot_id=_SNAPSHOT_ID,
+        body=io.BytesIO(payload),
+        size=len(payload),
+        sha256=hashlib.sha256(payload).hexdigest(),
+        deadline=deadline,
+    )
+
+
+def test_environment_snapshot_retry_after_a_lost_response_returns_the_existing_receipt() -> None:
+    payload = b"env-snapshot"
+    client = RecordingS3Client(
+        put_error=PreconditionFailure(), head_response=_snapshot_head(payload)
+    )
+    uploader = SandboxArchiveS3Uploader(_config(), client=client)
+
+    receipt = _upload_environment_snapshot(uploader, payload)
+
+    assert receipt.key == _snapshot_key()
+    assert receipt.version_id == "version-existing"
+    assert receipt.etag == '"existing"'
+
+
+def test_environment_snapshot_retry_refuses_different_existing_bytes() -> None:
+    payload = b"env-snapshot"
+    head = _snapshot_head(b"something else")
+    client = RecordingS3Client(put_error=PreconditionFailure(), head_response=head)
+    uploader = SandboxArchiveS3Uploader(_config(), client=client)
+
+    with pytest.raises(SandboxArchiveUploadError, match="does not match"):
+        _upload_environment_snapshot(uploader, payload)
+
+
+def test_environment_snapshot_retry_refuses_a_head_that_crosses_the_deadline() -> None:
+    payload = b"env-snapshot"
+    now = 0.0
+
+    class ExpiringClient(RecordingS3Client):
+        def head_object(self, **kwargs: Any) -> dict[str, Any]:
+            nonlocal now
+            response = super().head_object(**kwargs)
+            now += 0.6
+            return response
+
+    client = ExpiringClient(put_error=PreconditionFailure(), head_response=_snapshot_head(payload))
+    uploader = SandboxArchiveS3Uploader(_config(), client=client, clock=lambda: now)
+
+    with pytest.raises(SandboxArchiveDeadlineExceeded, match="deadline exceeded"):
+        _upload_environment_snapshot(uploader, payload, deadline=1.0)
+
+    # Both the retry probe and the receipt's own HEAD ran; the second must not
+    # be allowed to hand back a receipt once the deadline has elapsed.
+    assert len([call for call in client.calls if call[0] == "head_object"]) == 2
+
+
+def test_checkpoint_retry_also_refuses_a_head_that_crosses_the_deadline() -> None:
+    payload = b"oci-archive"
+    now = 0.0
+
+    class ExpiringClient(RecordingS3Client):
+        def head_object(self, **kwargs: Any) -> dict[str, Any]:
+            nonlocal now
+            response = super().head_object(**kwargs)
+            now += 0.6
+            return response
+
+    client = ExpiringClient(put_error=PreconditionFailure(), head_response=_snapshot_head(payload))
+    uploader = SandboxArchiveS3Uploader(_config(), client=client, clock=lambda: now)
+
+    with pytest.raises(SandboxArchiveDeadlineExceeded, match="deadline exceeded"):
+        uploader.upload_checkpoint(
+            sandbox_id=_SANDBOX_ID,
+            generation=_GENERATION,
+            checkpoint_id=_CHECKPOINT_ID,
+            body=io.BytesIO(payload),
+            size=len(payload),
+            sha256=hashlib.sha256(payload).hexdigest(),
+            deadline=1.0,
+        )
+
+    assert len([call for call in client.calls if call[0] == "head_object"]) == 2
